@@ -1102,6 +1102,66 @@ class TestSlackPlatformEnrich:
 
 
 # ---------------------------------------------------------------------------
+# SlackPlatform — HTTP client reuse
+# ---------------------------------------------------------------------------
+
+
+class TestSlackPlatformClientReuse:
+    """A single AsyncWebClient is created per bot_token and reused across calls."""
+
+    @pytest.mark.asyncio
+    async def test_send_reuses_client_for_same_token(self):
+        """Two send calls with the same token must share the same AsyncWebClient instance."""
+        p = SlackPlatform()
+        mock_client = AsyncMock()
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "1.0"}
+
+        created: list = []
+
+        def _factory(token=None, **kw):
+            created.append(token)
+            return mock_client
+
+        with patch("surogates.channels.platforms.slack.AsyncWebClient", side_effect=_factory):
+            item = type("Item", (), {"destination": {"channel_id": "C1"}, "payload": {"content": "hi"}})()
+            await p.send(item, creds=_creds(BOT_TOKEN))
+            await p.send(item, creds=_creds(BOT_TOKEN))
+
+        assert len(created) == 1, (
+            f"AsyncWebClient factory called {len(created)} times; expected 1 (client must be reused)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_auth_test_reuses_client(self):
+        """auth.test via _resolve_bot_user_id reuses the same client as send."""
+        p = SlackPlatform()
+        mock_client = AsyncMock()
+        mock_client.auth_test.return_value = {"user_id": BOT_USER_ID}
+        mock_client.chat_postMessage.return_value = {"ok": True, "ts": "1.0"}
+
+        created: list = []
+
+        def _factory(token=None, **kw):
+            created.append(token)
+            return mock_client
+
+        with patch("surogates.channels.platforms.slack.AsyncWebClient", side_effect=_factory):
+            # parse triggers auth.test; send uses the same client
+            body = {
+                "type": "event_callback",
+                "api_app_id": APP_ID,
+                "event": {"type": "message", "user": "U1", "text": "hi", "channel": "C1", "ts": "1.0"},
+            }
+            await p.parse(body, creds=_creds())
+            item = type("Item", (), {"destination": {"channel_id": "C1"}, "payload": {"content": "hi"}})()
+            await p.send(item, creds=_creds())
+
+        assert len(created) == 1, (
+            f"AsyncWebClient factory called {len(created)} times; expected 1 (same client for parse+send)"
+        )
+
+
+# ---------------------------------------------------------------------------
 # SlackPlatform — registry self-registration
 # ---------------------------------------------------------------------------
 

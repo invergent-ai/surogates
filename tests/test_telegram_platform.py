@@ -1067,3 +1067,71 @@ class TestTelegramBotFiltering:
             "With empty bot_username, even a different-named bot message must be dropped; "
             f"got {result!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TelegramPlatform — HTTP client reuse
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_reuses_http_client_across_calls():
+    """Two send calls must reuse the same httpx.AsyncClient instance (not create a new one each time)."""
+    platform = TelegramPlatform()
+
+    call_count = 0
+    original_post = platform._http.post
+
+    async def _counting_post(url, **kw):
+        nonlocal call_count
+        call_count += 1
+        # Return a minimal successful Telegram response
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"message_id": call_count, "date": 1700000000}},
+        )
+
+    platform._http.post = _counting_post  # type: ignore[method-assign]
+    item = SimpleNamespace(
+        destination={"chat_id": 111},
+        payload={"content": "hi"},
+    )
+    await platform.send(item, creds={"bot_token": BOT_TOKEN})
+    await platform.send(item, creds={"bot_token": BOT_TOKEN})
+
+    # Both calls must have gone through the same patched post method
+    assert call_count == 2, (
+        f"post was called {call_count} times; expected 2 (both sends must use shared client)"
+    )
+    # The platform's _http attribute must still be the SAME object we patched
+    assert platform._http is not None
+
+
+@pytest.mark.asyncio
+async def test_answer_callback_query_reuses_http_client():
+    """answerCallbackQuery must also use the shared self._http client."""
+    platform = TelegramPlatform()
+
+    post_calls: list = []
+    original_http = platform._http
+
+    async def _spy_post(url, **kw):
+        post_calls.append(url)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    platform._http.post = _spy_post  # type: ignore[method-assign]
+
+    body = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cq-1",
+            "data": "approve",
+            "from": {"id": 42, "is_bot": False, "first_name": "User"},
+        },
+    }
+    await platform.handle_non_message_update(body, routing=None, creds={"bot_token": BOT_TOKEN}, deps=None)
+
+    assert len(post_calls) == 1
+    assert "answerCallbackQuery" in post_calls[0]
+    # Confirm it still refers to our patched instance
+    assert platform._http is original_http

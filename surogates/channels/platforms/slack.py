@@ -433,6 +433,11 @@ class SlackPlatform:
     )
 
     def __init__(self) -> None:
+        # Cache keyed by bot_token → AsyncWebClient instance.
+        # SlackPlatform instances are process-lifetime singletons; no
+        # explicit close is needed (the SDK does not hold open sockets
+        # between API calls).
+        self._clients: dict[str, AsyncWebClient] = {}
         # Cache keyed by bot_token → bot user_id (from auth.test).
         self._bot_user_id_cache: dict[str, str] = {}
         # Cache keyed by (bot_token, platform_user_id) → display_name.
@@ -501,6 +506,17 @@ class SlackPlatform:
         bot_user_id = await self._resolve_bot_user_id(bot_token)
         return parse(body, bot_user_id=bot_user_id)
 
+    def _get_client(self, bot_token: str) -> AsyncWebClient:
+        """Return a cached :class:`AsyncWebClient` for *bot_token*.
+
+        One client is created per distinct token and reused for all calls
+        (parse, send, enrich).  SlackPlatform instances are process-lifetime
+        singletons so no explicit close is needed.
+        """
+        if bot_token not in self._clients:
+            self._clients[bot_token] = AsyncWebClient(token=bot_token)
+        return self._clients[bot_token]
+
     async def _resolve_bot_user_id(self, bot_token: str) -> str:
         """Return the bot's Slack user id, resolved once per token via auth.test."""
         if not bot_token:
@@ -508,7 +524,7 @@ class SlackPlatform:
         if bot_token in self._bot_user_id_cache:
             return self._bot_user_id_cache[bot_token]
         try:
-            client = AsyncWebClient(token=bot_token)
+            client = self._get_client(bot_token)
             result = await client.auth_test()
             user_id: str = result.get("user_id") or ""
             self._bot_user_id_cache[bot_token] = user_id
@@ -673,7 +689,7 @@ class SlackPlatform:
             Credential dict with ``bot_token``.
         """
         bot_token: str = creds.get("bot_token") or ""
-        client = AsyncWebClient(token=bot_token)
+        client = self._get_client(bot_token)
 
         channel_id: str = item.destination.get("channel_id", "")
         text: str = item.payload.get("content", "")
@@ -731,7 +747,7 @@ class SlackPlatform:
             return user_id
 
         try:
-            client = AsyncWebClient(token=bot_token)
+            client = self._get_client(bot_token)
             info = await client.users_info(user=user_id)
             user_obj = info.get("user", {}) if isinstance(info, dict) else {}
             profile = user_obj.get("profile", {})

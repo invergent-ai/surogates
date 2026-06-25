@@ -366,7 +366,12 @@ class TelegramPlatform:
     )
 
     def __init__(self) -> None:
-        pass
+        # Shared HTTP client reused for all Bot API calls (sendMessage,
+        # answerCallbackQuery, etc.).  The bot token is embedded in each
+        # request URL, not in the client, so one client per platform
+        # instance suffices.  TelegramPlatform instances are process-lifetime
+        # singletons; no explicit close is needed.
+        self._http: httpx.AsyncClient = httpx.AsyncClient()
 
     # ------------------------------------------------------------------
     # Route path
@@ -466,8 +471,7 @@ class TelegramPlatform:
             payload["message_thread_id"] = message_thread_id
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(api_url, json=payload)
+            resp = await self._http.post(api_url, json=payload)
             data = resp.json()
             if data.get("ok"):
                 msg_id = str(data["result"]["message_id"])
@@ -540,10 +544,9 @@ class TelegramPlatform:
         if bot_token and callback_id:
             try:
                 api_url = _bot_api_url(bot_token, "answerCallbackQuery")
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        api_url, json={"callback_query_id": callback_id}
-                    )
+                await self._http.post(
+                    api_url, json={"callback_query_id": callback_id}
+                )
             except Exception as exc:
                 logger.debug(
                     "[TelegramPlatform] answerCallbackQuery failed: %s", exc
