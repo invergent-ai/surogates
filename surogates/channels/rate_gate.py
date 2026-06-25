@@ -29,9 +29,9 @@ async def check_inbound_rate_limit(
     rate-limit budget; False if it must be dropped.
 
     ``limiter=None`` is a test-only pass-through.
-    ``routing`` is the dict returned by
-    :meth:`SharedSlackInbound.resolve` /
-    :meth:`SharedTelegramInbound.resolve`.
+    ``routing`` is the routing dict resolved by the platform webhook
+    dispatcher (e.g. ``surogates.channels.platforms.slack`` or
+    ``surogates.channels.platforms.telegram``).
     """
     if limiter is None:
         return True

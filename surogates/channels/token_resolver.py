@@ -64,9 +64,10 @@ async def resolve_channel_token(
     """Resolve the per-tenant bot token via CredentialVault.
 
     Thin wrapper around :func:`vault_ref_for_channel` for the
-    ``bot_token`` credential.  Exists so existing callers
-    (``SharedSlackInbound``, ``SharedTelegramInbound``, …) need no
-    changes.
+    ``bot_token`` credential.  Called by the platform webhook
+    dispatchers (``surogates.channels.platforms.slack``,
+    ``surogates.channels.platforms.telegram``, …) during inbound
+    event routing.
 
     Returns the decrypted token, or ``None`` if no credential is
     configured for this (kind, identifier, org_id) -- the caller

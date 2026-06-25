@@ -286,7 +286,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         return None
 
     # ------------------------------------------------------------------
-    # Extract message fields (mirrors SlackAdapter._handle_slack_message).
+    # Extract message fields from the inbound Slack event.
     # ------------------------------------------------------------------
     user_id: str = event.get("user", "")
     if not user_id:
