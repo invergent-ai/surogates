@@ -1,0 +1,323 @@
+"""Slack-specific webhook functions for the Events API channel strategy.
+
+These three functions are used by the Slack channel strategy to handle the
+stateless HTTP webhook flow (Events API, not Socket Mode).
+
+Functions
+---------
+identifier_of(request, body) -> str
+    Reads the Slack app id from the URL path parameter ``app_id``.  The path
+    is the authoritative identifier because:
+
+    - The dispatcher resolves credentials *before* parsing the body.
+    - Slack's ``url_verification`` handshake body carries no ``api_app_id``,
+      so the path is the only reliable source.
+
+verify(request, raw_body, *, creds) -> bool | VerificationResult
+    Validates the Slack request signature (HMAC-SHA256 over
+    ``v0:{timestamp}:{raw_body}``) and enforces a ±5-minute replay window.
+
+    Special cases *after* the signature check passes:
+
+    - ``url_verification`` → returns :class:`VerificationResult` with the
+      challenge echoed back; the strategy must return this response verbatim.
+    - ``event_callback`` → additionally cross-checks ``body["api_app_id"]``
+      against the path ``app_id``; mismatch → ``False``.
+
+    A bad signature or stale timestamp returns ``False``.
+
+parse(body, *, bot_user_id) -> InboundMessage | None
+    Unwraps an ``event_callback`` body and maps ``message`` / ``app_mention``
+    events to :class:`~surogates.channels.inbound.InboundMessage`.
+
+    Returns ``None`` for:
+    - Bot-authored messages (``bot_id`` present or ``subtype == "bot_message"``).
+    - Edit / delete subtypes (``message_changed``, ``message_deleted``).
+    - Non-message event types (reactions, member joins, …).
+    - Non-``event_callback`` bodies (``url_verification``, etc.).
+    - Events with no ``user`` field.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import time
+from typing import Any
+
+from surogates.channels.inbound import InboundMessage
+from surogates.channels.registry import VerificationResult
+
+__all__ = [
+    "identifier_of",
+    "verify",
+    "parse",
+]
+
+logger = logging.getLogger(__name__)
+
+# Replay-guard window in seconds (±5 minutes matches Slack's recommendation).
+_TIMESTAMP_TOLERANCE = 300
+
+
+# ---------------------------------------------------------------------------
+# identifier_of
+# ---------------------------------------------------------------------------
+
+
+def identifier_of(request: Any, body: Any) -> str:
+    """Return the Slack app id from the URL path parameter.
+
+    The path is the source of truth; the body is intentionally ignored so
+    this works for ``url_verification`` requests (which carry no
+    ``api_app_id``) and is safe to call before the body is parsed.
+    """
+    return request.path_params["app_id"]
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+
+def verify(
+    request: Any,
+    raw_body: bytes,
+    *,
+    creds: dict,
+) -> bool | VerificationResult:
+    """Validate a Slack webhook request.
+
+    Parameters
+    ----------
+    request:
+        Starlette-like request object.  Must expose ``path_params["app_id"]``
+        and ``headers`` (case-insensitive mapping or plain dict with
+        lowercase keys).
+    raw_body:
+        Raw request body bytes — must be the *original* bytes, not
+        re-serialised from a parsed dict.
+    creds:
+        Credential dict with ``signing_secret`` and ``bot_token`` keys.
+
+    Returns
+    -------
+    True
+        Signature valid; proceed to ``parse``.
+    False
+        Signature invalid, timestamp stale, or ``api_app_id`` mismatch.
+    VerificationResult
+        Returned for ``url_verification`` challenges so the dispatcher can
+        echo the challenge to Slack.
+    """
+    # Treat a missing OR null signing secret (unconfigured credential) as a
+    # hard reject: we cannot verify the signature without it.  A bare
+    # ``.get(..., "")`` would return ``None`` for ``{"signing_secret": None}``
+    # and then crash on ``None.encode(...)``, surfacing as an unhandled 500.
+    signing_secret: str = creds.get("signing_secret") or ""
+    if not signing_secret:
+        logger.debug("verify: no signing_secret configured — rejecting")
+        return False
+
+    headers = request.headers
+
+    # ------------------------------------------------------------------
+    # 1. Timestamp replay guard.
+    # ------------------------------------------------------------------
+    ts_str = _header(headers, "x-slack-request-timestamp")
+    try:
+        ts = int(ts_str)
+    except (ValueError, TypeError):
+        logger.debug("verify: missing or malformed X-Slack-Request-Timestamp")
+        return False
+
+    now = int(time.time())
+    if abs(now - ts) > _TIMESTAMP_TOLERANCE:
+        logger.debug(
+            "verify: timestamp %s outside ±%ds window (now=%s)",
+            ts, _TIMESTAMP_TOLERANCE, now,
+        )
+        return False
+
+    # ------------------------------------------------------------------
+    # 2. HMAC-SHA256 signature check (constant-time compare).
+    #
+    # Slack signs the RAW request bytes, so build the base string at the byte
+    # level (``v0:{timestamp}:{raw_body}``) rather than decoding/re-encoding
+    # the body — this matches Slack exactly and avoids any non-UTF-8 edge.
+    # ------------------------------------------------------------------
+    sig_header = _header(headers, "x-slack-signature")
+    basestring = b"v0:" + ts_str.encode("ascii") + b":" + raw_body
+    expected_mac = hmac.new(
+        signing_secret.encode("utf-8"),
+        basestring,
+        hashlib.sha256,
+    )
+    expected_sig = f"v0={expected_mac.hexdigest()}"
+
+    if not hmac.compare_digest(expected_sig, sig_header or ""):
+        logger.debug("verify: signature mismatch")
+        return False
+
+    # ------------------------------------------------------------------
+    # 3. Parse body (only after signature passes).
+    # ------------------------------------------------------------------
+    try:
+        body = json.loads(raw_body)
+    except (json.JSONDecodeError, ValueError):
+        logger.debug("verify: body is not valid JSON")
+        return False
+
+    body_type = body.get("type", "")
+
+    # ------------------------------------------------------------------
+    # 4. url_verification handshake — echo the challenge.
+    # ------------------------------------------------------------------
+    if body_type == "url_verification":
+        challenge = body.get("challenge", "")
+        return VerificationResult(
+            accepted=True,
+            response_body={"challenge": challenge},
+            status_code=200,
+        )
+
+    # ------------------------------------------------------------------
+    # 5. event_callback — cross-check api_app_id against path.
+    # ------------------------------------------------------------------
+    if body_type == "event_callback":
+        path_app_id = identifier_of(request, body)
+        body_app_id = body.get("api_app_id", "")
+        if body_app_id != path_app_id:
+            logger.debug(
+                "verify: api_app_id mismatch — path=%s body=%s",
+                path_app_id, body_app_id,
+            )
+            return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# parse
+# ---------------------------------------------------------------------------
+
+
+def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
+    """Convert a Slack ``event_callback`` body to an :class:`InboundMessage`.
+
+    The ``bot_user_id`` parameter is required to determine ``is_mention``
+    (whether ``<@{bot_user_id}>`` appears in the event text).  The strategy
+    is responsible for resolving and caching this value (e.g. via
+    ``auth.test`` keyed by ``bot_token``).
+
+    Parameters
+    ----------
+    body:
+        Parsed Slack JSON payload.
+    bot_user_id:
+        The Slack user-id of the bot (e.g. ``"U0BOTUSER"``).
+
+    Returns
+    -------
+    InboundMessage
+        When the event is a processable user message.
+    None
+        When the event should be silently dropped (bot message, edit,
+        delete, non-message type, url_verification, …).
+    """
+    # Only handle event_callback bodies.
+    if body.get("type") != "event_callback":
+        return None
+
+    event = body.get("event", {})
+    event_type = event.get("type", "")
+
+    # Only process message and app_mention events.
+    if event_type not in ("message", "app_mention"):
+        return None
+
+    # ------------------------------------------------------------------
+    # Gate: bot messages.
+    # ------------------------------------------------------------------
+    bot_id = event.get("bot_id")
+    subtype = event.get("subtype", "")
+
+    if bot_id or subtype == "bot_message":
+        return None
+
+    # ------------------------------------------------------------------
+    # Gate: edits and deletions.
+    # ------------------------------------------------------------------
+    if subtype in ("message_changed", "message_deleted"):
+        return None
+
+    # ------------------------------------------------------------------
+    # Extract message fields (mirrors SlackAdapter._handle_slack_message).
+    # ------------------------------------------------------------------
+    user_id: str = event.get("user", "")
+    if not user_id:
+        return None
+
+    text: str = event.get("text", "").strip()
+    channel_id: str = event.get("channel", "")
+    channel_type: str = event.get("channel_type", "")
+    ts: str = event.get("ts", "")
+    event_thread_ts: str | None = event.get("thread_ts")
+
+    # DM detection: channel_type "im" or "mpim".
+    is_dm = channel_type in ("im", "mpim")
+
+    # Thread key resolution mirrors the Socket Mode adapter:
+    #   - DM:      use thread_ts if present, else None (top-level DM has no thread)
+    #   - Channel: use thread_ts if present, else ts (every channel msg starts a thread)
+    if is_dm:
+        thread_key = event_thread_ts or None
+    else:
+        thread_key = event_thread_ts or ts
+
+    # Mention detection.
+    is_mention = bool(bot_user_id) and f"<@{bot_user_id}>" in text
+
+    # api_app_id from the outer wrapper (used as the platform app identifier).
+    api_app_id: str = body.get("api_app_id", "")
+
+    # Media: the webhook parse layer does NOT download files (that requires
+    # a bot token and async I/O).  The strategy's async handler will resolve
+    # files; here we produce an empty baseline that the strategy enriches.
+    media_urls: list[str] = []
+    media_types: list[str] = []
+
+    return InboundMessage(
+        kind="text",
+        identifier=channel_id,
+        thread_key=thread_key,
+        platform_user_id=user_id,
+        user_name=user_id,  # Strategy resolves display name asynchronously.
+        text=text,
+        media_urls=media_urls,
+        media_types=media_types,
+        is_dm=is_dm,
+        is_mention=is_mention,
+        ts=ts,
+        source={
+            "platform": "slack",
+            "api_app_id": api_app_id,
+            "channel_type": channel_type,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _header(headers: Any, name: str) -> str | None:
+    """Case-insensitive header lookup for dict or Starlette Headers."""
+    if hasattr(headers, "get"):
+        # Starlette Headers is case-insensitive; plain dicts may need lowercasing.
+        value = headers.get(name) or headers.get(name.lower())
+        return value
+    return None
