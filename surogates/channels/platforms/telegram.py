@@ -340,12 +340,9 @@ class TelegramPlatform:
     (``bot_token`` and ``webhook_secret``) are resolved by the dispatcher
     and passed to every method that requires them.
 
-    Instance caches (keyed by bot_token)
-    -------------------------------------
-    ``_bot_username_cache``:
-        ``{bot_token: username}`` — populated lazily by the first ``parse``
-        call for a given token via ``getMe``.  Mirrors :class:`SlackPlatform`'s
-        ``_bot_user_id_cache`` pattern (``auth.test`` → ``getMe``).
+    The bot username is available directly from the URL path (the
+    ``identifier`` kwarg passed to :meth:`parse` by the dispatcher), so no
+    ``getMe`` network round-trip is needed on the hot inbound path.
     """
 
     kind = "telegram"
@@ -369,8 +366,7 @@ class TelegramPlatform:
     )
 
     def __init__(self) -> None:
-        # Cache keyed by bot_token → bot username (from getMe).
-        self._bot_username_cache: dict[str, str] = {}
+        pass
 
     # ------------------------------------------------------------------
     # Route path
@@ -400,49 +396,37 @@ class TelegramPlatform:
         return verify(request, raw_body, creds=creds)
 
     # ------------------------------------------------------------------
-    # parse — async; resolves bot username via cached getMe
+    # parse — async; uses path identifier as bot username
     # ------------------------------------------------------------------
 
     async def parse(
-        self, body: Any, *, creds: dict | None = None
+        self,
+        body: Any,
+        *,
+        creds: dict | None = None,
+        identifier: str | None = None,
     ) -> InboundMessage | None:
         """Parse a Telegram update body into an :class:`InboundMessage`.
 
-        Resolves the bot username via ``getMe`` (cached per bot token) so
-        that mention detection (``@{bot_username}`` in text) works correctly.
+        Uses the ``identifier`` kwarg (the bot username from the URL path
+        resolved by the dispatcher) for mention detection.  No network
+        call is made — ``getMe`` is not needed because the path parameter
+        is the authoritative bot identity for Telegram webhooks.
 
         Parameters
         ----------
         body:
             Parsed Telegram JSON update.
         creds:
-            Credential dict with at least ``bot_token``.  When ``None``
-            (e.g. called from tests without creds), mention detection is
-            skipped (``bot_username=""``).
+            Credential dict — accepted for protocol compatibility but not
+            used for username resolution.
+        identifier:
+            The bot username from the URL path (e.g. ``"@my_bot"``).
+            When ``None`` (e.g. called from tests without a dispatcher),
+            mention detection is skipped (``bot_username=""``).
         """
-        bot_token: str = (creds or {}).get("bot_token") or ""
-        bot_username = await self._resolve_bot_username(bot_token)
+        bot_username: str = identifier or ""
         return parse(body, bot_username=bot_username)
-
-    async def _resolve_bot_username(self, bot_token: str) -> str:
-        """Return the bot's username, resolved once per token via getMe."""
-        if not bot_token:
-            return ""
-        if bot_token in self._bot_username_cache:
-            return self._bot_username_cache[bot_token]
-        try:
-            api_url = _bot_api_url(bot_token, "getMe")
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(api_url)
-            data = resp.json()
-            username: str = data.get("result", {}).get("username") or ""
-            self._bot_username_cache[bot_token] = username
-            return username
-        except Exception:
-            logger.debug(
-                "TelegramPlatform: getMe failed for token — skipping bot_username"
-            )
-            return ""
 
     # ------------------------------------------------------------------
     # send — POST sendMessage to the Telegram Bot API

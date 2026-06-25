@@ -476,7 +476,7 @@ class TestTelegramPlatform:
     async def test_parse_async_delegates(self):
         platform = TelegramPlatform()
         update = _private_message(text="Hello async")
-        result = await platform.parse(update, creds={"bot_username": BOT_USERNAME})
+        result = await platform.parse(update, identifier=BOT_USERNAME)
         assert result is not None
         assert result.text == "Hello async"
 
@@ -600,49 +600,62 @@ async def test_register_webhook_raises_on_non_ok():
 
 
 # ---------------------------------------------------------------------------
-# TelegramPlatform — parse uses cached getMe for bot_username
+# TelegramPlatform — parse uses path identifier for bot_username (no getMe)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_parse_resolves_bot_username_via_get_me():
-    """platform.parse calls getMe to resolve bot_username when creds has bot_token."""
+async def test_parse_uses_identifier_not_get_me():
+    """platform.parse uses the identifier kwarg for bot_username — getMe is NOT called."""
     platform = TelegramPlatform()
     update = _private_message(text="hello")
     creds = {"bot_token": BOT_TOKEN, "webhook_secret": "s"}
 
-    with respx.mock() as mock_router:
+    with respx.mock(assert_all_called=False) as mock_router:
+        # Register a getMe route; if it is called the test fails via the
+        # assertion below (call count must be zero).
         mock_router.get(f"{BOT_API_BASE}/getMe").mock(
             return_value=httpx.Response(
                 200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
             )
         )
-        result = await platform.parse(update, creds=creds)
+        result = await platform.parse(update, creds=creds, identifier="@my_bot")
+        get_me_calls = len(mock_router.calls)
 
     assert result is not None
     assert result.text == "hello"
+    assert get_me_calls == 0, f"getMe was called {get_me_calls} time(s); expected 0"
 
 
 @pytest.mark.asyncio
-async def test_parse_caches_bot_username_across_calls():
-    """getMe is called only once for the same bot_token, even across multiple parse calls."""
+async def test_parse_identifier_used_for_mention_detection():
+    """Mention detection works when bot username comes from the identifier kwarg."""
     platform = TelegramPlatform()
-    update = _private_message(text="hello")
-    creds = {"bot_token": BOT_TOKEN, "webhook_secret": "s"}
+    update = _private_message(text="@my_bot help me please")
+    creds = {"bot_token": BOT_TOKEN}
 
-    with respx.mock() as mock_router:
+    with respx.mock(assert_all_called=False) as mock_router:
         mock_router.get(f"{BOT_API_BASE}/getMe").mock(
             return_value=httpx.Response(
                 200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
             )
         )
-        await platform.parse(update, creds=creds)
-        await platform.parse(update, creds=creds)
-        await platform.parse(update, creds=creds)
+        result = await platform.parse(update, creds=creds, identifier="@my_bot")
+        get_me_calls = len(mock_router.calls)
 
-        call_count = len(mock_router.calls)
+    assert result is not None
+    assert result.is_mention is True
+    assert get_me_calls == 0, f"getMe was called {get_me_calls} time(s); expected 0"
 
-    assert call_count == 1, f"getMe called {call_count} times; expected exactly 1"
+
+@pytest.mark.asyncio
+async def test_parse_without_identifier_falls_back_to_empty_username():
+    """parse(body, identifier=None) gracefully falls back to empty bot_username."""
+    platform = TelegramPlatform()
+    update = _private_message(text="hello")
+    result = await platform.parse(update, creds=None)
+    assert result is not None
+    assert result.text == "hello"
 
 
 @pytest.mark.asyncio
@@ -653,25 +666,6 @@ async def test_parse_without_creds_still_works():
     result = await platform.parse(update, creds=None)
     assert result is not None
     assert result.text == "hello"
-
-
-@pytest.mark.asyncio
-async def test_parse_mention_detected_via_get_me():
-    """Mention detection works when bot username comes from getMe."""
-    platform = TelegramPlatform()
-    update = _private_message(text="@my_bot help me please")
-    creds = {"bot_token": BOT_TOKEN}
-
-    with respx.mock() as mock_router:
-        mock_router.get(f"{BOT_API_BASE}/getMe").mock(
-            return_value=httpx.Response(
-                200, json={"ok": True, "result": {"id": 123, "username": "my_bot"}}
-            )
-        )
-        result = await platform.parse(update, creds=creds)
-
-    assert result is not None
-    assert result.is_mention is True
 
 
 # ---------------------------------------------------------------------------

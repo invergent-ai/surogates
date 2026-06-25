@@ -472,7 +472,11 @@ class SlackPlatform:
     # ------------------------------------------------------------------
 
     async def parse(
-        self, body: Any, *, creds: dict | None = None
+        self,
+        body: Any,
+        *,
+        creds: dict | None = None,
+        identifier: str | None = None,
     ) -> InboundMessage | None:
         """Parse a Slack event_callback body into an :class:`InboundMessage`.
 
@@ -488,6 +492,10 @@ class SlackPlatform:
             Credential dict with at least ``bot_token``.  When ``None``
             (e.g. called directly from tests without creds), mention
             detection is skipped (``bot_user_id=""``).
+        identifier:
+            The resolved path identifier (Slack app id) — accepted but
+            ignored because Slack's bot_user_id is obtained via ``auth.test``
+            and is NOT the same as the app id.
         """
         bot_token: str = (creds or {}).get("bot_token") or ""
         bot_user_id = await self._resolve_bot_user_id(bot_token)

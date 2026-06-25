@@ -104,7 +104,7 @@ class _FakePlatform:
     def verify(self, request, body, *, creds) -> bool | VerificationResult:
         return self._verify_return
 
-    def parse(self, body, *, creds=None) -> InboundMessage | None:
+    def parse(self, body, *, creds=None, identifier=None) -> InboundMessage | None:
         self.parse_calls.append(body)
         return self._parse_return
 

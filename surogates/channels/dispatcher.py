@@ -327,14 +327,16 @@ class ChannelWebhookDispatcher:
             # creds are forwarded as an optional keyword argument so platforms
             # that need async credential-dependent initialisation (e.g. Slack
             # auth.test for bot_user_id) can receive them without requiring a
-            # separate pre-flight call.  Platforms whose parse does not accept
-            # creds silently ignore the kwarg via their own signature.
+            # separate pre-flight call.  identifier is forwarded so platforms
+            # whose path identifier IS the bot identity (e.g. Telegram username)
+            # can skip a network round-trip.  Platforms that do not accept these
+            # kwargs silently ignore them via their own signature.
             #
             # parse may return a coroutine (async platforms).  We await
             # defensively — same pattern used for verify above.
             # ----------------------------------------------------------------
             try:
-                msg_or_coro = platform.parse(body, creds=creds)
+                msg_or_coro = platform.parse(body, creds=creds, identifier=_id)
                 if inspect.isawaitable(msg_or_coro):
                     msg = await msg_or_coro
                 else:
