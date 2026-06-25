@@ -894,6 +894,76 @@ class TestSessionLifecycle:
         assert event_args[2]["title"] == "Sign in required"
         assert event_args[2]["action_type"] == "browser"
 
+    async def test_final_response_routes_to_inbox_for_service_account_session(
+        self,
+    ) -> None:
+        """Ops sessions are service-account-owned (user_id None); they get the
+        same judge-rescue routing as user sessions so a plain-text 'needs you'
+        final answer still becomes an inbox item."""
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({
+                            "action_kind": "action_required",
+                            "reason": "browser_login",
+                            "title": "Sign in required",
+                            "instructions": "Open the browser and complete sign-in.",
+                            "context": "The browser is showing a login page.",
+                            "action_type": "browser",
+                            "target": "browser",
+                        })
+                    )
+                )
+            ]
+        )
+        llm_client = AsyncMock()
+        llm_client.chat.completions.create.return_value = response
+        from surogates.tools.registry import ToolRegistry, ToolSchema
+
+        reg = ToolRegistry()
+        reg.register(
+            "ask_user_question",
+            ToolSchema(name="ask_user_question", description="test", parameters={}),
+            lambda _: "{}",
+        )
+        store = AsyncMock()
+        harness = _make_harness(
+            llm_client=llm_client,
+            tool_registry=reg,
+            session_store=store,
+        )
+        now = datetime.now(timezone.utc)
+        session = Session(
+            id=uuid4(),
+            user_id=None,
+            service_account_id=uuid4(),
+            org_id=uuid4(),
+            agent_id="agent-1",
+            channel="api",
+            status="active",
+            config={},
+            created_at=now,
+            updated_at=now,
+        )
+        assistant_message = {
+            "role": "assistant",
+            "content": "Please sign in in the browser so I can continue.",
+            "tool_calls": None,
+        }
+
+        routed = await harness._maybe_route_final_response_to_inbox(
+            session=session,
+            messages=[{"role": "user", "content": "Pay this invoice"}],
+            assistant_message=assistant_message,
+            model="surogate",
+            tool_filter={"ask_user_question", "browser_navigate"},
+        )
+
+        assert routed == "action_required"
+        store.emit_event.assert_awaited_once()
+        assert store.emit_event.await_args.args[1].value == "inbox.action_required"
+
     async def test_user_action_judge_prefers_outlines_structured_output(
         self,
         monkeypatch: pytest.MonkeyPatch,

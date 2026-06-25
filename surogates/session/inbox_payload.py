@@ -17,6 +17,12 @@ class InboxRow:
     action_ref: dict[str, Any] | None
 
 
+# Inbox-item kinds that are purely informational: the operator acknowledges
+# them (or just sees the result) rather than responding. They are therefore
+# acknowledge-able, not auto-expired on terminal sessions, and suppressed while
+# the session is actively viewed. Kinds not listed here need a real response.
+ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
+
 _TITLE_TRUNCATE = 120
 _BODY_TRUNCATE = 1000
 

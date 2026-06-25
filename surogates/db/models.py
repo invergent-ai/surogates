@@ -361,8 +361,19 @@ class InboxItem(Base):
             "created_at",
             postgresql_using="btree",
         ),
+        Index(
+            "idx_inbox_sa_status_created",
+            "service_account_id",
+            "status",
+            "created_at",
+            postgresql_using="btree",
+        ),
         Index("idx_inbox_org_created", "org_id", "created_at"),
         Index("idx_inbox_session", "session_id"),
+        CheckConstraint(
+            "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
+            name="ck_inbox_items_one_principal",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -371,8 +382,11 @@ class InboxItem(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id"), nullable=True
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False

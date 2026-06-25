@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
+from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import LeaseNotHeldError, SessionNotFoundError
 
@@ -904,3 +908,120 @@ async def _backdate(session_factory, session_id, *, seconds: int) -> None:
             {"s": seconds, "sid": session_id},
         )
         await db.commit()
+
+
+async def test_inbox_item_created_for_service_account_session(
+    session_store, session_factory,
+):
+    """A service-account-owned session (user_id NULL) still produces an inbox
+    item, stamped with service_account_id instead of user_id."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+
+    session = await session_store.create_session(
+        user_id=None,
+        org_id=org_id,
+        agent_id="test-agent",
+        service_account_id=issued.id,
+        channel="api",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc_1",
+            "questions": [{"prompt": "Pick one", "choices": []}],
+            "context": "",
+        },
+    )
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(InboxItem).where(InboxItem.session_id == session.id)
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].service_account_id == issued.id
+    assert rows[0].user_id is None
+    assert rows[0].kind == "input_required"
+
+
+async def test_acknowledge_only_inbox_suppressed_when_session_has_live_viewer(
+    session_store, session_factory, monkeypatch,
+):
+    """A task_complete is not created while the operator is watching the
+    session (a live event-stream subscriber); an input_required still is,
+    because it needs a response."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    monkeypatch.setattr(
+        session_store,
+        "_session_has_live_viewer",
+        AsyncMock(return_value=True),
+    )
+
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_TASK_COMPLETE,
+        {"outcome": "success", "summary": "All done."},
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc_view",
+            "questions": [{"prompt": "Pick one", "choices": []}],
+            "context": "",
+        },
+    )
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(InboxItem).where(InboxItem.session_id == session.id)
+            )
+        ).scalars().all()
+    kinds = {row.kind for row in rows}
+    assert "task_complete" not in kinds
+    assert "input_required" in kinds
+
+
+async def test_inbox_item_requires_exactly_one_principal(
+    session_store, session_factory,
+):
+    """The DB rejects an inbox item with neither (or both) principal set."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    # A non-inbox event gives us a free source_event_id (USER_MESSAGE does
+    # not create an inbox item, so its id is unused and unique).
+    await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "hi"})
+
+    async with session_factory() as db:
+        event_id = (
+            await db.execute(
+                text(
+                    "SELECT id FROM events WHERE session_id = :sid "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"sid": session.id},
+            )
+        ).scalar()
+        with pytest.raises(IntegrityError):
+            await db.execute(
+                text(
+                    "INSERT INTO inbox_items "
+                    "(org_id, user_id, service_account_id, session_id, "
+                    " source_event_id, kind, status, title, payload) "
+                    "VALUES (:org, NULL, NULL, :sid, :ev, "
+                    " 'task_complete', 'pending', 'x', '{}')"
+                ),
+                {"org": org_id, "sid": session.id, "ev": event_id},
+            )
+            await db.commit()

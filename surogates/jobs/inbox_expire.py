@@ -13,6 +13,7 @@ import logging
 from sqlalchemy import func, select, update
 
 from surogates.db.models import InboxItem, Session
+from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,9 @@ async def expire_inbox_items(session_store) -> int:
             .where(
                 InboxItem.status == "pending",
                 InboxItem.session_id.in_(terminal_sessions),
+                # Acknowledge-only kinds are informational; they persist until
+                # read/acknowledged rather than expiring on a terminal session.
+                InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
             )
             .values(
                 status="expired",
