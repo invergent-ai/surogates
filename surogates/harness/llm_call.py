@@ -14,11 +14,14 @@ Provides standalone async functions for calling LLMs with:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import urlparse
+
+import httpx
 
 from surogates.harness.message_utils import (
     message_to_dict,
@@ -128,6 +131,45 @@ STREAM_HEARTBEAT_INTERVAL: float = 15.0
 # dead-end was ~60 KB (well over); iter-4 legitimate was ~5 KB (well
 # under).  Configurable for testing only -- no env var.
 RUNAWAY_REASONING_CHAR_THRESHOLD: int = 16_000
+
+# Non-streaming fallback request timeouts.  The ``read`` budget is the
+# same reasoning-aware ceiling the streaming watchdog uses
+# (``compute_stream_stale_timeout``) so a non-streaming call gets the
+# generous reasoning window but is still bounded; ``connect``/``write``/
+# ``pool`` are tight so a hung socket cannot add minutes on top.  Without
+# this, the non-streaming fallback inherited the ``AsyncOpenAI`` default
+# (600s, no reasoning-awareness) and -- defeated by upstream keepalive
+# bytes on the proxy side -- blocked for minutes with the UI frozen.
+NON_STREAMING_CONNECT_TIMEOUT: float = 10.0
+NON_STREAMING_WRITE_TIMEOUT: float = 30.0
+NON_STREAMING_POOL_TIMEOUT: float = 10.0
+
+
+def compute_non_streaming_timeout(
+    create_kwargs: dict[str, Any],
+    *,
+    base_url: str = "",
+) -> httpx.Timeout | None:
+    """Per-request transport timeout for a non-streaming LLM call.
+
+    Returns ``None`` when the upstream is local and uncapped (mirroring
+    the streaming watchdog's local exemption), so the caller leaves the
+    client default in place rather than imposing a finite bound.
+    """
+    read = compute_stream_stale_timeout(
+        create_kwargs.get("messages"),
+        base_url=base_url,
+        model=str(create_kwargs.get("model", "")),
+    )
+    if read == float("inf"):
+        return None
+    return httpx.Timeout(
+        connect=NON_STREAMING_CONNECT_TIMEOUT,
+        read=read,
+        write=NON_STREAMING_WRITE_TIMEOUT,
+        pool=NON_STREAMING_POOL_TIMEOUT,
+    )
+
 
 _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "localhost",
@@ -521,6 +563,9 @@ async def call_llm_with_retry(
                     create_kwargs=create_kwargs,
                     iteration=iteration,
                     llm_client=llm_client,
+                    store=store,
+                    turn_id=turn_id,
+                    iteration_index=iteration_index,
                 )
 
             # Response shape validation.
@@ -1054,6 +1099,9 @@ async def call_llm_streaming(
                 create_kwargs=create_kwargs,
                 iteration=iteration,
                 llm_client=llm_client,
+                store=store,
+                turn_id=turn_id,
+                iteration_index=iteration_index,
             )
         except Exception as fallback_exc:
             # The streaming error carries the real provider detail (e.g.
@@ -1534,14 +1582,74 @@ async def call_llm_streaming_inner(
 # ---------------------------------------------------------------------------
 
 
+async def _await_with_heartbeats(
+    coro: Any,
+    *,
+    session: Session,
+    store: SessionStore,
+    iteration: int,
+    turn_id: str | None,
+    iteration_index: int | None,
+) -> Any:
+    """Await *coro*, emitting ``LLM_HEARTBEAT`` while it is in flight.
+
+    A non-streaming call produces no ``llm.delta`` events, so without this
+    the session emits nothing for the whole (potentially minute-scale)
+    wait and the UI looks frozen.  Heartbeats mirror the streaming
+    watchdog's payload so the client renders them identically.  A failed
+    heartbeat emit is logged and ignored -- it must never mask the real
+    LLM result or error, which ``task.result()`` re-raises faithfully.
+    """
+    task = asyncio.ensure_future(coro)
+    start = time.monotonic()
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {task}, timeout=STREAM_HEARTBEAT_INTERVAL,
+            )
+            if task in done:
+                return task.result()
+            try:
+                await store.emit_event(
+                    session.id,
+                    EventType.LLM_HEARTBEAT,
+                    {
+                        "iteration": iteration,
+                        "silent_for_seconds": round(time.monotonic() - start, 1),
+                        "turn_id": turn_id,
+                        "iteration_index": iteration_index,
+                        "phase": "non_streaming",
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "Non-streaming heartbeat emit failed for session %s",
+                    session.id,
+                    exc_info=True,
+                )
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+
 async def call_llm_non_streaming(
     *,
     session: Session,
     create_kwargs: dict[str, Any],
     iteration: int,
     llm_client: AsyncOpenAI,
+    store: SessionStore | None = None,
+    turn_id: str | None = None,
+    iteration_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Call the LLM without streaming. Returns (message_dict, usage_dict)."""
+    """Call the LLM without streaming. Returns (message_dict, usage_dict).
+
+    When ``store`` is provided, ``LLM_HEARTBEAT`` events are emitted while
+    the (otherwise event-silent) request is in flight, so the UI shows the
+    same "model is working" motion it gets from a streaming turn.
+    """
     # Inject prompt cache extra_body for cacheable models.
     final_kwargs = dict(create_kwargs)
     model_id = final_kwargs.get("model", "")
@@ -1551,7 +1659,30 @@ async def call_llm_non_streaming(
         merged = {**existing_extra, **cache_extra}
         final_kwargs["extra_body"] = merged
 
-    response = await llm_client.chat.completions.create(**final_kwargs)
+    # Bound the call so a stalled non-streaming response fails fast and is
+    # handled by the retry layer instead of blocking on the client default.
+    # An explicit per-request ``timeout`` overrides the client ceiling; a
+    # breach raises ``openai.APITimeoutError``, which ``call_llm_with_retry``
+    # classifies as retryable.  ``None`` (local upstream) leaves the client
+    # default in place.
+    request_timeout = compute_non_streaming_timeout(
+        final_kwargs, base_url=str(getattr(llm_client, "base_url", "") or ""),
+    )
+    if request_timeout is not None:
+        final_kwargs["timeout"] = request_timeout
+
+    create_call = llm_client.chat.completions.create(**final_kwargs)
+    if store is None:
+        response = await create_call
+    else:
+        response = await _await_with_heartbeats(
+            create_call,
+            session=session,
+            store=store,
+            iteration=iteration,
+            turn_id=turn_id,
+            iteration_index=iteration_index,
+        )
 
     # Response shape validation.
     if response is None or not getattr(response, "choices", None):
