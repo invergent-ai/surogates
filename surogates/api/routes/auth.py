@@ -703,33 +703,53 @@ async def link_channel(
     session_factory = request.app.state.session_factory
 
     async with session_factory() as db:
-        # Check if this platform identity is already linked.
         platform = entry.get("platform", "")
         platform_user_id = entry.get("platform_user_id", "")
         platform_meta = entry.get("platform_meta", {})
 
-        existing = await db.execute(
-            select(ChannelIdentity)
-            .where(ChannelIdentity.org_id == tenant.org_id)
-            .where(ChannelIdentity.platform == platform)
-            .where(ChannelIdentity.platform_user_id == platform_user_id)
-        )
-        if existing.scalar_one_or_none():
+        # Org-bound codes: a code minted in one org must not be consumed while
+        # logged into another (which would bind the platform user in the wrong
+        # tenant).  Reject a code whose org does not match the authenticated one.
+        if str(entry.get("org_id", "")) != str(tenant.org_id):
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"This {platform} account is already linked to a user.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Pairing code is not valid for this organization.",
             )
 
-        identity = ChannelIdentity(
-            id=uuid.uuid4(),
-            org_id=tenant.org_id,
-            user_id=tenant.user_id,
-            platform=platform,
-            platform_user_id=platform_user_id,
-            platform_meta=platform_meta,
-        )
-        db.add(identity)
-        await db.commit()
+        row = (
+            await db.execute(
+                select(ChannelIdentity, User)
+                .join(User, ChannelIdentity.user_id == User.id)
+                .where(ChannelIdentity.org_id == tenant.org_id)
+                .where(ChannelIdentity.platform == platform)
+                .where(ChannelIdentity.platform_user_id == platform_user_id)
+            )
+        ).first()
+
+        if row is None:
+            db.add(ChannelIdentity(
+                id=uuid.uuid4(),
+                org_id=tenant.org_id,
+                user_id=tenant.user_id,
+                platform=platform,
+                platform_user_id=platform_user_id,
+                platform_meta=platform_meta,
+            ))
+            await db.commit()
+        else:
+            identity, existing_user = row
+            if identity.user_id == tenant.user_id:
+                pass  # already linked to this user — idempotent
+            elif existing_user.auth_provider == platform:
+                # A Mate shadow identity (auth_provider == platform): take it
+                # over by re-pointing it to the authenticated real account.
+                identity.user_id = tenant.user_id
+                await db.commit()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"This {platform} account is already linked to a user.",
+                )
 
     logger.info(
         "Linked %s:%s to user %s via pairing code %s",
