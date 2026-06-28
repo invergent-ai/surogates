@@ -144,6 +144,7 @@ class IssuedServiceAccount:
     token: str
     token_prefix: str
     created_at: datetime
+    agent_id: str | None = None
 
 
 class ServiceAccountStore:
@@ -157,7 +158,9 @@ class ServiceAccountStore:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
-    async def create(self, *, org_id: UUID, name: str) -> IssuedServiceAccount:
+    async def create(
+        self, *, org_id: UUID, name: str, agent_id: str | None = None,
+    ) -> IssuedServiceAccount:
         """Issue a new service account and return its raw token exactly once."""
         token = generate_token()
         row = ServiceAccount(
@@ -165,12 +168,12 @@ class ServiceAccountStore:
             name=name,
             token_hash=hash_token(token),
             token_prefix=token[:_DISPLAY_PREFIX_LEN],
+            agent_id=agent_id,
         )
         async with self._sf() as db:
             db.add(row)
             await db.commit()
             await db.refresh(row)
-
         return IssuedServiceAccount(
             id=row.id,
             org_id=row.org_id,
@@ -178,6 +181,7 @@ class ServiceAccountStore:
             token=token,
             token_prefix=row.token_prefix,
             created_at=row.created_at,
+            agent_id=row.agent_id,
         )
 
     async def get_by_token(self, token: str) -> ResolvedServiceAccount | None:
@@ -273,6 +277,76 @@ class ServiceAccountStore:
         _ROW_CACHE_BY_ID.set(cache_key, resolved)
         _ROW_CACHE_BY_HASH.set(row.token_hash, resolved)
         return resolved
+
+    async def get_by_agent_id(
+        self, org_id: UUID, agent_id: str,
+    ) -> ResolvedServiceAccount | None:
+        """Resolve the live service account that backs ``agent_id`` in ``org_id``.
+
+        Returns ``None`` when the agent has no service account or it is
+        revoked.  Not cached by agent_id (low-frequency provisioning path);
+        the token/id caches still front the hot auth path.
+        """
+        async with self._sf() as db:
+            row = (
+                await db.execute(
+                    select(ServiceAccount).where(
+                        ServiceAccount.org_id == org_id,
+                        ServiceAccount.agent_id == agent_id,
+                        ServiceAccount.revoked_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return ResolvedServiceAccount(id=row.id, org_id=row.org_id)
+
+    async def rotate_token_for_agent_id(
+        self, *, org_id: UUID, agent_id: str, clear_revoked: bool = False,
+    ) -> IssuedServiceAccount | None:
+        """Mint a fresh token for the existing agent service-account row.
+
+        Recovers a usable principal when the vaulted token was lost without
+        creating a second row (which the unique ``agent_id`` index forbids).
+        Returns the new raw token exactly once, or ``None`` when no row exists
+        for ``(org_id, agent_id)``.  ``clear_revoked=True`` also lifts an
+        existing ``revoked_at`` (an explicit re-activation; rotation alone
+        never un-revokes).  Invalidates the auth caches for the OLD token hash
+        and the id so peers stop accepting the previous token within their TTL.
+        """
+        token = generate_token()
+        new_hash = hash_token(token)
+        new_prefix = token[:_DISPLAY_PREFIX_LEN]
+        async with self._sf() as db:
+            row = (
+                await db.execute(
+                    select(ServiceAccount).where(
+                        ServiceAccount.org_id == org_id,
+                        ServiceAccount.agent_id == agent_id,
+                    ).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            old_hash = row.token_hash
+            row.token_hash = new_hash
+            row.token_prefix = new_prefix
+            if clear_revoked:
+                row.revoked_at = None
+            await db.commit()
+            await db.refresh(row)
+
+        _ROW_CACHE_BY_HASH.invalidate(old_hash)
+        _ROW_CACHE_BY_ID.invalidate(str(row.id))
+        return IssuedServiceAccount(
+            id=row.id,
+            org_id=row.org_id,
+            name=row.name,
+            token=token,
+            token_prefix=row.token_prefix,
+            created_at=row.created_at,
+            agent_id=row.agent_id,
+        )
 
     async def list_for_org(self, org_id: UUID) -> list[ServiceAccount]:
         """Return all service accounts belonging to *org_id*, newest first."""
