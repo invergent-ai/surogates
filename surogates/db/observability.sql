@@ -112,7 +112,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent
     ON service_accounts (agent_id)
     WHERE agent_id IS NOT NULL;
 
-
 -- ----------------------------------------------------------------------------
 -- Sessions — retrofits for the API channel.
 --
