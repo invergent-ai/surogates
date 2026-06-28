@@ -8,10 +8,11 @@ the link prompt) for linked mode.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
-from surogates.channels.runner import _make_deps_factory
+from surogates.channels.runner import _make_deps_factory, _MultiCache
 
 
 class _FakeRedis:
@@ -113,3 +114,24 @@ def test_factory_selects_resolver_by_policy():
     shadow_deps = factory("slack", _routing(), {}, plat)          # default → shadow
     linked_deps = factory("slack", _routing("linked"), {}, plat)
     assert shadow_deps.resolve_identity is not linked_deps.resolve_identity
+
+
+def test_factory_exposes_identity_caches_for_invalidation():
+    """The factory exposes both resolvers' caches so the channels process can
+    wire them into the cross-process invalidator (invalidate-on-link)."""
+    factory = _make_deps_factory(
+        session_store=object(), redis=_FakeRedis(), session_factory=object(),
+    )
+    caches = factory.identity_caches
+    assert len(caches) == 2, "shadow + linked resolver caches"
+    for c in caches:
+        assert hasattr(c, "invalidate")
+
+
+def test_multicache_fans_invalidate_to_every_cache():
+    """_MultiCache lets the invalidator evict a key from both the shadow and
+    linked identity caches with a single invalidate(key) call."""
+    a, b = MagicMock(), MagicMock()
+    _MultiCache([a, b]).invalidate("slack\x00U1\x00org-1")
+    a.invalidate.assert_called_once_with("slack\x00U1\x00org-1")
+    b.invalidate.assert_called_once_with("slack\x00U1\x00org-1")

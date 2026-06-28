@@ -29,6 +29,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 class _FakeRedis:
     def __init__(self):
         self.kv = {}
+        self.published: list[tuple[str, bytes]] = []
 
     async def get(self, k):
         return self.kv.get(k)
@@ -42,15 +43,18 @@ class _FakeRedis:
     async def getdel(self, k):
         return self.kv.pop(k, None)
 
+    async def publish(self, channel, payload):
+        self.published.append((channel, payload))
+
 
 async def _mint(pairing, org_id, platform="slack", user="U_X"):
     return await pairing.create(str(org_id), platform, user, {})
 
 
-def _request(pairing, session_factory):
+def _request(pairing, session_factory, redis=None):
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(
-            pairing_store=pairing, session_factory=session_factory,
+            pairing_store=pairing, session_factory=session_factory, redis=redis,
         )),
     )
 
@@ -129,6 +133,44 @@ async def test_idempotent_when_already_linked_to_this_user(session_factory):
     await link_channel(LinkChannelRequest(code=code), _request(pairing, session_factory), tenant)  # no raise
 
     rows = await _identity(session_factory, user="U_ME")
+    assert len(rows) == 1 and rows[0].user_id == real_user
+
+
+async def test_publishes_identity_invalidation_on_link(session_factory):
+    """On a successful bind, link_channel publishes a cross-process cache
+    invalidation keyed exactly like the channels identity cache
+    (``<platform>\\x00<user>\\x00<org>``), so the just-linked user is recognized
+    on their next message instead of waiting out the negative-cache TTL."""
+    org_id = await create_org(session_factory)
+    real_user = await create_user(session_factory, org_id)
+    pairing = PairingStore(_FakeRedis())
+    code = await _mint(pairing, org_id, user="U_PUB")
+    bus = _FakeRedis()
+
+    tenant = SimpleNamespace(org_id=org_id, user_id=real_user)
+    await link_channel(
+        LinkChannelRequest(code=code), _request(pairing, session_factory, redis=bus), tenant,
+    )
+
+    assert bus.published == [
+        (f"channel_identity_changed:slack\x00U_PUB\x00{org_id}", b""),
+    ], "the just-linked identity's cache key is invalidated cluster-wide"
+
+
+async def test_link_succeeds_without_redis_bus(session_factory):
+    """Publishing is best-effort: a link still binds when no redis is wired
+    (the invalidation is simply skipped and the negative cache ages out)."""
+    org_id = await create_org(session_factory)
+    real_user = await create_user(session_factory, org_id)
+    pairing = PairingStore(_FakeRedis())
+    code = await _mint(pairing, org_id, user="U_NOBUS")
+
+    tenant = SimpleNamespace(org_id=org_id, user_id=real_user)
+    await link_channel(
+        LinkChannelRequest(code=code), _request(pairing, session_factory, redis=None), tenant,
+    )
+
+    rows = await _identity(session_factory, user="U_NOBUS")
     assert len(rows) == 1 and rows[0].user_id == real_user
 
 

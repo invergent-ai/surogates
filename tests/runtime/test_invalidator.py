@@ -251,6 +251,31 @@ def test_mate_settings_changed_is_subscribed():
     assert "mate_settings_changed:" in INVALIDATION_CHANNELS
 
 
+def test_channel_identity_changed_is_subscribed():
+    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
+
+    assert "channel_identity_changed:" in INVALIDATION_CHANNELS
+
+
+def test_handler_routes_channel_identity_changed_to_identity_cache():
+    """link_channel publishes ``channel_identity_changed:<platform>\\x00<user>\\x00<org>``
+    when a real account is bound, so the channels pod evicts its
+    negative-cached 'unknown sender' entry and recognizes the just-linked user
+    on their next message instead of waiting out the 30s TTL.
+
+    The identifier is the channels identity-cache key verbatim (NUL-joined),
+    so it must pass through unparsed."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    ic = MagicMock()
+    handle_invalidation_message(
+        channel="channel_identity_changed:slack\x00U1\x00org-1",
+        payload=b"",
+        channel_identity_cache=ic,
+    )
+    ic.invalidate.assert_called_once_with("slack\x00U1\x00org-1")
+
+
 def test_handler_routes_mate_settings_changed_to_mate_cache():
     from surogates.runtime.invalidator import handle_invalidation_message
 

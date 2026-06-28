@@ -287,6 +287,10 @@ def make_cached_identity_resolver(
         cache.set(key, ident)
         return ident
 
+    # Expose the cache so the channels process can wire it into the
+    # cross-process invalidator: link_channel evicts a just-linked sender's
+    # negative-cache entry on bind instead of waiting out ``ttl_seconds``.
+    _resolver.cache = cache
     return _resolver
 
 

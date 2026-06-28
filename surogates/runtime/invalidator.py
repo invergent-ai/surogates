@@ -61,6 +61,13 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # same shape so the channel suffix passes through verbatim.
     ("channel_routing_changed:", "channel_routing_cache"),
     ("mate_settings_changed:", "mate_settings_cache"),
+    # A channel sender linked their real account.  link_channel publishes
+    # ``channel_identity_changed:<platform>\x00<platform_user_id>\x00<org_id>``
+    # — the channels pod's per-message identity cache keys on that same
+    # NUL-joined string, so the suffix passes through verbatim and the
+    # just-linked user's negative-cache entry is evicted on bind rather than at
+    # TTL expiry.
+    ("channel_identity_changed:", "channel_identity_cache"),
     # global system-skills bundle bumped.  The ops
     # `surogate-ops seed-builtin-skills` CLI publishes
     # ``system_skills_changed:<new_tag>`` after a successful
@@ -100,6 +107,7 @@ def handle_invalidation_message(
     channel_routing_cache: Any = None,
     system_bundle_cache: Any = None,
     mate_settings_cache: Any = None,
+    channel_identity_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -118,6 +126,7 @@ def handle_invalidation_message(
         "channel_routing_cache": channel_routing_cache,
         "system_bundle_cache": system_bundle_cache,
         "mate_settings_cache": mate_settings_cache,
+        "channel_identity_cache": channel_identity_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -144,6 +153,7 @@ async def run_invalidator(
     channel_routing_cache: Any = None,
     system_bundle_cache: Any = None,
     mate_settings_cache: Any = None,
+    channel_identity_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -176,6 +186,7 @@ async def run_invalidator(
                 channel_routing_cache=channel_routing_cache,
                 system_bundle_cache=system_bundle_cache,
                 mate_settings_cache=mate_settings_cache,
+                channel_identity_cache=channel_identity_cache,
             )
     finally:
         try:

@@ -21,6 +21,15 @@ from surogates.channels.identity import (
 SF = object()  # opaque session_factory sentinel — never called by the fakes
 
 
+def test_resolver_exposes_its_cache_for_invalidation():
+    """The resolver must expose the underlying cache so the channels process
+    can wire it into the cross-process invalidator (a just-linked user's stale
+    negative-cache entry is evicted on bind, not on TTL expiry)."""
+    resolver = make_cached_identity_resolver(SF)
+    assert hasattr(resolver, "cache"), "resolver exposes .cache"
+    assert hasattr(resolver.cache, "invalidate"), "cache supports invalidate(key)"
+
+
 def _identity(platform: str, uid: str, org_id):
     return ResolvedIdentity(
         user_id=uuid4(), org_id=org_id, platform=platform, platform_user_id=uid

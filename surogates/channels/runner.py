@@ -44,6 +44,23 @@ logger = logging.getLogger(__name__)
 __all__ = ["build_channels_app", "run_channels"]
 
 
+class _MultiCache:
+    """Fan an ``invalidate(key)`` out to several caches.
+
+    The deps factory builds two identity caches (one provisioning ``shadow``
+    resolver, one resolve-only ``linked`` resolver).  A ``channel_identity_changed``
+    invalidation must evict the key from whichever holds it, so the invalidator
+    is wired with this composite rather than a single cache.
+    """
+
+    def __init__(self, caches: Any) -> None:
+        self._caches = tuple(caches)
+
+    def invalidate(self, key: str) -> None:
+        for cache in self._caches:
+            cache.invalidate(key)
+
+
 def _make_deps_factory(
     *,
     session_store: Any,
@@ -158,6 +175,9 @@ def _make_deps_factory(
             pairing_sender=_pairing_sender,
         )
 
+    # Expose both resolvers' caches so the channels process can wire them into
+    # the cross-process invalidator (invalidate-on-link).
+    _factory.identity_caches = (shadow_resolver.cache, linked_resolver.cache)
     return _factory
 
 
@@ -253,6 +273,10 @@ def build_channels_app(
     )
 
     app = dispatcher.build_app()
+    # Hand the per-message identity caches to the caller so it can wire the
+    # cross-process invalidator (link_channel publishes channel_identity_changed
+    # on bind; the channels pod evicts the just-linked sender's stale entry).
+    app.state.channel_identity_caches = deps_factory.identity_caches
 
     @app.get("/health")
     async def _health() -> Response:
@@ -328,8 +352,13 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         session_store=session_store,
         mate_settings_cache=mate_cache,
     )
-    # Follow toggles propagate within the mate_settings_cache TTL (30 s)
-    # without a process restart; no separate invalidator loop is needed here.
+    # Routing / mate-settings caches age out within their TTL (30 s) without a
+    # restart.  The per-message identity cache, however, negative-caches an
+    # 'unknown sender' so a just-linked user would stay unrecognized for the
+    # whole TTL — so we DO run an invalidator here, wired to the identity caches,
+    # and link_channel publishes ``channel_identity_changed`` on bind to evict
+    # that entry at once.
+    from surogates.runtime import run_invalidator
 
     # Determine which platforms to run delivery loops for.
     from surogates.channels.registry import registry as _registry
@@ -339,6 +368,15 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
 
     # Background tasks.
     tasks: list[asyncio.Task] = []
+
+    invalidator_task = asyncio.create_task(
+        run_invalidator(
+            redis,
+            channel_identity_cache=_MultiCache(app.state.channel_identity_caches),
+        ),
+        name="channel-identity-invalidator",
+    )
+    tasks.append(invalidator_task)
 
     for platform in enabled:
         task = asyncio.create_task(

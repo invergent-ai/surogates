@@ -765,6 +765,25 @@ async def link_channel(
         platform, platform_user_id, tenant.user_id, body.code,
     )
 
+    # Evict the sender's negative-cached "unknown" entry on the channels pod so
+    # they are recognized on their next message instead of being re-prompted
+    # until the identity cache's TTL expires.  The identifier is the channels
+    # identity-cache key verbatim (``<platform>\x00<user>\x00<org>``).  Best
+    # effort: a publish failure must not fail the bind — the entry still ages
+    # out on its own.
+    redis = getattr(request.app.state, "redis", None)
+    if redis is not None:
+        invalidation = (
+            f"channel_identity_changed:{platform}\x00{platform_user_id}\x00{tenant.org_id}"
+        )
+        try:
+            await redis.publish(invalidation, b"")
+        except Exception:  # noqa: BLE001 — best-effort cross-process invalidation
+            logger.warning(
+                "Failed to publish channel_identity_changed for %s:%s",
+                platform, platform_user_id, exc_info=True,
+            )
+
     return LinkChannelResponse(
         success=True,
         platform=platform,
