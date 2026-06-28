@@ -57,19 +57,22 @@ class PairingStore:
 
     async def create(
         self,
+        org_id: str,
         platform: str,
         platform_user_id: str,
         platform_meta: dict[str, Any] | None = None,
     ) -> str | None:
-        """Generate a pairing code for a platform user.
+        """Generate an org-scoped pairing code for a platform user.
 
-        Returns the code string (e.g., ``"A3F7-K9M2"``), or ``None`` if
-        the user is rate-limited.
+        The entry and rate-limit key are scoped by ``(org_id, platform,
+        platform_user_id)`` so a code minted in one org cannot be consumed while
+        logged into another.  Returns the code string (e.g., ``"A3F7-K9M2"``);
+        a still-live code for the same tuple is reused rather than re-minted.
         """
-        # Rate limit: check if this user already has a pending code.
-        # If the previous code is still alive, reuse it instead of generating
-        # a new one.  If it expired, allow a fresh code immediately.
-        rate_key = f"{_RATE_PREFIX}{platform}:{platform_user_id}"
+        # Rate limit: check if this (org, platform, user) already has a pending
+        # code.  If the previous code is still alive, reuse it; if it expired,
+        # allow a fresh code immediately.
+        rate_key = f"{_RATE_PREFIX}{org_id}:{platform}:{platform_user_id}"
         existing_code = await self._redis.get(rate_key)
         if existing_code:
             existing_code_str = existing_code.decode() if isinstance(existing_code, bytes) else str(existing_code)
@@ -81,6 +84,7 @@ class PairingStore:
 
         # Store the pairing entry in Redis with TTL.
         entry = json.dumps({
+            "org_id": org_id,
             "platform": platform,
             "platform_user_id": platform_user_id,
             "platform_meta": platform_meta or {},
@@ -92,8 +96,8 @@ class PairingStore:
         await self._redis.setex(rate_key, self._ttl, code)
 
         logger.info(
-            "Pairing code created for %s:%s (TTL %ds)",
-            platform, platform_user_id, self._ttl,
+            "Pairing code created for %s/%s:%s (TTL %ds)",
+            org_id, platform, platform_user_id, self._ttl,
         )
         return code
 
