@@ -155,11 +155,36 @@ def parse(body: dict, *, bot_username: str) -> InboundMessage | None:
         return None
 
 
+# Telegram service messages (member join/leave, chat created, pinned, …) are
+# not user messages to respond to.  Dropping them explicitly — rather than
+# relying on the no-text guard below — keeps the loop-safety contract from
+# registry.py honest: a service message that ever carries text can't slip
+# through and get its (often human) sender auto-provisioned.  Mirrors the Slack
+# parser's system-subtype drop.
+_SERVICE_MESSAGE_KEYS = (
+    "new_chat_members",
+    "left_chat_member",
+    "new_chat_title",
+    "new_chat_photo",
+    "delete_chat_photo",
+    "group_chat_created",
+    "supergroup_chat_created",
+    "channel_chat_created",
+    "pinned_message",
+    "message_auto_delete_timer_changed",
+    "migrate_to_chat_id",
+    "migrate_from_chat_id",
+)
+
+
 def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
     """Internal parser — may raise; wrapped by :func:`parse`."""
     # Only handle message updates.
     message = body.get("message")
     if message is None:
+        return None
+
+    if any(key in message for key in _SERVICE_MESSAGE_KEYS):
         return None
 
     # ------------------------------------------------------------------

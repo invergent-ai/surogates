@@ -388,6 +388,37 @@ class TestParse:
         update["message"]["text"] = ""
         assert parse(update, bot_username=BOT_USERNAME) is None
 
+    def test_service_new_chat_members_returns_none_even_with_text(self):
+        """A member-join service message is not a user message — dropped
+        explicitly, regardless of any text the platform attaches (so it can't
+        slip past the no-text guard and get a sender auto-provisioned)."""
+        update = {
+            "update_id": 201,
+            "message": {
+                "message_id": 11,
+                "from": {"id": 1, "is_bot": False, "first_name": "Alice"},
+                "chat": {"id": 111, "type": "group"},
+                "date": 1700000006,
+                "new_chat_members": [{"id": 999, "is_bot": True, "username": "b"}],
+                "text": "Alice added a bot to the group",
+            },
+        }
+        assert parse(update, bot_username=BOT_USERNAME) is None
+
+    def test_service_left_chat_member_returns_none(self):
+        update = {
+            "update_id": 202,
+            "message": {
+                "message_id": 12,
+                "from": {"id": 1, "is_bot": False, "first_name": "Alice"},
+                "chat": {"id": 111, "type": "group"},
+                "date": 1700000007,
+                "left_chat_member": {"id": 999, "is_bot": False, "first_name": "Bob"},
+                "text": "Bob left",
+            },
+        }
+        assert parse(update, bot_username=BOT_USERNAME) is None
+
     # ------------------------------------------------------------------
     # Source dict
     # ------------------------------------------------------------------

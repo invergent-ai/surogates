@@ -501,6 +501,29 @@ class TestParseReturnsNone:
         body = self._evt(subtype="message_deleted", text="")
         assert parse(body, bot_user_id=BOT_USER_ID) is None
 
+    def test_own_bot_message_returns_none_even_without_bot_marker(self):
+        """Own-bot loop safety: any event authored by our own bot drops.
+
+        Slack marks the bot's own join with ``subtype=channel_join`` and the
+        bot's user id but no ``bot_id`` — without an unconditional own-bot drop
+        the agent would provision itself and open a session on its own join.
+        """
+        body = self._evt(
+            user=BOT_USER_ID,
+            subtype="channel_join",
+            text="<@U0BOTUSER> has joined the channel",
+        )
+        assert parse(body, bot_user_id=BOT_USER_ID) is None
+
+    def test_channel_join_subtype_returns_none(self):
+        """A member-join system message is not a message to respond to."""
+        body = self._evt(user="U2", subtype="channel_join", text="has joined")
+        assert parse(body, bot_user_id=BOT_USER_ID) is None
+
+    def test_channel_leave_subtype_returns_none(self):
+        body = self._evt(user="U2", subtype="channel_leave", text="has left")
+        assert parse(body, bot_user_id=BOT_USER_ID) is None
+
     def test_non_message_event_type_returns_none(self):
         body = {
             "type": "event_callback",

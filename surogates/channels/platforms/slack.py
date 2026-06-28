@@ -281,11 +281,20 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
     subtype = event.get("subtype", "")
     user_id_raw: str = event.get("user", "")
 
+    # ------------------------------------------------------------------
+    # Loop safety: drop anything authored by our OWN bot user, however Slack
+    # marks it — a bot_message, or the bare ``channel_join`` Slack emits (with
+    # the bot's user id but no ``bot_id``) when the agent is invited.  Without
+    # this unconditional drop the agent would react to its own join/messages.
+    # ------------------------------------------------------------------
+    if bot_user_id and user_id_raw == bot_user_id:
+        return None
+
     is_bot: bool = False
     if bot_id or subtype == "bot_message":
-        # Loop safety: drop if (a) we can't identify our own bot id (resolution
-        # failed → empty string), OR (b) this IS our own bot's message.
-        if (not bot_user_id) or (user_id_raw == bot_user_id):
+        # Can't identify our own bot id (resolution failed → empty string) →
+        # drop for safety; our own messages are already dropped above.
+        if not bot_user_id:
             return None
         # Another bot's message. If there's no user field we can't route it.
         if not user_id_raw:
@@ -293,9 +302,17 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         is_bot = True
 
     # ------------------------------------------------------------------
-    # Gate: edits and deletions.
+    # Gate: non-message system subtypes (edits, deletions, member join/leave)
+    # are not user messages to respond to.
     # ------------------------------------------------------------------
-    if subtype in ("message_changed", "message_deleted"):
+    if subtype in (
+        "message_changed",
+        "message_deleted",
+        "channel_join",
+        "channel_leave",
+        "group_join",
+        "group_leave",
+    ):
         return None
 
     # ------------------------------------------------------------------

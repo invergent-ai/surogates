@@ -156,7 +156,22 @@ class ChannelPlatform(Protocol):
 
     def parse(
         self, body: Any, *, creds: dict | None = None, identifier: str | None = None
-    ) -> InboundMessage | None: ...
+    ) -> InboundMessage | None:
+        """Map a verified inbound payload to an :class:`InboundMessage`, or None.
+
+        Loop-safety contract — implementations MUST return ``None`` for:
+
+        - messages authored by the agent's OWN bot user (however the platform
+          marks them). Senders are auto-provisioned an identity downstream, so a
+          self-authored message that slips through would make the agent provision
+          and converse with itself.
+        - non-message system events (member join/leave, edits, deletions, etc.)
+          that are not something to respond to.
+
+        Other bots' messages should be returned with ``is_bot=True`` so the
+        pipeline's ``allow_bots`` gate decides — only the OWN bot is hard-dropped.
+        """
+        ...
 
     async def send(self, item: Any, *, creds: dict) -> SendResult: ...
 
