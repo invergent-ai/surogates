@@ -8,6 +8,10 @@ import cycle.
 
 from __future__ import annotations
 
+from surogates.runtime.agent_principal import (
+    ServiceAccountPrincipal,
+    make_cached_agent_principal_resolver,
+)
 from surogates.runtime.bundle_accessor import AgentFileBundle
 from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
@@ -49,6 +53,8 @@ from surogates.runtime.worker_resolver import (
 __all__ = [
     "AgentDisabledError",
     "AgentFileBundle",
+    "ServiceAccountPrincipal",
+    "make_cached_agent_principal_resolver",
     "AgentRuntimeContext",
     "ChannelRoutingCache",
     "FileBundleCache",
