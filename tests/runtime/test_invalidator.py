@@ -286,3 +286,24 @@ def test_handler_routes_mate_settings_changed_to_mate_cache():
         mate_settings_cache=cache,
     )
     cache.invalidate.assert_called_once_with("a1:slack:C1")
+
+
+def test_agent_principal_changed_is_subscribed():
+    from surogates.runtime.invalidator import INVALIDATION_CHANNELS
+
+    assert "agent_principal_changed:" in INVALIDATION_CHANNELS
+
+
+def test_handler_routes_agent_principal_changed_to_cache():
+    """ops publishes ``agent_principal_changed:<org_id>\\x00<agent_id>`` on
+    revoke/rotate; the resolver cache keys on that same NUL-joined string, so
+    the suffix passes through verbatim."""
+    from surogates.runtime.invalidator import handle_invalidation_message
+
+    cache = MagicMock()
+    handle_invalidation_message(
+        channel="agent_principal_changed:org-1\x00agent-1",
+        payload=b"",
+        agent_principal_cache=cache,
+    )
+    cache.invalidate.assert_called_once_with("org-1\x00agent-1")

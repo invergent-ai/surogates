@@ -68,6 +68,11 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # just-linked user's negative-cache entry is evicted on bind rather than at
     # TTL expiry.
     ("channel_identity_changed:", "channel_identity_cache"),
+    # An agent's service-account principal was rotated or revoked.  ops
+    # publishes ``agent_principal_changed:<org_id>\x00<agent_id>``; the runtime
+    # resolver cache keys on that same NUL-joined string, so the suffix passes
+    # through verbatim.
+    ("agent_principal_changed:", "agent_principal_cache"),
     # global system-skills bundle bumped.  The ops
     # `surogate-ops seed-builtin-skills` CLI publishes
     # ``system_skills_changed:<new_tag>`` after a successful
@@ -108,6 +113,7 @@ def handle_invalidation_message(
     system_bundle_cache: Any = None,
     mate_settings_cache: Any = None,
     channel_identity_cache: Any = None,
+    agent_principal_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -127,6 +133,7 @@ def handle_invalidation_message(
         "system_bundle_cache": system_bundle_cache,
         "mate_settings_cache": mate_settings_cache,
         "channel_identity_cache": channel_identity_cache,
+        "agent_principal_cache": agent_principal_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -154,6 +161,7 @@ async def run_invalidator(
     system_bundle_cache: Any = None,
     mate_settings_cache: Any = None,
     channel_identity_cache: Any = None,
+    agent_principal_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 
@@ -187,6 +195,7 @@ async def run_invalidator(
                 system_bundle_cache=system_bundle_cache,
                 mate_settings_cache=mate_settings_cache,
                 channel_identity_cache=channel_identity_cache,
+                agent_principal_cache=agent_principal_cache,
             )
     finally:
         try:
