@@ -77,6 +77,9 @@ async def test_rejects_code_from_a_different_org(session_factory):
     with pytest.raises(HTTPException):
         await link_channel(LinkChannelRequest(code=code), _request(pairing, session_factory), tenant)
     assert await _identity(session_factory, user="U_MISMATCH") == [], "nothing created cross-org"
+    # The code must NOT be consumed by a wrong-org attempt — it stays valid for
+    # the correct org (otherwise a wrong-org paste griefs the real owner).
+    assert await pairing.get(code) is not None, "wrong-org attempt must not burn the code"
 
 
 async def test_creates_identity_when_none_exists(session_factory):

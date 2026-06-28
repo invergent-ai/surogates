@@ -666,7 +666,10 @@ async def pairing_info(
         return PairingInfoResponse(platform="", platform_user_id="", valid=False)
 
     entry = await pairing_store.get(code)
-    if entry is None:
+    # Treat a code with no org metadata as invalid: org-bound codes always carry
+    # an org_id, so a missing one is a malformed / pre-migration entry that must
+    # not be presented as linkable.
+    if entry is None or not entry.get("org_id"):
         return PairingInfoResponse(platform="", platform_user_id="", valid=False)
 
     # Mask the platform user ID — the unauthenticated endpoint should
@@ -696,6 +699,21 @@ async def link_channel(
     if pairing_store is None:
         raise HTTPException(status_code=503, detail="Pairing service not available.")
 
+    # Peek (non-destructive) first: org-bound codes must not be consumed while
+    # logged into the wrong org (which would both mis-bind and burn a still-valid
+    # code).  Validate org BEFORE the single-use resolve, so a wrong-org attempt
+    # leaves the code alive for the correct org.
+    entry = await pairing_store.get(body.code)
+    if entry is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
+
+    if str(entry.get("org_id", "")) != str(tenant.org_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pairing code is not valid for this organization.",
+        )
+
+    # Org matches — now consume the code (single-use) and bind.
     entry = await pairing_store.resolve(body.code)
     if entry is None:
         raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
@@ -706,15 +724,6 @@ async def link_channel(
         platform = entry.get("platform", "")
         platform_user_id = entry.get("platform_user_id", "")
         platform_meta = entry.get("platform_meta", {})
-
-        # Org-bound codes: a code minted in one org must not be consumed while
-        # logged into another (which would bind the platform user in the wrong
-        # tenant).  Reject a code whose org does not match the authenticated one.
-        if str(entry.get("org_id", "")) != str(tenant.org_id):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Pairing code is not valid for this organization.",
-            )
 
         row = (
             await db.execute(

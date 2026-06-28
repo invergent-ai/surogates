@@ -120,13 +120,21 @@ def _make_deps_factory(
                     kind, msg.platform_user_id,
                 )
                 return
-            await send_private(
+            delivered = await send_private(
                 creds,
                 sender_id=msg.platform_user_id,
                 chat_id=msg.identifier,
                 is_dm=msg.is_dm,
                 text=_link_prompt(code),
             )
+            if not delivered:
+                # Private delivery failed (e.g. the user blocked the bot).  The
+                # code stays in Redis until its TTL; the sender's next message
+                # re-attempts delivery with the same still-live code.
+                logger.warning(
+                    "[channels] %s send_private failed for %s — link prompt not delivered",
+                    kind, msg.platform_user_id,
+                )
 
         return PipelineDeps(
             session_store=session_store,
