@@ -163,3 +163,31 @@ async def test_returns_existing_identity_without_creating_a_new_user(session_fac
             )
         ).scalars().all()
         assert external == []
+
+
+async def test_resolve_real_identity_excludes_shadow_users(session_factory):
+    """A shadow identity (auth_provider == platform) is not a linked real user."""
+    org_id = await create_org(session_factory)
+    await get_or_create_channel_identity(
+        session_factory, platform="slack", platform_user_id="U_SHADOW",
+        org_id=org_id, display_name="Shadow",
+    )
+    from surogates.channels.identity import resolve_real_identity
+    assert await resolve_real_identity(
+        session_factory, "slack", "U_SHADOW", org_id=org_id
+    ) is None
+
+
+async def test_resolve_real_identity_finds_real_user(session_factory):
+    """A channel identity pointing at a real (database) user resolves."""
+    from surogates.channels.identity import resolve_real_identity
+    org_id = await create_org(session_factory)
+    real_user_id = await create_user(session_factory, org_id)  # auth_provider defaults to "database"
+    async with session_factory() as db:
+        db.add(ChannelIdentity(
+            id=uuid.uuid4(), org_id=org_id, user_id=real_user_id,
+            platform="slack", platform_user_id="U_REAL",
+        ))
+        await db.commit()
+    r = await resolve_real_identity(session_factory, "slack", "U_REAL", org_id=org_id)
+    assert r is not None and r.user_id == real_user_id

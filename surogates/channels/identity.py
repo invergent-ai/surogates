@@ -73,6 +73,44 @@ async def resolve_identity(
         )
 
 
+async def resolve_real_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    platform_user_id: str,
+    *,
+    org_id: object,
+) -> ResolvedIdentity | None:
+    """Resolve a channel sender to a LINKED real user, or ``None``.
+
+    Like :func:`resolve_identity` but filtered to **real** (non-shadow) users —
+    a ``shadow`` user (``auth_provider == platform``, created by auto-provision)
+    does not count as linked.  Never provisions; ``linked`` mode uses this to
+    decide between "known real user" and "prompt to link".
+    """
+    from surogates.db.models import User as UserRow
+
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                select(ChannelIdentityRow, UserRow)
+                .join(UserRow, ChannelIdentityRow.user_id == UserRow.id)
+                .where(ChannelIdentityRow.platform == platform)
+                .where(ChannelIdentityRow.platform_user_id == platform_user_id)
+                .where(ChannelIdentityRow.org_id == org_id)
+                .where(UserRow.auth_provider != platform)
+            )
+        ).first()
+        if row is None:
+            return None
+        identity, user = row
+        return ResolvedIdentity(
+            user_id=user.id,
+            org_id=user.org_id,
+            platform=identity.platform,
+            platform_user_id=identity.platform_user_id,
+        )
+
+
 async def get_or_create_channel_identity(
     session_factory: async_sessionmaker[AsyncSession],
     *,
