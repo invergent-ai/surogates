@@ -345,12 +345,13 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Gate 5: Identity resolution.
         # ------------------------------------------------------------------
-        # Channel membership is the authorisation boundary — an admin installed
-        # the app and invited the agent — so an unlinked sender is provisioned a
-        # lightweight external identity scoped to the agent's org rather than
-        # turned away.  ``resolve_identity`` get-or-creates that identity.
+        # ``deps.resolve_identity`` is policy-aware (see the deps factory): in
+        # ``shadow`` mode (Mate) it auto-provisions an org-scoped identity —
+        # channel membership is the authorisation boundary; in ``linked`` mode
+        # (multi-user assistant) it resolves only a real linked account and
+        # returns None for an unknown sender, who is prompted to link below.
         #
-        # Provisioning hits the DB, so it can fail transiently (deadlock,
+        # The lookup hits the DB, so it can fail transiently (deadlock,
         # connection drop).  Drop on failure rather than letting the exception
         # 5xx the webhook handler — the platform redelivers, and a retry storm
         # of 5xxs helps no one.
@@ -366,7 +367,7 @@ class ChannelInboundPipeline:
             # Transient DB fault (deadlock, connection drop) — expected under
             # load.  Drop at WARNING; the platform redelivers.
             logger.warning(
-                "[inbound] Transient DB error provisioning identity for %s on %s — dropping",
+                "[inbound] Transient DB error resolving identity for %s on %s — dropping",
                 msg.platform_user_id, routing.platform,
             )
             return InboundOutcome.DROPPED
@@ -375,12 +376,29 @@ class ChannelInboundPipeline:
             # drop so we don't 5xx-storm the webhook, but log at ERROR with the
             # traceback so it's surfaced, not masked as a routine drop.
             logger.error(
-                "[inbound] Unexpected error provisioning identity for %s (%s) on %s — dropping",
+                "[inbound] Unexpected error resolving identity for %s (%s) on %s — dropping",
                 msg.platform_user_id, msg.user_name, routing.platform,
                 exc_info=True,
             )
             return InboundOutcome.DROPPED
         if identity is None:
+            # ``linked`` (multi-user assistant): an unknown sender is NOT
+            # auto-provisioned — mint a code and privately prompt them to link
+            # their real Surogate account; no session opens until they do.
+            # ``shadow`` (Mate): the resolver provisions, so None means a genuine
+            # provisioning failure → drop.
+            if config.get("identity_policy", "shadow") == "linked":
+                code = await deps.pairing.create(
+                    str(routing.org_id),
+                    routing.platform,
+                    msg.platform_user_id,
+                    {"user_name": msg.user_name},
+                )
+                if code and deps.pairing_sender is not None:
+                    await deps.pairing_sender(
+                        routing.org_id, routing.platform, msg, code,
+                    )
+                return InboundOutcome.PAIRING_PROMPTED
             logger.warning(
                 "[inbound] No identity resolved for %s (%s) on %s — dropping",
                 msg.platform_user_id, msg.user_name, routing.platform,

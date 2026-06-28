@@ -175,11 +175,13 @@ def _make_config(
     require_mention: bool = True,
     free_response_channels: set[str] | None = None,
     allow_bots: str = "none",
+    identity_policy: str = "shadow",
 ) -> dict:
     return {
         "require_mention": require_mention,
         "free_response_channels": free_response_channels or set(),
         "allow_bots": allow_bots,
+        "identity_policy": identity_policy,
     }
 
 
@@ -1178,3 +1180,37 @@ async def test_resolve_follow_empty_channel():
     result = await _resolve_follow("agent-1", "slack", "")
     assert result is False
     assert not loader_calls, "loader must not be called when channel_id is empty"
+
+
+@pytest.mark.asyncio
+async def test_linked_unknown_sender_prompts_link_no_session():
+    """linked policy + unknown sender → mint a code, send the link prompt,
+    open NO session, return PAIRING_PROMPTED."""
+    msg = _make_msg(is_dm=True, ts="7.0", platform_user_id="U_NEW")
+    config = _make_config(identity_policy="linked")
+    deps = _make_deps(identity=None)  # real-user resolver returns None (unknown)
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=config, deps=deps,
+    )
+
+    assert result == InboundOutcome.PAIRING_PROMPTED
+    assert not deps._sessions_created, "no session for an unlinked sender"
+    assert deps._pairing_created, "a pairing code was minted"
+    assert deps._link_prompts_sent, "the link prompt was sent privately"
+
+
+@pytest.mark.asyncio
+async def test_linked_known_real_user_is_processed():
+    """linked policy + resolved real user → processed as that user."""
+    msg = _make_msg(is_dm=True, ts="7.1", platform_user_id="U_LINKED")
+    config = _make_config(identity_policy="linked")
+    deps = _make_deps()  # resolver returns a real identity
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=config, deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    assert deps._sessions_created
+    assert not deps._pairing_created, "no link prompt when already linked"
