@@ -122,6 +122,9 @@ class InboundOutcome(str, Enum):
     FIREHOSED = "firehosed"
     """Message appended as a non-waking channel observation (follow mode)."""
 
+    PAIRING_PROMPTED = "pairing_prompted"
+    """Linked-mode sender is unknown; a link prompt was sent, no session created."""
+
     DROPPED = "dropped"
     """Message discarded (duplicate, mention gate, bot filter, empty body)."""
 
@@ -200,6 +203,11 @@ class PipelineDeps:
     resolve_identity: _ResolveIdentity
     session_factory: Any
     follow_enabled: _FollowEnabled | None = None
+    # ``linked`` identity policy only — the producer that mints a pairing code
+    # and privately delivers the link prompt.  Unused (``None``) in ``shadow``
+    # mode, so Mate constructs neither.
+    pairing: Any = None
+    pairing_sender: Any = None
 
 
 # ---------------------------------------------------------------------------

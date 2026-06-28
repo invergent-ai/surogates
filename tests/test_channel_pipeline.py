@@ -259,6 +259,19 @@ def _make_deps(
             raise resolve_error
         return identity
 
+    pairing_created: list[dict] = []
+    link_prompts_sent: list[dict] = []
+
+    class _RecordingPairing:
+        async def create(self, org_id, platform, platform_user_id, platform_meta=None):
+            pairing_created.append(
+                {"org_id": org_id, "platform": platform, "platform_user_id": platform_user_id},
+            )
+            return "TEST-CODE"
+
+    async def pairing_sender(org_id, platform, msg, code):
+        link_prompts_sent.append({"org_id": org_id, "platform": platform, "code": code})
+
     deps = PipelineDeps(
         session_store=store,
         redis=redis,
@@ -269,18 +282,32 @@ def _make_deps(
         resolve_identity=resolve_id,
         session_factory=None,
         follow_enabled=follow_enabled,
+        pairing=_RecordingPairing(),
+        pairing_sender=pairing_sender,
     )
     # Expose internals for assertions.
     deps._firehose_calls = firehose_calls  # type: ignore[attr-defined]
     deps._sessions_created = sessions_created  # type: ignore[attr-defined]
     deps._enqueued = enqueued  # type: ignore[attr-defined]
     deps._resolve_calls = resolve_calls  # type: ignore[attr-defined]
+    deps._pairing_created = pairing_created  # type: ignore[attr-defined]
+    deps._link_prompts_sent = link_prompts_sent  # type: ignore[attr-defined]
     return deps
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pairing_prompted_outcome_and_deps_fields():
+    """linked mode needs the PAIRING_PROMPTED outcome and the pairing deps back."""
+    assert InboundOutcome.PAIRING_PROMPTED.value == "pairing_prompted"
+    deps = _make_deps()
+    assert hasattr(deps, "pairing") and hasattr(deps, "pairing_sender")
+    # The test factory records producer activity for the gate-branch tests.
+    assert hasattr(deps, "_pairing_created") and hasattr(deps, "_link_prompts_sent")
 
 
 @pytest.mark.asyncio
