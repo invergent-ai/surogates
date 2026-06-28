@@ -101,6 +101,17 @@ CREATE TABLE IF NOT EXISTS service_accounts (
 CREATE INDEX IF NOT EXISTS idx_service_accounts_org
     ON service_accounts (org_id);
 
+-- Per-agent principal: ``agent_id`` links a service account to its owning ops
+-- Agent (a different database — logical reference, not a FK).  The partial
+-- unique index keeps it one service account per agent.  Retrofit for existing
+-- databases; ``create_all`` covers fresh ones.
+ALTER TABLE service_accounts
+    ADD COLUMN IF NOT EXISTS agent_id text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent
+    ON service_accounts (agent_id)
+    WHERE agent_id IS NOT NULL;
+
 
 -- ----------------------------------------------------------------------------
 -- Sessions — retrofits for the API channel.

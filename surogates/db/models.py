@@ -787,6 +787,12 @@ class ServiceAccount(Base):
     __tablename__ = "service_accounts"
     __table_args__ = (
         Index("idx_service_accounts_org", "org_id"),
+        Index(
+            "uq_service_accounts_agent",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("agent_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -806,6 +812,11 @@ class ServiceAccount(Base):
     )
     last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # Logical reference to the ops ``Agent.id`` (a different database, so no
+    # FK).  Set when this service account is the agent's own principal; NULL for
+    # ordinary org-scoped service accounts.  The partial unique index above
+    # keeps it one-SA-per-agent.
+    agent_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships
     org: Mapped[Org] = relationship(
