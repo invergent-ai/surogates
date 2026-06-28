@@ -79,9 +79,9 @@ class ChannelWebhookDispatcher:
         :class:`~surogates.channels.inbound.ChannelInboundPipeline` instance.
     deps_factory:
         Callable ``(kind, routing_obj, creds, platform) -> PipelineDeps``.  Called
-        once per verified message to build per-event dependencies (adapter state,
-        pairing sender).  The other deps are long-lived runtime singletons and
-        should be closed over by the factory.
+        once per verified message to build per-event dependencies (adapter state
+        scoped to the routing's agent).  The other deps are long-lived runtime
+        singletons and should be closed over by the factory.
     settings:
         Application settings; passed to ``registry.enabled_platforms(settings)`` to
         determine which platforms are active.

@@ -828,7 +828,7 @@ class TestMarkBotMessageAfterDelivery:
         async def enqueue(redis, *, org_id, agent_id, session_id):
             enqueued.append(session_id)
 
-        async def resolve_id(sf, platform, uid):
+        async def resolve_id(sf, platform, uid, *, org_id=None, display_name=""):
             class _Id:
                 user_id = UUID("bbbbbbbb-0000-0000-0000-000000000001")
             return _Id()
@@ -836,22 +836,16 @@ class TestMarkBotMessageAfterDelivery:
         async def firehose(*a, **kw):
             pass
 
-        class _Pairing:
-            async def create(self, *a, **kw):
-                return None
-
         state = _FakeStateFix2()
         deps = PipelineDeps(
             session_store=_FakeSS(),
             redis=_FakeRedisInPipeline(),
             state=state,
-            pairing=_Pairing(),
             firehose_append=firehose,
             get_or_create_session=get_or_create,
             enqueue_session=enqueue,
             resolve_identity=resolve_id,
             session_factory=None,
-            pairing_sender=lambda *a: None,
         )
 
         class _Routing:

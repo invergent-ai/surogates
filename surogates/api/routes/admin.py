@@ -333,6 +333,7 @@ async def create_channel_identity(
 
         existing = await session.execute(
             select(ChannelIdentity)
+            .where(ChannelIdentity.org_id == tenant.org_id)
             .where(ChannelIdentity.platform == body.platform)
             .where(ChannelIdentity.platform_user_id == body.platform_user_id)
         )
@@ -344,6 +345,7 @@ async def create_channel_identity(
 
         identity = ChannelIdentity(
             id=uuid.uuid4(),
+            org_id=tenant.org_id,
             user_id=body.user_id,
             platform=body.platform,
             platform_user_id=body.platform_user_id,

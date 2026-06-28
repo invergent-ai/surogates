@@ -5,7 +5,7 @@ Covers the 7 gating scenarios extracted from SlackAdapter._handle_slack_message:
   b. Channel non-mention + require_mention + follow on → firehose append, no session/enqueue.
   c. Channel mention → processed (session + USER_MESSAGE + enqueue).
   d. Free-response channel → processed without mention.
-  e. Unpaired user (identity=None) → pairing prompt, no session.
+  e. Unknown sender → auto-provisioned identity → processed (no pairing wall).
   f. Dedup by ts → second identical message dropped.
   g. Replay-stable → same inputs produce the same session_key call.
 """
@@ -115,18 +115,6 @@ class _FakeState:
         return ts in self._botmsg
 
 
-class _FakePairing:
-    def __init__(self, code: str = "AAAA-BBBB") -> None:
-        self.code = code
-        self.calls: list[tuple[str, str]] = []
-
-    async def create(
-        self, platform: str, platform_user_id: str, platform_meta: dict | None = None,
-    ) -> str | None:
-        self.calls.append((platform, platform_user_id))
-        return self.code
-
-
 # ---------------------------------------------------------------------------
 # Fixture factories
 # ---------------------------------------------------------------------------
@@ -202,14 +190,13 @@ def _make_deps(
     *,
     identity: _FakeIdentity | None = _FakeIdentity(),
     session_id: UUID = SESSION_ID,
-    pairing_sender: Any = None,
     follow_enabled: Any = None,
+    resolve_error: Exception | None = None,
 ) -> PipelineDeps:
     store = _FakeSessionStore()
     store._next_session_id = session_id
     redis = _FakeRedis()
     state = _FakeState()
-    pairing = _FakePairing()
 
     firehose_calls: list[dict] = []
 
@@ -250,32 +237,44 @@ def _make_deps(
     async def enqueue(redis_: Any, *, org_id: str, agent_id: str, session_id: Any) -> None:
         enqueued.append({"org_id": org_id, "agent_id": agent_id, "session_id": session_id})
 
-    async def resolve_id(sf: Any, platform: str, platform_user_id: str):
+    resolve_calls: list[dict] = []
+
+    async def resolve_id(
+        sf: Any,
+        platform: str,
+        platform_user_id: str,
+        *,
+        org_id: Any = None,
+        display_name: str = "",
+    ):
+        resolve_calls.append(
+            {
+                "platform": platform,
+                "platform_user_id": platform_user_id,
+                "org_id": org_id,
+                "display_name": display_name,
+            },
+        )
+        if resolve_error is not None:
+            raise resolve_error
         return identity
-
-    sender_calls: list[tuple] = []
-
-    async def _default_sender(platform_user_id: str, user_name: str, code: str) -> None:
-        sender_calls.append((platform_user_id, user_name, code))
 
     deps = PipelineDeps(
         session_store=store,
         redis=redis,
         state=state,
-        pairing=pairing,
         firehose_append=firehose_append,
         get_or_create_session=get_or_create,
         enqueue_session=enqueue,
         resolve_identity=resolve_id,
         session_factory=None,
-        pairing_sender=pairing_sender or _default_sender,
         follow_enabled=follow_enabled,
     )
     # Expose internals for assertions.
     deps._firehose_calls = firehose_calls  # type: ignore[attr-defined]
     deps._sessions_created = sessions_created  # type: ignore[attr-defined]
     deps._enqueued = enqueued  # type: ignore[attr-defined]
-    deps._sender_calls = sender_calls  # type: ignore[attr-defined]
+    deps._resolve_calls = resolve_calls  # type: ignore[attr-defined]
     return deps
 
 
@@ -417,20 +416,44 @@ async def test_d_free_response_channel_skips_mention_gate():
 
 
 @pytest.mark.asyncio
-async def test_e_unpaired_user_sends_pairing_prompt_no_session():
-    """(e) Identity not found → pairing prompt, no session."""
+async def test_e_unknown_sender_is_auto_provisioned_and_processed():
+    """(e) Unknown sender → auto-provisioned identity → processed.
+
+    Channel membership is the authorisation boundary; an unlinked sender must
+    not be turned away.  The gate forwards the agent's org and the sender's
+    display name to the resolver so it can provision an external user scoped to
+    the right org, then proceeds to a session.
+    """
     msg = _make_msg(is_dm=True, ts="6.0", platform_user_id="U_UNKNOWN")
     routing = _make_routing()
     config = _make_config()
-    deps = _make_deps(identity=None)  # <-- no identity
+    deps = _make_deps()  # resolver returns a (provisioned) identity
 
     pipeline = ChannelInboundPipeline()
     result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
 
-    assert result == InboundOutcome.PAIRING_PROMPTED
-    assert deps._sender_calls, "pairing prompt should have been sent"
-    assert not deps._sessions_created, "no session for unpaired user"
-    assert not deps._enqueued
+    assert result == InboundOutcome.PROCESSED
+    assert deps._sessions_created, "auto-provisioned sender gets a session"
+    call = deps._resolve_calls[-1]
+    assert call["org_id"] == routing.org_id, "agent org forwarded for provisioning"
+    assert call["display_name"] == "Alice", "sender display name forwarded"
+    assert deps._enqueued, "auto-provisioned sender's session is enqueued"
+
+
+@pytest.mark.asyncio
+async def test_provisioning_failure_drops_instead_of_crashing():
+    """A DB error while provisioning the identity must DROP (so the platform
+    redelivers), not propagate out of the handler and 5xx the webhook."""
+    msg = _make_msg(is_dm=True, ts="9.9", platform_user_id="U_ERR")
+    routing = _make_routing()
+    config = _make_config()
+    deps = _make_deps(resolve_error=RuntimeError("transient DB failure"))
+
+    pipeline = ChannelInboundPipeline()
+    result = await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+
+    assert result == InboundOutcome.DROPPED
+    assert not deps._sessions_created, "no session when provisioning fails"
 
 
 @pytest.mark.asyncio

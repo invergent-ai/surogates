@@ -182,12 +182,21 @@ class User(Base):
 
 class ChannelIdentity(Base):
     __tablename__ = "channel_identities"
+    # Scoped per-org: the same platform user id (e.g. a Slack workspace member)
+    # may legitimately be known to agents in different orgs, and each must
+    # resolve to its OWN org-scoped user — a global (platform, platform_user_id)
+    # uniqueness would attribute one org's session to another org's user.
     __table_args__ = (
-        UniqueConstraint("platform", "platform_user_id", name="uq_channel_platform"),
+        UniqueConstraint(
+            "org_id", "platform", "platform_user_id", name="uq_channel_org_platform"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False

@@ -211,13 +211,11 @@ def _deps_factory(kind, routing, creds, platform) -> PipelineDeps:
         session_store=None,
         redis=None,
         state=None,
-        pairing=None,
         firehose_append=_noop,
         get_or_create_session=_noop,
         enqueue_session=_noop,
         resolve_identity=_noop,
         session_factory=None,
-        pairing_sender=_noop,
     )
 
 

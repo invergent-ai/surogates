@@ -710,6 +710,7 @@ async def link_channel(
 
         existing = await db.execute(
             select(ChannelIdentity)
+            .where(ChannelIdentity.org_id == tenant.org_id)
             .where(ChannelIdentity.platform == platform)
             .where(ChannelIdentity.platform_user_id == platform_user_id)
         )
@@ -721,6 +722,7 @@ async def link_channel(
 
         identity = ChannelIdentity(
             id=uuid.uuid4(),
+            org_id=tenant.org_id,
             user_id=tenant.user_id,
             platform=platform,
             platform_user_id=platform_user_id,

@@ -28,9 +28,11 @@ from surogates.channels.dispatcher import (
     ChannelWebhookDispatcher,
     ChannelWebhookReconciler,
 )
-from surogates.channels.identity import get_or_create_channel_session, resolve_identity
+from surogates.channels.identity import (
+    get_or_create_channel_session,
+    make_cached_identity_resolver,
+)
 from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
-from surogates.channels.pairing import PairingStore
 from surogates.channels.registry import ChannelRegistry
 from surogates.channels.channel_state import ChannelAdapterState
 from surogates.config import enqueue_session
@@ -51,20 +53,7 @@ def _make_deps_factory(
 
     The factory is called once per verified inbound event.  It fills STATIC
     deps (singletons) from closures and constructs PER-EVENT deps (adapter
-    state scoped to the routing's agent_id, platform-specific pairing sender)
-    on each call.
-
-    ``pairing_sender`` contract
-    ---------------------------
-    The factory looks for ``platform.send_pairing_prompt`` (an async method
-    the platform adapter may implement).  If present it wraps it into a
-    three-arg coroutine ``(platform_user_id, user_name, code) → None`` that
-    also passes the ``web_url`` from the routing's credentials (not available
-    at build time, so the closure captures the platform object and delegates).
-    If the method is absent a warning is logged and the caller receives a
-    no-op stub — the pipeline still creates the pairing code; only the
-    delivery of the prompt to the user is skipped until the platform
-    implements the method.
+    state scoped to the routing's agent_id) on each call.
 
     ``follow_enabled`` resolver
     ---------------------------
@@ -76,7 +65,9 @@ def _make_deps_factory(
     """
     from surogates.runtime.mate_settings_cache import mate_cache_key
 
-    pairing = PairingStore(redis)
+    # One identity cache for the process — memoizes resolved senders so a busy
+    # channel doesn't re-read the DB per message (see make_cached_identity_resolver).
+    resolve_identity = make_cached_identity_resolver(session_factory)
 
     async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
         if mate_settings_cache is None or not channel_id:
@@ -87,35 +78,15 @@ def _make_deps_factory(
     def _factory(kind: str, routing: Any, creds: dict, platform: Any) -> PipelineDeps:
         state = ChannelAdapterState(redis, agent_id=routing.agent_id, platform=kind)
 
-        send_pairing_prompt = getattr(platform, "send_pairing_prompt", None)
-
-        if send_pairing_prompt is not None:
-            async def _pairing_sender(
-                platform_user_id: str, user_name: str, code: str,
-            ) -> None:
-                web_url: str = creds.get("web_url", "")
-                await send_pairing_prompt(creds, platform_user_id, user_name, code, web_url)
-        else:
-            async def _pairing_sender(  # type: ignore[misc]
-                platform_user_id: str, user_name: str, code: str,
-            ) -> None:
-                logger.warning(
-                    "[channels] %s platform has no send_pairing_prompt — "
-                    "pairing code %r generated but NOT delivered to user %s",
-                    kind, code, platform_user_id,
-                )
-
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
             state=state,
-            pairing=pairing,
             firehose_append=append_channel_observation,
             get_or_create_session=get_or_create_channel_session,
             enqueue_session=enqueue_session,
             resolve_identity=resolve_identity,
             session_factory=session_factory,
-            pairing_sender=_pairing_sender,
             follow_enabled=_resolve_follow,
         )
 

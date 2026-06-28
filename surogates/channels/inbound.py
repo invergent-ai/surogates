@@ -32,6 +32,8 @@ from enum import Enum
 from typing import Any, Awaitable, Callable
 from uuid import UUID
 
+from sqlalchemy.exc import InterfaceError, OperationalError
+
 from surogates.channels.dedup import MessageDeduplicator
 from surogates.channels.source import SessionSource, build_session_key
 from surogates.session.events import EventType
@@ -120,9 +122,6 @@ class InboundOutcome(str, Enum):
     FIREHOSED = "firehosed"
     """Message appended as a non-waking channel observation (follow mode)."""
 
-    PAIRING_PROMPTED = "pairing_prompted"
-    """Sender is unknown; pairing code sent, no session created."""
-
     DROPPED = "dropped"
     """Message discarded (duplicate, mention gate, bot filter, empty body)."""
 
@@ -140,11 +139,8 @@ _GetOrCreateSession = Callable[..., Awaitable[UUID]]
 #: Callable type for enqueue_session.
 _EnqueueSession = Callable[..., Awaitable[None]]
 
-#: Callable type for resolve_identity.
+#: Callable type for the identity resolver (get-or-create).
 _ResolveIdentity = Callable[..., Awaitable[Any]]
-
-#: Callable type for the pairing sender (platform-specific prompt).
-_PairingSender = Callable[[str, str, str], Awaitable[None]]
 
 #: Callable type for the follow-enabled resolver.
 #: Args: (agent_id, platform, channel_id) → bool
@@ -169,8 +165,6 @@ class PipelineDeps:
         Adapter state object exposing ``is_mentioned_thread``,
         ``mark_mentioned_thread``, ``get_session``, and ``remember_session``.
         Compatible with :class:`~surogates.channels.channel_state.ChannelAdapterState`.
-    pairing:
-        :class:`~surogates.channels.pairing.PairingStore` instance.
     firehose_append:
         Callable matching the signature of
         :func:`~surogates.channels.channel_observations.append_channel_observation`.
@@ -182,13 +176,12 @@ class PipelineDeps:
         :func:`~surogates.config.enqueue_session`.
     resolve_identity:
         Callable matching the signature of
-        :func:`~surogates.channels.identity.resolve_identity`.
+        :func:`~surogates.channels.identity.get_or_create_channel_identity`
+        — resolves a channel sender to an identity, provisioning a lightweight
+        external user (scoped to the agent's org) on first contact.
     session_factory:
         SQLAlchemy ``async_sessionmaker`` forwarded to ``get_or_create_session``
         and ``resolve_identity`` (may be ``None`` in tests that override both).
-    pairing_sender:
-        Platform-specific coroutine ``(platform_user_id, user_name, code) →
-        None`` that delivers the pairing prompt to the user.
     follow_enabled:
         Async resolver ``(agent_id, platform, channel_id) → bool`` that
         returns ``True`` when the agent has enabled follow mode for this
@@ -201,13 +194,11 @@ class PipelineDeps:
     session_store: Any
     redis: Any
     state: Any
-    pairing: Any
     firehose_append: _FirehoseAppend
     get_or_create_session: _GetOrCreateSession
     enqueue_session: _EnqueueSession
     resolve_identity: _ResolveIdentity
     session_factory: Any
-    pairing_sender: _PairingSender
     follow_enabled: _FollowEnabled | None = None
 
 
@@ -260,7 +251,8 @@ class ChannelInboundPipeline:
             * ``allow_bots`` (str) — ``"none"`` / ``"mentions"`` / ``"all"``.
 
         deps:
-            Injected dependencies (session store, Redis, state, pairing, …).
+            Injected dependencies (session store, Redis, state, identity
+            resolver, …).
         """
 
         # ------------------------------------------------------------------
@@ -345,24 +337,47 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Gate 5: Identity resolution.
         # ------------------------------------------------------------------
-        identity = await deps.resolve_identity(
-            deps.session_factory,
-            routing.platform,
-            msg.platform_user_id,
-        )
-        if identity is None:
-            logger.warning(
-                "[inbound] Unknown user %s (%s) on %s — no channel_identity registered",
-                msg.platform_user_id, msg.user_name, routing.platform,
-            )
-            code = await deps.pairing.create(
+        # Channel membership is the authorisation boundary — an admin installed
+        # the app and invited the agent — so an unlinked sender is provisioned a
+        # lightweight external identity scoped to the agent's org rather than
+        # turned away.  ``resolve_identity`` get-or-creates that identity.
+        #
+        # Provisioning hits the DB, so it can fail transiently (deadlock,
+        # connection drop).  Drop on failure rather than letting the exception
+        # 5xx the webhook handler — the platform redelivers, and a retry storm
+        # of 5xxs helps no one.
+        try:
+            identity = await deps.resolve_identity(
+                deps.session_factory,
                 routing.platform,
                 msg.platform_user_id,
-                platform_meta={"identifier": msg.identifier, "user_name": msg.user_name},
+                org_id=routing.org_id,
+                display_name=msg.user_name,
             )
-            if code:
-                await deps.pairing_sender(msg.platform_user_id, msg.user_name, code)
-            return InboundOutcome.PAIRING_PROMPTED
+        except (OperationalError, InterfaceError):
+            # Transient DB fault (deadlock, connection drop) — expected under
+            # load.  Drop at WARNING; the platform redelivers.
+            logger.warning(
+                "[inbound] Transient DB error provisioning identity for %s on %s — dropping",
+                msg.platform_user_id, routing.platform,
+            )
+            return InboundOutcome.DROPPED
+        except Exception:
+            # Unexpected — a real bug (bad data, constraint mismatch).  Still
+            # drop so we don't 5xx-storm the webhook, but log at ERROR with the
+            # traceback so it's surfaced, not masked as a routine drop.
+            logger.error(
+                "[inbound] Unexpected error provisioning identity for %s (%s) on %s — dropping",
+                msg.platform_user_id, msg.user_name, routing.platform,
+                exc_info=True,
+            )
+            return InboundOutcome.DROPPED
+        if identity is None:
+            logger.warning(
+                "[inbound] No identity resolved for %s (%s) on %s — dropping",
+                msg.platform_user_id, msg.user_name, routing.platform,
+            )
+            return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------
         # Gate 6: Session resolution (get-or-create).

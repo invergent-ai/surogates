@@ -71,23 +71,25 @@ def async_session_factory(
     )
 
 
-async def apply_observability_ddl(conn: AsyncConnection) -> None:
-    """Apply the observability trigger + views on an open connection.
+async def _exec_script(conn: AsyncConnection, sql: str) -> None:
+    """Run a multi-statement SQL script on an open connection.
 
-    Reads :data:`OBSERVABILITY_SQL_PATH` and runs it through the
-    underlying asyncpg connection's simple-query protocol, which is the
-    only path that accepts a multi-statement script.  Every statement
-    in the file is idempotent (``CREATE OR REPLACE`` / ``DROP IF
-    EXISTS``) so it is safe to run on every startup.  Callers must
-    pass a connection already inside a transaction (e.g. ``async with
-    engine.begin() as conn``).
+    Uses asyncpg's simple-query protocol (the only path that accepts a
+    multi-statement script — SQLAlchemy's ``exec_driver_sql`` uses the extended
+    protocol and rejects them).  Scripts must be idempotent (they run on every
+    startup) and the connection must already be inside a transaction (e.g.
+    ``async with engine.begin() as conn``).
     """
-    sql = OBSERVABILITY_SQL_PATH.read_text(encoding="utf-8")
-    # asyncpg's execute() accepts multi-statement scripts when called
-    # without parameters (simple query protocol).  SQLAlchemy's
-    # ``exec_driver_sql`` uses the extended protocol and rejects them.
     raw = await conn.get_raw_connection()
     await raw.driver_connection.execute(sql)
+
+
+async def apply_observability_ddl(conn: AsyncConnection) -> None:
+    """Apply ``observability.sql`` — the trigger, retrofit ``ALTER``s, indexes
+    and views.  Every statement is idempotent (``CREATE OR REPLACE`` / ``IF
+    [NOT] EXISTS`` / guarded ``DO`` blocks), so it is safe on every startup and
+    is where column-level schema changes to existing tables live (no Alembic)."""
+    await _exec_script(conn, OBSERVABILITY_SQL_PATH.read_text(encoding="utf-8"))
 
 
 def run_migrations(db_settings: DatabaseSettings) -> None:
@@ -95,9 +97,8 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
 
     Uses ``Base.metadata.create_all`` (idempotent — skips existing
     tables) for ORM-managed schema, then applies
-    :func:`apply_observability_ddl` for the trigger and views that sit
-    on top of the events table.  A future version can wire Alembic for
-    versioned migrations.
+    :func:`apply_observability_ddl` for the trigger, retrofit ``ALTER``s and
+    views.  A future version can wire Alembic for versioned migrations.
     """
     import asyncio
 
