@@ -1611,3 +1611,43 @@ class TestSlackBotLoopSafety:
         assert result.is_bot is True, (
             f"Different bot's message must have is_bot=True; got {result.is_bot!r}"
         )
+
+
+class TestSlackSendPrivate:
+    """send_private opens a DM with the sender and posts there."""
+
+    @pytest.mark.asyncio
+    async def test_dms_the_sender(self):
+        calls = {}
+
+        class _FakeClient:
+            async def conversations_open(self, users):
+                calls["users"] = users
+                return {"channel": {"id": "D123"}}
+
+            async def chat_postMessage(self, **kw):
+                calls["post"] = kw
+                return {"ok": True, "ts": "1.0"}
+
+        plat = SlackPlatform()
+        plat._get_client = lambda token: _FakeClient()
+        ok = await plat.send_private(
+            {"bot_token": "xoxb"}, sender_id="U9", chat_id="C1", is_dm=False, text="link me",
+        )
+        assert ok is True
+        assert calls["users"] == "U9"
+        assert calls["post"]["channel"] == "D123"
+        assert "link me" in calls["post"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_failure(self):
+        class _FailClient:
+            async def conversations_open(self, users):
+                raise RuntimeError("cannot dm")
+
+        plat = SlackPlatform()
+        plat._get_client = lambda token: _FailClient()
+        ok = await plat.send_private(
+            {"bot_token": "x"}, sender_id="U9", chat_id="C1", is_dm=False, text="x",
+        )
+        assert ok is False

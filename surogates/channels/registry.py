@@ -182,6 +182,24 @@ class ChannelPlatform(Protocol):
         self, body: Any, *, routing: Any, creds: dict, deps: Any
     ) -> bool: ...
 
+    async def send_private(
+        self,
+        creds: dict,
+        *,
+        sender_id: str,
+        chat_id: str,
+        is_dm: bool,
+        text: str,
+    ) -> bool:
+        """Privately deliver *text* to *sender_id* (a DM / ephemeral response).
+
+        Used by ``linked`` identity policy to send a link prompt without leaking
+        a usable code into a shared channel.  Returns ``True`` if delivered
+        privately, ``False`` if the platform cannot — so the caller withholds
+        the code.  Optional: the producer ``getattr``-guards this method.
+        """
+        ...
+
     async def handle_interactive(
         self,
         path_template: str,

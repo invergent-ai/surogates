@@ -1166,3 +1166,48 @@ async def test_answer_callback_query_reuses_http_client():
     assert "answerCallbackQuery" in post_calls[0]
     # Confirm it still refers to our patched instance
     assert platform._http is original_http
+
+
+class TestTelegramSendPrivate:
+    """send_private DMs the sender (the user id is their private chat)."""
+
+    @pytest.mark.asyncio
+    async def test_dms_the_sender(self):
+        posted = {}
+
+        class _FakeHttp:
+            async def post(self, url, json):
+                posted.update(url=url, json=json)
+
+                class _R:
+                    def json(self_inner):
+                        return {"ok": True, "result": {"message_id": 1}}
+
+                return _R()
+
+        plat = TelegramPlatform()
+        plat._http = _FakeHttp()
+        ok = await plat.send_private(
+            {"bot_token": "T"}, sender_id="555", chat_id="-100", is_dm=False, text="link me",
+        )
+        assert ok is True
+        assert posted["json"]["chat_id"] == "555"
+        assert "link me" in posted["json"]["text"]
+        assert "sendMessage" in posted["url"]
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_api_error(self):
+        class _FakeHttp:
+            async def post(self, url, json):
+                class _R:
+                    def json(self_inner):
+                        return {"ok": False, "description": "blocked"}
+
+                return _R()
+
+        plat = TelegramPlatform()
+        plat._http = _FakeHttp()
+        ok = await plat.send_private(
+            {"bot_token": "T"}, sender_id="555", chat_id="-100", is_dm=False, text="x",
+        )
+        assert ok is False

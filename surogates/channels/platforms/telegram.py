@@ -508,6 +508,35 @@ class TelegramPlatform:
             return SendResult(success=False, error=str(exc))
 
     # ------------------------------------------------------------------
+    # send_private — DM the sender a link prompt
+    # ------------------------------------------------------------------
+
+    async def send_private(
+        self,
+        creds: dict,
+        *,
+        sender_id: str,
+        chat_id: str,
+        is_dm: bool,
+        text: str,
+    ) -> bool:
+        """Privately deliver *text* to *sender_id*.
+
+        On Telegram a user's id is their private chat id, so this is a plain
+        ``sendMessage`` to the sender.  Returns ``True`` on delivery, ``False``
+        on any API/HTTP error (never raises) — the caller withholds the code if
+        private delivery fails.
+        """
+        bot_token: str = creds.get("bot_token") or ""
+        api_url = _bot_api_url(bot_token, "sendMessage")
+        try:
+            resp = await self._http.post(api_url, json={"chat_id": sender_id, "text": text})
+            return bool(resp.json().get("ok"))
+        except Exception as exc:
+            logger.error("[TelegramPlatform] send_private failed: %s", exc)
+            return False
+
+    # ------------------------------------------------------------------
     # handle_non_message_update — callback_query ack-only
     # ------------------------------------------------------------------
 

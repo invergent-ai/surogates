@@ -728,6 +728,36 @@ class SlackPlatform:
             return SendResult(success=False, error=str(exc))
 
     # ------------------------------------------------------------------
+    # send_private — DM the sender a link prompt
+    # ------------------------------------------------------------------
+
+    async def send_private(
+        self,
+        creds: dict,
+        *,
+        sender_id: str,
+        chat_id: str,
+        is_dm: bool,
+        text: str,
+    ) -> bool:
+        """Privately deliver *text* to *sender_id* by opening a DM.
+
+        Returns ``True`` on delivery, ``False`` on any error (never raises) —
+        the caller withholds the code if private delivery fails (so a usable
+        code is never printed into a shared channel).
+        """
+        bot_token: str = creds.get("bot_token") or ""
+        client = self._get_client(bot_token)
+        try:
+            opened = await client.conversations_open(users=sender_id)
+            dm_channel = opened["channel"]["id"]
+            await client.chat_postMessage(channel=dm_channel, text=text)
+            return True
+        except Exception as exc:
+            logger.error("[SlackPlatform] send_private failed: %s", exc)
+            return False
+
+    # ------------------------------------------------------------------
     # enrich — async user name resolution
     # ------------------------------------------------------------------
 
