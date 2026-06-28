@@ -239,7 +239,7 @@ class PlatformClient:
         return resp.json()
 
     async def mint_composio_session(
-        self, agent_id: str, user_id: str,
+        self, agent_id: str, user_id: str, session_id: str | None = None,
     ) -> dict | None:
         """Mint a per-end-user Composio Tool Router MCP server for an agent.
 
@@ -252,9 +252,12 @@ class PlatformClient:
         * :class:`PlatformAuthError` on 401 -- operations problem.
         * ``httpx.HTTPStatusError`` on any other non-2xx.
         """
+        body: dict[str, str] = {"user_id": user_id}
+        if session_id is not None:
+            body["session_id"] = session_id
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/composio/session",
-            json={"user_id": user_id},
+            json=body,
         )
         if resp.status_code in (404, 503):
             return None

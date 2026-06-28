@@ -112,6 +112,7 @@ async def _ensure_tenant_connected(
         allowed_ids=allowed_ids,
         is_service_account=auth.is_service_account,
         agent_id=agent_id,
+        session_id=str(auth.session_id),
         platform_client=getattr(request.app.state, "platform_client", None),
     )
 
