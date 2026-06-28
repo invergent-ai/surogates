@@ -60,11 +60,49 @@ async def test_factory_wires_pairing_producer_and_link_prompt():
     assert deps.pairing_sender is not None
 
     msg = SimpleNamespace(platform_user_id="U1", identifier="C1", is_dm=True)
-    await deps.pairing_sender("o1", "slack", msg, "CODE-123")
+    delivered = await deps.pairing_sender("o1", "slack", msg, "CODE-123")
 
+    assert delivered is True, "a successful private send reports delivered"
     assert plat.sent and plat.sent[0]["sender_id"] == "U1"
     assert "CODE-123" in plat.sent[0]["text"]
     assert "https://studio.example/link" in plat.sent[0]["text"]
+
+
+class _FailingPlatform:
+    """send_private exists but reports non-delivery (e.g. the user blocked the bot)."""
+
+    async def send_private(self, creds, *, sender_id, chat_id, is_dm, text):
+        return False
+
+
+class _NoPrivatePlatform:
+    """A platform with no private-addressing capability at all."""
+
+
+@pytest.mark.asyncio
+async def test_pairing_sender_reports_undelivered_when_send_private_fails():
+    factory = _make_deps_factory(
+        session_store=object(), redis=_FakeRedis(), session_factory=object(),
+    )
+    deps = factory("slack", _routing("linked"), {"bot_token": "x"}, _FailingPlatform())
+
+    msg = SimpleNamespace(platform_user_id="U1", identifier="C1", is_dm=True)
+    delivered = await deps.pairing_sender("o1", "slack", msg, "CODE-123")
+
+    assert delivered is False, "a failed private send must report not-delivered"
+
+
+@pytest.mark.asyncio
+async def test_pairing_sender_reports_undelivered_when_no_send_private():
+    factory = _make_deps_factory(
+        session_store=object(), redis=_FakeRedis(), session_factory=object(),
+    )
+    deps = factory("slack", _routing("linked"), {}, _NoPrivatePlatform())
+
+    msg = SimpleNamespace(platform_user_id="U1", identifier="C1", is_dm=True)
+    delivered = await deps.pairing_sender("o1", "slack", msg, "CODE-123")
+
+    assert delivered is False, "no send_private capability → not-delivered"
 
 
 def test_factory_selects_resolver_by_policy():

@@ -194,6 +194,7 @@ def _make_deps(
     session_id: UUID = SESSION_ID,
     follow_enabled: Any = None,
     resolve_error: Exception | None = None,
+    pairing_delivers: bool = True,
 ) -> PipelineDeps:
     store = _FakeSessionStore()
     store._next_session_id = session_id
@@ -271,8 +272,9 @@ def _make_deps(
             )
             return "TEST-CODE"
 
-    async def pairing_sender(org_id, platform, msg, code):
+    async def pairing_sender(org_id, platform, msg, code) -> bool:
         link_prompts_sent.append({"org_id": org_id, "platform": platform, "code": code})
+        return pairing_delivers
 
     deps = PipelineDeps(
         session_store=store,
@@ -1198,6 +1200,27 @@ async def test_linked_unknown_sender_prompts_link_no_session():
     assert not deps._sessions_created, "no session for an unlinked sender"
     assert deps._pairing_created, "a pairing code was minted"
     assert deps._link_prompts_sent, "the link prompt was sent privately"
+
+
+@pytest.mark.asyncio
+async def test_linked_unknown_sender_undelivered_prompt_drops():
+    """linked policy + unknown sender + private delivery FAILS (e.g. the user
+    blocked the bot) → the outcome is DROPPED, not PAIRING_PROMPTED, because no
+    prompt actually reached the sender.  Claiming PAIRING_PROMPTED here is the
+    silent dead-end bug: the sender sees nothing yet the pipeline reports the
+    prompt was shown."""
+    msg = _make_msg(is_dm=True, ts="7.2", platform_user_id="U_BLOCKED")
+    config = _make_config(identity_policy="linked")
+    deps = _make_deps(identity=None, pairing_delivers=False)
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=config, deps=deps,
+    )
+
+    assert result == InboundOutcome.DROPPED
+    assert not deps._sessions_created, "no session for an unlinked sender"
+    assert deps._pairing_created, "a code is still minted (reused on next attempt)"
+    assert deps._link_prompts_sent, "delivery was attempted"
 
 
 @pytest.mark.asyncio

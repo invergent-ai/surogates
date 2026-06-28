@@ -394,11 +394,22 @@ class ChannelInboundPipeline:
                     msg.platform_user_id,
                     {"user_name": msg.user_name},
                 )
+                delivered = False
                 if code and deps.pairing_sender is not None:
-                    await deps.pairing_sender(
+                    delivered = await deps.pairing_sender(
                         routing.org_id, routing.platform, msg, code,
                     )
-                return InboundOutcome.PAIRING_PROMPTED
+                if delivered:
+                    return InboundOutcome.PAIRING_PROMPTED
+                # The code was minted but the prompt never reached the sender
+                # (no private channel, or the user blocked the bot).  Report
+                # DROPPED rather than PAIRING_PROMPTED — the sender saw nothing,
+                # and the still-live code is retried on their next message.
+                logger.warning(
+                    "[inbound] Link prompt not delivered to %s (%s) on %s — dropping",
+                    msg.platform_user_id, msg.user_name, routing.platform,
+                )
+                return InboundOutcome.DROPPED
             logger.warning(
                 "[inbound] No identity resolved for %s (%s) on %s — dropping",
                 msg.platform_user_id, msg.user_name, routing.platform,

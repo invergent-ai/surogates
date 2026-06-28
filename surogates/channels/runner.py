@@ -110,7 +110,14 @@ def _make_deps_factory(
         policy = (getattr(routing, "config", None) or {}).get("identity_policy", "shadow")
         resolve_identity = linked_resolver if policy == "linked" else shadow_resolver
 
-        async def _pairing_sender(org_id: Any, plat: str, msg: Any, code: str) -> None:
+        async def _pairing_sender(org_id: Any, plat: str, msg: Any, code: str) -> bool:
+            """Privately deliver the link prompt; return whether it reached the sender.
+
+            The caller uses the return value to decide the inbound outcome: a
+            delivered prompt is ``PAIRING_PROMPTED``, an undelivered one is a
+            silent ``DROPPED`` (claiming PAIRING_PROMPTED when nothing reached
+            the sender would be a dead-end the user can never escape).
+            """
             send_private = getattr(platform, "send_private", None)
             if send_private is None:
                 # A platform that can't privately address the sender must not
@@ -119,7 +126,7 @@ def _make_deps_factory(
                     "[channels] %s has no send_private — link code for %s not delivered",
                     kind, msg.platform_user_id,
                 )
-                return
+                return False
             delivered = await send_private(
                 creds,
                 sender_id=msg.platform_user_id,
@@ -135,6 +142,7 @@ def _make_deps_factory(
                     "[channels] %s send_private failed for %s — link prompt not delivered",
                     kind, msg.platform_user_id,
                 )
+            return bool(delivered)
 
         return PipelineDeps(
             session_store=session_store,
