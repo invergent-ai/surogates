@@ -265,16 +265,18 @@ def make_cached_identity_resolver(
         *,
         org_id: object,
         display_name: str = "",
-    ) -> ResolvedIdentity:
+    ) -> ResolvedIdentity | None:
         # ``sf`` is the session_factory the pipeline forwards; it is always the
         # one captured above (which the loader uses), so we use the captured
         # factory throughout for a single source of truth.
         key = _key(platform, platform_user_id, org_id)
         cached = await cache.get(key)
-        if cached is not None:
+        if cached is not None or provision is None:
+            # ``provision is None`` (linked policy): resolve-only — return the
+            # real identity or None (the caller prompts the sender to link).
             return cached
-        # Unknown sender: provision, then drop the negative cache entry the
-        # miss just stored so the next message loads the freshly-linked row.
+        # Unknown sender (shadow policy): provision, then seed the cache so this
+        # sender's next message is a hit, not a reload.
         ident = await provision(
             session_factory,
             platform=platform,
@@ -282,9 +284,6 @@ def make_cached_identity_resolver(
             org_id=org_id,
             display_name=display_name,
         )
-        # Seed the freshly-provisioned identity (overwriting the negative entry
-        # the miss stored) so this sender's next message is a cache hit, not a
-        # reload.
         cache.set(key, ident)
         return ident
 

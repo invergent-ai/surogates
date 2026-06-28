@@ -582,6 +582,10 @@ class ChannelsSettings(BaseSettings):
 
     port: int = 8001
     public_url: str = ""
+    # Studio web app base URL used to build the ``/link`` prompt that a
+    # ``linked``-policy agent sends an unlinked sender.  Empty falls back to a
+    # generic "link in Surogate Studio" instruction.
+    studio_url: str = ""
 
     # Per-kind enablement.  Keys are platform kind slugs; presence +
     # ``enabled=True`` activates the platform.  Absent key → disabled.

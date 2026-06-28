@@ -30,7 +30,7 @@ import inspect
 import logging
 import os
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
@@ -59,6 +59,9 @@ class _RoutingObject:
     agent_id: str
     platform: str
     identifier: str
+    # The channel's config blob (channel_routing.config) — the deps factory
+    # reads ``identity_policy`` from it to pick the shadow vs linked resolver.
+    config: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +257,7 @@ class ChannelWebhookDispatcher:
             agent_id=agent_id,
             platform=platform.kind,
             identifier=identifier,
+            config=config,
         )
         return identifier, org_id, config, creds, routing, None
 

@@ -31,8 +31,10 @@ from surogates.channels.dispatcher import (
 from surogates.channels.identity import (
     get_or_create_channel_session,
     make_cached_identity_resolver,
+    resolve_real_identity,
 )
 from surogates.channels.inbound import ChannelInboundPipeline, PipelineDeps
+from surogates.channels.pairing import PairingStore
 from surogates.channels.registry import ChannelRegistry
 from surogates.channels.channel_state import ChannelAdapterState
 from surogates.config import enqueue_session
@@ -48,12 +50,23 @@ def _make_deps_factory(
     redis: Any,
     session_factory: Any,
     mate_settings_cache: Any = None,
+    link_url_base: str = "",
 ) -> Any:
     """Return a deps_factory for :class:`ChannelWebhookDispatcher`.
 
     The factory is called once per verified inbound event.  It fills STATIC
     deps (singletons) from closures and constructs PER-EVENT deps (adapter
-    state scoped to the routing's agent_id) on each call.
+    state scoped to the routing's agent_id, and the resolver/producer selected
+    by the channel's ``identity_policy``) on each call.
+
+    ``identity_policy`` resolver
+    ----------------------------
+    ``shadow`` (Mate) uses the provisioning resolver — an unknown sender is
+    auto-provisioned.  ``linked`` (multi-user assistant) uses a resolve-only
+    resolver over :func:`resolve_real_identity` (no provisioning) plus the
+    pairing producer, so an unknown sender is privately prompted to link their
+    real account.  Both caches are process-wide and memoize the per-message
+    lookup.
 
     ``follow_enabled`` resolver
     ---------------------------
@@ -65,9 +78,25 @@ def _make_deps_factory(
     """
     from surogates.runtime.mate_settings_cache import mate_cache_key
 
-    # One identity cache for the process — memoizes resolved senders so a busy
-    # channel doesn't re-read the DB per message (see make_cached_identity_resolver).
-    resolve_identity = make_cached_identity_resolver(session_factory)
+    # Process-wide identity caches: one provisioning resolver for ``shadow``,
+    # one resolve-only resolver for ``linked`` (provision=None → returns the
+    # real identity or None, never auto-provisions).
+    shadow_resolver = make_cached_identity_resolver(session_factory)
+    linked_resolver = make_cached_identity_resolver(
+        session_factory, resolve=resolve_real_identity, provision=None,
+    )
+    pairing = PairingStore(redis)
+
+    def _link_prompt(code: str) -> str:
+        where = (
+            f"{link_url_base.rstrip('/')}/link"
+            if link_url_base
+            else "Surogate Studio (Settings → Channels)"
+        )
+        return (
+            "To talk to me as your own Surogate assistant, link your account: "
+            f"enter code {code} at {where}."
+        )
 
     async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
         if mate_settings_cache is None or not channel_id:
@@ -77,6 +106,27 @@ def _make_deps_factory(
 
     def _factory(kind: str, routing: Any, creds: dict, platform: Any) -> PipelineDeps:
         state = ChannelAdapterState(redis, agent_id=routing.agent_id, platform=kind)
+
+        policy = (getattr(routing, "config", None) or {}).get("identity_policy", "shadow")
+        resolve_identity = linked_resolver if policy == "linked" else shadow_resolver
+
+        async def _pairing_sender(org_id: Any, plat: str, msg: Any, code: str) -> None:
+            send_private = getattr(platform, "send_private", None)
+            if send_private is None:
+                # A platform that can't privately address the sender must not
+                # print a usable code into a shared channel — withhold it.
+                logger.warning(
+                    "[channels] %s has no send_private — link code for %s not delivered",
+                    kind, msg.platform_user_id,
+                )
+                return
+            await send_private(
+                creds,
+                sender_id=msg.platform_user_id,
+                chat_id=msg.identifier,
+                is_dm=msg.is_dm,
+                text=_link_prompt(code),
+            )
 
         return PipelineDeps(
             session_store=session_store,
@@ -88,6 +138,8 @@ def _make_deps_factory(
             resolve_identity=resolve_identity,
             session_factory=session_factory,
             follow_enabled=_resolve_follow,
+            pairing=pairing,
+            pairing_sender=_pairing_sender,
         )
 
     return _factory
@@ -156,6 +208,7 @@ def build_channels_app(
         redis=redis,
         session_factory=session_factory,
         mate_settings_cache=mate_settings_cache,
+        link_url_base=getattr(getattr(settings, "channels", None), "studio_url", ""),
     )
 
     dispatcher = ChannelWebhookDispatcher(
