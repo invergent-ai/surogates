@@ -869,7 +869,9 @@ class SlackPlatform:
 
         try:
             info_resp = await client.conversations_info(channel=channel_id)
-            ch = (info_resp.get("channel") or {}) if isinstance(info_resp, dict) else {}
+            # AsyncWebClient returns an AsyncSlackResponse (dict-like .get(), but
+            # NOT a dict), so never gate field access on isinstance(_, dict).
+            ch = info_resp.get("channel") or {}
             if ch.get("is_im") or ch.get("is_mpim"):
                 return None  # DMs / MPDMs are out of scope for v1
             meta = ChannelMeta(
@@ -895,7 +897,7 @@ class SlackPlatform:
                     if raw and retry_after is not None and time.monotonic() + retry_after >= deadline:
                         break
                     raise
-                msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+                msgs = hist.get("messages") or []
                 for m in filter_messages(msgs, bot_user_id=bot_user_id):
                     try:
                         ts = float(m.get("ts") or 0.0)
@@ -903,8 +905,7 @@ class SlackPlatform:
                         continue
                     author = await self._resolve_user_name(bot_token, m.get("user") or "")
                     raw.append(RawMessage(ts=ts, author=author, text=(m.get("text") or "").strip()))
-                cursor = ((hist.get("response_metadata") or {}).get("next_cursor") or "") \
-                    if isinstance(hist, dict) else ""
+                cursor = (hist.get("response_metadata") or {}).get("next_cursor") or ""
                 if not hist.get("has_more") or not cursor:
                     break
             return meta, raw
@@ -927,7 +928,8 @@ class SlackPlatform:
         try:
             client = self._get_client(bot_token)
             info = await client.users_info(user=user_id)
-            user_obj = info.get("user", {}) if isinstance(info, dict) else {}
+            # AsyncSlackResponse is dict-like but not a dict; .get() works directly.
+            user_obj = info.get("user") or {}
             profile = user_obj.get("profile", {})
             name: str = (
                 profile.get("display_name")
