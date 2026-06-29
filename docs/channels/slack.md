@@ -35,6 +35,8 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** and add:
 | `reactions:write`   | Add/remove reactions          |
 | `users:read`        | Resolve user names            |
 
+These scopes also let the agent read channel metadata and recent history when it joins a channel.
+
 ## 3. Subscribe to Events
 
 Go to **Event Subscriptions** → **Enable Events**, then under **Subscribe to bot events** add:
@@ -44,11 +46,16 @@ Go to **Event Subscriptions** → **Enable Events**, then under **Subscribe to b
 - `message.im`
 - `message.mpim`
 - `app_mention`
+- `member_joined_channel` — lets the agent pre-fetch a channel's recent history when it is added
 
 If using the AI Assistant feature (optional):
 
 - `assistant_thread_started`
 - `assistant_thread_context_changed`
+
+### Channel context on join
+
+When the agent is added to a channel (or on its first message there), it backfills the channel's metadata and recent history — the most recent messages, bounded to roughly 7 days / 200 messages / 8k tokens — so it has context from the first reply. This needs the `channels:history` / `groups:history` read scopes and the `member_joined_channel` bot event above. DMs and group DMs are not backfilled. Private-channel history is only readable in channels the bot is a member of, and stays isolated to that channel's memory.
 
 ## 4. Install the App
 
