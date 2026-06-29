@@ -438,6 +438,16 @@ class ChannelInboundPipeline:
         )
         session_key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
 
+        from surogates.channels.memory_boundary import boundary_token
+
+        memory_boundary = boundary_token(
+            platform=routing.platform,
+            channel_id=msg.identifier,
+            visibility=msg.visibility,
+            source=msg.source,
+            fallback_id=session_key,
+        )
+
         session_id = await deps.get_or_create_session(
             deps.session_store,
             deps.redis,
@@ -450,6 +460,7 @@ class ChannelInboundPipeline:
                 f"{routing.platform}_channel_id": msg.identifier,
                 f"{routing.platform}_thread_key": msg.thread_key,
                 "channel_identifier": routing.identifier,
+                "memory_boundary": memory_boundary,
             },
             session_factory=deps.session_factory,
         )

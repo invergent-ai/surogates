@@ -1237,3 +1237,75 @@ async def test_linked_known_real_user_is_processed():
     assert result == InboundOutcome.PROCESSED
     assert deps._sessions_created
     assert not deps._pairing_created, "no link prompt when already linked"
+
+
+# ---------------------------------------------------------------------------
+# memory_boundary persisted on channel sessions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_channel_session_persists_memory_boundary():
+    """A Slack public-channel message persists a 'public' memory_boundary;
+    a private channel persists an isolated token."""
+    deps = _make_deps()
+    pub = _make_msg(
+        is_dm=False,
+        is_mention=False,
+        identifier="C_PUBLIC",
+        ts="90.0",
+        platform_user_id="U1",
+    )
+    object.__setattr__(pub, "visibility", "public")
+
+    await ChannelInboundPipeline().handle(
+        pub,
+        routing=_make_routing(),
+        config=_make_config(require_mention=False),
+        deps=deps,
+    )
+
+    cfg = deps._sessions_created[-1]["config"]
+    assert cfg["memory_boundary"] == "public"
+
+    priv = _make_msg(
+        is_dm=False,
+        is_mention=False,
+        identifier="G_PRIVATE",
+        ts="91.0",
+        platform_user_id="U1",
+    )
+    object.__setattr__(priv, "visibility", "private")
+
+    await ChannelInboundPipeline().handle(
+        priv,
+        routing=_make_routing(),
+        config=_make_config(require_mention=False),
+        deps=deps,
+    )
+
+    cfg2 = deps._sessions_created[-1]["config"]
+    assert cfg2["memory_boundary"] == "slack:c:G_PRIVATE"
+
+
+@pytest.mark.asyncio
+async def test_channel_session_blank_identifier_memory_boundary_fails_closed():
+    deps = _make_deps()
+    msg = _make_msg(
+        is_dm=False,
+        is_mention=False,
+        identifier="",
+        ts="92.0",
+        platform_user_id="U1",
+    )
+    object.__setattr__(msg, "visibility", "public")
+
+    await ChannelInboundPipeline().handle(
+        msg,
+        routing=_make_routing(),
+        config=_make_config(require_mention=False),
+        deps=deps,
+    )
+
+    created = deps._sessions_created[-1]
+    assert created["config"]["memory_boundary"] == f"slack:iso:{created['session_key']}"
