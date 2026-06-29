@@ -7,6 +7,7 @@ and session seeding live in the platform and coordinator layers.
 from __future__ import annotations
 
 import dataclasses
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -106,3 +107,36 @@ def format_context_block(
         lines.append(f"{_fmt_ts(m.ts)} {m.author}: {m.text}")
     lines.append("[/channel context]")
     return "\n".join(lines)
+
+
+def cache_key(*, org_id: str, agent_id: str, kind: str, identifier: str, channel_id: str) -> str:
+    return f"channel-backfill:{org_id}:{agent_id}:{kind}:{identifier}:{channel_id}"
+
+
+async def read_block(redis, key: str) -> tuple[str, float] | None:
+    raw = await redis.get(key)
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        obj = json.loads(raw)
+        return obj["block"], float(obj["fetched_at"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+async def write_block(redis, key: str, block: str, *, fetched_at: float, ttl_s: int) -> None:
+    await redis.set(key, json.dumps({"block": block, "fetched_at": fetched_at}), ex=ttl_s)
+
+
+async def in_negative_cooldown(redis, key: str) -> bool:
+    return bool(await redis.get(f"{key}:neg"))
+
+
+async def mark_negative(redis, key: str, *, cooldown_s: int) -> None:
+    await redis.set(f"{key}:neg", "1", ex=cooldown_s)
+
+
+def is_stale(fetched_at: float, *, now: float, ttl_s: int) -> bool:
+    return (now - fetched_at) >= ttl_s
