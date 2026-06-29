@@ -37,3 +37,64 @@ def test_unknown_and_blank_fail_closed_isolated():
     assert _tok("slack", "", "public", fallback="s1") == "slack:iso:s1"  # blank id never public
     assert _tok("telegram", "", "private", chat_type="group", fallback="s2") == "telegram:iso:s2"
     assert _tok("matrix", "X1", "public", fallback="s3") == "matrix:iso:s3"  # unknown platform
+
+
+# ---------------------------------------------------------------------------
+# session_memory_boundary tests
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace
+
+from surogates.channels.memory_boundary import session_memory_boundary
+
+
+def _session(channel, config, sid="s1"):
+    return SimpleNamespace(channel=channel, config=config, id=sid)
+
+
+def test_channel_session_uses_persisted_boundary():
+    s = _session("slack", {"memory_boundary": "public"})
+    assert session_memory_boundary(s) == "public"
+
+
+def test_older_slack_public_session_collapses_to_public_only_for_c_prefix():
+    s = _session(
+        "slack",
+        {"slack_channel_id": "C111", "channel_session_key": "agent:slack:group:C111"},
+        sid="abc",
+    )
+    assert session_memory_boundary(s) == "public"
+
+
+def test_older_slack_non_public_or_ambiguous_session_is_isolated():
+    private = _session(
+        "slack",
+        {"slack_channel_id": "G111", "channel_session_key": "agent:slack:group:G111"},
+        sid="abc",
+    )
+    assert session_memory_boundary(private) == "slack:iso:agent:slack:group:G111"
+
+    dm = _session(
+        "slack",
+        {"slack_channel_id": "D111", "channel_session_key": "agent:slack:dm:D111"},
+        sid="def",
+    )
+    assert session_memory_boundary(dm) == "slack:iso:agent:slack:dm:D111"
+
+    blank = _session("slack", {"slack_channel_id": ""}, sid="ghi")
+    assert session_memory_boundary(blank) == "slack:iso:ghi"
+
+
+def test_older_telegram_session_without_boundary_is_isolated_not_per_user():
+    s = _session(
+        "telegram",
+        {"telegram_channel_id": "-100", "channel_session_key": "agent:telegram:group:-100"},
+        sid="abc",
+    )
+    assert session_memory_boundary(s) == "telegram:iso:agent:telegram:group:-100"
+
+
+def test_non_channel_session_is_per_user():
+    assert session_memory_boundary(_session("web", {"memory_boundary": "x"})) is None
+    assert session_memory_boundary(_session("api", {})) is None
+    assert session_memory_boundary(_session("ambient", {})) is None
