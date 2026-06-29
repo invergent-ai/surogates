@@ -443,6 +443,8 @@ class SlackPlatform:
     kind = "slack"
     topology = "webhook"
 
+    _THINKING_TEXT = "_Thinking…_"
+
     interactive_paths: tuple[str, ...] = (
         "/slack/{app_id}/interact",
         "/slack/{app_id}/commands",
@@ -750,14 +752,35 @@ class SlackPlatform:
     # send
     # ------------------------------------------------------------------
 
+    async def post_thinking_placeholder(
+        self, *, creds: dict, channel: str, thread_ts,
+    ) -> str | None:
+        """Post the '_Thinking…_' placeholder; return its ts, or None on error."""
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token or not channel:
+            return None
+        kwargs: dict = {"channel": channel, "text": self._THINKING_TEXT}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            resp = await self._get_client(bot_token).chat_postMessage(**kwargs)
+            return resp.get("ts")
+        except Exception:
+            logger.warning("[SlackPlatform] post_thinking_placeholder failed for %s", channel, exc_info=True)
+            return None
+
     async def send(self, item: Any, *, creds: dict) -> SendResult:
         """Post an outbox item to Slack via ``chat.postMessage``.
+
+        When ``item.destination["update_ts"]`` is set, edits that message via
+        ``chat.update`` instead of posting a fresh message.  Falls back to a
+        fresh ``chat.postMessage`` if the edit fails so the reply still lands.
 
         Parameters
         ----------
         item:
             Outbox item with ``destination`` (``channel_id``, optional
-            ``thread_ts``) and ``payload`` (``content``).
+            ``thread_ts``, optional ``update_ts``) and ``payload`` (``content``).
         creds:
             Credential dict with ``bot_token``.
         """
@@ -775,10 +798,20 @@ class SlackPlatform:
         if thread_ts:
             kwargs["thread_ts"] = thread_ts
 
+        update_ts = item.destination.get("update_ts")
+        if update_ts:
+            try:
+                edited = await client.chat_update(channel=channel_id, ts=update_ts, text=text)
+                return SendResult(success=True, message_id=edited.get("ts") or update_ts)
+            except Exception as exc:
+                logger.warning(
+                    "[SlackPlatform] chat_update failed (%s); posting a fresh message", exc,
+                )
+                # fall through to a fresh post so the reply still lands
+
         try:
             result = await client.chat_postMessage(**kwargs)
-            sent_ts: str | None = result.get("ts") if isinstance(result, dict) else None
-            return SendResult(success=True, message_id=sent_ts)
+            return SendResult(success=True, message_id=result.get("ts"))
         except Exception as exc:
             logger.error("[SlackPlatform] chat_postMessage failed: %s", exc)
             return SendResult(success=False, error=str(exc))
