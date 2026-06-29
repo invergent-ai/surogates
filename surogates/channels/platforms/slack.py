@@ -833,6 +833,28 @@ class SlackPlatform:
     # send
     # ------------------------------------------------------------------
 
+    async def post_input_nudge(
+        self,
+        *,
+        creds: dict,
+        channel: str,
+        thread_ts: Any,
+        text: str,
+    ) -> str | None:
+        """Post a nudge to prompt the user to use the Answer button; return its ts or None."""
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token or not channel:
+            return None
+        kwargs: dict[str, Any] = {"channel": channel, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            resp = await self._get_client(bot_token).chat_postMessage(**kwargs)
+            return resp.get("ts")
+        except Exception:
+            logger.warning("[SlackPlatform] post_input_nudge failed for %s", channel, exc_info=True)
+            return None
+
     async def post_thinking_placeholder(
         self, *, creds: dict, channel: str, thread_ts,
     ) -> str | None:

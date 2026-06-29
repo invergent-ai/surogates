@@ -183,6 +183,12 @@ _Progress = Callable[[Any, str, Any], Awaitable[None]]
 #: Downloads and ingests platform file attachments into the harness event shapes.
 _Attachments = Callable[[Any, Any], Awaitable[dict]]
 
+#: Async callable: (session_id) -> pending input dict | None.
+_PendingInput = Callable[[Any], Awaitable[dict | None]]
+
+#: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
+_InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+
 
 @dataclass
 class PipelineDeps:
@@ -245,6 +251,8 @@ class PipelineDeps:
     backfill: _Backfill | None = None
     progress: _Progress | None = None
     attachments: _Attachments | None = None
+    pending_input: _PendingInput | None = None
+    input_nudge: _InputNudge | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +505,27 @@ class ChannelInboundPipeline:
 
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
+
+        # While a question is pending, a plain in-thread reply is NOT the answer
+        # (the user must use the Answer button / modal). Intercept: nudge and
+        # suppress the turn so it doesn't pile into a blocked worker.
+        if deps.pending_input is not None and routing.platform == "slack":
+            try:
+                pending = await deps.pending_input(session_id)
+            except Exception:
+                logger.warning("[channels] pending input lookup failed - continuing", exc_info=True)
+                pending = None
+            if pending:
+                if deps.input_nudge is not None:
+                    try:
+                        await deps.input_nudge(
+                            session_id,
+                            msg,
+                            "I'm waiting on your answer - tap *Answer* above, or use the web inbox.",
+                        )
+                    except Exception:
+                        logger.warning("[channels] pending input nudge failed", exc_info=True)
+                return InboundOutcome.DROPPED
 
         # Seed channel history on the first message of a Slack channel session
         # (lazy fallback for channels where the join event was missed). Best

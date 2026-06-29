@@ -282,6 +282,25 @@ def _make_deps_factory(
             )
             return {"images": images, "attachments": attachments, "note": note}
 
+        async def _pending_input(session_id: Any) -> dict | None:
+            try:
+                from surogates.session.interactive_input import pending_input_for_session
+                return await pending_input_for_session(session_store, session_id=session_id)
+            except Exception:
+                logger.warning("[channels] pending_input lookup failed", exc_info=True)
+                return None
+
+        async def _input_nudge(session_id: Any, msg: Any, text: str) -> None:
+            post = getattr(platform, "post_input_nudge", None)
+            if post is None:
+                return
+            await post(
+                creds=creds,
+                channel=msg.identifier,
+                thread_ts=msg.thread_key,
+                text=text,
+            )
+
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
@@ -297,6 +316,8 @@ def _make_deps_factory(
             backfill=_backfill,
             progress=_progress,
             attachments=_attachments,
+            pending_input=_pending_input,
+            input_nudge=_input_nudge,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
