@@ -790,9 +790,10 @@ class ChannelDeliveryDispatcher:
             # Non-empty-text reply with resolved files: upload them as follow-ups
             # in the same thread. Best-effort — a failed upload never fails or
             # retries the already-delivered text.
-            if media_files and not marker_only:
+            send_files_fn = getattr(platform, "send_files", None)
+            if media_files and not marker_only and send_files_fn is not None:
                 try:
-                    await platform.send_files(item, creds=creds, files=media_files)
+                    await send_files_fn(item, creds=creds, files=media_files)
                 except Exception:
                     logger.warning(
                         "[delivery] send_files raised for outbox %d", item.id, exc_info=True,

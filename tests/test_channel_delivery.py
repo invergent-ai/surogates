@@ -20,6 +20,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from surogates.channels.base import SendResult
+from surogates.channels.channel_media import OutboundFile
 
 
 # ---------------------------------------------------------------------------
@@ -1457,9 +1458,6 @@ class TestInputRequiredOutboxDelivery:
 # Tests: Slack MEDIA: outbound file delivery
 # ---------------------------------------------------------------------------
 
-from surogates.channels.channel_media import OutboundFile
-
-
 @dataclass
 class _MediaSession:
     id: str = "22222222-2222-2222-2222-222222222222"
@@ -1494,6 +1492,21 @@ class _MediaStorage:
         if name not in self._present:
             raise KeyError(key)
         return self._present[name]
+
+
+class _ProgressRedis:
+    """Minimal async Redis: get/delete over an in-memory dict, recording deletes."""
+
+    def __init__(self, store: dict | None = None) -> None:
+        self._store = store or {}
+        self.deleted: list[str] = []
+
+    async def get(self, key: str):
+        return self._store.get(key)
+
+    async def delete(self, key: str) -> None:
+        self.deleted.append(key)
+        self._store.pop(key, None)
 
 
 class _FakeMediaPlatform(_FakePlatform):
@@ -1607,3 +1620,37 @@ class TestSlackMediaDelivery:
         sent_item, _ = platform.send_calls[0]
         assert sent_item.payload["content"] == "just a normal reply"
         assert platform.send_files_calls == []
+
+    async def test_marker_only_with_placeholder_deletes_and_clears(self):
+        import json
+        from surogates.channels.channel_progress import progress_key
+        from surogates.channels.dispatcher import ChannelDeliveryDispatcher
+
+        session_id = uuid4()
+        item = _FakeOutboxItem(
+            id=5,
+            session_id=session_id,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:/workspace/only.pdf"},
+        )
+        redis = _ProgressRedis({
+            progress_key("slack", session_id): json.dumps(
+                {"channel": "C001", "ts": "1700.5", "thread_ts": None}
+            ),
+        })
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform(uploaded_ids=["FA9"])
+        storage = _MediaStorage({"only.pdf": b"data"})
+        store = _FakeSessionStore(_MediaSession())
+        dispatcher = ChannelDeliveryDispatcher(
+            cache=_FakeCache(_KNOWN_CACHE), vault=_FakeVault(),
+            delivery_service=delivery, redis=redis, storage=storage, session_store=store,
+        )
+
+        await dispatcher.deliver_batch(platform)
+
+        # No text send; placeholder message deleted on Slack; Redis key cleared.
+        assert platform.send_calls == []
+        assert platform.deleted == [{"channel": "C001", "ts": "1700.5"}]
+        assert progress_key("slack", session_id) in redis.deleted
+        assert delivery.delivered == [(5, "FA9")]
