@@ -57,9 +57,14 @@ class _MemoryEnvelope:
 
 def memory_object_key(
     *, storage_key_prefix: str, user_id: str | None,
-    target: str = "memory",
+    target: str = "memory", boundary: str | None = None,
 ) -> str:
     """Build the R2 object key for one memory target.
+
+    ``boundary`` (set for channel sessions) keys memory per conversation —
+    ``{prefix}/boundaries/{boundary}/{target}.json`` — isolating private
+    conversations from each other.  Without it, the per-user / shared layout
+    is unchanged.
 
     ``target`` is ``"memory"`` (agent memory) or ``"user"`` (facts
     about the user surfaced by the UI).  Each target lands in its own
@@ -75,6 +80,8 @@ def memory_object_key(
     if target not in ("memory", "user"):
         raise ValueError(f"unknown memory target: {target!r}")
     prefix = storage_key_prefix.rstrip("/")
+    if boundary is not None:
+        return f"{prefix}/boundaries/{boundary}/{target}.json"
     if user_id is None:
         return f"{prefix}/shared/{target}.json"
     return f"{prefix}/users/{user_id}/{target}.json"
