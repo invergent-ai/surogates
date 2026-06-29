@@ -778,11 +778,16 @@ class SessionStore:
                 # nothing-to-deliver guard below skips non-Slack channels.
                 questions = data.get("questions") or []
                 if questions:
+                    # The model appends its <next_action> footer to free text,
+                    # including the context argument — strip it the same as the
+                    # LLM_RESPONSE content path so it never reaches the channel.
                     payload = {
                         "input_prompt": True,
                         "tool_call_id": (data.get("tool_call_id") or "").strip(),
                         "questions": questions,
-                        "context": data.get("context", ""),
+                        "context": strip_next_action_blocks(
+                            data.get("context", "") or ""
+                        ),
                     }
 
             if not payload:
