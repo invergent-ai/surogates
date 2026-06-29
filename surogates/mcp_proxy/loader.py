@@ -138,7 +138,7 @@ async def apply_composio_minting(
     platform_client: Any | None,
     agent_id: str | None,
     user_id: Any,
-    session_id: Any | None = None,
+    session_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Replace ``composio``-transport placeholders with one minted HTTP server.
 

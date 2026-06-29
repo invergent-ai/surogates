@@ -1,7 +1,13 @@
 """Conversation-privacy boundary token (memory isolation)."""
 from __future__ import annotations
 
-from surogates.channels.memory_boundary import MANAGED_CHANNELS, boundary_token
+from types import SimpleNamespace
+
+from surogates.channels.memory_boundary import (
+    MANAGED_CHANNELS,
+    boundary_token,
+    session_memory_boundary,
+)
 
 
 def _tok(platform, channel_id, visibility, chat_type="", fallback="fb"):
@@ -42,10 +48,6 @@ def test_unknown_and_blank_fail_closed_isolated():
 # ---------------------------------------------------------------------------
 # session_memory_boundary tests
 # ---------------------------------------------------------------------------
-
-from types import SimpleNamespace
-
-from surogates.channels.memory_boundary import session_memory_boundary
 
 
 def _session(channel, config, sid="s1"):

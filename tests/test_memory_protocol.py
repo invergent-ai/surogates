@@ -31,3 +31,12 @@ def test_unknown_target_still_rejected():
 
     with pytest.raises(ValueError):
         memory_object_key(storage_key_prefix="p/a", user_id="u1", target="bogus")
+
+
+def test_unknown_target_rejected_even_with_boundary():
+    from surogates.runtime.memory_protocol import memory_object_key
+
+    with pytest.raises(ValueError):
+        memory_object_key(
+            storage_key_prefix="p/a", user_id="u1", target="bogus", boundary="x",
+        )
