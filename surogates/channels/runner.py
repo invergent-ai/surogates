@@ -408,6 +408,8 @@ def build_channels_app(
         vault=vault,
         delivery_service=delivery_service,
         redis=redis,
+        storage=storage,
+        session_store=session_store,
     )
 
     public_url: str = getattr(getattr(settings, "channels", None), "public_url", "")

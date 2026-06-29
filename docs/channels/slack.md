@@ -25,6 +25,7 @@ Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** and add:
 | `channels:read`     | List channels                 |
 | `chat:write`        | Send messages                 |
 | `files:read`        | Download file attachments     |
+| `files:write`       | Upload agent files            |
 | `groups:history`    | Read private channel messages |
 | `groups:read`       | List private channels         |
 | `im:history`        | Read DM messages              |

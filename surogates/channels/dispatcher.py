@@ -543,11 +543,15 @@ class ChannelDeliveryDispatcher:
         vault: Any,
         delivery_service: Any,
         redis: Any = None,
+        storage: Any = None,
+        session_store: Any = None,
     ) -> None:
         self._cache = cache
         self._vault = vault
         self._delivery = delivery_service
         self._redis = redis
+        self._storage = storage
+        self._session_store = session_store
 
     # ------------------------------------------------------------------
     # Core batch method (testable; all per-item logic lives here)
@@ -621,7 +625,11 @@ class ChannelDeliveryDispatcher:
     # ------------------------------------------------------------------
 
     async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> None:
-        """Process a single outbox item: resolve creds and call platform.send."""
+        """Process a single outbox item: resolve creds and call platform.send.
+
+        For Slack, parse any ``MEDIA:`` markers out of the reply text, upload the
+        referenced workspace files, and never let the raw marker reach Slack.
+        """
         # 1. Extract channel identifier.
         identifier: str = item.destination.get("channel_identifier", "")
         if not identifier:
@@ -668,7 +676,78 @@ class ChannelDeliveryDispatcher:
             if update_ts is not None:
                 item.destination["update_ts"] = update_ts
 
-        # 4. Send via the platform, with per-item exception isolation.
+        # Slack MEDIA: markers — strip from text and resolve workspace files.
+        # Gated to Slack: never strip a marker on a platform that cannot upload.
+        media_files: list = []
+        marker_only = False
+        content = item.payload.get("content") or ""
+        if platform.kind == "slack" and "MEDIA:" in content:
+            from surogates.channels.channel_media import (
+                parse_media_markers,
+                resolve_workspace_media,
+            )
+            paths, cleaned = parse_media_markers(content)
+            item.payload["content"] = cleaned
+            marker_only = bool(paths) and not cleaned.strip()
+            if (
+                paths
+                and self._storage is not None
+                and self._session_store is not None
+                and getattr(platform, "send_files", None)
+            ):
+                try:
+                    session = await self._session_store.get_session(item.session_id)
+                    media_files = await resolve_workspace_media(
+                        self._storage, session,
+                        paths=paths, max_files=10, max_bytes=20 * 1024 * 1024,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[delivery] resolving MEDIA files failed for outbox %d",
+                        item.id, exc_info=True,
+                    )
+                    media_files = []
+
+        # Marker-only reply: the file IS the reply (no text to post).
+        if marker_only:
+            uploaded: list = []
+            send_files = getattr(platform, "send_files", None)
+            if media_files and send_files is not None:
+                try:
+                    uploaded = await send_files(item, creds=creds, files=media_files)
+                except Exception:
+                    logger.warning(
+                        "[delivery] send_files raised for outbox %d", item.id, exc_info=True,
+                    )
+                    uploaded = []
+            if uploaded:
+                # A file cannot be an edited message, so delete the placeholder
+                # rather than editing it, then clear the Redis handshake key.
+                if update_ts is not None and self._redis is not None:
+                    try:
+                        await platform.delete_message(
+                            creds=creds,
+                            channel=item.destination.get("channel_id", ""),
+                            ts=update_ts,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[delivery] delete placeholder failed for outbox %d",
+                            item.id, exc_info=True,
+                        )
+                    try:
+                        from surogates.channels.channel_progress import clear_placeholder
+                        await clear_placeholder(self._redis, platform.kind, item.session_id)
+                    except Exception:
+                        pass
+                await self._delivery.mark_delivered(
+                    item.id, provider_message_id=uploaded[0]
+                )
+                return
+            # Nothing uploaded — show a generic, non-leaking failure message.
+            item.payload["content"] = "I couldn't upload the referenced file."
+
+        # 4. Send the text via the platform, with per-item exception isolation.
         try:
             result = await platform.send(item, creds=creds)
         except Exception as exc:
@@ -707,6 +786,16 @@ class ChannelDeliveryDispatcher:
                     logger.warning(
                         "[delivery] mark_bot_message failed for outbox %d — ignoring (best-effort)",
                         item.id,
+                    )
+            # Non-empty-text reply with resolved files: upload them as follow-ups
+            # in the same thread. Best-effort — a failed upload never fails or
+            # retries the already-delivered text.
+            if media_files and not marker_only:
+                try:
+                    await platform.send_files(item, creds=creds, files=media_files)
+                except Exception:
+                    logger.warning(
+                        "[delivery] send_files raised for outbox %d", item.id, exc_info=True,
                     )
         else:
             error = result.error or "send failed"

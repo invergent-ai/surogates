@@ -1451,3 +1451,159 @@ class TestInputRequiredOutboxDelivery:
         assert captured[0]["payload"]["input_prompt"] is True
         assert captured[0]["payload"]["tool_call_id"] == ""
         assert captured[0]["payload"]["questions"] == [{"prompt": "Pick one"}]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Slack MEDIA: outbound file delivery
+# ---------------------------------------------------------------------------
+
+from surogates.channels.channel_media import OutboundFile
+
+
+@dataclass
+class _MediaSession:
+    id: str = "22222222-2222-2222-2222-222222222222"
+    config: dict = field(default_factory=lambda: {"storage_bucket": "wsbucket"})
+
+
+class _FakeSessionStore:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def get_session(self, session_id: Any) -> Any:
+        return self._session
+
+
+class _MediaStorage:
+    """Storage that returns bytes for any key whose basename is in `present`."""
+
+    def __init__(self, present: dict[str, bytes]) -> None:
+        self._present = present  # basename -> bytes
+
+    def _name(self, key: str) -> str:
+        return key.rsplit("/", 1)[-1]
+
+    async def stat(self, bucket: str, key: str):
+        name = self._name(key)
+        if name not in self._present:
+            raise KeyError(key)
+        return {"size": len(self._present[name])}
+
+    async def read(self, bucket: str, key: str) -> bytes:
+        name = self._name(key)
+        if name not in self._present:
+            raise KeyError(key)
+        return self._present[name]
+
+
+class _FakeMediaPlatform(_FakePlatform):
+    """_FakePlatform plus outbound file upload + message delete recording."""
+
+    def __init__(self, uploaded_ids: list[str] | None = None, **kw) -> None:
+        super().__init__(**kw)
+        self._uploaded_ids = uploaded_ids if uploaded_ids is not None else ["F999"]
+        self.send_files_calls: list[tuple[Any, list]] = []
+        self.deleted: list[dict] = []
+
+    async def send_files(self, item: Any, *, creds: dict, files: list) -> list[str]:
+        self.send_files_calls.append((item, files))
+        return list(self._uploaded_ids) if files else []
+
+    async def delete_message(self, *, creds: dict, channel: str, ts: str) -> None:
+        self.deleted.append({"channel": channel, "ts": ts})
+
+
+def _media_dispatcher(platform, delivery, storage, session_store):
+    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
+    return ChannelDeliveryDispatcher(
+        cache=_FakeCache(_KNOWN_CACHE),
+        vault=_FakeVault(),
+        delivery_service=delivery,
+        redis=None,
+        storage=storage,
+        session_store=session_store,
+    )
+
+
+class TestSlackMediaDelivery:
+    async def test_text_with_marker_posts_text_and_uploads(self):
+        item = _FakeOutboxItem(
+            id=1,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "Here it is. MEDIA:/workspace/report.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform()
+        storage = _MediaStorage({"report.pdf": b"%PDF data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        # Text was sent with the marker stripped.
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == "Here it is."
+        # The workspace file was uploaded.
+        assert len(platform.send_files_calls) == 1
+        _, files = platform.send_files_calls[0]
+        assert [f.filename for f in files] == ["report.pdf"]
+        assert delivery.delivered == [(1, "msg-001")]
+
+    async def test_marker_only_uploads_without_text_and_marks_delivered(self):
+        item = _FakeOutboxItem(
+            id=2,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:/workspace/only.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform(uploaded_ids=["FA1"])
+        storage = _MediaStorage({"only.pdf": b"data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        # No text send; file uploaded; item delivered with the file id.
+        assert platform.send_calls == []
+        assert len(platform.send_files_calls) == 1
+        assert delivery.delivered == [(2, "FA1")]
+
+    async def test_marker_only_upload_failure_posts_generic_message(self):
+        item = _FakeOutboxItem(
+            id=3,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:/workspace/missing.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform()  # send_files returns [] for no files
+        storage = _MediaStorage({})  # missing.pdf not present → no files resolved
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        # Falls back to the generic non-leaking failure message via send.
+        assert len(platform.send_calls) == 1
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == "I couldn't upload the referenced file."
+        assert "MEDIA:" not in sent_item.payload["content"]
+        assert platform.send_files_calls == []  # nothing to re-upload
+        assert delivery.delivered == [(3, "msg-001")]
+
+    async def test_no_marker_text_is_unchanged(self):
+        item = _FakeOutboxItem(
+            id=4,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "just a normal reply"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform()
+        storage = _MediaStorage({})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == "just a normal reply"
+        assert platform.send_files_calls == []
