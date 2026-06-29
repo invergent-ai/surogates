@@ -50,6 +50,8 @@ import mimetypes
 import time
 from typing import Any
 
+import httpx
+
 try:
     from slack_sdk.web.async_client import AsyncWebClient
 except ImportError:
@@ -825,6 +827,38 @@ class SlackPlatform:
         except Exception as exc:
             logger.error("[SlackPlatform] chat_postMessage failed: %s", exc)
             return SendResult(success=False, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # download_file — fetch a private Slack file URL
+    # ------------------------------------------------------------------
+
+    async def download_file(
+        self, *, creds: dict, url: str, max_bytes: int,
+    ) -> bytes | None:
+        """Download a Slack file. url_private requires the bot token as Bearer
+        auth. Returns the bytes, or None on missing token, non-2xx, timeout,
+        Content-Length over cap, or body over cap (never raises)."""
+        bot_token = (creds or {}).get("bot_token") or ""
+        if not bot_token or not url:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {bot_token}"})
+                if resp.status_code < 200 or resp.status_code >= 300:
+                    logger.warning("[SlackPlatform] download_file %s -> HTTP %s", url, resp.status_code)
+                    return None
+                cl = resp.headers.get("Content-Length")
+                if cl is not None and cl.isdigit() and int(cl) > max_bytes:
+                    logger.warning("[SlackPlatform] download_file %s over cap (Content-Length=%s)", url, cl)
+                    return None
+                data = resp.content
+                if len(data) > max_bytes:
+                    logger.warning("[SlackPlatform] download_file %s body over cap (%d bytes)", url, len(data))
+                    return None
+                return data
+        except Exception:
+            logger.warning("[SlackPlatform] download_file failed for %s", url, exc_info=True)
+            return None
 
     # ------------------------------------------------------------------
     # send_private — DM the sender a link prompt
