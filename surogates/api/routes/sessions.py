@@ -47,17 +47,11 @@ logger = logging.getLogger(__name__)
 
 # Lazy singleton for the AGT PromptInjectionDetector — screens user
 # messages before they enter the event log.
-_injection_detector = None
-
-
+# Delegates to the shared accessor in attachment_ingest to avoid two singletons.
 def _get_injection_detector():
     """Return a shared PromptInjectionDetector instance."""
-    global _injection_detector
-    if _injection_detector is None:
-        from agent_os.prompt_injection import PromptInjectionDetector
-
-        _injection_detector = PromptInjectionDetector()
-    return _injection_detector
+    from surogates.session.attachment_ingest import get_injection_detector
+    return get_injection_detector()
 
 
 router = APIRouter()

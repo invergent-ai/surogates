@@ -4,6 +4,7 @@ Covers:
 1. _apply_total_inline_budget_to_attachments: demotes over-budget items
    to remove inlined_text and set inline_skip_reason.
 2. _injection_blocks_filename: benign and injection-like filenames.
+3. _injection_blocks_filename uses surogates.session.attachment_ingest, not api.routes.sessions.
 """
 
 from surogates.channels.runner import (
@@ -131,3 +132,25 @@ def test_apply_total_inline_budget_all_pre_failed():
     assert attachments[1].get("inline_skip_reason") == "oversize_output"
     assert attachments[0].get("inlined_text") is None
     assert attachments[1].get("inlined_text") is None
+
+
+def test_injection_blocks_filename_uses_shared_accessor_not_api_routes(monkeypatch):
+    """_injection_blocks_filename must obtain its detector from
+    surogates.session.attachment_ingest.get_injection_detector, NOT from
+    surogates.api.routes.sessions._get_injection_detector.
+    Importing surogates.api.routes.sessions should NOT be required for this call.
+    """
+    import surogates.session.attachment_ingest as ingest_mod
+
+    called = []
+
+    class _FakeDetector:
+        def detect(self, name, source=None):
+            called.append(name)
+            from types import SimpleNamespace
+            return SimpleNamespace(is_injection=False)
+
+    monkeypatch.setattr(ingest_mod, "_injection_detector", _FakeDetector())
+    result = _injection_blocks_filename("benign.pdf")
+    assert result is False
+    assert "benign.pdf" in called, "detector sourced from attachment_ingest was not called"

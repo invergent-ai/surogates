@@ -384,7 +384,8 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         ))
 
     if file_names:
-        names_str = ", ".join(file_names)
+        from surogates.session.attachment_ingest import safe_display_name
+        names_str = ", ".join(safe_display_name(n) for n in file_names)
         marker = f"\n[shared {len(file_names)} file(s): {names_str}]"
         text = text + marker if text else marker
 
@@ -840,6 +841,11 @@ class SlackPlatform:
         Content-Length over cap, or body over cap (never raises)."""
         bot_token = (creds or {}).get("bot_token") or ""
         if not bot_token or not url:
+            return None
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        if host != "slack.com" and not host.endswith(".slack.com"):
+            logger.warning("[SlackPlatform] download_file refusing non-slack host: %s", host)
             return None
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:

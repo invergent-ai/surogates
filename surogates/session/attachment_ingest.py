@@ -12,6 +12,7 @@ import base64
 import hashlib
 import logging
 import os
+import re as _re
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,40 @@ from typing import Any, Literal
 from surogates.storage.tenant import prefixed_session_workspace_key
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Filename sanitization (prompt-injection guard)
+# ---------------------------------------------------------------------------
+
+_CONTROL_CHARS_RE = _re.compile(r"[\x00-\x1f\x7f]")
+
+
+def safe_display_name(name: str, *, max_len: int = 100) -> str:
+    """Filename sanitized for inclusion in model-visible text: control chars
+    (incl. newlines/tabs) collapsed to spaces, whitespace squeezed, truncated.
+    Defends against prompt-injection via crafted filenames regardless of any
+    detector."""
+    cleaned = _CONTROL_CHARS_RE.sub(" ", name or "")
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1] + "…"
+    return cleaned or "file"
+
+
+# ---------------------------------------------------------------------------
+# Shared injection-detector singleton (decoupled from the API router)
+# ---------------------------------------------------------------------------
+
+_injection_detector = None
+
+
+def get_injection_detector():
+    """Return the process-wide PromptInjectionDetector, created on first call."""
+    global _injection_detector
+    if _injection_detector is None:
+        from agent_os.prompt_injection import PromptInjectionDetector
+        _injection_detector = PromptInjectionDetector()
+    return _injection_detector
 
 # ---------------------------------------------------------------------------
 # Inline-attachment parameters

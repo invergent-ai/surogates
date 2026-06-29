@@ -56,3 +56,39 @@ async def test_download_none_when_body_over_cap(monkeypatch):
 async def test_download_none_when_no_token(monkeypatch):
     p, _ = _platform_with_httpx(monkeypatch, _Resp())
     assert await p.download_file(creds={}, url="u", max_bytes=1000) is None
+
+
+async def test_download_refuses_non_slack_host_and_never_calls_http(monkeypatch):
+    """Bot token must NEVER be sent to a non-Slack host."""
+    p, client = _platform_with_httpx(monkeypatch, _Resp(body=b"STOLEN"))
+    result = await p.download_file(
+        creds={"bot_token": "xoxb-secret"},
+        url="https://attacker.example.com/steal",
+        max_bytes=10_000,
+    )
+    assert result is None
+    assert client.calls == [], "client.get must not be called for non-Slack host"
+
+
+async def test_download_allows_files_slack_com_host(monkeypatch):
+    """files.slack.com is a valid Slack subdomain and must be allowed."""
+    p, client = _platform_with_httpx(monkeypatch, _Resp(body=b"FILEDATA"))
+    result = await p.download_file(
+        creds={"bot_token": "xoxb-1"},
+        url="https://files.slack.com/files-pri/abc/download",
+        max_bytes=10_000,
+    )
+    assert result == b"FILEDATA"
+    assert len(client.calls) == 1
+
+
+async def test_download_refuses_slack_com_lookalike(monkeypatch):
+    """slack.com.evil.org is NOT a slack host — must be refused."""
+    p, client = _platform_with_httpx(monkeypatch, _Resp(body=b"STOLEN"))
+    result = await p.download_file(
+        creds={"bot_token": "xoxb-secret"},
+        url="https://slack.com.evil.org/steal",
+        max_bytes=10_000,
+    )
+    assert result is None
+    assert client.calls == []

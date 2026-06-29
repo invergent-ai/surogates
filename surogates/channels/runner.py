@@ -64,8 +64,8 @@ class _MultiCache:
 def _injection_blocks_filename(name: str) -> bool:
     """Return True if the filename looks like a prompt-injection attempt."""
     try:
-        from surogates.api.routes.sessions import _get_injection_detector
-        return bool(_get_injection_detector().detect(name, source="slack_channel").is_injection)
+        from surogates.session.attachment_ingest import get_injection_detector
+        return bool(get_injection_detector().detect(name, source="slack_channel").is_injection)
     except Exception:
         return False
 
@@ -225,6 +225,7 @@ def _make_deps_factory(
             from pathlib import PurePosixPath
             from surogates.session.attachment_ingest import (
                 ingest_attachment_bytes,
+                safe_display_name,
                 workspace_root_id,
             )
             session = await session_store.get_session(session_id)
@@ -239,7 +240,7 @@ def _make_deps_factory(
             MAX_BYTES = 20 * 1024 * 1024
             for index, f in enumerate(msg.files):
                 if index >= MAX_FILES:
-                    skipped.append(f.filename)
+                    skipped.append(safe_display_name(f.filename))
                     continue
                 safe = PurePosixPath(f.filename).name
                 if safe in ("", ".", ".."):
@@ -249,15 +250,15 @@ def _make_deps_factory(
                     skipped.append("(blocked)")
                     continue
                 if f.size is not None and f.size > MAX_BYTES:
-                    skipped.append(safe)
+                    skipped.append(safe_display_name(safe))
                     continue
                 is_image = (f.mime_type or "").lower().startswith("image/")
                 if not is_image and not bucket:
-                    skipped.append(safe)
+                    skipped.append(safe_display_name(safe))
                     continue
                 data = await download(creds=creds, url=f.url, max_bytes=MAX_BYTES)
                 if data is None:
-                    skipped.append(safe)
+                    skipped.append(safe_display_name(safe))
                     continue
                 path = f"uploads/slack/{ts}-{index}-{safe}"
                 try:
@@ -269,7 +270,7 @@ def _make_deps_factory(
                     logger.warning(
                         "[channels] ingest failed for %s", safe, exc_info=True,
                     )
-                    skipped.append(safe)
+                    skipped.append(safe_display_name(safe))
                     continue
                 if "image" in out:
                     images.append(out["image"])
