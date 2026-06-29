@@ -1261,3 +1261,68 @@ class TestInputRequiredOutboxDelivery:
             )
 
         assert captured == []
+
+    async def test_slack_input_required_no_tool_call_id_still_enqueues(self):
+        """questions present but no tool_call_id key must still enqueue (gate is questions-only)."""
+        import unittest.mock as mock
+        from uuid import uuid4
+
+        from surogates.session import store as store_mod
+        from surogates.session.events import EventType
+
+        captured: list[dict] = []
+
+        class _FakeSF:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, model, pk):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(
+                    channel="slack",
+                    config={
+                        "slack_channel_id": "C2",
+                        "slack_thread_key": "200.0",
+                        "channel_identifier": "A0Y",
+                    },
+                )
+
+            def add(self, obj):
+                pass
+
+            async def commit(self):
+                pass
+
+        class _FakeOutbox:
+            id = None
+
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        ss = object.__new__(store_mod.SessionStore)
+        ss._sf = _FakeSF()
+        ss._channel_cache = {}
+
+        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
+            await ss._enqueue_channel_delivery(
+                session_id=uuid4(),
+                event_id=13,
+                event_type=EventType.INBOX_INPUT_REQUIRED,
+                data={
+                    "questions": [{"prompt": "Pick one"}],
+                    "context": "no tool call here",
+                    # no tool_call_id key at all
+                },
+            )
+
+        assert len(captured) == 1, f"expected 1 outbox row, got {len(captured)}"
+        assert captured[0]["payload"]["input_prompt"] is True
+        assert captured[0]["payload"]["tool_call_id"] == ""
+        assert captured[0]["payload"]["questions"] == [{"prompt": "Pick one"}]

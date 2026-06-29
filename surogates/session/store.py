@@ -772,11 +772,10 @@ class SessionStore:
                     payload["content"] = content
             elif event_type == EventType.INBOX_INPUT_REQUIRED:
                 questions = data.get("questions") or []
-                tool_call_id = (data.get("tool_call_id") or "").strip()
-                if questions and tool_call_id:
+                if questions:
                     payload = {
                         "input_prompt": True,
-                        "tool_call_id": tool_call_id,
+                        "tool_call_id": (data.get("tool_call_id") or "").strip(),
                         "questions": questions,
                         "context": data.get("context", ""),
                     }
