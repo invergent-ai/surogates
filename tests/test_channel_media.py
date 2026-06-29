@@ -33,7 +33,7 @@ class TestParseMediaMarkers:
             "a MEDIA:/workspace/a.png and b MEDIA:/workspace/b.png done"
         )
         assert paths == ["/workspace/a.png", "/workspace/b.png"]
-        assert "MEDIA:" not in cleaned
+        assert cleaned == "a and b done"
 
     def test_backtick_and_quote_wrapping_stripped(self):
         paths, cleaned = parse_media_markers("see `MEDIA:/workspace/x.pdf`")
@@ -59,6 +59,7 @@ class TestNormalizeWorkspacePath:
     def test_traversal_and_empty_rejected(self):
         assert normalize_workspace_path("../etc/passwd") is None
         assert normalize_workspace_path("/workspace/../x") is None
+        assert normalize_workspace_path("workspace/..") is None
         assert normalize_workspace_path("") is None
         assert normalize_workspace_path("/") is None
 
@@ -90,8 +91,9 @@ class _FakeStorage:
 
 def _key(rel: str) -> str:
     from surogates.storage.tenant import prefixed_session_workspace_key
+    from surogates.session.attachment_ingest import workspace_root_id
     session = _FakeSession()
-    return prefixed_session_workspace_key(session.config, str(session.id), rel)
+    return prefixed_session_workspace_key(session.config, workspace_root_id(session), rel)
 
 
 class TestResolveWorkspaceMedia:

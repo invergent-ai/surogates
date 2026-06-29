@@ -106,12 +106,16 @@ async def resolve_workspace_media(
     if not bucket:
         logger.warning("[channel_media] session has no storage_bucket; skipping %d file(s)", len(paths))
         return []
-    root_id = workspace_root_id(session)
+    try:
+        root_id = workspace_root_id(session)
+    except Exception:
+        logger.warning("[channel_media] could not resolve workspace root; skipping media")
+        return []
     out: list[OutboundFile] = []
     for raw in paths[:max_files]:
         rel = normalize_workspace_path(raw)
         if rel is None:
-            logger.warning("[channel_media] rejecting malformed media path")
+            logger.warning("[channel_media] rejecting malformed media path: %r", raw)
             continue
         key = prefixed_session_workspace_key(session.config, root_id, rel)
         try:
