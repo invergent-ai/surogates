@@ -801,6 +801,46 @@ class SlackPlatform:
         client = self._get_client(bot_token)
 
         channel_id: str = item.destination.get("channel_id", "")
+
+        if item.payload.get("input_prompt"):
+            from surogates.channels.platforms.slack_interactive import build_input_prompt_blocks
+
+            text, blocks = build_input_prompt_blocks(
+                session_id=str(getattr(item, "session_id", "")),
+                tool_call_id=item.payload.get("tool_call_id", ""),
+                questions=item.payload.get("questions") or [],
+                context=item.payload.get("context", ""),
+            )
+            thread_ts: str | None = item.destination.get("thread_ts")
+            update_ts = item.destination.get("update_ts")
+            post_kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "text": text,
+                "blocks": blocks,
+            }
+            if thread_ts:
+                post_kwargs["thread_ts"] = thread_ts
+            if update_ts:
+                try:
+                    edited = await client.chat_update(
+                        channel=channel_id,
+                        ts=update_ts,
+                        text=text,
+                        blocks=blocks,
+                    )
+                    return SendResult(success=True, message_id=edited.get("ts") or update_ts)
+                except Exception as exc:
+                    logger.warning(
+                        "[SlackPlatform] input prompt chat_update failed (%s); posting fresh",
+                        exc,
+                    )
+            try:
+                posted = await client.chat_postMessage(**post_kwargs)
+                return SendResult(success=True, message_id=posted.get("ts"))
+            except Exception as exc:
+                logger.error("[SlackPlatform] input prompt chat_postMessage failed: %s", exc)
+                return SendResult(success=False, error=str(exc))
+
         text: str = item.payload.get("content", "")
         thread_ts: str | None = item.destination.get("thread_ts")
 
