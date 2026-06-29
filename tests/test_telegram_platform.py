@@ -1211,3 +1211,35 @@ class TestTelegramSendPrivate:
             {"bot_token": "T"}, sender_id="555", chat_id="-100", is_dm=False, text="x",
         )
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Visibility field
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_visibility_dm_vs_shared_surfaces():
+    msg = parse(_private_message(chat_id=11, text="hi"), bot_username=BOT_USERNAME)
+    assert msg is not None
+    assert msg.visibility == "dm"
+
+    msg = parse(
+        _group_message(chat_id=22, chat_type="group", text="hi"),
+        bot_username=BOT_USERNAME,
+    )
+    assert msg is not None
+    assert msg.visibility == "private"
+
+    msg = parse(
+        _group_message(chat_id=33, chat_type="supergroup", text="hi"),
+        bot_username=BOT_USERNAME,
+    )
+    assert msg is not None
+    assert msg.visibility == "private"
+
+    msg = parse(
+        _group_message(chat_id=44, chat_type="channel", text="hi"),
+        bot_username=BOT_USERNAME,
+    )
+    assert msg is not None
+    assert msg.visibility == "private"

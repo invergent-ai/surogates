@@ -91,6 +91,10 @@ class InboundMessage:
     source:
         Freeform platform-specific metadata forwarded verbatim into the
         ``USER_MESSAGE`` event payload.
+    visibility:
+        Conversation privacy for memory isolation:
+        ``"public"``, ``"private"``, or ``"dm"``.  Defaults to
+        ``"private"`` so omitted/unknown adapter values fail closed.
     """
 
     kind: str
@@ -106,6 +110,9 @@ class InboundMessage:
     ts: str
     source: dict
     is_bot: bool = False
+    # Conversation privacy: "public" | "private" | "dm".  Default is the
+    # fail-closed value so any constructor that omits it is treated as private.
+    visibility: str = "private"
 
 
 # ---------------------------------------------------------------------------

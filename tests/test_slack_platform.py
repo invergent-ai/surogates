@@ -1651,3 +1651,61 @@ class TestSlackSendPrivate:
             {"bot_token": "x"}, sender_id="U9", chat_id="C1", is_dm=False, text="x",
         )
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Visibility field
+# ---------------------------------------------------------------------------
+
+
+def _visibility_event(channel: str, channel_type: str) -> dict:
+    return {
+        "type": "event_callback",
+        "api_app_id": APP_ID,
+        "event": {
+            "type": "message",
+            "text": "hi",
+            "user": "U_VIS",
+            "channel": channel,
+            "channel_type": channel_type,
+            "ts": "1700000090.000100",
+        },
+    }
+
+
+def test_slack_visibility_public_private_dm():
+    msg = parse(_visibility_event("C100", "channel"), bot_user_id=BOT_USER_ID)
+    assert msg is not None
+    assert msg.visibility == "public"
+
+    msg = parse(_visibility_event("G100", "group"), bot_user_id=BOT_USER_ID)
+    assert msg is not None
+    assert msg.visibility == "private"
+
+    msg = parse(_visibility_event("D100", "im"), bot_user_id=BOT_USER_ID)
+    assert msg is not None
+    assert msg.visibility == "dm"
+
+    msg = parse(_visibility_event("G200", "mpim"), bot_user_id=BOT_USER_ID)
+    assert msg is not None
+    assert msg.visibility == "dm"
+
+
+@pytest.mark.asyncio
+async def test_slash_command_visibility_is_dm():
+    p = SlackPlatform()
+    form = _make_slash_form(text="hello", channel_id="D123")
+    request = SimpleNamespace(path_params={"app_id": APP_ID})
+
+    result = await p.handle_interactive(
+        "/slack/{app_id}/commands",
+        form,
+        request=request,
+        creds=_creds(),
+        routing=None,
+    )
+
+    from surogates.channels.inbound import InboundMessage
+
+    assert isinstance(result, InboundMessage)
+    assert result.visibility == "dm"

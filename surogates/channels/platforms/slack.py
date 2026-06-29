@@ -330,6 +330,12 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
 
     # DM detection: channel_type "im" or "mpim".
     is_dm = channel_type in ("im", "mpim")
+    if is_dm:
+        visibility = "dm"
+    elif channel_type == "channel":
+        visibility = "public"
+    else:
+        visibility = "private"  # "group" (private channel) or unknown → fail closed
 
     # Thread key resolution mirrors the Socket Mode adapter:
     #   - DM:      use thread_ts if present, else None (top-level DM has no thread)
@@ -384,6 +390,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
             "channel_type": channel_type,
         },
         is_bot=is_bot,
+        visibility=visibility,
     )
 
 
@@ -664,6 +671,7 @@ class SlackPlatform:
                 "team": team_id,
                 "via": "slash_command",
             },
+            visibility="dm",
         )
 
     async def _handle_interact(self, form: dict) -> Any:

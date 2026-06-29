@@ -195,8 +195,10 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 
     if chat_type == "private":
         is_dm = True
+        visibility = "dm"
     else:
         is_dm = False
+        visibility = "private"  # group/supergroup/channel → isolated (no public tier)
 
     # ------------------------------------------------------------------
     # Thread key — forum supergroups use message_thread_id.
@@ -292,6 +294,7 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
         ts=ts,
         source=source,
         is_bot=is_bot,
+        visibility=visibility,
     )
 
 
