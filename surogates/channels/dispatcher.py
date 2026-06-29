@@ -664,7 +664,7 @@ class ChannelDeliveryDispatcher:
                 self._redis, platform.kind, item.session_id,
                 item.destination.get("channel_id", ""),
             )
-            if update_ts:
+            if update_ts is not None:
                 item.destination["update_ts"] = update_ts
 
         # 4. Send via the platform, with per-item exception isolation.
