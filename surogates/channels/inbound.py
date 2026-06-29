@@ -156,6 +156,9 @@ _ResolveIdentity = Callable[..., Awaitable[Any]]
 #: Args: (agent_id, platform, channel_id) → bool
 _FollowEnabled = Callable[[str, str, str], Awaitable[bool]]
 
+#: Async callable: (session_id, channel_id, routing) -> seeded event id | None.
+_Backfill = Callable[[Any, str, Any], Awaitable[int | None]]
+
 
 @dataclass
 class PipelineDeps:
@@ -215,6 +218,7 @@ class PipelineDeps:
     # mode, so Mate constructs neither.
     pairing: Any = None
     pairing_sender: Any = None
+    backfill: _Backfill | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +471,12 @@ class ChannelInboundPipeline:
 
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
+
+        # Seed channel history on the first message of a Slack channel session
+        # (lazy fallback for channels where the join event was missed). Best
+        # effort: maybe_seed_session is idempotent and never raises.
+        if deps.backfill is not None and routing.platform == "slack" and not msg.is_dm:
+            await deps.backfill(session_id, msg.identifier, routing)
 
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.

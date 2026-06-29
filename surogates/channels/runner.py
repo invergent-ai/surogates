@@ -161,6 +161,24 @@ def _make_deps_factory(
                 )
             return bool(delivered)
 
+        async def _backfill(session_id: Any, channel_id: str, rt: Any) -> Any:
+            fetch = getattr(platform, "fetch_channel_context", None)
+            if fetch is None:  # non-Slack platforms: no backfill in v1
+                return None
+            import time as _t
+            from surogates.channels.channel_backfill import (
+                BackfillLimits,
+                maybe_seed_session,
+            )
+            limits = BackfillLimits.from_config(
+                (getattr(rt, "config", None) or {}).get("history_backfill"),
+            )
+            return await maybe_seed_session(
+                store=session_store, redis=redis, platform=platform, creds=creds,
+                routing=rt, session_id=session_id, channel_id=channel_id,
+                limits=limits, now=_t.time(),
+            )
+
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
@@ -173,6 +191,7 @@ def _make_deps_factory(
             follow_enabled=_resolve_follow,
             pairing=pairing,
             pairing_sender=_pairing_sender,
+            backfill=_backfill,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
