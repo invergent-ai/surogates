@@ -57,6 +57,7 @@ except ImportError:
 from fastapi.responses import Response
 
 from surogates.channels.base import SendResult
+from surogates.channels.channel_backfill import BackfillLimits, ChannelMeta, RawMessage, filter_messages
 from surogates.channels.inbound import InboundMessage
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 
@@ -791,6 +792,83 @@ class SlackPlatform:
         if display_name == msg.user_name:
             return msg
         return dataclasses.replace(msg, user_name=display_name)
+
+    async def fetch_channel_context(
+        self, *, creds: dict, channel_id: str, limits: BackfillLimits,
+    ) -> tuple[ChannelMeta, list[RawMessage]] | None:
+        """Fetch channel metadata + recent history (newest-first).
+
+        Returns None for DMs/MPDMs (v1 is channel-only), when the bot is not a
+        member, or on any Slack error. Bounding by count/token/age is the
+        coordinator's job; here we only honour the page + time budgets.
+        """
+        import time as _time
+
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token:
+            return None
+        client = self._get_client(bot_token)
+
+        def _retry_after_seconds(exc: Exception) -> float | None:
+            response = getattr(exc, "response", None)
+            headers = {}
+            if isinstance(response, dict):
+                headers = response.get("headers") or {}
+            else:
+                headers = getattr(response, "headers", {}) or {}
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+            try:
+                return float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            info_resp = await client.conversations_info(channel=channel_id)
+            ch = (info_resp.get("channel") or {}) if isinstance(info_resp, dict) else {}
+            if ch.get("is_im") or ch.get("is_mpim"):
+                return None  # DMs / MPDMs are out of scope for v1
+            meta = ChannelMeta(
+                name=ch.get("name") or "",
+                topic=((ch.get("topic") or {}).get("value") or ""),
+                purpose=((ch.get("purpose") or {}).get("value") or ""),
+            )
+
+            bot_user_id = await self._resolve_bot_user_id(bot_token)
+            raw: list[RawMessage] = []
+            cursor: str = ""
+            deadline = _time.monotonic() + limits.fetch_time_budget_s
+            for _page in range(max(1, limits.max_pages)):
+                if _time.monotonic() >= deadline:
+                    break
+                kwargs: dict = {"channel": channel_id, "limit": 200}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                try:
+                    hist = await client.conversations_history(**kwargs)
+                except Exception as exc:
+                    retry_after = _retry_after_seconds(exc)
+                    if raw and retry_after is not None and _time.monotonic() + retry_after >= deadline:
+                        break
+                    raise
+                msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+                for m in filter_messages(msgs, bot_user_id=bot_user_id):
+                    try:
+                        ts = float(m.get("ts") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    author = await self._resolve_user_name(bot_token, m.get("user") or "")
+                    raw.append(RawMessage(ts=ts, author=author, text=(m.get("text") or "").strip()))
+                cursor = ((hist.get("response_metadata") or {}).get("next_cursor") or "") \
+                    if isinstance(hist, dict) else ""
+                if not hist.get("has_more") or not cursor:
+                    break
+            return meta, raw
+        except Exception:
+            logger.warning(
+                "SlackPlatform.fetch_channel_context failed for %s", channel_id,
+                exc_info=True,
+            )
+            return None
 
     async def _resolve_user_name(self, bot_token: str, user_id: str) -> str:
         """Return a display name for *user_id*, cached per (token, user_id)."""
