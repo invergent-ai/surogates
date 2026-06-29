@@ -78,8 +78,9 @@ async def resolve_input_response(
             ),
         )
         await db.commit()
+        updated = bool(getattr(result, "rowcount", 0))
 
-    if not getattr(result, "rowcount", 0):
+    if not updated:
         return False
 
     await store.emit_event(
