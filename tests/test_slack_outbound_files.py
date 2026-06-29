@@ -84,6 +84,7 @@ class TestSendFiles:
             files=[OutboundFile(filename="a.pdf", mime_type="application/pdf", data=b"a")],
         )
         assert ids == []  # logged + skipped, not raised
+        assert len(client.uploads) == 1  # upload was attempted before the swallowed exception
 
     async def test_missing_token_returns_empty(self):
         client = _FakeClient()
@@ -103,6 +104,16 @@ class TestSendFiles:
         assert ids == []
         assert client.uploads == []
 
+    async def test_uploads_with_singular_file_response_shape(self):
+        client = _FakeClient(resp={"file": {"id": "F999"}})
+        platform = _platform_with(client)
+        item = _Item(destination={"channel_id": "C001"})
+        ids = await platform.send_files(
+            item, creds={"bot_token": TOKEN},
+            files=[OutboundFile(filename="a.pdf", mime_type="application/pdf", data=b"a")],
+        )
+        assert ids == ["F999"]
+
 
 class TestDeleteMessage:
     async def test_calls_chat_delete(self):
@@ -121,6 +132,7 @@ class TestDeleteMessage:
         platform = _platform_with(client)
         # Must not raise.
         await platform.delete_message(creds={"bot_token": TOKEN}, channel="C001", ts="x")
+        assert client.deletes == []  # _boom raised before recording; nothing stale landed
 
     async def test_missing_args_noop(self):
         client = _FakeClient()
