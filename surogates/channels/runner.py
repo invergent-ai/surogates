@@ -168,13 +168,12 @@ def _make_deps_factory(
             if post is None:  # non-Slack platforms: no placeholder in v1
                 return
             try:
-                ts = await post(creds=creds, channel=channel_id, thread_ts=thread_ts)
-                if ts:
-                    from surogates.channels.channel_progress import set_placeholder
-                    await set_placeholder(
-                        redis, kind, session_id,
-                        channel=channel_id, ts=ts, thread_ts=thread_ts,
-                    )
+                from surogates.channels.channel_progress import post_placeholder_once
+                await post_placeholder_once(
+                    redis, kind, session_id,
+                    post=lambda: post(creds=creds, channel=channel_id, thread_ts=thread_ts),
+                    channel=channel_id, thread_ts=thread_ts,
+                )
             except Exception:
                 logger.warning("[channels] thinking-placeholder post failed", exc_info=True)
 
