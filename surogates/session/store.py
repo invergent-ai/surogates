@@ -770,7 +770,12 @@ class SessionStore:
                     content = strip_next_action_blocks(content)
                 if content:
                     payload["content"] = content
-            elif event_type == EventType.INBOX_INPUT_REQUIRED:
+            elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
+                # Only Slack renders the interactive modal.  Other channels have
+                # no input_prompt surface, and their send() reads payload[
+                # "content"] — a content-less row would post empty text (the
+                # Telegram API rejects it).  Leave payload empty so the
+                # nothing-to-deliver guard below skips non-Slack channels.
                 questions = data.get("questions") or []
                 if questions:
                     payload = {

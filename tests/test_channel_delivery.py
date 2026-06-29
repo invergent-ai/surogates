@@ -1262,6 +1262,59 @@ class TestInputRequiredOutboxDelivery:
 
         assert captured == []
 
+    async def test_telegram_input_required_does_not_enqueue_prompt_payload(self):
+        """Only Slack renders the interactive modal.  A non-Slack channel must
+        not enqueue a content-less input_prompt row — Telegram's send() reads
+        payload['content'] ('' here) and the API rejects an empty-text message.
+        """
+        import unittest.mock as mock
+        from uuid import uuid4
+
+        from surogates.session import store as store_mod
+        from surogates.session.events import EventType
+
+        captured: list[dict] = []
+
+        class _FakeSF:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, model, pk):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(
+                    channel="telegram",
+                    config={
+                        "telegram_channel_id": "-100123456789",
+                        "telegram_thread_key": "42",
+                        "channel_identifier": "tg-1",
+                    },
+                )
+
+        class _FakeOutbox:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        ss = object.__new__(store_mod.SessionStore)
+        ss._sf = _FakeSF()
+        ss._channel_cache = {}
+
+        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
+            await ss._enqueue_channel_delivery(
+                session_id=uuid4(),
+                event_id=14,
+                event_type=EventType.INBOX_INPUT_REQUIRED,
+                data={"tool_call_id": "tc1", "questions": [{"prompt": "q"}]},
+            )
+
+        assert captured == []
+
     async def test_slack_input_required_no_tool_call_id_still_enqueues(self):
         """questions present but no tool_call_id key must still enqueue (gate is questions-only)."""
         import unittest.mock as mock
