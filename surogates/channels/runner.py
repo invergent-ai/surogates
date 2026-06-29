@@ -122,6 +122,8 @@ def _make_deps_factory(
         return bool(s and s.get("follow_enabled"))
 
     def _factory(kind: str, routing: Any, creds: dict, platform: Any) -> PipelineDeps:
+        import time
+
         state = ChannelAdapterState(redis, agent_id=routing.agent_id, platform=kind)
 
         policy = (getattr(routing, "config", None) or {}).get("identity_policy", "shadow")
@@ -165,7 +167,6 @@ def _make_deps_factory(
             fetch = getattr(platform, "fetch_channel_context", None)
             if fetch is None:  # non-Slack platforms: no backfill in v1
                 return None
-            import time as _t
             from surogates.channels.channel_backfill import (
                 BackfillLimits,
                 maybe_seed_session,
@@ -176,7 +177,7 @@ def _make_deps_factory(
             return await maybe_seed_session(
                 store=session_store, redis=redis, platform=platform, creds=creds,
                 routing=rt, session_id=session_id, channel_id=channel_id,
-                limits=limits, now=_t.time(),
+                limits=limits, now=time.time(),
             )
 
         return PipelineDeps(

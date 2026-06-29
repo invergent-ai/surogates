@@ -147,16 +147,20 @@ async def test_none_backfill_does_not_crash_pipeline():
 
     This is the regression guard: existing tests don't pass backfill, so None
     must be the safe default that skips the seed without any AttributeError.
+
+    Uses a non-DM Slack channel message (is_dm=False) to reach the backfill
+    guard code path, verifying that None backfill does not crash when the
+    routing.platform == "slack" and not msg.is_dm condition is met.
     """
     deps = _make_deps()
     # backfill is NOT set (should default to None on PipelineDeps)
     assert deps.backfill is None, "PipelineDeps.backfill must default to None"
 
-    msg = _make_msg(is_dm=True, ts="52.0")
+    msg = _make_msg(is_dm=False, is_mention=True, identifier="C2", ts="52.0")
     result = await ChannelInboundPipeline().handle(
         msg,
         routing=_make_routing(),
-        config=_make_config(),
+        config=_make_config(require_mention=True),
         deps=deps,
     )
 
