@@ -997,6 +997,63 @@ class SlackPlatform:
             return None
 
     # ------------------------------------------------------------------
+    # send_files — upload workspace files referenced by MEDIA: markers
+    # ------------------------------------------------------------------
+
+    async def send_files(
+        self, item: Any, *, creds: dict, files: list,
+    ) -> list[str]:
+        """Upload *files* to the item's Slack channel via ``files_upload_v2``.
+
+        Each file is uploaded into ``destination["thread_ts"]`` when present.
+        Returns the uploaded Slack file ids (empty when nothing uploaded).
+        Best-effort per file: any error is logged and skipped, never raised —
+        the same contract as ``download_file``.
+        """
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token or not files:
+            return []
+        client = self._get_client(bot_token)
+        channel_id: str = item.destination.get("channel_id", "")
+        thread_ts = item.destination.get("thread_ts")
+        uploaded: list[str] = []
+        for f in files:
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "content": f.data,
+                "filename": f.filename,
+            }
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            try:
+                resp = await client.files_upload_v2(**kwargs)
+            except Exception as exc:
+                logger.warning(
+                    "[SlackPlatform] files_upload_v2 failed for %s: %s", f.filename, exc,
+                )
+                continue
+            file_id = _uploaded_file_id(resp)
+            if file_id:
+                uploaded.append(file_id)
+        return uploaded
+
+    # ------------------------------------------------------------------
+    # delete_message — best-effort chat.delete (placeholder cleanup)
+    # ------------------------------------------------------------------
+
+    async def delete_message(self, *, creds: dict, channel: str, ts: str) -> None:
+        """Delete a message via ``chat.delete``. Best-effort; never raises."""
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token or not channel or not ts:
+            return
+        try:
+            await self._get_client(bot_token).chat_delete(channel=channel, ts=ts)
+        except Exception as exc:
+            logger.warning(
+                "[SlackPlatform] chat_delete failed for %s/%s: %s", channel, ts, exc,
+            )
+
+    # ------------------------------------------------------------------
     # send_private — DM the sender a link prompt
     # ------------------------------------------------------------------
 
@@ -1153,6 +1210,31 @@ class SlackPlatform:
             return name
         except Exception:
             return user_id
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+def _uploaded_file_id(resp: Any) -> str | None:
+    """Extract the uploaded file id from a files_upload_v2 response.
+
+    ``resp`` is an ``AsyncSlackResponse`` — dict-like but not a dict subclass —
+    so access fields with ``.get`` / indexing directly, never via isinstance.
+    Handles both the ``{"files": [{"id": …}]}`` and ``{"file": {"id": …}}``
+    response shapes.
+    """
+    files = resp.get("files")
+    if files:
+        fid = files[0].get("id")
+        if fid:
+            return str(fid)
+    single = resp.get("file")
+    if single:
+        fid = single.get("id")
+        if fid:
+            return str(fid)
+    return None
 
 
 # ---------------------------------------------------------------------------
