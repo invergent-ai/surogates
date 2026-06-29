@@ -655,6 +655,18 @@ class ChannelDeliveryDispatcher:
             refs=platform.descriptor.vault_refs(identifier),
         )
 
+        # Thinking-placeholder: if inbound posted one for this session and it is
+        # for this channel, edit it instead of posting a fresh reply.
+        update_ts = None
+        if self._redis is not None:
+            from surogates.channels.channel_progress import take_progress_update
+            update_ts = await take_progress_update(
+                self._redis, platform.kind, item.session_id,
+                item.destination.get("channel_id", ""),
+            )
+            if update_ts:
+                item.destination["update_ts"] = update_ts
+
         # 4. Send via the platform, with per-item exception isolation.
         try:
             result = await platform.send(item, creds=creds)
@@ -670,6 +682,14 @@ class ChannelDeliveryDispatcher:
             await self._delivery.mark_delivered(
                 item.id, provider_message_id=result.message_id
             )
+            if update_ts is not None and self._redis is not None:
+                try:
+                    from surogates.channels.channel_progress import clear_placeholder
+                    await clear_placeholder(self._redis, platform.kind, item.session_id)
+                except Exception:
+                    logger.warning(
+                        "[delivery] clear placeholder failed for outbox %d — ignoring", item.id,
+                    )
             # Mark the sent message (and its thread, if any) as bot-authored.
             # Best-effort: a Redis error here must NOT re-mark the item as failed.
             if self._redis is not None and result.message_id:

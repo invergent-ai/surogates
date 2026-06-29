@@ -116,6 +116,7 @@ def _make_dispatcher(
     delivery: _FakeDeliveryService | None = None,
     cache: _FakeCache | None = None,
     vault: _FakeVault | None = None,
+    redis: Any = None,
 ) -> "ChannelDeliveryDispatcher":
     from surogates.channels.dispatcher import ChannelDeliveryDispatcher
 
@@ -123,6 +124,7 @@ def _make_dispatcher(
         cache=cache or _FakeCache(),
         vault=vault or _FakeVault(),
         delivery_service=delivery or _FakeDeliveryService(),
+        redis=redis,
     )
 
 
@@ -640,6 +642,10 @@ class _FakeRedis:
     async def exists(self, key: str) -> int:
         return 1 if key in self.kv else 0
 
+    async def delete(self, *keys: str) -> None:
+        for key in keys:
+            self.kv.pop(key, None)
+
 
 def _make_dispatcher_with_redis(
     platform: _FakePlatform | None = None,
@@ -981,3 +987,154 @@ class TestMarkBotMessageAfterDelivery:
         assert await state.is_bot_message("slack-thread-001"), (
             "thread_ts from Slack destination must still be marked as bot message"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: thinking-placeholder injected into destination on delivery
+# ---------------------------------------------------------------------------
+
+
+class TestThinkingPlaceholderDelivery:
+    async def test_matching_placeholder_injects_update_ts_and_clears_on_success(self):
+        """A same-channel placeholder → update_ts injected into destination; key cleared after successful send."""
+        from surogates.channels.channel_progress import (
+            read_placeholder,
+            set_placeholder,
+        )
+
+        redis = _FakeRedis()
+        item = _FakeOutboxItem(
+            id=101,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+                "thread_ts": "10.0",
+            },
+        )
+        await set_placeholder(
+            redis,
+            "slack",
+            item.session_id,
+            channel="C001",
+            ts="20.0",
+            thread_ts="10.0",
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(success=True, message_id="20.0"))
+        dispatcher = _make_dispatcher(
+            platform=platform,
+            delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE),
+            redis=redis,
+        )
+
+        await dispatcher._deliver_item(platform, item)
+
+        # update_ts must be injected into the destination before send
+        assert platform.send_calls[0][0].destination["update_ts"] == "20.0"
+        # Redis key must be cleared after successful send
+        assert await read_placeholder(redis, "slack", item.session_id) is None
+        # Item must be marked delivered (not failed)
+        assert delivery.delivered == [(101, "20.0")]
+        assert delivery.failed == []
+
+    async def test_no_placeholder_posts_fresh_without_update_ts(self):
+        """No placeholder seeded → destination has no update_ts; send still succeeds."""
+        item = _FakeOutboxItem(
+            id=102,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+        )
+        redis = _FakeRedis()
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(success=True, message_id="new-1"))
+        dispatcher = _make_dispatcher(
+            platform=platform,
+            delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE),
+            redis=redis,
+        )
+
+        await dispatcher._deliver_item(platform, item)
+
+        # No update_ts injected
+        assert "update_ts" not in platform.send_calls[0][0].destination
+        assert delivery.delivered == [(102, "new-1")]
+        assert delivery.failed == []
+
+    async def test_channel_mismatch_clears_stale_placeholder_and_posts_fresh(self):
+        """Placeholder for a different channel → stale entry cleared; send posts fresh."""
+        from surogates.channels.channel_progress import (
+            read_placeholder,
+            set_placeholder,
+        )
+
+        redis = _FakeRedis()
+        item = _FakeOutboxItem(
+            id=103,
+            destination={"channel_identifier": APP_ID, "channel_id": "C_NEW"},
+        )
+        await set_placeholder(
+            redis,
+            "slack",
+            item.session_id,
+            channel="C_OLD",
+            ts="old-1",
+            thread_ts=None,
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(success=True, message_id="new-2"))
+        dispatcher = _make_dispatcher(
+            platform=platform,
+            delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE),
+            redis=redis,
+        )
+
+        await dispatcher._deliver_item(platform, item)
+
+        # Stale placeholder was cleared; no update_ts injected
+        assert "update_ts" not in platform.send_calls[0][0].destination
+        assert await read_placeholder(redis, "slack", item.session_id) is None
+        assert delivery.delivered == [(103, "new-2")]
+
+    async def test_send_failure_retains_matching_placeholder_for_retry(self):
+        """A failed send must NOT clear the placeholder so the next retry can still edit it."""
+        from surogates.channels.channel_progress import (
+            read_placeholder,
+            set_placeholder,
+        )
+
+        redis = _FakeRedis()
+        item = _FakeOutboxItem(
+            id=104,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+        )
+        await set_placeholder(
+            redis,
+            "slack",
+            item.session_id,
+            channel="C001",
+            ts="20.0",
+            thread_ts=None,
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(success=False, error="rate_limited"))
+        dispatcher = _make_dispatcher(
+            platform=platform,
+            delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE),
+            redis=redis,
+        )
+
+        await dispatcher._deliver_item(platform, item)
+
+        # update_ts was injected even on failure
+        assert platform.send_calls[0][0].destination["update_ts"] == "20.0"
+        # Placeholder must NOT be cleared on failure
+        assert await read_placeholder(redis, "slack", item.session_id) == {
+            "channel": "C001",
+            "ts": "20.0",
+            "thread_ts": None,
+        }
+        assert delivery.delivered == []
+        assert delivery.failed == [(104, "rate_limited")]
