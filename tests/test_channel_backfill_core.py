@@ -1,4 +1,3 @@
-import pytest
 from surogates.channels.channel_backfill import (
     BackfillLimits, RawMessage, ChannelMeta,
     filter_messages, bound_messages, format_context_block,

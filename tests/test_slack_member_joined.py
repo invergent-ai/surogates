@@ -1,4 +1,3 @@
-import pytest
 from types import SimpleNamespace
 from surogates.channels.platforms.slack import SlackPlatform
 
@@ -9,7 +8,6 @@ def _body(event_type, channel="C1", user="U_BOT"):
 def _routing():
     return SimpleNamespace(org_id="o1", agent_id="a1", identifier="A0X", config={})
 
-@pytest.mark.asyncio
 async def test_bot_join_warms_cache_and_acks():
     p = SlackPlatform()
     p._resolve_bot_user_id = lambda token: _async("U_BOT")           # type: ignore
@@ -23,7 +21,6 @@ async def test_bot_join_warms_cache_and_acks():
     assert handled is True
     assert warmed["channel_id"] == "C1"
 
-@pytest.mark.asyncio
 async def test_other_user_join_is_ignored():
     p = SlackPlatform()
     p._resolve_bot_user_id = lambda token: _async("U_BOT")            # type: ignore
@@ -33,7 +30,6 @@ async def test_other_user_join_is_ignored():
         routing=_routing(), creds={"bot_token": "x"}, deps=deps)
     assert handled is False  # not our bot → fall through, do not ACK-swallow
 
-@pytest.mark.asyncio
 async def test_non_join_event_falls_through():
     p = SlackPlatform()
     deps = SimpleNamespace(redis=object())

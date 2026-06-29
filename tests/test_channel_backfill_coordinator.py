@@ -1,6 +1,5 @@
 # tests/test_channel_backfill_coordinator.py
 import uuid
-import pytest
 from types import SimpleNamespace
 from surogates.channels.channel_backfill import (
     BackfillLimits, warm_cache, maybe_seed_session, cache_key,
@@ -45,7 +44,6 @@ def _routing():
 
 from surogates.channels.channel_backfill import ChannelMeta, RawMessage
 
-@pytest.mark.asyncio
 async def test_warm_cache_writes_block():
     now = 1000.0
     plat = FakePlatform((ChannelMeta("eng", "", ""), [RawMessage(now - 1, "Al", "hi")]))
@@ -57,7 +55,6 @@ async def test_warm_cache_writes_block():
     assert await r.get(cache_key(org_id="o1", agent_id="a1", kind="slack",
                                  identifier="A0X", channel_id="C1"))
 
-@pytest.mark.asyncio
 async def test_warm_cache_marks_negative_on_empty_fetch():
     plat = FakePlatform(None)
     r = FakeRedis()
@@ -68,7 +65,6 @@ async def test_warm_cache_marks_negative_on_empty_fetch():
     k = cache_key(org_id="o1", agent_id="a1", kind="slack", identifier="A0X", channel_id="C1")
     assert await r.get(f"{k}:neg")
 
-@pytest.mark.asyncio
 async def test_seed_emits_once_and_marks_config():
     now = 1000.0
     plat = FakePlatform((ChannelMeta("eng", "t", "p"), [RawMessage(now - 1, "Al", "hi")]))
@@ -85,7 +81,6 @@ async def test_seed_emits_once_and_marks_config():
     assert "channel context" in content
     assert store.config_updates and store.config_updates[0][0] == "history_backfill"
 
-@pytest.mark.asyncio
 async def test_seed_skips_when_prior_real_user_message():
     real = SimpleNamespace(type=EventType.USER_MESSAGE.value, data={"content": "hey"})
     store = FakeStore(events=[real])
@@ -96,7 +91,6 @@ async def test_seed_skips_when_prior_real_user_message():
     assert eid is None
     assert store.emitted == []
 
-@pytest.mark.asyncio
 async def test_seed_skips_when_config_marker_exists():
     store = FakeStore(events=[], config={"history_backfill": {"event_id": 10}})
     plat = FakePlatform((ChannelMeta("e", "", ""), [RawMessage(1.0, "A", "x")]))
@@ -106,7 +100,6 @@ async def test_seed_skips_when_config_marker_exists():
     assert eid is None
     assert store.emitted == []
 
-@pytest.mark.asyncio
 async def test_seed_skips_when_prior_synthetic_seed():
     seed = SimpleNamespace(type=EventType.USER_MESSAGE.value,
                            data={"synthetic": "channel_history_backfill"})
@@ -117,7 +110,6 @@ async def test_seed_skips_when_prior_synthetic_seed():
         channel_id="C1", limits=BackfillLimits(), now=2.0)
     assert eid is None
 
-@pytest.mark.asyncio
 async def test_seed_never_raises_on_store_failure():
     class BoomStore(FakeStore):
         async def emit_synthetic_user_message(self, *a, **k): raise RuntimeError("db down")

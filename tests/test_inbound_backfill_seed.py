@@ -8,7 +8,6 @@ Covers two real behaviours:
 
 from __future__ import annotations
 
-import pytest
 
 from surogates.channels.inbound import ChannelInboundPipeline, InboundOutcome
 from surogates.session.events import EventType
@@ -29,7 +28,6 @@ from tests.test_channel_pipeline import (  # noqa: PLC2701
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_first_slack_channel_message_triggers_backfill_before_user_event():
     """Backfill is awaited once, with the correct session_id, before USER_MESSAGE.
 
@@ -106,7 +104,6 @@ async def test_first_slack_channel_message_triggers_backfill_before_user_event()
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_dm_message_does_not_trigger_backfill():
     """is_dm=True → backfill must not be called, even when deps.backfill is set.
 
@@ -141,7 +138,6 @@ async def test_dm_message_does_not_trigger_backfill():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
 async def test_none_backfill_does_not_crash_pipeline():
     """deps.backfill=None (the default) — pipeline continues to work normally.
 

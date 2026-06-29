@@ -1,5 +1,4 @@
 import json
-import pytest
 from surogates.channels.channel_backfill import (
     cache_key, read_block, write_block, in_negative_cooldown, mark_negative, is_stale,
 )
@@ -15,7 +14,6 @@ def test_cache_key_shape():
     k = cache_key(org_id="o1", agent_id="a1", kind="slack", identifier="A0X", channel_id="C9")
     assert k == "channel-backfill:o1:a1:slack:A0X:C9"
 
-@pytest.mark.asyncio
 async def test_write_then_read_roundtrips_block_and_time():
     r = FakeRedis()
     k = cache_key(org_id="o", agent_id="a", kind="slack", identifier="A", channel_id="C")
@@ -23,11 +21,9 @@ async def test_write_then_read_roundtrips_block_and_time():
     got = await read_block(r, k)
     assert got == ("BLOCK", 123.0)
 
-@pytest.mark.asyncio
 async def test_read_miss_returns_none():
     assert await read_block(FakeRedis(), "nope") is None
 
-@pytest.mark.asyncio
 async def test_negative_cooldown_roundtrip():
     r = FakeRedis()
     k = cache_key(org_id="o", agent_id="a", kind="slack", identifier="A", channel_id="C")
@@ -39,14 +35,12 @@ def test_is_stale():
     assert is_stale(100.0, now=100.0 + 7200, ttl_s=3600) is True
     assert is_stale(100.0, now=100.0 + 60, ttl_s=3600) is False
 
-@pytest.mark.asyncio
 async def test_read_block_malformed_json_returns_none():
     r = FakeRedis()
     r.kv["bad"] = "not-json"
     assert await read_block(r, "bad") is None
 
 
-@pytest.mark.asyncio
 async def test_read_block_decodes_bytes():
     r = FakeRedis()
     k = cache_key(org_id="o", agent_id="a", kind="slack", identifier="A", channel_id="C")
