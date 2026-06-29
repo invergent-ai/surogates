@@ -1138,3 +1138,126 @@ class TestThinkingPlaceholderDelivery:
         }
         assert delivery.delivered == []
         assert delivery.failed == [(104, "rate_limited")]
+
+
+# ---------------------------------------------------------------------------
+# Tests: INBOX_INPUT_REQUIRED events enqueued to outbox for channel sessions
+# ---------------------------------------------------------------------------
+
+
+class TestInputRequiredOutboxDelivery:
+    async def test_slack_input_required_enqueues_prompt_payload(self):
+        import unittest.mock as mock
+        from uuid import uuid4
+
+        from surogates.session import store as store_mod
+        from surogates.session.events import EventType
+
+        captured: list[dict] = []
+
+        class _FakeSF:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, model, pk):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(
+                    channel="slack",
+                    config={
+                        "slack_channel_id": "C1",
+                        "slack_thread_key": "100.0",
+                        "channel_identifier": "A0X",
+                    },
+                )
+
+            def add(self, obj):
+                pass
+
+            async def commit(self):
+                pass
+
+        class _FakeOutbox:
+            id = None
+
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        ss = object.__new__(store_mod.SessionStore)
+        ss._sf = _FakeSF()
+        ss._channel_cache = {}
+
+        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
+            await ss._enqueue_channel_delivery(
+                session_id=uuid4(),
+                event_id=11,
+                event_type=EventType.INBOX_INPUT_REQUIRED,
+                data={
+                    "tool_call_id": "tc1",
+                    "questions": [{"prompt": "Which color?"}],
+                    "context": "need a choice",
+                },
+            )
+
+        assert len(captured) == 1
+        assert captured[0]["channel"] == "slack"
+        assert captured[0]["dedupe_key"] == "slack:11"
+        assert captured[0]["destination"] == {
+            "channel_id": "C1",
+            "thread_ts": "100.0",
+            "channel_identifier": "A0X",
+        }
+        assert captured[0]["payload"] == {
+            "input_prompt": True,
+            "tool_call_id": "tc1",
+            "questions": [{"prompt": "Which color?"}],
+            "context": "need a choice",
+        }
+
+    async def test_web_input_required_does_not_enqueue_prompt_payload(self):
+        import unittest.mock as mock
+        from uuid import uuid4
+
+        from surogates.session import store as store_mod
+        from surogates.session.events import EventType
+
+        captured: list[dict] = []
+
+        class _FakeSF:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def get(self, model, pk):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(channel="web", config={})
+
+        class _FakeOutbox:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        ss = object.__new__(store_mod.SessionStore)
+        ss._sf = _FakeSF()
+        ss._channel_cache = {}
+
+        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
+            await ss._enqueue_channel_delivery(
+                session_id=uuid4(),
+                event_id=12,
+                event_type=EventType.INBOX_INPUT_REQUIRED,
+                data={"tool_call_id": "tc1", "questions": [{"prompt": "q"}]},
+            )
+
+        assert captured == []

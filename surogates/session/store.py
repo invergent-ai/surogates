@@ -53,6 +53,7 @@ class LeaseNotHeldError(Exception):
 # Web channel reads from the events table directly via SSE.
 _DELIVERABLE_EVENTS = frozenset({
     EventType.LLM_RESPONSE,
+    EventType.INBOX_INPUT_REQUIRED,
 })
 
 
@@ -769,8 +770,18 @@ class SessionStore:
                     content = strip_next_action_blocks(content)
                 if content:
                     payload["content"] = content
+            elif event_type == EventType.INBOX_INPUT_REQUIRED:
+                questions = data.get("questions") or []
+                tool_call_id = (data.get("tool_call_id") or "").strip()
+                if questions and tool_call_id:
+                    payload = {
+                        "input_prompt": True,
+                        "tool_call_id": tool_call_id,
+                        "questions": questions,
+                        "context": data.get("context", ""),
+                    }
 
-            if not payload.get("content"):
+            if not payload:
                 return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
 
             # Enqueue to the delivery outbox.
