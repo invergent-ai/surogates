@@ -77,7 +77,7 @@ def _apply_total_inline_budget_to_attachments(attachments: list) -> None:
         (a.get("inlined_text"), a.get("inlined_render_kind"), a.get("inline_skip_reason"))
         for a in attachments
     ]
-    for a, (text, kind, reason) in zip(attachments, _apply_inline_total_budget(outcomes)):
+    for a, (text, _kind, reason) in zip(attachments, _apply_inline_total_budget(outcomes)):
         if text is None and reason is not None and a.get("inlined_text") is not None:
             a.pop("inlined_text", None)
             a.pop("inlined_render_kind", None)
@@ -263,7 +263,7 @@ def _make_deps_factory(
                 try:
                     out = await ingest_attachment_bytes(
                         storage, session=session, root_id=root_id, bucket=bucket,
-                        path=path, filename=safe, mime_type=f.mime_type, data=data,
+                        path=path, filename=safe, mime_type=f.mime_type or "application/octet-stream", data=data,
                     )
                 except Exception:
                     logger.warning(
