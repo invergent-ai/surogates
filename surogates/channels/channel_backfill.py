@@ -6,10 +6,14 @@ and session seeding live in the platform and coordinator layers.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from surogates.session.events import EventType
 
 
 @dataclass(frozen=True)
@@ -141,10 +145,6 @@ async def mark_negative(redis, key: str, *, cooldown_s: int) -> None:
 def is_stale(fetched_at: float, *, now: float, ttl_s: int) -> bool:
     return (now - fetched_at) >= ttl_s
 
-
-import contextlib
-import logging
-from surogates.session.events import EventType
 
 _log = logging.getLogger(__name__)
 

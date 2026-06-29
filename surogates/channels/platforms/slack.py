@@ -849,8 +849,6 @@ class SlackPlatform:
         member, or on any Slack error. Bounding by count/token/age is the
         coordinator's job; here we only honour the page + time budgets.
         """
-        import time as _time
-
         bot_token: str = (creds or {}).get("bot_token") or ""
         if not bot_token:
             return None
@@ -883,9 +881,9 @@ class SlackPlatform:
             bot_user_id = await self._resolve_bot_user_id(bot_token)
             raw: list[RawMessage] = []
             cursor: str = ""
-            deadline = _time.monotonic() + limits.fetch_time_budget_s
+            deadline = time.monotonic() + limits.fetch_time_budget_s
             for _page in range(max(1, limits.max_pages)):
-                if _time.monotonic() >= deadline:
+                if time.monotonic() >= deadline:
                     break
                 kwargs: dict = {"channel": channel_id, "limit": 200}
                 if cursor:
@@ -894,7 +892,7 @@ class SlackPlatform:
                     hist = await client.conversations_history(**kwargs)
                 except Exception as exc:
                     retry_after = _retry_after_seconds(exc)
-                    if raw and retry_after is not None and _time.monotonic() + retry_after >= deadline:
+                    if raw and retry_after is not None and time.monotonic() + retry_after >= deadline:
                         break
                     raise
                 msgs = hist.get("messages", []) if isinstance(hist, dict) else []

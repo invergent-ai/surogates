@@ -15,7 +15,6 @@ async def test_bot_join_warms_cache_and_acks():
     p._resolve_bot_user_id = lambda token: _async("U_BOT")           # type: ignore
     warmed = {}
     async def fake_warm(**kw): warmed.update(kw); return True
-    import surogates.channels.platforms.slack as slk
     p._warm_cache = fake_warm  # injected hook (see impl)                # type: ignore
     deps = SimpleNamespace(redis=object())
     handled = await p.handle_non_message_update(
