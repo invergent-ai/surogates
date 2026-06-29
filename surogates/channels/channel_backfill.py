@@ -140,3 +140,110 @@ async def mark_negative(redis, key: str, *, cooldown_s: int) -> None:
 
 def is_stale(fetched_at: float, *, now: float, ttl_s: int) -> bool:
     return (now - fetched_at) >= ttl_s
+
+
+import contextlib
+import logging
+from surogates.session.events import EventType
+
+_log = logging.getLogger(__name__)
+
+
+async def warm_cache(
+    *, platform, creds, redis, org_id, agent_id, identifier, channel_id,
+    limits: BackfillLimits, now: float,
+) -> bool:
+    key = cache_key(org_id=org_id, agent_id=agent_id, kind="slack",
+                    identifier=identifier, channel_id=channel_id)
+    fetched = await platform.fetch_channel_context(
+        creds=creds, channel_id=channel_id, limits=limits)
+    if fetched is None:
+        await mark_negative(redis, key, cooldown_s=limits.negative_cooldown_s)
+        return False
+    meta, raw = fetched
+    block = format_context_block(meta, bound_messages(raw, limits, now=now), now=now)
+    if not block:
+        await mark_negative(redis, key, cooldown_s=limits.negative_cooldown_s)
+        return False
+    await write_block(redis, key, block, fetched_at=now, ttl_s=limits.cache_ttl_s)
+    return True
+
+
+@contextlib.asynccontextmanager
+async def _session_lock(redis, session_id):
+    """Best-effort short lock so concurrent first-messages for ONE session
+    don't double-seed. A failed acquire yields False (caller skips)."""
+    lock_key = f"channel-backfill:lock:{session_id}"
+    acquired = await redis.set(lock_key, "1", ex=15, nx=True)
+    try:
+        yield bool(acquired)
+    finally:
+        if acquired:
+            with contextlib.suppress(Exception):
+                await redis.delete(lock_key)
+
+
+async def _already_seeded(store, session_id) -> bool:
+    get_session = getattr(store, "get_session", None)
+    if get_session is not None:
+        session = await get_session(session_id)
+        config = getattr(session, "config", None) or {}
+        if config.get("history_backfill"):
+            return True
+    prior = await store.get_events(session_id, types=[EventType.USER_MESSAGE])
+    for e in prior:
+        data = getattr(e, "data", None) or {}
+        if data.get("synthetic") == "channel_history_backfill":
+            return True
+        if not data.get("synthetic"):
+            return True  # a real user message already exists — too late to seed
+    return False
+
+
+async def maybe_seed_session(
+    *, store, redis, platform, creds, routing, session_id, channel_id,
+    limits: BackfillLimits, now: float,
+) -> int | None:
+    """Seed one channel session with the cached/freshly-fetched context block.
+
+    Best-effort: returns the seeded event id, or None when skipped/failed.
+    Never raises — a backfill failure must not block the user's real message.
+    """
+    try:
+        key = cache_key(org_id=routing.org_id, agent_id=routing.agent_id, kind="slack",
+                        identifier=routing.identifier, channel_id=channel_id)
+        async with _session_lock(redis, session_id) as got:
+            if not got:
+                return None
+            if await _already_seeded(store, session_id):
+                return None
+            cached = await read_block(redis, key)
+            if cached is not None and not is_stale(cached[1], now=now, ttl_s=limits.cache_ttl_s):
+                block, fetched_at = cached
+            else:
+                if await in_negative_cooldown(redis, key):
+                    return None
+                ok = await warm_cache(
+                    platform=platform, creds=creds, redis=redis,
+                    org_id=routing.org_id, agent_id=routing.agent_id,
+                    identifier=routing.identifier, channel_id=channel_id,
+                    limits=limits, now=now)
+                if not ok:
+                    return None
+                refreshed = await read_block(redis, key)
+                if refreshed is None:
+                    return None
+                block, fetched_at = refreshed
+            event_id = await store.emit_synthetic_user_message(
+                session_id, content=block, synthetic="channel_history_backfill",
+                metadata={"source": {
+                    "platform": "slack", "chat_id": channel_id,
+                    "channel_history_backfill": True, "cache_fetched_at": fetched_at,
+                }})
+            await store.update_session_config_key(
+                session_id, "history_backfill",
+                {"seeded_at": now, "event_id": event_id, "cache_fetched_at": fetched_at})
+            return event_id
+    except Exception:
+        _log.warning("maybe_seed_session failed for %s", channel_id, exc_info=True)
+        return None
