@@ -57,7 +57,13 @@ except ImportError:
 from fastapi.responses import Response
 
 from surogates.channels.base import SendResult
-from surogates.channels.channel_backfill import BackfillLimits, ChannelMeta, RawMessage, filter_messages
+from surogates.channels.channel_backfill import (
+    BackfillLimits,
+    ChannelMeta,
+    RawMessage,
+    filter_messages,
+    warm_cache as _warm_cache_fn,
+)
 from surogates.channels.inbound import InboundMessage
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 
@@ -557,6 +563,47 @@ class SlackPlatform:
         except Exception:
             logger.debug("SlackPlatform: auth.test failed for token — skipping bot_user_id")
             return ""
+
+    # ------------------------------------------------------------------
+    # handle_non_message_update — warm cache on bot self-join
+    # ------------------------------------------------------------------
+
+    async def handle_non_message_update(
+        self, body, *, routing, creds, deps,
+    ) -> bool:
+        """Warm the channel-context cache when THIS bot is added to a channel.
+
+        Returns True (ACK, skip parse) only when we handled a bot self-join;
+        all other non-message events fall through (return False).
+        """
+        if (body or {}).get("type") != "event_callback":
+            return False
+        event = body.get("event", {})
+        if event.get("type") != "member_joined_channel":
+            return False
+        bot_token = (creds or {}).get("bot_token") or ""
+        bot_user_id = await self._resolve_bot_user_id(bot_token)
+        if not bot_user_id or event.get("user") != bot_user_id:
+            return False  # someone else joined — not our concern
+
+        channel_id = event.get("channel") or ""
+        if not channel_id:
+            return True
+        limits = BackfillLimits.from_config(
+            (getattr(routing, "config", None) or {}).get("history_backfill")
+        )
+        warm = getattr(self, "_warm_cache", None) or _warm_cache_fn
+        try:
+            await warm(
+                platform=self, creds=creds, redis=deps.redis,
+                org_id=routing.org_id, agent_id=routing.agent_id,
+                identifier=routing.identifier, channel_id=channel_id,
+                limits=limits, now=time.time())
+        except Exception:
+            logger.warning(
+                "member_joined backfill warm failed for %s", channel_id, exc_info=True,
+            )
+        return True
 
     # ------------------------------------------------------------------
     # handle_interactive — slash commands and Block Kit interactions
