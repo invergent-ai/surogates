@@ -1,4 +1,3 @@
-import math
 import pytest
 from surogates.channels.channel_backfill import (
     BackfillLimits, RawMessage, ChannelMeta,
@@ -35,7 +34,7 @@ def test_bound_token_cap_binds():
     big = "x" * 4000  # ~1000 tokens at chars/4
     raw = [RawMessage(ts=now - i, author="A", text=big) for i in range(20)]
     out = bound_messages(raw, BackfillLimits(max_tokens=2500), now=now)
-    assert 1 <= len(out) <= 3  # token budget binds well before 20
+    assert len(out) == 2  # with ~1009-token messages, exactly 2 fit
 
 def test_format_block_has_header_and_oldest_first():
     now = 100 * DAY

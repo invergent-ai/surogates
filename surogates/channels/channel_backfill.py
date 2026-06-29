@@ -74,6 +74,7 @@ def bound_messages(
         if m.ts < oldest_allowed:
             break
         cost = _est_tokens(m.text) + _est_tokens(m.author) + 8  # +label overhead
+        # The newest message is always included (picked is empty on the first iteration) so a session never gets an empty block when history exists, even if that one message exceeds max_tokens.
         if picked and tokens + cost > limits.max_tokens:
             break
         if len(picked) >= limits.max_messages:
