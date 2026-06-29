@@ -61,6 +61,29 @@ class _MultiCache:
             cache.invalidate(key)
 
 
+def _injection_blocks_filename(name: str) -> bool:
+    """Return True if the filename looks like a prompt-injection attempt."""
+    try:
+        from surogates.api.routes.sessions import _get_injection_detector
+        return bool(_get_injection_detector().detect(name, source="slack_channel").is_injection)
+    except Exception:
+        return False
+
+
+def _apply_total_inline_budget_to_attachments(attachments: list) -> None:
+    """Apply the cross-file total inline budget over a batch of doc attachments."""
+    from surogates.session.attachment_ingest import _apply_inline_total_budget
+    outcomes = [
+        (a.get("inlined_text"), a.get("inlined_render_kind"), a.get("inline_skip_reason"))
+        for a in attachments
+    ]
+    for a, (text, kind, reason) in zip(attachments, _apply_inline_total_budget(outcomes)):
+        if text is None and reason is not None and a.get("inlined_text") is not None:
+            a.pop("inlined_text", None)
+            a.pop("inlined_render_kind", None)
+            a["inline_skip_reason"] = reason
+
+
 def _make_deps_factory(
     *,
     session_store: Any,
@@ -68,6 +91,7 @@ def _make_deps_factory(
     session_factory: Any,
     mate_settings_cache: Any = None,
     link_url_base: str = "",
+    storage: Any = None,
 ) -> Any:
     """Return a deps_factory for :class:`ChannelWebhookDispatcher`.
 
@@ -194,6 +218,69 @@ def _make_deps_factory(
                 limits=limits, now=time.time(),
             )
 
+        async def _attachments(session_id: Any, msg: Any) -> dict:
+            download = getattr(platform, "download_file", None)
+            if download is None or storage is None or not getattr(msg, "files", None):
+                return {"images": [], "attachments": [], "note": ""}
+            from pathlib import PurePosixPath
+            from surogates.session.attachment_ingest import (
+                ingest_attachment_bytes,
+                workspace_root_id,
+            )
+            session = await session_store.get_session(session_id)
+            cfg = (getattr(session, "config", None) or {})
+            bucket = cfg.get("storage_bucket") or ""
+            root_id = workspace_root_id(session)
+            ts = getattr(msg, "ts", "") or "0"
+            images: list = []
+            attachments: list = []
+            skipped: list[str] = []
+            MAX_FILES = 10
+            MAX_BYTES = 20 * 1024 * 1024
+            for index, f in enumerate(msg.files):
+                if index >= MAX_FILES:
+                    skipped.append(f.filename)
+                    continue
+                safe = PurePosixPath(f.filename).name
+                if safe in ("", ".", ".."):
+                    skipped.append("(invalid filename)")
+                    continue
+                if _injection_blocks_filename(safe):
+                    skipped.append("(blocked)")
+                    continue
+                if f.size is not None and f.size > MAX_BYTES:
+                    skipped.append(safe)
+                    continue
+                is_image = (f.mime_type or "").lower().startswith("image/")
+                if not is_image and not bucket:
+                    skipped.append(safe)
+                    continue
+                data = await download(creds=creds, url=f.url, max_bytes=MAX_BYTES)
+                if data is None:
+                    skipped.append(safe)
+                    continue
+                path = f"uploads/slack/{ts}-{index}-{safe}"
+                try:
+                    out = await ingest_attachment_bytes(
+                        storage, session=session, root_id=root_id, bucket=bucket,
+                        path=path, filename=safe, mime_type=f.mime_type, data=data,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[channels] ingest failed for %s", safe, exc_info=True,
+                    )
+                    skipped.append(safe)
+                    continue
+                if "image" in out:
+                    images.append(out["image"])
+                else:
+                    attachments.append(out["attachment"])
+            _apply_total_inline_budget_to_attachments(attachments)
+            note = (
+                f"[shared file(s) not read: {', '.join(skipped)}]" if skipped else ""
+            )
+            return {"images": images, "attachments": attachments, "note": note}
+
         return PipelineDeps(
             session_store=session_store,
             redis=redis,
@@ -208,6 +295,7 @@ def _make_deps_factory(
             pairing_sender=_pairing_sender,
             backfill=_backfill,
             progress=_progress,
+            attachments=_attachments,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
@@ -228,6 +316,7 @@ def build_channels_app(
     session_store: Any,
     mate_settings_cache: Any = None,
     registry: ChannelRegistry | None = None,
+    storage: Any = None,
 ) -> tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler]:
     """Construct the channel webhook FastAPI app and related dispatchers.
 
@@ -280,6 +369,7 @@ def build_channels_app(
         session_factory=session_factory,
         mate_settings_cache=mate_settings_cache,
         link_url_base=getattr(getattr(settings, "channels", None), "studio_url", ""),
+        storage=storage,
     )
 
     dispatcher = ChannelWebhookDispatcher(
@@ -376,6 +466,9 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
 
     delivery_service = DeliveryService(session_factory=sf, redis_client=redis)
 
+    from surogates.storage.backend import create_backend
+    storage = create_backend(settings)
+
     app, delivery_dispatcher, reconciler = build_channels_app(
         settings,
         redis=redis,
@@ -386,6 +479,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         delivery_service=delivery_service,
         session_store=session_store,
         mate_settings_cache=mate_cache,
+        storage=storage,
     )
     # Routing / mate-settings caches age out within their TTL (30 s) without a
     # restart.  The per-message identity cache, however, negative-caches an

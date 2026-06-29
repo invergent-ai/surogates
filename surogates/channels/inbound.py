@@ -179,6 +179,10 @@ _Backfill = Callable[[Any, str, Any], Awaitable[int | None]]
 #: "Thinking…" placeholder for a message that will be answered.
 _Progress = Callable[[Any, str, Any], Awaitable[None]]
 
+#: Async callable: (session_id, msg) -> {"images": list, "attachments": list, "note": str}.
+#: Downloads and ingests platform file attachments into the harness event shapes.
+_Attachments = Callable[[Any, Any], Awaitable[dict]]
+
 
 @dataclass
 class PipelineDeps:
@@ -240,6 +244,7 @@ class PipelineDeps:
     pairing_sender: Any = None
     backfill: _Backfill | None = None
     progress: _Progress | None = None
+    attachments: _Attachments | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -499,27 +504,52 @@ class ChannelInboundPipeline:
         if deps.backfill is not None and routing.platform == "slack" and not msg.is_dm:
             await deps.backfill(session_id, msg.identifier, routing)
 
+        # Download + ingest Slack file attachments into the harness's
+        # images/attachments event shapes. Best-effort: never drop the message.
+        _images: list = []
+        _attachments: list = []
+        _att_note = ""
+        if (deps.attachments is not None and routing.platform == "slack"
+                and getattr(msg, "files", None)):
+            try:
+                _ingested = await deps.attachments(session_id, msg)
+                _images = _ingested.get("images") or []
+                _attachments = _ingested.get("attachments") or []
+                _att_note = _ingested.get("note") or ""
+            except Exception:
+                logger.warning("[channels] attachment ingest failed", exc_info=True)
+
+        _content = msg.text
+        if _att_note:
+            _content = f"{_content}\n{_att_note}" if _content else _att_note
+
         # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.
         # ------------------------------------------------------------------
+        event_data: dict = {
+            "content": _content,
+            "media_urls": msg.media_urls,
+            "media_types": msg.media_types,
+            "source": {
+                # Adapter-supplied metadata first; pipeline-derived keys
+                # win so an adapter can't silently shadow them.
+                **msg.source,
+                "platform": routing.platform,
+                "chat_id": msg.identifier,
+                "user_id": msg.platform_user_id,
+                "user_name": msg.user_name,
+                "thread_id": msg.thread_key,
+            },
+        }
+        if _images:
+            event_data["images"] = _images
+        if _attachments:
+            event_data["attachments"] = _attachments
+
         await deps.session_store.emit_event(
             session_id,
             EventType.USER_MESSAGE,
-            {
-                "content": msg.text,
-                "media_urls": msg.media_urls,
-                "media_types": msg.media_types,
-                "source": {
-                    # Adapter-supplied metadata first; pipeline-derived keys
-                    # win so an adapter can't silently shadow them.
-                    **msg.source,
-                    "platform": routing.platform,
-                    "chat_id": msg.identifier,
-                    "user_id": msg.platform_user_id,
-                    "user_name": msg.user_name,
-                    "thread_id": msg.thread_key,
-                },
-            },
+            event_data,
         )
 
         # Post a "Thinking…" placeholder so the user sees progress while the
