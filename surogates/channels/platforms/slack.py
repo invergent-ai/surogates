@@ -632,6 +632,7 @@ class SlackPlatform:
         request: Any,
         creds: dict,
         routing: Any,
+        deps: Any = None,
     ) -> InboundMessage | Any:
         """Handle a form-encoded interactive Slack request.
 
@@ -645,18 +646,9 @@ class SlackPlatform:
             instead — Slack displays it ephemerally to the user.
 
         ``/slack/{app_id}/interact``
-            Block Kit button clicks / modal submissions.  ACK-only: parses the
-            ``payload`` field, logs the ``action_id``, and returns a 200
-            :class:`~fastapi.responses.Response`.
-
-            **Approval handling is a follow-up task.**  The current ``send``
-            implementation does not yet render Block Kit approval buttons, and
-            the harness-side approval resolution mechanism (persisting the
-            decision to a durable store and unblocking the waiting session)
-            must be wired before this path does anything beyond ack.  The old
-            in-process ``_approval_resolved`` dict from the Socket Mode adapter
-            is intentionally NOT ported here — it is process-local and wrong
-            for the stateless multi-replica deployment model.
+            Block Kit button clicks / modal submissions.  Opens a modal for
+            pending input questions on ``block_actions`` with the answer
+            action, and resolves the modal submission on ``view_submission``.
 
         Parameters
         ----------
@@ -672,6 +664,8 @@ class SlackPlatform:
             Resolved credential dict (``bot_token``, ``signing_secret``).
         routing:
             Routing object from the dispatcher (may be ``None`` in tests).
+        deps:
+            Pipeline dependencies bundle (carries ``session_store``).
 
         Returns
         -------
@@ -685,10 +679,9 @@ class SlackPlatform:
         if path_template.endswith("/commands"):
             return await self._handle_slash(form)
         if path_template.endswith("/interact"):
-            return await self._handle_interact(form)
-        # Unknown interactive path — ack silently.
+            return await self._handle_interact(form, creds=creds, deps=deps)
         logger.debug(
-            "[SlackPlatform] Unknown interactive path template %r — acking silently",
+            "[SlackPlatform] Unknown interactive path template %r - acking silently",
             path_template,
         )
         return Response(status_code=200)
@@ -737,28 +730,103 @@ class SlackPlatform:
             visibility="dm",
         )
 
-    async def _handle_interact(self, form: dict) -> Any:
-        """ACK a Block Kit button-click or modal-submission payload.
+    async def _handle_interact(
+        self,
+        form: dict,
+        *,
+        creds: dict | None = None,
+        deps: Any = None,
+    ) -> Any:
+        """Handle a Block Kit button-click or modal-submission payload.
 
-        Parses the ``payload`` JSON field and logs the ``action_id`` for
-        observability.  Returns a plain 200 so Slack stops retrying.
+        ``block_actions`` with the answer action_id: opens a modal with the
+        pending question(s) for the session.  ``view_submission`` with the
+        modal callback_id: resolves the response, or returns Slack field errors
+        to keep the modal open when validation fails.
 
-        Full approval handling is deferred: the harness-side mechanism that
-        persists the decision and unblocks the waiting session must be wired
-        before this path does more than ack.
+        Everything is best-effort — any exception is caught and logged; Slack
+        always receives a 200 ack.
         """
+        from fastapi.responses import JSONResponse
+        from surogates.channels.platforms.slack_interactive import (
+            ANSWER_ACTION_ID,
+            MODAL_CALLBACK_ID,
+            ModalErrors,
+            build_question_modal,
+            parse_modal_submission,
+        )
+        from surogates.session import interactive_input
+
         try:
             payload = json.loads(form.get("payload", "{}"))
-            actions = payload.get("actions", [])
-            for action in actions:
-                action_id = action.get("action_id", "")
-                if action_id:
-                    logger.debug(
-                        "[SlackPlatform] /interact ack — action_id=%r (approval handling is a follow-up)",
-                        action_id,
-                    )
         except (json.JSONDecodeError, ValueError):
-            logger.debug("[SlackPlatform] /interact payload is not valid JSON — acking silently")
+            logger.debug("[SlackPlatform] /interact payload is not valid JSON - acking silently")
+            return Response(status_code=200)
+
+        if deps is None:
+            return Response(status_code=200)
+
+        payload_type = payload.get("type")
+        if payload_type == "block_actions":
+            action = next(
+                (
+                    a for a in payload.get("actions", [])
+                    if a.get("action_id") == ANSWER_ACTION_ID
+                ),
+                None,
+            )
+            if action is None:
+                return Response(status_code=200)
+            try:
+                ref = json.loads(action.get("value") or "{}")
+                session_id = ref.get("session_id") or ""
+                tool_call_id = ref.get("tool_call_id") or ""
+                pending = await interactive_input.pending_input_for_session(
+                    deps.session_store,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
+                if not pending:
+                    return Response(status_code=200)
+                view = build_question_modal(
+                    session_id=session_id,
+                    tool_call_id=pending["tool_call_id"],
+                    questions=pending["questions"],
+                )
+                await self._get_client((creds or {}).get("bot_token") or "").views_open(
+                    trigger_id=payload.get("trigger_id"),
+                    view=view,
+                )
+            except Exception:
+                logger.warning("[SlackPlatform] /interact views_open failed", exc_info=True)
+            return Response(status_code=200)
+
+        if payload_type == "view_submission":
+            view = payload.get("view") or {}
+            if view.get("callback_id") != MODAL_CALLBACK_ID:
+                return Response(status_code=200)
+            try:
+                meta = json.loads(view.get("private_metadata") or "{}")
+                pending = await interactive_input.pending_input_for_session(
+                    deps.session_store,
+                    session_id=meta.get("session_id") or "",
+                    tool_call_id=meta.get("tool_call_id") or "",
+                )
+                if not pending:
+                    return Response(status_code=200)
+                parsed = parse_modal_submission(view, pending["questions"])
+                if isinstance(parsed, ModalErrors):
+                    return JSONResponse(parsed.to_response(), status_code=200)
+                await interactive_input.resolve_input_response(
+                    deps.session_store,
+                    session_id=parsed.session_id,
+                    tool_call_id=parsed.tool_call_id,
+                    responses=parsed.responses,
+                )
+            except Exception:
+                logger.warning("[SlackPlatform] /interact view_submission resolve failed", exc_info=True)
+            return Response(status_code=200)
+
         return Response(status_code=200)
 
     # ------------------------------------------------------------------

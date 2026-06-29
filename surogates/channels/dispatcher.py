@@ -466,6 +466,7 @@ class ChannelWebhookDispatcher:
                     matched_template = tmpl
                     break
 
+            deps = deps_factory(platform.kind, routing, creds, platform)
             try:
                 result = await handle_interactive(
                     matched_template,
@@ -473,6 +474,7 @@ class ChannelWebhookDispatcher:
                     request=request,
                     creds=creds,
                     routing=routing,
+                    deps=deps,
                 )
             except Exception:
                 logger.warning(
@@ -499,7 +501,6 @@ class ChannelWebhookDispatcher:
                             platform.kind, _id, exc_info=True,
                         )
 
-                deps = deps_factory(platform.kind, routing, creds, platform)
                 await pipeline.handle(result, routing=routing, config=config, deps=deps)
                 return Response(status_code=200)
 

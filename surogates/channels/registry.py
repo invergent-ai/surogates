@@ -208,6 +208,7 @@ class ChannelPlatform(Protocol):
         request: Any,
         creds: dict,
         routing: Any,
+        deps: Any = None,
     ) -> Any:
         """Handle a form-encoded interactive request (slash commands, button clicks).
 
