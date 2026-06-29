@@ -57,6 +57,10 @@ def parse_media_markers(text: str) -> tuple[list[str], str]:
         return [], text or ""
     paths = [m.group(1) for m in _MEDIA_RE.finditer(text)]
     cleaned = _MEDIA_RE.sub("", text)
+    # A path-less ``MEDIA:`` (token emitted without a path) won't match
+    # _MEDIA_RE; strip a trailing dangling marker so the raw token never reaches
+    # the channel. Anchored to end-of-string so mid-sentence prose is untouched.
+    cleaned = re.sub(r"""[`"']?MEDIA:[`"']?\s*$""", "", cleaned)
     # Collapse the runs of spaces/tabs a mid-sentence removal can leave behind,
     # without touching newlines, then trim the ends.
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()

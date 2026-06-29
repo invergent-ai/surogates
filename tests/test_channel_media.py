@@ -45,6 +45,12 @@ class TestParseMediaMarkers:
         assert paths == ["/workspace/only.pdf"]
         assert cleaned == ""
 
+    def test_dangling_pathless_marker_stripped(self):
+        # Agent emitted the token but omitted the path → no raw MEDIA: leaks.
+        assert parse_media_markers("Sharing it: MEDIA:") == ([], "Sharing it:")
+        assert parse_media_markers("MEDIA:") == ([], "")
+        assert parse_media_markers("see `MEDIA:`") == ([], "see")
+
 
 class TestNormalizeWorkspacePath:
     def test_workspace_prefixed_variants_all_normalize(self):

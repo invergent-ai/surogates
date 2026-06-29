@@ -114,6 +114,16 @@ class TestSendFiles:
         )
         assert ids == ["F999"]
 
+    async def test_malformed_response_shape_skipped_no_raise(self):
+        client = _FakeClient(resp={"files": ["not-a-dict"]})
+        platform = _platform_with(client)
+        item = _Item(destination={"channel_id": "C001"})
+        ids = await platform.send_files(
+            item, creds={"bot_token": TOKEN},
+            files=[OutboundFile(filename="a.pdf", mime_type="application/pdf", data=b"a")],
+        )
+        assert ids == []  # malformed shape caught and skipped, not raised
+
 
 class TestDeleteMessage:
     async def test_calls_chat_delete(self):

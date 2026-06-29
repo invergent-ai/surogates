@@ -1027,12 +1027,12 @@ class SlackPlatform:
                 kwargs["thread_ts"] = thread_ts
             try:
                 resp = await client.files_upload_v2(**kwargs)
+                file_id = _uploaded_file_id(resp)
             except Exception as exc:
                 logger.warning(
                     "[SlackPlatform] files_upload_v2 failed for %s: %s", f.filename, exc,
                 )
                 continue
-            file_id = _uploaded_file_id(resp)
             if file_id:
                 uploaded.append(file_id)
         return uploaded
