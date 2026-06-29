@@ -596,6 +596,29 @@ async def _stop_worker_invalidator(state: dict) -> None:
     state["runtime_invalidator_task"] = None
 
 
+def _build_r2_memory_keys(
+    *,
+    session: object,
+    storage_key_prefix: str,
+    user_id: str | None,
+) -> dict[str, str]:
+    """Build the R2 memory-object keys for one worker session."""
+    from surogates.channels.memory_boundary import session_memory_boundary
+    from surogates.memory.r2_store import MEMORY_TARGETS
+    from surogates.runtime.memory_protocol import memory_object_key
+
+    boundary = session_memory_boundary(session)
+    return {
+        target: memory_object_key(
+            storage_key_prefix=storage_key_prefix,
+            user_id=user_id,
+            boundary=boundary,
+            target=target,
+        )
+        for target in MEMORY_TARGETS
+    }
+
+
 async def run_worker(settings: Settings) -> None:
     """Bootstrap all dependencies and run the orchestrator loop.
 
@@ -1012,10 +1035,7 @@ async def run_worker(settings: Settings) -> None:
         # in-memory fallback below covers test contexts only.
         memory_cache = worker_state.get("memory_cache")
         if memory_cache is not None:
-            from surogates.memory.r2_store import (
-                MEMORY_TARGETS, R2MemoryStore,
-            )
-            from surogates.runtime.memory_protocol import memory_object_key
+            from surogates.memory.r2_store import R2MemoryStore
 
             mem_bucket = (
                 settings.storage.memory_bucket or settings.storage.bucket
@@ -1023,14 +1043,11 @@ async def run_worker(settings: Settings) -> None:
             _user_id_str = (
                 str(session.user_id) if session.user_id else None
             )
-            mem_keys = {
-                target: memory_object_key(
-                    storage_key_prefix=ctx.storage_key_prefix,
-                    user_id=_user_id_str,
-                    target=target,
-                )
-                for target in MEMORY_TARGETS
-            }
+            mem_keys = _build_r2_memory_keys(
+                session=session,
+                storage_key_prefix=ctx.storage_key_prefix,
+                user_id=_user_id_str,
+            )
             # on every successful write, publish
             # user.memory_changed:<org_id>:<user_id> on Redis so other
             # workers serving the same user invalidate their L1
