@@ -163,6 +163,21 @@ def _make_deps_factory(
                 )
             return bool(delivered)
 
+        async def _progress(session_id: Any, channel_id: str, thread_ts: Any) -> None:
+            post = getattr(platform, "post_thinking_placeholder", None)
+            if post is None:  # non-Slack platforms: no placeholder in v1
+                return
+            try:
+                ts = await post(creds=creds, channel=channel_id, thread_ts=thread_ts)
+                if ts:
+                    from surogates.channels.channel_progress import set_placeholder
+                    await set_placeholder(
+                        redis, kind, session_id,
+                        channel=channel_id, ts=ts, thread_ts=thread_ts,
+                    )
+            except Exception:
+                logger.warning("[channels] thinking-placeholder post failed", exc_info=True)
+
         async def _backfill(session_id: Any, channel_id: str, rt: Any) -> Any:
             fetch = getattr(platform, "fetch_channel_context", None)
             if fetch is None:  # non-Slack platforms: no backfill in v1
@@ -193,6 +208,7 @@ def _make_deps_factory(
             pairing=pairing,
             pairing_sender=_pairing_sender,
             backfill=_backfill,
+            progress=_progress,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into

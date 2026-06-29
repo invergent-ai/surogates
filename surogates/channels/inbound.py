@@ -159,6 +159,10 @@ _FollowEnabled = Callable[[str, str, str], Awaitable[bool]]
 #: Async callable: (session_id, channel_id, routing) -> seeded event id | None.
 _Backfill = Callable[[Any, str, Any], Awaitable[int | None]]
 
+#: Async callable: (session_id, channel_id, thread_ts) -> None. Posts a
+#: "Thinking…" placeholder for a message that will be answered.
+_Progress = Callable[[Any, str, Any], Awaitable[None]]
+
 
 @dataclass
 class PipelineDeps:
@@ -219,6 +223,7 @@ class PipelineDeps:
     pairing: Any = None
     pairing_sender: Any = None
     backfill: _Backfill | None = None
+    progress: _Progress | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +505,17 @@ class ChannelInboundPipeline:
                 },
             },
         )
+
+        # Post a "Thinking…" placeholder so the user sees progress while the
+        # worker runs. Best effort: progress failures must not block enqueue.
+        if deps.progress is not None and routing.platform == "slack":
+            try:
+                await deps.progress(session_id, msg.identifier, msg.thread_key)
+            except Exception:
+                logger.warning(
+                    "[channels] thinking-placeholder progress failed — ignoring",
+                    exc_info=True,
+                )
 
         # ------------------------------------------------------------------
         # Gate 8: Enqueue for worker pickup.
