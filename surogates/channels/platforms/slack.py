@@ -46,6 +46,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import time
 from typing import Any
 
@@ -64,7 +65,7 @@ from surogates.channels.channel_backfill import (
     filter_messages,
     warm_cache as _warm_cache_fn,
 )
-from surogates.channels.inbound import InboundMessage
+from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 
 
@@ -364,13 +365,21 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
     # ------------------------------------------------------------------
     media_urls: list[str] = []
     file_names: list[str] = []
+    files: list[InboundFileRef] = []
 
     for file_info in event.get("files", []):
         url = file_info.get("url_private_download") or file_info.get("url_private", "")
         if not url:
             continue
+        name = file_info.get("name", "file")
+        mime = file_info.get("mimetype") or mimetypes.guess_type(name)[0] or "application/octet-stream"
+        size = file_info.get("size")
         media_urls.append(url)
-        file_names.append(file_info.get("name", "file"))
+        file_names.append(name)
+        files.append(InboundFileRef(
+            url=url, filename=name, mime_type=mime,
+            size=int(size) if isinstance(size, int) else None,
+        ))
 
     if file_names:
         names_str = ", ".join(file_names)
@@ -398,6 +407,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         },
         is_bot=is_bot,
         visibility=visibility,
+        files=files,
     )
 
 

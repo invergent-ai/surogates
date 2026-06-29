@@ -27,7 +27,7 @@ the cache TTL).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable
 from uuid import UUID
@@ -41,6 +41,7 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "InboundFileRef",
     "InboundMessage",
     "InboundOutcome",
     "PipelineDeps",
@@ -51,6 +52,20 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Normalised message
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InboundFileRef:
+    """A file attached to an inbound message, before download.
+
+    ``url`` is the platform's download URL (auth-gated for Slack);
+    ``mime_type`` is the platform's type or a ``mimetypes.guess_type``
+    fallback; ``size`` is the platform-reported byte size when known.
+    """
+    url: str
+    filename: str
+    mime_type: str
+    size: int | None
 
 
 @dataclass(frozen=True)
@@ -113,6 +128,7 @@ class InboundMessage:
     # Conversation privacy: "public" | "private" | "dm".  Default is the
     # fail-closed value so any constructor that omits it is treated as private.
     visibility: str = "private"
+    files: list[InboundFileRef] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
