@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from surogates.channels.credentials import resolve_channel_credentials
+from surogates.channels.errors import ChannelApiError
 from surogates.session.attachment_ingest import (
     ingest_attachment_bytes,
     safe_display_name,
@@ -41,6 +42,10 @@ class ChannelFileForbidden(ChannelFileError):
 
 class ChannelFileTooLarge(ChannelFileError):
     """The file exceeds the per-file size cap."""
+
+
+class ChannelFileRateLimited(ChannelFileError):
+    """The channel platform is rate-limiting; the agent should retry shortly."""
 
 
 class ChannelFileUnavailable(ChannelFileError):
@@ -95,7 +100,17 @@ async def fetch_channel_file(
     if not (creds or {}).get("bot_token"):
         raise ChannelFileUnavailable("No Slack bot token for this channel.")
 
-    meta = await platform.fetch_file_meta(creds=creds, file_id=file_id)
+    try:
+        meta = await platform.fetch_file_meta(creds=creds, file_id=file_id)
+    except ChannelApiError as exc:
+        if exc.reason == "forbidden":
+            raise ChannelFileForbidden(f"Access to file {file_id} was denied.")
+        if exc.reason == "rate_limited":
+            raise ChannelFileRateLimited(
+                f"Slack is rate-limiting access to file {file_id}; "
+                "try again shortly."
+            )
+        raise ChannelFileUnavailable(f"Could not read file {file_id}.")
     if not meta:
         raise ChannelFileNotFound(f"File {file_id} was not found.")
 

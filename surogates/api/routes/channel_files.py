@@ -19,6 +19,7 @@ import surogates.channels.platforms  # noqa: F401  # ensure SlackPlatform self-r
 from surogates.channels.file_fetch import (
     ChannelFileForbidden,
     ChannelFileNotFound,
+    ChannelFileRateLimited,
     ChannelFileTooLarge,
     ChannelFileUnavailable,
     fetch_channel_file,
@@ -110,6 +111,10 @@ async def fetch_channel_file_route(
     except ChannelFileTooLarge as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc),
+        )
+    except ChannelFileRateLimited as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc),
         )
     except ChannelFileUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
