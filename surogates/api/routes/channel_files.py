@@ -23,6 +23,7 @@ from surogates.channels.file_fetch import (
     ChannelFileUnavailable,
     fetch_channel_file,
 )
+from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.channels.registry import registry
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -79,7 +80,7 @@ async def fetch_channel_file_route(
     session, bucket = await _resolve_session_bucket(store, session_id, tenant)
 
     # Ambient sessions carry a slack channel_id but channel="ambient".
-    channel = "slack" if session.channel == "ambient" else session.channel
+    channel = effective_channel_platform(session)
     if channel != "slack":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

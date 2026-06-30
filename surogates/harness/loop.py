@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
+from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -3190,9 +3191,8 @@ class AgentHarness(
         channel has no mapped toolkit or the agent has no Composio tools.
         """
         # Ambient sessions act in a Slack channel (they carry slack_channel_id)
-        # but their session.channel is "ambient"; resolve to the slack platform
-        # like the worker does (worker.py: _platform = "slack" if _is_ambient).
-        channel = "slack" if session.channel == "ambient" else (session.channel or "")
+        # but their session.channel is "ambient"; resolve to the slack platform.
+        channel = effective_channel_platform(session)
         toolkit = CHANNEL_NATIVE_COMPOSIO_TOOLKIT.get(channel)
         if not toolkit or not self._composio_tool_names:
             return tool_filter

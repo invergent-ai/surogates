@@ -1116,6 +1116,9 @@ async def run_worker(settings: Settings) -> None:
         if memory_cache is not None:
             channel_provider = None
             try:
+                from surogates.channels.platform_resolve import (
+                    effective_channel_platform,
+                )
                 from surogates.memory.channel_factory import build_channel_provider
                 from surogates.runtime.mate_settings_cache import mate_cache_key
 
@@ -1125,7 +1128,7 @@ async def run_worker(settings: Settings) -> None:
                 _is_ambient = session.channel == "ambient"
                 # Ambient sessions carry a slack channel_id but channel="ambient";
                 # their settings live under the "slack" platform key.
-                _platform = "slack" if _is_ambient else session.channel
+                _platform = effective_channel_platform(session)
                 follow_enabled = None
                 if mate_cache is not None and _channel_id:
                     _settings = await mate_cache.get(
