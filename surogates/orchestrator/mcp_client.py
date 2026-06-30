@@ -20,6 +20,18 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
 
+# Composio's tool-router is exposed as a single MCP server; its tools carry
+# one of these server-name prefixes (the second is the non-debranded fallback).
+COMPOSIO_TOOL_ROUTER_PREFIXES: tuple[str, ...] = (
+    "mcp__tool_router__",
+    "mcp__composio_tool_router__",
+)
+
+
+def is_composio_router_name(name: str) -> bool:
+    """True if *name* is an MCP tool advertised by the Composio tool-router."""
+    return name.startswith(COMPOSIO_TOOL_ROUTER_PREFIXES)
+
 
 class McpProxyClient:
     """HTTP client that proxies MCP tool calls through the MCP proxy service.
@@ -40,6 +52,9 @@ class McpProxyClient:
         # ToolRegistry across every agent it serves.  Maps agent_id ->
         # the set of mcp__ tool names that agent may use.
         self._discovered_by_agent: dict[str, set[str]] = {}
+        # Subset of the above that came from the Composio tool-router, so the
+        # harness can hide a channel agent's own-platform Composio toolkit.
+        self._composio_by_agent: dict[str, set[str]] = {}
 
     async def discover_and_register(
         self,
@@ -110,6 +125,9 @@ class McpProxyClient:
             )
 
         self._discovered_by_agent[agent_id] = current
+        self._composio_by_agent[agent_id] = {
+            n for n in current if is_composio_router_name(n)
+        }
         registered = sorted(current)
         if registered:
             logger.info(
@@ -117,6 +135,10 @@ class McpProxyClient:
                 agent_id, len(registered), ", ".join(registered),
             )
         return registered
+
+    def composio_tool_names_for_agent(self, agent_id: str) -> frozenset[str]:
+        """Return *agent_id*'s discovered Composio tool-router tool names."""
+        return frozenset(self._composio_by_agent.get(agent_id, set()))
 
     def _make_proxy_handler(self, tool_name: str):
         """Create a handler function that forwards tool calls to the proxy.

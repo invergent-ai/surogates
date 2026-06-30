@@ -369,6 +369,7 @@ class AgentHarness(
         bundle: Any | None = None,
         turn_gate: Any | None = None,
         mcp_tool_names: frozenset[str] | None = None,
+        composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
     ) -> None:
         self._store = session_store
@@ -377,6 +378,10 @@ class AgentHarness(
         # proxy.  The registry is process-wide; this scopes the
         # model-visible schema set to the agent's own MCP tools.
         self._mcp_tool_names: frozenset[str] = frozenset(mcp_tool_names or ())
+        # Subset of ``_mcp_tool_names`` from the Composio tool-router; used to
+        # hide a channel agent's own-platform Composio toolkit (see
+        # ``_drop_native_channel_composio_tools``).
+        self._composio_tool_names: frozenset[str] = frozenset(composio_tool_names or ())
         # Per-agent slash-command gating.  Defaults to permissive so a
         # session resolved before this was wired keeps every command.
         self._slash_commands: SlashCommandConfig = (

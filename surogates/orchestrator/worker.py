@@ -950,6 +950,12 @@ async def run_worker(settings: Settings) -> None:
                     session.id, exc_info=True,
                 )
 
+        composio_mcp_tools: frozenset[str] = frozenset()
+        if mcp_proxy_client is not None:
+            composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
+                ctx.agent_id
+            )
+
         # Per-session LLM bundle resolved from the AgentRuntimeContext
         # (already pulled above for ``asset_root``) + the credential
         # vault.  Every agent has ``llm_main`` populated at create
@@ -1389,6 +1395,7 @@ async def run_worker(settings: Settings) -> None:
             # it to filter the shared registry's prompt schemas down to
             # this agent's own MCP tools.
             mcp_tool_names=frozenset(discovered_mcp_tools),
+            composio_tool_names=composio_mcp_tools,
             # Per-agent slash-command gating resolved from the runtime
             # config; the dispatch gate refuses disabled commands.
             slash_commands=ctx.slash_commands,
