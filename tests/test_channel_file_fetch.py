@@ -171,3 +171,31 @@ async def test_fetch_channel_file_unavailable_without_token(monkeypatch):
         await fetch_channel_file(
             platform=platform, vault=object(), storage=object(),
             session=_session(), bucket="b", file_id="F1")
+
+
+async def test_fetch_channel_file_download_failure_raises_unavailable(monkeypatch):
+    _patch_externals(monkeypatch)
+    meta = {"name": "report.pdf", "url_private_download": "https://slack.com/d",
+            "mimetype": "application/pdf", "size": 10, "channels": ["C1"]}
+    platform = _FakePlatform(meta=meta, data=None)
+    with pytest.raises(ChannelFileUnavailable):
+        await fetch_channel_file(
+            platform=platform, vault=object(), storage=object(),
+            session=_session(channel_id="C1"), bucket="b", file_id="F1")
+
+
+async def test_fetch_channel_file_sanitizes_file_id_in_path(monkeypatch):
+    _patch_externals(monkeypatch)
+    meta = {"name": "report.pdf", "url_private_download": "https://slack.com/d",
+            "mimetype": "application/pdf", "size": 10, "channels": ["C1"]}
+    platform = _FakePlatform(meta=meta)
+    out = await fetch_channel_file(
+        platform=platform, vault=object(), storage=object(),
+        session=_session(channel_id="C1"), bucket="b", file_id="F1/../etc\nx")
+    assert "\n" not in out["path"]
+    assert out["path"].startswith("uploads/slack/fetch/")
+    # The fixed prefix is the only slash-delimited segment; the file_id portion
+    # has had all "/" and "\n" replaced with "_" so there are no extra path
+    # separators that could enable directory traversal.
+    suffix = out["path"][len("uploads/slack/fetch/"):]
+    assert "/" not in suffix

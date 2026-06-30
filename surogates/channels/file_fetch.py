@@ -11,6 +11,7 @@ security-critical path is unit-testable without Slack or S3.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -94,7 +95,7 @@ async def fetch_channel_file(
         )
 
     size = meta.get("size")
-    if isinstance(size, int) and size > max_bytes:
+    if isinstance(size, (int, float)) and size > max_bytes:
         raise ChannelFileTooLarge(
             f"File {file_id} exceeds the {max_bytes}-byte limit."
         )
@@ -108,12 +109,13 @@ async def fetch_channel_file(
 
     raw_name = meta.get("name") or file_id
     safe_name = safe_display_name(PurePosixPath(raw_name).name or file_id)
+    safe_file_id = re.sub(r"[^\w.-]", "_", file_id) or "file"
     out = await ingest_attachment_bytes(
         storage,
         session=session,
         root_id=workspace_root_id(session),
         bucket=bucket,
-        path=f"uploads/slack/fetch/{file_id}-{safe_name}",
+        path=f"uploads/slack/fetch/{safe_file_id}-{safe_name}",
         filename=safe_name,
         mime_type=meta.get("mimetype") or "application/octet-stream",
         data=data,
