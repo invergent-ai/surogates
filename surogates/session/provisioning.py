@@ -21,6 +21,33 @@ _WORKSPACE_SHARING_FIELDS = (
 )
 
 
+async def stamp_workspace_config(
+    config: dict,
+    *,
+    storage: Any,
+    settings: Any,
+    session_id: UUID,
+    model: str,
+) -> dict:
+    """Stamp the persistent-workspace fields into *config* and ensure the bucket exists.
+
+    Sets ``storage_bucket``, ``storage_key_prefix``, ``workspace_path`` and
+    ``supports_vision`` so the worker mounts a persistent S3 ``/workspace`` for
+    the session. Shared by API/web provisioning (:func:`create_agent_session`)
+    and channel-session provisioning so both yield an identical workspace.
+    """
+    bucket = agent_session_bucket(settings.storage.bucket)
+    await storage.create_bucket(bucket)
+    config["storage_bucket"] = bucket
+    config["storage_key_prefix"] = getattr(settings.storage, "key_prefix", "") or ""
+    config["workspace_path"] = storage.resolve_workspace_path(bucket, session_id)
+    model_info = get_model_info(model)
+    config["supports_vision"] = (
+        model_info.supports_vision if model_info is not None else False
+    )
+    return config
+
+
 async def create_agent_session(
     *,
     store: SessionStore,
@@ -38,19 +65,10 @@ async def create_agent_session(
     session_id: UUID | None = None,
 ) -> Session:
     sid = session_id or uuid4()
-    bucket = agent_session_bucket(settings.storage.bucket)
-    await storage.create_bucket(bucket)
 
     merged_config = dict(config or {})
-    merged_config["storage_bucket"] = bucket
-    merged_config["storage_key_prefix"] = (
-        getattr(settings.storage, "key_prefix", "") or ""
-    )
-    merged_config["workspace_path"] = storage.resolve_workspace_path(bucket, sid)
-
-    model_info = get_model_info(model)
-    merged_config["supports_vision"] = (
-        model_info.supports_vision if model_info is not None else False
+    await stamp_workspace_config(
+        merged_config, storage=storage, settings=settings, session_id=sid, model=model,
     )
     if service_account_id is not None:
         merged_config["service_account_id"] = str(service_account_id)

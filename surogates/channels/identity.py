@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import ChannelIdentity as ChannelIdentityRow
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import EventType
+from surogates.session.provisioning import stamp_workspace_config
 from surogates.session.store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -306,6 +307,8 @@ async def get_or_create_channel_session(
     config: dict,
     session_factory: async_sessionmaker[AsyncSession],
     model: str = "",
+    storage: object = None,
+    settings: object = None,
 ) -> UUID:
     """Find an existing active session for the channel routing key, or create one.
 
@@ -361,6 +364,29 @@ async def get_or_create_channel_session(
         "channel_session_key": session_key,
         **config,
     }
+    # Provision a persistent workspace (storage_bucket/storage_key_prefix/
+    # workspace_path) the same way API/web sessions do, so the worker mounts a
+    # persistent /workspace and inbound attachments can be written there. A
+    # storage failure here must NOT abort session creation — that would 500 the
+    # inbound webhook and trigger platform retries — so degrade to a
+    # workspace-less session and log instead.
+    if storage is not None and settings is not None:
+        try:
+            await stamp_workspace_config(
+                merged_config,
+                storage=storage,
+                settings=settings,
+                session_id=session_id,
+                model=model,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to provision workspace for %s session %s; "
+                "creating it without one",
+                channel,
+                session_id,
+                exc_info=True,
+            )
     await session_store.create_session(
         session_id=session_id,
         user_id=user_id,
