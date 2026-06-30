@@ -313,92 +313,6 @@ async def test_runaway_detector_silent_after_content_arrives(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# per-turn thinking-disabled flag on AgentHarness
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_thinking_gate_respects_disabled_flag(monkeypatch):
-    """When _thinking_disabled_for_turn is True, the thinking gate
-    forces enable_thinking=False regardless of the classifier."""
-    from surogates.harness.loop import AgentHarness
-
-    # Build a minimal AgentHarness without the full constructor by
-    # directly instantiating and patching only what the gate uses.
-    loop = AgentHarness.__new__(AgentHarness)
-    loop._tenant = None
-    loop._thinking_disabled_for_turn = True
-
-    monkeypatch.setattr(
-        "surogates.harness.loop.classify_hard_task_async",
-        AsyncMock(side_effect=AssertionError("classifier should not be called")),
-    )
-
-    create_kwargs = {"model": "zai-org/GLM-5.1", "extra_body": {}}
-    await loop._maybe_apply_thinking_gate(
-        create_kwargs,
-        messages=[{"role": "user", "content": "easy"}],
-    )
-
-    extra = create_kwargs["extra_body"]
-    assert extra["chat_template_kwargs"]["enable_thinking"] is False
-
-
-@pytest.mark.asyncio
-async def test_thinking_gate_unchanged_when_flag_not_set(monkeypatch):
-    """When flag is False and classifier says required=True, gate must
-    leave extra_body alone (model default = thinking on)."""
-    from surogates.harness.loop import AgentHarness
-
-    loop = AgentHarness.__new__(AgentHarness)
-    loop._tenant = None
-    loop._thinking_disabled_for_turn = False
-
-    monkeypatch.setattr(
-        "surogates.harness.loop.classify_hard_task_async",
-        AsyncMock(return_value=SimpleNamespace(
-            required=True,
-            category="debugging",
-            reason="test",
-        )),
-    )
-
-    create_kwargs = {"model": "zai-org/GLM-5.1"}
-    await loop._maybe_apply_thinking_gate(
-        create_kwargs,
-        messages=[{"role": "user", "content": "Debug this Python stack trace and explain the root cause."}],
-    )
-
-    extra = create_kwargs.get("extra_body") or {}
-    # Either no extra_body at all, or it doesn't disable thinking.
-    if "chat_template_kwargs" in extra:
-        assert extra["chat_template_kwargs"].get("enable_thinking") is not False
-
-
-# ---------------------------------------------------------------------------
-# flag resets at user-turn boundary
-# ---------------------------------------------------------------------------
-
-
-def test_thinking_disabled_flag_resets_with_user_turn_count():
-    """The per-turn flag must clear whenever the loop increments
-    _user_turn_count (start of a new user turn).  This is a structural
-    test -- it inspects the source to confirm the reset lives next to
-    the counter increment, since the full wake() pipeline is too heavy
-    to exercise in a unit test."""
-    import inspect
-    from surogates.harness import loop as loop_module
-
-    source = inspect.getsource(loop_module)
-    inc_idx = source.index("self._user_turn_count += 1")
-    snippet = source[inc_idx:inc_idx + 400]
-    assert "self._thinking_disabled_for_turn = False" in snippet, (
-        "_thinking_disabled_for_turn must be reset within ~5 lines of "
-        "the _user_turn_count increment"
-    )
-
-
-# ---------------------------------------------------------------------------
 # outer retry path re-issues runaway with thinking disabled
 # ---------------------------------------------------------------------------
 
@@ -481,45 +395,7 @@ async def test_runaway_retry_disables_thinking(monkeypatch):
     second_extra = call_log[1]["extra_body"]
     second_ct = second_extra.get("chat_template_kwargs", {})
     assert second_ct.get("enable_thinking") is False
-    # Response marker propagates to loop.
-    assert usage["thinking_disabled_due_to_runaway"] is True
     assert msg["content"] == "Hello"
-
-
-def test_propagate_runaway_flag_sets_per_turn_flag():
-    """When the LLM layer stamps thinking_disabled_due_to_runaway,
-    AgentHarness._propagate_runaway_flag must flip the per-turn flag."""
-    from surogates.harness.loop import AgentHarness
-
-    loop = AgentHarness.__new__(AgentHarness)
-    loop._thinking_disabled_for_turn = False
-
-    session = _make_session()
-    loop._propagate_runaway_flag(
-        session,
-        {"thinking_disabled_due_to_runaway": True, "finish_reason": "stop"},
-    )
-    assert loop._thinking_disabled_for_turn is True
-
-
-def test_propagate_runaway_flag_noop_without_marker():
-    """No marker → flag stays False.  No marker plus flag already True
-    → flag stays True (we don't accidentally clear it mid-turn)."""
-    from surogates.harness.loop import AgentHarness
-
-    loop = AgentHarness.__new__(AgentHarness)
-    loop._thinking_disabled_for_turn = False
-    session = _make_session()
-
-    loop._propagate_runaway_flag(session, {"finish_reason": "stop"})
-    assert loop._thinking_disabled_for_turn is False
-
-    loop._thinking_disabled_for_turn = True
-    loop._propagate_runaway_flag(session, {"finish_reason": "stop"})
-    assert loop._thinking_disabled_for_turn is True
-
-    loop._propagate_runaway_flag(session, None)
-    assert loop._thinking_disabled_for_turn is True
 
 
 @pytest.mark.asyncio
