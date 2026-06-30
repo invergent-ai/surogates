@@ -15,12 +15,16 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
-from surogates.channels.channel_backfill import BackfillLimits, filter_messages
+from surogates.channels.channel_backfill import BackfillLimits, _est_tokens, filter_messages
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.runtime.leader_lock import RedisLeaderLock
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
+
+
+class _LockLost(Exception):
+    """Raised inside a conversation replay when the per-app leader lock is lost."""
 
 
 _WATERMARK_SQL = text("""
@@ -99,6 +103,16 @@ class _Routing:
         self.config = config
 
 
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = response.get("headers") if isinstance(response, dict) else getattr(response, "headers", {})
+    raw = (headers or {}).get("Retry-After") or (headers or {}).get("retry-after")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 class ChannelCatchup:
     """Replays Slack messages missed during downtime, on channels-process boot."""
 
@@ -154,7 +168,7 @@ class ChannelCatchup:
         agent_id: str = app.get("agent_id", "")
         if not (app_id and org_id and agent_id):
             return
-        lock = self._make_lock(app_id)
+        lock = self._make_lock(org_id, agent_id, app_id)
         if not await lock.acquire():
             logger.info("[catchup] app %s locked by another instance — skipping", app_id)
             return
@@ -172,17 +186,25 @@ class ChannelCatchup:
                 org_id=org_id, agent_id=agent_id, platform="slack",
                 identifier=app_id, config=app.get("config") or {},
             )
+            hb = (routing.config or {}).get("history_backfill")
+            limits = BackfillLimits.from_config(hb) if hb else self._limits
             for conv_id, channel_type in await self._list_conversations(platform, creds):
+                if not await lock.heartbeat():
+                    logger.warning("[catchup] app %s lost leader lock — stopping", app_id)
+                    return
                 try:
                     await self._catchup_conversation(
                         platform=platform, routing=routing, creds=creds,
                         conv_id=conv_id, channel_type=channel_type,
+                        lock=lock, limits=limits,
                     )
-                except Exception:
-                    logger.warning("[catchup] conversation %s failed", conv_id, exc_info=True)
-                if not await lock.heartbeat():
+                except _LockLost:
                     logger.warning("[catchup] app %s lost leader lock — stopping", app_id)
                     return
+                except Exception:
+                    logger.warning("[catchup] conversation %s failed", conv_id, exc_info=True)
+                if self._pace_s:
+                    await _sleep(self._pace_s)
         finally:
             await lock.release()
 
@@ -190,6 +212,7 @@ class ChannelCatchup:
 
     async def _catchup_conversation(
         self, *, platform: Any, routing: _Routing, creds: dict, conv_id: str, channel_type: str,
+        lock: Any, limits: BackfillLimits,
     ) -> None:
         wm = await self._watermark(
             org_id=routing.org_id, agent_id=routing.agent_id,
@@ -197,18 +220,20 @@ class ChannelCatchup:
         )
         if wm is None:
             return  # first-run guard: establish on the next live message, replay nothing
-        raw = await self._fetch_history(platform, creds, conv_id, oldest=wm)
+        raw = await self._fetch_history(platform, creds, conv_id, oldest=wm, limits=limits)
         # Pre-filter obvious bot/subtype/empty events. Own-bot bare messages are
         # still filtered by platform.parse(creds=...) using the cached bot user id,
         # matching the live dispatcher path.
         kept = [m for m in filter_messages(raw, bot_user_id="")
                 if str(m.get("ts", "")) > wm]
         kept.sort(key=lambda m: str(m.get("ts", "")))      # ascending
-        kept = self._bound_messages(kept)
+        kept = self._bound_messages(kept, limits)
         for m in kept:
             await self._replay(platform, routing, creds, conv_id, channel_type, m)
             if self._pace_s:
                 await _sleep(self._pace_s)
+            if not await lock.heartbeat():
+                raise _LockLost()
 
     async def _replay(
         self, platform: Any, routing: _Routing, creds: dict, conv_id: str, channel_type: str, m: dict,
@@ -239,12 +264,12 @@ class ChannelCatchup:
     def _resolve_platform(self, app: dict) -> Any:
         return self._registry.get("slack") if self._registry is not None else None
 
-    def _make_lock(self, app_id: str) -> Any:
+    def _make_lock(self, org_id: str, agent_id: str, app_id: str) -> Any:
         if self._lock is not None:
             return self._lock  # injected (tests)
         return RedisLeaderLock(
             self._redis,
-            key=f"channel-catchup:leader:{app_id}",
+            key=f"channel-catchup:leader:{org_id}:{agent_id}:{app_id}",
             ttl_seconds=120,
             holder_id=uuid.uuid4().hex,
         )
@@ -252,14 +277,27 @@ class ChannelCatchup:
     async def _watermark(self, **kw: Any) -> str | None:
         return await latest_catchup_watermark(self._session_factory, **kw)
 
+    async def _call_with_retry(self, make_call: Any, *, attempts: int = 3) -> Any:
+        """Call an async Slack op, honoring Retry-After on rate-limit errors."""
+        for i in range(max(1, attempts)):
+            try:
+                return await make_call()
+            except Exception as exc:
+                delay = _retry_after_seconds(exc)
+                if delay is None or i == attempts - 1:
+                    raise
+                await _sleep(delay)
+
     async def _list_conversations(self, platform: Any, creds: dict) -> list[tuple[str, str]]:
         client = platform._get_client((creds or {}).get("bot_token") or "")
         out: list[tuple[str, str]] = []
         cursor = ""
         while True:
-            resp = await client.conversations_list(
-                types=self._CONV_TYPES, exclude_archived=True, limit=200,
-                **({"cursor": cursor} if cursor else {}),
+            resp = await self._call_with_retry(
+                lambda: client.conversations_list(
+                    types=self._CONV_TYPES, exclude_archived=True, limit=200,
+                    **({"cursor": cursor} if cursor else {}),
+                )
             )
             for ch in resp.get("channels") or []:
                 cid = ch.get("id")
@@ -282,30 +320,36 @@ class ChannelCatchup:
                 break
         return out
 
-    async def _fetch_history(self, platform: Any, creds: dict, conv_id: str, *, oldest: str) -> list[dict]:
+    async def _fetch_history(
+        self, platform: Any, creds: dict, conv_id: str, *, oldest: str, limits: BackfillLimits,
+    ) -> list[dict]:
         client = platform._get_client((creds or {}).get("bot_token") or "")
-        floor = self._age_floor(oldest)
+        floor = self._age_floor(oldest, limits)
         msgs: list[dict] = []
         cursor = ""
-        for _ in range(max(1, self._limits.max_pages)):
-            resp = await client.conversations_history(
-                channel=conv_id, oldest=floor, limit=200,
-                **({"cursor": cursor} if cursor else {}),
+        for _ in range(max(1, limits.max_pages)):
+            resp = await self._call_with_retry(
+                lambda: client.conversations_history(
+                    channel=conv_id, oldest=floor, limit=200,
+                    **({"cursor": cursor} if cursor else {}),
+                )
             )
             msgs.extend(resp.get("messages") or [])
             cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
-            if not cursor or len(msgs) >= self._limits.max_messages:
+            if not cursor or len(msgs) >= limits.max_messages:
                 break
         return msgs
 
-    def _age_floor(self, watermark: str) -> str:
+    def _age_floor(self, watermark: str, limits: BackfillLimits) -> str:
         """Clamp the fetch start to the BackfillLimits age window."""
-        cutoff = _now() - self._limits.max_age_days * 86400.0
+        cutoff = _now() - limits.max_age_days * 86400.0
         cutoff_ts = f"{cutoff:.6f}"
         return watermark if watermark > cutoff_ts else cutoff_ts
 
-    def _bound_messages(self, messages: list[dict]) -> list[dict]:
-        """Apply the catch-up count and token caps to oldest-first dicts."""
+    def _bound_messages(self, messages: list[dict], limits: BackfillLimits) -> list[dict]:
+        # Mirrors channel_backfill.bound_messages' count/token caps but iterates
+        # string-ts dicts (not RawMessage floats) to keep ts de-dupe float-free;
+        # the age cap is applied earlier at fetch via _age_floor.
         picked: list[dict] = []
         tokens = 0
         for m in messages:
@@ -314,10 +358,10 @@ class ChannelCatchup:
                 for f in (m.get("files") or [])
             )
             body = " ".join(part for part in ((m.get("text") or ""), file_bits) if part)
-            cost = max(1, len(body) // 4) + 8
-            if picked and tokens + cost > self._limits.max_tokens:
+            cost = _est_tokens(body) + 8
+            if picked and tokens + cost > limits.max_tokens:
                 break
-            if len(picked) >= self._limits.max_messages:
+            if len(picked) >= limits.max_messages:
                 break
             picked.append(m)
             tokens += cost

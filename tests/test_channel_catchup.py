@@ -218,7 +218,7 @@ def _catchup(*, client, pipeline, routings, watermarks, limits=None):
     )
     cu._resolve_platform = lambda app: platform        # inject the fake platform (sync)
     cu._watermark = _wm(watermarks)                    # inject watermarks (async)
-    cu._make_lock = lambda app_id: _AcquiredLock()
+    cu._make_lock = lambda *a, **k: _AcquiredLock()
     return cu
 
 
@@ -415,7 +415,7 @@ class TestChannelCatchupLock:
         cu = _catchup(client=client, pipeline=pipeline, routings=_ROUTINGS,
                       watermarks={"C1": "1712345680.000000"})
         cu._lock = _HeldLock()                # lock held elsewhere
-        cu._make_lock = lambda app_id: cu._lock
+        cu._make_lock = lambda *a, **k: cu._lock
         await cu.run()
         assert pipeline.handled == []         # app skipped, nothing replayed
         assert client.history_calls == []
@@ -442,13 +442,135 @@ class TestChannelCatchupLock:
             routings=_ROUTINGS,
             watermarks={"C1": "1712345680.000000", "C2": "1712345680.000000"},
         )
-        cu._make_lock = lambda app_id: lock
+        cu._make_lock = lambda *a, **k: lock
         await cu.run()
 
-        # Only C1 was processed — the loop stopped before fetching C2.
-        assert len(client.history_calls) == 1
-        assert client.history_calls[0]["channel"] == "C1"
-        # Exactly one message replayed.
-        assert len(pipeline.handled) == 1
-        # The finally block must have fired despite the early return.
+        # The lock is lost before the first conversation (top-of-loop heartbeat),
+        # so nothing is fetched or replayed and the lock is still released.
+        assert client.history_calls == []
+        assert pipeline.handled == []
         assert lock.released is True
+
+    async def test_heartbeat_lost_mid_conversation_stops_and_releases(self):
+        # A lock that succeeds once (first top-of-loop heartbeat for C1) then fails
+        # (the per-message heartbeat inside _catchup_conversation).
+        class _MidConvLock:
+            def __init__(self) -> None:
+                self.released = False
+                self._calls = 0
+
+            async def acquire(self) -> bool:
+                return True
+
+            async def heartbeat(self) -> bool:
+                self._calls += 1
+                return self._calls <= 1  # True on 1st call, False on 2nd
+
+            async def release(self) -> None:
+                self.released = True
+
+        lock = _MidConvLock()
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [
+                {"user": "U1", "text": "first",  "ts": "1712345691.000000"},
+                {"user": "U1", "text": "second", "ts": "1712345692.000000"},
+            ]},
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(
+            client=client,
+            pipeline=pipeline,
+            routings=_ROUTINGS,
+            watermarks={"C1": "1712345680.000000"},
+        )
+        cu._make_lock = lambda *a, **k: lock
+        await cu.run()
+
+        # Exactly one message replayed before per-message heartbeat failed.
+        assert len(pipeline.handled) == 1
+        assert lock.released is True
+
+    async def test_lock_key_scoped_per_routing(self):
+        # Two routings sharing the same channel_identifier but different agent_id.
+        # _make_lock must be called with distinct (org, agent, app) tuples.
+        routings = [
+            {"org_id": "org-1", "agent_id": "agent-1", "channel_identifier": "A1", "config": {}},
+            {"org_id": "org-1", "agent_id": "agent-2", "channel_identifier": "A1", "config": {}},
+        ]
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [{"user": "U1", "text": "hi", "ts": "1712345691.000000"}]},
+        )
+        pipeline = _FakePipeline()
+        seen: list[tuple] = []
+        cu = _catchup(client=client, pipeline=pipeline, routings=routings,
+                      watermarks={"C1": "1712345680.000000"})
+        cu._make_lock = lambda *a, **k: (seen.append(a), _AcquiredLock())[1]
+        await cu.run()
+
+        # Must have been called twice with distinct (org, agent, app) triples.
+        assert len(seen) == 2
+        assert seen[0] != seen[1]
+        # Each call carries the same app_id but different agent_ids.
+        org_0, agent_0, app_0 = seen[0]
+        org_1, agent_1, app_1 = seen[1]
+        assert app_0 == "A1" and app_1 == "A1"
+        assert agent_0 != agent_1
+
+    async def test_per_routing_history_backfill_overrides_limits(self):
+        # Routing declares max_messages=1 via history_backfill config;
+        # the _catchup instance default is 200.  Only one message must replay.
+        routings = [{"org_id": "org-1", "agent_id": "agent-1",
+                     "channel_identifier": "A1",
+                     "config": {"history_backfill": {"max_messages": 1}}}]
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [
+                {"user": "U1", "text": "c", "ts": "1712345687.000000"},
+                {"user": "U1", "text": "b", "ts": "1712345686.000000"},
+                {"user": "U1", "text": "a", "ts": "1712345685.000000"},
+            ]},
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(client=client, pipeline=pipeline, routings=routings,
+                      watermarks={"C1": "1712345680.000000"})
+        await cu.run()
+        assert len(pipeline.handled) == 1
+
+    async def test_fetch_history_retries_on_rate_limit(self):
+        import surogates.channels.channel_catchup as cc
+        from unittest import mock
+
+        class _RateLimited(Exception):
+            def __init__(self) -> None:
+                super().__init__("ratelimited")
+                self.response = {"headers": {"Retry-After": "0"}}
+
+        class _RetryingClient(_FakeSlackClient):
+            def __init__(self, *args, **kwargs) -> None:
+                super().__init__(*args, **kwargs)
+                self.call_count = 0
+
+            async def conversations_history(self, **kwargs: Any) -> dict:
+                self.call_count += 1
+                if self.call_count == 1:
+                    raise _RateLimited()
+                return await super().conversations_history(**kwargs)
+
+        client = _RetryingClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [{"user": "U1", "text": "ok", "ts": "1712345691.000000"}]},
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(client=client, pipeline=pipeline, routings=_ROUTINGS,
+                      watermarks={"C1": "1712345680.000000"})
+
+        async def _noop_sleep(s: float) -> None:
+            pass
+
+        with mock.patch.object(cc, "_sleep", _noop_sleep):
+            await cu.run()
+
+        assert client.call_count == 2
+        assert len(pipeline.handled) == 1
