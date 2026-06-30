@@ -243,6 +243,58 @@ class TestDiskBackedSkill:
 
 
 @pytest.mark.asyncio
+class TestEmptyNameApiMediated:
+    """An empty/missing name must be rejected on BOTH the local and the
+    API-mediated paths. Forwarding an empty name to the API server builds
+    ``/v1/skills/`` which 307-redirects, surfacing an opaque error to the agent.
+    """
+
+    async def test_empty_name_not_forwarded_to_api(self) -> None:
+        class _ExplodingApiClient:
+            async def view_skill(self, name: str, file_path: Any = None) -> str:
+                raise AssertionError(
+                    "view_skill must not be called with an empty name"
+                )
+
+        payload = json.loads(
+            await _skill_view_handler(
+                {"name": ""},
+                api_client=_ExplodingApiClient(),
+            )
+        )
+        assert payload["success"] is False
+        assert "name is required" in payload["error"].lower()
+
+    async def test_missing_name_not_forwarded_to_api(self) -> None:
+        class _ExplodingApiClient:
+            async def view_skill(self, name: str, file_path: Any = None) -> str:
+                raise AssertionError("view_skill must not be called")
+
+        payload = json.loads(
+            await _skill_view_handler({}, api_client=_ExplodingApiClient())
+        )
+        assert payload["success"] is False
+        assert "name is required" in payload["error"].lower()
+
+    async def test_valid_name_still_delegates_to_api(self) -> None:
+        seen: dict[str, Any] = {}
+
+        class _RecordingApiClient:
+            async def view_skill(self, name: str, file_path: Any = None) -> str:
+                seen["name"] = name
+                return json.dumps({"success": True, "name": name})
+
+        payload = json.loads(
+            await _skill_view_handler(
+                {"name": "wiki"},
+                api_client=_RecordingApiClient(),
+            )
+        )
+        assert seen["name"] == "wiki"
+        assert payload["success"] is True
+
+
+@pytest.mark.asyncio
 class TestUnknownSkill:
     async def test_unknown_name_returns_helpful_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
