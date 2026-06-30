@@ -1,16 +1,21 @@
 import pytest
+from slack_sdk.errors import SlackApiError
 
+from surogates.channels.errors import ChannelApiError
 from surogates.channels.platforms.slack import SlackPlatform
 
 
 class _FilesClient:
-    def __init__(self, file_obj, *, raises=False):
+    def __init__(self, file_obj=None, *, error_code=None, exc=None):
         self._file = file_obj
-        self._raises = raises
+        self._error_code = error_code
+        self._exc = exc
 
     async def files_info(self, file):
-        if self._raises:
-            raise RuntimeError("file_not_found")
+        if self._exc is not None:
+            raise self._exc
+        if self._error_code is not None:
+            raise SlackApiError("boom", {"error": self._error_code})
         return {"file": self._file}
 
 
@@ -33,9 +38,32 @@ async def test_fetch_file_meta_none_without_token():
     assert await p.fetch_file_meta(creds={}, file_id="F1") is None
 
 
-async def test_fetch_file_meta_none_on_error():
-    p = _platform_with_files(_FilesClient(None, raises=True))
+async def test_fetch_file_meta_none_on_file_not_found():
+    # A genuinely-missing file resolves to None (the caller maps it to 404).
+    p = _platform_with_files(_FilesClient(error_code="file_not_found"))
     assert await p.fetch_file_meta(creds={"bot_token": "xoxb"}, file_id="F1") is None
+
+
+async def test_fetch_file_meta_raises_forbidden_on_access_denied():
+    p = _platform_with_files(_FilesClient(error_code="not_in_channel"))
+    with pytest.raises(ChannelApiError) as ei:
+        await p.fetch_file_meta(creds={"bot_token": "xoxb"}, file_id="F1")
+    assert ei.value.reason == "forbidden"
+
+
+async def test_fetch_file_meta_raises_rate_limited():
+    p = _platform_with_files(_FilesClient(error_code="ratelimited"))
+    with pytest.raises(ChannelApiError) as ei:
+        await p.fetch_file_meta(creds={"bot_token": "xoxb"}, file_id="F1")
+    assert ei.value.reason == "rate_limited"
+
+
+async def test_fetch_file_meta_raises_unavailable_on_unknown_error():
+    # A non-Slack/transport failure surfaces as "unavailable", not "not found".
+    p = _platform_with_files(_FilesClient(exc=RuntimeError("boom")))
+    with pytest.raises(ChannelApiError) as ei:
+        await p.fetch_file_meta(creds={"bot_token": "xoxb"}, file_id="F1")
+    assert ei.value.reason == "unavailable"
 
 
 from types import SimpleNamespace
@@ -45,6 +73,7 @@ from surogates.channels import file_fetch
 from surogates.channels.file_fetch import (
     ChannelFileForbidden,
     ChannelFileNotFound,
+    ChannelFileRateLimited,
     ChannelFileTooLarge,
     ChannelFileUnavailable,
     fetch_channel_file,
@@ -54,15 +83,18 @@ from surogates.channels.file_fetch import (
 class _FakePlatform:
     """Injectable stand-in: descriptor.vault_refs + the two Slack calls."""
 
-    def __init__(self, *, meta, data=b"bytes"):
+    def __init__(self, *, meta=None, data=b"bytes", meta_exc=None):
         self._meta = meta
         self._data = data
+        self._meta_exc = meta_exc
         self.descriptor = SimpleNamespace(
             vault_refs=lambda identifier: {"bot_token": "bot_token"},
         )
         self.download_calls = 0
 
     async def fetch_file_meta(self, *, creds, file_id):
+        if self._meta_exc is not None:
+            raise self._meta_exc
         return self._meta
 
     async def download_file(self, *, creds, url, max_bytes):
@@ -229,4 +261,36 @@ async def test_fetch_channel_file_refuses_foreign_shares(monkeypatch):
         await fetch_channel_file(
             platform=platform, vault=object(), storage=object(),
             session=_session(channel_id="C1"), bucket="b", file_id="F1")
+    assert platform.download_calls == 0
+
+
+async def test_fetch_channel_file_maps_forbidden_api_error(monkeypatch):
+    # A "forbidden" ChannelApiError from fetch_file_meta must surface as
+    # ChannelFileForbidden (403), not ChannelFileNotFound (404).
+    _patch_externals(monkeypatch)
+    platform = _FakePlatform(meta_exc=ChannelApiError("forbidden", "not_in_channel"))
+    with pytest.raises(ChannelFileForbidden):
+        await fetch_channel_file(
+            platform=platform, vault=object(), storage=object(),
+            session=_session(), bucket="b", file_id="F1")
+    assert platform.download_calls == 0
+
+
+async def test_fetch_channel_file_maps_rate_limited_api_error(monkeypatch):
+    _patch_externals(monkeypatch)
+    platform = _FakePlatform(meta_exc=ChannelApiError("rate_limited", "ratelimited"))
+    with pytest.raises(ChannelFileRateLimited):
+        await fetch_channel_file(
+            platform=platform, vault=object(), storage=object(),
+            session=_session(), bucket="b", file_id="F1")
+    assert platform.download_calls == 0
+
+
+async def test_fetch_channel_file_maps_unavailable_api_error(monkeypatch):
+    _patch_externals(monkeypatch)
+    platform = _FakePlatform(meta_exc=ChannelApiError("unavailable", "boom"))
+    with pytest.raises(ChannelFileUnavailable):
+        await fetch_channel_file(
+            platform=platform, vault=object(), storage=object(),
+            session=_session(), bucket="b", file_id="F1")
     assert platform.download_calls == 0

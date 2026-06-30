@@ -53,9 +53,13 @@ from typing import Any
 import httpx
 
 try:
+    from slack_sdk.errors import SlackApiError
     from slack_sdk.web.async_client import AsyncWebClient
 except ImportError:
     AsyncWebClient = Any  # type: ignore[misc,assignment]
+    SlackApiError = Exception  # type: ignore[misc,assignment]
+
+from surogates.channels.errors import ChannelApiError
 
 from fastapi.responses import Response
 
@@ -90,6 +94,30 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# files.info error codes that mean the file is genuinely gone (-> not found),
+# the bot cannot access it (-> forbidden), or Slack is throttling (-> retry).
+_FILE_MISSING_CODES = frozenset({"file_not_found", "file_deleted"})
+_FORBIDDEN_CODES = frozenset({
+    "not_in_channel",
+    "access_denied",
+    "file_not_visible",
+    "not_allowed_token_type",
+    "no_permission",
+})
+_RATE_LIMIT_CODES = frozenset({"ratelimited", "rate_limited"})
+
+
+def _slack_error_code(exc: SlackApiError) -> str:
+    """Extract the ``error`` string from a SlackApiError's response (or "")."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return ""
+    try:
+        return resp.get("error") or ""
+    except Exception:
+        return ""
+
 
 # Replay-guard window in seconds (±5 minutes matches Slack's recommendation).
 _TIMESTAMP_TOLERANCE = 300
@@ -999,13 +1027,16 @@ class SlackPlatform:
     async def fetch_file_meta(
         self, *, creds: dict, file_id: str,
     ) -> dict | None:
-        """Return Slack ``files.info`` metadata for *file_id*, or None.
+        """Return Slack ``files.info`` metadata for *file_id*.
 
         The returned object carries ``url_private_download``, ``name``,
-        ``mimetype``, ``size`` and the ``channels``/``groups``/``ims``
-        membership lists used to enforce that the file was shared in the
-        agent's own channel.  Returns None on missing token, missing
-        file_id, or any Slack error (never raises).
+        ``mimetype``, ``size`` and the membership info used to enforce that the
+        file was shared in the agent's own channel.  Returns None when the file
+        genuinely does not exist (missing token/file_id, or Slack
+        ``file_not_found``/``file_deleted``).  Raises :class:`ChannelApiError`
+        for access-denied (``"forbidden"``), rate-limit (``"rate_limited"``)
+        and transient/unknown (``"unavailable"``) failures so the caller can
+        surface a precise status instead of a blanket "not found".
         """
         bot_token = (creds or {}).get("bot_token") or ""
         if not bot_token or not file_id:
@@ -1013,11 +1044,25 @@ class SlackPlatform:
         client = self._get_client(bot_token)
         try:
             resp = await client.files_info(file=file_id)
+        except SlackApiError as exc:
+            code = _slack_error_code(exc)
+            if code in _FILE_MISSING_CODES:
+                return None
+            if code in _FORBIDDEN_CODES:
+                raise ChannelApiError("forbidden", code)
+            if code in _RATE_LIMIT_CODES:
+                raise ChannelApiError("rate_limited", code)
+            logger.warning(
+                "[SlackPlatform] files_info error %r for %s", code, file_id,
+            )
+            raise ChannelApiError("unavailable", code or "files_info_failed")
+        except ChannelApiError:
+            raise
         except Exception:
             logger.warning(
                 "[SlackPlatform] files_info failed for %s", file_id, exc_info=True,
             )
-            return None
+            raise ChannelApiError("unavailable", "files_info_failed")
         file_obj = resp.get("file")
         return file_obj if file_obj else None
 

@@ -135,3 +135,20 @@ def test_slack_platform_registered_when_route_imported():
     from surogates.api.routes import channel_files  # noqa: F401
     from surogates.channels.registry import registry
     assert registry.get("slack") is not None
+
+
+async def test_route_maps_rate_limited_to_429(monkeypatch):
+    from fastapi import HTTPException
+    from surogates.channels.file_fetch import ChannelFileRateLimited
+    session = _session(channel="slack")
+    monkeypatch.setattr(channel_files.registry, "get", lambda kind: object())
+
+    async def _raise(**_):
+        raise ChannelFileRateLimited("slow down")
+
+    monkeypatch.setattr(channel_files, "fetch_channel_file", _raise)
+    with pytest.raises(HTTPException) as ei:
+        await channel_files.fetch_channel_file_route(
+            session_id=session.id, file_id="F1",
+            request=_request(session), tenant=_Tenant())
+    assert ei.value.status_code == 429
