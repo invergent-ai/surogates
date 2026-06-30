@@ -90,16 +90,19 @@ class MemoryManager:
 
     # -- Registration -------------------------------------------------------
 
-    def add_provider(self, provider: MemoryProvider) -> None:
+    def add_provider(self, provider: MemoryProvider, *, internal: bool = False) -> None:
         """Register a memory provider.
 
-        Built-in provider (name ``"builtin"``) is always accepted.
-        Only **one** external (non-builtin) provider is allowed -- a second
-        attempt is rejected with a warning.
+        Built-in provider (name ``"builtin"``) is always accepted.  Internal
+        providers (``internal=True``) are always-on platform capacity (e.g.
+        channel memory) and do not count against the external limit.  Only
+        **one** external (non-builtin, non-internal) provider is allowed -- a
+        second attempt is rejected with a warning.
         """
         is_builtin = provider.name == "builtin"
+        counts_as_external = not is_builtin and not internal
 
-        if not is_builtin:
+        if counts_as_external:
             if self._has_external:
                 existing = next(
                     (p.name for p in self._providers if p.name != "builtin"), "unknown"
@@ -373,6 +376,29 @@ class MemoryManager:
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' shutdown failed: %s",
+                    provider.name, e,
+                )
+
+    async def flush_async_providers(self) -> None:
+        """Flush providers that expose an async flush method.
+
+        The base MemoryProvider contract is sync for compatibility, but
+        internal providers may need awaited persistence after a turn.
+        Failures are isolated so one provider never blocks the others.
+        """
+        import inspect
+
+        for provider in self._providers:
+            flush = getattr(provider, "flush", None)
+            if flush is None:
+                continue
+            try:
+                result = flush()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' flush failed: %s",
                     provider.name, e,
                 )
 

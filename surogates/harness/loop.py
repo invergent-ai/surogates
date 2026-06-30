@@ -34,18 +34,7 @@ from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
-from surogates.harness.expert_routing import (
-    build_thinking_extra_body,
-    classify_hard_task_async,
-    merge_extra_body,
-    model_supports_thinking_toggle,
-)
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
-from surogates.harness.self_discover import (
-    SCAFFOLD_CATEGORIES,
-    build_scaffold,
-    format_scaffold_for_injection,
-)
 from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
@@ -118,8 +107,6 @@ from surogates.harness.loop_attachments import (
     _render_inlined_attachments,  # noqa: F401
 )
 from surogates.harness.loop_constants import (
-    DEFAULT_PRESERVE_THINKING,
-    DEFAULT_THINKING_BUDGET,
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
@@ -134,7 +121,6 @@ from surogates.harness.loop_deep_research import (
     DEEP_RESEARCH_NO_DELEGATE_NUDGE,
     _is_deep_research_planner,
     _planner_already_delegated_to_writer,
-    _prior_next_action_complexity,
 )
 from surogates.harness.loop_messages import (
     _initial_system_message,
@@ -536,14 +522,6 @@ class AgentHarness(
         self._iters_since_skill: int = 0
         self._user_turn_count: int = 0
 
-        # When set, the thinking gate forces enable_thinking=False for
-        # every iteration in the current user turn, overriding the
-        # classifier.  Set by the LLM-call retry path when a
-        # runaway-reasoning stream was cancelled and re-issued with
-        # thinking disabled (the same task would runaway again otherwise).
-        # Cleared at the start of each new user turn.
-        self._thinking_disabled_for_turn: bool = False
-
         # Fallback provider chain.
         self._fallback_chain: list[dict] = []
         self._fallback_index: int = 0
@@ -820,15 +798,6 @@ class AgentHarness(
         # orchestrator or API middleware).
         new_span()
 
-        # Skip thinking-gate + SELF-DISCOVER scaffolding on turns where
-        # the user explicitly invoked a slash-skill: the skill body is
-        # already the planning structure, so layering an additional
-        # classifier-driven scaffold on top is dead weight that adds
-        # ~40s of LLM round-trips on cold sessions for no quality
-        # gain.  Flag is set below if expand_slash_skill succeeds, and
-        # consumed once by ``_run_iteration`` before the first LLM call.
-        self._skip_pre_llm_scaffold_for_turn = False
-
         # Honour streaming preference from env.
         env_streaming = os.environ.get("SUROGATES_STREAMING_ENABLED", "").lower()
         if env_streaming in ("0", "false", "no"):
@@ -1097,9 +1066,6 @@ class AgentHarness(
                     all_events,
                     build_deep_research_message(topic=deep_research_topic),
                 )
-                # The rewritten directive is the planning structure;
-                # skip the SELF-DISCOVER / thinking-gate scaffold.
-                self._skip_pre_llm_scaffold_for_turn = True
 
             # 10c. Eager /<skill> or /<expert> expansion.
             # See slash_skill.expand_slash_skill. ``kind`` distinguishes
@@ -1123,10 +1089,6 @@ class AgentHarness(
                     _rewrite_user_content_preserving_attachments(
                         last_user, all_events, expanded_text,
                     )
-                    # The skill body itself is the planning structure;
-                    # don't pay for the thinking-gate + SELF-DISCOVER
-                    # classifier pair on this turn.
-                    self._skip_pre_llm_scaffold_for_turn = True
                     if kind == "skill":
                         # Suppress duplicate audit events on crash-recovery wakes.
                         # skill_view itself is idempotent (staging short-circuits via
@@ -1416,9 +1378,6 @@ class AgentHarness(
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
-        # New user turn clears any prior runaway-thinking suppression.
-        # Future turns get thinking back automatically.
-        self._thinking_disabled_for_turn = False
         should_review_memory = False
         if (
             self._memory_nudge_interval > 0
@@ -1606,32 +1565,6 @@ class AgentHarness(
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
 
-            # Skip both scaffolding hops when a slash-skill
-            # expansion already supplied planning structure for this
-            # turn.  The flag is one-shot — consumed here and reset
-            # so subsequent iterations within the same wake cycle go
-            # back to the default behaviour (tool-call follow-ups
-            # still get the gate so the model can drop thinking on
-            # easy assistant turns).
-            _skip_scaffold = getattr(
-                self, "_skip_pre_llm_scaffold_for_turn", False,
-            )
-            self._skip_pre_llm_scaffold_for_turn = False
-            if not _skip_scaffold:
-                # Run both concurrently.  They mutate disjoint
-                # parts of create_kwargs (gate → extra_body, self_discover
-                # → messages), so gather is safe.  Wall-clock collapses
-                # to max(gate_classifier, classifier+scaffold) instead
-                # of their sum.
-                await asyncio.gather(
-                    self._maybe_apply_thinking_gate(
-                        create_kwargs, api_messages, session,
-                    ),
-                    self._maybe_apply_self_discover(
-                        create_kwargs, api_messages,
-                    ),
-                )
-
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
             # tool_use blocks complete during LLM streaming, overlapping
@@ -1712,7 +1645,6 @@ class AgentHarness(
                     ),
                     rate_limit_guard=self._provider_rate_limit_guard(),
                 )
-                self._propagate_runaway_flag(session, usage_data)
             except Exception as exc:
                 logger.exception(
                     "LLM call failed for session %s (iteration %d, model %s): %s",
@@ -2444,6 +2376,7 @@ class AgentHarness(
                             break
                     assistant_content = assistant_message.get("content", "") or ""
                     self._memory_manager.sync_all(user_content, assistant_content)
+                    await self._memory_manager.flush_async_providers()
                 except Exception:
                     logger.debug("Memory manager sync_all failed", exc_info=True)
 
@@ -2460,20 +2393,17 @@ class AgentHarness(
 
             # 9. Check if compression is needed.
             if self._compressor.should_compress(messages, system_prompt):
-                # Memory manager: extract insights before compression.
+                # Memory manager: extract insights before compression and feed
+                # them into the summary so they survive compaction.
+                pre_compress_text = ""
                 if self._memory_manager is not None:
                     try:
                         pre_compress_text = self._memory_manager.on_pre_compress(messages)
-                        if pre_compress_text:
-                            logger.debug(
-                                "Session %s: memory pre-compress extracted %d chars",
-                                session.id, len(pre_compress_text),
-                            )
                     except Exception:
                         logger.debug("Memory manager on_pre_compress failed", exc_info=True)
 
                 compressed, summary_data = await self._compressor.compress(
-                    messages, self._llm,
+                    messages, self._llm, pre_compress_guidance=pre_compress_text,
                 )
                 await self._store.emit_event(
                     session.id,
@@ -3421,253 +3351,6 @@ class AgentHarness(
         return make_skipped_tool_result(tc)
 
     # ------------------------------------------------------------------
-    # Auto-think gate
-    # ------------------------------------------------------------------
-
-    def _propagate_runaway_flag(
-        self,
-        session: Session,
-        usage_data: dict[str, Any] | None,
-    ) -> None:
-        """Flip the per-turn thinking-disabled flag if the LLM-call layer
-        recovered from a runaway-reasoning stream by retrying with
-        ``enable_thinking=False``.
-
-        The flag is cleared at the start of every new user turn, so
-        future turns get thinking back automatically.
-        """
-        if not usage_data:
-            return
-        if not usage_data.get("thinking_disabled_due_to_runaway"):
-            return
-        if self._thinking_disabled_for_turn:
-            return
-        self._thinking_disabled_for_turn = True
-        logger.info(
-            "Runaway-reasoning recovery: disabling thinking for "
-            "remainder of user turn (session=%s).",
-            session.id,
-        )
-
-    async def _maybe_apply_thinking_gate(
-        self,
-        create_kwargs: dict[str, Any],
-        messages: list[dict[str, Any]],
-        session: Session | None = None,
-    ) -> None:
-        """Inject reasoning-control knobs into ``create_kwargs["extra_body"]``.
-
-        Three knobs feed in:
-
-        1. ``enable_thinking`` -- disabled when ``_thinking_disabled_for_turn``
-           is set (runaway recovery within the current user turn) or when
-           the cached LLM classifier returns ``required=False`` for an
-           easy turn.  Otherwise left at the provider default.
-        2. ``thinking_budget`` -- read from ``session.config["thinking_budget"]``
-           if set; caps reasoning tokens on providers that honor it
-           (Qwen3 via DashScope).  Left at the provider default otherwise.
-        3. ``preserve_thinking`` -- read from
-           ``session.config["preserve_thinking"]``; tells the provider to
-           feed prior assistant ``reasoning_content`` back into the input
-           on subsequent turns.  Left at the provider default otherwise.
-
-        The runaway flag in (1) clears on the next user turn (see the
-        user-turn bookkeeping where ``_user_turn_count`` is incremented),
-        so future turns get thinking back automatically.
-
-        Classifier failures (aux unavailable, network error,
-        structured-output parse miss) fall through silently -- the
-        request just keeps the model default for ``enable_thinking``,
-        while ``thinking_budget`` / ``preserve_thinking`` still apply.
-        """
-        model_id = str(create_kwargs.get("model") or "")
-        if not model_supports_thinking_toggle(model_id):
-            return
-        if not messages:
-            return
-
-        session_cfg = session.config if session is not None else {}
-        raw_budget = session_cfg.get("thinking_budget", DEFAULT_THINKING_BUDGET)
-        thinking_budget: int | None
-        if isinstance(raw_budget, (int, float)) and not isinstance(raw_budget, bool):
-            thinking_budget = int(raw_budget)
-        else:
-            thinking_budget = None
-        raw_preserve = session_cfg.get(
-            "preserve_thinking", DEFAULT_PRESERVE_THINKING,
-        )
-        preserve_thinking: bool | None = (
-            bool(raw_preserve) if isinstance(raw_preserve, bool) else None
-        )
-
-        enable_thinking: bool | None = None
-        reason: str | None = None
-        if self._thinking_disabled_for_turn:
-            enable_thinking = False
-            reason = "runaway flag set for current user turn"
-        else:
-            try:
-                classification = await classify_hard_task_async(
-                    messages,
-                    tenant=self._tenant,
-                )
-            except Exception:
-                logger.debug(
-                    "Thinking-gate classification failed; leaving model default.",
-                    exc_info=True,
-                )
-                classification = None
-
-            if classification is not None and not classification.required:
-                enable_thinking = False
-                reason = (
-                    f"easy turn (category={classification.category}, "
-                    f"reason={classification.reason})"
-                )
-
-        if (
-            enable_thinking is None
-            and thinking_budget is None
-            and preserve_thinking is None
-        ):
-            return
-
-        thinking_extra = build_thinking_extra_body(
-            enable_thinking=enable_thinking,
-            thinking_budget=thinking_budget,
-            preserve_thinking=preserve_thinking,
-        )
-        create_kwargs["extra_body"] = merge_extra_body(
-            create_kwargs.get("extra_body"),
-            thinking_extra,
-        )
-        if reason is not None:
-            logger.debug("Thinking-gate: disabling reasoning (%s).", reason)
-
-    # ------------------------------------------------------------------
-    # SELF-DISCOVER planning preamble
-    # ------------------------------------------------------------------
-
-    async def _maybe_apply_self_discover(
-        self,
-        create_kwargs: dict[str, Any],
-        messages: list[dict[str, Any]],
-    ) -> None:
-        """Inject a SELF-DISCOVER scaffold as a synthetic user message.
-
-        Two-tier gate before paying for ``build_scaffold`` (~24s upstream
-        LLM call on cold sessions):
-
-        1. If the prior assistant turn emitted a ``<next_action>``
-           footer (per ``guidance/next_action`` prompt fragment),
-           trust that as the model's self-reported intent for THIS
-           turn.  Complexity ``low`` → skip scaffold entirely; ``high``
-           → proceed; ``medium`` (or missing) → fall through to the
-           classifier.
-        2. Classifier gate: ``classify_hard_task_async`` returns a
-           ``needs_scaffold`` field (see ``HardTaskJudgment``).  Only
-           build the scaffold when the LLM judges it genuinely helpful.
-
-        The scaffold itself is cached per-turn so iterations within a
-        user turn reuse it without re-paying the build cost.  Appended
-        to a **copy** of the messages list on ``create_kwargs``; the
-        persistent conversation log is not mutated -- keeps the prompt
-        cache, compressor, and event log untouched.
-        """
-        if not messages:
-            return
-
-        # Tier 1: trust the model's prior next_action declaration.
-        prior_complexity = _prior_next_action_complexity(messages)
-        if prior_complexity == "low":
-            return  # Model said next turn is simple — believe it.
-
-        # Tier 2: classifier-gated build.  Whether we reach here
-        # because there was no prior declaration (turn 1, or model
-        # forgot to emit one) or because the declaration was
-        # ``medium``/``high`` (uncertain enough to warrant a check),
-        # the classifier's ``needs_scaffold`` field is the final say.
-        try:
-            classification = await classify_hard_task_async(
-                messages,
-                tenant=self._tenant,
-            )
-        except Exception:
-            logger.debug(
-                "SELF-DISCOVER classification failed; skipping scaffold.",
-                exc_info=True,
-            )
-            return
-
-        if not classification.needs_scaffold:
-            return
-        # Defensive: SCAFFOLD_CATEGORIES still gates the category
-        # whitelist so a misclassified ``needs_scaffold=true`` paired
-        # with an unknown/none category cannot trigger an unscaffolded
-        # build.
-        if classification.category not in SCAFFOLD_CATEGORIES:
-            return
-
-        try:
-            scaffold = await build_scaffold(
-                messages,
-                category=classification.category,
-                tenant=self._tenant,
-            )
-        except Exception:
-            logger.debug(
-                "SELF-DISCOVER build_scaffold raised; skipping scaffold.",
-                exc_info=True,
-            )
-            return
-
-        if scaffold is None:
-            return
-
-        # Merge the scaffold into the latest user message in-place
-        # rather than appending it as a separate synthetic user
-        # message. With a separate trailing message, every iteration's
-        # last user-role content was the scaffold's imperative; the
-        # model kept narrating "The user is asking me to continue..."
-        # because that's literally what its most recent user message
-        # said. Bundling the scaffold into the original request keeps
-        # the planning context visible without re-prompting the model
-        # on every iteration.
-        body = format_scaffold_for_injection(scaffold)
-        working = list(create_kwargs["messages"])
-        target_idx = -1
-        for i in range(len(working) - 1, -1, -1):
-            if working[i].get("role") == "user":
-                target_idx = i
-                break
-        if target_idx < 0:
-            return
-        target = dict(working[target_idx])
-        original_content = target.get("content")
-        if isinstance(original_content, str):
-            target["content"] = f"{original_content}\n\n{body}"
-        elif isinstance(original_content, list):
-            # Multimodal user message (text blocks + images). Append
-            # the scaffold as an extra text block so we don't
-            # stringify and lose the image parts.
-            target["content"] = list(original_content) + [
-                {"type": "text", "text": body},
-            ]
-        else:
-            # Unknown content shape — leave the message alone rather
-            # than corrupt it.
-            return
-        target["_surogate_scaffold_merged"] = True
-        working[target_idx] = target
-        create_kwargs["messages"] = working
-        logger.debug(
-            "SELF-DISCOVER: merged scaffold into user msg "
-            "(category=%s, modules=%s).",
-            classification.category,
-            scaffold.relevant_modules,
-        )
-
-    # ------------------------------------------------------------------
     # Hidden advisor routing
     # ------------------------------------------------------------------
 
@@ -3752,11 +3435,6 @@ class AgentHarness(
                 # No tools -- force a text-only response.
             }
 
-            await self._maybe_apply_thinking_gate(
-                create_kwargs, api_messages, session,
-            )
-            await self._maybe_apply_self_discover(create_kwargs, api_messages)
-
             assistant_message, usage_data = await call_llm_with_retry(
                 session=session,
                 create_kwargs=create_kwargs,
@@ -3777,7 +3455,6 @@ class AgentHarness(
                 context_compressor=self._compressor,
                 rate_limit_guard=self._provider_rate_limit_guard(),
             )
-            self._propagate_runaway_flag(session, usage_data)
 
             # Strip thinking blocks from the summary.
             reasoning_text = extract_reasoning(assistant_message)

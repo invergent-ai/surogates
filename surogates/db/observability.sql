@@ -101,6 +101,16 @@ CREATE TABLE IF NOT EXISTS service_accounts (
 CREATE INDEX IF NOT EXISTS idx_service_accounts_org
     ON service_accounts (org_id);
 
+-- Per-agent principal: ``agent_id`` links a service account to its owning ops
+-- Agent (a different database — logical reference, not a FK).  The partial
+-- unique index keeps it one service account per agent.  Retrofit for existing
+-- databases; ``create_all`` covers fresh ones.
+ALTER TABLE service_accounts
+    ADD COLUMN IF NOT EXISTS agent_id text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent
+    ON service_accounts (agent_id)
+    WHERE agent_id IS NOT NULL;
 
 -- ----------------------------------------------------------------------------
 -- Sessions — retrofits for the API channel.
@@ -141,6 +151,33 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_lock
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_auth_external
     ON users (org_id, auth_provider, external_id)
     WHERE external_id IS NOT NULL;
+
+
+-- ----------------------------------------------------------------------------
+-- Channel identities: org-scoped retrofit.
+--
+-- channel_identities moved from a GLOBAL (platform, platform_user_id)
+-- uniqueness to an org-scoped identity, so the same platform user (e.g. a Slack
+-- workspace member) resolves to its own user per tenant instead of leaking
+-- across orgs.  The ORM carries the org_id column + uq_channel_org_platform to
+-- fresh databases; this backfills org_id and swaps the constraint on
+-- already-deployed ones.
+-- ----------------------------------------------------------------------------
+ALTER TABLE channel_identities ADD COLUMN IF NOT EXISTS org_id uuid;
+UPDATE channel_identities ci SET org_id = u.org_id
+    FROM users u WHERE ci.user_id = u.id AND ci.org_id IS NULL;
+ALTER TABLE channel_identities DROP CONSTRAINT IF EXISTS uq_channel_platform;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'channel_identities_org_id_fkey') THEN
+        ALTER TABLE channel_identities
+            ADD CONSTRAINT channel_identities_org_id_fkey FOREIGN KEY (org_id) REFERENCES orgs(id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_channel_org_platform') THEN
+        ALTER TABLE channel_identities
+            ADD CONSTRAINT uq_channel_org_platform UNIQUE (org_id, platform, platform_user_id);
+    END IF;
+END $$;
+ALTER TABLE channel_identities ALTER COLUMN org_id SET NOT NULL;
 
 
 -- ----------------------------------------------------------------------------

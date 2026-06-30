@@ -2,16 +2,6 @@
 
 from __future__ import annotations
 
-# Default reasoning-control knobs applied to every main-loop call when the
-# model supports the thinking toggle.  Sessions can override via
-# ``session.config["thinking_budget"]`` / ``session.config["preserve_thinking"]``.
-# ``4096`` keeps reasoning roomy enough for hard tasks while staying well
-# under the 16 KB-char runaway threshold in ``llm_call.py``.
-# ``preserve_thinking=True`` matches the existing behaviour of replaying
-# ``reasoning_content`` across turns for OpenRouter/Moonshot.
-DEFAULT_THINKING_BUDGET: int = 4096
-DEFAULT_PRESERVE_THINKING: bool = True
-
 # Default TTL (seconds) for lease acquisition and renewal.
 _LEASE_TTL_SECONDS: int = 60
 

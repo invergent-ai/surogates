@@ -53,7 +53,7 @@ async def test_minting_collapses_composio_into_one_http_server():
     assert merged["static"]["url"] == "https://static.example/mcp"
     assert merged["composio-tool-router"]["url"] == "https://mcp.composio.dev/session"
     assert merged["composio-tool-router"]["headers"]["x-api-key"] == "secret"
-    pc.mint_composio_session.assert_awaited_once_with("agent-1", "user-1")
+    pc.mint_composio_session.assert_awaited_once_with("agent-1", "user-1", session_id=None)
 
 
 @pytest.mark.asyncio

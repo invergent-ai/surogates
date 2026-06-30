@@ -72,6 +72,7 @@ class ToolRuntime:
         )
         from surogates.board import tools as board_tools
         from surogates.tasks import tools as task_tools
+        from surogates.tools import mate_ambient
         from surogates.tools.builtin import arbor as arbor_tools
 
         modules = [
@@ -99,6 +100,7 @@ class ToolRuntime:
             task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
             board_tools,  # share_note, read_board, expand_note (coordination board)
             arbor_tools,  # idea_tree, dispatch_experiments, merge_experiment (research missions)
+            mate_ambient,  # mate_ambient_post (gated ambient channel post)
         ]
 
         for mod in modules:

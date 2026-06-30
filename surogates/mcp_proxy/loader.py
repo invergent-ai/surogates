@@ -54,6 +54,7 @@ async def load_mcp_configs(
     allowed_ids: frozenset[str],
     is_service_account: bool = False,
     agent_id: str | None = None,
+    session_id: str | None = None,
     platform_client: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load, merge, and credential-resolve MCP server configs.
@@ -96,7 +97,8 @@ async def load_mcp_configs(
     # Composio Tool Router servers are minted per end-user by ops, after
     # (and independent of) vault credential resolution above.
     merged = await apply_composio_minting(
-        merged, platform_client=platform_client, agent_id=agent_id, user_id=user_id,
+        merged, platform_client=platform_client, agent_id=agent_id,
+        user_id=user_id, session_id=session_id,
     )
 
     return merged
@@ -136,6 +138,7 @@ async def apply_composio_minting(
     platform_client: Any | None,
     agent_id: str | None,
     user_id: Any,
+    session_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Replace ``composio``-transport placeholders with one minted HTTP server.
 
@@ -169,6 +172,7 @@ async def apply_composio_minting(
     try:
         minted = await platform_client.mint_composio_session(
             str(agent_id), str(user_id),
+            session_id=str(session_id) if session_id is not None else None,
         )
     except Exception:  # noqa: BLE001 — a Composio failure must not drop other tools
         logger.warning(

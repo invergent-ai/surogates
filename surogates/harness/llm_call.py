@@ -616,11 +616,6 @@ async def call_llm_with_retry(
                 )
                 continue
 
-            # If a runaway retry succeeded, stamp the response so the
-            # outer loop knows to flip its per-turn flag.
-            if runaway_retry_used:
-                usage_data["thinking_disabled_due_to_runaway"] = True
-
             return result
 
         except UnicodeEncodeError:

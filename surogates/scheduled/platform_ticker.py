@@ -246,6 +246,11 @@ async def main(
     redis = await redis_factory(settings.redis.url)
     store = await store_factory(settings)
 
+    # The ambient sibling ticker only starts on the fully-internal prod path
+    # (where session_store/storage/run_one are all built here).  When a caller
+    # injects run_one (tests), the ambient ticker is skipped.
+    _run_one_injected = run_one is not None
+
     if run_one is None:
         if session_store_factory is None:
             async def _real_session_store(s):  # pragma: no cover - prod path
@@ -303,16 +308,56 @@ async def main(
         claim_limit=claim_limit,
     )
 
+    # Ambient engine: a sibling ticker (distinct leader lock) fires due
+    # ambient-review schedules into dedicated ambient sessions.  Shares this
+    # process's redis / session store / settings.
+    ambient_ticker = None
+    if not _run_one_injected:  # prod path only (session_store built above)
+        from surogates.ambient.store import AmbientScheduleStore
+        from surogates.ambient.ticker import AmbientTicker
+        from surogates.ambient.materialize import materialize_ambient_tick
+
+        ambient_store = AmbientScheduleStore(_session_factory())
+
+        async def _ambient_run_one(row):  # pragma: no cover - prod path
+            await materialize_ambient_tick(
+                row,
+                session_store=session_store,
+                ambient_store=ambient_store,
+                session_factory=_session_factory(),
+                settings=settings,
+                redis=redis,
+            )
+
+        ambient_lock = RedisLeaderLock(
+            redis, key="surogates:ambient_ticker:leader",
+            ttl_seconds=lock_ttl, holder_id=holder_id,
+        )
+        ambient_ticker = AmbientTicker(
+            ambient_store, redis=redis, materialize=_ambient_run_one,
+            worker_id=worker_id, leader_lock=ambient_lock,
+            tick_interval_seconds=tick_interval, claim_limit=claim_limit,
+        )
+
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
+
+        def _stop_all() -> None:
+            ticker.request_stop()
+            if ambient_ticker is not None:
+                ambient_ticker.request_stop()
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
-                loop.add_signal_handler(sig, ticker.request_stop)
+                loop.add_signal_handler(sig, _stop_all)
             except NotImplementedError:  # pragma: no cover - Windows
                 pass
 
     try:
-        await ticker.run()
+        if ambient_ticker is not None:
+            await asyncio.gather(ticker.run(), ambient_ticker.run())
+        else:
+            await ticker.run()
     finally:
         close = getattr(redis, "aclose", None) or getattr(
             redis, "close", None,

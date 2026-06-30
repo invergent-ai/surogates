@@ -337,8 +337,15 @@ class ContextReplayMixin:
         if not self._compressor.should_compress(messages, system_prompt):
             return messages
 
+        pre_compress_text = ""
+        if self._memory_manager is not None:
+            try:
+                pre_compress_text = self._memory_manager.on_pre_compress(messages)
+            except Exception:
+                logger.debug("Memory on_pre_compress failed at replay compaction", exc_info=True)
+
         compressed, summary_data = await self._compressor.compress(
-            messages, self._llm,
+            messages, self._llm, pre_compress_guidance=pre_compress_text,
         )
 
         await self._store.emit_event(

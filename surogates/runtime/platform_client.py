@@ -157,6 +157,34 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()["agent_id"]
 
+    async def list_channel_routings(self, kind: str) -> list[dict]:
+        """Fetch all routing records for an inbound channel kind.
+
+        Returns a list of routing dicts (each with at least
+        ``channel_identifier``, ``org_id``, ``agent_id``) on 200; returns an
+        empty list on 404 (no routings configured for this kind — a normal
+        state for a newly-deployed platform).
+
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        try:
+            resp = await self._client.get(
+                f"/api/channels/by-kind/{kind}",
+            )
+        except httpx.HTTPError as exc:
+            raise exc
+
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def get_channel_routing(
         self, kind: str, identifier: str,
     ) -> dict | None:
@@ -188,8 +216,30 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_mate_channel_settings(
+        self, agent_id: str, platform: str, channel_id: str,
+    ) -> dict | None:
+        """Fetch effective Mate settings for a channel.
+
+        Returns the JSON dict on 200, ``None`` on 404 (no agent / treated as
+        defaults-off by the caller).  Raises :class:`PlatformAuthError` on 401
+        and ``httpx.HTTPStatusError`` on any other non-2xx -- same contract as
+        :meth:`get_channel_routing`.
+        """
+        resp = await self._client.get(
+            f"/api/mate/runtime/{agent_id}/{platform}/{channel_id}",
+        )
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401) for mate settings",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def mint_composio_session(
-        self, agent_id: str, user_id: str,
+        self, agent_id: str, user_id: str, session_id: str | None = None,
     ) -> dict | None:
         """Mint a per-end-user Composio Tool Router MCP server for an agent.
 
@@ -202,9 +252,12 @@ class PlatformClient:
         * :class:`PlatformAuthError` on 401 -- operations problem.
         * ``httpx.HTTPStatusError`` on any other non-2xx.
         """
+        body: dict[str, str] = {"user_id": user_id}
+        if session_id is not None:
+            body["session_id"] = session_id
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/composio/session",
-            json={"user_id": user_id},
+            json=body,
         )
         if resp.status_code in (404, 503):
             return None

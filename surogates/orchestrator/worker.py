@@ -494,7 +494,9 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
         build_memory_cache,
         build_system_bundle_cache,
     )
-    from surogates.runtime import PlatformClient, RuntimeConfigCache
+    from surogates.runtime import (
+        MateSettingsCache, PlatformClient, RuntimeConfigCache,
+    )
 
     if not settings.platform_api_url:
         raise RuntimeError(
@@ -509,8 +511,18 @@ def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     runtime_config_cache = RuntimeConfigCache(
         loader=client.get_runtime_config, ttl_seconds=1.0,
     )
+
+    async def _mate_loader(key: str) -> dict | None:
+        agent_id, platform, channel_id = key.split(":", 2)
+        return await client.get_mate_channel_settings(
+            agent_id, platform, channel_id,
+        )
+
     state["platform_client"] = client
     state["runtime_config_cache"] = runtime_config_cache
+    state["mate_settings_cache"] = MateSettingsCache(
+        loader=_mate_loader, ttl_seconds=30.0,
+    )
     state["file_bundle_cache"] = build_file_bundle_cache(
         settings=settings, runtime_config_cache=runtime_config_cache,
     )
@@ -539,6 +551,7 @@ async def _shutdown_worker_runtime_plumbing(state: dict) -> None:
     state["file_bundle_cache"] = None
     state["memory_cache"] = None
     state["system_bundle_cache"] = None
+    state["mate_settings_cache"] = None
 
 
 def _start_worker_invalidator(state: dict) -> None:
@@ -565,6 +578,7 @@ def _start_worker_invalidator(state: dict) -> None:
             file_bundle_cache=state.get("file_bundle_cache"),
             memory_cache=state.get("memory_cache"),
             system_bundle_cache=state.get("system_bundle_cache"),
+            mate_settings_cache=state.get("mate_settings_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
@@ -580,6 +594,29 @@ async def _stop_worker_invalidator(state: dict) -> None:
     except BaseException:  # noqa: BLE001 — cancellation expected
         pass
     state["runtime_invalidator_task"] = None
+
+
+def _build_r2_memory_keys(
+    *,
+    session: object,
+    storage_key_prefix: str,
+    user_id: str | None,
+) -> dict[str, str]:
+    """Build the R2 memory-object keys for one worker session."""
+    from surogates.channels.memory_boundary import session_memory_boundary
+    from surogates.memory.r2_store import MEMORY_TARGETS
+    from surogates.runtime.memory_protocol import memory_object_key
+
+    boundary = session_memory_boundary(session)
+    return {
+        target: memory_object_key(
+            storage_key_prefix=storage_key_prefix,
+            user_id=user_id,
+            boundary=boundary,
+            target=target,
+        )
+        for target in MEMORY_TARGETS
+    }
 
 
 async def run_worker(settings: Settings) -> None:
@@ -998,10 +1035,7 @@ async def run_worker(settings: Settings) -> None:
         # in-memory fallback below covers test contexts only.
         memory_cache = worker_state.get("memory_cache")
         if memory_cache is not None:
-            from surogates.memory.r2_store import (
-                MEMORY_TARGETS, R2MemoryStore,
-            )
-            from surogates.runtime.memory_protocol import memory_object_key
+            from surogates.memory.r2_store import R2MemoryStore
 
             mem_bucket = (
                 settings.storage.memory_bucket or settings.storage.bucket
@@ -1009,14 +1043,11 @@ async def run_worker(settings: Settings) -> None:
             _user_id_str = (
                 str(session.user_id) if session.user_id else None
             )
-            mem_keys = {
-                target: memory_object_key(
-                    storage_key_prefix=ctx.storage_key_prefix,
-                    user_id=_user_id_str,
-                    target=target,
-                )
-                for target in MEMORY_TARGETS
-            }
+            mem_keys = _build_r2_memory_keys(
+                session=session,
+                storage_key_prefix=ctx.storage_key_prefix,
+                user_id=_user_id_str,
+            )
             # on every successful write, publish
             # user.memory_changed:<org_id>:<user_id> on Redis so other
             # workers serving the same user invalidate their L1
@@ -1074,6 +1105,62 @@ async def run_worker(settings: Settings) -> None:
             memory_store = MemoryStore(memory_dir=memory_dir)
         memory_manager = MemoryManager(memory_store)
 
+        # Channel-scoped memory: for follow-enabled channel sessions, attach
+        # an internal provider so non-mention activity builds durable context
+        # without crowding out a tenant's external memory backend.  Requires
+        # the R2 storage path (mem_bucket is defined only on that branch).
+        if memory_cache is not None:
+            channel_provider = None
+            try:
+                from surogates.memory.channel_factory import build_channel_provider
+                from surogates.runtime.mate_settings_cache import mate_cache_key
+
+                mate_cache = worker_state.get("mate_settings_cache")
+                _cfg = getattr(session, "config", None) or {}
+                _channel_id = _cfg.get("slack_channel_id")
+                _is_ambient = session.channel == "ambient"
+                # Ambient sessions carry a slack channel_id but channel="ambient";
+                # their settings live under the "slack" platform key.
+                _platform = "slack" if _is_ambient else session.channel
+                follow_enabled = None
+                if mate_cache is not None and _channel_id:
+                    _settings = await mate_cache.get(
+                        mate_cache_key(str(session.agent_id), _platform, _channel_id),
+                    )
+                    if _settings is not None:
+                        follow_enabled = bool(_settings.get("follow_enabled"))
+                        # On a real Slack channel wake, reconcile the channel's
+                        # ambient schedule from its settings (create/deactivate).
+                        if session.channel == "slack":
+                            from surogates.ambient.store import AmbientScheduleStore
+                            from surogates.ambient.reconcile import (
+                                reconcile_ambient_schedule,
+                            )
+                            await reconcile_ambient_schedule(
+                                AmbientScheduleStore(session_factory),
+                                settings_dict=_settings,
+                                org_id=session.org_id,
+                                agent_id=str(session.agent_id),
+                                platform="slack",
+                                channel_id=_channel_id,
+                                source_session_id=session.id,
+                                team_id=_cfg.get("slack_team_id", ""),
+                            )
+                # The dedicated ambient session always gets channel recall.
+                if _is_ambient:
+                    follow_enabled = True
+                channel_provider = await build_channel_provider(
+                    session,
+                    storage_backend=storage_backend,
+                    bucket=mem_bucket,
+                    redis_client=redis_client,
+                    follow_enabled=follow_enabled,
+                )
+            except Exception:
+                logger.warning("Channel memory provider setup failed", exc_info=True)
+            if channel_provider is not None:
+                memory_manager.add_provider(channel_provider, internal=True)
+
         # Resolve the per-session file bundle once and share it
         # across the catalog load and the PromptBuilder content
         # pre-load.  ``None`` is acceptable for agents that haven't
@@ -1129,6 +1216,15 @@ async def run_worker(settings: Settings) -> None:
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+        # The "mate" toolset (mate_ambient_post) is only meaningful inside a
+        # dedicated ambient review session; hide it from every other session
+        # (same toolset-gating mechanism as the browser/kb tools above).
+        if session.channel != "ambient":
+            effective_tools.difference_update(
+                e.name
+                for e in tool_registry.get_all()
+                if e.toolset == "mate"
+            )
         # "Live browser support" capability: drop the browser_* tools from
         # the model-visible set when the agent has it turned off.  The
         # shared browser pool stays wired; this agent's LLM just never

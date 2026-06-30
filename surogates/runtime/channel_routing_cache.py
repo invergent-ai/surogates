@@ -32,9 +32,16 @@ class ChannelRoutingCache:
         self,
         loader: Callable[[str], Awaitable[dict[str, Any] | None]],
         ttl_seconds: float = 30.0,
+        max_entries: int | None = None,
     ) -> None:
         self._loader = loader
         self._ttl = ttl_seconds
+        # ``max_entries`` bounds memory for high-cardinality keyspaces (e.g. a
+        # per-sender identity cache); the TTL bounds staleness, not size, so an
+        # unbounded keyspace would otherwise grow for the process lifetime.
+        # ``None`` keeps the unbounded behaviour for low-cardinality callers
+        # (one entry per channel_routing / mate setting).
+        self._max_entries = max_entries
         self._entries: dict[str, tuple[float, Any]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global = asyncio.Lock()
@@ -56,12 +63,30 @@ class ChannelRoutingCache:
             ):
                 return None if cached[1] is _MISSING else cached[1]
             data = await self._loader(key)
-            stored = _MISSING if data is None else data
-            self._entries[key] = (time.monotonic(), stored)
+            self._store(key, _MISSING if data is None else data)
             return data
+
+    def set(self, key: str, value: Any) -> None:
+        """Seed a known value so the next ``get`` is a hit, not a reload.
+
+        Used to populate the cache with a row the caller just created (e.g. a
+        freshly-provisioned identity) instead of invalidating and forcing a
+        reload on the next access.
+        """
+        self._store(key, _MISSING if value is None else value)
 
     def invalidate(self, key: str) -> None:
         self._entries.pop(key, None)
+
+    def _store(self, key: str, stored: Any) -> None:
+        self._entries[key] = (time.monotonic(), stored)
+        if self._max_entries is not None:
+            # FIFO eviction: dict preserves insertion order, so the first key is
+            # the oldest.  Drop its lock too so ``_locks`` stays bounded.
+            while len(self._entries) > self._max_entries:
+                oldest = next(iter(self._entries))
+                self._entries.pop(oldest, None)
+                self._locks.pop(oldest, None)
 
     async def _lock_for(self, key: str) -> asyncio.Lock:
         async with self._global:

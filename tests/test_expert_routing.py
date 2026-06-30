@@ -3,15 +3,15 @@
 Auto-routing to experts was dropped (see
 ``docs/superpowers/specs/2026-05-23-expert-mechanism-resurrection-design.md``);
 ``TestDeadHelpersRemoved`` guards against the deleted helpers
-creeping back.  The classifier itself still drives the thinking
-gate, SELF-DISCOVER scaffold, and advisor preflight.
+creeping back.  The classifier now drives only the hidden advisor
+preflight.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -93,19 +93,6 @@ class TestHardTaskClassification:
 
         assert result.required is False
         assert result.category is None
-
-
-class TestNextActionParsing:
-    def test_parses_complexity_when_summary_attribute_is_present(self):
-        from surogates.harness.expert_routing import parse_next_action_complexity
-
-        text = """Answer body.
-
-<next_action complexity="low" summary="hide">
-done
-</next_action>"""
-
-        assert parse_next_action_complexity(text) == "low"
 
 
 class TestDeadHelpersRemoved:

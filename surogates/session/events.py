@@ -17,6 +17,10 @@ class EventType(str, Enum):
     # User interaction
     USER_MESSAGE = "user.message"
 
+    # Ambient engine (Surogate Mate)
+    AMBIENT_TICK = "ambient.tick"   # a tick wakes the dedicated ambient session
+    AMBIENT_POST = "ambient.post"   # an ambient post that cleared the gate
+
     # LLM interaction
     LLM_REQUEST = "llm.request"
     LLM_RESPONSE = "llm.response"

@@ -88,12 +88,10 @@ async def _execute_sql_script(conn: AsyncConnection, path: Path) -> None:
 
 
 async def apply_observability_ddl(conn: AsyncConnection) -> None:
-    """Apply the observability trigger + views on an open connection.
-
-    Every statement in :data:`OBSERVABILITY_SQL_PATH` is idempotent
-    (``CREATE OR REPLACE`` / ``DROP IF EXISTS``) so it is safe to run on
-    every startup.
-    """
+    """Apply ``observability.sql`` — the trigger, retrofit ``ALTER``s, indexes
+    and views.  Every statement is idempotent (``CREATE OR REPLACE`` / ``IF
+    [NOT] EXISTS`` / guarded ``DO`` blocks), so it is safe on every startup and
+    is where column-level schema changes to existing tables live (no Alembic)."""
     await _execute_sql_script(conn, OBSERVABILITY_SQL_PATH)
 
 
@@ -102,9 +100,8 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
 
     Uses ``Base.metadata.create_all`` (idempotent — skips existing
     tables) for ORM-managed schema, then applies
-    :func:`apply_observability_ddl` for the trigger and views that sit
-    on top of the events table.  A future version can wire Alembic for
-    versioned migrations.
+    :func:`apply_observability_ddl` for the trigger, retrofit ``ALTER``s and
+    views.  A future version can wire Alembic for versioned migrations.
     """
     import asyncio
 

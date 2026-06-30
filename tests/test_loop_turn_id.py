@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -73,7 +73,6 @@ def _make_loop_harness(
     harness._skill_nudge_interval = 0
     harness._iters_since_skill = 0
     harness._user_turn_count = 0
-    harness._thinking_disabled_for_turn = False
     harness._streaming_enabled = False
     harness._default_model = "test-model"
     harness._current_model = "test-model"
@@ -320,9 +319,6 @@ async def test_request_final_summary_stamps_turn_id(
         session_store=store,
         budget=IterationBudget(max_total=1),
     )
-    harness._maybe_apply_thinking_gate = AsyncMock(return_value=None)
-    harness._maybe_apply_self_discover = AsyncMock(return_value=None)
-    harness._propagate_runaway_flag = MagicMock(return_value=None)
 
     async def fake_call_llm_with_retry(**kwargs: Any) -> tuple[dict, dict]:
         assert kwargs.get("turn_id") == "turn-final"

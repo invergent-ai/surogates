@@ -7,9 +7,9 @@ through *channels*:
   is always available.  The browser SPA talks directly to the FastAPI
   routes; no adapter process is needed.
 
-* **slack**, **telegram** — messaging-platform inbound resolvers
-  (:class:`surogates.channels.slack.SharedSlackInbound`,
-  :class:`surogates.channels.telegram.SharedTelegramInbound`) that map
-  inbound platform events to ``(org_id, agent_id)`` via the channel-
-  routing cache.
+* **slack**, **telegram** — messaging-platform webhook dispatchers
+  (``surogates.channels.platforms.slack``,
+  ``surogates.channels.platforms.telegram``) that receive inbound
+  platform events via HTTP webhooks and route them to the matching
+  ``(org_id, agent_id)`` via the channel-routing cache.
 """

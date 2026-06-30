@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     LargeBinary,
     Numeric,
     Sequence,
@@ -32,6 +33,34 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
+from sqlalchemy.types import TypeDecorator
+
+
+class GUID(TypeDecorator):
+    """Platform-independent UUID column.
+
+    Native ``UUID`` on Postgres (prod); ``String(36)`` with ``uuid.UUID``
+    coercion on SQLite so a model using it is unit-testable in isolation
+    without a Postgres engine.  Postgres DDL/behaviour is unchanged.
+    """
+
+    impl = String(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(UUID(as_uuid=True))
+        return dialect.type_descriptor(String(36))
+
+    def process_bind_param(self, value, dialect):
+        if value is None or dialect.name == "postgresql":
+            return value
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None or isinstance(value, uuid.UUID):
+            return value
+        return uuid.UUID(str(value))
 
 
 class Base(DeclarativeBase):
@@ -153,12 +182,21 @@ class User(Base):
 
 class ChannelIdentity(Base):
     __tablename__ = "channel_identities"
+    # Scoped per-org: the same platform user id (e.g. a Slack workspace member)
+    # may legitimately be known to agents in different orgs, and each must
+    # resolve to its OWN org-scoped user — a global (platform, platform_user_id)
+    # uniqueness would attribute one org's session to another org's user.
     __table_args__ = (
-        UniqueConstraint("platform", "platform_user_id", name="uq_channel_platform"),
+        UniqueConstraint(
+            "org_id", "platform", "platform_user_id", name="uq_channel_org_platform"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
@@ -608,6 +646,81 @@ class ScheduledSession(Base):
 
 
 # ---------------------------------------------------------------------------
+# Ambient schedules (Surogate Mate)
+# ---------------------------------------------------------------------------
+
+
+class AmbientScheduleRow(Base):
+    """One ambient-review schedule per followed channel.
+
+    Deliberately NOT reusing ``scheduled_sessions``: that table requires a
+    ``user_id XOR service_account_id`` principal, which a system-owned,
+    userless channel schedule has no natural value for.  This table reuses
+    the platform-ticker's claim/lock pattern (``locked_by`` / ``locked_until``
+    + ``SELECT FOR UPDATE SKIP LOCKED``) without the principal constraint.
+    """
+
+    __tablename__ = "ambient_schedules"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "platform", "channel_id",
+            name="uq_ambient_schedules_channel",
+        ),
+        Index(
+            "idx_ambient_schedules_due",
+            "status", "next_run_at",
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("idx_ambient_schedules_lock", "locked_until"),
+    )
+
+    # Portable Postgres types: UUID/JSONB on Postgres (prod), String/JSON on
+    # SQLite so this table is unit-testable in isolation.  The Postgres DDL is
+    # unchanged.
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The shared channel session this ambient schedule was created from
+    # (provenance + the slack_channel_id/team_id source for the ambient
+    # session config).
+    source_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    # The dedicated ambient session reused across ticks (created lazily by
+    # the materializer; channel="ambient").
+    ambient_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    cadence_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1800"
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="active"
+    )
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    locked_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Browser Profiles
 # ---------------------------------------------------------------------------
 
@@ -688,6 +801,12 @@ class ServiceAccount(Base):
     __tablename__ = "service_accounts"
     __table_args__ = (
         Index("idx_service_accounts_org", "org_id"),
+        Index(
+            "uq_service_accounts_agent",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("agent_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -707,6 +826,11 @@ class ServiceAccount(Base):
     )
     last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # Logical reference to the ops ``Agent.id`` (a different database, so no
+    # FK).  Set when this service account is the agent's own principal; NULL for
+    # ordinary org-scoped service accounts.  The partial unique index above
+    # keeps it one-SA-per-agent.
+    agent_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships
     org: Mapped[Org] = relationship(

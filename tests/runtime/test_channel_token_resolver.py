@@ -65,19 +65,19 @@ async def test_resolve_channel_token_missing_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_resolve_channel_token_unknown_kind_raises():
-    """An unknown channel kind is a programming error -- the
-    adapter caller should validate this before reaching the
-    resolver.  Raise rather than return None so the caller sees
-    the bug instead of treating it as a missing-token state."""
+async def test_resolve_channel_token_arbitrary_kind_returns_none():
+    """The framework is open-ended over channel kinds, so an
+    as-yet-unknown kind does NOT raise -- with no credential
+    configured it simply resolves to None, which the caller treats
+    as a 'channel misconfigured' state."""
     from surogates.channels.token_resolver import resolve_channel_token
 
     vault = _FakeVault({})
-    with pytest.raises(ValueError):
-        await resolve_channel_token(
-            vault=vault, kind="discord", identifier="x",
-            org_id="o-1",
-        )
+    token = await resolve_channel_token(
+        vault=vault, kind="discord", identifier="x",
+        org_id="o-1",
+    )
+    assert token is None
 
 
 def test_vault_ref_for_channel_helper():
@@ -86,11 +86,14 @@ def test_vault_ref_for_channel_helper():
     full resolver."""
     from surogates.channels.token_resolver import vault_ref_for_channel
 
-    assert vault_ref_for_channel("slack", "A0123ABCD") == (
+    assert vault_ref_for_channel("slack", "bot_token", "A0123ABCD") == (
         "vault://slack_bot_token_A0123ABCD"
     )
-    assert vault_ref_for_channel("telegram", "@my_bot") == (
+    assert vault_ref_for_channel("telegram", "bot_token", "@my_bot") == (
         "vault://telegram_bot_token_@my_bot"
     )
-    with pytest.raises(ValueError):
-        vault_ref_for_channel("discord", "x")
+    # Open-ended over kinds: an as-yet-unknown kind produces the
+    # generic ref shape rather than raising.
+    assert vault_ref_for_channel("teams", "bot_token", "x") == (
+        "vault://teams_bot_token_x"
+    )

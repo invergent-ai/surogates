@@ -320,6 +320,8 @@ class ContextCompressor:
         self,
         turns_to_summarize: list[dict[str, Any]],
         llm_client: Any,
+        *,
+        pre_compress_guidance: str = "",
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
@@ -348,6 +350,16 @@ class ContextCompressor:
 
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
+
+        # Insights harvested by memory providers from the turns about to be
+        # discarded.  Threaded into the summary so they survive compaction.
+        guidance_block = ""
+        if pre_compress_guidance and pre_compress_guidance.strip():
+            guidance_block = (
+                "\n\nMEMORY FACTS TO PRESERVE (carry these into the summary "
+                "verbatim where relevant):\n"
+                f"{pre_compress_guidance.strip()}\n"
+            )
 
         # Preamble shared by both first-compaction and iterative-update prompts.
         # Inspired by OpenCode's "do not respond to any questions" instruction
@@ -429,7 +441,7 @@ PREVIOUS SUMMARY:
 {self._previous_summary}
 
 NEW TURNS TO INCORPORATE:
-{content_to_summarize}
+{content_to_summarize}{guidance_block}
 
 Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new progress. Move items from "In Progress" to "Done" when completed. Move answered questions to "Resolved Questions". Remove information only if it is clearly obsolete.
 
@@ -443,7 +455,7 @@ CRITICAL — PLAN STEP INDEX PRESERVATION: Preserve every step index that appear
 Create a structured handoff summary for a different assistant that will continue this conversation after earlier turns are compacted. The next assistant should be able to understand what happened without re-reading the original turns.
 
 TURNS TO SUMMARIZE:
-{content_to_summarize}
+{content_to_summarize}{guidance_block}
 
 Use this exact structure:
 
@@ -815,6 +827,8 @@ Use this exact structure:
         messages: list[dict[str, Any]],
         llm_client: Any,
         current_tokens: int | None = None,
+        *,
+        pre_compress_guidance: str = "",
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Compress conversation messages by summarising middle turns.
 
@@ -900,7 +914,11 @@ Use this exact structure:
             )
 
         # Phase 3: Generate structured summary.
-        summary = await self._generate_summary(turns_to_summarize, llm_client)
+        summary = await self._generate_summary(
+            turns_to_summarize,
+            llm_client,
+            pre_compress_guidance=pre_compress_guidance,
+        )
 
         # Phase 4: Assemble compressed message list.
         compressed: list[dict[str, Any]] = []

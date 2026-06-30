@@ -531,6 +531,78 @@ class WebsiteSettings(BaseSettings):
     session_message_cap: int = 0
 
 
+class ChannelKindSettings(BaseSettings):
+    """Per-kind enablement block inside ``ChannelsSettings``.
+
+    Subclassed per platform so each block carries a kind-scoped
+    ``env_prefix`` (``SUROGATES_CHANNELS_<KIND>_``).  A shared empty prefix
+    would make every kind read a single bare ``ENABLED`` env var — they would
+    all flip together, and the ``SUROGATES_CHANNELS_<KIND>_ENABLED`` keys the
+    YAML loader emits would be ignored, so no platform could be enabled via
+    config at all.
+    """
+
+    enabled: bool = False
+
+
+class SlackChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_SLACK_"}
+
+
+class TelegramChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_TELEGRAM_"}
+
+
+class WebsiteChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_WEBSITE_"}
+
+
+class ChannelsSettings(BaseSettings):
+    """Webhook channel service configuration.
+
+    ``port`` is the HTTP port the channel webhook dispatcher listens on.
+    ``public_url`` is the externally reachable base URL used by the
+    :class:`ChannelWebhookReconciler` when registering webhooks with
+    platforms that support API-driven registration (e.g. Telegram).
+
+    Per-kind enablement is expressed as nested sub-blocks keyed by the
+    platform ``kind`` string (``"slack"``, ``"telegram"``, …).  Each
+    block needs at minimum ``enabled: bool`` which is what
+    :meth:`ChannelRegistry.enabled_platforms` checks via::
+
+        channels_config = settings.channels   # this object
+        cfg = channels_config.get(kind)       # dict.get → ChannelKindSettings
+        if cfg is not None and cfg.enabled: ...
+
+    ``ChannelsSettings`` exposes ``get(kind)`` so it can be used as a
+    dict by ``enabled_platforms`` without wrapping it in a plain dict.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_"}
+
+    port: int = 8001
+    public_url: str = ""
+    # Studio web app base URL used to build the ``/link`` prompt that a
+    # ``linked``-policy agent sends an unlinked sender.  Empty falls back to a
+    # generic "link in Surogate Studio" instruction.
+    studio_url: str = ""
+
+    # Per-kind enablement.  Keys are platform kind slugs; presence +
+    # ``enabled=True`` activates the platform.  Absent key → disabled.
+    slack: SlackChannelSettings = Field(default_factory=SlackChannelSettings)
+    telegram: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
+    website: WebsiteChannelSettings = Field(default_factory=WebsiteChannelSettings)
+
+    def get(self, kind: str, default: Any = None) -> Any:
+        """Dict-like access so ``enabled_platforms(settings)`` works.
+
+        :class:`ChannelRegistry.enabled_platforms` calls
+        ``channels_config.get(kind)`` — this allows ``settings.channels``
+        to be passed directly.
+        """
+        return getattr(self, kind, default)
+
+
 class GovernanceSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_GOVERNANCE_"}
 
@@ -614,6 +686,7 @@ class Settings(BaseSettings):
     slack: SlackSettings = Field(default_factory=SlackSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
+    channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

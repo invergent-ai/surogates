@@ -56,6 +56,7 @@ class LeaseNotHeldError(Exception):
 # Web channel reads from the events table directly via SSE.
 _DELIVERABLE_EVENTS = frozenset({
     EventType.LLM_RESPONSE,
+    EventType.INBOX_INPUT_REQUIRED,
 })
 
 
@@ -769,23 +770,30 @@ class SessionStore:
             if channel == "web":
                 return
 
+            # Ambient sessions reason privately; their only outbound path is
+            # the gated mate_ambient_post tool. Never auto-deliver them.
+            if channel == "ambient":
+                return
+
             # Build channel-specific destination from session config.
             destination: dict[str, Any] = {}
             if channel == "slack":
                 destination = {
                     "channel_id": config.get("slack_channel_id", ""),
-                    "thread_ts": config.get("slack_thread_ts"),
-                    "team_id": config.get("slack_team_id", ""),
+                    "thread_ts": config.get("slack_thread_key"),
+                    "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "teams":
                 destination = {
-                    "conversation_id": config.get("teams_conversation_id", ""),
-                    "activity_id": config.get("teams_activity_id"),
+                    "conversation_id": config.get("teams_channel_id", ""),
+                    "activity_id": config.get("teams_thread_key"),
+                    "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "telegram":
                 destination = {
-                    "chat_id": config.get("telegram_chat_id", ""),
-                    "reply_to_message_id": config.get("telegram_reply_to"),
+                    "chat_id": config.get("telegram_channel_id", ""),
+                    "message_thread_id": config.get("telegram_thread_key"),
+                    "channel_identifier": config.get("channel_identifier", ""),
                 }
             else:
                 destination = {"session_id": str(session_id)}
@@ -805,8 +813,27 @@ class SessionStore:
                     content = strip_next_action_blocks(content)
                 if content:
                     payload["content"] = content
+            elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
+                # Only Slack renders the interactive modal.  Other channels have
+                # no input_prompt surface, and their send() reads payload[
+                # "content"] — a content-less row would post empty text (the
+                # Telegram API rejects it).  Leave payload empty so the
+                # nothing-to-deliver guard below skips non-Slack channels.
+                questions = data.get("questions") or []
+                if questions:
+                    # The model appends its <next_action> footer to free text,
+                    # including the context argument — strip it the same as the
+                    # LLM_RESPONSE content path so it never reaches the channel.
+                    payload = {
+                        "input_prompt": True,
+                        "tool_call_id": (data.get("tool_call_id") or "").strip(),
+                        "questions": questions,
+                        "context": strip_next_action_blocks(
+                            data.get("context", "") or ""
+                        ),
+                    }
 
-            if not payload.get("content"):
+            if not payload:
                 return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
 
             # Enqueue to the delivery outbox.

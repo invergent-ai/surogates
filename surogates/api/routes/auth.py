@@ -666,7 +666,10 @@ async def pairing_info(
         return PairingInfoResponse(platform="", platform_user_id="", valid=False)
 
     entry = await pairing_store.get(code)
-    if entry is None:
+    # Treat a code with no org metadata as invalid: org-bound codes always carry
+    # an org_id, so a missing one is a malformed / pre-migration entry that must
+    # not be presented as linkable.
+    if entry is None or not entry.get("org_id"):
         return PairingInfoResponse(platform="", platform_user_id="", valid=False)
 
     # Mask the platform user ID — the unauthenticated endpoint should
@@ -696,6 +699,21 @@ async def link_channel(
     if pairing_store is None:
         raise HTTPException(status_code=503, detail="Pairing service not available.")
 
+    # Peek (non-destructive) first: org-bound codes must not be consumed while
+    # logged into the wrong org (which would both mis-bind and burn a still-valid
+    # code).  Validate org BEFORE the single-use resolve, so a wrong-org attempt
+    # leaves the code alive for the correct org.
+    entry = await pairing_store.get(body.code)
+    if entry is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
+
+    if str(entry.get("org_id", "")) != str(tenant.org_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pairing code is not valid for this organization.",
+        )
+
+    # Org matches — now consume the code (single-use) and bind.
     entry = await pairing_store.resolve(body.code)
     if entry is None:
         raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
@@ -703,36 +721,68 @@ async def link_channel(
     session_factory = request.app.state.session_factory
 
     async with session_factory() as db:
-        # Check if this platform identity is already linked.
         platform = entry.get("platform", "")
         platform_user_id = entry.get("platform_user_id", "")
         platform_meta = entry.get("platform_meta", {})
 
-        existing = await db.execute(
-            select(ChannelIdentity)
-            .where(ChannelIdentity.platform == platform)
-            .where(ChannelIdentity.platform_user_id == platform_user_id)
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"This {platform} account is already linked to a user.",
+        row = (
+            await db.execute(
+                select(ChannelIdentity, User)
+                .join(User, ChannelIdentity.user_id == User.id)
+                .where(ChannelIdentity.org_id == tenant.org_id)
+                .where(ChannelIdentity.platform == platform)
+                .where(ChannelIdentity.platform_user_id == platform_user_id)
             )
+        ).first()
 
-        identity = ChannelIdentity(
-            id=uuid.uuid4(),
-            user_id=tenant.user_id,
-            platform=platform,
-            platform_user_id=platform_user_id,
-            platform_meta=platform_meta,
-        )
-        db.add(identity)
-        await db.commit()
+        if row is None:
+            db.add(ChannelIdentity(
+                id=uuid.uuid4(),
+                org_id=tenant.org_id,
+                user_id=tenant.user_id,
+                platform=platform,
+                platform_user_id=platform_user_id,
+                platform_meta=platform_meta,
+            ))
+            await db.commit()
+        else:
+            identity, existing_user = row
+            if identity.user_id == tenant.user_id:
+                pass  # already linked to this user — idempotent
+            elif existing_user.auth_provider == platform:
+                # A Mate shadow identity (auth_provider == platform): take it
+                # over by re-pointing it to the authenticated real account.
+                identity.user_id = tenant.user_id
+                await db.commit()
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"This {platform} account is already linked to a user.",
+                )
 
     logger.info(
         "Linked %s:%s to user %s via pairing code %s",
         platform, platform_user_id, tenant.user_id, body.code,
     )
+
+    # Evict the sender's negative-cached "unknown" entry on the channels pod so
+    # they are recognized on their next message instead of being re-prompted
+    # until the identity cache's TTL expires.  The identifier is the channels
+    # identity-cache key verbatim (``<platform>\x00<user>\x00<org>``).  Best
+    # effort: a publish failure must not fail the bind — the entry still ages
+    # out on its own.
+    redis = getattr(request.app.state, "redis", None)
+    if redis is not None:
+        invalidation = (
+            f"channel_identity_changed:{platform}\x00{platform_user_id}\x00{tenant.org_id}"
+        )
+        try:
+            await redis.publish(invalidation, b"")
+        except Exception:  # noqa: BLE001 — best-effort cross-process invalidation
+            logger.warning(
+                "Failed to publish channel_identity_changed for %s:%s",
+                platform, platform_user_id, exc_info=True,
+            )
 
     return LinkChannelResponse(
         success=True,

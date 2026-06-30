@@ -8,6 +8,10 @@ import cycle.
 
 from __future__ import annotations
 
+from surogates.runtime.agent_principal import (
+    ServiceAccountPrincipal,
+    make_cached_agent_principal_resolver,
+)
 from surogates.runtime.bundle_accessor import AgentFileBundle
 from surogates.runtime.bundle_cache import FileBundleCache
 from surogates.runtime.cache import RuntimeConfigCache
@@ -28,6 +32,7 @@ from surogates.runtime.invalidator import (
     run_invalidator,
 )
 from surogates.runtime.leader_lock import RedisLeaderLock
+from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
 from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
 from surogates.runtime.rate_limiter import PerTenantRateLimiter, rate_limit_dep
 from surogates.runtime.resolver import (
@@ -49,9 +54,13 @@ __all__ = [
     "AgentDisabledError",
     "AgentFileBundle",
     "AgentRuntimeContext",
+    "ServiceAccountPrincipal",
+    "make_cached_agent_principal_resolver",
     "ChannelRoutingCache",
     "FileBundleCache",
     "FirebaseConfig",
+    "MateSettingsCache",
+    "mate_cache_key",
     "FirebaseConfigCache",
     "HubBundleClient",
     "INVALIDATION_CHANNELS",

@@ -75,29 +75,6 @@ class TestStripNextActionBlocks:
         assert cleaned == "answer"
         assert elapsed < 2.0, f"strip took {elapsed:.2f}s — backtracking regression"
 
-    def test_parse_complexity_is_linear_on_unclosed_openers(self):
-        # Same scan in expert_routing's parser; complexity-bearing
-        # openers are its worst case (attribute-less openers were cheap
-        # even for the old regex — its lookahead rejected them).
-        from surogates.harness.expert_routing import parse_next_action_complexity
-
-        text = "answer\n" + '<next_action complexity="low" summary="hide">' * 50_000
-        start = time.perf_counter()
-        result = parse_next_action_complexity(text)
-        elapsed = time.perf_counter() - start
-        assert result is None
-        assert elapsed < 2.0, f"parse took {elapsed:.2f}s — backtracking regression"
-
-    def test_parse_complexity_still_reads_last_block(self):
-        # Tempering the body group must not change parse results.
-        from surogates.harness.expert_routing import parse_next_action_complexity
-
-        text = (
-            'x <next_action complexity="low" summary="hide">a</next_action> y '
-            '<next_action complexity="high" summary="show">b</next_action>'
-        )
-        assert parse_next_action_complexity(text) == "high"
-
 
 class TestEnqueueChannelDeliveryStrip:
     """The store-level wiring: footer stripped before the outbox row."""
