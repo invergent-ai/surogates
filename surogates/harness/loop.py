@@ -178,6 +178,19 @@ def _build_mission_judge(*, llm_client: Any, eval_model: str) -> Any:
     )
 
 
+# Channel platforms whose native I/O supersedes a Composio toolkit. A channel
+# agent should use the native channel path, not Composio's same-named toolkit
+# (a different connection/identity). Slack only in v1; extend as needed.
+CHANNEL_NATIVE_COMPOSIO_TOOLKIT: dict[str, str] = {"slack": "SLACK"}
+
+
+def _mcp_tool_component(name: str) -> str:
+    """The bare tool component of a (possibly MCP-prefixed) tool name.
+
+    ``mcp__tool_router__SLACK_SEND_MESSAGE`` -> ``SLACK_SEND_MESSAGE``;
+    a non-prefixed name is returned unchanged.
+    """
+    return name.rsplit("__", 1)[-1]
 
 
 
@@ -3165,6 +3178,30 @@ class AgentHarness(
             mcp_allowed = self._mcp_tool_names & all_names
         return non_mcp | mcp_allowed
 
+    def _drop_native_channel_composio_tools(
+        self, tool_filter: set[str] | None, session: Session,
+    ) -> set[str] | None:
+        """Remove the session channel's own Composio toolkit from *tool_filter*.
+
+        For a Slack channel session, drop the agent's Composio ``SLACK_*`` tools
+        so it uses the native channel I/O. Only the channel's own toolkit is
+        affected; the drop set is intersected with ``self._composio_tool_names``
+        so native or non-Composio tools are never caught. A no-op when the
+        channel has no mapped toolkit or the agent has no Composio tools.
+        """
+        toolkit = CHANNEL_NATIVE_COMPOSIO_TOOLKIT.get(session.channel or "")
+        if not toolkit or not self._composio_tool_names:
+            return tool_filter
+        prefix = f"{toolkit}_"
+        drop = {
+            n for n in self._composio_tool_names
+            if _mcp_tool_component(n).startswith(prefix)
+        }
+        if not drop:
+            return tool_filter
+        names = set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
+        return names - drop
+
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:
         """Return the tool allow-list for a session."""
         config = session.config or {}
@@ -3235,6 +3272,7 @@ class AgentHarness(
             tool_filter = self._apply_mcp_schema_filter(
                 tool_filter, explicit_allowed=explicit_allowed,
             )
+            tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
             return self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
             )
@@ -3246,6 +3284,7 @@ class AgentHarness(
         tool_filter = self._apply_mcp_schema_filter(
             tool_filter, explicit_allowed=explicit_allowed,
         )
+        tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
         return self._ensure_always_available_tools(
             tool_filter, explicit_allowed=explicit_allowed,
         )
