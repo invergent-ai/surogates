@@ -341,6 +341,16 @@ async def _skill_view_handler(
     name = arguments.get("name", "")
     file_path = arguments.get("file_path")
 
+    # Validate before either path: an empty name on the API-mediated path would
+    # build the URL "/v1/skills/", which 307-redirects to the list endpoint and
+    # surfaces an opaque error to the agent. Reject it the same way the local
+    # path already does.
+    if not name or not name.strip():
+        return json.dumps(
+            {"success": False, "error": "Skill name is required."},
+            ensure_ascii=False,
+        )
+
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
@@ -349,12 +359,6 @@ async def _skill_view_handler(
     tenant = kwargs.get("tenant")
     if tenant is None:
         return json.dumps({"error": "No tenant context available"})
-
-    if not name:
-        return json.dumps(
-            {"success": False, "error": "Skill name is required."},
-            ensure_ascii=False,
-        )
 
     skills = await _load_all_skills(**kwargs)
 
