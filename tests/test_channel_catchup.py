@@ -386,6 +386,23 @@ class _HeldLock:
         return None
 
 
+class _HeartbeatFailsLock:
+    """acquire() succeeds, heartbeat() fails on first call — exercises the
+    mid-loop abort + release-in-finally path."""
+
+    def __init__(self) -> None:
+        self.released = False
+
+    async def acquire(self) -> bool:
+        return True
+
+    async def heartbeat(self) -> bool:
+        return False
+
+    async def release(self) -> None:
+        self.released = True
+
+
 class TestChannelCatchupLock:
     async def test_app_skipped_when_lock_not_acquired(self):
         client = _FakeSlackClient(
@@ -400,3 +417,36 @@ class TestChannelCatchupLock:
         await cu.run()
         assert pipeline.handled == []         # app skipped, nothing replayed
         assert client.history_calls == []
+
+    async def test_heartbeat_abort_stops_loop_and_releases_lock(self):
+        # Two conversations, both with a replayable message newer than their watermark.
+        # The heartbeat fails after the first conversation is processed, so only C1
+        # should be fetched/replayed and the lock must still be released via finally.
+        lock = _HeartbeatFailsLock()
+        client = _FakeSlackClient(
+            conversations=[
+                {"id": "C1", "is_member": True},
+                {"id": "C2", "is_member": True},
+            ],
+            history={
+                "C1": [{"user": "U1", "text": "first",  "ts": "1712345691.000000"}],
+                "C2": [{"user": "U2", "text": "second", "ts": "1712345692.000000"}],
+            },
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(
+            client=client,
+            pipeline=pipeline,
+            routings=_ROUTINGS,
+            watermarks={"C1": "1712345680.000000", "C2": "1712345680.000000"},
+        )
+        cu._make_lock = lambda app_id: lock
+        await cu.run()
+
+        # Only C1 was processed — the loop stopped before fetching C2.
+        assert len(client.history_calls) == 1
+        assert client.history_calls[0]["channel"] == "C1"
+        # Exactly one message replayed.
+        assert len(pipeline.handled) == 1
+        # The finally block must have fired despite the early return.
+        assert lock.released is True
