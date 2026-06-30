@@ -23,12 +23,11 @@ from sse_starlette.sse import EventSourceResponse
 
 from surogates.config import enqueue_session
 from surogates.session.events import EventType
+from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
 router = APIRouter(prefix="/inbox")
-
-_ACKABLE_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 
 class InboxResponse(BaseModel):
@@ -288,7 +287,7 @@ async def acknowledge_inbox_item(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
-    if item.kind not in _ACKABLE_KINDS:
+    if item.kind not in ACKNOWLEDGE_ONLY_KINDS:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Inbox item kind is not acknowledgeable.",

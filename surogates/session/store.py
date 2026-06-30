@@ -35,7 +35,10 @@ from surogates.db.models import (
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
 from surogates.session.events import EventType
-from surogates.session.inbox_payload import build_inbox_row
+from surogates.session.inbox_payload import (
+    ACKNOWLEDGE_ONLY_KINDS,
+    build_inbox_row,
+)
 from surogates.session.models import Event, Session, SessionLease
 
 logger = logging.getLogger(__name__)
@@ -189,6 +192,25 @@ class SessionStore:
         if row is None:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
+
+    async def _session_has_live_viewer(self, session_id: UUID) -> bool:
+        """Whether a client is actively streaming this session's events.
+
+        Viewers SUBSCRIBE to ``surogates:session:{id}`` for the session-event
+        SSE, so a non-zero ``PUBSUB NUMSUB`` means someone is watching (NUMSUB
+        counts exact subscribers only, not the pattern subscribers used
+        elsewhere). Best-effort: any failure reports "no viewer" so a
+        notification is never dropped on a Redis hiccup.
+        """
+        if self._redis is None:
+            return False
+        try:
+            counts = await self._redis.pubsub_numsub(
+                f"surogates:session:{session_id}"
+            )
+            return any(count > 0 for _channel, count in counts)
+        except Exception:
+            return False
 
     async def get_agent_ids_for_sessions(
         self, session_ids: list[UUID]
@@ -622,6 +644,26 @@ class SessionStore:
         counter_clause = _build_counter_update_clause(event_type, redacted_data)
         inbox_publish: tuple[int, str, UUID] | None = None
 
+        # Build the inbox row and run the presence check up front, before the
+        # DB transaction below, so the Redis NUMSUB round-trip doesn't hold a
+        # pooled DB connection open. Acknowledge-only notifications are skipped
+        # while the operator is actively watching the session (a live viewer);
+        # kinds that need a response are always created.
+        inbox_row = (
+            build_inbox_row(
+                event_type=event_type,
+                event_data=redacted_data,
+                session_id=str(session_id),
+            )
+            if event_type in _INBOX_EVENTS
+            else None
+        )
+        suppress_for_viewer = (
+            inbox_row is not None
+            and inbox_row.kind in ACKNOWLEDGE_ONLY_KINDS
+            and await self._session_has_live_viewer(session_id)
+        )
+
         async with self._sf() as db:
             db.add(row)
             await db.flush()  # assigns row.id via BIGSERIAL
@@ -633,33 +675,34 @@ class SessionStore:
                 {"id": session_id},
             )
 
-            if event_type in _INBOX_EVENTS:
+            if inbox_row is not None and not suppress_for_viewer:
                 session_row = await db.get(SessionRow, session_id)
-                if session_row is not None and session_row.user_id is not None:
-                    inbox_row = build_inbox_row(
-                        event_type=event_type,
-                        event_data=redacted_data,
-                        session_id=str(session_id),
+                if session_row is not None and (
+                    session_row.user_id is not None
+                    or session_row.service_account_id is not None
+                ):
+                    item = InboxItem(
+                        org_id=session_row.org_id,
+                        user_id=session_row.user_id,
+                        service_account_id=session_row.service_account_id,
+                        session_id=session_id,
+                        source_event_id=event_id,
+                        kind=inbox_row.kind,
+                        title=inbox_row.title,
+                        body=inbox_row.body,
+                        payload=inbox_row.payload,
+                        action_ref=inbox_row.action_ref,
                     )
-                    if inbox_row is not None:
-                        item = InboxItem(
-                            org_id=session_row.org_id,
-                            user_id=session_row.user_id,
-                            session_id=session_id,
-                            source_event_id=event_id,
-                            kind=inbox_row.kind,
-                            title=inbox_row.title,
-                            body=inbox_row.body,
-                            payload=inbox_row.payload,
-                            action_ref=inbox_row.action_ref,
-                        )
-                        db.add(item)
-                        await db.flush()
-                        inbox_publish = (
-                            item.id,
-                            inbox_row.kind,
-                            session_row.user_id,
-                        )
+                    db.add(item)
+                    await db.flush()
+                    # Publish to the owner's inbox channel, keyed by the
+                    # session's principal (a user, or a service account for ops
+                    # chats), so the live unread badge updates for both. The
+                    # one-principal CHECK guarantees this is non-null.
+                    principal_id = (
+                        session_row.user_id or session_row.service_account_id
+                    )
+                    inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()
 
@@ -675,10 +718,10 @@ class SessionStore:
 
         # Notify inbox subscribers after commit so consumers can read the row.
         if inbox_publish is not None and self._redis is not None:
-            item_id, kind, user_id = inbox_publish
+            item_id, kind, principal_id = inbox_publish
             try:
                 await self._redis.publish(
-                    f"surogates:inbox:{user_id}",
+                    f"surogates:inbox:{principal_id}",
                     f"{item_id}:{kind}",
                 )
             except Exception:

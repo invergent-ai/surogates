@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # a SQL file rather than SQLAlchemy DDL objects because the views contain
 # PostgreSQL-specific constructs (recursive CTEs, LATERAL joins, plpgsql).
 OBSERVABILITY_SQL_PATH = Path(__file__).with_name("observability.sql")
+# Idempotent column patches for existing inbox_items tables (create_all only
+# creates missing tables, it does not alter existing ones).
+INBOX_PRINCIPAL_SQL_PATH = Path(__file__).with_name("inbox_principal.sql")
 
 # Suppress noisy CancelledError logs from the connection pool when SSE
 # clients disconnect mid-query.  These are harmless — the pool discards
@@ -71,17 +74,17 @@ def async_session_factory(
     )
 
 
-async def _exec_script(conn: AsyncConnection, sql: str) -> None:
-    """Run a multi-statement SQL script on an open connection.
+async def _execute_sql_script(conn: AsyncConnection, path: Path) -> None:
+    """Run a multi-statement, idempotent SQL script on an open connection.
 
-    Uses asyncpg's simple-query protocol (the only path that accepts a
-    multi-statement script — SQLAlchemy's ``exec_driver_sql`` uses the extended
-    protocol and rejects them).  Scripts must be idempotent (they run on every
-    startup) and the connection must already be inside a transaction (e.g.
-    ``async with engine.begin() as conn``).
+    asyncpg's ``execute()`` accepts multi-statement scripts when called
+    without parameters (simple query protocol).  SQLAlchemy's ``text()`` /
+    ``exec_driver_sql`` use the extended protocol and reject them, so we go
+    through the raw driver connection.  Callers must pass a connection
+    already inside a transaction (e.g. ``async with engine.begin() as conn``).
     """
     raw = await conn.get_raw_connection()
-    await raw.driver_connection.execute(sql)
+    await raw.driver_connection.execute(path.read_text(encoding="utf-8"))
 
 
 async def apply_observability_ddl(conn: AsyncConnection) -> None:
@@ -89,7 +92,7 @@ async def apply_observability_ddl(conn: AsyncConnection) -> None:
     and views.  Every statement is idempotent (``CREATE OR REPLACE`` / ``IF
     [NOT] EXISTS`` / guarded ``DO`` blocks), so it is safe on every startup and
     is where column-level schema changes to existing tables live (no Alembic)."""
-    await _exec_script(conn, OBSERVABILITY_SQL_PATH.read_text(encoding="utf-8"))
+    await _execute_sql_script(conn, OBSERVABILITY_SQL_PATH)
 
 
 def run_migrations(db_settings: DatabaseSettings) -> None:
@@ -109,6 +112,7 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await apply_observability_ddl(conn)
+            await _execute_sql_script(conn, INBOX_PRINCIPAL_SQL_PATH)
         await engine.dispose()
 
     asyncio.run(_create_all())
