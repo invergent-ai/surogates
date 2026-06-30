@@ -125,3 +125,13 @@ async def test_route_maps_not_found_to_404(monkeypatch):
             session_id=session.id, file_id="F1",
             request=_request(session), tenant=_Tenant())
     assert ei.value.status_code == 404
+
+
+def test_slack_platform_registered_when_route_imported():
+    # Importing the route module must guarantee SlackPlatform self-registers
+    # in this (runtime-api) process; otherwise registry.get("slack") is None
+    # and every fetch returns 500. The other route tests stub registry.get,
+    # so only this unstubbed test catches the wiring.
+    from surogates.api.routes import channel_files  # noqa: F401
+    from surogates.channels.registry import registry
+    assert registry.get("slack") is not None

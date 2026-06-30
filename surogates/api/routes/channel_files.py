@@ -14,6 +14,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+import surogates.channels.platforms  # noqa: F401  # ensure SlackPlatform self-registers in this process
+
 from surogates.channels.file_fetch import (
     ChannelFileForbidden,
     ChannelFileNotFound,

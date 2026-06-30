@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -345,7 +346,7 @@ class HarnessAPIClient:
             )
         try:
             data = await self._post(
-                f"/v1/sessions/{self._session_id}/channel-files/{file_id}",
+                f"/v1/sessions/{self._session_id}/channel-files/{quote(file_id, safe='')}",
             )
             return json.dumps({"success": True, **data}, ensure_ascii=False)
         except httpx.HTTPStatusError as exc:

@@ -60,3 +60,17 @@ async def test_fetch_channel_file_maps_http_error(monkeypatch):
     out = json.loads(await c.fetch_channel_file("F1"))
     assert out["success"] is False
     assert out["error"] == "not shared"
+
+
+async def test_fetch_channel_file_encodes_file_id_path_segments(monkeypatch):
+    seen = {}
+
+    async def _post(path, body=None):
+        seen["path"] = path
+        return {"kind": "attachment", "path": "uploads/slack/fetch/x",
+                "filename": "x", "mime_type": "text/plain", "size": 1}
+
+    c = _client()
+    monkeypatch.setattr(c, "_post", _post)
+    await c.fetch_channel_file("a/b")
+    assert "channel-files/a%2Fb" in seen["path"]
