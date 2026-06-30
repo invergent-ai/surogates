@@ -327,3 +327,35 @@ class TestChannelCatchupReplay:
                       watermarks={"C1": "1712345680.000000", "C2": "1712345680.000000"})
         await cu.run()  # C1 raises, C2 still processed
         assert [m.ts for m in pipeline.handled] == ["1712345690.000000"]
+
+    async def test_fetch_oldest_clamped_to_age_window(self):
+        import surogates.channels.channel_catchup as cc
+        from unittest import mock
+
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [{"user": "U1", "text": "x", "ts": "1712345690.000000"}]},
+        )
+        cu = _catchup(client=client, pipeline=_FakePipeline(), routings=_ROUTINGS,
+                      watermarks={"C1": "1000000000.000000"})  # far older than 7d
+        fixed_now = 1712345700.0
+        with mock.patch.object(cc, "_now", lambda: fixed_now):
+            await cu.run()
+        # watermark is far older than the 7-day window → oldest clamps to now-7d
+        cutoff = f"{(fixed_now - 7 * 86400.0):.6f}"
+        assert client.history_calls[0]["oldest"] == cutoff
+
+    async def test_fetch_oldest_is_watermark_when_recent(self):
+        import surogates.channels.channel_catchup as cc
+        from unittest import mock
+
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": []},
+        )
+        cu = _catchup(client=client, pipeline=_FakePipeline(), routings=_ROUTINGS,
+                      watermarks={"C1": "1712345695.000000"})  # within 7d of fixed_now
+        fixed_now = 1712345700.0
+        with mock.patch.object(cc, "_now", lambda: fixed_now):
+            await cu.run()
+        assert client.history_calls[0]["oldest"] == "1712345695.000000"
