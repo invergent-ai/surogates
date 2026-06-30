@@ -39,6 +39,7 @@ class _FakeDB:
     def __init__(self, value: str | None) -> None:
         self._value = value
         self.executed = False
+        self.params: dict[str, Any] | None = None
 
     async def __aenter__(self) -> "_FakeDB":
         return self
@@ -48,13 +49,17 @@ class _FakeDB:
 
     async def execute(self, _stmt: Any, _params: dict[str, Any] | None = None) -> _FakeResult:
         self.executed = True
+        self.params = _params
         return _FakeResult(self._value)
 
 
 def _sf(value: str | None):
-    def factory() -> _FakeDB:
-        return _FakeDB(value)
+    db = _FakeDB(value)
 
+    def factory() -> _FakeDB:
+        return db
+
+    factory.db = db  # type: ignore[attr-defined]
     return factory
 
 
@@ -80,3 +85,17 @@ class TestLatestCatchupWatermark:
             org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
         )
         assert wm is None
+
+    async def test_forwards_scoping_params(self):
+        from surogates.session.events import EventType
+
+        sf = _sf("1712345678.123456")
+        await latest_catchup_watermark(
+            sf, org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
+        )
+        params = sf.db.params  # type: ignore[attr-defined]
+        assert params["org_id"] == "org-1"
+        assert params["agent_id"] == "agent-1"
+        assert params["api_app_id"] == "A1"
+        assert params["chat_id"] == "C1"
+        assert params["event_type"] == EventType.USER_MESSAGE.value

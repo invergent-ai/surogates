@@ -80,4 +80,4 @@ async def latest_catchup_watermark(
             },
         )
         watermark = result.scalar_one_or_none()
-    return str(watermark) if watermark else None
+    return str(watermark) if watermark is not None else None
