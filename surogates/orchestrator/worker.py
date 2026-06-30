@@ -930,6 +930,7 @@ async def run_worker(settings: Settings) -> None:
         # unreachable — built-in tools still work; only the
         # platform/copilot MCP tools go missing in that case.
         discovered_mcp_tools: set[str] = set()
+        composio_mcp_tools: frozenset[str] = frozenset()
         if mcp_proxy_client is not None:
             try:
                 principal_user_id = session.user_id or session.service_account_id
@@ -943,18 +944,15 @@ async def run_worker(settings: Settings) -> None:
                             is_service_account=session.user_id is None,
                         )
                     )
+                    composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
+                        ctx.agent_id
+                    )
             except Exception:
                 logger.warning(
                     "MCP proxy tool discovery failed for session %s; "
                     "built-in tools still available",
                     session.id, exc_info=True,
                 )
-
-        composio_mcp_tools: frozenset[str] = frozenset()
-        if mcp_proxy_client is not None:
-            composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
-                ctx.agent_id
-            )
 
         # Per-session LLM bundle resolved from the AgentRuntimeContext
         # (already pulled above for ``asset_root``) + the credential
