@@ -1,12 +1,15 @@
 """Outbound stripping of the per-turn ``<next_action>`` footer.
 
-The ``guidance/next_action`` prompt fragment instructs the model to end
-every final text response with one ``<next_action ...>...</next_action>``
-block.  The block is harness/UI metadata, not user-facing content: the
-web chat UI strips it client-side (``sdk/agent-chat-react/src/lib/
-next-action.ts``) and renders a status pill instead.  Messaging channels
-(Telegram, Slack, Teams, ...) deliver raw text, so the session store
-strips the block server-side before enqueueing channel deliveries.
+The harness no longer instructs the model to emit a ``<next_action>``
+footer (the ``guidance/next_action`` prompt fragment and the complexity
+parser that consumed it were removed).  This stripper is retained as a
+purely defensive outbound filter: replayed history from older sessions
+and the occasional unprompted emission can still carry the block, which
+is harness/UI metadata rather than user-facing content.  The web chat UI
+strips it client-side (``sdk/agent-chat-react/src/lib/next-action.ts``)
+and messaging channels (Telegram, Slack, Teams, ...) deliver raw text,
+so the session store strips it server-side before enqueueing channel
+deliveries.
 
 The strip is a closer-driven linear scan, NOT a single block regex.  Any
 pattern of the shape ``<next_action[^>]*>...</next_action>`` — lazy,
@@ -19,8 +22,7 @@ stay linear.  Scanning for the rare ``</next_action>`` closer first and
 matching one bounded opener per segment is O(length) by construction.
 
 Kept dependency-free so the session layer can import it without pulling
-LLM-client modules (unlike ``expert_routing``, which parses the same
-block for the planning-scaffold gate).
+LLM-client modules.
 """
 
 from __future__ import annotations

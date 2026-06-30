@@ -52,7 +52,6 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._skill_nudge_interval = 0
     harness._iters_since_skill = 0
     harness._user_turn_count = 0
-    harness._thinking_disabled_for_turn = False
     harness._streaming_enabled = False
     harness._default_model = "test-model"
     harness._current_model = "test-model"

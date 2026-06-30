@@ -3,8 +3,9 @@
 This module provides the deterministic regex classifier
 (``classify_hard_task``) and its LLM-based equivalent
 (``classify_hard_task_async``) plus the chat-template ``enable_thinking``
-toggle. The classifier drives the thinking gate, SELF-DISCOVER scaffold,
-and the hidden advisor preflight.
+toggle helpers. The classifier drives the hidden advisor preflight; the
+thinking-toggle helpers are used by the LLM-call layer's
+runaway-reasoning recovery.
 
 Auto-routing to experts based on this classifier was removed when the
 expert mechanism was rebuilt as a voluntary-consultation feature
@@ -43,87 +44,17 @@ HARD_TASK_CATEGORIES: tuple[str, ...] = (
 _HARD_CATEGORY_SET: frozenset[str] = frozenset(HARD_TASK_CATEGORIES)
 
 
-#: Recognised values for the ``complexity`` attribute on a
-#: ``<next_action>`` block emitted by the assistant.  Anything else
-#: is treated as ``medium`` (the conservative middle ground that
-#: falls through to the classifier instead of skipping or forcing).
-_NEXT_ACTION_COMPLEXITY_VALUES: frozenset[str] = frozenset(
-    {"low", "medium", "high"}
-)
-
-
-# One opening tag; the complexity attribute is extracted from the
-# matched tag text separately.  Parsing is a closer-driven linear scan
-# rather than a single block regex: any ``<next_action...>...</next_action>``
-# pattern walks from every opener toward a closer that may never arrive,
-# which is O(openers x length) on adversarial input (the model can echo
-# prompt-injected garbage verbatim).  See ``surogates.harness.next_action``
-# for the same construction on the delivery-strip path.
-_NEXT_ACTION_OPEN_RE = re.compile(r"<next_action\b[^>]*>", re.IGNORECASE)
-_NEXT_ACTION_COMPLEXITY_ATTR_RE = re.compile(
-    r'\bcomplexity="([^"]+)"', re.IGNORECASE
-)
-_NEXT_ACTION_CLOSE = "</next_action>"
-
-
-def parse_next_action_complexity(assistant_text: str | None) -> str | None:
-    """Return ``"low" | "medium" | "high"`` from an assistant message footer.
-
-    The model is instructed by the ``guidance/next_action`` prompt
-    fragment to emit one ``<next_action ...>...</next_action>`` block
-    at the end of every assistant turn.  This helper pulls the
-    complexity field out so the harness can gate downstream planning
-    work (SELF-DISCOVER scaffold, etc.) on the model's own self-reported
-    intent for the upcoming turn.
-
-    Returns ``None`` when no block is present (older assistant turns,
-    or the model failed to emit one) so callers can fall through to
-    the classifier-driven gate.  Returns the lower-cased complexity
-    value when present; unknown values normalise to ``"medium"`` (the
-    conservative fall-through).
-    """
-    if not assistant_text:
-        return None
-    lower = assistant_text.lower()
-    complexity: str | None = None
-    pos = 0
-    # Closer-driven scan: one bounded opener search per closer keeps
-    # this linear on adversarial input (see the regex comment above).
-    # Last complexity-bearing block wins so a model that emits the
-    # directive twice (e.g. retried thinking pre-amble) reports its
-    # FINAL intent.
-    while True:
-        close = lower.find(_NEXT_ACTION_CLOSE, pos)
-        if close == -1:
-            break
-        opener = _NEXT_ACTION_OPEN_RE.search(assistant_text, pos, close)
-        if opener is not None:
-            attr = _NEXT_ACTION_COMPLEXITY_ATTR_RE.search(opener.group(0))
-            if attr is not None:
-                complexity = attr.group(1).strip().lower()
-        pos = close + len(_NEXT_ACTION_CLOSE)
-    if complexity is None:
-        return None
-    if complexity in _NEXT_ACTION_COMPLEXITY_VALUES:
-        return complexity
-    return "medium"
-
-
 @dataclass(frozen=True, slots=True)
 class HardTaskClassification:
     """Result of deterministic hard-task classification.
 
-    ``needs_scaffold`` is the gate for SELF-DISCOVER scaffold building.
-    The regex fallback defaults it to False (conservative — costs the
-    model a small chain-of-thought lift rather than 24s of upstream
-    scaffold-build latency); the LLM classifier sets it explicitly per
-    its prompt rules.
+    Drives the hidden advisor preflight: ``required`` gates whether an
+    advisor is consulted and ``category`` selects which advisor.
     """
 
     required: bool
     category: str | None = None
     reason: str = ""
-    needs_scaffold: bool = False
 
 
 _DEBUGGING_RE = re.compile(
@@ -219,25 +150,10 @@ class HardTaskJudgment(BaseModel):
         default="none",
         description="One of the routing categories, or 'none' for chitchat / trivial lookups.",
     )
-    needs_scaffold: bool = Field(
-        default=False,
-        description=(
-            "True iff this turn genuinely benefits from a structured "
-            "planning preamble (SELF-DISCOVER scaffold).  Short refinements, "
-            "conversational replies, and small follow-ups inside an active "
-            "tool-using conversation should be False even when 'required' "
-            "is True -- the model already has chain-of-thought built in and "
-            "the conversation context already carries the prior plan.  "
-            "Reserve True for genuinely novel multi-step work where the "
-            "model would benefit from being told to consider problem "
-            "decomposition / typical solutions / risk analysis before it "
-            "starts."
-        ),
-    )
 
 
 _CLASSIFIER_SYSTEM_PROMPT = """\
-You decide whether a specialist (expert) should be consulted before the main assistant answers the user's most recent message, and whether the model would benefit from a structured planning preamble before answering.
+You decide whether a specialist (expert) should be consulted before the main assistant answers the user's most recent message.
 
 You will see a short slice of the recent conversation. Short or anaphoric replies like "yes do it", "now the same for the API", "ok try that" inherit the topic of the immediately preceding turn -- read the prior assistant turn to figure out what work the user is approving or extending, and classify based on THAT work.
 
@@ -251,12 +167,6 @@ Categories:
 - problem_solving: long multi-part requests that need careful reasoning but do not fit a category above.
 - none: greetings, casual conversation, acknowledgements, simple lookups, requests that genuinely need no expert.
 
-needs_scaffold rules of thumb:
-- True ONLY for genuinely novel multi-step work that the model has not already started: a new feature spec, a fresh debugging session, a multi-system migration plan, an architecture decision spanning several components.
-- False for refinements within an active conversation ("now do X also", "give me a nicer artifact", "use a python script instead"), for short anaphoric replies inheriting prior plan, for simple lookups, and for chit-chat.  The model's chain-of-thought + the prior conversation context already cover these.
-- False when the assistant's prior turn already laid out a plan and the user is just approving / iterating on it.
-- A turn can be required=true (expert routing useful) but needs_scaffold=false (no need to re-plan from scratch).
-
 Examples (transcripts shown in the same format you will receive):
 
 EX1:
@@ -268,7 +178,7 @@ Could you share the full traceback?
 
 [USER]
 yes do it
-=> {"required": true, "category": "debugging", "needs_scaffold": false}
+=> {"required": true, "category": "debugging"}
 
 EX2:
 [USER]
@@ -279,12 +189,12 @@ A sessions table with (id, user_id, created_at, expires_at, token) is typical. W
 
 [USER]
 yes please
-=> {"required": true, "category": "data_reasoning", "needs_scaffold": false}
+=> {"required": true, "category": "data_reasoning"}
 
 EX3:
 [USER]
 hi there
-=> {"required": false, "category": "none", "needs_scaffold": false}
+=> {"required": false, "category": "none"}
 
 EX4:
 [USER]
@@ -295,12 +205,12 @@ You're welcome.
 
 [USER]
 one more thing -- what time is it in Tokyo?
-=> {"required": false, "category": "none", "needs_scaffold": false}
+=> {"required": false, "category": "none"}
 
-EX5 (genuine new complex task, no prior planning context):
+EX5:
 [USER]
 Design a multi-region failover strategy for our postgres replicas and write the runbook
-=> {"required": true, "category": "planning", "needs_scaffold": true}
+=> {"required": true, "category": "planning"}
 
 EX6 (follow-up refinement on an active conversation):
 [USER]
@@ -311,9 +221,9 @@ check the weather today in bucharest from 3 sources and average them
 
 [USER]
 give me a nice artifact
-=> {"required": false, "category": "none", "needs_scaffold": false}
+=> {"required": false, "category": "none"}
 
-Reply with JSON only: {"required": <bool>, "category": "<category>", "needs_scaffold": <bool>}.
+Reply with JSON only: {"required": <bool>, "category": "<category>"}.
 "required" must be true iff "category" != "none".
 """
 
@@ -529,12 +439,6 @@ async def classify_hard_task_async(
         required=required,
         category=category,
         reason="llm",
-        # needs_scaffold is meaningful only when 'required' is True;
-        # AND-gate here so a future regression in the classifier
-        # (returning needs_scaffold=True for category=none) can't
-        # silently re-introduce the 24s scaffold-build penalty on
-        # chitchat turns.
-        needs_scaffold=bool(judgment.needs_scaffold) and required,
     )
     _classifier_cache.put(cache_key, result)
     return result
@@ -579,39 +483,24 @@ def model_supports_thinking_toggle(model_id: str | None) -> bool:
 def build_thinking_extra_body(
     *,
     enable_thinking: bool | None = None,
-    thinking_budget: int | None = None,
-    preserve_thinking: bool | None = None,
 ) -> dict[str, Any]:
-    """Return ``extra_body`` payload for reasoning-control knobs.
+    """Return ``extra_body`` payload for the reasoning on/off toggle.
 
-    Emits, all at the top level of ``extra_body`` so DashScope-compatible
-    providers (Qwen3-Max) see them, plus a duplicate
+    Emits ``enable_thinking`` at the top level of ``extra_body`` so
+    DashScope-compatible providers (Qwen3-Max) see it, plus a duplicate
     ``chat_template_kwargs.enable_thinking`` for vLLM-style providers
     (GLM via DeepInfra) that read the chat-template form.  Unknown
     fields are silently dropped by providers that don't recognise them,
     so dual emission costs nothing.
 
-    Parameters
-    ----------
-    enable_thinking:
-        ``False`` suppresses reasoning; ``True`` forces it on; ``None``
-        leaves the provider default in place (no field emitted).
-    thinking_budget:
-        Hard cap on reasoning tokens.  ``None`` to leave the provider
-        default.
-    preserve_thinking:
-        Pass prior ``reasoning_content`` from the message history back
-        into the model's input on subsequent turns.  ``None`` to leave
-        the provider default.
+    ``enable_thinking`` ``False`` suppresses reasoning; ``True`` forces
+    it on; ``None`` leaves the provider default in place (no field
+    emitted).
     """
     body: dict[str, Any] = {}
     if enable_thinking is not None:
         body["enable_thinking"] = bool(enable_thinking)
         body["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
-    if thinking_budget is not None:
-        body["thinking_budget"] = int(thinking_budget)
-    if preserve_thinking is not None:
-        body["preserve_thinking"] = bool(preserve_thinking)
     return body
 
 
