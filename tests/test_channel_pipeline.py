@@ -643,6 +643,9 @@ async def test_user_message_event_content_matches_text():
 
     ev = next(e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE)
     assert ev[2]["content"] == "What is the plan?"
+    # the catch-up watermark relies on the Slack ts being stored
+    emitted_source = ev[2]["source"]
+    assert emitted_source["ts"] == msg.ts
 
 
 @pytest.mark.asyncio

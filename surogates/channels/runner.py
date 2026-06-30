@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.responses import Response
 
+from surogates.channels.channel_catchup import ChannelCatchup
 from surogates.channels.channel_observations import append_channel_observation
 from surogates.channels.dispatcher import (
     ChannelDeliveryDispatcher,
@@ -352,7 +353,7 @@ def build_channels_app(
     mate_settings_cache: Any = None,
     registry: ChannelRegistry | None = None,
     storage: Any = None,
-) -> tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler]:
+) -> tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler, ChannelCatchup]:
     """Construct the channel webhook FastAPI app and related dispatchers.
 
     This is a pure-construction function — no network I/O, no serving.
@@ -389,9 +390,10 @@ def build_channels_app(
 
     Returns
     -------
-    tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler]
-        ``(app, delivery_dispatcher, reconciler)`` — the caller starts the
-        delivery loops and reconciler as asyncio tasks, then serves ``app``.
+    tuple[FastAPI, ChannelDeliveryDispatcher, ChannelWebhookReconciler, ChannelCatchup]
+        ``(app, delivery_dispatcher, reconciler, channel_catchup)`` — the caller
+        starts the delivery loops, reconciler, and catch-up as asyncio tasks,
+        then serves ``app``.
     """
     if registry is None:
         from surogates.channels.registry import registry as _global_registry
@@ -435,6 +437,17 @@ def build_channels_app(
         registry=registry,
     )
 
+    channel_catchup = ChannelCatchup(
+        redis=redis,
+        session_factory=session_factory,
+        vault=vault,
+        platform_client=platform_client,
+        registry=registry,
+        pipeline=pipeline,
+        deps_factory=deps_factory,
+        settings=settings,
+    )
+
     app = dispatcher.build_app()
     # Hand the per-message identity caches to the caller so it can wire the
     # cross-process invalidator (link_channel publishes channel_identity_changed
@@ -445,7 +458,7 @@ def build_channels_app(
     async def _health() -> Response:
         return Response(status_code=200)
 
-    return app, delivery_dispatcher, reconciler
+    return app, delivery_dispatcher, reconciler, channel_catchup
 
 
 async def run_channels(settings: Any, kind: str | None = None) -> None:
@@ -507,7 +520,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
     from surogates.storage.backend import create_backend
     storage = create_backend(settings)
 
-    app, delivery_dispatcher, reconciler = build_channels_app(
+    app, delivery_dispatcher, reconciler, channel_catchup = build_channels_app(
         settings,
         redis=redis,
         session_factory=sf,
@@ -557,6 +570,12 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         name="channel-reconciler",
     )
     tasks.append(reconciler_task)
+
+    catchup_task = asyncio.create_task(
+        channel_catchup.run(),
+        name="channel-catchup",
+    )
+    tasks.append(catchup_task)
 
     # Serve via uvicorn.
     channels_settings = getattr(settings, "channels", None)

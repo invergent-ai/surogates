@@ -568,6 +568,7 @@ class ChannelInboundPipeline:
                 "user_id": msg.platform_user_id,
                 "user_name": msg.user_name,
                 "thread_id": msg.thread_key,
+                "ts": msg.ts,
             },
         }
         if _images:

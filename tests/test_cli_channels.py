@@ -301,7 +301,7 @@ class TestBuildChannelsApp:
         settings.channels = {}
 
         result = build_channels_app(settings, registry=empty_reg, **self._make_deps())
-        app, delivery_dispatcher, reconciler = result
+        app, delivery_dispatcher, reconciler, catchup = result
         assert isinstance(app, FastAPI)
 
     def test_health_route_returns_200(self):
@@ -311,7 +311,7 @@ class TestBuildChannelsApp:
         settings = MagicMock()
         settings.channels = {}
 
-        app, _, _ = build_channels_app(settings, registry=empty_reg, **self._make_deps())
+        app, _, _, _ = build_channels_app(settings, registry=empty_reg, **self._make_deps())
         client = TestClient(app)
         resp = client.get("/health")
         assert resp.status_code == 200
@@ -325,7 +325,7 @@ class TestBuildChannelsApp:
         settings.channels = {}
 
         # Should not raise.
-        app, delivery, reconciler = build_channels_app(
+        app, delivery, reconciler, catchup = build_channels_app(
             settings, registry=empty_reg, **self._make_deps()
         )
         assert delivery is not None
@@ -339,7 +339,7 @@ class TestBuildChannelsApp:
         settings = MagicMock()
         settings.channels = {}
 
-        _, delivery, _ = build_channels_app(settings, registry=empty_reg, **self._make_deps())
+        _, delivery, _, _ = build_channels_app(settings, registry=empty_reg, **self._make_deps())
         assert isinstance(delivery, ChannelDeliveryDispatcher)
 
     def test_reconciler_returned(self):
@@ -350,7 +350,7 @@ class TestBuildChannelsApp:
         settings = MagicMock()
         settings.channels = {}
 
-        _, _, reconciler = build_channels_app(settings, registry=empty_reg, **self._make_deps())
+        _, _, reconciler, _ = build_channels_app(settings, registry=empty_reg, **self._make_deps())
         assert isinstance(reconciler, ChannelWebhookReconciler)
 
 
