@@ -88,6 +88,15 @@ def test_native_slack_named_tool_not_caught():
     assert "mcp__other__SLACK_thing" in result
 
 
+def test_ambient_session_treated_as_slack():
+    # Ambient sessions act in a Slack channel but carry channel="ambient";
+    # they must drop Composio SLACK too (the worker resolves ambient → slack).
+    h = _harness(_REG, mcp=_COMPOSIO, composio=_COMPOSIO)
+    result = h._drop_native_channel_composio_tools(set(_REG), _session("ambient"))
+    assert _SLACK not in result and _SLACK2 not in result
+    assert _GMAIL in result
+
+
 def test_ordering_drop_survives_apply_mcp_schema_filter():
     # The integration concern: _apply_mcp_schema_filter re-adds the agent's MCP
     # tools (incl. Composio SLACK), so the drop must run AFTER it.

@@ -3189,7 +3189,11 @@ class AgentHarness(
         so native or non-Composio tools are never caught. A no-op when the
         channel has no mapped toolkit or the agent has no Composio tools.
         """
-        toolkit = CHANNEL_NATIVE_COMPOSIO_TOOLKIT.get(session.channel or "")
+        # Ambient sessions act in a Slack channel (they carry slack_channel_id)
+        # but their session.channel is "ambient"; resolve to the slack platform
+        # like the worker does (worker.py: _platform = "slack" if _is_ambient).
+        channel = "slack" if session.channel == "ambient" else (session.channel or "")
+        toolkit = CHANNEL_NATIVE_COMPOSIO_TOOLKIT.get(channel)
         if not toolkit or not self._composio_tool_names:
             return tool_filter
         prefix = f"{toolkit}_"
