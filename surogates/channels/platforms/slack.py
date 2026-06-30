@@ -996,6 +996,31 @@ class SlackPlatform:
             logger.warning("[SlackPlatform] download_file failed for %s", url, exc_info=True)
             return None
 
+    async def fetch_file_meta(
+        self, *, creds: dict, file_id: str,
+    ) -> dict | None:
+        """Return Slack ``files.info`` metadata for *file_id*, or None.
+
+        The returned object carries ``url_private_download``, ``name``,
+        ``mimetype``, ``size`` and the ``channels``/``groups``/``ims``
+        membership lists used to enforce that the file was shared in the
+        agent's own channel.  Returns None on missing token, missing
+        file_id, or any Slack error (never raises).
+        """
+        bot_token = (creds or {}).get("bot_token") or ""
+        if not bot_token or not file_id:
+            return None
+        client = self._get_client(bot_token)
+        try:
+            resp = await client.files_info(file=file_id)
+        except Exception:
+            logger.warning(
+                "[SlackPlatform] files_info failed for %s", file_id, exc_info=True,
+            )
+            return None
+        file_obj = resp.get("file")
+        return file_obj if file_obj else None
+
     # ------------------------------------------------------------------
     # send_files — upload workspace files referenced by MEDIA: markers
     # ------------------------------------------------------------------
