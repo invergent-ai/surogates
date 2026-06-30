@@ -114,6 +114,10 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # delivery service, and the per-session ambient caps; none exist in a
     # sandbox pod, so it runs in the worker process.
     "mate_ambient_post": ToolLocation.HARNESS,
+    # Channel file fetch — handler needs the session-scoped API client to
+    # call the ops server endpoint that downloads/ingests the Slack file;
+    # no sandbox isolation needed or available.
+    "fetch_channel_file": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,

@@ -320,6 +320,37 @@ class HarnessAPIClient:
         except httpx.HTTPStatusError as exc:
             return _error_response(exc)
 
+    async def fetch_channel_file(self, file_id: str) -> str:
+        """Fetch a file shared earlier in this session's channel.
+
+        Downloads the file server-side into the session workspace and returns
+        a JSON string with the workspace ``path`` (and inlined text when the
+        file is textual).  Requires a session-scoped client.
+        """
+        if not file_id or not file_id.strip():
+            return json.dumps(
+                {"success": False, "error": "A file_id is required."},
+                ensure_ascii=False,
+            )
+        if self._session_id is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "Channel-file fetch requires a session-scoped API "
+                        "client; session_id is not set."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        try:
+            data = await self._post(
+                f"/v1/sessions/{self._session_id}/channel-files/{file_id}",
+            )
+            return json.dumps({"success": True, **data}, ensure_ascii=False)
+        except httpx.HTTPStatusError as exc:
+            return _error_response(exc)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
