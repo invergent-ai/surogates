@@ -1621,6 +1621,29 @@ class TestSlackMediaDelivery:
         assert sent_item.payload["content"] == "just a normal reply"
         assert platform.send_files_calls == []
 
+    async def test_pathless_marker_only_posts_generic_message(self):
+        item = _FakeOutboxItem(
+            id=6,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform()
+        storage = _MediaStorage({})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        # A bare 'MEDIA:' must never produce an empty send; the user gets the
+        # generic non-leaking message instead.
+        assert len(platform.send_calls) == 1
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == "I couldn't upload the referenced file."
+        assert "MEDIA:" not in sent_item.payload["content"]
+        assert platform.send_files_calls == []
+        assert delivery.delivered == [(6, "msg-001")]
+
     async def test_marker_only_with_placeholder_deletes_and_clears(self):
         import json
         from surogates.channels.channel_progress import progress_key

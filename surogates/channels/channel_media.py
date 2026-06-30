@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from surogates.session.attachment_ingest import workspace_root_id
+from surogates.session.attachment_ingest import safe_display_name, workspace_root_id
 from surogates.storage.tenant import prefixed_session_workspace_key
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,8 @@ async def resolve_workspace_media(
         except Exception:
             logger.warning("[channel_media] read failed for %s", rel, exc_info=True)
             continue
-        filename = PurePosixPath(rel).name
-        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        raw_name = PurePosixPath(rel).name
+        filename = safe_display_name(raw_name)
+        mime = mimetypes.guess_type(raw_name)[0] or "application/octet-stream"
         out.append(OutboundFile(filename=filename, mime_type=mime, data=data))
     return out

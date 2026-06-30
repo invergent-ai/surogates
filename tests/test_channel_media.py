@@ -158,3 +158,13 @@ class TestResolveWorkspaceMedia:
             storage, session, paths=["/workspace/report.pdf"], max_files=10, max_bytes=1024,
         )
         assert files == []
+
+    async def test_filename_is_sanitized(self):
+        session = _FakeSession()
+        storage = _FakeStorage({_key("re\x07port.pdf"): b"data"})
+        files = await resolve_workspace_media(
+            storage, session, paths=["/workspace/re\x07port.pdf"], max_files=10, max_bytes=1024,
+        )
+        assert len(files) == 1
+        assert "\x07" not in files[0].filename
+        assert files[0].mime_type == "application/pdf"

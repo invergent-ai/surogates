@@ -45,6 +45,8 @@ __all__ = ["ChannelWebhookDispatcher", "ChannelDeliveryDispatcher", "ChannelWebh
 
 logger = logging.getLogger(__name__)
 
+_MEDIA_UPLOAD_FAILED_MSG = "I couldn't upload the referenced file."
+
 
 # ---------------------------------------------------------------------------
 # Routing object
@@ -679,7 +681,8 @@ class ChannelDeliveryDispatcher:
         # Slack MEDIA: markers — strip from text and resolve workspace files.
         # Gated to Slack: never strip a marker on a platform that cannot upload.
         media_files: list = []
-        marker_only = False
+        media_reply_only = False
+        send_files_fn = getattr(platform, "send_files", None)
         content = item.payload.get("content") or ""
         if platform.kind == "slack" and "MEDIA:" in content:
             from surogates.channels.channel_media import (
@@ -688,12 +691,12 @@ class ChannelDeliveryDispatcher:
             )
             paths, cleaned = parse_media_markers(content)
             item.payload["content"] = cleaned
-            marker_only = bool(paths) and not cleaned.strip()
+            media_reply_only = not cleaned.strip()
             if (
                 paths
                 and self._storage is not None
                 and self._session_store is not None
-                and getattr(platform, "send_files", None)
+                and send_files_fn
             ):
                 try:
                     session = await self._session_store.get_session(item.session_id)
@@ -709,12 +712,11 @@ class ChannelDeliveryDispatcher:
                     media_files = []
 
         # Marker-only reply: the file IS the reply (no text to post).
-        if marker_only:
+        if media_reply_only:
             uploaded: list = []
-            send_files = getattr(platform, "send_files", None)
-            if media_files and send_files is not None:
+            if media_files and send_files_fn is not None:
                 try:
-                    uploaded = await send_files(item, creds=creds, files=media_files)
+                    uploaded = await send_files_fn(item, creds=creds, files=media_files)
                 except Exception:
                     logger.warning(
                         "[delivery] send_files raised for outbox %d", item.id, exc_info=True,
@@ -745,7 +747,7 @@ class ChannelDeliveryDispatcher:
                 )
                 return
             # Nothing uploaded — show a generic, non-leaking failure message.
-            item.payload["content"] = "I couldn't upload the referenced file."
+            item.payload["content"] = _MEDIA_UPLOAD_FAILED_MSG
 
         # 4. Send the text via the platform, with per-item exception isolation.
         try:
@@ -790,8 +792,7 @@ class ChannelDeliveryDispatcher:
             # Non-empty-text reply with resolved files: upload them as follow-ups
             # in the same thread. Best-effort — a failed upload never fails or
             # retries the already-delivered text.
-            send_files_fn = getattr(platform, "send_files", None)
-            if media_files and not marker_only and send_files_fn is not None:
+            if media_files and not media_reply_only and send_files_fn is not None:
                 try:
                     await send_files_fn(item, creds=creds, files=media_files)
                 except Exception:
