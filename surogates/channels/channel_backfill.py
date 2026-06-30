@@ -13,6 +13,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from surogates.session.attachment_ingest import safe_display_name
 from surogates.session.events import EventType
 
 
@@ -41,6 +42,7 @@ class RawMessage:
     ts: float
     author: str
     text: str
+    files: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ def filter_messages(messages: list[dict], *, bot_user_id: str) -> list[dict]:
             continue
         if m.get("bot_id") or m.get("subtype"):
             continue
-        if not (m.get("text") or "").strip():
+        if not (m.get("text") or "").strip() and not (m.get("files") or []):
             continue
         out.append(m)
     return out
@@ -78,7 +80,9 @@ def bound_messages(
     for m in messages:  # newest-first
         if m.ts < oldest_allowed:
             break
-        cost = _est_tokens(m.text) + _est_tokens(m.author) + 8  # +label overhead
+        file_bits = " ".join(f"{name} {file_id}" for file_id, name in m.files)
+        body = " ".join(part for part in (m.text, file_bits) if part)
+        cost = _est_tokens(body) + _est_tokens(m.author) + 8
         # The newest message is always included (picked is empty on the first iteration) so a session never gets an empty block when history exists, even if that one message exceeds max_tokens.
         if picked and tokens + cost > limits.max_tokens:
             break
@@ -108,7 +112,17 @@ def format_context_block(
     lines.append("")
     lines.append("Recent messages (oldest to newest, bounded):")
     for m in messages:
-        lines.append(f"{_fmt_ts(m.ts)} {m.author}: {m.text}")
+        if m.text:
+            lines.append(f"{_fmt_ts(m.ts)} {m.author}: {m.text}")
+        for file_id, name in m.files:
+            # A file-only message (empty text) attributes the file inline so it
+            # never emits a blank "author: " line; file_id is sanitized like the
+            # name so a crafted id can't forge extra context lines.
+            prefix = "    " if m.text else f"{_fmt_ts(m.ts)} {m.author}: "
+            lines.append(
+                f"{prefix}shared file: {safe_display_name(name)} "
+                f"(file: {safe_display_name(file_id)})"
+            )
     lines.append("[/channel context]")
     return "\n".join(lines)
 

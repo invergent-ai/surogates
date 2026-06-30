@@ -125,6 +125,26 @@ class SlackRespClient:
         return _SlackResp({"user_id": "U_BOT"})
 
 
+async def test_fetch_captures_message_files():
+    info = {"name": "eng", "is_im": False, "is_mpim": False}
+    page = {"messages": [
+        {"user": "U1", "text": "see this", "ts": "3.0", "files": [
+            {"id": "F999", "name": "doc.pdf", "mimetype": "application/pdf"},
+        ]},
+        {"user": "U2", "text": "", "ts": "2.0", "files": [
+            {"id": "F998", "name": "file-only.txt", "mimetype": "text/plain"},
+        ]},
+    ], "has_more": False, "response_metadata": {"next_cursor": ""}}
+    p = _platform_with(FakeClient(info, [page]))
+    out = await p.fetch_channel_context(
+        creds={"bot_token": "xoxb"}, channel_id="C1", limits=BackfillLimits())
+    assert out is not None
+    _meta, msgs = out
+    assert msgs[0].files == (("F999", "doc.pdf"),)
+    assert msgs[1].text == ""
+    assert msgs[1].files == (("F998", "file-only.txt"),)
+
+
 async def test_fetch_handles_non_dict_slack_response():
     """The real Web API returns AsyncSlackResponse (not a dict). Metadata,
     messages, and author names must all survive — a regression guard for

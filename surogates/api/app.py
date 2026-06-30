@@ -693,6 +693,7 @@ def create_app() -> FastAPI:
         board,
         browser,
         browser_profiles,
+        channel_files,
         coding_agents,
         composio,
         events,
@@ -750,6 +751,7 @@ def create_app() -> FastAPI:
     app.include_router(website.router, prefix="/v1", tags=["website"])
     app.include_router(workspace.router, prefix="/v1", tags=["workspace"])
     app.include_router(artifacts.router, prefix="/v1", tags=["artifacts"])
+    app.include_router(channel_files.router, prefix="/v1", tags=["channel-files"])
     app.include_router(browser.router, prefix="/v1", tags=["browser"])
     # Dual-mount like the feedback router: the web app reaches these as
     # ``/api/v1/browser-profiles`` (its dev proxy strips the leading ``/api`` →
