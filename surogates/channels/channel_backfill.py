@@ -112,10 +112,16 @@ def format_context_block(
     lines.append("")
     lines.append("Recent messages (oldest to newest, bounded):")
     for m in messages:
-        lines.append(f"{_fmt_ts(m.ts)} {m.author}: {m.text}")
+        if m.text:
+            lines.append(f"{_fmt_ts(m.ts)} {m.author}: {m.text}")
         for file_id, name in m.files:
+            # A file-only message (empty text) attributes the file inline so it
+            # never emits a blank "author: " line; file_id is sanitized like the
+            # name so a crafted id can't forge extra context lines.
+            prefix = "    " if m.text else f"{_fmt_ts(m.ts)} {m.author}: "
             lines.append(
-                f"    shared file: {safe_display_name(name)} (file: {file_id})"
+                f"{prefix}shared file: {safe_display_name(name)} "
+                f"(file: {safe_display_name(file_id)})"
             )
     lines.append("[/channel context]")
     return "\n".join(lines)

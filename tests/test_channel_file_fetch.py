@@ -199,3 +199,34 @@ async def test_fetch_channel_file_sanitizes_file_id_in_path(monkeypatch):
     # separators that could enable directory traversal.
     suffix = out["path"][len("uploads/slack/fetch/"):]
     assert "/" not in suffix
+
+
+async def test_fetch_channel_file_accepts_shares_membership(monkeypatch):
+    # Modern v2-upload metadata records membership under shares.private with no
+    # top-level "channels" array; the file is legitimately in the session's
+    # channel and must be fetched, not refused.
+    _patch_externals(monkeypatch)
+    meta = {"name": "report.html", "url_private_download": "https://slack.com/d",
+            "mimetype": "text/html", "size": 12,
+            "shares": {"private": {"C1": [{"ts": "1.0"}]}}}
+    platform = _FakePlatform(meta=meta)
+    out = await fetch_channel_file(
+        platform=platform, vault=object(), storage=object(),
+        session=_session(channel_id="C1"), bucket="b", file_id="F1")
+    assert out["kind"] == "attachment"
+    assert platform.download_calls == 1
+
+
+async def test_fetch_channel_file_refuses_foreign_shares(monkeypatch):
+    # A file shared only into channel C2 (via shares) must still be refused for
+    # a C1 session — the shares lookup must not weaken tenant isolation.
+    _patch_externals(monkeypatch)
+    meta = {"name": "secret.html", "url_private_download": "https://slack.com/d",
+            "mimetype": "text/html", "size": 12,
+            "shares": {"public": {"C2": [{"ts": "1.0"}]}}}
+    platform = _FakePlatform(meta=meta)
+    with pytest.raises(ChannelFileForbidden):
+        await fetch_channel_file(
+            platform=platform, vault=object(), storage=object(),
+            session=_session(channel_id="C1"), bucket="b", file_id="F1")
+    assert platform.download_calls == 0

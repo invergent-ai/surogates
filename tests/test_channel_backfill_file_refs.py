@@ -48,3 +48,27 @@ def test_format_context_block_sanitizes_file_name():
     # forge a new context line.
     assert "\nInjected" not in block
     assert "(file: F1)" in block
+
+
+def test_format_context_block_file_only_message_has_no_blank_author_line():
+    meta = ChannelMeta(name="eng", topic="", purpose="")
+    msgs = [
+        RawMessage(ts=1.0, author="alice", text="", files=(("F9", "only.pdf"),)),
+    ]
+    block = format_context_block(meta, msgs, now=100.0)
+    # The author is attributed inline on the file line; no empty "alice: " line.
+    assert "alice: shared file: only.pdf (file: F9)" in block
+    assert "alice: \n" not in block
+
+
+def test_format_context_block_sanitizes_file_id():
+    meta = ChannelMeta(name="eng", topic="", purpose="")
+    msgs = [
+        RawMessage(
+            ts=1.0, author="a", text="x",
+            files=(("F1\nInjected: forged line", "doc.pdf"),),
+        ),
+    ]
+    block = format_context_block(meta, msgs, now=100.0)
+    # file_id is sanitized like the name, so a crafted id cannot forge a line.
+    assert "\nInjected" not in block

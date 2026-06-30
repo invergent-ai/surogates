@@ -48,11 +48,21 @@ class ChannelFileUnavailable(ChannelFileError):
 
 
 def _shared_in_channel(file_meta: dict, channel_id: str) -> bool:
-    """True if *channel_id* appears in the file's share lists."""
+    """True if *channel_id* appears in the file's share lists.
+
+    Checks both the legacy top-level arrays (``channels``/``groups``/``ims``)
+    and the modern ``shares`` object (``{"public": {"C123": [...]},
+    "private": {"G123": [...]}}``) — files uploaded via the v2 API may record
+    channel membership only under ``shares``, so consulting it too keeps a
+    legitimately-shared private-channel file from being wrongly refused.
+    """
     if not channel_id:
         return False
     for key in ("channels", "groups", "ims"):
         if channel_id in (file_meta.get(key) or []):
+            return True
+    for visibility in (file_meta.get("shares") or {}).values():
+        if isinstance(visibility, dict) and channel_id in visibility:
             return True
     return False
 
