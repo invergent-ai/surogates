@@ -92,6 +92,7 @@ def _make_deps_factory(
     mate_settings_cache: Any = None,
     link_url_base: str = "",
     storage: Any = None,
+    settings: Any = None,
 ) -> Any:
     """Return a deps_factory for :class:`ChannelWebhookDispatcher`.
 
@@ -127,6 +128,18 @@ def _make_deps_factory(
         session_factory, resolve=resolve_real_identity, provision=None,
     )
     pairing = PairingStore(redis)
+
+    async def _get_or_create(*args: Any, **kwargs: Any) -> Any:
+        """Create the channel session WITH a persistent workspace.
+
+        Injects the storage backend + settings so new channel sessions are
+        provisioned a workspace (storage_bucket/key_prefix/workspace_path) the
+        same way API/web sessions are — otherwise the worker mounts no
+        /workspace and inbound attachments are skipped.
+        """
+        return await get_or_create_channel_session(
+            *args, storage=storage, settings=settings, **kwargs
+        )
 
     def _link_prompt(code: str) -> str:
         where = (
@@ -306,7 +319,7 @@ def _make_deps_factory(
             redis=redis,
             state=state,
             firehose_append=append_channel_observation,
-            get_or_create_session=get_or_create_channel_session,
+            get_or_create_session=_get_or_create,
             enqueue_session=enqueue_session,
             resolve_identity=resolve_identity,
             session_factory=session_factory,
@@ -392,6 +405,7 @@ def build_channels_app(
         mate_settings_cache=mate_settings_cache,
         link_url_base=getattr(getattr(settings, "channels", None), "studio_url", ""),
         storage=storage,
+        settings=settings,
     )
 
     dispatcher = ChannelWebhookDispatcher(
