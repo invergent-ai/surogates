@@ -1174,7 +1174,17 @@ class SlackPlatform:
                     except (TypeError, ValueError):
                         continue
                     author = await self._resolve_user_name(bot_token, m.get("user") or "")
-                    raw.append(RawMessage(ts=ts, author=author, text=(m.get("text") or "").strip()))
+                    files = tuple(
+                        (f.get("id") or "", f.get("name") or "")
+                        for f in (m.get("files") or [])
+                        if f.get("id")
+                    )
+                    raw.append(RawMessage(
+                        ts=ts,
+                        author=author,
+                        text=(m.get("text") or "").strip(),
+                        files=files,
+                    ))
                 cursor = (hist.get("response_metadata") or {}).get("next_cursor") or ""
                 if not hist.get("has_more") or not cursor:
                     break
