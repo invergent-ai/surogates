@@ -147,6 +147,13 @@ class HarnessAPIClient:
         Forwards the client's ``session_id`` (if set) to the API so that
         supporting files get auto-staged into the session workspace.
         """
+        if not name or not name.strip():
+            # An empty name would build "/v1/skills/" and 307-redirect into an
+            # opaque error; reject it with a clear message instead.
+            return json.dumps(
+                {"success": False, "error": "Skill name is required."},
+                ensure_ascii=False,
+            )
         params: dict[str, Any] = {}
         if self._session_id is not None:
             params["session_id"] = self._session_id
