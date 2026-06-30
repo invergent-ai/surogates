@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
 from surogates.channels.channel_backfill import BackfillLimits, filter_messages
 from surogates.channels.credentials import resolve_channel_credentials
+from surogates.runtime.leader_lock import RedisLeaderLock
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -152,27 +154,37 @@ class ChannelCatchup:
         agent_id: str = app.get("agent_id", "")
         if not (app_id and org_id and agent_id):
             return
-        platform = self._resolve_platform(app)
-        if platform is None:
+        lock = self._make_lock(app_id)
+        if not await lock.acquire():
+            logger.info("[catchup] app %s locked by another instance — skipping", app_id)
             return
-        creds = await resolve_channel_credentials(
-            vault=self._vault, kind="slack", identifier=app_id, org_id=org_id,
-            refs=platform.descriptor.vault_refs(app_id),
-        )
-        if not (creds or {}).get("bot_token"):
-            return
-        routing = _Routing(
-            org_id=org_id, agent_id=agent_id, platform="slack",
-            identifier=app_id, config=app.get("config") or {},
-        )
-        for conv_id, channel_type in await self._list_conversations(platform, creds):
-            try:
-                await self._catchup_conversation(
-                    platform=platform, routing=routing, creds=creds,
-                    conv_id=conv_id, channel_type=channel_type,
-                )
-            except Exception:
-                logger.warning("[catchup] conversation %s failed", conv_id, exc_info=True)
+        try:
+            platform = self._resolve_platform(app)
+            if platform is None:
+                return
+            creds = await resolve_channel_credentials(
+                vault=self._vault, kind="slack", identifier=app_id, org_id=org_id,
+                refs=platform.descriptor.vault_refs(app_id),
+            )
+            if not (creds or {}).get("bot_token"):
+                return
+            routing = _Routing(
+                org_id=org_id, agent_id=agent_id, platform="slack",
+                identifier=app_id, config=app.get("config") or {},
+            )
+            for conv_id, channel_type in await self._list_conversations(platform, creds):
+                try:
+                    await self._catchup_conversation(
+                        platform=platform, routing=routing, creds=creds,
+                        conv_id=conv_id, channel_type=channel_type,
+                    )
+                except Exception:
+                    logger.warning("[catchup] conversation %s failed", conv_id, exc_info=True)
+                if not await lock.heartbeat():
+                    logger.warning("[catchup] app %s lost leader lock — stopping", app_id)
+                    return
+        finally:
+            await lock.release()
 
     # -- per conversation ---------------------------------------------------
 
@@ -225,6 +237,16 @@ class ChannelCatchup:
 
     def _resolve_platform(self, app: dict) -> Any:
         return self._registry.get("slack") if self._registry is not None else None
+
+    def _make_lock(self, app_id: str) -> Any:
+        if self._lock is not None:
+            return self._lock  # injected (tests)
+        return RedisLeaderLock(
+            self._redis,
+            key=f"channel-catchup:leader:{app_id}",
+            ttl_seconds=120,
+            holder_id=uuid.uuid4().hex,
+        )
 
     async def _watermark(self, **kw: Any) -> str | None:
         return await latest_catchup_watermark(self._session_factory, **kw)

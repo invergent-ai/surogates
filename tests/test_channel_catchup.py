@@ -188,6 +188,17 @@ def _wm(watermarks: dict[str, str | None]):
     return _w
 
 
+class _AcquiredLock:
+    async def acquire(self) -> bool:
+        return True
+
+    async def heartbeat(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        return None
+
+
 def _catchup(*, client, pipeline, routings, watermarks, limits=None):
     platform = _FakePlatform(client)
     cu = ChannelCatchup(
@@ -201,10 +212,11 @@ def _catchup(*, client, pipeline, routings, watermarks, limits=None):
         settings=None,
         limits=limits or BackfillLimits(),
         pace_s=0.0,
-        lock=None,  # no-op until the lock wiring is added
+        lock=None,
     )
     cu._resolve_platform = lambda app: platform        # inject the fake platform (sync)
     cu._watermark = _wm(watermarks)                    # inject watermarks (async)
+    cu._make_lock = lambda app_id: _AcquiredLock()
     return cu
 
 
@@ -359,3 +371,32 @@ class TestChannelCatchupReplay:
         with mock.patch.object(cc, "_now", lambda: fixed_now):
             await cu.run()
         assert client.history_calls[0]["oldest"] == "1712345695.000000"
+
+
+class _HeldLock:
+    """A lock that is already held by someone else — acquire returns False."""
+
+    async def acquire(self) -> bool:
+        return False
+
+    async def heartbeat(self) -> bool:
+        return True
+
+    async def release(self) -> None:
+        return None
+
+
+class TestChannelCatchupLock:
+    async def test_app_skipped_when_lock_not_acquired(self):
+        client = _FakeSlackClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [{"user": "U1", "text": "hi", "ts": "1712345690.000000"}]},
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(client=client, pipeline=pipeline, routings=_ROUTINGS,
+                      watermarks={"C1": "1712345680.000000"})
+        cu._lock = _HeldLock()                # lock held elsewhere
+        cu._make_lock = lambda app_id: cu._lock
+        await cu.run()
+        assert pipeline.handled == []         # app skipped, nothing replayed
+        assert client.history_calls == []
