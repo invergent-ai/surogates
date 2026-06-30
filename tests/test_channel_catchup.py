@@ -151,6 +151,8 @@ class _FakePlatform:
         return self._client
 
     async def parse(self, body: Any, *, creds: dict | None = None, identifier: str | None = None):
+        if body.get("type") != "event_callback":
+            return None
         ev = body["event"]
         if ev.get("user") == "UBOT" or ev.get("bot_id") or ev.get("subtype"):
             return None

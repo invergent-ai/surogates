@@ -214,6 +214,7 @@ class ChannelCatchup:
         self, platform: Any, routing: _Routing, creds: dict, conv_id: str, channel_type: str, m: dict,
     ) -> None:
         body = {
+            "type": "event_callback",
             "api_app_id": routing.identifier,
             "event": {
                 "type": "message",
