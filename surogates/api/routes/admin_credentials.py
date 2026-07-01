@@ -20,7 +20,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from surogates.db.models import Org, User
+from surogates.db.models import Org, ServiceAccount, User
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 from surogates.tenant.credentials import CredentialVault
@@ -35,6 +35,7 @@ router = APIRouter()
 class CredentialCreate(BaseModel):
     org_id: UUID
     user_id: UUID | None = None
+    service_account_id: UUID | None = None
     name: str = Field(..., min_length=1, max_length=128)
     value: str = Field(..., min_length=1, repr=False)
 
@@ -44,7 +45,19 @@ class CredentialInfo(BaseModel):
 
     org_id: UUID
     user_id: UUID | None
+    service_account_id: UUID | None = None
     name: str
+
+
+def _require_credential_scope(
+    user_id: UUID | None,
+    service_account_id: UUID | None,
+) -> None:
+    if user_id is not None and service_account_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Credential scope accepts user_id or service_account_id, not both.",
+        )
 
 
 class CredentialListResponse(BaseModel):
@@ -80,9 +93,17 @@ async def create_credential(
     Returns ``201 Created`` on insert, ``200 OK`` on update.  The
     plaintext is never echoed back.
     """
+    _require_credential_scope(body.user_id, body.service_account_id)
     require_tenant_scope(
         tenant, body.org_id, body.user_id, resource="credentials",
     )
+    # Agent-owned (service-account) credentials are shared infrastructure —
+    # only platform admins manage them, so they stay admin/runtime-controlled.
+    if body.service_account_id is not None and "admin" not in tenant.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins may manage service-account credentials.",
+        )
     vault = _get_vault(request)
 
     session_factory = request.app.state.session_factory
@@ -100,16 +121,28 @@ async def create_credential(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"User {body.user_id} not found in org {body.org_id}.",
                 )
+        if body.service_account_id is not None:
+            sa = await session.get(ServiceAccount, body.service_account_id)
+            if sa is None or sa.org_id != body.org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=(
+                        f"Service account {body.service_account_id} not found "
+                        f"in org {body.org_id}."
+                    ),
+                )
 
     _id, created = await vault.store(
-        body.org_id, body.name, body.value, user_id=body.user_id,
+        body.org_id, body.name, body.value,
+        user_id=body.user_id, service_account_id=body.service_account_id,
     )
 
     response.status_code = (
         status.HTTP_201_CREATED if created else status.HTTP_200_OK
     )
     return CredentialInfo(
-        org_id=body.org_id, user_id=body.user_id, name=body.name,
+        org_id=body.org_id, user_id=body.user_id,
+        service_account_id=body.service_account_id, name=body.name,
     )
 
 
@@ -119,18 +152,20 @@ async def list_credentials(
     tenant: TenantContext = Depends(get_current_tenant),
     org_id: UUID | None = None,
     user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> CredentialListResponse:
     """List credential names visible to the tenant.
 
-    Platform admins may pass any ``org_id`` / ``user_id`` and, without
-    filters, see every credential in the database.  Regular users are
-    pinned to their own org and their own user scope.  ``total`` is
-    the true unpaginated count.
+    Platform admins may pass any ``org_id`` / ``user_id`` / ``service_account_id``
+    and, without filters, see every credential in the database.  Regular users
+    are pinned to their own org and their own user scope and may not query
+    service-account credentials.  ``total`` is the true unpaginated count.
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
+    _require_credential_scope(user_id, service_account_id)
 
     vault = _get_vault(request)
     is_admin = "admin" in tenant.permissions
@@ -146,23 +181,34 @@ async def list_credentials(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Cannot list another user's credentials.",
             )
+        if service_account_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot list service-account credentials.",
+            )
 
     if is_admin and org_id is None:
         rows, total = await vault.list_all(
-            user_id=user_id, limit=limit, offset=offset,
+            user_id=user_id, service_account_id=service_account_id,
+            limit=limit, offset=offset,
         )
         credentials = [
-            CredentialInfo(org_id=oid, user_id=uid, name=name)
-            for (oid, uid, _sid, name) in rows
+            CredentialInfo(org_id=oid, user_id=uid, service_account_id=sid, name=name)
+            for (oid, uid, sid, name) in rows
         ]
         return CredentialListResponse(credentials=credentials, total=total)
 
     target_org = org_id if org_id is not None else tenant.org_id
-    names = await vault.list_names(target_org, user_id=user_id)
+    names = await vault.list_names(
+        target_org, user_id=user_id, service_account_id=service_account_id,
+    )
     names_sorted = sorted(names)
     page = names_sorted[offset : offset + limit]
     credentials = [
-        CredentialInfo(org_id=target_org, user_id=user_id, name=n)
+        CredentialInfo(
+            org_id=target_org, user_id=user_id,
+            service_account_id=service_account_id, name=n,
+        )
         for n in page
     ]
     return CredentialListResponse(credentials=credentials, total=len(names_sorted))
@@ -177,17 +223,27 @@ async def delete_credential(
     org_id: UUID,
     name: str,
     user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> None:
-    """Delete a credential by (org, user, name).
+    """Delete a credential by (org, user/service-account, name).
 
-    ``user_id`` is optional.  Omitting it deletes the org-wide
-    credential.  Returns 204 on success, 404 otherwise.
+    ``user_id`` and ``service_account_id`` are optional and mutually
+    exclusive.  Omitting both deletes the org-wide credential.  Returns 204 on
+    success, 404 otherwise.
     """
+    _require_credential_scope(user_id, service_account_id)
     require_tenant_scope(tenant, org_id, user_id, resource="credentials")
+    if service_account_id is not None and "admin" not in tenant.permissions:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins may manage service-account credentials.",
+        )
     vault = _get_vault(request)
 
-    deleted = await vault.delete(org_id, name, user_id=user_id)
+    deleted = await vault.delete(
+        org_id, name, user_id=user_id, service_account_id=service_account_id,
+    )
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
