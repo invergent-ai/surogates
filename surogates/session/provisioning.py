@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID, uuid4
 
+from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.harness.model_metadata import get_model_info
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
@@ -19,6 +20,29 @@ _WORKSPACE_SHARING_FIELDS = (
     "workspace_path",
     "supports_vision",
 )
+
+# Boundary fields a child session inherits verbatim from its parent so it
+# lands in the same partitioned workspace/memory as the rest of the thread.
+_BOUNDARY_SHARING_FIELDS = (
+    "memory_boundary",
+    "workspace_boundary",
+)
+
+
+def _pin_workspace_boundary(config: dict, *, channel: str) -> None:
+    """Copy a managed channel's ``memory_boundary`` onto ``workspace_boundary``.
+
+    Managed-channel (slack/telegram) threads share one workspace across every
+    participant, keyed off the thread's ``memory_boundary``.  Pinning it into
+    ``workspace_boundary`` at provisioning time makes the partition immutable
+    for the session's life; non-managed channels (web/api/website) keep their
+    per-session workspace and get no ``workspace_boundary``.
+    """
+    if channel not in MANAGED_CHANNELS:
+        return
+    boundary = str(config.get("memory_boundary") or "").strip()
+    if boundary:
+        config["workspace_boundary"] = boundary
 
 
 async def stamp_workspace_config(
@@ -67,6 +91,7 @@ async def create_agent_session(
     sid = session_id or uuid4()
 
     merged_config = dict(config or {})
+    _pin_workspace_boundary(merged_config, channel=channel)
     await stamp_workspace_config(
         merged_config, storage=storage, settings=settings, session_id=sid, model=model,
     )
@@ -129,6 +154,10 @@ async def create_child_session(
         )
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
+
+    for field in _BOUNDARY_SHARING_FIELDS:
+        if field in parent_config:
+            merged_config[field] = parent_config[field]
 
     merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
 
