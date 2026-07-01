@@ -1677,3 +1677,238 @@ class TestSlackMediaDelivery:
         assert platform.deleted == [{"channel": "C001", "ts": "1700.5"}]
         assert progress_key("slack", session_id) in redis.deleted
         assert delivery.delivered == [(5, "FA9")]
+
+
+# ---------------------------------------------------------------------------
+# Tests: live-progress dispatcher state machine (Task 2)
+# ---------------------------------------------------------------------------
+
+
+class _FullRedis:
+    """Fake Redis supporting get/set/delete and set(..., nx=True) for throttle tests."""
+
+    def __init__(self, store: dict | None = None) -> None:
+        self.kv: dict[str, Any] = dict(store or {})
+        self.deleted: list[str] = []
+
+    async def get(self, key: str) -> Any:
+        return self.kv.get(key)
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ex: int | None = None,
+        nx: bool = False,
+    ) -> Any:
+        if nx:
+            if key in self.kv:
+                return None  # already set — NX fails
+            self.kv[key] = value
+            return True
+        self.kv[key] = value
+        return True
+
+    async def delete(self, *keys: str) -> None:
+        for key in keys:
+            self.deleted.append(key)
+            self.kv.pop(key, None)
+
+    async def exists(self, key: str) -> int:
+        return 1 if key in self.kv else 0
+
+
+class _FakeEditablePlatform(_FakePlatform):
+    """_FakePlatform that declares supports_edit = True."""
+    supports_edit = True
+
+
+def _make_live_dispatcher(
+    platform=None,
+    delivery=None,
+    redis=None,
+):
+    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
+
+    return ChannelDeliveryDispatcher(
+        cache=_FakeCache(_KNOWN_CACHE),
+        vault=_FakeVault(),
+        delivery_service=delivery or _FakeDeliveryService(),
+        redis=redis or _FullRedis(),
+    )
+
+
+class TestLiveProgressDispatcher:
+    """State-machine tests for live-update / intermediate-suppression behaviour."""
+
+    async def test_slack_intermediate_with_placeholder_edits_and_sets_new_placeholder(self):
+        """Intermediate + edit-capable + existing placeholder → send with update_ts;
+        clear_placeholder NOT called; set_placeholder called with result ts."""
+        import json
+        from surogates.channels.channel_progress import progress_key, read_placeholder
+
+        session_id = uuid4()
+        placeholder_ts = "111.0"
+        redis = _FullRedis({
+            progress_key("slack", session_id): json.dumps(
+                {"channel": "C001", "ts": placeholder_ts, "thread_ts": "100.0"}
+            ),
+        })
+
+        item = _FakeOutboxItem(
+            id=1,
+            session_id=session_id,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+                "thread_ts": "100.0",
+            },
+            payload={"content": "step", "intermediate": True},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        result_ts = "222.0"
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id=result_ts))
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
+
+        await dispatcher._deliver_item(platform, item)
+
+        # update_ts injected from the placeholder
+        assert item.destination["update_ts"] == placeholder_ts
+        # send was called
+        assert len(platform.send_calls) == 1
+        # clear_placeholder must NOT have been called (placeholder key still present or
+        # replaced with the new ts — not deleted)
+        ph = await read_placeholder(redis, "slack", session_id)
+        assert ph is not None, "placeholder must still exist after an intermediate send"
+        # set_placeholder updated it to the new ts
+        assert ph["ts"] == result_ts
+        # mark_delivered called
+        assert delivery.delivered == [(1, result_ts)]
+        assert delivery.failed == []
+
+    async def test_slack_intermediate_no_placeholder_posts_fresh_and_sets_placeholder(self):
+        """Intermediate + no placeholder → send without update_ts; set_placeholder called."""
+        from surogates.channels.channel_progress import read_placeholder
+
+        session_id = uuid4()
+        redis = _FullRedis()  # empty — no placeholder
+
+        item = _FakeOutboxItem(
+            id=2,
+            session_id=session_id,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+                "thread_ts": "100.0",
+            },
+            payload={"content": "step", "intermediate": True},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        result_ts = "333.0"
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id=result_ts))
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
+
+        await dispatcher._deliver_item(platform, item)
+
+        # no update_ts injected (no placeholder existed)
+        assert "update_ts" not in item.destination
+        # send was called
+        assert len(platform.send_calls) == 1
+        # set_placeholder called with the new ts
+        ph = await read_placeholder(redis, "slack", session_id)
+        assert ph is not None, "set_placeholder must have been called after intermediate send"
+        assert ph["ts"] == result_ts
+        assert delivery.delivered == [(2, result_ts)]
+
+    async def test_slack_final_with_placeholder_sends_and_clears(self):
+        """Final message + placeholder → send with update_ts; clear_placeholder IS called."""
+        import json
+        from surogates.channels.channel_progress import progress_key, read_placeholder
+
+        session_id = uuid4()
+        placeholder_ts = "444.0"
+        redis = _FullRedis({
+            progress_key("slack", session_id): json.dumps(
+                {"channel": "C001", "ts": placeholder_ts, "thread_ts": "100.0"}
+            ),
+        })
+
+        item = _FakeOutboxItem(
+            id=3,
+            session_id=session_id,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+                "thread_ts": "100.0",
+            },
+            payload={"content": "Here is the answer", "intermediate": False},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="555.0"))
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
+
+        await dispatcher._deliver_item(platform, item)
+
+        assert item.destination["update_ts"] == placeholder_ts
+        assert len(platform.send_calls) == 1
+        # clear_placeholder must have been called on final message
+        ph = await read_placeholder(redis, "slack", session_id)
+        assert ph is None, "clear_placeholder must be called on the final message"
+        assert delivery.delivered == [(3, "555.0")]
+
+    async def test_non_edit_platform_intermediate_suppressed(self):
+        """Intermediate on a platform without supports_edit → mark_delivered, no send."""
+        session_id = uuid4()
+        item = _FakeOutboxItem(
+            id=4,
+            session_id=session_id,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+            },
+            payload={"content": "narration step", "intermediate": True},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        # _FakePlatform has no supports_edit attribute
+        platform = _FakePlatform(result=SendResult(success=True, message_id="x"))
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery)
+
+        await dispatcher._deliver_item(platform, item)
+
+        # send must NOT be called for suppressed intermediates
+        assert platform.send_calls == [], "send must not be called for suppressed intermediate"
+        # mark_delivered must still be called (item consumed from outbox)
+        assert len(delivery.delivered) == 1
+        assert delivery.delivered[0][0] == 4
+        assert delivery.failed == []
+
+    async def test_slack_intermediate_throttle_coalesces_second_edit(self):
+        """Two intermediate items back-to-back: the redis nx key is already set on the
+        second → the second is mark_delivered without send."""
+        session_id = uuid4()
+        throttle_key = f"channel-progress-edit:slack:{session_id}"
+
+        # Pre-seed the throttle key to simulate a recent-in-flight edit.
+        redis = _FullRedis({throttle_key: "1"})
+
+        item = _FakeOutboxItem(
+            id=5,
+            session_id=session_id,
+            destination={
+                "channel_identifier": APP_ID,
+                "channel_id": "C001",
+            },
+            payload={"content": "another step", "intermediate": True},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeEditablePlatform(result=SendResult(success=True, message_id="y"))
+        dispatcher = _make_live_dispatcher(platform=platform, delivery=delivery, redis=redis)
+
+        await dispatcher._deliver_item(platform, item)
+
+        # Throttled: send must NOT be called
+        assert platform.send_calls == [], "throttled intermediate must not call send"
+        # mark_delivered still called (coalesced away)
+        assert len(delivery.delivered) == 1
+        assert delivery.delivered[0][0] == 5
+        assert delivery.failed == []

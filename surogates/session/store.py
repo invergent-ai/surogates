@@ -75,6 +75,34 @@ _INBOX_EVENTS = frozenset({
 _MAX_LISTED_DESCENDANTS = 1000
 
 
+def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
+    """Extract the deliverable payload from an event. Empty dict = nothing to
+    deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
+    message still has tool_calls, i.e. it is narration before a tool call rather
+    than the turn's final answer)."""
+    payload: dict[str, Any] = {}
+    if event_type == EventType.LLM_RESPONSE:
+        msg = data.get("message", {})
+        content = msg.get("content", "") if isinstance(msg, dict) else ""
+        if content and isinstance(content, str):
+            content = strip_next_action_blocks(content)
+        if content:
+            payload["content"] = content
+            payload["intermediate"] = bool(
+                isinstance(msg, dict) and msg.get("tool_calls")
+            )
+    elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
+        questions = data.get("questions") or []
+        if questions:
+            payload = {
+                "input_prompt": True,
+                "tool_call_id": (data.get("tool_call_id") or "").strip(),
+                "questions": questions,
+                "context": strip_next_action_blocks(data.get("context", "") or ""),
+            }
+    return payload
+
+
 class SessionStore:
     """Async, PostgreSQL-backed store for sessions, events, leases, and cursors.
 
@@ -799,40 +827,7 @@ class SessionStore:
                 destination = {"session_id": str(session_id)}
 
             # Build payload: extract the user-facing content from the event.
-            payload: dict[str, Any] = {}
-            if event_type == EventType.LLM_RESPONSE:
-                msg = data.get("message", {})
-                content = msg.get("content", "") if isinstance(msg, dict) else ""
-                if content and isinstance(content, str):
-                    # The <next_action> footer is harness/UI metadata.  The
-                    # web SDK strips it client-side and renders a status
-                    # pill; messaging channels deliver raw text, so strip
-                    # it server-side here.  A footer-only message strips
-                    # to "" and falls through to the nothing-to-deliver
-                    # return below.
-                    content = strip_next_action_blocks(content)
-                if content:
-                    payload["content"] = content
-            elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
-                # Only Slack renders the interactive modal.  Other channels have
-                # no input_prompt surface, and their send() reads payload[
-                # "content"] — a content-less row would post empty text (the
-                # Telegram API rejects it).  Leave payload empty so the
-                # nothing-to-deliver guard below skips non-Slack channels.
-                questions = data.get("questions") or []
-                if questions:
-                    # The model appends its <next_action> footer to free text,
-                    # including the context argument — strip it the same as the
-                    # LLM_RESPONSE content path so it never reaches the channel.
-                    payload = {
-                        "input_prompt": True,
-                        "tool_call_id": (data.get("tool_call_id") or "").strip(),
-                        "questions": questions,
-                        "context": strip_next_action_blocks(
-                            data.get("context", "") or ""
-                        ),
-                    }
-
+            payload = _build_channel_payload(event_type, data, channel)
             if not payload:
                 return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
 

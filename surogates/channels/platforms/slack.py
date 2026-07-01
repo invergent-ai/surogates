@@ -483,6 +483,7 @@ class SlackPlatform:
     """
 
     kind = "slack"
+    supports_edit = True
     topology = "webhook"
 
     _THINKING_TEXT = "_Thinking…_"
