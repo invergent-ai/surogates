@@ -120,6 +120,54 @@ def prefixed_session_workspace_key(
     )
 
 
+def workspace_boundary(session: object) -> str | None:
+    """The conversation boundary a session's workspace is partitioned by.
+
+    A pinned ``config["workspace_boundary"]`` (set at creation / inherited by a
+    child) wins; otherwise fall back through ``session_memory_boundary`` so a
+    managed-channel session created before the flag existed still fails closed
+    to its private boundary. ``None`` keeps the per-session layout (web/Studio).
+    """
+    cfg = getattr(session, "config", None) or {}
+    pinned = str(cfg.get("workspace_boundary") or "").strip()
+    if pinned:
+        return pinned
+
+    from surogates.channels.memory_boundary import session_memory_boundary
+
+    return session_memory_boundary(session)
+
+
+def boundary_workspace_prefix(
+    config: dict | None,
+    session: object,
+    session_id: UUID | str,
+) -> str:
+    """Physical object prefix for a session's workspace, boundary-partitioned.
+
+    ``{storage_key_prefix}/boundaries/{boundary}/workspace/`` for a managed
+    conversation, else the per-session prefix (fail-closed isolated).
+    """
+    boundary = workspace_boundary(session)
+    if not boundary:
+        return prefixed_session_workspace_prefix(config, session_id)
+
+    return prefixed(
+        f"boundaries/{boundary}/workspace/",
+        storage_key_prefix(config),
+    )
+
+
+def boundary_workspace_key(
+    config: dict | None,
+    session: object,
+    session_id: UUID | str,
+    key: str = "",
+) -> str:
+    """Physical object key for one file inside the boundary workspace."""
+    return f"{boundary_workspace_prefix(config, session, session_id)}{key.lstrip('/')}"
+
+
 class TenantStorage:
     """Tenant-aware storage operations.
 
