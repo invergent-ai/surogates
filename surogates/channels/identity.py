@@ -295,6 +295,12 @@ def make_cached_identity_resolver(
     return _resolver
 
 
+# Statuses whose session is reused for a routing key. completed/paused are
+# idle-but-resumable (re-activated on reuse); active/processing are in flight.
+# Any other status (failed, archived, …) starts a fresh session.
+_RESUMABLE_STATUSES = ("active", "processing", "paused", "completed")
+
+
 async def get_or_create_channel_session(
     session_store: SessionStore,
     redis: object,
@@ -310,11 +316,9 @@ async def get_or_create_channel_session(
     storage: object = None,
     settings: object = None,
 ) -> UUID:
-    """Reuse the most-recent session for the channel routing key — resuming a
-    completed one so the conversation continues — or create a new session.
-
-    Also enqueues the session to the Redis work queue so the worker picks
-    it up.
+    """Reuse the most-recent session for the channel routing key — resuming an
+    idle (completed/paused) one so the conversation continues — or create a new
+    session. The caller (the inbound pipeline) enqueues the returned session.
 
     Parameters
     ----------
@@ -341,18 +345,16 @@ async def get_or_create_channel_session(
     UUID
         The session ID (existing or newly created).
     """
-    # Check database for existing active session with this routing key.
+    # Always-resume: fetch the MOST-RECENT session for this routing key,
+    # regardless of status (order-then-decide). Deciding in Python — rather than
+    # filtering statuses in SQL — ensures a failed/terminal *most-recent* session
+    # starts fresh below instead of resurrecting an older completed one behind it.
     async with session_factory() as db:
         result = await db.execute(
             select(SessionRow)
             .where(SessionRow.user_id == user_id)
             .where(SessionRow.agent_id == agent_id)
             .where(SessionRow.channel == channel)
-            .where(
-                SessionRow.status.in_(
-                    ["active", "processing", "paused", "completed"]
-                )
-            )
             .where(
                 SessionRow.config["channel_session_key"].as_string() == session_key
             )
@@ -362,20 +364,17 @@ async def get_or_create_channel_session(
         existing = result.scalar_one_or_none()
         existing_id = existing.id if existing else None
         existing_status = existing.status if existing else None
-    if existing_id is not None:
-        # Always-resume: reuse the most-recent session for this routing key. If
-        # it has completed, re-activate it so the worker picks it up and the
-        # harness resumes it (replaying the full prior conversation) instead of
-        # starting a fresh session for every message. A failed session is not
-        # matched above, so a failure starts a new session.
-        if existing_status == "completed":
-            await session_store.update_session_status(existing_id, "active")
-            await session_store.emit_event(
-                existing_id, EventType.SESSION_RESUME, {},
-            )
+    # Reuse the session when it is in a resumable state. An idle one
+    # (completed/paused) is re-activated + resume-tagged so the worker continues
+    # it (the harness then replays the full prior conversation); active/processing
+    # are reused as-is. Anything else (failed, archived, …) — including as the
+    # most recent — falls through to a fresh session.
+    if existing_id is not None and existing_status in _RESUMABLE_STATUSES:
+        if existing_status in ("completed", "paused"):
+            await session_store.resume_session(existing_id, source="channel_message")
             logger.info(
-                "Resuming completed %s session %s (key: %s)",
-                channel, existing_id, session_key,
+                "Resuming %s session %s (status=%s, key=%s)",
+                channel, existing_id, existing_status, session_key,
             )
         return existing_id
 

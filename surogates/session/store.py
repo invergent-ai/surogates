@@ -266,6 +266,21 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
+    async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
+        """Re-activate an idle (completed/paused) session and record the resume.
+
+        Flips the status to ``active`` and emits a ``SESSION_RESUME`` event so the
+        worker continues the session. ``source`` tags the event for audit (which
+        surface triggered the resume). Centralizes the revive pair that several
+        routes and the harness otherwise open-code.
+        """
+        await self.update_session_status(session_id, "active")
+        await self.emit_event(
+            session_id,
+            EventType.SESSION_RESUME,
+            {"source": source} if source else {},
+        )
+
     async def archive_session_tree_and_delete_schedules(
         self,
         session_id: UUID,

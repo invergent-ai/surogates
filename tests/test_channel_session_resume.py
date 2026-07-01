@@ -1,18 +1,16 @@
 """Channel sessions always resume the same session.
 
-An inbound channel message reuses the most-recent session for its routing key
-even when that session has ``completed`` — re-activating it so the harness
-replays the full prior conversation instead of starting a fresh session per
-message. A ``failed`` session is excluded (start fresh after a failure), and a
-key with no prior session creates a new one.
+An inbound channel message reuses the most-recent session for its routing key,
+re-activating an idle (completed/paused) one so the harness continues the
+conversation. A failed/terminal most-recent session — even with an older
+completed one behind it — starts fresh, and a key with no prior session creates
+one.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from uuid import uuid4
-
-from sqlalchemy.dialects import postgresql
 
 from surogates.channels.identity import get_or_create_channel_session
 from surogates.session.events import EventType
@@ -29,7 +27,6 @@ class _Result:
 class _DB:
     def __init__(self, value):
         self._value = value
-        self.stmt = None
 
     async def __aenter__(self):
         return self
@@ -37,34 +34,29 @@ class _DB:
     async def __aexit__(self, *exc):
         return False
 
-    async def execute(self, stmt, *a, **k):
-        self.stmt = stmt
+    async def execute(self, *a, **k):
         return _Result(self._value)
 
 
 class _SessionFactory:
     def __init__(self, value):
-        self.db = _DB(value)
+        self._value = value
 
     def __call__(self):
-        return self.db
+        return _DB(self._value)
 
 
 class _Store:
     def __init__(self):
         self.created = None
-        self.status_updates: list = []
-        self.events: list = []
+        self.resumed: list = []
 
     async def create_session(self, **kwargs):
         self.created = kwargs
         return SimpleNamespace(**kwargs)
 
-    async def update_session_status(self, session_id, status):
-        self.status_updates.append((session_id, status))
-
-    async def emit_event(self, session_id, event_type, data):
-        self.events.append((session_id, event_type, data))
+    async def resume_session(self, session_id, *, source=""):
+        self.resumed.append((session_id, source))
 
 
 async def _call(store, factory):
@@ -81,20 +73,39 @@ async def test_resumes_completed_session():
     sid = uuid4()
     store = _Store()
     got = await _call(store, _SessionFactory(SimpleNamespace(id=sid, status="completed")))
-    assert got == sid                          # reused, not a new session
-    assert store.created is None               # nothing created
-    assert store.status_updates == [(sid, "active")]   # re-activated for resume
-    assert store.events == [(sid, EventType.SESSION_RESUME, {})]  # resume emitted
+    assert got == sid
+    assert store.created is None
+    assert store.resumed == [(sid, "channel_message")]
 
 
-async def test_reuses_active_session_without_reactivation():
+async def test_resumes_paused_session():
+    # A paused session must also be re-activated on a new message — otherwise the
+    # harness's paused branch is a hard stop and the message is stranded.
+    sid = uuid4()
+    store = _Store()
+    got = await _call(store, _SessionFactory(SimpleNamespace(id=sid, status="paused")))
+    assert got == sid
+    assert store.created is None
+    assert store.resumed == [(sid, "channel_message")]
+
+
+async def test_reuses_active_session_without_resume():
     sid = uuid4()
     store = _Store()
     got = await _call(store, _SessionFactory(SimpleNamespace(id=sid, status="active")))
     assert got == sid
     assert store.created is None
-    assert store.status_updates == []          # already active — no status change
-    assert store.events == []                  # no resume event needed
+    assert store.resumed == []          # already active — no resume needed
+
+
+async def test_failed_most_recent_starts_fresh():
+    # The most-recent session for the key failed → do NOT resume it (nor an older
+    # completed one behind it, since the query no longer filters status): fresh.
+    store = _Store()
+    got = await _call(store, _SessionFactory(SimpleNamespace(id=uuid4(), status="failed")))
+    assert store.created is not None
+    assert got == store.created["session_id"]
+    assert store.resumed == []
 
 
 async def test_creates_when_no_prior_session():
@@ -102,14 +113,26 @@ async def test_creates_when_no_prior_session():
     got = await _call(store, _SessionFactory(None))
     assert store.created is not None
     assert got == store.created["session_id"]
-    assert store.status_updates == []
+    assert store.resumed == []
 
 
-async def test_lookup_includes_completed_excludes_failed():
-    factory = _SessionFactory(None)
-    await _call(_Store(), factory)
-    sql = str(factory.db.stmt.compile(
-        dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True},
-    ))
-    assert "completed" in sql          # a completed session is now reusable
-    assert "failed" not in sql         # a failed session is not resumed
+async def test_resume_session_helper_flips_status_and_tags_source():
+    from surogates.session.store import SessionStore
+
+    store = SessionStore.__new__(SessionStore)   # bypass __init__/DB
+    calls: list = []
+
+    async def _upd(sid, status):
+        calls.append(("status", sid, status))
+
+    async def _emit(sid, et, data):
+        calls.append(("event", sid, et, data))
+
+    store.update_session_status = _upd
+    store.emit_event = _emit
+    sid = uuid4()
+    await store.resume_session(sid, source="channel_message")
+    assert calls == [
+        ("status", sid, "active"),
+        ("event", sid, EventType.SESSION_RESUME, {"source": "channel_message"}),
+    ]
