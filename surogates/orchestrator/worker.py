@@ -1101,7 +1101,7 @@ async def run_worker(settings: Settings) -> None:
                     await audit_store.emit(
                         org_id=session_org_id,
                         agent_id=ctx.agent_id,
-                        user_id=session.user_id,
+                        user_id=tenant.user_id,
                         type=(
                             AuditType.MEMORY_CONFLICT
                             if conflict_detected
