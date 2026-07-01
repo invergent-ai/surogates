@@ -310,7 +310,8 @@ async def get_or_create_channel_session(
     storage: object = None,
     settings: object = None,
 ) -> UUID:
-    """Find an existing active session for the channel routing key, or create one.
+    """Reuse the most-recent session for the channel routing key — resuming a
+    completed one so the conversation continues — or create a new session.
 
     Also enqueues the session to the Redis work queue so the worker picks
     it up.
@@ -347,7 +348,11 @@ async def get_or_create_channel_session(
             .where(SessionRow.user_id == user_id)
             .where(SessionRow.agent_id == agent_id)
             .where(SessionRow.channel == channel)
-            .where(SessionRow.status.in_(["active", "processing", "paused"]))
+            .where(
+                SessionRow.status.in_(
+                    ["active", "processing", "paused", "completed"]
+                )
+            )
             .where(
                 SessionRow.config["channel_session_key"].as_string() == session_key
             )
@@ -355,8 +360,24 @@ async def get_or_create_channel_session(
             .limit(1)
         )
         existing = result.scalar_one_or_none()
-        if existing:
-            return existing.id
+        existing_id = existing.id if existing else None
+        existing_status = existing.status if existing else None
+    if existing_id is not None:
+        # Always-resume: reuse the most-recent session for this routing key. If
+        # it has completed, re-activate it so the worker picks it up and the
+        # harness resumes it (replaying the full prior conversation) instead of
+        # starting a fresh session for every message. A failed session is not
+        # matched above, so a failure starts a new session.
+        if existing_status == "completed":
+            await session_store.update_session_status(existing_id, "active")
+            await session_store.emit_event(
+                existing_id, EventType.SESSION_RESUME, {},
+            )
+            logger.info(
+                "Resuming completed %s session %s (key: %s)",
+                channel, existing_id, session_key,
+            )
+        return existing_id
 
     # Create a new session.
     session_id = uuid4()
