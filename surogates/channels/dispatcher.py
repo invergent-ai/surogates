@@ -666,6 +666,24 @@ class ChannelDeliveryDispatcher:
             refs=platform.descriptor.vault_refs(identifier),
         )
 
+        intermediate = bool(item.payload.get("intermediate"))
+        supports_edit = getattr(platform, "supports_edit", False)
+
+        # Intermediate narration: fold into the single progress message on
+        # edit-capable platforms; suppress elsewhere so only the final answer
+        # reaches the channel.
+        if intermediate and not supports_edit:
+            await self._delivery.mark_delivered(item.id, provider_message_id=None)
+            return
+        if intermediate and self._redis is not None:
+            fresh = await self._redis.set(
+                f"channel-progress-edit:{platform.kind}:{item.session_id}",
+                "1", ex=1, nx=True,
+            )
+            if not fresh:  # a sub-second-old edit already in flight — coalesce
+                await self._delivery.mark_delivered(item.id, provider_message_id=None)
+                return
+
         # Thinking-placeholder: if inbound posted one for this session and it is
         # for this channel, edit it instead of posting a fresh reply.
         update_ts = None
@@ -764,14 +782,33 @@ class ChannelDeliveryDispatcher:
             await self._delivery.mark_delivered(
                 item.id, provider_message_id=result.message_id
             )
-            if update_ts is not None and self._redis is not None:
-                try:
-                    from surogates.channels.channel_progress import clear_placeholder
-                    await clear_placeholder(self._redis, platform.kind, item.session_id)
-                except Exception:
-                    logger.warning(
-                        "[delivery] clear placeholder failed for outbox %d — ignoring", item.id,
-                    )
+            if self._redis is not None:
+                from surogates.channels.channel_progress import (
+                    clear_placeholder,
+                    set_placeholder,
+                )
+                if intermediate:
+                    ts = result.message_id or update_ts
+                    if ts:
+                        try:
+                            await set_placeholder(
+                                self._redis, platform.kind, item.session_id,
+                                channel=item.destination.get("channel_id", ""),
+                                ts=ts,
+                                thread_ts=item.destination.get("thread_ts"),
+                            )
+                        except Exception:
+                            logger.warning(
+                                "[delivery] set_placeholder failed for outbox %d — ignoring",
+                                item.id,
+                            )
+                elif update_ts is not None:
+                    try:
+                        await clear_placeholder(self._redis, platform.kind, item.session_id)
+                    except Exception:
+                        logger.warning(
+                            "[delivery] clear placeholder failed for outbox %d — ignoring", item.id,
+                        )
             # Mark the sent message (and its thread, if any) as bot-authored.
             # Best-effort: a Redis error here must NOT re-mark the item as failed.
             if self._redis is not None and result.message_id:
