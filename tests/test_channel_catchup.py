@@ -374,6 +374,44 @@ class TestChannelCatchupReplay:
             await cu.run()
         assert client.history_calls[0]["oldest"] == "1712345695.000000"
 
+    async def test_list_conversations_degrades_on_missing_scope(self):
+        # The app token lacks mpim:read, so Slack aborts the WHOLE
+        # conversations.list when the request includes the mpim type. Catch-up
+        # must drop the un-granted type and still list the readable channels,
+        # rather than failing the entire app's catch-up.
+        class _MissingScope(Exception):
+            def __init__(self) -> None:
+                super().__init__("missing_scope")
+                self.response = {"error": "missing_scope", "needed": "mpim:read"}
+
+        class _ScopedClient(_FakeSlackClient):
+            def __init__(self, *a: Any, **k: Any) -> None:
+                super().__init__(*a, **k)
+                self.list_types: list[str] = []
+
+            async def conversations_list(self, **kwargs: Any) -> dict:
+                types = kwargs.get("types") or ""
+                self.list_types.append(types)
+                if "mpim" in types:
+                    raise _MissingScope()
+                return {"channels": self._conversations,
+                        "response_metadata": {"next_cursor": ""}}
+
+        client = _ScopedClient(
+            conversations=[{"id": "C1", "is_member": True}],
+            history={"C1": [{"user": "U1", "text": "hi", "ts": "1712345691.000000"}]},
+        )
+        pipeline = _FakePipeline()
+        cu = _catchup(client=client, pipeline=pipeline, routings=_ROUTINGS,
+                      watermarks={"C1": "1712345680.000000"})
+        await cu.run()
+
+        # The readable channel's message was still replayed despite the missing scope.
+        assert [m.ts for m in pipeline.handled] == ["1712345691.000000"]
+        # First attempt included mpim (raised); the retry dropped it.
+        assert any("mpim" in t for t in client.list_types)
+        assert any("mpim" not in t for t in client.list_types)
+
 
 class _HeldLock:
     """A lock that is already held by someone else — acquire returns False."""
