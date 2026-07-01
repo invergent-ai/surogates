@@ -61,43 +61,74 @@ def _attachments_note_from_data(data: Any) -> str | None:
     """Pure helper: render the attachments note from a user.message data dict."""
     if not isinstance(data, dict):
         return None
+
+    # Section 1: downloaded/workspace attachments (existing behaviour preserved).
+    attachments_section: str | None = None
     attachments = data.get("attachments")
-    if not isinstance(attachments, list) or not attachments:
-        return None
+    if isinstance(attachments, list) and attachments:
+        lines = [
+            "The user attached the following files to this message. They are"
+            " available in the workspace and you can read them with your file"
+            " tools:",
+        ]
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            if item.get("inlined_text"):
+                # Content already in the user message text via
+                # _render_inlined_attachments — don't double-list it here.
+                continue
+            path = item.get("path")
+            filename = item.get("filename")
+            if not path or not filename:
+                continue
+            mime = item.get("mime_type") or "application/octet-stream"
+            raw_size = item.get("size")
+            if isinstance(raw_size, (int, float)) and raw_size >= 0:
+                size_str = _format_bytes(int(raw_size))
+            else:
+                size_str = "unknown size"
+            line = f"- {path} ({mime}, {size_str}) — \"{filename}\""
+            skip_reason = item.get("inline_skip_reason")
+            if skip_reason:
+                hint = _ATTACHMENT_SKIP_HINTS.get(skip_reason, "use read_file")
+                line += f" (inline skipped: {skip_reason} — {hint})"
+            lines.append(line)
 
-    lines = [
-        "The user attached the following files to this message. They are"
-        " available in the workspace and you can read them with your file"
-        " tools:",
-    ]
-    for item in attachments:
-        if not isinstance(item, dict):
-            continue
-        if item.get("inlined_text"):
-            # Content already in the user message text via
-            # _render_inlined_attachments — don't double-list it here.
-            continue
-        path = item.get("path")
-        filename = item.get("filename")
-        if not path or not filename:
-            continue
-        mime = item.get("mime_type") or "application/octet-stream"
-        raw_size = item.get("size")
-        if isinstance(raw_size, (int, float)) and raw_size >= 0:
-            size_str = _format_bytes(int(raw_size))
-        else:
-            size_str = "unknown size"
-        line = f"- {path} ({mime}, {size_str}) — \"{filename}\""
-        skip_reason = item.get("inline_skip_reason")
-        if skip_reason:
-            hint = _ATTACHMENT_SKIP_HINTS.get(skip_reason, "use read_file")
-            line += f" (inline skipped: {skip_reason} — {hint})"
-        lines.append(line)
+        if len(lines) > 1:
+            attachments_section = "\n".join(lines)
 
-    if len(lines) == 1:
-        # All items malformed or all inlined.
-        return None
-    return "\n".join(lines)
+    # Section 2: channel file ids from source.files (additive, never raises).
+    files_section: str | None = None
+    try:
+        source_files = (data.get("source") or {}).get("files")
+        if isinstance(source_files, list):
+            file_lines = []
+            for f in source_files:
+                if not isinstance(f, dict):
+                    continue
+                fid = f.get("id")
+                if not fid:
+                    continue
+                name = f.get("name") or "file"
+                file_lines.append(f"- \"{name}\" — file id {fid}")
+            if file_lines:
+                header = (
+                    "These files were shared in this channel. If one is not"
+                    " already in your workspace above, download it on demand"
+                    " with fetch_channel_file(\"<id>\"):"
+                )
+                files_section = header + "\n" + "\n".join(file_lines)
+    except Exception:
+        pass
+
+    if attachments_section and files_section:
+        return attachments_section + "\n\n" + files_section
+    if attachments_section:
+        return attachments_section
+    if files_section:
+        return files_section
+    return None
 
 
 def _render_inlined_attachments(

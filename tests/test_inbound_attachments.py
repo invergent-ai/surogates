@@ -174,3 +174,79 @@ async def test_none_attachments_keeps_existing_event_shape():
     assert ev[2]["content"] == "hello"
     assert "images" not in ev[2]
     assert "attachments" not in ev[2]
+
+
+# ---------------------------------------------------------------------------
+# Test 4: source.files persisted when msg.files carry file_ids
+# ---------------------------------------------------------------------------
+
+
+def _file_with_id() -> InboundFileRef:
+    return InboundFileRef(
+        url="https://files.slack.com/p1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        size=2048,
+        file_id="F0ABCDE1234",
+    )
+
+
+async def test_user_message_event_carries_source_files_when_file_ids_present():
+    """USER_MESSAGE source.files must list ids+names for files that have a file_id."""
+    deps = _make_deps()
+    msg = replace(
+        _make_msg(is_dm=True, identifier="D1", ts="103.0"),
+        files=[_file_with_id()],
+    )
+
+    result = await ChannelInboundPipeline().handle(
+        msg,
+        routing=_make_routing(),
+        config=_make_config(),
+        deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    ev = next(e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE)
+    data = ev[2]
+    assert data["source"]["files"] == [{"id": "F0ABCDE1234", "name": "report.pdf"}]
+
+
+async def test_user_message_event_no_source_files_when_no_file_ids():
+    """USER_MESSAGE must NOT add source.files when no files carry a file_id."""
+    deps = _make_deps()
+    # _file() has no file_id (defaults to None)
+    msg = replace(
+        _make_msg(is_dm=True, identifier="D1", ts="104.0"),
+        files=[_file()],
+    )
+
+    result = await ChannelInboundPipeline().handle(
+        msg,
+        routing=_make_routing(),
+        config=_make_config(),
+        deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    ev = next(e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE)
+    data = ev[2]
+    assert "files" not in data["source"]
+
+
+async def test_user_message_event_no_source_files_when_no_files_at_all():
+    """USER_MESSAGE must NOT add source.files when msg.files is empty."""
+    deps = _make_deps()
+    msg = _make_msg(is_dm=True, identifier="D1", ts="105.0")
+
+    result = await ChannelInboundPipeline().handle(
+        msg,
+        routing=_make_routing(),
+        config=_make_config(),
+        deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    ev = next(e for e in deps.session_store.events if e[1] == EventType.USER_MESSAGE)
+    data = ev[2]
+    assert "files" not in data["source"]
