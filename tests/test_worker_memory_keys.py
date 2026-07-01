@@ -36,3 +36,42 @@ def test_web_session_stays_per_user():
     s = SimpleNamespace(channel="web", config={}, id="s1")
     keys = _build_r2_memory_keys(session=s, storage_key_prefix="p/a", user_id="u1")
     assert keys["memory"] == "p/a/users/u1/memory.json"
+
+
+from pathlib import Path
+
+from surogates.orchestrator.worker import local_memory_dir_for_session
+
+
+def test_local_memory_dir_uses_boundary_namespace_for_channel_session():
+    session = SimpleNamespace(
+        channel="slack",
+        config={"memory_boundary": "slack:c:G1"},
+        id="session-1",
+    )
+
+    assert local_memory_dir_for_session(
+        session=session,
+        asset_root=Path("project/agent"),
+        user_id="user-1",
+    ) == Path("project/agent/boundaries/slack:c:G1")
+
+
+def test_local_memory_dir_keeps_user_namespace_for_web_session():
+    session = SimpleNamespace(channel="web", config={}, id="session-1")
+
+    assert local_memory_dir_for_session(
+        session=session,
+        asset_root=Path("project/agent"),
+        user_id="user-1",
+    ) == Path("project/agent/users/user-1/memory")
+
+
+def test_local_memory_dir_keeps_shared_namespace_when_no_user():
+    session = SimpleNamespace(channel="api", config={}, id="session-1")
+
+    assert local_memory_dir_for_session(
+        session=session,
+        asset_root=Path("project/agent"),
+        user_id=None,
+    ) == Path("project/agent/shared/memory")

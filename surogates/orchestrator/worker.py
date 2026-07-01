@@ -619,6 +619,32 @@ def _build_r2_memory_keys(
     }
 
 
+def local_memory_dir_for_session(
+    *,
+    session: object,
+    asset_root: Any,
+    user_id: str | None,
+):
+    """Local disk directory for a session's memory fallback.
+
+    Mirrors the namespace :func:`_build_r2_memory_keys` uses for R2 so the
+    disk fallback (test / no-cache contexts) reads and writes the same
+    partition: a boundary-scoped ``{asset_root}/boundaries/{boundary}`` for
+    channel sessions, else the per-user (or org-shared) layout.
+    """
+    from pathlib import Path
+
+    from surogates.channels.memory_boundary import session_memory_boundary
+
+    root = Path(asset_root)
+    boundary = session_memory_boundary(session)
+    if boundary is not None:
+        return root / "boundaries" / boundary
+    if user_id is not None:
+        return root / "users" / user_id / "memory"
+    return root / "shared" / "memory"
+
+
 async def run_worker(settings: Settings) -> None:
     """Bootstrap all dependencies and run the orchestrator loop.
 
@@ -1022,17 +1048,16 @@ async def run_worker(settings: Settings) -> None:
             ),
         )
 
-        # User-scoped memory dir for interactive sessions, org-shared
-        # memory dir for service-account sessions (no per-user context
-        # to carry forward).
-        from pathlib import Path
-
-        if session.user_id is not None:
-            memory_dir = (
-                Path(tenant.asset_root) / "users" / str(session.user_id) / "memory"
-            )
-        else:
-            memory_dir = Path(tenant.asset_root) / "shared" / "memory"
+        # Boundary-scoped memory dir for channel sessions (shared across a
+        # thread's participants), else the per-user layout for interactive
+        # sessions or the org-shared layout for service-account sessions.
+        # Same partition as the R2 keys so the disk fallback and the R2
+        # store never disagree on where a session's memory lives.
+        memory_dir = local_memory_dir_for_session(
+            session=session,
+            asset_root=tenant.asset_root,
+            user_id=str(session.user_id) if session.user_id else None,
+        )
 
         # R2-backed per-user memory store.  Requires both the memory
         # cache (wired at worker startup) and a storage backend; the
