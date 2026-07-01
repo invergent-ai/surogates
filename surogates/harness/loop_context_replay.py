@@ -19,6 +19,19 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+def sanitize_sender_name(name: str) -> str:
+    """Neutralize an attributed display name for safe inline prefixing.
+
+    Strips control chars/newlines, removes ':' characters that could forge the
+    'Name: ' delimiter, collapses internal whitespace, and caps length. Purely a
+    function of the input, so replay stays byte-stable.
+    """
+    cleaned = "".join(ch for ch in name if ch.isprintable())
+    cleaned = cleaned.replace(":", " ")
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:64]
+
+
 def build_user_message_dict(
     event_data: dict,
     *,
@@ -45,7 +58,7 @@ def build_user_message_dict(
     # the produced bytes are identical on every replay (prefix-cache stable).
     _source = event_data.get("source") or {}
     if _source.get("chat_type") == "group":
-        _sender = (_source.get("user_name") or "").strip()
+        _sender = sanitize_sender_name((_source.get("user_name") or "").strip())
         if _sender:
             content = f"{_sender}: {content}" if content else _sender
     # Fold per-user ephemeral notes (view-context, non-inlined attachments)
