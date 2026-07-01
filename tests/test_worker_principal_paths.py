@@ -12,7 +12,9 @@ from uuid import uuid4
 from surogates.orchestrator.worker import (
     _select_harness_token,
     _filter_effective_tools,
+    principal_subject,
 )
+from surogates.session.acting_principal import ActingPrincipal
 from surogates.tenant.auth.jwt import decode_token
 from surogates.tenant.context import TenantContext
 
@@ -63,3 +65,34 @@ def test_artifact_kept_for_acting_service_account():
         use_api_for_harness_tools=True,
     )
     assert "create_artifact" in tools  # acting SA -> will have an API client
+
+
+def test_principal_subject_marks_user_principal():
+    user_id = uuid4()
+
+    subject_id, is_service_account = principal_subject(
+        ActingPrincipal(user_id=user_id, service_account_id=None),
+    )
+
+    assert subject_id == user_id
+    assert is_service_account is False
+
+
+def test_principal_subject_marks_service_account_principal():
+    service_account_id = uuid4()
+
+    subject_id, is_service_account = principal_subject(
+        ActingPrincipal(user_id=None, service_account_id=service_account_id),
+    )
+
+    assert subject_id == service_account_id
+    assert is_service_account is True
+
+
+def test_principal_subject_handles_empty_principal_shape():
+    subject_id, is_service_account = principal_subject(
+        ActingPrincipal(user_id=None, service_account_id=None),
+    )
+
+    assert subject_id is None
+    assert is_service_account is False

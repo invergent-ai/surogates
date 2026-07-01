@@ -92,6 +92,19 @@ def resolve_credential_principal(
     return acting
 
 
+def principal_subject(principal: Any) -> tuple[Any, bool]:
+    """Return ``(subject_id, is_service_account)`` for a principal.
+
+    A user id (not a service account), a service-account id, or ``(None, False)``
+    for an empty principal shape.
+    """
+    if principal.user_id is not None:
+        return principal.user_id, False
+    if principal.service_account_id is not None:
+        return principal.service_account_id, True
+    return None, False
+
+
 def _select_harness_token(
     *,
     tenant: TenantContext,
@@ -1014,7 +1027,7 @@ async def run_worker(settings: Settings) -> None:
         composio_mcp_tools: frozenset[str] = frozenset()
         if mcp_proxy_client is not None:
             try:
-                principal_user_id = acting.user_id or acting.service_account_id
+                principal_user_id, is_service_account = principal_subject(credential)
                 if principal_user_id is not None:
                     discovered_mcp_tools = set(
                         await mcp_proxy_client.discover_and_register(
@@ -1022,7 +1035,7 @@ async def run_worker(settings: Settings) -> None:
                             user_id=principal_user_id,
                             session_id=session.id,
                             agent_id=ctx.agent_id,
-                            is_service_account=acting.user_id is None,
+                            is_service_account=is_service_account,
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
