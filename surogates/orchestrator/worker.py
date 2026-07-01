@@ -480,6 +480,17 @@ async def _load_prompt_catalogs(
     return available_agents, available_skills
 
 
+def build_agent_principal_resolver(*, session_factory: Any):
+    """The cached agent_id -> service-account-principal resolver.
+
+    Its ``.cache`` is wired into the invalidator so ``agent_principal_changed``
+    events evict it; the resolver itself is called per wake in ``harness_factory``.
+    """
+    from surogates.runtime import make_cached_agent_principal_resolver
+
+    return make_cached_agent_principal_resolver(session_factory)
+
+
 def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     """Wire PlatformClient + RuntimeConfigCache + FileBundleCache
     onto a worker state dict.
@@ -579,6 +590,7 @@ def _start_worker_invalidator(state: dict) -> None:
             memory_cache=state.get("memory_cache"),
             system_bundle_cache=state.get("system_bundle_cache"),
             mate_settings_cache=state.get("mate_settings_cache"),
+            agent_principal_cache=state.get("agent_principal_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
@@ -852,6 +864,10 @@ async def run_worker(settings: Settings) -> None:
         "storage_backend": storage_backend,
     }
     _install_worker_runtime_plumbing(worker_state, settings)
+    agent_principal_resolver = build_agent_principal_resolver(
+        session_factory=session_factory,
+    )
+    worker_state["agent_principal_cache"] = agent_principal_resolver.cache
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
 
