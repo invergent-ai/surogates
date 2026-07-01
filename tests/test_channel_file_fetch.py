@@ -350,6 +350,20 @@ async def test_resolve_file_id_not_found_lists_available():
     assert "report.html" in msg
 
 
+# Test: a ChannelApiError raised while listing files during resolution is
+# translated to the matching ChannelFile* error, so a rate-limited files.list
+# surfaces as 429 rather than an opaque 500.
+async def test_resolve_file_id_translates_api_error():
+    class _RateLimitedLister(_FakePlatform):
+        async def list_channel_files(self, *, creds, channel_id):
+            raise ChannelApiError("rate_limited", "ratelimited")
+
+    with pytest.raises(ChannelFileRateLimited):
+        await _resolve_file_id(
+            _RateLimitedLister(), {"bot_token": "xoxb"}, "C1", "report.html",
+        )
+
+
 # Test: fetch_channel_file with a filename resolves and downloads the correct file
 async def test_fetch_channel_file_resolves_filename_to_id(monkeypatch):
     _patch_externals(monkeypatch)

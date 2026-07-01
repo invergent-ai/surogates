@@ -82,7 +82,16 @@ async def _resolve_file_id(platform: Any, creds: dict, channel_id: str, ref: str
     if _SLACK_FILE_ID.fullmatch(ref):
         return ref
     lister = getattr(platform, "list_channel_files", None)
-    files = await lister(creds=creds, channel_id=channel_id) if lister else []
+    try:
+        files = await lister(creds=creds, channel_id=channel_id) if lister else []
+    except ChannelApiError as exc:
+        if exc.reason == "forbidden":
+            raise ChannelFileForbidden("Access to this channel's files was denied.")
+        if exc.reason == "rate_limited":
+            raise ChannelFileRateLimited(
+                "Slack is rate-limiting channel file listing; try again shortly."
+            )
+        raise ChannelFileUnavailable("Could not list this channel's files.")
 
     def _created(f: dict) -> float:
         try:
