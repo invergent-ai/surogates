@@ -762,14 +762,25 @@ class SessionStore:
 
             if inbox_row is not None and not suppress_for_viewer:
                 session_row = await db.get(SessionRow, session_id)
-                if session_row is not None and (
-                    session_row.user_id is not None
-                    or session_row.service_account_id is not None
-                ):
+                # Target the turn's acting principal (the participant who
+                # triggered this event), not the frozen session owner — in a
+                # shared thread they differ. Resolved in this same transaction
+                # so the event row and inbox target agree; falls back to the
+                # session owner when the triggering message is unstamped.
+                acting = (
+                    await self._resolve_acting_principal_in(db, session_row)
+                    if session_row is not None
+                    else None
+                )
+                target_user_id = acting.user_id if acting is not None else None
+                target_sa_id = (
+                    acting.service_account_id if acting is not None else None
+                )
+                if target_user_id is not None or target_sa_id is not None:
                     item = InboxItem(
                         org_id=session_row.org_id,
-                        user_id=session_row.user_id,
-                        service_account_id=session_row.service_account_id,
+                        user_id=target_user_id,
+                        service_account_id=target_sa_id,
                         session_id=session_id,
                         source_event_id=event_id,
                         kind=inbox_row.kind,
@@ -780,13 +791,11 @@ class SessionStore:
                     )
                     db.add(item)
                     await db.flush()
-                    # Publish to the owner's inbox channel, keyed by the
-                    # session's principal (a user, or a service account for ops
-                    # chats), so the live unread badge updates for both. The
-                    # one-principal CHECK guarantees this is non-null.
-                    principal_id = (
-                        session_row.user_id or session_row.service_account_id
-                    )
+                    # Publish to the acting principal's inbox channel (a user,
+                    # or a service account for ops chats) so the live unread
+                    # badge updates. The one-principal CHECK guarantees this is
+                    # non-null.
+                    principal_id = target_user_id or target_sa_id
                     inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()
