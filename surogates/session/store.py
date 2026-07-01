@@ -34,6 +34,10 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
+from surogates.session.acting_principal import (
+    ActingPrincipal,
+    resolve_principal_from_event_data,
+)
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
@@ -220,6 +224,44 @@ class SessionStore:
         if row is None:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
+
+    async def _resolve_acting_principal_in(
+        self, db: AsyncSession, session_row: SessionRow
+    ) -> ActingPrincipal:
+        """Acting principal using an already-open session + loaded row.
+
+        Scans the most recent user messages (newest first) for the latest
+        non-synthetic one and reads its principal stamp; a synthetic wake
+        (ambient / worker-complete) with no human sender falls back to the
+        session owner. Shares the caller's transaction snapshot so the event
+        row, inbox row, and publish target agree.
+        """
+        fallback = ActingPrincipal(
+            user_id=session_row.user_id,
+            service_account_id=session_row.service_account_id,
+        )
+        rows = (
+            await db.execute(
+                select(EventRow.data)
+                .where(EventRow.session_id == session_row.id)
+                .where(EventRow.type == EventType.USER_MESSAGE.value)
+                .order_by(EventRow.id.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+        for data in rows:
+            if (data or {}).get("synthetic"):
+                continue
+            return resolve_principal_from_event_data(data, fallback=fallback)
+        return fallback
+
+    async def resolve_acting_principal(self, session_id: UUID) -> ActingPrincipal:
+        """Acting principal for the session's latest real user message."""
+        async with self._sf() as db:
+            row = await db.get(SessionRow, session_id)
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            return await self._resolve_acting_principal_in(db, row)
 
     async def _session_has_live_viewer(self, session_id: UUID) -> bool:
         """Whether a client is actively streaming this session's events.
