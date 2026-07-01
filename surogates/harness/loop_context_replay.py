@@ -40,6 +40,14 @@ def build_user_message_dict(
     """
     content = base_content if base_content is not None else event_data.get("content", "")
     content = _render_inlined_attachments(content, event_data.get("attachments"))
+    # Attribute group messages so the model can tell participants apart
+    # in a shared thread. Derived entirely from the durable event payload, so
+    # the produced bytes are identical on every replay (prefix-cache stable).
+    _source = event_data.get("source") or {}
+    if _source.get("chat_type") == "group":
+        _sender = (_source.get("user_name") or "").strip()
+        if _sender:
+            content = f"{_sender}: {content}" if content else _sender
     # Fold per-user ephemeral notes (view-context, non-inlined attachments)
     # into the user content here so the bytes are determined entirely by the
     # durable event payload.  This keeps the provider's implicit prefix cache
