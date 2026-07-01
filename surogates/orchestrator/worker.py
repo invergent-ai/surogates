@@ -103,10 +103,10 @@ def _select_harness_token(
                 "tools:read",
             },
         )
-    if session.service_account_id is not None:
+    if tenant.service_account_id is not None:
         return create_service_account_session_token(
             org_id=tenant.org_id,
-            service_account_id=session.service_account_id,
+            service_account_id=tenant.service_account_id,
             session_id=session.id,
         )
     if session.channel in ANONYMOUS_CHANNELS:
@@ -150,7 +150,7 @@ def _filter_effective_tools(
 
     session_will_have_api_client = use_api_for_harness_tools and (
         tenant.user_id is not None
-        or session.service_account_id is not None
+        or tenant.service_account_id is not None
         or session.channel in ANONYMOUS_CHANNELS
     )
     if not session_will_have_api_client:
@@ -158,7 +158,7 @@ def _filter_effective_tools(
 
     session_is_anonymous_channel = (
         tenant.user_id is None
-        and session.service_account_id is None
+        and tenant.service_account_id is None
         and session.channel in ANONYMOUS_CHANNELS
     )
     if session_is_anonymous_channel:
@@ -886,6 +886,11 @@ async def run_worker(settings: Settings) -> None:
         session = await session_store.get_session(session_id)
         session_org_id = UUID(str(session.org_id))
 
+        # The acting principal is whoever sent the message that triggered this
+        # wake — not the frozen session owner (they differ in a shared thread).
+        # Credentials, tools, memory, and the API-client token all derive from it.
+        acting = await session_store.resolve_acting_principal(session_id)
+
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
 
@@ -893,9 +898,9 @@ async def run_worker(settings: Settings) -> None:
             org_row = (
                 await db.execute(sa_select(Org).where(Org.id == session_org_id))
             ).scalar_one_or_none()
-            if session.user_id is not None:
+            if acting.user_id is not None:
                 user_row = (
-                    await db.execute(sa_select(User).where(User.id == session.user_id))
+                    await db.execute(sa_select(User).where(User.id == acting.user_id))
                 ).scalar_one_or_none()
             else:
                 user_row = None
@@ -910,14 +915,20 @@ async def run_worker(settings: Settings) -> None:
             settings=settings,
         )
 
+        # Multi-party (shared channel) threads carry no per-user memory or
+        # preferences — only shared conversation + agent/org memory — so one
+        # participant's personal context never surfaces for another.
+        _multi_party = bool((session.config or {}).get("multi_party"))
         tenant = TenantContext(
             org_id=session_org_id,
-            user_id=session.user_id,
+            user_id=acting.user_id,
             org_config=org_row.config if org_row else {},
-            user_preferences=user_row.preferences if user_row else {},
+            user_preferences={} if _multi_party else (
+                user_row.preferences if user_row else {}
+            ),
             permissions=frozenset(),
             asset_root=ctx.storage_key_prefix,
-            service_account_id=session.service_account_id,
+            service_account_id=acting.service_account_id,
         )
 
         # Proxy-mode MCP tool discovery. The worker shares one tool
@@ -933,7 +944,7 @@ async def run_worker(settings: Settings) -> None:
         composio_mcp_tools: frozenset[str] = frozenset()
         if mcp_proxy_client is not None:
             try:
-                principal_user_id = session.user_id or session.service_account_id
+                principal_user_id = acting.user_id or acting.service_account_id
                 if principal_user_id is not None:
                     discovered_mcp_tools = set(
                         await mcp_proxy_client.discover_and_register(
@@ -941,7 +952,7 @@ async def run_worker(settings: Settings) -> None:
                             user_id=principal_user_id,
                             session_id=session.id,
                             agent_id=ctx.agent_id,
-                            is_service_account=session.user_id is None,
+                            is_service_account=acting.user_id is None,
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
