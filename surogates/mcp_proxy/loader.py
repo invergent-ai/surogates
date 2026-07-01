@@ -327,6 +327,7 @@ async def _resolve_credentials(
             name = ref
             value, scope = await _retrieve_credential(
                 vault, org_id, user_id, name,
+                is_service_account=is_service_account,
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
@@ -350,6 +351,7 @@ async def _resolve_credentials(
 
             value, scope = await _retrieve_credential(
                 vault, org_id, user_id, name,
+                is_service_account=is_service_account,
             )
             await _emit_credential_access(
                 audit_store, org_id, audit_user_id, name, consumer, scope,
@@ -376,22 +378,33 @@ async def _retrieve_credential(
     org_id: UUID,
     user_id: UUID,
     name: str,
+    *,
+    is_service_account: bool = False,
 ) -> tuple[str | None, str]:
     """Retrieve a credential; returns ``(value, scope)``.
 
-    ``scope`` is ``"user"`` when the user's personal vault supplied the
-    value, ``"org"`` when it came from the org-wide vault, and
-    ``"missing"`` when neither had the credential.
+    ``scope`` is ``"user"`` when a user's personal vault supplied the value,
+    ``"service_account"`` when it came from an agent service-account vault,
+    ``"org"`` when it came from the org-wide vault, and ``"missing"`` when
+    none had the credential.  When *is_service_account* is set, ``user_id``
+    carries the service-account principal id.
 
-    Routes both lookups through
-    :meth:`CredentialVault.resolve_ref` so the single canonical
-    per-session entry point is used;
+    Routes lookups through :meth:`CredentialVault.resolve_ref` so the single
+    canonical per-session entry point is used.
     """
     ref = f"vault://{name}"
-    # User-scoped first.
-    value = await vault.resolve_ref(ref, org_id=org_id, user_id=user_id)
-    if value is not None:
-        return value, "user"
+    if is_service_account:
+        value = await vault.resolve_ref(
+            ref,
+            org_id=org_id,
+            service_account_id=user_id,
+        )
+        if value is not None:
+            return value, "service_account"
+    else:
+        value = await vault.resolve_ref(ref, org_id=org_id, user_id=user_id)
+        if value is not None:
+            return value, "user"
 
     # Fall back to org-scoped.
     value = await vault.resolve_ref(ref, org_id=org_id, user_id=None)
