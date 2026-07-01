@@ -276,14 +276,20 @@ async def ingest_attachment_bytes(
     filename: str,
     mime_type: str,
     data: bytes,
+    inline_images: bool = True,
 ) -> dict:
     """Turn downloaded bytes into an ``images[]`` or ``attachments[]`` event
     entry, mirroring the API upload route. Images return an image entry and are
     NOT written to the workspace. Non-images are written to the session
     workspace and return an attachment entry with the same inline rules as the
     API route.
+
+    When *inline_images* is False, images are written to the workspace instead
+    of being returned as base64 blobs, and an attachment entry (with path) is
+    returned instead of an image entry. The caller is responsible for
+    distinguishing images from other attachments via the mime_type.
     """
-    if _is_image_mime(mime_type):
+    if _is_image_mime(mime_type) and inline_images:
         return {"image": {"data": base64.b64encode(data).decode(), "mime_type": mime_type}}
 
     key = prefixed_session_workspace_key(session.config, root_id, path)

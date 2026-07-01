@@ -18,6 +18,7 @@ from typing import Any
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.channels.errors import ChannelApiError
 from surogates.session.attachment_ingest import (
+    _is_image_mime,
     ingest_attachment_bytes,
     safe_display_name,
     workspace_root_id,
@@ -179,6 +180,7 @@ async def fetch_channel_file(
     raw_name = meta.get("name") or file_id
     safe_name = safe_display_name(PurePosixPath(raw_name).name or file_id)
     safe_file_id = re.sub(r"[^\w.-]", "_", file_id) or "file"
+    mime_type = meta.get("mimetype") or "application/octet-stream"
     out = await ingest_attachment_bytes(
         storage,
         session=session,
@@ -186,9 +188,12 @@ async def fetch_channel_file(
         bucket=bucket,
         path=f"uploads/slack/fetch/{safe_file_id}-{safe_name}",
         filename=safe_name,
-        mime_type=meta.get("mimetype") or "application/octet-stream",
+        mime_type=mime_type,
         data=data,
+        inline_images=False,
     )
-    if "image" in out:
-        return {"kind": "image", **out["image"]}
-    return {"kind": "attachment", **out["attachment"]}
+    # images also return an attachment entry (with path, no base64)
+    entry = out["attachment"]
+    if _is_image_mime(mime_type):
+        return {"kind": "image", **entry}
+    return {"kind": "attachment", **entry}
