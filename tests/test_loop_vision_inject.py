@@ -11,8 +11,6 @@ Covers the cases listed in the task spec:
 import base64
 import json
 
-import pytest
-
 from surogates.harness.loop_vision_inject import maybe_build_fetched_image_messages
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20  # minimal PNG-ish bytes
@@ -33,7 +31,7 @@ def _tr(call_id: str, content) -> dict:
 
 
 async def _read_ok(path: str):
-    return (PNG_BYTES, "image/png")
+    return PNG_BYTES
 
 
 async def _read_none(path: str):
@@ -43,7 +41,6 @@ async def _read_none(path: str):
 # ---------------------------------------------------------------------------
 # 1. Vision model + fetch_channel_file image result -> user message with image_url
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_vision_model_image_result_injects_user_message():
     call_id = "cid_1"
     tool_calls = [_tc("fetch_channel_file", call_id)]
@@ -86,7 +83,6 @@ async def test_vision_model_image_result_injects_user_message():
 # ---------------------------------------------------------------------------
 # 2. supports_vision=False -> []
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_non_vision_model_returns_empty():
     call_id = "cid_2"
     tool_calls = [_tc("fetch_channel_file", call_id)]
@@ -106,7 +102,6 @@ async def test_non_vision_model_returns_empty():
 # ---------------------------------------------------------------------------
 # 3. read_image returns None -> [] (no raise)
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_read_image_returns_none_no_raise():
     call_id = "cid_3"
     tool_calls = [_tc("fetch_channel_file", call_id)]
@@ -126,7 +121,6 @@ async def test_read_image_returns_none_no_raise():
 # ---------------------------------------------------------------------------
 # 4. kind=attachment -> []
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_non_image_kind_returns_empty():
     call_id = "cid_4"
     tool_calls = [_tc("fetch_channel_file", call_id)]
@@ -154,7 +148,6 @@ async def test_non_image_kind_returns_empty():
 # ---------------------------------------------------------------------------
 # 5. Tool name is NOT fetch_channel_file -> []
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_other_tool_name_returns_empty():
     call_id = "cid_5"
     tool_calls = [_tc("generate_image", call_id)]  # wrong tool name
@@ -174,7 +167,6 @@ async def test_other_tool_name_returns_empty():
 # ---------------------------------------------------------------------------
 # 6. Malformed content (not JSON) -> [] (no raise)
 # ---------------------------------------------------------------------------
-@pytest.mark.asyncio
 async def test_malformed_content_no_raise():
     call_id = "cid_6"
     tool_calls = [_tc("fetch_channel_file", call_id)]

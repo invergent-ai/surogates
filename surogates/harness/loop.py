@@ -2361,7 +2361,11 @@ class AgentHarness(
                 try:
                     from surogates.harness.model_metadata import get_model_info as _gmi
                     _mi = _gmi(model_id)
-                    _supports_vision = (_mi is None) or _mi.supports_vision
+                    # Inject only for models KNOWN to support vision. Unknown /
+                    # BYO models (not in the catalog) fall through to the
+                    # vision_analyze(path) path, which works for any model —
+                    # safer than injecting an image block a text model may reject.
+                    _supports_vision = _mi is not None and _mi.supports_vision
                     extra_image_msgs = await maybe_build_fetched_image_messages(
                         tool_results,
                         tool_calls_raw,
@@ -2575,10 +2579,12 @@ class AgentHarness(
         self,
         session: "Session",
         path: str,
-    ) -> tuple[bytes, str] | None:
-        """Read an image file from the session workspace, returning (bytes, mime) or None.
+    ) -> bytes | None:
+        """Read an image file's bytes from the session workspace, or None.
 
-        Best-effort: any storage error returns None so the caller can skip injection.
+        Best-effort: any storage error returns None so the caller can skip
+        injection. The mime type is taken from the fetch result (the platform's
+        authoritative value), not re-derived here.
         """
         if self._storage is None:
             return None
@@ -2593,19 +2599,7 @@ class AgentHarness(
             root_id = workspace_root_id(session)
             key = prefixed_session_workspace_key(cfg, root_id, path)
             data = await self._storage.read(bucket, key)
-            if not data:
-                return None
-            # Derive mime from path extension.
-            ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-            mime_map = {
-                "png": "image/png",
-                "jpg": "image/jpeg",
-                "jpeg": "image/jpeg",
-                "webp": "image/webp",
-                "gif": "image/gif",
-            }
-            mime = mime_map.get(ext, "image/png")
-            return (data, mime)
+            return data or None
         except Exception:
             logger.debug(
                 "Session %s: workspace image read failed for path=%s",

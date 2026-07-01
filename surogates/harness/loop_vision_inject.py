@@ -42,7 +42,7 @@ async def maybe_build_fetched_image_messages(
     tool_calls_raw: list[dict],
     *,
     supports_vision: bool,
-    read_image: Callable[[str], Awaitable[tuple[bytes, str] | None]],
+    read_image: Callable[[str], Awaitable[bytes | None]],
 ) -> list[dict]:
     """Build trailing vision-block user messages for fetched channel images.
 
@@ -98,7 +98,7 @@ async def maybe_build_fetched_image_messages(
 
         # Read image bytes from storage (best-effort).
         try:
-            result = await read_image(path)
+            img_bytes = await read_image(path)
         except Exception:
             logger.debug(
                 "loop_vision_inject: storage read failed for path=%s; skipping injection",
@@ -106,17 +106,15 @@ async def maybe_build_fetched_image_messages(
             )
             continue
 
-        if result is None:
-            logger.debug("loop_vision_inject: storage returned None for path=%s; skipping", path)
-            continue
-
-        img_bytes, img_mime = result
         if not img_bytes:
+            logger.debug("loop_vision_inject: no image bytes for path=%s; skipping", path)
             continue
 
-        # Build data URL.
+        # Build the data URL with the fetch result's authoritative mime (already
+        # raster-gated above); normalise the non-standard image/jpg alias.
+        send_mime = "image/jpeg" if mime_type == "image/jpg" else mime_type
         b64 = base64.b64encode(img_bytes).decode("ascii")
-        data_url = f"data:{img_mime};base64,{b64}"
+        data_url = f"data:{send_mime};base64,{b64}"
 
         user_msg: dict[str, Any] = {
             "role": "user",
