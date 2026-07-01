@@ -359,3 +359,78 @@ async def test_build_session_llm_clients_closes_partial_bundle_on_later_slot_fai
     # All three resolved slots must be closed.
     assert len(closed) == 3
     assert all(c._closed for c in closed)
+
+
+class _SAScopeVault:
+    """Records resolve_ref calls keyed by (org_id, user_id, service_account_id)."""
+
+    def __init__(self, values):
+        self.values = values
+        self.calls = []
+
+    async def resolve_ref(self, ref, **kwargs):
+        self.calls.append((ref, kwargs))
+        return self.values.get(
+            (kwargs.get("org_id"), kwargs.get("user_id"), kwargs.get("service_account_id"))
+        )
+
+
+def _sa_scope_ctx(org_id):
+    from surogates.runtime import AgentRuntimeContext, LLMEndpoint
+    return AgentRuntimeContext(
+        agent_id="agent-1", org_id=org_id, project_id="p-1",
+        enabled=True, config_version=1, storage_key_prefix="p/a",
+        llm_main=LLMEndpoint(
+            model="gpt-test", base_url="https://llm.example/v1",
+            api_key_ref="vault://OPENAI_API_KEY",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_clients_resolve_service_account_key_before_org(monkeypatch):
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from surogates.harness.session_llm import build_session_llm_clients
+    monkeypatch.setattr(
+        "surogates.harness.session_llm.AsyncOpenAI", _RecordingOpenAI, raising=False
+    )
+    org_id, sa = "o-agent", uuid4()
+    vault = _SAScopeVault({(org_id, None, sa): "sk-agent", (org_id, None, None): "sk-org"})
+    bundle = await build_session_llm_clients(
+        _sa_scope_ctx(org_id), vault=vault, service_account_id=sa,
+        settings=SimpleNamespace(llm=SimpleNamespace(image_model="")),
+    )
+    assert bundle.main.client.api_key == "sk-agent"
+    assert vault.calls[0][1].get("service_account_id") == sa
+    assert vault.calls[0][1].get("user_id") is None
+
+
+@pytest.mark.asyncio
+async def test_llm_clients_fall_back_from_service_account_key_to_org(monkeypatch):
+    from types import SimpleNamespace
+    from uuid import uuid4
+    from surogates.harness.session_llm import build_session_llm_clients
+    monkeypatch.setattr(
+        "surogates.harness.session_llm.AsyncOpenAI", _RecordingOpenAI, raising=False
+    )
+    org_id, sa = "o-agent", uuid4()
+    vault = _SAScopeVault({(org_id, None, None): "sk-org"})
+    bundle = await build_session_llm_clients(
+        _sa_scope_ctx(org_id), vault=vault, service_account_id=sa,
+        settings=SimpleNamespace(llm=SimpleNamespace(image_model="")),
+    )
+    assert bundle.main.client.api_key == "sk-org"
+    assert vault.calls[1][1].get("user_id") is None
+    assert vault.calls[1][1].get("service_account_id") is None
+
+
+@pytest.mark.asyncio
+async def test_llm_clients_reject_user_and_service_account_scope():
+    from uuid import uuid4
+    from surogates.harness.session_llm import build_session_llm_clients
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await build_session_llm_clients(
+            _sa_scope_ctx("o-x"), vault=_SAScopeVault({}),
+            user_id=uuid4(), service_account_id=uuid4(),
+        )

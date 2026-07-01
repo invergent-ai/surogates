@@ -1061,7 +1061,9 @@ async def run_worker(settings: Settings) -> None:
         from surogates.tools.builtin.media_gen import MediaGenConfig
 
         llm_bundle = await build_session_llm_clients(
-            ctx, vault=credential_vault, user_id=tenant.user_id,
+            ctx, vault=credential_vault,
+            user_id=credential.user_id,
+            service_account_id=credential.service_account_id,
             settings=settings,
         )
 
@@ -1087,7 +1089,9 @@ async def run_worker(settings: Settings) -> None:
         advisor_slot = llm_bundle.advisor
         image_slot = llm_bundle.image
         video_endpoint = await resolve_video_endpoint(
-            ctx, vault=credential_vault, user_id=tenant.user_id,
+            ctx, vault=credential_vault,
+            user_id=credential.user_id,
+            service_account_id=credential.service_account_id,
             settings=settings,
         )
         media_gen_config = MediaGenConfig(
