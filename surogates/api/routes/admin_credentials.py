@@ -153,7 +153,7 @@ async def list_credentials(
         )
         credentials = [
             CredentialInfo(org_id=oid, user_id=uid, name=name)
-            for (oid, uid, name) in rows
+            for (oid, uid, _sid, name) in rows
         ]
         return CredentialListResponse(credentials=credentials, total=total)
 
