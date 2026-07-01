@@ -20,7 +20,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from surogates.session.attachment_ingest import safe_display_name, workspace_root_id
-from surogates.storage.tenant import prefixed_session_workspace_key
+from surogates.storage.tenant import boundary_workspace_key
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ async def resolve_workspace_media(
         if rel is None:
             logger.warning("[channel_media] rejecting malformed media path: %r", raw)
             continue
-        key = prefixed_session_workspace_key(session.config, root_id, rel)
+        key = boundary_workspace_key(session.config, session, root_id, rel)
         try:
             meta = await storage.stat(bucket, key)
         except KeyError:

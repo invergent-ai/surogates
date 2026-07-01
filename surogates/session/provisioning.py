@@ -91,6 +91,11 @@ async def create_agent_session(
     sid = session_id or uuid4()
 
     merged_config = dict(config or {})
+    # Tool paths that receive only ``session_config`` (media_gen, vision)
+    # reconstruct a minimal session shape for boundary resolution; carry the
+    # channel so a managed-channel session without a pinned workspace_boundary
+    # still resolves its memory boundary rather than falling to per-session.
+    merged_config.setdefault("channel", channel)
     _pin_workspace_boundary(merged_config, channel=channel)
     await stamp_workspace_config(
         merged_config, storage=storage, settings=settings, session_id=sid, model=model,

@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
-from surogates.storage.tenant import prefixed_session_workspace_key
+from surogates.storage.tenant import boundary_workspace_key
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +304,7 @@ async def ingest_attachment_bytes(
     if _is_image_mime(mime_type) and inline_images:
         return {"image": {"data": base64.b64encode(data).decode(), "mime_type": mime_type}}
 
-    key = prefixed_session_workspace_key(session.config, root_id, path)
+    key = boundary_workspace_key(session.config, session, root_id, path)
     await storage.write(bucket, key, data)
 
     entry: dict = {

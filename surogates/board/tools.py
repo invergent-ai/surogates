@@ -359,14 +359,17 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             ArtifactNotFoundError,
             ArtifactStore,
         )
-        from surogates.storage.tenant import prefixed_session_workspace_prefix
+        from surogates.session.attachment_ingest import workspace_root_id
+        from surogates.storage.tenant import boundary_workspace_prefix
 
         artifact_store = ArtifactStore(
             storage,
             session_id=target_sid,
             bucket=bucket,
-            key_prefix=prefixed_session_workspace_prefix(
-                target.config, target_sid,
+            key_prefix=boundary_workspace_prefix(
+                target.config,
+                target,
+                workspace_root_id(target),
             ),
         )
         try:

@@ -2594,7 +2594,7 @@ class AgentHarness(
             return None
         try:
             from surogates.session.attachment_ingest import workspace_root_id
-            from surogates.storage.tenant import prefixed_session_workspace_key
+            from surogates.storage.tenant import boundary_workspace_key
 
             cfg = session.config or {}
             bucket = cfg.get("storage_bucket") or ""
@@ -2605,7 +2605,7 @@ class AgentHarness(
                 )
                 return None
             root_id = workspace_root_id(session)
-            key = prefixed_session_workspace_key(cfg, root_id, path)
+            key = boundary_workspace_key(cfg, session, root_id, path)
             data = await self._storage.read(bucket, key)
             return data or None
         except Exception:

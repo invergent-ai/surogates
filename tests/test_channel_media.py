@@ -73,7 +73,15 @@ class TestNormalizeWorkspacePath:
 @dataclass
 class _FakeSession:
     id: str = "11111111-1111-1111-1111-111111111111"
-    config: dict = field(default_factory=lambda: {"storage_bucket": "wsbucket"})
+    channel: str = "slack"
+    config: dict = field(
+        default_factory=lambda: {
+            "storage_bucket": "wsbucket",
+            "storage_key_prefix": "project/agent",
+            "memory_boundary": "slack:c:G1",
+            "workspace_boundary": "slack:c:G1",
+        }
+    )
 
 
 class _FakeStorage:
@@ -96,10 +104,16 @@ class _FakeStorage:
 
 
 def _key(rel: str) -> str:
-    from surogates.storage.tenant import prefixed_session_workspace_key
+    from surogates.storage.tenant import boundary_workspace_key
     from surogates.session.attachment_ingest import workspace_root_id
+
     session = _FakeSession()
-    return prefixed_session_workspace_key(session.config, workspace_root_id(session), rel)
+    return boundary_workspace_key(
+        session.config,
+        session,
+        workspace_root_id(session),
+        rel,
+    )
 
 
 class TestResolveWorkspaceMedia:
