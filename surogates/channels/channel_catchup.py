@@ -113,6 +113,27 @@ def _retry_after_seconds(exc: Exception) -> float | None:
         return None
 
 
+# conversations.list returns `missing_scope` and aborts the WHOLE listing when
+# the app token lacks a requested type's read scope; map the needed scope back
+# to the conversation type so we can drop it and re-list the readable ones.
+_SCOPE_TO_TYPE = {
+    "channels:read": "public_channel",
+    "groups:read": "private_channel",
+    "im:read": "im",
+    "mpim:read": "mpim",
+}
+
+
+def _missing_scope(exc: Exception) -> str | None:
+    """Return the scope Slack reported as missing, or None if not a scope error."""
+    response = getattr(exc, "response", None)
+    if response is None or not hasattr(response, "get"):
+        return None
+    if response.get("error") != "missing_scope":
+        return None
+    return response.get("needed") or None
+
+
 class ChannelCatchup:
     """Replays Slack messages missed during downtime, on channels-process boot."""
 
@@ -290,12 +311,33 @@ class ChannelCatchup:
 
     async def _list_conversations(self, platform: Any, creds: dict) -> list[tuple[str, str]]:
         client = platform._get_client((creds or {}).get("bot_token") or "")
+        types = [t for t in (p.strip() for p in self._CONV_TYPES.split(",")) if t]
+        # A token missing one type's read scope makes Slack abort the WHOLE
+        # listing; drop the un-granted type and re-list the readable ones so the
+        # rest of the app's conversations still catch up.
+        while types:
+            try:
+                return await self._list_for_types(client, types)
+            except Exception as exc:
+                scope = _missing_scope(exc)
+                drop = _SCOPE_TO_TYPE.get(scope) if scope else None
+                if drop is None or drop not in types:
+                    raise
+                types.remove(drop)
+                logger.info(
+                    "[catchup] app token missing %s — skipping %s conversations",
+                    scope, drop,
+                )
+        return []
+
+    async def _list_for_types(self, client: Any, types: list[str]) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         cursor = ""
+        joined = ",".join(types)
         while True:
             resp = await self._call_with_retry(
                 lambda: client.conversations_list(
-                    types=self._CONV_TYPES, exclude_archived=True, limit=200,
+                    types=joined, exclude_archived=True, limit=200,
                     **({"cursor": cursor} if cursor else {}),
                 )
             )
