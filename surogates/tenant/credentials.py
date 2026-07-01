@@ -99,7 +99,7 @@ class CredentialVault:
         responses without a second round trip.
 
         Uses Postgres ``INSERT ... ON CONFLICT DO UPDATE`` keyed on the
-        ``uq_credentials_org_user_name`` unique index so concurrent
+        ``uq_credentials_org_user_sa_name`` unique constraint so concurrent
         callers can't race past each other into duplicate rows.  ``xmax``
         is zero on inserted tuples and non-zero on updates — the canonical
         Postgres trick for detecting which branch fired.

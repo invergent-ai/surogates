@@ -66,7 +66,9 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 
 #: Channels whose sessions mint external secrets/tools under the agent's own
 #: service-account principal (when the agent has one) instead of the end user.
-MANAGED_CREDENTIAL_CHANNELS: frozenset[str] = frozenset({"slack", "telegram"})
+#: One source of truth with the memory-boundary set so credential-switching and
+#: conversation-scoped memory isolation can never drift to different channels.
+from surogates.channels.memory_boundary import MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS  # noqa: E402
 
 
 def resolve_credential_principal(
@@ -651,9 +653,11 @@ async def _stop_worker_invalidator(state: dict) -> None:
 def _memory_user_id(session, tenant) -> str | None:
     """The user id whose personal memory this turn uses, or None for shared.
 
-    Multi-party channel threads (and service-account turns) carry no per-user
-    memory — only shared conversation + agent/org memory. Single-principal
-    sessions (1:1 DM, web) use the acting user.
+    Keyed off the credential principal (``tenant``). Multi-party channel threads
+    carry no per-user memory (shared only); a session whose credential principal
+    is a service account — including a managed-channel session where the agent
+    acts as itself — is ``None`` (agent/shared memory, not any human's); a
+    single-user session (web / api / DM webapp) uses that user.
     """
     if (getattr(session, "config", None) or {}).get("multi_party"):
         return None
@@ -963,7 +967,9 @@ async def run_worker(settings: Settings) -> None:
         # The credential principal is what external secrets/tools mint under.
         # For a managed-channel session with a live agent service account, that
         # is the agent itself (it acts as itself, not the human); otherwise the
-        # acting principal. ``acting`` is kept separately for inbox + attribution.
+        # acting principal. ``acting`` is kept separately and passed to the
+        # harness so inbox routing, attribution, and automation ownership
+        # (/loop, /mission, /auto-research) still track the human sender.
         agent_principal = await agent_principal_resolver(
             session_org_id,
             session.agent_id,
