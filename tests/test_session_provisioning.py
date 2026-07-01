@@ -349,3 +349,57 @@ async def test_create_child_session_propagates_idempotency_and_session_id():
     call = store.create_session.await_args.kwargs
     assert call["session_id"] == explicit_id
     assert call["idempotency_key"] == "scheduled:abc:2026-05-12T00:00:00"
+
+
+# ---------------------------------------------------------------------------
+# stamp_workspace_config: direct tests for supports_vision stamping
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stamp_workspace_config_supports_vision_true_for_vision_model():
+    """A vision model has config['supports_vision'] = True after stamp."""
+    from surogates.session.provisioning import stamp_workspace_config
+
+    class _FakeStorage:
+        async def create_bucket(self, bucket): pass
+        def resolve_workspace_path(self, bucket, session_id): return f"/ws/{session_id}"
+
+    class _FakeSettings:
+        class storage:
+            bucket = "test-bucket"
+            key_prefix = ""
+
+    config = {}
+    await stamp_workspace_config(
+        config,
+        storage=_FakeStorage(),
+        settings=_FakeSettings(),
+        session_id=uuid4(),
+        model="gpt-5.5",
+    )
+    assert config["supports_vision"] is True
+
+
+@pytest.mark.asyncio
+async def test_stamp_workspace_config_supports_vision_false_for_text_model():
+    """A text-only model has config['supports_vision'] = False after stamp."""
+    from surogates.session.provisioning import stamp_workspace_config
+
+    class _FakeStorage:
+        async def create_bucket(self, bucket): pass
+        def resolve_workspace_path(self, bucket, session_id): return f"/ws/{session_id}"
+
+    class _FakeSettings:
+        class storage:
+            bucket = "test-bucket"
+            key_prefix = ""
+
+    config = {}
+    await stamp_workspace_config(
+        config,
+        storage=_FakeStorage(),
+        settings=_FakeSettings(),
+        session_id=uuid4(),
+        model="deepseek/deepseek-v4-pro",
+    )
+    assert config["supports_vision"] is False

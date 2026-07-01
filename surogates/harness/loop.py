@@ -2350,6 +2350,34 @@ class AgentHarness(
             # 7c. Budget pressure warning -- inject into the last tool result.
             tool_results = inject_budget_warning(tool_results, self._budget)
 
+            # 7d. For vision-capable models, inject a native image block after tool
+            #     results for any fetch_channel_file image result. Best-effort: any
+            #     failure returns [] and the turn continues unchanged.
+            extra_image_msgs: list[dict] = []
+            if tool_calls_raw:
+                from surogates.harness.loop_vision_inject import (
+                    maybe_build_fetched_image_messages,
+                )
+                try:
+                    from surogates.harness.model_metadata import get_model_info as _gmi
+                    _mi = _gmi(model_id)
+                    # Inject only for models KNOWN to support vision. Unknown /
+                    # BYO models (not in the catalog) fall through to the
+                    # vision_analyze(path) path, which works for any model —
+                    # safer than injecting an image block a text model may reject.
+                    _supports_vision = _mi is not None and _mi.supports_vision
+                    extra_image_msgs = await maybe_build_fetched_image_messages(
+                        tool_results,
+                        tool_calls_raw,
+                        supports_vision=_supports_vision,
+                        read_image=lambda p: self._read_workspace_image(session, p),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Session %s: vision inject failed; skipping",
+                        session.id, exc_info=True,
+                    )
+
             # 8. Append tool results to messages.
             messages.extend(tool_results)
 
@@ -2371,6 +2399,11 @@ class AgentHarness(
                     turn_id=turn_id,
                 )
                 return
+
+            # The turn continues: append fetched-image vision blocks AFTER the
+            # tool results. A guardrail-halted turn returns above, so an image
+            # the model never saw is never persisted in the snapshot.
+            messages.extend(extra_image_msgs)
 
             last_tool_name = ""
             for tc in reversed(tool_calls_raw):
@@ -2545,6 +2578,42 @@ class AgentHarness(
                     tc["_checkpoint_hash"] = cp_hash
             except Exception:
                 logger.debug("Checkpoint before %s failed", tool_name, exc_info=True)
+
+    async def _read_workspace_image(
+        self,
+        session: "Session",
+        path: str,
+    ) -> bytes | None:
+        """Read an image file's bytes from the session workspace, or None.
+
+        Best-effort: any storage error returns None so the caller can skip
+        injection. The mime type is taken from the fetch result (the platform's
+        authoritative value), not re-derived here.
+        """
+        if self._storage is None:
+            return None
+        try:
+            from surogates.session.attachment_ingest import workspace_root_id
+            from surogates.storage.tenant import prefixed_session_workspace_key
+
+            cfg = session.config or {}
+            bucket = cfg.get("storage_bucket") or ""
+            if not bucket:
+                logger.debug(
+                    "Session %s: no storage_bucket; skipping vision inject for %s",
+                    session.id, path,
+                )
+                return None
+            root_id = workspace_root_id(session)
+            key = prefixed_session_workspace_key(cfg, root_id, path)
+            data = await self._storage.read(bucket, key)
+            return data or None
+        except Exception:
+            logger.debug(
+                "Session %s: workspace image read failed for path=%s",
+                session.id, path, exc_info=True,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Saga lifecycle helpers

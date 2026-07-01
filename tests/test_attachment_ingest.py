@@ -118,3 +118,35 @@ def test_get_injection_detector_returns_singleton():
     d2 = get_injection_detector()
     assert d1 is d2
     assert hasattr(d1, "detect")
+
+
+async def test_ingest_image_inline_false_writes_workspace_returns_attachment():
+    """inline_images=False: image goes to workspace, returns attachment entry with path (no base64)."""
+    storage = _FakeStorage()
+    out = await ingest_attachment_bytes(
+        storage, session=_session(), root_id="s1", bucket="b",
+        path="uploads/slack/fetch/FIMG001-pic.png", filename="pic.png",
+        mime_type="image/png", data=b"PNGBYTES",
+        inline_images=False,
+    )
+    att = out["attachment"]
+    assert att["path"] == "uploads/slack/fetch/FIMG001-pic.png"
+    assert att["mime_type"] == "image/png"
+    assert att["size"] == len(b"PNGBYTES")
+    assert "data" not in att  # no base64
+    assert any(k[0] == "b" and "pic.png" in k[1] for k in storage.written)
+
+
+async def test_ingest_image_inline_true_still_returns_base64():
+    """inline_images=True (default): existing behavior preserved."""
+    import base64
+    storage = _FakeStorage()
+    out = await ingest_attachment_bytes(
+        storage, session=_session(), root_id="s1", bucket="b",
+        path="uploads/slack/fetch/FIMG001-pic.png", filename="pic.png",
+        mime_type="image/png", data=b"PNGBYTES",
+        inline_images=True,
+    )
+    assert "image" in out
+    assert out["image"]["data"] == base64.b64encode(b"PNGBYTES").decode()
+    assert storage.written == {}  # not written to workspace

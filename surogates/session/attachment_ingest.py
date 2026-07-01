@@ -253,6 +253,18 @@ def _is_image_mime(mime_type: str) -> bool:
     return (mime_type or "").lower().startswith("image/")
 
 
+# Raster image formats that can be shown to a model as a vision block or read by
+# vision tools. SVG/TIFF/BMP are image/* but not natively renderable, so they are
+# treated as plain attachments rather than viewable images.
+RASTER_IMAGE_MIMES = frozenset({
+    "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
+})
+
+
+def is_raster_image_mime(mime_type: str) -> bool:
+    return (mime_type or "").lower().split(";")[0].strip() in RASTER_IMAGE_MIMES
+
+
 def workspace_root_id(session: Any) -> str:
     """Return the workspace root session id for *session*.
 
@@ -276,14 +288,20 @@ async def ingest_attachment_bytes(
     filename: str,
     mime_type: str,
     data: bytes,
+    inline_images: bool = True,
 ) -> dict:
     """Turn downloaded bytes into an ``images[]`` or ``attachments[]`` event
     entry, mirroring the API upload route. Images return an image entry and are
     NOT written to the workspace. Non-images are written to the session
     workspace and return an attachment entry with the same inline rules as the
     API route.
+
+    When *inline_images* is False, images are written to the workspace instead
+    of being returned as base64 blobs, and an attachment entry (with path) is
+    returned instead of an image entry. The caller is responsible for
+    distinguishing images from other attachments via the mime_type.
     """
-    if _is_image_mime(mime_type):
+    if _is_image_mime(mime_type) and inline_images:
         return {"image": {"data": base64.b64encode(data).decode(), "mime_type": mime_type}}
 
     key = prefixed_session_workspace_key(session.config, root_id, path)
