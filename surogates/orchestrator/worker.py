@@ -64,6 +64,33 @@ logger = logging.getLogger(__name__)
 #:   same model.
 ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 
+#: Channels whose sessions mint external secrets/tools under the agent's own
+#: service-account principal (when the agent has one) instead of the end user.
+MANAGED_CREDENTIAL_CHANNELS: frozenset[str] = frozenset({"slack", "telegram"})
+
+
+def resolve_credential_principal(
+    *,
+    session: Any,
+    acting: Any,
+    agent_principal: Any | None,
+    managed_channels: frozenset[str] = MANAGED_CREDENTIAL_CHANNELS,
+):
+    """The principal external secrets/tools mint under for this wake.
+
+    The agent's own service account for a managed-channel session with a live
+    agent principal; otherwise the acting principal (Studio/web/api, or a channel
+    agent with no service account — fail-safe).
+    """
+    from surogates.session.acting_principal import ActingPrincipal
+
+    if session.channel in managed_channels and agent_principal is not None:
+        return ActingPrincipal(
+            user_id=None,
+            service_account_id=agent_principal.id,
+        )
+    return acting
+
 
 def _select_harness_token(
     *,
@@ -920,6 +947,20 @@ async def run_worker(settings: Settings) -> None:
         # Resolve from the already-loaded session (no second sessions-row SELECT).
         acting = await session_store.resolve_acting_principal_for_session(session)
 
+        # The credential principal is what external secrets/tools mint under.
+        # For a managed-channel session with a live agent service account, that
+        # is the agent itself (it acts as itself, not the human); otherwise the
+        # acting principal. ``acting`` is kept separately for inbox + attribution.
+        agent_principal = await agent_principal_resolver(
+            session_org_id,
+            session.agent_id,
+        )
+        credential = resolve_credential_principal(
+            session=session,
+            acting=acting,
+            agent_principal=agent_principal,
+        )
+
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
 
@@ -927,9 +968,9 @@ async def run_worker(settings: Settings) -> None:
             org_row = (
                 await db.execute(sa_select(Org).where(Org.id == session_org_id))
             ).scalar_one_or_none()
-            if acting.user_id is not None:
+            if credential.user_id is not None:
                 user_row = (
-                    await db.execute(sa_select(User).where(User.id == acting.user_id))
+                    await db.execute(sa_select(User).where(User.id == credential.user_id))
                 ).scalar_one_or_none()
             else:
                 user_row = None
@@ -950,14 +991,14 @@ async def run_worker(settings: Settings) -> None:
         _multi_party = bool((session.config or {}).get("multi_party"))
         tenant = TenantContext(
             org_id=session_org_id,
-            user_id=acting.user_id,
+            user_id=credential.user_id,
             org_config=org_row.config if org_row else {},
             user_preferences={} if _multi_party else (
                 user_row.preferences if user_row else {}
             ),
             permissions=frozenset(),
             asset_root=ctx.storage_key_prefix,
-            service_account_id=acting.service_account_id,
+            service_account_id=credential.service_account_id,
         )
 
         # Proxy-mode MCP tool discovery. The worker shares one tool
