@@ -225,35 +225,47 @@ class SessionStore:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
 
+    async def _latest_principal(
+        self, db: AsyncSession, *, session_id: UUID, fallback: ActingPrincipal
+    ) -> ActingPrincipal:
+        """Stamped principal of the latest non-synthetic user message, else
+        *fallback*.
+
+        Synthetic messages (ambient / worker-complete / backfill) are excluded
+        in SQL — via the JSONB ``?`` key test — so a burst of them can never
+        shadow the real sender the way a bounded newest-first scan could. A wake
+        with no real human message (purely synthetic) falls back to the owner.
+        """
+        data = (
+            await db.execute(
+                select(EventRow.data)
+                .where(EventRow.session_id == session_id)
+                .where(EventRow.type == EventType.USER_MESSAGE.value)
+                .where(~EventRow.data.has_key("synthetic"))
+                .order_by(EventRow.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if data is None:
+            return fallback
+        return resolve_principal_from_event_data(data, fallback=fallback)
+
     async def _resolve_acting_principal_in(
         self, db: AsyncSession, session_row: SessionRow
     ) -> ActingPrincipal:
         """Acting principal using an already-open session + loaded row.
 
-        Scans the most recent user messages (newest first) for the latest
-        non-synthetic one and reads its principal stamp; a synthetic wake
-        (ambient / worker-complete) with no human sender falls back to the
-        session owner. Shares the caller's transaction snapshot so the event
-        row, inbox row, and publish target agree.
+        Shares the caller's transaction snapshot so the event row, inbox row,
+        and publish target are computed from one database snapshot.
         """
-        fallback = ActingPrincipal(
-            user_id=session_row.user_id,
-            service_account_id=session_row.service_account_id,
+        return await self._latest_principal(
+            db,
+            session_id=session_row.id,
+            fallback=ActingPrincipal(
+                user_id=session_row.user_id,
+                service_account_id=session_row.service_account_id,
+            ),
         )
-        rows = (
-            await db.execute(
-                select(EventRow.data)
-                .where(EventRow.session_id == session_row.id)
-                .where(EventRow.type == EventType.USER_MESSAGE.value)
-                .order_by(EventRow.id.desc())
-                .limit(20)
-            )
-        ).scalars().all()
-        for data in rows:
-            if (data or {}).get("synthetic"):
-                continue
-            return resolve_principal_from_event_data(data, fallback=fallback)
-        return fallback
 
     async def resolve_acting_principal(self, session_id: UUID) -> ActingPrincipal:
         """Acting principal for the session's latest real user message."""
@@ -262,6 +274,24 @@ class SessionStore:
             if row is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
             return await self._resolve_acting_principal_in(db, row)
+
+    async def resolve_acting_principal_for_session(
+        self, session: Session
+    ) -> ActingPrincipal:
+        """Acting principal for an already-loaded session (no row refetch).
+
+        The harness holds the session at wake start, so this reads only the
+        events — it avoids re-SELECTing the sessions row just to read its owner
+        for the fallback.
+        """
+        fallback = ActingPrincipal(
+            user_id=session.user_id,
+            service_account_id=session.service_account_id,
+        )
+        async with self._sf() as db:
+            return await self._latest_principal(
+                db, session_id=session.id, fallback=fallback
+            )
 
     async def _session_has_live_viewer(self, session_id: UUID) -> bool:
         """Whether a client is actively streaming this session's events.
@@ -770,17 +800,13 @@ class SessionStore:
                 acting = (
                     await self._resolve_acting_principal_in(db, session_row)
                     if session_row is not None
-                    else None
+                    else ActingPrincipal(user_id=None, service_account_id=None)
                 )
-                target_user_id = acting.user_id if acting is not None else None
-                target_sa_id = (
-                    acting.service_account_id if acting is not None else None
-                )
-                if target_user_id is not None or target_sa_id is not None:
+                if acting.user_id is not None or acting.service_account_id is not None:
                     item = InboxItem(
                         org_id=session_row.org_id,
-                        user_id=target_user_id,
-                        service_account_id=target_sa_id,
+                        user_id=acting.user_id,
+                        service_account_id=acting.service_account_id,
                         session_id=session_id,
                         source_event_id=event_id,
                         kind=inbox_row.kind,
@@ -795,7 +821,7 @@ class SessionStore:
                     # or a service account for ops chats) so the live unread
                     # badge updates. The one-principal CHECK guarantees this is
                     # non-null.
-                    principal_id = target_user_id or target_sa_id
+                    principal_id = acting.user_id or acting.service_account_id
                     inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()

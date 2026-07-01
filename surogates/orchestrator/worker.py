@@ -901,7 +901,8 @@ async def run_worker(settings: Settings) -> None:
         # The acting principal is whoever sent the message that triggered this
         # wake — not the frozen session owner (they differ in a shared thread).
         # Credentials, tools, memory, and the API-client token all derive from it.
-        acting = await session_store.resolve_acting_principal(session_id)
+        # Resolve from the already-loaded session (no second sessions-row SELECT).
+        acting = await session_store.resolve_acting_principal_for_session(session)
 
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
@@ -1101,7 +1102,11 @@ async def run_worker(settings: Settings) -> None:
                     await audit_store.emit(
                         org_id=session_org_id,
                         agent_id=ctx.agent_id,
-                        user_id=tenant.user_id,
+                        # Attribute to the memory owner this write actually
+                        # targeted: the acting user for a personal store, or None
+                        # for a shared/multi-party write (matches _mem_user, the
+                        # R2 key, and the Redis invalidation channel).
+                        user_id=tenant.user_id if _mem_user is not None else None,
                         type=(
                             AuditType.MEMORY_CONFLICT
                             if conflict_detected

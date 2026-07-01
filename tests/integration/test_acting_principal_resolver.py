@@ -63,3 +63,36 @@ async def test_ignores_synthetic_user_messages(session_store, session_factory):
     })
     got = await session_store.resolve_acting_principal(sid)
     assert got == ActingPrincipal(user_id=sender, service_account_id=None)
+
+
+async def test_many_synthetic_do_not_shadow_real_sender(session_store, session_factory):
+    # A long synthetic burst (e.g. a mission/outcome loop) must not shadow the
+    # last real human sender — the SQL synthetic filter has no bounded window.
+    org_id = await create_org(session_factory)
+    owner = await create_user(session_factory, org_id)
+    sender = await create_user(session_factory, org_id)
+    sid = await _new_session(session_store, owner, org_id)
+
+    await session_store.emit_event(sid, EventType.USER_MESSAGE, {
+        "content": "real", "principal_user_id": str(sender),
+    })
+    for i in range(30):
+        await session_store.emit_event(sid, EventType.USER_MESSAGE, {
+            "content": f"loop {i}", "synthetic": "outcome_continuation",
+        })
+    got = await session_store.resolve_acting_principal(sid)
+    assert got == ActingPrincipal(user_id=sender, service_account_id=None)
+
+
+async def test_for_session_variant_matches(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    owner = await create_user(session_factory, org_id)
+    sender = await create_user(session_factory, org_id)
+    sid = await _new_session(session_store, owner, org_id)
+
+    await session_store.emit_event(sid, EventType.USER_MESSAGE, {
+        "content": "hi", "principal_user_id": str(sender),
+    })
+    session = await session_store.get_session(sid)
+    got = await session_store.resolve_acting_principal_for_session(session)
+    assert got == ActingPrincipal(user_id=sender, service_account_id=None)
