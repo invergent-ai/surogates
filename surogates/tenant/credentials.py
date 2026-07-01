@@ -88,6 +88,8 @@ class CredentialVault:
         name: str,
         value: str,
         user_id: UUID | None = None,
+        *,
+        service_account_id: UUID | None = None,
     ) -> tuple[UUID, bool]:
         """Encrypt *value* and store (or update) the named credential.
 
@@ -102,6 +104,7 @@ class CredentialVault:
         is zero on inserted tuples and non-zero on updates — the canonical
         Postgres trick for detecting which branch fired.
         """
+        self._require_one_principal(user_id, service_account_id)
         encrypted = self._fernet.encrypt(value.encode("utf-8"))
 
         stmt = (
@@ -109,11 +112,12 @@ class CredentialVault:
             .values(
                 org_id=org_id,
                 user_id=user_id,
+                service_account_id=service_account_id,
                 name=name,
                 value_enc=encrypted,
             )
             .on_conflict_do_update(
-                index_elements=["org_id", "user_id", "name"],
+                index_elements=["org_id", "user_id", "service_account_id", "name"],
                 set_={"value_enc": encrypted},
             )
             .returning(
@@ -134,11 +138,13 @@ class CredentialVault:
         org_id: UUID,
         name: str,
         user_id: UUID | None = None,
+        *,
+        service_account_id: UUID | None = None,
     ) -> str | None:
         """Return the decrypted value of the named credential, or ``None``."""
         async with self._session_factory() as session:
             credential = await self._get_credential(
-                session, org_id, name, user_id
+                session, org_id, name, user_id, service_account_id
             )
 
         if credential is None:
@@ -158,6 +164,7 @@ class CredentialVault:
         *,
         org_id: UUID,
         user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
     ) -> str | None:
         """Resolve a ``vault://<name>`` reference to plaintext.
 
@@ -168,13 +175,17 @@ class CredentialVault:
         on a malformed reference.
         """
         name = parse_vault_ref(ref)
-        return await self.retrieve(org_id, name, user_id=user_id)
+        return await self.retrieve(
+            org_id, name, user_id=user_id, service_account_id=service_account_id
+        )
 
     async def delete(
         self,
         org_id: UUID,
         name: str,
         user_id: UUID | None = None,
+        *,
+        service_account_id: UUID | None = None,
     ) -> bool:
         """Delete the named credential.  Returns ``True`` if it existed."""
         async with self._session_factory() as session:
@@ -182,7 +193,7 @@ class CredentialVault:
                 stmt = delete(Credential).where(
                     Credential.org_id == org_id,
                     Credential.name == name,
-                    self._user_id_clause(user_id),
+                    *self._scope_clause(user_id, service_account_id),
                 )
                 result = await session.execute(stmt)
         return result.rowcount > 0  # type: ignore[union-attr]
@@ -191,12 +202,14 @@ class CredentialVault:
         self,
         org_id: UUID,
         user_id: UUID | None = None,
+        *,
+        service_account_id: UUID | None = None,
     ) -> list[str]:
         """Return the names of all credentials for the given scope."""
         async with self._session_factory() as session:
             stmt = select(Credential.name).where(
                 Credential.org_id == org_id,
-                self._user_id_clause(user_id),
+                *self._scope_clause(user_id, service_account_id),
             )
             result = await session.execute(stmt)
             return list(result.scalars().all())
@@ -205,49 +218,77 @@ class CredentialVault:
         self,
         user_id: UUID | None = None,
         *,
+        service_account_id: UUID | None = None,
         limit: int = 200,
         offset: int = 0,
-    ) -> tuple[list[tuple[UUID, UUID | None, str]], int]:
+    ) -> tuple[list[tuple[UUID, UUID | None, UUID | None, str]], int]:
         """Platform-wide credential listing (admin use).
 
         Returns ``(rows, total)`` where rows are ``(org_id, user_id,
-        name)`` tuples.  Plaintext is never loaded — only metadata.
-        ``user_id`` filters to a specific user when supplied; pass
-        ``None`` to include every row regardless of scope.
+        service_account_id, name)`` tuples.  Plaintext is never loaded — only
+        metadata.  ``user_id`` or ``service_account_id`` (mutually exclusive)
+        filters to that scope; pass neither to include every row.
         """
-        async with self._session_factory() as session:
-            base = select(Credential)
-            if user_id is not None:
-                base = base.where(Credential.user_id == user_id)
+        self._require_one_principal(user_id, service_account_id)
 
+        def _filter(stmt):
+            if service_account_id is not None:
+                return stmt.where(Credential.service_account_id == service_account_id)
+            if user_id is not None:
+                return stmt.where(Credential.user_id == user_id)
+            return stmt
+
+        async with self._session_factory() as session:
+            base = _filter(select(Credential))
             count_stmt = select(func.count()).select_from(base.subquery())
             total = (await session.execute(count_stmt)).scalar_one()
 
-            page_stmt = (
+            page_stmt = _filter(
                 select(
-                    Credential.org_id, Credential.user_id, Credential.name,
+                    Credential.org_id,
+                    Credential.user_id,
+                    Credential.service_account_id,
+                    Credential.name,
                 )
                 .order_by(Credential.org_id, Credential.name)
                 .limit(limit)
                 .offset(offset)
             )
-            if user_id is not None:
-                page_stmt = page_stmt.where(Credential.user_id == user_id)
-
             rows = (await session.execute(page_stmt)).all()
 
-        return [(oid, uid, name) for (oid, uid, name) in rows], total
+        return [(oid, uid, sid, name) for (oid, uid, sid, name) in rows], total
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _user_id_clause(user_id: UUID | None):
-        """Return the appropriate SQLAlchemy clause for the user_id filter."""
+    def _require_one_principal(
+        user_id: UUID | None,
+        service_account_id: UUID | None,
+    ) -> None:
+        if user_id is not None and service_account_id is not None:
+            raise ValueError(
+                "a credential is scoped to a user OR a service account, not both"
+            )
+
+    @staticmethod
+    def _scope_clause(user_id: UUID | None, service_account_id: UUID | None):
+        """Return the WHERE clause(s) selecting one credential scope.
+
+        A service account when set, else a user when set, else org scope (both
+        principal columns NULL). Returned as a tuple so callers splat it into
+        ``.where(*clause)``.
+        """
+        CredentialVault._require_one_principal(user_id, service_account_id)
+        if service_account_id is not None:
+            return (Credential.service_account_id == service_account_id,)
         if user_id is not None:
-            return Credential.user_id == user_id
-        return Credential.user_id.is_(None)
+            return (Credential.user_id == user_id,)
+        return (
+            Credential.user_id.is_(None),
+            Credential.service_account_id.is_(None),
+        )
 
     @classmethod
     async def _get_credential(
@@ -256,11 +297,12 @@ class CredentialVault:
         org_id: UUID,
         name: str,
         user_id: UUID | None,
+        service_account_id: UUID | None = None,
     ) -> Credential | None:
         stmt = select(Credential).where(
             Credential.org_id == org_id,
             Credential.name == name,
-            cls._user_id_clause(user_id),
+            *cls._scope_clause(user_id, service_account_id),
         )
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
