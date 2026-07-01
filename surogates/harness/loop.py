@@ -2361,7 +2361,7 @@ class AgentHarness(
                 try:
                     from surogates.harness.model_metadata import get_model_info as _gmi
                     _mi = _gmi(model_id)
-                    _supports_vision = _mi.supports_vision if _mi is not None else False
+                    _supports_vision = (_mi is None) or _mi.supports_vision
                     extra_image_msgs = await maybe_build_fetched_image_messages(
                         tool_results,
                         tool_calls_raw,
