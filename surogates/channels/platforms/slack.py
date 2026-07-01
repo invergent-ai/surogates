@@ -1067,6 +1067,45 @@ class SlackPlatform:
         file_obj = resp.get("file")
         return file_obj if file_obj else None
 
+    async def list_channel_files(
+        self, *, creds: dict, channel_id: str, max_pages: int = 3,
+    ) -> list[dict]:
+        """List files shared in *channel_id* (Slack ``files.list``), across
+        threads too. Bounded by *max_pages*. Needs the ``files:read`` scope.
+        Returns the raw file objects (each with ``id``/``name``/``title``/
+        ``created``). Raises :class:`ChannelApiError` for forbidden/rate-limit;
+        returns ``[]`` when the token/channel is missing or the call fails
+        transiently.
+        """
+        bot_token = (creds or {}).get("bot_token") or ""
+        if not bot_token or not channel_id:
+            return []
+        client = self._get_client(bot_token)
+        out: list[dict] = []
+        page = 1
+        while page <= max(1, max_pages):
+            try:
+                resp = await client.files_list(channel=channel_id, count=100, page=page)
+            except SlackApiError as exc:
+                code = _slack_error_code(exc)
+                if code in _RATE_LIMIT_CODES:
+                    raise ChannelApiError("rate_limited", code)
+                if code in _FORBIDDEN_CODES:
+                    raise ChannelApiError("forbidden", code)
+                logger.warning("[SlackPlatform] files_list error %r for %s", code, channel_id)
+                break
+            except ChannelApiError:
+                raise
+            except Exception:
+                logger.warning("[SlackPlatform] files_list failed for %s", channel_id, exc_info=True)
+                break
+            out.extend(resp.get("files") or [])
+            pages = (resp.get("paging") or {}).get("pages") or 1
+            if page >= pages:
+                break
+            page += 1
+        return out
+
     # ------------------------------------------------------------------
     # send_files — upload workspace files referenced by MEDIA: markers
     # ------------------------------------------------------------------

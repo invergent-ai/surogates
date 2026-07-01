@@ -1,9 +1,10 @@
 """The ``fetch_channel_file`` builtin tool.
 
-Lets a Slack-channel agent pull a file shared in an earlier message of its
-own channel (the id comes from the backfilled history, shown as
-``name (file: F…)``).  Thin delegate to the session-scoped harness API
-client; the privileged download/ingest runs server-side.
+Lets a Slack-channel agent pull a file shared anywhere in its own channel
+(including threads and messages from other users) by name or id.  The name
+comes from the channel history (``name (file: F…)`` format), and can be passed
+as-is or as the bare filename.  Thin delegate to the session-scoped harness API
+client; the privileged resolution, download and ingest runs server-side.
 """
 
 from __future__ import annotations
@@ -16,24 +17,25 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 FETCH_CHANNEL_FILE_SCHEMA = ToolSchema(
     name="fetch_channel_file",
     description=(
-        "Fetch a file that was shared earlier in this channel and load it "
-        "into your workspace. Pass the Slack file id shown in the channel "
-        "history as 'name (file: F…)'. The file is downloaded under "
+        "Fetch a file shared anywhere in this channel (including threads and "
+        "messages from other users) and load it into your workspace. Pass the "
+        "file's name as shown in the channel (e.g. 'report.html') or its Slack "
+        "file id (e.g. 'F0BE46MG31P'). The file is downloaded under "
         "uploads/slack/fetch/ and, when textual, its content is returned "
         "inline. Only files shared in this channel can be fetched."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "file_id": {
+            "file": {
                 "type": "string",
                 "description": (
-                    "The Slack file id from the channel history, e.g. "
-                    "'F0BE46MG31P'."
+                    "The file to fetch: either its name as shown in the channel "
+                    "(e.g. 'report.html') or its Slack file id (e.g. 'F0BE46MG31P')."
                 ),
             },
         },
-        "required": ["file_id"],
+        "required": ["file"],
     },
 )
 
@@ -41,10 +43,10 @@ FETCH_CHANNEL_FILE_SCHEMA = ToolSchema(
 async def _fetch_channel_file_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
-    file_id = (arguments.get("file_id") or "").strip()
-    if not file_id:
+    ref = (arguments.get("file") or arguments.get("file_id") or "").strip()
+    if not ref:
         return json.dumps(
-            {"success": False, "error": "A file_id is required."},
+            {"success": False, "error": "A file name or file id is required."},
             ensure_ascii=False,
         )
     api_client = kwargs.get("api_client")
@@ -58,7 +60,7 @@ async def _fetch_channel_file_handler(
             },
             ensure_ascii=False,
         )
-    return await api_client.fetch_channel_file(file_id)
+    return await api_client.fetch_channel_file(ref)
 
 
 def register(registry: ToolRegistry) -> None:

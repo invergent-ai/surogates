@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 MAX_FETCH_BYTES = 20 * 1024 * 1024
 
+_SLACK_FILE_ID = re.compile(r"F[A-Z0-9]{6,}\Z")
+
 
 class ChannelFileError(Exception):
     """Base class for channel-file fetch failures."""
@@ -72,6 +74,37 @@ def _shared_in_channel(file_meta: dict, channel_id: str) -> bool:
     return False
 
 
+async def _resolve_file_id(platform: Any, creds: dict, channel_id: str, ref: str) -> str:
+    """Return *ref* if it is already a Slack file id, else resolve it as a
+    filename against the channel's files (newest match wins). Raises
+    ChannelFileNotFound listing available names when nothing matches."""
+    ref = (ref or "").strip()
+    if _SLACK_FILE_ID.fullmatch(ref):
+        return ref
+    lister = getattr(platform, "list_channel_files", None)
+    files = await lister(creds=creds, channel_id=channel_id) if lister else []
+
+    def _created(f: dict) -> float:
+        try:
+            return float(f.get("created") or f.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _named(f: dict) -> tuple[str, str]:
+        return (f.get("name") or ""), (f.get("title") or "")
+
+    low = ref.lower()
+    exact = [f for f in files if ref in _named(f)]
+    ci = exact or [f for f in files if low in (n.lower() for n in _named(f))]
+    base = PurePosixPath(ref).name.lower()
+    bybase = ci or [f for f in files if PurePosixPath((f.get("name") or "")).name.lower() == base]
+    if bybase:
+        return max(bybase, key=_created).get("id") or ""
+    names = sorted({(f.get("name") or "") for f in files if f.get("name")})
+    hint = ("; files here: " + ", ".join(names[:10])) if names else ""
+    raise ChannelFileNotFound(f"No file named '{ref}' in this channel{hint}.")
+
+
 async def fetch_channel_file(
     *,
     platform: Any,
@@ -99,6 +132,8 @@ async def fetch_channel_file(
     )
     if not (creds or {}).get("bot_token"):
         raise ChannelFileUnavailable("No Slack bot token for this channel.")
+
+    file_id = await _resolve_file_id(platform, creds, channel_id, file_id)
 
     try:
         meta = await platform.fetch_file_meta(creds=creds, file_id=file_id)
