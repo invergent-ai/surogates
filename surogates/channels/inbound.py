@@ -61,11 +61,15 @@ class InboundFileRef:
     ``url`` is the platform's download URL (auth-gated for Slack);
     ``mime_type`` is the platform's type or a ``mimetypes.guess_type``
     fallback; ``size`` is the platform-reported byte size when known.
+    ``file_id`` is the platform's opaque file identifier (e.g. Slack's
+    ``F…`` id) that can be passed to ``fetch_channel_file`` for on-demand
+    download.  ``None`` when the platform does not provide one.
     """
     url: str
     filename: str
     mime_type: str
     size: int | None
+    file_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -575,6 +579,14 @@ class ChannelInboundPipeline:
             event_data["images"] = _images
         if _attachments:
             event_data["attachments"] = _attachments
+
+        _file_refs = [
+            {"id": f.file_id, "name": f.filename}
+            for f in (getattr(msg, "files", None) or [])
+            if getattr(f, "file_id", None)
+        ]
+        if _file_refs:
+            event_data["source"]["files"] = _file_refs
 
         await deps.session_store.emit_event(
             session_id,

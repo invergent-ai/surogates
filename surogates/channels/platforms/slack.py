@@ -409,6 +409,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         files.append(InboundFileRef(
             url=url, filename=name, mime_type=mime,
             size=int(size) if isinstance(size, int) else None,
+            file_id=file_info.get("id"),
         ))
 
     if file_names:

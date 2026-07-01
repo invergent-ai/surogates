@@ -243,6 +243,73 @@ def test_attachments_note_orders_files_as_provided():
     assert first_idx < second_idx
 
 
+def test_attachments_note_source_files_only_no_attachments():
+    """source.files without attachments → non-None note with fetch_channel_file and id."""
+    note = _attachments_note([_user_event({
+        "content": "here is a file",
+        "source": {"files": [{"id": "F123", "name": "report.pdf"}]},
+    })])
+    assert note is not None
+    assert "fetch_channel_file" in note
+    assert "F123" in note
+    assert "report.pdf" in note
+
+
+def test_attachments_note_both_attachments_and_source_files():
+    """Both a downloaded attachment AND source.files → note contains both sections."""
+    note = _attachments_note([_user_event({
+        "content": "see attached",
+        "attachments": [
+            {
+                "path": "uploads/doc.txt",
+                "filename": "doc.txt",
+                "mime_type": "text/plain",
+                "size": 10,
+            },
+        ],
+        "source": {"files": [{"id": "F123", "name": "report.pdf"}]},
+    })])
+    assert note is not None
+    # Existing attachments section present
+    assert "uploads/doc.txt" in note
+    assert "file tools" in note
+    # Channel file id section present
+    assert "fetch_channel_file" in note
+    assert "F123" in note
+
+
+def test_attachments_note_no_source_files_unchanged():
+    """Existing tests: no source.files → None (no regressions)."""
+    note = _attachments_note([_user_event({"content": "hi"})])
+    assert note is None
+
+
+def test_attachments_note_source_files_missing_id_skipped():
+    """A source.files entry without an 'id' field must be silently skipped."""
+    note = _attachments_note([_user_event({
+        "source": {"files": [{"name": "no-id.txt"}]},
+    })])
+    assert note is None
+
+
+def test_attachments_note_source_files_malformed_skipped():
+    """Malformed source.files (not a list) must not raise; returns None."""
+    note = _attachments_note([_user_event({
+        "source": {"files": "oops"},
+    })])
+    assert note is None
+
+
+def test_attachments_note_source_files_name_defaults_to_file():
+    """A source.files entry without a 'name' shows fallback label 'file'."""
+    note = _attachments_note([_user_event({
+        "source": {"files": [{"id": "FXYZ"}]},
+    })])
+    assert note is not None
+    assert "FXYZ" in note
+    assert "file" in note
+
+
 def test_attachments_note_inserts_adjacent_to_user_when_view_context_also_present():
     """When both notes apply, attachments must sit closest to the user message.
 

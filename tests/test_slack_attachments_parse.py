@@ -73,3 +73,33 @@ def test_parse_sanitizes_null_byte_in_filename_in_text_marker():
     msg = parse(body, bot_user_id="U_BOT")
     assert msg is not None
     assert "\x00" not in msg.text
+
+
+def test_parse_captures_slack_file_id_on_inbound_ref():
+    """The Slack file_info 'id' (F…) must be preserved on InboundFileRef.file_id."""
+    body = _event([
+        {
+            "id": "F0ABCDE1234",
+            "url_private_download": "https://files.slack.com/d1",
+            "name": "report.pdf",
+            "mimetype": "application/pdf",
+            "size": 1234,
+        },
+    ])
+    msg = parse(body, bot_user_id="U_BOT")
+    assert msg is not None
+    assert msg.files[0].file_id == "F0ABCDE1234"
+
+
+def test_parse_file_id_is_none_when_slack_omits_id():
+    """When Slack does not provide an 'id', file_id must be None (not raise)."""
+    body = _event([
+        {
+            "url_private": "https://files.slack.com/p3",
+            "name": "notes.txt",
+            "mimetype": "text/plain",
+        },
+    ])
+    msg = parse(body, bot_user_id="U_BOT")
+    assert msg is not None
+    assert msg.files[0].file_id is None
