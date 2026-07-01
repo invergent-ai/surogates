@@ -596,6 +596,18 @@ async def _stop_worker_invalidator(state: dict) -> None:
     state["runtime_invalidator_task"] = None
 
 
+def _memory_user_id(session, tenant) -> str | None:
+    """The user id whose personal memory this turn uses, or None for shared.
+
+    Multi-party channel threads (and service-account turns) carry no per-user
+    memory — only shared conversation + agent/org memory. Single-principal
+    sessions (1:1 DM, web) use the acting user.
+    """
+    if (getattr(session, "config", None) or {}).get("multi_party"):
+        return None
+    return str(tenant.user_id) if tenant.user_id is not None else None
+
+
 def _build_r2_memory_keys(
     *,
     session: object,
@@ -1033,15 +1045,14 @@ async def run_worker(settings: Settings) -> None:
             ),
         )
 
-        # User-scoped memory dir for interactive sessions, org-shared
-        # memory dir for service-account sessions (no per-user context
-        # to carry forward).
+        # User-scoped memory dir for single-principal interactive sessions;
+        # org-shared memory dir for service-account sessions and multi-party
+        # channel threads (no single per-user context to carry forward).
         from pathlib import Path
 
-        if session.user_id is not None:
-            memory_dir = (
-                Path(tenant.asset_root) / "users" / str(session.user_id) / "memory"
-            )
+        _mem_user = _memory_user_id(session, tenant)
+        if _mem_user is not None:
+            memory_dir = Path(tenant.asset_root) / "users" / _mem_user / "memory"
         else:
             memory_dir = Path(tenant.asset_root) / "shared" / "memory"
 
@@ -1055,9 +1066,7 @@ async def run_worker(settings: Settings) -> None:
             mem_bucket = (
                 settings.storage.memory_bucket or settings.storage.bucket
             )
-            _user_id_str = (
-                str(session.user_id) if session.user_id else None
-            )
+            _user_id_str = _mem_user
             mem_keys = _build_r2_memory_keys(
                 session=session,
                 storage_key_prefix=ctx.storage_key_prefix,
@@ -1070,9 +1079,7 @@ async def run_worker(settings: Settings) -> None:
             # dashboards surface conflict rates per tenant.
             from surogates.audit.types import AuditType
 
-            _user_token = (
-                str(session.user_id) if session.user_id else "shared"
-            )
+            _user_token = _mem_user or "shared"
             _memory_channel = (
                 f"user.memory_changed:{ctx.org_id}:{_user_token}".encode()
             )
