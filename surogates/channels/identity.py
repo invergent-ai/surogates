@@ -352,7 +352,7 @@ async def get_or_create_channel_session(
     async with session_factory() as db:
         result = await db.execute(
             select(SessionRow)
-            .where(SessionRow.user_id == user_id)
+            .where(SessionRow.org_id == org_id)
             .where(SessionRow.agent_id == agent_id)
             .where(SessionRow.channel == channel)
             .where(
