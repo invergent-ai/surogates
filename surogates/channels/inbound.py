@@ -296,6 +296,22 @@ def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
     }
 
 
+def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
+    """The resolved-principal fields to merge onto a USER_MESSAGE event.
+
+    ``principal_user_id`` is the Surogates user UUID (distinct from the
+    platform id in ``source.user_id``). API-channel senders can stamp a
+    service-account principal instead. Empty when no identity resolved.
+    """
+    if user_id is not None and service_account_id is not None:
+        raise ValueError("principal stamp requires exactly one principal id")
+    if user_id is not None:
+        return {"principal_user_id": str(user_id)}
+    if service_account_id is not None:
+        return {"principal_service_account_id": str(service_account_id)}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -540,6 +556,7 @@ class ChannelInboundPipeline:
                 f"{routing.platform}_thread_key": msg.thread_key,
                 "channel_identifier": routing.identifier,
                 "memory_boundary": memory_boundary,
+                "multi_party": chat_type in ("group", "channel"),
             },
             session_factory=deps.session_factory,
         )
@@ -608,6 +625,13 @@ class ChannelInboundPipeline:
             event_data["images"] = _images
         if _attachments:
             event_data["attachments"] = _attachments
+
+        event_data.update(
+            build_principal_stamp(
+                user_id=identity.user_id,
+                service_account_id=None,
+            )
+        )
 
         _file_refs = [
             {"id": f.file_id, "name": f.filename}
