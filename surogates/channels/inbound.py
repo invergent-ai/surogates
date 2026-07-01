@@ -260,6 +260,31 @@ class PipelineDeps:
 
 
 # ---------------------------------------------------------------------------
+# Event-source helpers
+# ---------------------------------------------------------------------------
+
+
+def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
+    """Source metadata for a USER_MESSAGE event.
+
+    Adapter-supplied metadata comes first; pipeline-derived keys win so an
+    adapter cannot shadow them. ``chat_type`` is the normalized chat kind
+    ('dm'/'group') and overrides any adapter-native value (Slack
+    ``channel_type``, Telegram ``supergroup``).
+    """
+    return {
+        **msg.source,
+        "platform": platform,
+        "chat_id": msg.identifier,
+        "chat_type": chat_type,
+        "user_id": msg.platform_user_id,
+        "user_name": msg.user_name,
+        "thread_id": msg.thread_key,
+        "ts": msg.ts,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
 
@@ -563,17 +588,9 @@ class ChannelInboundPipeline:
             "content": _content,
             "media_urls": msg.media_urls,
             "media_types": msg.media_types,
-            "source": {
-                # Adapter-supplied metadata first; pipeline-derived keys
-                # win so an adapter can't silently shadow them.
-                **msg.source,
-                "platform": routing.platform,
-                "chat_id": msg.identifier,
-                "user_id": msg.platform_user_id,
-                "user_name": msg.user_name,
-                "thread_id": msg.thread_key,
-                "ts": msg.ts,
-            },
+            "source": build_message_source(
+                msg, platform=routing.platform, chat_type=chat_type,
+            ),
         }
         if _images:
             event_data["images"] = _images
