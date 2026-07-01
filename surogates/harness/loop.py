@@ -2378,9 +2378,8 @@ class AgentHarness(
                         session.id, exc_info=True,
                     )
 
-            # 8. Append tool results to messages (vision blocks follow, after results).
+            # 8. Append tool results to messages.
             messages.extend(tool_results)
-            messages.extend(extra_image_msgs)
 
             # A guardrail hard stop ends the turn: continuing would let
             # the model re-issue the same call, and providers reject
@@ -2400,6 +2399,11 @@ class AgentHarness(
                     turn_id=turn_id,
                 )
                 return
+
+            # The turn continues: append fetched-image vision blocks AFTER the
+            # tool results. A guardrail-halted turn returns above, so an image
+            # the model never saw is never persisted in the snapshot.
+            messages.extend(extra_image_msgs)
 
             last_tool_name = ""
             for tc in reversed(tool_calls_raw):
@@ -2595,6 +2599,10 @@ class AgentHarness(
             cfg = session.config or {}
             bucket = cfg.get("storage_bucket") or ""
             if not bucket:
+                logger.debug(
+                    "Session %s: no storage_bucket; skipping vision inject for %s",
+                    session.id, path,
+                )
                 return None
             root_id = workspace_root_id(session)
             key = prefixed_session_workspace_key(cfg, root_id, path)

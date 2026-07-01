@@ -1,13 +1,14 @@
 """Vision-block injection for fetched channel images.
 
 Pure helper: given tool results + tool calls (to match names), and an async
-``read_image(path) -> (bytes, mime) | None`` callback, returns the extra
-user messages (vision blocks) to append after the tool results for
-vision-capable models.  No loop state required.
+``read_image(path) -> bytes | None`` callback, returns the extra user messages
+(vision blocks) to append after the tool results for vision-capable models.
+No loop state required.
 
-Called from ``loop.py`` between ``execute_tool_calls`` and
-``enforce_turn_budget``.  All failures are best-effort: any exception
-during storage read or JSON parsing returns [] and never breaks the turn.
+Called from ``loop.py`` after the tool results are gathered (post
+``enforce_turn_budget``); the returned messages are appended after the
+tool-result messages. All failures are best-effort: any exception during the
+storage read or JSON parsing returns [] and never breaks the turn.
 """
 
 from __future__ import annotations
@@ -17,16 +18,9 @@ import json
 import logging
 from typing import Any, Awaitable, Callable
 
+from surogates.session.attachment_ingest import is_raster_image_mime
+
 logger = logging.getLogger(__name__)
-
-# Raster mimes eligible for native vision injection.
-_RASTER_IMAGE_MIMES = frozenset({
-    "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
-})
-
-
-def _is_raster_mime(mime: str) -> bool:
-    return (mime or "").lower().split(";")[0].strip() in _RASTER_IMAGE_MIMES
 
 
 def _tool_name_for_call_id(tool_calls_raw: list[dict], call_id: str) -> str:
@@ -93,7 +87,7 @@ async def maybe_build_fetched_image_messages(
         path = content_data.get("path") or ""
         mime_type = (content_data.get("mime_type") or "").lower()
         filename = content_data.get("filename") or path.rsplit("/", 1)[-1] or "image"
-        if not path or not _is_raster_mime(mime_type):
+        if not path or not is_raster_image_mime(mime_type):
             continue
 
         # Read image bytes from storage (best-effort).

@@ -253,6 +253,18 @@ def _is_image_mime(mime_type: str) -> bool:
     return (mime_type or "").lower().startswith("image/")
 
 
+# Raster image formats that can be shown to a model as a vision block or read by
+# vision tools. SVG/TIFF/BMP are image/* but not natively renderable, so they are
+# treated as plain attachments rather than viewable images.
+RASTER_IMAGE_MIMES = frozenset({
+    "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
+})
+
+
+def is_raster_image_mime(mime_type: str) -> bool:
+    return (mime_type or "").lower().split(";")[0].strip() in RASTER_IMAGE_MIMES
+
+
 def workspace_root_id(session: Any) -> str:
     """Return the workspace root session id for *session*.
 

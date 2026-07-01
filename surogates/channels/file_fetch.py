@@ -18,8 +18,8 @@ from typing import Any
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.channels.errors import ChannelApiError
 from surogates.session.attachment_ingest import (
-    _is_image_mime,
     ingest_attachment_bytes,
+    is_raster_image_mime,
     safe_display_name,
     workspace_root_id,
 )
@@ -192,8 +192,10 @@ async def fetch_channel_file(
         data=data,
         inline_images=False,
     )
-    # images also return an attachment entry (with path, no base64)
+    # Images also return an attachment entry (with path, no base64). Only
+    # natively-renderable raster images get kind="image"; SVG/TIFF/BMP stay
+    # "attachment" so the kind signal matches what the agent can actually view.
     entry = out["attachment"]
-    if _is_image_mime(mime_type):
+    if is_raster_image_mime(mime_type):
         return {"kind": "image", **entry}
     return {"kind": "attachment", **entry}

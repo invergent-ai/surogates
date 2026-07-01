@@ -437,3 +437,26 @@ async def test_fetch_channel_file_image_returns_kind_image_with_path_no_base64(m
     assert "data" not in out          # no base64 in result
     assert out["mime_type"] == "image/png"
     assert any("photo.png" in k[1] for k in storage.written)  # written to workspace
+
+
+async def test_fetch_channel_file_non_raster_image_is_attachment(monkeypatch):
+    """SVG (image/* but non-raster) is kind=attachment, not a viewable image."""
+    async def _creds(**_):
+        return {"bot_token": "xoxb"}
+    monkeypatch.setattr(file_fetch, "resolve_channel_credentials", _creds)
+
+    class _FakeStorage3:
+        def __init__(self): self.written = {}
+        async def write(self, bucket, key, data): self.written[(bucket, key)] = data
+
+    storage = _FakeStorage3()
+    meta = {"name": "diagram.svg", "url_private_download": "https://slack.com/d",
+            "mimetype": "image/svg+xml", "size": 12, "channels": ["C1"]}
+    platform = _FakePlatform(meta=meta, data=b"<svg></svg>")
+    out = await fetch_channel_file(
+        platform=platform, vault=object(), storage=storage,
+        session=_session(channel_id="C1"), bucket="b", file_id="FTEST000098",
+    )
+    assert out["kind"] == "attachment"   # not "image" — non-raster
+    assert "path" in out
+    assert "data" not in out
