@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from surogates.channels.inbound import build_message_source
+from surogates.channels.inbound import build_message_source, resolve_chat_type
 
 
 def _msg(**over):
@@ -55,3 +55,20 @@ def test_adapter_metadata_preserved_alongside():
     assert src["channel_type"] == "channel"
     assert src["custom"] == "x"
     assert src["chat_type"] == "group"
+
+
+def _chat_msg(*, is_dm, is_group_dm):
+    return SimpleNamespace(is_dm=is_dm, is_group_dm=is_group_dm)
+
+
+def test_resolve_chat_type_direct_message_is_dm():
+    assert resolve_chat_type(_chat_msg(is_dm=True, is_group_dm=False)) == "dm"
+
+
+def test_resolve_chat_type_group_dm_is_group():
+    # A multi-person DM is multi-party -> 'group' so its turns get attributed.
+    assert resolve_chat_type(_chat_msg(is_dm=True, is_group_dm=True)) == "group"
+
+
+def test_resolve_chat_type_channel_is_group():
+    assert resolve_chat_type(_chat_msg(is_dm=False, is_group_dm=False)) == "group"

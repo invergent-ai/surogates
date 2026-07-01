@@ -129,6 +129,7 @@ class InboundMessage:
     ts: str
     source: dict
     is_bot: bool = False
+    is_group_dm: bool = False
     # Conversation privacy: "public" | "private" | "dm".  Default is the
     # fail-closed value so any constructor that omits it is treated as private.
     visibility: str = "private"
@@ -262,6 +263,17 @@ class PipelineDeps:
 # ---------------------------------------------------------------------------
 # Event-source helpers
 # ---------------------------------------------------------------------------
+
+
+def resolve_chat_type(msg) -> str:
+    """Normalized chat kind for routing + attribution.
+
+    'dm' only for a 1:1 direct message. A multi-person DM (``is_group_dm``) is a
+    multi-party conversation, so it is 'group' — like a channel — and its
+    messages get per-sender attribution, even though it stays DM-like for
+    mention gating.
+    """
+    return "dm" if (msg.is_dm and not msg.is_group_dm) else "group"
 
 
 def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
@@ -493,7 +505,7 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Gate 6: Session resolution (get-or-create).
         # ------------------------------------------------------------------
-        chat_type = "dm" if msg.is_dm else "group"
+        chat_type = resolve_chat_type(msg)
         source = SessionSource(
             platform=routing.platform,
             chat_id=msg.identifier,
@@ -692,7 +704,7 @@ class ChannelInboundPipeline:
 
         # Build the session key for the thread and check state. Mirror Gate 6's
         # chat_type derivation so the lookup key matches the stored key.
-        chat_type = "dm" if msg.is_dm else "group"
+        chat_type = resolve_chat_type(msg)
         source = SessionSource(
             platform=routing.platform,
             chat_id=msg.identifier,
