@@ -22,7 +22,6 @@ import binascii
 import json
 import logging
 import os
-from types import SimpleNamespace
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -32,7 +31,7 @@ from uuid import uuid4
 import httpx
 
 from surogates.harness.message_utils import message_to_dict
-from surogates.storage.tenant import boundary_workspace_key
+from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.builtin.vision import (
     _extract_response_content,
     _image_ref_to_data_url,
@@ -592,11 +591,7 @@ async def _save_media_bytes(
     if storage is not None and session_id is not None and bucket:
         key = boundary_workspace_key(
             session_config,
-            SimpleNamespace(
-                channel=session_config.get("channel", ""),
-                config=session_config,
-                id=session_id,
-            ),
+            workspace_session_shim(session_config, session_id),
             session_id,
             relative_path,
         )

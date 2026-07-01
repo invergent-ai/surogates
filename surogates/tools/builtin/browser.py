@@ -20,11 +20,11 @@ from surogates.browser.base import (
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
-from types import SimpleNamespace
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
     boundary_workspace_prefix,
+    workspace_session_shim,
 )
 
 
@@ -97,11 +97,7 @@ async def _resolve_session_browser(
 
     try:
         storage_bucket = (session_config or {}).get("storage_bucket")
-        session_for_workspace = SimpleNamespace(
-            id=sid,
-            channel=(session_config or {}).get("channel", ""),
-            config=session_config or {},
-        )
+        session_for_workspace = workspace_session_shim(session_config, sid)
         browser_spec = spec or BrowserSpec(
             workspace_path=workspace_path,
             workspace_source_ref=(
@@ -758,11 +754,7 @@ async def _save_screenshot_to_storage(
     if not storage_bucket:
         return None
 
-    session_for_workspace = SimpleNamespace(
-        id=session_id,
-        channel=(session_config or {}).get("channel", ""),
-        config=session_config or {},
-    )
+    session_for_workspace = workspace_session_shim(session_config, session_id)
     key = build_browser_screenshot_key(
         session=session_for_workspace,
         session_id=session_id,

@@ -168,6 +168,21 @@ def boundary_workspace_key(
     return f"{boundary_workspace_prefix(config, session, session_id)}{key.lstrip('/')}"
 
 
+def workspace_session_shim(config: dict | None, session_id: object) -> Any:
+    """Minimal session shape for boundary resolution from loose config.
+
+    Tool paths that hold only ``session_config`` + ``session_id`` (not a
+    ``Session`` row) still need to resolve the boundary workspace.
+    :func:`workspace_boundary` reads ``.config`` and ``.channel``; this builds
+    exactly that shape so those callers don't each hand-roll a
+    ``SimpleNamespace``.
+    """
+    from types import SimpleNamespace
+
+    cfg = config or {}
+    return SimpleNamespace(id=session_id, channel=cfg.get("channel", ""), config=cfg)
+
+
 class TenantStorage:
     """Tenant-aware storage operations.
 

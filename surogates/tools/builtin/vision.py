@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 
 import base64
 import binascii
@@ -17,7 +16,7 @@ import httpx
 
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
-from surogates.storage.tenant import boundary_workspace_key
+from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
@@ -226,11 +225,7 @@ async def _image_ref_to_data_url(
             )
             key = boundary_workspace_key(
                 session_config,
-                SimpleNamespace(
-                    channel=session_config.get("channel", ""),
-                    config=session_config,
-                    id=session_id,
-                ),
+                workspace_session_shim(session_config, session_id),
                 session_id,
                 relative_path,
             )

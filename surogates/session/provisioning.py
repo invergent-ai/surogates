@@ -29,7 +29,7 @@ _BOUNDARY_SHARING_FIELDS = (
 )
 
 
-def _pin_workspace_boundary(config: dict, *, channel: str) -> None:
+def pin_workspace_boundary(config: dict, *, channel: str) -> None:
     """Copy a managed channel's ``memory_boundary`` onto ``workspace_boundary``.
 
     Managed-channel (slack/telegram) threads share one workspace across every
@@ -96,7 +96,7 @@ async def create_agent_session(
     # channel so a managed-channel session without a pinned workspace_boundary
     # still resolves its memory boundary rather than falling to per-session.
     merged_config.setdefault("channel", channel)
-    _pin_workspace_boundary(merged_config, channel=channel)
+    pin_workspace_boundary(merged_config, channel=channel)
     await stamp_workspace_config(
         merged_config, storage=storage, settings=settings, session_id=sid, model=model,
     )

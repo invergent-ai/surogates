@@ -21,7 +21,10 @@ from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.db.models import ChannelIdentity as ChannelIdentityRow
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import EventType
-from surogates.session.provisioning import stamp_workspace_config
+from surogates.session.provisioning import (
+    pin_workspace_boundary,
+    stamp_workspace_config,
+)
 from surogates.session.store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -404,9 +407,7 @@ async def get_or_create_channel_session(
     }
     # Pin the managed-channel thread's memory boundary as the workspace
     # boundary so this new session shares the thread's partitioned workspace.
-    incoming_boundary = str(merged_config.get("memory_boundary") or "").strip()
-    if channel in MANAGED_CHANNELS and incoming_boundary:
-        merged_config["workspace_boundary"] = incoming_boundary
+    pin_workspace_boundary(merged_config, channel=channel)
     # Provision a persistent workspace (storage_bucket/storage_key_prefix/
     # workspace_path) the same way API/web sessions do, so the worker mounts a
     # persistent /workspace and inbound attachments can be written there. A
