@@ -273,6 +273,15 @@ def verify(
 # parse
 # ---------------------------------------------------------------------------
 
+# ``message`` subtypes that ARE real user messages.  Everything else with a
+# subtype is a system notification (join/leave, topic/name/purpose, archive,
+# pins, reminders, bot_add, edits/deletions, …) and must not create a turn.
+_USER_MESSAGE_SUBTYPES: frozenset[str] = frozenset({
+    "file_share",
+    "thread_broadcast",
+    "me_message",
+})
+
 
 def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
     """Convert a Slack ``event_callback`` body to an :class:`InboundMessage`.
@@ -340,17 +349,14 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         is_bot = True
 
     # ------------------------------------------------------------------
-    # Gate: non-message system subtypes (edits, deletions, member join/leave)
-    # are not user messages to respond to.
+    # Gate: only real user messages carry no subtype or a content subtype
+    # (file_share / thread_broadcast / me_message).  Every other subtype is a
+    # system notification — edits/deletions, member join/leave, topic/name/
+    # purpose changes, archive, pins, reminders, bot_add, … — not a request.
+    # Other-bot messages (``is_bot``, handled above) are exempt so the
+    # allow_bots gate downstream can still see them.
     # ------------------------------------------------------------------
-    if subtype in (
-        "message_changed",
-        "message_deleted",
-        "channel_join",
-        "channel_leave",
-        "group_join",
-        "group_leave",
-    ):
+    if subtype and not is_bot and subtype not in _USER_MESSAGE_SUBTYPES:
         return None
 
     # ------------------------------------------------------------------
