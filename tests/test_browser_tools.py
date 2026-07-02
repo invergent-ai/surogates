@@ -248,9 +248,12 @@ class TestNavigateHandler:
         )
 
         assert pool.specs[0].workspace_path == str(tmp_path)
+        # No channel/boundary in config → per-session prefix, matching the
+        # sandbox mount's ``{id}/`` shape (boundary_workspace_prefix always
+        # returns a trailing slash).
         assert (
             pool.specs[0].workspace_source_ref
-            == f"s3://agent-bucket/{session_id}"
+            == f"s3://agent-bucket/{session_id}/"
         )
 
     async def test_short_circuits_when_user_in_control(self, tenant) -> None:
@@ -806,3 +809,47 @@ async def test_browser_tool_suspends_while_user_holds_control(
     # The guard must fire before any browser provisioning or teardown.
     assert pool.ensures == []
     assert pool.destroyed == []
+
+
+def test_browser_source_ref_uses_boundary_workspace_prefix():
+    from surogates.tools.builtin.browser import build_browser_session_source_ref
+
+    session = SimpleNamespace(
+        id="session-1",
+        channel="slack",
+        config={
+            "storage_key_prefix": "project/agent",
+            "workspace_boundary": "slack:c:G1",
+        },
+    )
+
+    assert (
+        build_browser_session_source_ref(
+            storage_bucket="agent-bucket",
+            session=session,
+            session_id="session-1",
+        )
+        == "s3://agent-bucket/project/agent/boundaries/slack:c:G1/workspace/"
+    )
+
+
+def test_browser_screenshot_key_uses_boundary_workspace_prefix():
+    from surogates.tools.builtin.browser import build_browser_screenshot_key
+
+    session = SimpleNamespace(
+        id="session-1",
+        channel="slack",
+        config={
+            "storage_key_prefix": "project/agent",
+            "workspace_boundary": "slack:c:G1",
+        },
+    )
+
+    assert (
+        build_browser_screenshot_key(
+            session=session,
+            session_id="session-1",
+            relative_path="browser-screenshots/shot.png",
+        )
+        == "project/agent/boundaries/slack:c:G1/workspace/browser-screenshots/shot.png"
+    )

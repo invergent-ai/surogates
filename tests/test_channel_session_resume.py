@@ -178,3 +178,52 @@ async def test_resume_session_helper_flips_status_and_tags_source():
         ("status", sid, "active"),
         ("event", sid, EventType.SESSION_RESUME, {"source": "channel_message"}),
     ]
+
+
+async def _call_group(store, factory, config):
+    return await get_or_create_channel_session(
+        store, None,
+        session_key="agent:slack:channel:G1",
+        user_id=uuid4(), org_id=uuid4(), agent_id="a1",
+        channel="slack", config=config,
+        session_factory=factory,
+    )
+
+
+async def test_backfills_memory_and_workspace_boundary_on_resume():
+    sid = uuid4()
+    store = _Store()
+
+    got = await _call_group(
+        store,
+        _SessionFactory(SimpleNamespace(id=sid, status="active", config={})),
+        {
+            "slack_channel_id": "G1",
+            "memory_boundary": "slack:c:G1",
+            "multi_party": True,
+        },
+    )
+
+    assert got == sid
+    assert (sid, "memory_boundary", "slack:c:G1") in store.config_updates
+    assert (sid, "workspace_boundary", "slack:c:G1") in store.config_updates
+
+
+async def test_does_not_backfill_workspace_boundary_for_non_managed_channel_without_boundary():
+    sid = uuid4()
+    store = _Store()
+
+    got = await get_or_create_channel_session(
+        store,
+        None,
+        session_key="agent:website:visitor:v1",
+        user_id=uuid4(),
+        org_id=uuid4(),
+        agent_id="a1",
+        channel="website",
+        config={},
+        session_factory=_SessionFactory(SimpleNamespace(id=sid, status="active", config={})),
+    )
+
+    assert got == sid
+    assert all(key != "workspace_boundary" for _, key, _ in store.config_updates)

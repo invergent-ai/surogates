@@ -17,10 +17,14 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.db.models import ChannelIdentity as ChannelIdentityRow
 from surogates.db.models import Session as SessionRow
 from surogates.session.events import EventType
-from surogates.session.provisioning import stamp_workspace_config
+from surogates.session.provisioning import (
+    pin_workspace_boundary,
+    stamp_workspace_config,
+)
 from surogates.session.store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -380,6 +384,23 @@ async def get_or_create_channel_session(
             await session_store.update_session_config_key(
                 existing_id, "multi_party", _incoming_multi_party
             )
+        # Backfill boundary partitioning onto sessions created before the
+        # thread's boundary was known (or before workspace partitioning
+        # existed). Managed-channel threads carry a live ``memory_boundary``
+        # on every inbound message; mirror it onto the session's memory and
+        # workspace boundaries so a resumed session joins the shared
+        # partition instead of stranding attachments in its own prefix.
+        incoming_boundary = str(config.get("memory_boundary") or "").strip()
+        if channel in MANAGED_CHANNELS and incoming_boundary:
+            existing_config = getattr(existing, "config", None) or {}
+            if existing_config.get("memory_boundary") != incoming_boundary:
+                await session_store.update_session_config_key(
+                    existing_id, "memory_boundary", incoming_boundary,
+                )
+            if existing_config.get("workspace_boundary") != incoming_boundary:
+                await session_store.update_session_config_key(
+                    existing_id, "workspace_boundary", incoming_boundary,
+                )
         if existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(
@@ -394,6 +415,9 @@ async def get_or_create_channel_session(
         "channel_session_key": session_key,
         **config,
     }
+    # Pin the managed-channel thread's memory boundary as the workspace
+    # boundary so this new session shares the thread's partitioned workspace.
+    pin_workspace_boundary(merged_config, channel=channel)
     # Provision a persistent workspace (storage_bucket/storage_key_prefix/
     # workspace_path) the same way API/web sessions do, so the worker mounts a
     # persistent /workspace and inbound attachments can be written there. A

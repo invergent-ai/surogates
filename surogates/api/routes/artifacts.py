@@ -27,7 +27,8 @@ from surogates.artifacts.store import (
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
-from surogates.storage.tenant import prefixed_session_workspace_prefix
+from surogates.session.attachment_ingest import workspace_root_id
+from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
 
@@ -135,7 +136,9 @@ async def list_artifacts(
         _get_storage(request),
         session_id=session_id,
         bucket=bucket,
-        key_prefix=prefixed_session_workspace_prefix(session.config, session_id),
+        key_prefix=boundary_workspace_prefix(
+            session.config, session, workspace_root_id(session),
+        ),
     )
     artifacts = await artifact_store.list()
     return ArtifactListResponse(artifacts=artifacts)
@@ -163,7 +166,9 @@ async def get_artifact(
         _get_storage(request),
         session_id=session_id,
         bucket=bucket,
-        key_prefix=prefixed_session_workspace_prefix(session.config, session_id),
+        key_prefix=boundary_workspace_prefix(
+            session.config, session, workspace_root_id(session),
+        ),
     )
     try:
         meta = await artifact_store.get_meta(artifact_id)
@@ -213,7 +218,9 @@ async def create_artifact(
         _get_storage(request),
         session_id=session_id,
         bucket=bucket,
-        key_prefix=prefixed_session_workspace_prefix(session.config, session_id),
+        key_prefix=boundary_workspace_prefix(
+            session.config, session, workspace_root_id(session),
+        ),
     )
     try:
         meta = await artifact_store.create(

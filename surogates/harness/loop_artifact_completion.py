@@ -465,7 +465,7 @@ class ArtifactCompletionMixin:
             TurnArtifact,
             _is_internal_workspace_path,
         )
-        from surogates.storage.tenant import prefixed_session_workspace_prefix
+        from surogates.storage.tenant import boundary_workspace_prefix
 
         storage = self._storage
         if storage is None or self._turn_started_at is None:
@@ -482,7 +482,7 @@ class ArtifactCompletionMixin:
             (session.config or {}).get("sandbox_root_session_id")
             or str(session.id)
         )
-        prefix = prefixed_session_workspace_prefix(session.config, str(root_id))
+        prefix = boundary_workspace_prefix(session.config, session, str(root_id))
 
         try:
             entries = await storage.list_entries(bucket, prefix=prefix)

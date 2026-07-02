@@ -256,6 +256,55 @@ def test_spec_workspace_path_none_when_absent():
     assert spec.workspace_path is None
 
 
+def test_managed_channel_mounts_boundary_workspace_prefix():
+    sid = uuid4()
+    session = _session(
+        id_=sid,
+        config={
+            "storage_bucket": "agent-a-bucket",
+            "storage_key_prefix": "project/agent",
+            "memory_boundary": "slack:c:G1",
+            "workspace_boundary": "slack:c:G1",
+        },
+    )
+
+    spec = _build_session_sandbox_spec(
+        session,
+        tenant=SimpleNamespace(),
+        sandbox_owner=sandbox_session_key(session),
+    )
+
+    sources = [r.source_ref for r in spec.resources]
+    assert sources == [
+        "s3://agent-a-bucket/project/agent/boundaries/slack:c:G1/workspace/"
+    ]
+
+
+def test_child_mounts_parent_boundary_workspace_prefix():
+    parent_id = uuid4()
+    child = _session(
+        id_=uuid4(),
+        parent_id=parent_id,
+        config={
+            "storage_bucket": "agent-a-bucket",
+            "storage_key_prefix": "project/agent",
+            "sandbox_root_session_id": str(parent_id),
+            "workspace_boundary": "slack:c:G1",
+        },
+    )
+
+    spec = _build_session_sandbox_spec(
+        child,
+        tenant=SimpleNamespace(),
+        sandbox_owner=sandbox_session_key(child),
+    )
+
+    sources = [r.source_ref for r in spec.resources]
+    assert sources == [
+        "s3://agent-a-bucket/project/agent/boundaries/slack:c:G1/workspace/"
+    ]
+
+
 def test_spec_env_uses_service_account_credential_subject():
     org_id = uuid4()
     service_account_id = uuid4()

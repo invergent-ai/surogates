@@ -403,3 +403,84 @@ async def test_stamp_workspace_config_supports_vision_false_for_text_model():
         model="deepseek/deepseek-v4-pro",
     )
     assert config["supports_vision"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_agent_session_pins_managed_channel_workspace_boundary():
+    session_id = uuid4()
+    org_id = uuid4()
+    user_id = uuid4()
+    created = SimpleNamespace(id=session_id)
+    store = SimpleNamespace(create_session=AsyncMock(return_value=created))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    settings = SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket"))
+
+    await create_agent_session(
+        store=store,
+        storage=storage,
+        settings=settings,
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        channel="slack",
+        model="gpt-4o",
+        config={"memory_boundary": "slack:c:G1"},
+        session_id=session_id,
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["memory_boundary"] == "slack:c:G1"
+    assert cfg["workspace_boundary"] == "slack:c:G1"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_session_does_not_pin_non_channel_memory_boundary():
+    session_id = uuid4()
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=session_id)))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    settings = SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket"))
+
+    await create_agent_session(
+        store=store,
+        storage=storage,
+        settings=settings,
+        org_id=uuid4(),
+        user_id=uuid4(),
+        agent_id="agent-a",
+        channel="web",
+        model="gpt-4o",
+        config={"memory_boundary": "slack:c:G1"},
+        session_id=session_id,
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert "workspace_boundary" not in cfg
+
+
+@pytest.mark.asyncio
+async def test_create_child_session_inherits_boundary_fields_from_parent():
+    parent = _make_session(
+        channel="slack",
+        config={
+            "storage_bucket": "tenant-bucket",
+            "storage_key_prefix": "project/agent",
+            "workspace_path": "/workspace",
+            "supports_vision": True,
+            "memory_boundary": "slack:c:G1",
+            "workspace_boundary": "slack:c:G1",
+        },
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel="worker")
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["memory_boundary"] == "slack:c:G1"
+    assert cfg["workspace_boundary"] == "slack:c:G1"
+    assert cfg["sandbox_root_session_id"] == str(parent.id)

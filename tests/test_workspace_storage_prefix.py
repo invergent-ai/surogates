@@ -61,3 +61,77 @@ def test_prefixed_session_workspace_key_empty_key():
         )
         == "p-1/a-1/s-1/"
     )
+
+
+from types import SimpleNamespace
+
+from surogates.storage.tenant import (
+    boundary_workspace_key,
+    boundary_workspace_prefix,
+    workspace_boundary,
+)
+
+
+def _boundary_session(channel: str, config: dict, sid: str = "session-1"):
+    return SimpleNamespace(channel=channel, config=config, id=sid)
+
+
+def test_workspace_boundary_prefers_pinned_workspace_boundary():
+    session = _boundary_session(
+        "worker", {"workspace_boundary": "slack:c:G1", "memory_boundary": "wrong"},
+    )
+    assert workspace_boundary(session) == "slack:c:G1"
+
+
+def test_workspace_boundary_uses_managed_channel_memory_boundary():
+    session = _boundary_session("slack", {"memory_boundary": "slack:c:G1"})
+    assert workspace_boundary(session) == "slack:c:G1"
+
+
+def test_workspace_boundary_ignores_non_channel_memory_boundary():
+    session = _boundary_session("web", {"memory_boundary": "slack:c:G1"})
+    assert workspace_boundary(session) is None
+
+
+def test_boundary_workspace_prefix_uses_boundary_with_trailing_slash():
+    session = _boundary_session("slack", {"memory_boundary": "slack:c:G1"})
+    assert (
+        boundary_workspace_prefix(
+            {"storage_key_prefix": "project/agent"}, session, "root-session",
+        )
+        == "project/agent/boundaries/slack:c:G1/workspace/"
+    )
+
+
+def test_boundary_workspace_prefix_falls_back_to_session_prefix():
+    session = _boundary_session("web", {"memory_boundary": "ignored"})
+    assert (
+        boundary_workspace_prefix(
+            {"storage_key_prefix": "project/agent"}, session, "root-session",
+        )
+        == "project/agent/root-session/"
+    )
+
+
+def test_boundary_workspace_prefix_fail_closes_older_managed_session():
+    session = _boundary_session(
+        "telegram", {"channel_session_key": "agent:telegram:group:-100"},
+        sid="legacy-session",
+    )
+    assert (
+        boundary_workspace_prefix(
+            {"storage_key_prefix": "project/agent"}, session, "legacy-session",
+        )
+        == "project/agent/boundaries/telegram:iso:agent:telegram:group:-100/workspace/"
+    )
+
+
+def test_boundary_workspace_key_strips_leading_slash():
+    session = _boundary_session("slack", {"memory_boundary": "slack:c:G1"})
+    assert (
+        boundary_workspace_key(
+            {"storage_key_prefix": "project/agent"}, session, "root-session",
+            "/docs/report.pdf",
+        )
+        == "project/agent/boundaries/slack:c:G1/workspace/docs/report.pdf"
+    )

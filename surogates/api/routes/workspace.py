@@ -25,8 +25,8 @@ from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
 from surogates.storage.tenant import (
-    prefixed_session_workspace_key,
-    prefixed_session_workspace_prefix,
+    boundary_workspace_key,
+    boundary_workspace_prefix,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -249,7 +249,7 @@ def _strip_session_prefix(session: Session, root_id: str, key: str) -> str:
     sees session-relative paths (``sessions/{root}/`` is hidden, and so
     is the agent ``storage_key_prefix`` when set).
     """
-    prefix = prefixed_session_workspace_prefix(session.config, root_id)
+    prefix = boundary_workspace_prefix(session.config, session, root_id)
     if not key.startswith(prefix):
         return key
     return key[len(prefix):]
@@ -383,7 +383,7 @@ async def get_workspace_tree(
         store, session_id, tenant,
     )
 
-    prefix = prefixed_session_workspace_prefix(session.config, root_id)
+    prefix = boundary_workspace_prefix(session.config, session, root_id)
     keys = await storage.list_keys(bucket, prefix=prefix)
     relative_keys = [_strip_session_prefix(session, root_id, k) for k in keys]
     # Drop keys living under reserved prefixes (artifact storage) so
@@ -435,7 +435,7 @@ async def get_workspace_file(
     try:
         data = await storage.read(
             bucket,
-            prefixed_session_workspace_key(session.config, root_id, path),
+            boundary_workspace_key(session.config, session, root_id, path),
         )
     except KeyError:
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
@@ -523,7 +523,7 @@ async def upload_file(
 
     await storage.write(
         bucket,
-        prefixed_session_workspace_key(session.config, root_id, key),
+        boundary_workspace_key(session.config, session, root_id, key),
         contents,
     )
 
@@ -547,7 +547,7 @@ async def download_file(
         store, session_id, tenant,
     )
 
-    storage_key = prefixed_session_workspace_key(session.config, root_id, path)
+    storage_key = boundary_workspace_key(session.config, session, root_id, path)
     if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 
@@ -597,7 +597,7 @@ async def delete_file(
     )
     require_user_writable_session(session)
 
-    storage_key = prefixed_session_workspace_key(session.config, root_id, path)
+    storage_key = boundary_workspace_key(session.config, session, root_id, path)
     if not await storage.exists(bucket, storage_key):
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
 

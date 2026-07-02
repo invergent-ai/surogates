@@ -32,8 +32,9 @@ from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import (
-    prefixed_session_workspace_key,
-    prefixed_session_workspace_prefix,
+    boundary_workspace_key,
+    boundary_workspace_prefix,
+    workspace_boundary,
 )
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -582,8 +583,8 @@ async def send_message(
         inline_tasks: list[tuple[int, AttachmentRef, asyncio.Task]] = []
         total_bytes = 0
         for attachment in body.attachments:
-            storage_key = prefixed_session_workspace_key(
-                session.config, root_id, attachment.path,
+            storage_key = boundary_workspace_key(
+                session.config, session, root_id, attachment.path,
             )
             if not await storage.exists(bucket, storage_key):
                 raise HTTPException(
@@ -1148,8 +1149,26 @@ async def _cleanup_archived_workspaces(
                 archived_session.id,
             )
             continue
-        prefix = prefixed_session_workspace_prefix(
-            archived_session.config, archived_session.id,
+        # A boundary-partitioned session (managed channel) shares its
+        # workspace with every other session in the same conversation
+        # boundary — all threads in a Slack channel key into one
+        # ``boundaries/{boundary}/workspace/`` prefix. Deleting that prefix
+        # when a single session is archived would wipe siblings' live files,
+        # so retain it: the shared workspace outlives any one session.
+        if workspace_boundary(archived_session) is not None:
+            logger.info(
+                "Archived session %s is boundary-partitioned; retaining "
+                "shared workspace",
+                archived_session.id,
+            )
+            continue
+
+        from surogates.session.attachment_ingest import workspace_root_id
+
+        prefix = boundary_workspace_prefix(
+            archived_session.config,
+            archived_session,
+            workspace_root_id(archived_session),
         )
         try:
             deleted = await storage.delete_prefix(storage_bucket, prefix)

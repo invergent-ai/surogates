@@ -20,35 +20,44 @@ from surogates.browser.base import (
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
-from surogates.storage.keys import prefixed
-from surogates.storage.tenant import session_workspace_key, session_workspace_prefix
+
+from surogates.storage.tenant import (
+    boundary_workspace_key,
+    boundary_workspace_prefix,
+    workspace_session_shim,
+)
 
 
 def build_browser_session_source_ref(
     *,
     storage_bucket: str,
-    storage_key_prefix: str,
+    session: object,
     session_id: object,
 ) -> str:
-    """Return the ``s3://`` URI for the per-session browser workspace.
+    """Return the ``s3://`` URI for the session's browser workspace.
 
-    Both the session-scoped ``sessions/{id}`` segment and the agent's
-    storage key prefix (when set) live under the shared bucket.
+    Uses the same boundary-partitioned prefix as every other workspace
+    reader/writer so a managed-channel thread's browser lands in the
+    shared workspace instead of a per-session prefix.
     """
-    workspace = session_workspace_prefix(session_id).rstrip("/")
-    return f"s3://{storage_bucket}/{prefixed(workspace, storage_key_prefix)}"
+    return (
+        f"s3://{storage_bucket}/"
+        f"{boundary_workspace_prefix(session.config, session, session_id)}"
+    )
 
 
 def build_browser_screenshot_key(
     *,
-    storage_key_prefix: str,
+    session: object,
     session_id: object,
     relative_path: str,
 ) -> str:
     """Return the physical object key for a browser screenshot."""
-    return prefixed(
-        session_workspace_key(session_id, relative_path),
-        storage_key_prefix,
+    return boundary_workspace_key(
+        session.config,
+        session,
+        session_id,
+        relative_path,
     )
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -88,13 +97,13 @@ async def _resolve_session_browser(
 
     try:
         storage_bucket = (session_config or {}).get("storage_bucket")
-        storage_key_prefix = (session_config or {}).get("storage_key_prefix", "") or ""
+        session_for_workspace = workspace_session_shim(session_config, sid)
         browser_spec = spec or BrowserSpec(
             workspace_path=workspace_path,
             workspace_source_ref=(
                 build_browser_session_source_ref(
                     storage_bucket=storage_bucket,
-                    storage_key_prefix=storage_key_prefix,
+                    session=session_for_workspace,
                     session_id=sid,
                 )
                 if storage_bucket
@@ -745,9 +754,9 @@ async def _save_screenshot_to_storage(
     if not storage_bucket:
         return None
 
-    storage_key_prefix = (session_config or {}).get("storage_key_prefix", "") or ""
+    session_for_workspace = workspace_session_shim(session_config, session_id)
     key = build_browser_screenshot_key(
-        storage_key_prefix=storage_key_prefix,
+        session=session_for_workspace,
         session_id=session_id,
         relative_path=relative_path,
     )

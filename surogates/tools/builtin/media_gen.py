@@ -31,7 +31,7 @@ from uuid import uuid4
 import httpx
 
 from surogates.harness.message_utils import message_to_dict
-from surogates.storage.tenant import prefixed_session_workspace_key
+from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.builtin.vision import (
     _extract_response_content,
     _image_ref_to_data_url,
@@ -589,7 +589,12 @@ async def _save_media_bytes(
             )
     bucket = (session_config or {}).get("storage_bucket")
     if storage is not None and session_id is not None and bucket:
-        key = prefixed_session_workspace_key(session_config, session_id, relative_path)
+        key = boundary_workspace_key(
+            session_config,
+            workspace_session_shim(session_config, session_id),
+            session_id,
+            relative_path,
+        )
         try:
             await storage.write(bucket, key, data)
             saved = True
