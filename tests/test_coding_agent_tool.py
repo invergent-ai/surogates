@@ -170,19 +170,6 @@ async def test_handler_git_pat_not_connected_guidance():
     assert data["code"] == "git_pat_not_connected"
 
 
-async def test_handler_rejects_read_only_repo_run():
-    session = _session()
-    store = _FakeStore(session)
-    out = await _run_coding_agent_handler(
-        {"agent": "claude", "prompt": "do it", "read_only": True},
-        tenant=_tenant(), session_id=str(session.id), session_store=store,
-        sandbox_pool=_sandbox([]),
-        credential_vault=_anthropic_vault(git_pat="github_pat_abc"),
-    )
-    data = json.loads(out)
-    assert data["code"] == "repo_run_read_only"
-
-
 async def test_handler_selects_requested_repo(monkeypatch):
     repos = (
         {"url": "https://github.com/acme/api", "default_branch": "main"},

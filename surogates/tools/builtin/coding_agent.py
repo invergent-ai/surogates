@@ -62,10 +62,6 @@ _SCHEMA = ToolSchema(
                 "type": "string",
                 "enum": ["low", "medium", "high", "xhigh"],
             },
-            "read_only": {
-                "type": "boolean",
-                "description": "Run without writing changes.",
-            },
         },
         "required": ["agent", "prompt"],
         "additionalProperties": False,
@@ -146,12 +142,6 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         return json.dumps({
             "error": "Connect a GitHub token in the agent's Tools tab first.",
             "code": "git_pat_not_connected",
-        })
-
-    if arguments.get("read_only"):
-        return json.dumps({
-            "error": "Repository PR runs require read_only=false.",
-            "code": "repo_run_read_only",
         })
 
     from surogates.sandbox.pool import sandbox_session_key
