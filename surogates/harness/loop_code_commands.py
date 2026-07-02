@@ -119,6 +119,14 @@ class CodeCommandMixin:
     # ------------------------------------------------------------------
 
     async def _run_code_agent(self, session, cmd, lease, all_events) -> None:
+        import time
+
+        from surogates.coding_agents.pr_workflow import augment_prompt
+        from surogates.coding_agents.repo_checkout import fix_branch_name
+        from surogates.coding_agents.repo_resolve import (
+            resolve_git_pat,
+            select_repo,
+        )
         from surogates.coding_agents.run_core import execute_coding_run
 
         creds = self._code_credentials()
@@ -138,6 +146,52 @@ class CodeCommandMixin:
         ):
             return
 
+        # Resolve the target repo from the wake-local config.  A specific
+        # ``--repo`` with no match is an error; zero/ambiguous repos with no
+        # request keep today's bare-workspace behavior.
+        repos = (session.config or {}).get("repos") or []
+        requested_repo = cmd.flags.get("repo")
+        repo = select_repo(repos, requested_repo)
+        if requested_repo and repo is None:
+            await self._emit_code_message(
+                session,
+                f"No configured repository matches '{requested_repo}'. "
+                f"Update the agent's Tools tab or use a configured repo name.",
+                lease,
+            )
+            return
+
+        read_only = cmd.flags.get("allow") == "read-only"
+        prompt = cmd.prompt
+        git_pat: str | None = None
+        branch: str | None = None
+        if repo is not None:
+            # A repo run opens a PR, which must write — read-only is incoherent.
+            if read_only:
+                await self._emit_code_message(
+                    session,
+                    "A repository run opens a pull request and cannot be "
+                    "read-only. Re-run without --allow read-only.",
+                    lease,
+                )
+                return
+            git_pat = await resolve_git_pat(
+                self._credential_vault,
+                org_id=self._tenant.org_id,
+                **self._code_principal(),
+            )
+            if not git_pat:
+                await self._emit_code_message(
+                    session,
+                    "Connect a GitHub token in the agent's Tools tab first.",
+                    lease,
+                )
+                return
+            branch = fix_branch_name(cmd.prompt, now=time.time())
+            prompt = augment_prompt(
+                cmd.prompt, branch=branch, default_branch=repo["default_branch"],
+            )
+
         from surogates.sandbox.pool import sandbox_session_key
 
         sandbox_owner = sandbox_session_key(session)
@@ -152,14 +206,15 @@ class CodeCommandMixin:
             outcome = await execute_coding_run(
                 store=self._store, tenant=self._tenant, session=session,
                 credentials=creds, agent=cmd.agent, provider=cmd.provider,
-                prompt=cmd.prompt, model=cmd.flags.get("model"),
+                prompt=prompt, model=cmd.flags.get("model"),
                 effort=cmd.flags.get("effort"),
-                read_only=cmd.flags.get("allow") == "read-only",
+                read_only=False if repo is not None else read_only,
                 ensure_sandbox=_ensure, execute=_execute,
                 should_cancel=lambda: bool(
                     getattr(self, "_interrupt_requested", False)
                 ),
                 started_metadata={"source_event_id": source_event_id},
+                repo=repo, git_pat=git_pat, branch=branch,
             )
         except Exception as exc:  # provisioning/build failure — report cleanly
             logger.warning("/code run failed: %s", exc)
