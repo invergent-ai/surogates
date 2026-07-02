@@ -68,11 +68,35 @@ def build_input_prompt_blocks(
     return text, blocks
 
 
+def build_answered_blocks(responses: list[dict]) -> tuple[str, list[dict]]:
+    """Render a resolved input prompt: the submitted answer(s), no button.
+
+    Replaces the original Answer-button message via ``chat.update`` once the
+    user submits the modal, so the thread shows what was answered instead of a
+    now-dead button.  ``responses`` are the ``parse_modal_submission`` entries
+    (each ``{"question", "answer", "is_other"}``).
+    """
+    blocks: list[dict] = [
+        {"type": "section", "text": _mrkdwn("✅ *Answered*")},
+    ]
+    summary: list[str] = []
+    for response in responses:
+        question = (response.get("question") or "").strip()
+        answer = (response.get("answer") or "").strip()
+        body = f"*{question}*\n> {answer}" if question else f"> {answer}"
+        blocks.append({"type": "section", "text": _mrkdwn(body)})
+        summary.append(f"{question}: {answer}" if question else answer)
+    text = "Answered — " + "; ".join(summary) if summary else "Answered"
+    return text, blocks
+
+
 def build_question_modal(
     *,
     session_id: str,
     tool_call_id: str,
     questions: list[dict],
+    channel: str = "",
+    message_ts: str = "",
 ) -> dict:
     blocks: list[dict] = []
     for index, question in enumerate(questions):
@@ -130,7 +154,12 @@ def build_question_modal(
         "type": "modal",
         "callback_id": MODAL_CALLBACK_ID,
         "private_metadata": json.dumps(
-            {"session_id": str(session_id), "tool_call_id": str(tool_call_id)},
+            {
+                "session_id": str(session_id),
+                "tool_call_id": str(tool_call_id),
+                "channel": str(channel),
+                "message_ts": str(message_ts),
+            },
             separators=(",", ":"),
         ),
         "title": _plain("Answer", limit=24),
