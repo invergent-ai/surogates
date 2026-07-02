@@ -664,21 +664,6 @@ def _memory_user_id(session, tenant) -> str | None:
     return str(tenant.user_id) if tenant.user_id is not None else None
 
 
-def _overlay_session_repos(session, repos):
-    """Return a wake-local session whose config carries the runtime repos.
-
-    The overlay lets ``/code`` and tool dispatch read the agent's configured
-    repositories from ``session.config['repos']``.  It is never written back to
-    the persisted session row.  With no repos configured the session is
-    returned unchanged (no needless copy).
-    """
-    if not repos:
-        return session
-    config = dict(session.config or {})
-    config["repos"] = [dict(repo) for repo in repos]
-    return session.model_copy(update={"config": config})
-
-
 def _build_r2_memory_keys(
     *,
     session: object,
@@ -1044,11 +1029,6 @@ async def run_worker(settings: Settings) -> None:
             cache=runtime_config_cache,
             settings=settings,
         )
-
-        # Project the agent's configured git repos onto a wake-local session
-        # config so /code and the coding tool can resolve them.  Never written
-        # back to the session row.
-        session = _overlay_session_repos(session, ctx.repos)
 
         # Multi-party (shared channel) threads carry no per-user memory or
         # preferences — only shared conversation + agent/org memory — so one
@@ -1551,6 +1531,9 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent slash-command gating resolved from the runtime
             # config; the dispatch gate refuses disabled commands.
             slash_commands=ctx.slash_commands,
+            # Per-agent git repos the coding tool / /code check out; overlaid
+            # onto the wake-local session inside AgentHarness.wake.
+            coding_repos=ctx.repos,
             # The sending human/service account — owns automation they create
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.

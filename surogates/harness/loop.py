@@ -385,6 +385,7 @@ class AgentHarness(
         mcp_tool_names: frozenset[str] | None = None,
         composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
+        coding_repos: tuple[dict[str, str], ...] = (),
         acting_principal: Any | None = None,
     ) -> None:
         self._store = session_store
@@ -402,6 +403,11 @@ class AgentHarness(
         self._slash_commands: SlashCommandConfig = (
             slash_commands if slash_commands is not None else SlashCommandConfig()
         )
+        # Per-agent git repos the coding tool / ``/code`` may check out.
+        # ``wake`` re-fetches the session from the store, so these are overlaid
+        # onto the wake-local session config (see ``_overlay_repos``) rather
+        # than in the worker's harness factory.
+        self._coding_repos: tuple[dict[str, str], ...] = tuple(coding_repos or ())
         self._llm = llm_client
         self._tenant = tenant
         # Who actually SENT this turn — the owner of any automation they create
@@ -765,6 +771,20 @@ class AgentHarness(
         """True when slash command *name* is enabled for this agent."""
         return name in self._slash_commands.commands
 
+    def _overlay_repos(self, session: Session) -> Session:
+        """Overlay the agent's configured repos onto a wake-local session.
+
+        ``wake`` re-fetches the session from the store, so the runtime-projected
+        repos are applied here so ``/code`` and the coding tool can read
+        ``session.config['repos']``.  Never written back to the persisted row;
+        with no repos configured the session is returned unchanged.
+        """
+        if not self._coding_repos:
+            return session
+        config = dict(session.config or {})
+        config["repos"] = [dict(repo) for repo in self._coding_repos]
+        return session.model_copy(update={"config": config})
+
     def _slash_command_block_reason(self, content: str | None) -> str | None:
         """User-facing message when the slash command in *content* is gated
         off for this agent, else None (allowed, or not a gateable command)."""
@@ -863,6 +883,10 @@ class AgentHarness(
                 "wake step=fetch_session session=%s", session_id,
             )
             session = await self._store.get_session(session_id)
+            # Overlay runtime-projected repos onto this wake-local session so
+            # /code and the coding tool can resolve them (the fetched row does
+            # not carry them).
+            session = self._overlay_repos(session)
 
             # A browser-setup session is interactive-only: provision a fresh
             # browser + grant the user control on the first wake, and release it
