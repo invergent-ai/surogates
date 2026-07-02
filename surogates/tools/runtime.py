@@ -58,6 +58,7 @@ class ToolRuntime:
             delegate,
             expert,
             file_ops,
+            github,
             kb_tools,
             loop_control,
             media_gen,
@@ -98,6 +99,7 @@ class ToolRuntime:
             coordinator,
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
+            github,  # github (read-only GitHub REST for the agent's repos)
             task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
             board_tools,  # share_note, read_board, expand_note (coordination board)
             arbor_tools,  # idea_tree, dispatch_experiments, merge_experiment (research missions)
