@@ -98,6 +98,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         llm_image=_opt_llm(payload.get("llm_image")),
         llm_video=_opt_llm(payload.get("llm_video")),
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
+        repos=tuple(dict(repo) for repo in (payload.get("repos") or ())),
         governance=dict(payload.get("governance") or {}),
         slash_commands=_slash_commands(payload.get("slash_commands")),
         brainstorming_gate=bool(payload.get("brainstorming_gate", True)),
