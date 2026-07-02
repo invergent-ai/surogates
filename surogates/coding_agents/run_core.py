@@ -21,6 +21,11 @@ from surogates.coding_agents.credentials import (
     CodingAgentCredentials,
     CredentialBundle,
 )
+from surogates.coding_agents.run_progress import (
+    CHANNEL_UPDATE_INTERVAL,
+    render_code_run_ack,
+    render_code_run_update,
+)
 from surogates.coding_agents.runner import run_code_agent
 from surogates.session.events import EventType
 
@@ -157,12 +162,36 @@ async def execute_coding_run(
         extra_env = git_env
         workdir = checkout_dir
 
+    # Channel heartbeat: code-run PROGRESS renders live in the web UI but is
+    # never delivered to channels, so a Slack/Telegram user sees nothing for
+    # the minutes a run takes.  Post a throttled "still working" update for
+    # channel sessions (web/api render progress themselves).
+    wants_updates = getattr(session, "channel", "") not in ("web", "api")
+    last_update = time.monotonic()
+    if wants_updates:
+        await store.emit_event(
+            session.id,
+            EventType.CODE_RUN_CHANNEL_UPDATE,
+            {"run_id": run_id, "agent": agent, "text": render_code_run_ack(agent, repo)},
+        )
+
     async def _emit_progress(chunk: str) -> None:
+        nonlocal last_update
         await store.emit_event(
             session.id,
             EventType.CODE_RUN_PROGRESS,
             {"run_id": run_id, "agent": agent, "chunk": chunk},
         )
+        if wants_updates and time.monotonic() - last_update >= CHANNEL_UPDATE_INTERVAL:
+            last_update = time.monotonic()
+            await store.emit_event(
+                session.id,
+                EventType.CODE_RUN_CHANNEL_UPDATE,
+                {
+                    "run_id": run_id, "agent": agent,
+                    "text": render_code_run_update(repo, chunk),
+                },
+            )
 
     result = await run_code_agent(
         run_id=run_id,

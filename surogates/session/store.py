@@ -95,6 +95,13 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             payload["intermediate"] = bool(
                 isinstance(msg, dict) and msg.get("tool_calls")
             )
+    elif event_type == EventType.CODE_RUN_CHANNEL_UPDATE:
+        # A throttled "still working" heartbeat during a coding run — delivered
+        # as a normal (non-intermediate) message so channels aren't silent for
+        # the minutes a run takes (code-run PROGRESS is web-UI-only).
+        text = data.get("text")
+        if text and isinstance(text, str):
+            payload["content"] = text
     elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
         questions = data.get("questions") or []
         if questions:

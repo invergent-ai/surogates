@@ -58,6 +58,7 @@ class EventType(str, Enum):
     # Credentials must NEVER appear in any of these payloads.
     CODE_RUN_STARTED = "code.run_started"
     CODE_RUN_PROGRESS = "code.run_progress"
+    CODE_RUN_CHANNEL_UPDATE = "code.run_channel_update"
     CODE_RUN_RESULT = "code.run_result"
 
     # Session lifecycle

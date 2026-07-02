@@ -193,3 +193,59 @@ async def test_no_repo_run_never_checks_out():
     launch = next(p for a, p in calls if a == "launch")
     assert "workdir" not in launch
     assert "GH_TOKEN" not in launch["env"]
+
+
+async def test_emits_channel_progress_updates(monkeypatch):
+    # Channel sessions get a throttled "still working" heartbeat during the run
+    # (code-run PROGRESS is web-UI-only). Force every progress chunk to emit one.
+    import surogates.coding_agents.run_core as rc
+    monkeypatch.setattr(rc, "CHANNEL_UPDATE_INTERVAL", 0.0)
+
+    store = _FakeStore()
+    polls = [
+        {"ok": True, "done": False, "exit_code": None, "offset": 10,
+         "new_output": json.dumps({
+             "type": "assistant",
+             "message": {"content": [{"type": "text", "text": "Editing search.py"}]},
+         }) + "\n"},
+        {"ok": True, "done": True, "exit_code": 0, "offset": 40,
+         "new_output": json.dumps({
+             "type": "result", "result": "Done.",
+             "usage": {"input_tokens": 1, "output_tokens": 1},
+         }) + "\n"},
+    ]
+    execute, _calls = _sbx(polls)
+    await execute_coding_run(
+        store=store, tenant=_tenant(),
+        session=SimpleNamespace(id=uuid4(), channel="slack"),
+        credentials=_anthropic_creds(), agent="claude", provider="anthropic",
+        prompt="fix it", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+        repo={"url": "https://github.com/acme/api", "default_branch": "main"},
+        git_pat=_PAT, now=1_700_000_000.0,
+    )
+    updates = [
+        d for et, d in store.events if et == EventType.CODE_RUN_CHANNEL_UPDATE
+    ]
+    assert any("On it" in u["text"] for u in updates)          # initial ack
+    assert any("Still working" in u["text"] for u in updates)  # throttled update
+    assert all("acme/api" in u["text"] for u in updates)
+
+
+async def test_no_channel_updates_for_web_sessions(monkeypatch):
+    import surogates.coding_agents.run_core as rc
+    monkeypatch.setattr(rc, "CHANNEL_UPDATE_INTERVAL", 0.0)
+    store = _FakeStore()
+    execute, _calls = _sbx(_done_poll())
+    await execute_coding_run(
+        store=store, tenant=_tenant(),
+        session=SimpleNamespace(id=uuid4(), channel="web"),
+        credentials=_anthropic_creds(), agent="claude", provider="anthropic",
+        prompt="fix it", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+        repo={"url": "https://github.com/acme/api", "default_branch": "main"},
+        git_pat=_PAT, now=1_700_000_000.0,
+    )
+    assert not any(
+        et == EventType.CODE_RUN_CHANNEL_UPDATE for et, _ in store.events
+    )
