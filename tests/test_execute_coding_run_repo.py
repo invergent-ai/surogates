@@ -137,6 +137,22 @@ async def test_checkout_runs_before_launch_and_injects_git_env():
         assert _PAT not in json.dumps(data)
 
 
+async def test_caller_supplied_branch_is_used():
+    store = _FakeStore()
+    execute, calls = _sbx(_done_poll())
+    outcome = await execute_coding_run(
+        store=store, tenant=_tenant(), session=SimpleNamespace(id=uuid4()),
+        credentials=_anthropic_creds(), agent="claude", provider="anthropic",
+        prompt="fix the login bug", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+        repo={"url": "https://github.com/acme/api", "default_branch": "main"},
+        git_pat=_PAT, branch="fix/explicit-123", now=1_700_000_000.0,
+    )
+    assert outcome.branch == "fix/explicit-123"
+    checkout = next(p for a, p in calls if a == "checkout")
+    assert "fix/explicit-123" in checkout["command"]
+
+
 async def test_checkout_failure_emits_error_and_skips_launch():
     store = _FakeStore()
     execute, calls = _sbx(_done_poll(), checkout_ok=False)

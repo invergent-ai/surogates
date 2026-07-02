@@ -68,6 +68,7 @@ async def execute_coding_run(
     started_metadata: dict | None = None,
     repo: dict | None = None,
     git_pat: str | None = None,
+    branch: str | None = None,
     now: float | None = None,
 ) -> CodingRunOutcome:
     """Run one coding agent end to end, emitting CODE_RUN_* events.
@@ -108,7 +109,6 @@ async def execute_coding_run(
     # commit, push, and open a PR.
     extra_env: dict[str, str] | None = None
     workdir: str | None = None
-    branch: str | None = None
     checkout_dir: str | None = None
     if repo and git_pat:
         from surogates.coding_agents.repo_checkout import (
@@ -119,7 +119,9 @@ async def execute_coding_run(
         )
 
         run_now = now if now is not None else time.time()
-        branch = fix_branch_name(prompt, now=run_now)
+        # Honor a caller-computed branch (so the tool can augment the prompt
+        # with the same name); otherwise derive it from the prompt.
+        branch = branch or fix_branch_name(prompt, now=run_now)
         checkout_dir = f"/workspace/{repo_dir_name(repo['url'])}"
         git_env = git_auth_env(git_pat)
         checkout_payload = {
