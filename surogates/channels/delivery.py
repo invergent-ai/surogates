@@ -25,7 +25,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, AsyncIterator
 from uuid import UUID
 
@@ -40,11 +40,61 @@ if TYPE_CHECKING:
 __all__ = [
     "DeliveryService",
     "OutboxItem",
+    "delivery_exhausted",
+    "is_permanent_delivery_error",
 ]
 
 logger = logging.getLogger(__name__)
 
 _CHANNEL_PREFIX = "surogates:delivery:"
+
+# Platform errors where re-posting the SAME message to the SAME target can
+# never succeed — the channel can't receive it (read-only/archived/not a
+# member), the message itself is invalid, or the credential is dead.  These
+# are dropped (marked dead) instead of retried.  Match is a case-insensitive
+# substring of the error string (Slack raises ``…'error': '<code>'…``).
+# Ambiguous errors (e.g. ``channel_not_found``) are left retryable and caught
+# by the age cap below.
+_PERMANENT_DELIVERY_ERRORS: frozenset[str] = frozenset({
+    # Slack — target cannot receive the message
+    "restricted_action_read_only_channel",
+    "is_archived",
+    "not_in_channel",
+    "cannot_dm_bot",
+    # Slack — the message content is invalid
+    "msg_too_long",
+    "no_text",
+    # Slack — the credential is dead
+    "account_inactive",
+    "token_revoked",
+    "invalid_auth",
+    # Telegram
+    "bot was blocked by the user",
+    "user is deactivated",
+    "bot was kicked",
+})
+
+# Give up on an undelivered item once it is older than this, whatever the
+# error — a transient failure that has not cleared in this long won't, and the
+# conversation has moved on.  Backstop against infinite retries.
+MAX_DELIVERY_AGE = timedelta(minutes=30)
+
+
+def is_permanent_delivery_error(error: str | None) -> bool:
+    """True when re-sending this message can never succeed (drop, don't retry)."""
+    if not error:
+        return False
+    low = error.lower()
+    return any(code in low for code in _PERMANENT_DELIVERY_ERRORS)
+
+
+def delivery_exhausted(created_at: datetime | None, *, now: datetime | None = None) -> bool:
+    """True when an item has been retried past :data:`MAX_DELIVERY_AGE`."""
+    if created_at is None:
+        return False
+    ref = now or datetime.now(timezone.utc)
+    at = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    return (ref - at) > MAX_DELIVERY_AGE
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +295,21 @@ class DeliveryService:
             )
             await db.commit()
         logger.warning("Outbox %d failed: %s (will retry)", outbox_id, error)
+
+    async def mark_dead(self, outbox_id: int, error: str) -> None:
+        """Terminally fail an outbox item — a permanent error or age-exhausted.
+
+        Sets ``status='failed'`` so :meth:`claim_batch` never re-claims it; the
+        message is dropped rather than retried forever.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                update(DeliveryOutbox)
+                .where(DeliveryOutbox.id == outbox_id)
+                .values(status="failed")
+            )
+            await db.commit()
+        logger.warning("Outbox %d dropped (no retry): %s", outbox_id, error)
 
     # ------------------------------------------------------------------
     # Real-time notifications (Redis pub/sub)
