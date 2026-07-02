@@ -44,12 +44,16 @@ def render_repos_prompt(repos: Sequence[Mapping[str, str]] | None) -> str:
         "## GitHub repositories\n"
         "You have access to these GitHub repositories:\n"
         + "\n".join(lines)
-        + "\n\nUse the `github` tool to read them (issues, pull requests, files, "
-        "commits, diffs, search) and `run_coding_agent` or `/code` to make changes "
-        "and open a pull request. When you reference an issue, commit, or pull "
-        "request, include its GitHub link — e.g. "
-        "`https://github.com/<owner>/<repo>/issues/<number>`, "
-        "`.../pull/<number>`, or `.../commit/<sha>`."
+        + "\n\nUse the `github` tool to READ them (issues, pull requests, files, "
+        "commits, diffs, search). To FIX an issue or make ANY code change, use "
+        "`run_coding_agent` (Claude Code / Codex on the connected plan) or `/code` "
+        "— it checks the repo out with credentials, makes the change, and opens a "
+        "pull request for review. Do NOT `git clone`, `gh`, or push from the "
+        "terminal: it has no git credentials; only the coding tool's checkout is "
+        "authenticated. When you reference an issue, commit, or pull request, "
+        "include its GitHub link — e.g. "
+        "`https://github.com/<owner>/<repo>/issues/<number>`, `.../pull/<number>`, "
+        "or `.../commit/<sha>`."
     )
 
 
