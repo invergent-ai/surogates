@@ -285,8 +285,52 @@ def _cleanup(run_dir: Path) -> None:
     shutil.rmtree(run_dir, ignore_errors=True)
 
 
+def checkout(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a git checkout script with a private per-call env (the git PAT).
+
+    Runs in ``WORKSPACE_DIR`` so the clone lands beside the coding run's
+    workspace.  Output is redacted and capped so a leaked token can't surface
+    in the returned payload.
+    """
+    from surogates.harness.redact import redact_sensitive_text
+
+    run_id = payload.get("run_id", "")
+    command = payload.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return {"ok": False, "run_id": run_id, "error": "checkout command is required"}
+    child_env = dict(os.environ)
+    child_env.update(dict(payload.get("env") or {}))
+    workspace_dir = child_env.get("WORKSPACE_DIR", "/workspace")
+    workspace_root = Path(workspace_dir).resolve()
+    if not workspace_root.is_dir():
+        return {
+            "ok": False, "run_id": run_id,
+            "error": f"workspace missing: {workspace_root}",
+        }
+    proc = subprocess.run(  # noqa: S603 — fixed shell, no untrusted argv
+        ["/bin/sh", "-lc", command],
+        cwd=str(workspace_root),
+        env=child_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=300,
+        check=False,
+    )
+    ok = proc.returncode == 0
+    stdout = redact_sensitive_text((proc.stdout or "")[-4000:])
+    stderr = redact_sensitive_text((proc.stderr or "")[-4000:])
+    return {
+        "ok": ok,
+        "run_id": run_id,
+        "exit_code": proc.returncode,
+        "output": stdout,
+        "error": None if ok else (stderr or stdout or "checkout failed"),
+    }
+
+
 def dispatch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]:
-    """Route a ``_code`` payload to launch / poll / cancel."""
+    """Route a ``_code`` payload to launch / poll / cancel / checkout."""
     action = payload.get("action")
     if action == "launch":
         return launch(payload, base=base)
@@ -294,6 +338,8 @@ def dispatch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, 
         return poll(payload, base=base)
     if action == "cancel":
         return cancel(payload, base=base)
+    if action == "checkout":
+        return checkout(payload)
     return {"ok": False, "error": f"unknown action {action!r}"}
 
 

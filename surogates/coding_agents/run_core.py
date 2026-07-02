@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import uuid4
@@ -29,6 +30,8 @@ class CodingRunOutcome:
     status: str  # "ok" | "not_connected"
     result: CodeResult | None = None
     result_event_id: int | None = None
+    branch: str | None = None
+    checkout_dir: str | None = None
 
 
 def credential_env(bundle: CredentialBundle) -> tuple[dict[str, str], str | None]:
@@ -63,6 +66,9 @@ async def execute_coding_run(
     execute: Callable[[str, str], Awaitable[str]],
     should_cancel: Callable[[], bool],
     started_metadata: dict | None = None,
+    repo: dict | None = None,
+    git_pat: str | None = None,
+    now: float | None = None,
 ) -> CodingRunOutcome:
     """Run one coding agent end to end, emitting CODE_RUN_* events.
 
@@ -96,6 +102,59 @@ async def execute_coding_run(
 
     await ensure_sandbox()
 
+    # Optional repo checkout: clone the configured repo into the workspace on a
+    # fresh branch (auth via a git credential helper reading $GH_TOKEN — the PAT
+    # never enters argv/logs) and run the CLI inside that checkout so it can
+    # commit, push, and open a PR.
+    extra_env: dict[str, str] | None = None
+    workdir: str | None = None
+    branch: str | None = None
+    checkout_dir: str | None = None
+    if repo and git_pat:
+        from surogates.coding_agents.repo_checkout import (
+            clone_script,
+            fix_branch_name,
+            git_auth_env,
+            repo_dir_name,
+        )
+
+        run_now = now if now is not None else time.time()
+        branch = fix_branch_name(prompt, now=run_now)
+        checkout_dir = f"/workspace/{repo_dir_name(repo['url'])}"
+        git_env = git_auth_env(git_pat)
+        checkout_payload = {
+            "action": "checkout",
+            "run_id": run_id,
+            "command": clone_script(
+                repo_url=repo["url"],
+                default_branch=repo["default_branch"],
+                dest=checkout_dir,
+                branch=branch,
+            ),
+            "env": git_env,
+        }
+        checkout_result = json.loads(
+            await execute("_code", json.dumps(checkout_payload)),
+        )
+        if not checkout_result.get("ok"):
+            error = checkout_result.get("error") or "repo checkout failed"
+            result_event_id = await store.emit_event(
+                session.id,
+                EventType.CODE_RUN_RESULT,
+                {
+                    "run_id": run_id, "agent": agent, "final_message": None,
+                    "error": error, "input_tokens": 0, "output_tokens": 0,
+                },
+            )
+            return CodingRunOutcome(
+                status="ok",
+                result=CodeResult(final_message="", error=error),
+                result_event_id=result_event_id,
+                branch=branch, checkout_dir=checkout_dir,
+            )
+        extra_env = git_env
+        workdir = checkout_dir
+
     async def _emit_progress(chunk: str) -> None:
         await store.emit_event(
             session.id,
@@ -113,6 +172,8 @@ async def execute_coding_run(
         emit_progress=_emit_progress,
         should_cancel=should_cancel,
         sleep=asyncio.sleep,
+        extra_env=extra_env,
+        workdir=workdir,
     )
 
     # Codex refreshes its auth.json in-pod; persist the new copy so the vault
@@ -142,4 +203,5 @@ async def execute_coding_run(
     )
     return CodingRunOutcome(
         status="ok", result=result, result_event_id=result_event_id,
+        branch=branch, checkout_dir=checkout_dir,
     )
