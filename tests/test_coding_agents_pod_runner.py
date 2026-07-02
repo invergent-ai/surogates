@@ -143,3 +143,39 @@ def test_dispatch_routes_actions(tmp_path):
     # Unknown action is a clean error, not a crash.
     err = pod_runner.dispatch({"action": "frobnicate"}, base=base)
     assert err["ok"] is False
+
+
+def test_launch_uses_payload_workdir(tmp_path):
+    base = str(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pod_runner.launch(
+        {
+            "run_id": "wd1",
+            "argv": ["python3", "-c", "import os; print('CWD=' + os.getcwd())"],
+            "stdin": None,
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+            "workdir": str(repo),
+        },
+        base=base,
+    )
+    _res, out = _wait_done("wd1", base)
+    assert f"CWD={repo.resolve()}" in out
+
+
+def test_launch_rejects_workdir_outside_workspace(tmp_path):
+    base = str(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    result = pod_runner.launch(
+        {
+            "run_id": "wd2",
+            "argv": ["python3", "-c", "print('should not run')"],
+            "stdin": None,
+            "env": {"WORKSPACE_DIR": str(ws)},
+            "workdir": str(tmp_path),
+        },
+        base=base,
+    )
+    assert result["ok"] is False
+    assert "workdir must be inside WORKSPACE_DIR" in result["error"]

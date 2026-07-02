@@ -70,8 +70,15 @@ async def run_code_agent(
     sleep: Callable[[float], Awaitable[None]],
     now: Callable[[], float] = time.monotonic,
     config: RunnerConfig | None = None,
+    extra_env: dict[str, str] | None = None,
+    workdir: str | None = None,
 ) -> CodeResult:
-    """Launch, poll, stream, and parse a single coding-agent run."""
+    """Launch, poll, stream, and parse a single coding-agent run.
+
+    *extra_env* is merged over the credential env (e.g. the git ``GH_TOKEN``
+    for a repo run); *workdir*, when set, runs the CLI inside a checked-out
+    repo directory instead of the workspace root.
+    """
     cfg = config or RunnerConfig()
 
     launch_payload = {
@@ -79,10 +86,12 @@ async def run_code_agent(
         "run_id": run_id,
         "argv": invocation.argv,
         "stdin": invocation.stdin,
-        "env": dict(env),
+        "env": {**env, **(extra_env or {})},
     }
     if codex_auth_json is not None:
         launch_payload["codex_auth_json"] = codex_auth_json
+    if workdir:
+        launch_payload["workdir"] = workdir
 
     launched = _parse_exec_result(await execute("_code", json.dumps(launch_payload)))
     if not launched.get("ok"):

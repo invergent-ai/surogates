@@ -91,9 +91,31 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
         stdin_path.write_text(stdin)
         stdin_handle = open(stdin_path, "rb")  # noqa: SIM115 — closed below
 
-    workdir = child_env.get("WORKSPACE_DIR", "/workspace")
-    if not os.path.isdir(workdir):
-        workdir = None  # inherit the launcher's cwd when the mount is absent
+    workspace_dir = child_env.get("WORKSPACE_DIR", "/workspace")
+    requested_workdir = payload.get("workdir") or workspace_dir
+    if not os.path.isdir(workspace_dir):
+        # No workspace mount (test/dev): inherit the launcher's cwd, and a
+        # repo workdir cannot exist either.
+        workdir = None
+    else:
+        workspace_root = Path(workspace_dir).resolve()
+        candidate_workdir = Path(str(requested_workdir)).resolve()
+        if (
+            candidate_workdir != workspace_root
+            and workspace_root not in candidate_workdir.parents
+        ):
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "error": "workdir must be inside WORKSPACE_DIR",
+            }
+        if not candidate_workdir.is_dir():
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "error": f"workdir does not exist: {candidate_workdir}",
+            }
+        workdir = str(candidate_workdir)
 
     exit_path = run_dir / "exit_code"
 
