@@ -696,6 +696,7 @@ def create_app() -> FastAPI:
         channel_files,
         coding_agents,
         composio,
+        git_credentials,
         events,
         feedback,
         health,
@@ -744,6 +745,12 @@ def create_app() -> FastAPI:
     # under a bare ``surg_sk_`` ops-chat service-account token (the auth
     # middleware only accepts those on /v1/api/*).  Mirrors missions/feedback.
     app.include_router(coding_agents.router, prefix="/v1/api", tags=["coding-agents"])
+    app.include_router(git_credentials.router, prefix="/v1", tags=["git-credentials"])
+    # Also at /v1/api so ops can forward the PAT connect/status/delete under the
+    # agent SA's bare ``surg_sk_`` token (auth middleware only accepts /v1/api/*).
+    app.include_router(
+        git_credentials.router, prefix="/v1/api", tags=["git-credentials"],
+    )
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
     app.include_router(scheduled_work.router, prefix="/v1", tags=["scheduled-work"])

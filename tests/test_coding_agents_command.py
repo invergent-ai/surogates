@@ -49,6 +49,13 @@ def test_run_with_quoted_prompt_and_flags():
     assert cmd.flags == {"model": "opus", "effort": "high"}
 
 
+def test_run_with_repo_flag():
+    cmd = parse_code_command('/code claude "fix X" --repo api')
+    assert cmd.action == "run"
+    assert cmd.prompt == "fix X"
+    assert cmd.flags["repo"] == "api"
+
+
 def test_run_requires_prompt():
     cmd = parse_code_command("/code codex")
     assert cmd.action == "run"

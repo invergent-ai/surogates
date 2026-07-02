@@ -141,6 +141,12 @@ class AgentRuntimeContext:
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)
 
+    # Per-agent git repositories the coding agent may check out and open PRs
+    # against.  Each entry is a ``{"url", "default_branch"}`` dict.  Empty by
+    # default so a runtime-config payload that predates this field keeps the
+    # no-repo coding behavior.
+    repos: tuple[dict[str, str], ...] = ()
+
     # Per-agent slash-command gating.  Defaults to fully permissive so a
     # runtime-config payload that predates this field keeps every command.
     slash_commands: SlashCommandConfig = SlashCommandConfig()

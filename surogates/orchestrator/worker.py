@@ -1531,6 +1531,9 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent slash-command gating resolved from the runtime
             # config; the dispatch gate refuses disabled commands.
             slash_commands=ctx.slash_commands,
+            # Per-agent git repos the coding tool / /code check out; overlaid
+            # onto the wake-local session inside AgentHarness.wake.
+            coding_repos=ctx.repos,
             # The sending human/service account — owns automation they create
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.

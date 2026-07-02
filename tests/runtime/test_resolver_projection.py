@@ -89,6 +89,26 @@ def test_mcp_server_ids_become_a_tuple_not_a_list():
     assert ctx.mcp_server_ids == ("m1", "m2", "m3")
 
 
+def test_repos_default_to_empty_tuple():
+    from surogates.runtime import build_agent_runtime_context
+
+    ctx = build_agent_runtime_context(_minimum_payload())
+    assert ctx.repos == ()
+
+
+def test_repos_project_as_independent_dicts():
+    from surogates.runtime import build_agent_runtime_context
+
+    repos = [{"url": "https://github.com/acme/api", "default_branch": "main"}]
+    payload = _minimum_payload()
+    payload["repos"] = repos
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.repos == tuple(repos)
+    # Deep copy — a caller mutating its list after projection must not leak.
+    repos[0]["url"] = "mutated"
+    assert ctx.repos[0]["url"] == "https://github.com/acme/api"
+
+
 def test_governance_is_independent_copy():
     """Caller's payload mutations after projection must not leak."""
     from surogates.runtime import build_agent_runtime_context

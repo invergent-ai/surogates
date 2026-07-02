@@ -23,7 +23,9 @@ _PROVIDER_ALIASES: Final[dict[str, str]] = {
     "openai": "openai",
 }
 
-_VALUE_FLAGS: Final[frozenset[str]] = frozenset({"--model", "--effort", "--allow"})
+_VALUE_FLAGS: Final[frozenset[str]] = frozenset(
+    {"--model", "--effort", "--allow", "--repo"},
+)
 _CODE_RE: Final = re.compile(r"^/code(?:\s+(.*))?$", re.DOTALL)
 
 

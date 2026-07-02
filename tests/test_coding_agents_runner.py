@@ -218,3 +218,33 @@ async def test_codex_auth_writeback_surfaced_in_result():
         config=RunnerConfig(poll_interval=0.0),
     )
     assert result.updated_codex_auth_json == '{"tokens":{"access_token":"refreshed"}}'
+
+
+async def test_extra_env_and_workdir_forwarded_to_launch():
+    polls = [
+        {
+            "ok": True, "done": True, "exit_code": 0, "offset": 10,
+            "new_output": json.dumps({"type": "result", "result": "ok"}) + "\n",
+        },
+    ]
+    sandbox = _FakeSandbox(polls)
+
+    await run_code_agent(
+        run_id="run-2",
+        agent="claude",
+        invocation=_inv(),
+        env={"CLAUDE_CODE_OAUTH_TOKEN": "tok"},
+        codex_auth_json=None,
+        execute=sandbox.execute,
+        emit_progress=lambda chunk: _noop_sleep(0),
+        should_cancel=lambda: False,
+        sleep=_noop_sleep,
+        config=RunnerConfig(poll_interval=0.0),
+        extra_env={"GH_TOKEN": "github_pat_x"},
+        workdir="/workspace/api",
+    )
+
+    launch_payload = sandbox.calls[0][1]
+    assert launch_payload["env"]["GH_TOKEN"] == "github_pat_x"
+    assert launch_payload["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert launch_payload["workdir"] == "/workspace/api"

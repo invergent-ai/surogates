@@ -143,3 +143,114 @@ def test_dispatch_routes_actions(tmp_path):
     # Unknown action is a clean error, not a crash.
     err = pod_runner.dispatch({"action": "frobnicate"}, base=base)
     assert err["ok"] is False
+
+
+def test_launch_uses_payload_workdir(tmp_path):
+    base = str(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    pod_runner.launch(
+        {
+            "run_id": "wd1",
+            "argv": ["python3", "-c", "import os; print('CWD=' + os.getcwd())"],
+            "stdin": None,
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+            "workdir": str(repo),
+        },
+        base=base,
+    )
+    _res, out = _wait_done("wd1", base)
+    assert f"CWD={repo.resolve()}" in out
+
+
+def test_launch_rejects_workdir_outside_workspace(tmp_path):
+    base = str(tmp_path)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    result = pod_runner.launch(
+        {
+            "run_id": "wd2",
+            "argv": ["python3", "-c", "print('should not run')"],
+            "stdin": None,
+            "env": {"WORKSPACE_DIR": str(ws)},
+            "workdir": str(tmp_path),
+        },
+        base=base,
+    )
+    assert result["ok"] is False
+    assert "workdir must be inside WORKSPACE_DIR" in result["error"]
+
+
+def test_checkout_runs_command_in_workspace(tmp_path):
+    result = pod_runner.checkout(
+        {
+            "run_id": "co1",
+            "command": "pwd && echo cloned",
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+        },
+    )
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert "cloned" in result["output"]
+    # Ran in the workspace root.
+    assert str(tmp_path.resolve()) in result["output"]
+
+
+def test_checkout_redacts_secret_in_output(tmp_path):
+    token = "github_pat_11ABCDE0secretmiddlepart9876"
+    result = pod_runner.checkout(
+        {
+            "run_id": "co2",
+            "command": f"echo leaked {token}",
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+        },
+    )
+    assert result["ok"] is True
+    # A token that leaks to stdout must be masked before it is returned.
+    assert token not in result["output"]
+
+
+def test_checkout_reports_failure_with_error(tmp_path):
+    result = pod_runner.checkout(
+        {
+            "run_id": "co3",
+            "command": "echo boom 1>&2; exit 3",
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+        },
+    )
+    assert result["ok"] is False
+    assert result["exit_code"] == 3
+    assert "boom" in result["error"]
+
+
+def test_checkout_requires_a_command(tmp_path):
+    result = pod_runner.checkout(
+        {"run_id": "co4", "env": {"WORKSPACE_DIR": str(tmp_path)}},
+    )
+    assert result["ok"] is False
+    assert "command is required" in result["error"]
+
+
+def test_checkout_missing_workspace_is_error(tmp_path):
+    result = pod_runner.checkout(
+        {
+            "run_id": "co5",
+            "command": "echo hi",
+            "env": {"WORKSPACE_DIR": str(tmp_path / "does-not-exist")},
+        },
+    )
+    assert result["ok"] is False
+    assert "workspace missing" in result["error"]
+
+
+def test_dispatch_routes_checkout(tmp_path):
+    out = pod_runner.dispatch(
+        {
+            "action": "checkout",
+            "run_id": "co6",
+            "command": "echo ok",
+            "env": {"WORKSPACE_DIR": str(tmp_path)},
+        },
+    )
+    assert out["ok"] is True
+    assert "ok" in out["output"]
