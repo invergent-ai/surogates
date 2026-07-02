@@ -3333,6 +3333,17 @@ class AgentHarness(
             excluded.update(WORKER_EXCLUDED_TOOLS)
             tool_filter = set(self._tools.tool_names) - excluded
 
+        # The autonomous coding tool follows the ``/code`` capability: when
+        # that command is disabled the tool must also disappear from the
+        # model-visible set (slash gating alone only blocks the human command).
+        # This beats an explicit ``allowed_tools`` that lists it.
+        if not self._slash_command_enabled("code"):
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            else:
+                tool_filter = set(tool_filter)
+            tool_filter.discard("run_coding_agent")
+
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.
         # Otherwise the LLM can spawn nested cron jobs from inside a wake —
