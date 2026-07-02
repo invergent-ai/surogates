@@ -126,6 +126,24 @@ def _build_session_sandbox_spec(
     # create_child_session, so reading session.config here is correct for them.
     sandbox_spec.session_id = sandbox_owner
     sandbox_spec.workspace_path = session.config.get("workspace_path")
+
+    # Credential subject: the sandbox mints its MCP-proxy token under the
+    # tenant's principal (agent service account for managed channels, else the
+    # user), so proxy-side discovery + credential resolution agree with it.
+    subject_id = getattr(tenant, "user_id", None)
+    is_service_account = False
+    if subject_id is None:
+        subject_id = getattr(tenant, "service_account_id", None)
+        is_service_account = subject_id is not None
+    if getattr(tenant, "org_id", None) is not None:
+        sandbox_spec.env["ORG_ID"] = str(tenant.org_id)
+    if subject_id is not None:
+        sandbox_spec.env["USER_ID"] = str(subject_id)
+    if getattr(session, "agent_id", None):
+        sandbox_spec.env["SUROGATES_AGENT_ID"] = str(session.agent_id)
+    sandbox_spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] = (
+        "1" if is_service_account else "0"
+    )
     return sandbox_spec
 
 

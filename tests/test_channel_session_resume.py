@@ -82,6 +82,44 @@ async def test_resumes_completed_session():
     assert store.resumed == [(sid, "channel_message")]
 
 
+async def _call_group(store, factory, config):
+    return await get_or_create_channel_session(
+        store, None,
+        session_key="agent:slack:group:C1",
+        user_id=uuid4(), org_id=uuid4(), agent_id="a1",
+        channel="slack", config=config,
+        session_factory=factory,
+    )
+
+
+async def test_backfills_multi_party_on_resume():
+    # A group session created before multi_party existed gets the flag stamped
+    # on resume so the memory gate reflects the true thread kind.
+    sid = uuid4()
+    store = _Store()
+    got = await _call_group(
+        store,
+        _SessionFactory(SimpleNamespace(id=sid, status="active", config={})),
+        {"slack_channel_id": "C1", "multi_party": True},
+    )
+    assert got == sid
+    assert store.config_updates == [(sid, "multi_party", True)]
+
+
+async def test_no_backfill_when_multi_party_already_matches():
+    sid = uuid4()
+    store = _Store()
+    got = await _call_group(
+        store,
+        _SessionFactory(
+            SimpleNamespace(id=sid, status="active", config={"multi_party": True})
+        ),
+        {"slack_channel_id": "C1", "multi_party": True},
+    )
+    assert got == sid
+    assert store.config_updates == []
+
+
 async def test_resumes_paused_session():
     # A paused session must also be re-activated on a new message — otherwise the
     # harness's paused branch is a hard stop and the message is stranded.

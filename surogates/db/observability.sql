@@ -183,30 +183,58 @@ ALTER TABLE channel_identities ALTER COLUMN org_id SET NOT NULL;
 -- ----------------------------------------------------------------------------
 -- Credentials uniqueness retrofit.
 --
--- ``CredentialVault.store`` is an upsert keyed on (org_id, user_id, name).
--- Without a unique index, concurrent stores raced and produced duplicate
--- rows, after which every ``retrieve`` raised MultipleResultsFound.  The
--- ORM ``UniqueConstraint`` on ``Credential`` carries this to fresh
--- databases; the dedupe + ``CREATE UNIQUE INDEX IF NOT EXISTS`` below is
--- the retrofit for already-deployed databases.
+-- ``CredentialVault.store`` is an upsert keyed on
+-- (org_id, user_id, service_account_id, name).  Without a unique index,
+-- concurrent stores raced and produced duplicate rows, after which every
+-- ``retrieve`` raised MultipleResultsFound.  The ORM ``UniqueConstraint`` on
+-- ``Credential`` carries this to fresh databases; the dedupe + idempotent
+-- ALTERs below retrofit already-deployed databases and add the agent
+-- service-account scope.
 --
--- ``NULLS NOT DISTINCT`` (PG 15+) makes ``user_id IS NULL`` rows collide
--- with each other, which is what the upsert needs for org-scoped
+-- ``NULLS NOT DISTINCT`` (PG 15+) makes rows whose principal columns are NULL
+-- collide with each other, which is what the upsert needs for org-scoped
 -- credentials (the dominant case).
 -- ----------------------------------------------------------------------------
+
+ALTER TABLE credentials
+    ADD COLUMN IF NOT EXISTS service_account_id uuid REFERENCES service_accounts(id);
 
 DELETE FROM credentials a
 USING credentials b
 WHERE a.created_at < b.created_at
   AND a.org_id = b.org_id
   AND a.name   = b.name
-  AND (
-      (a.user_id IS NULL AND b.user_id IS NULL)
-      OR a.user_id = b.user_id
-  );
+  AND a.user_id IS NOT DISTINCT FROM b.user_id
+  AND a.service_account_id IS NOT DISTINCT FROM b.service_account_id;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_credentials_org_user_name
-    ON credentials (org_id, user_id, name) NULLS NOT DISTINCT;
+ALTER TABLE credentials
+    DROP CONSTRAINT IF EXISTS uq_credentials_org_user_name;
+
+DROP INDEX IF EXISTS uq_credentials_org_user_name;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_credentials_org_user_sa_name'
+    ) THEN
+        ALTER TABLE credentials
+            ADD CONSTRAINT uq_credentials_org_user_sa_name
+            UNIQUE NULLS NOT DISTINCT (org_id, user_id, service_account_id, name);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_credentials_one_principal'
+    ) THEN
+        ALTER TABLE credentials
+            ADD CONSTRAINT ck_credentials_one_principal
+            CHECK (NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL));
+    END IF;
+END $$;
 
 
 -- ----------------------------------------------------------------------------

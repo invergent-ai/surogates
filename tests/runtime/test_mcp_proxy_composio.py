@@ -201,3 +201,29 @@ async def test_governance_scan_exempts_composio_tool_router(monkeypatch):
     # The untrusted server was scanned and its flagged tool dropped.
     assert "evil" in scanned
     assert all("DO_EVIL" not in n for n in names)
+
+
+@pytest.mark.asyncio
+async def test_composio_minting_uses_authenticated_subject_id():
+    service_account_id = "00000000-0000-0000-0000-0000000000aa"
+    pc = AsyncMock()
+    pc.mint_composio_session.return_value = {
+        "transport": "http",
+        "url": "https://mcp.composio.dev/session",
+        "headers": {"x-api-key": "secret"},
+    }
+
+    merged = await apply_composio_minting(
+        {"composio-github": {"transport": "composio"}},
+        platform_client=pc,
+        agent_id="agent-1",
+        user_id=service_account_id,
+        session_id="session-1",
+    )
+
+    assert COMPOSIO_SERVER_NAME in merged
+    pc.mint_composio_session.assert_awaited_once_with(
+        "agent-1",
+        service_account_id,
+        session_id="session-1",
+    )

@@ -849,15 +849,22 @@ class ServiceAccount(Base):
 class Credential(Base):
     __tablename__ = "credentials"
     __table_args__ = (
-        # NULLS NOT DISTINCT (PG 15+) makes org-scoped rows (user_id IS NULL)
-        # collide with each other, which the upsert in CredentialVault.store
-        # relies on to be race-safe.
+        # NULLS NOT DISTINCT (PG 15+) makes org-scoped rows (both principal
+        # columns NULL) collide with each other, which the upsert in
+        # CredentialVault.store relies on to be race-safe.
         UniqueConstraint(
             "org_id",
             "user_id",
+            "service_account_id",
             "name",
-            name="uq_credentials_org_user_name",
+            name="uq_credentials_org_user_sa_name",
             postgresql_nulls_not_distinct=True,
+        ),
+        # A credential is scoped to a user OR a service account (or neither, for
+        # org scope) — never both.
+        CheckConstraint(
+            "NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL)",
+            name="ck_credentials_one_principal",
         ),
     )
 
@@ -869,6 +876,9 @@ class Credential(Base):
     )
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    service_account_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("service_accounts.id"), nullable=True
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     value_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

@@ -144,8 +144,8 @@ class OutcomeCommandMixin:
                 mission_store = MissionStore(self._session_factory)
                 redis_client = self._redis
                 if command.action == "create":
-                    principal_user_id = self._tenant.user_id
-                    principal_sa_id = self._tenant.service_account_id
+                    principal_user_id = self._acting_principal.user_id
+                    principal_sa_id = self._acting_principal.service_account_id
                     if redis_client is None:
                         message = (
                             "/mission create cannot run without a Redis "
@@ -345,8 +345,8 @@ class OutcomeCommandMixin:
                 mission_store = MissionStore(self._session_factory)
                 redis_client = self._redis
                 if command.action == "create":
-                    principal_user_id = self._tenant.user_id
-                    principal_sa_id = self._tenant.service_account_id
+                    principal_user_id = self._acting_principal.user_id
+                    principal_sa_id = self._acting_principal.service_account_id
                     if redis_client is None:
                         message = (
                             "/auto-research cannot run without a Redis "

@@ -575,6 +575,44 @@ async def test_active_thread_session_bypasses_mention_gate():
 
 
 @pytest.mark.asyncio
+async def test_active_thread_session_bypasses_mention_gate_for_different_sender():
+    """Thread reply from another participant uses the shared thread key."""
+    thread_key = "201.0"
+    routing = _make_routing()
+    config = _make_config(require_mention=True)
+    deps = _make_deps()
+
+    # Seed the existing thread session as USER_A. With per_user_groups=False
+    # (Slack's default), the key excludes the user id.
+    seed_key = build_session_key(
+        SessionSource(
+            platform=routing.platform,
+            chat_id="C1",
+            chat_type="group",
+            user_id="USER_A",
+            thread_id=thread_key,
+        ),
+    )
+    await deps.state.remember_session(seed_key, "sess-existing")
+
+    # USER_B replies without re-mentioning the bot. The gate must build the same
+    # shared session key and allow the message through.
+    msg = _make_msg(
+        is_dm=False,
+        is_mention=False,
+        ts="11.1",
+        thread_key=thread_key,
+        platform_user_id="USER_B",
+    )
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=routing, config=config, deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+
+
+@pytest.mark.asyncio
 async def test_bot_thread_reply_bypasses_mention_gate():
     """Non-mention thread reply whose root the bot authored → processed."""
     THREAD_KEY = "250.0"

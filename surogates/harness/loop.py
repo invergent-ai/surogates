@@ -385,6 +385,7 @@ class AgentHarness(
         mcp_tool_names: frozenset[str] | None = None,
         composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
+        acting_principal: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -403,6 +404,21 @@ class AgentHarness(
         )
         self._llm = llm_client
         self._tenant = tenant
+        # Who actually SENT this turn — the owner of any automation they create
+        # (/loop, /mission, /auto-research) and the principal for user-scoped
+        # coding-agent credentials. Distinct from ``tenant``, which is the
+        # credential principal the agent *acts as* (its own service account on
+        # managed channels). Falls back to the tenant principal for
+        # single-principal sessions (web / Studio / api) where they coincide.
+        from surogates.session.acting_principal import ActingPrincipal
+        self._acting_principal = (
+            acting_principal
+            if acting_principal is not None
+            else ActingPrincipal(
+                user_id=tenant.user_id,
+                service_account_id=tenant.service_account_id,
+            )
+        )
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -3699,8 +3715,8 @@ class AgentHarness(
         )
         from surogates.scheduled.store import ScheduledSessionStore
 
-        principal_user_id = self._tenant.user_id
-        principal_sa_id = self._tenant.service_account_id
+        principal_user_id = self._acting_principal.user_id
+        principal_sa_id = self._acting_principal.service_account_id
         if principal_user_id is None and principal_sa_id is None:
             # Anonymous-channel sessions have neither a user nor a
             # service-account principal — there is no durable owner that

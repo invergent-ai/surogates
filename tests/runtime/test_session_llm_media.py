@@ -121,3 +121,64 @@ async def test_resolve_video_endpoint_none_when_unconfigured():
 
     endpoint = await resolve_video_endpoint(_ctx(), vault=_vault(), settings=_settings())
     assert endpoint is None
+
+
+class _SAVideoVault:
+    def __init__(self, values):
+        self.values = values
+        self.calls = []
+
+    async def resolve_ref(self, ref, **kwargs):
+        self.calls.append((ref, kwargs))
+        return self.values.get(
+            (kwargs.get("org_id"), kwargs.get("user_id"), kwargs.get("service_account_id"))
+        )
+
+
+def _video_endpoint():
+    return LLMEndpoint(
+        model="video-test", base_url="https://video.example/v1",
+        api_key_ref="vault://VIDEO_API_KEY",
+    )
+
+
+@pytest.mark.asyncio
+async def test_video_endpoint_resolves_service_account_key_before_org():
+    from uuid import uuid4
+    from surogates.harness.session_llm import resolve_video_endpoint
+    sa = uuid4()
+    vault = _SAVideoVault(
+        {("org-1", None, sa): "video-agent", ("org-1", None, None): "video-org"}
+    )
+    endpoint = await resolve_video_endpoint(
+        _ctx(llm_video=_video_endpoint()), vault=vault,
+        service_account_id=sa, settings=_settings(),
+    )
+    assert endpoint.api_key == "video-agent"
+    assert vault.calls[0][1].get("service_account_id") == sa
+
+
+@pytest.mark.asyncio
+async def test_video_endpoint_falls_back_from_service_account_key_to_org():
+    from uuid import uuid4
+    from surogates.harness.session_llm import resolve_video_endpoint
+    sa = uuid4()
+    vault = _SAVideoVault({("org-1", None, None): "video-org"})
+    endpoint = await resolve_video_endpoint(
+        _ctx(llm_video=_video_endpoint()), vault=vault,
+        service_account_id=sa, settings=_settings(),
+    )
+    assert endpoint.api_key == "video-org"
+    assert vault.calls[1][1].get("user_id") is None
+    assert vault.calls[1][1].get("service_account_id") is None
+
+
+@pytest.mark.asyncio
+async def test_video_endpoint_rejects_user_and_service_account_scope():
+    from uuid import uuid4
+    from surogates.harness.session_llm import resolve_video_endpoint
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await resolve_video_endpoint(
+            _ctx(llm_video=_video_endpoint()), vault=_SAVideoVault({}),
+            user_id=uuid4(), service_account_id=uuid4(), settings=_settings(),
+        )

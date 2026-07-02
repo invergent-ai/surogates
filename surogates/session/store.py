@@ -34,6 +34,10 @@ from surogates.db.models import (
 )
 from surogates.harness.next_action import strip_next_action_blocks
 from surogates.harness.redact import redact_sensitive_data
+from surogates.session.acting_principal import (
+    ActingPrincipal,
+    resolve_principal_from_event_data,
+)
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
@@ -220,6 +224,74 @@ class SessionStore:
         if row is None:
             raise SessionNotFoundError(f"session {session_id} not found")
         return Session.model_validate(row)
+
+    async def _latest_principal(
+        self, db: AsyncSession, *, session_id: UUID, fallback: ActingPrincipal
+    ) -> ActingPrincipal:
+        """Stamped principal of the latest non-synthetic user message, else
+        *fallback*.
+
+        Synthetic messages (ambient / worker-complete / backfill) are excluded
+        in SQL — via the JSONB ``?`` key test — so a burst of them can never
+        shadow the real sender the way a bounded newest-first scan could. A wake
+        with no real human message (purely synthetic) falls back to the owner.
+        """
+        data = (
+            await db.execute(
+                select(EventRow.data)
+                .where(EventRow.session_id == session_id)
+                .where(EventRow.type == EventType.USER_MESSAGE.value)
+                .where(~EventRow.data.has_key("synthetic"))
+                .order_by(EventRow.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if data is None:
+            return fallback
+        return resolve_principal_from_event_data(data, fallback=fallback)
+
+    async def _resolve_acting_principal_in(
+        self, db: AsyncSession, session_row: SessionRow
+    ) -> ActingPrincipal:
+        """Acting principal using an already-open session + loaded row.
+
+        Shares the caller's transaction snapshot so the event row, inbox row,
+        and publish target are computed from one database snapshot.
+        """
+        return await self._latest_principal(
+            db,
+            session_id=session_row.id,
+            fallback=ActingPrincipal(
+                user_id=session_row.user_id,
+                service_account_id=session_row.service_account_id,
+            ),
+        )
+
+    async def resolve_acting_principal(self, session_id: UUID) -> ActingPrincipal:
+        """Acting principal for the session's latest real user message."""
+        async with self._sf() as db:
+            row = await db.get(SessionRow, session_id)
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            return await self._resolve_acting_principal_in(db, row)
+
+    async def resolve_acting_principal_for_session(
+        self, session: Session
+    ) -> ActingPrincipal:
+        """Acting principal for an already-loaded session (no row refetch).
+
+        The harness holds the session at wake start, so this reads only the
+        events — it avoids re-SELECTing the sessions row just to read its owner
+        for the fallback.
+        """
+        fallback = ActingPrincipal(
+            user_id=session.user_id,
+            service_account_id=session.service_account_id,
+        )
+        async with self._sf() as db:
+            return await self._latest_principal(
+                db, session_id=session.id, fallback=fallback
+            )
 
     async def _session_has_live_viewer(self, session_id: UUID) -> bool:
         """Whether a client is actively streaming this session's events.
@@ -720,14 +792,21 @@ class SessionStore:
 
             if inbox_row is not None and not suppress_for_viewer:
                 session_row = await db.get(SessionRow, session_id)
-                if session_row is not None and (
-                    session_row.user_id is not None
-                    or session_row.service_account_id is not None
-                ):
+                # Target the turn's acting principal (the participant who
+                # triggered this event), not the frozen session owner — in a
+                # shared thread they differ. Resolved in this same transaction
+                # so the event row and inbox target agree; falls back to the
+                # session owner when the triggering message is unstamped.
+                acting = (
+                    await self._resolve_acting_principal_in(db, session_row)
+                    if session_row is not None
+                    else ActingPrincipal(user_id=None, service_account_id=None)
+                )
+                if acting.user_id is not None or acting.service_account_id is not None:
                     item = InboxItem(
                         org_id=session_row.org_id,
-                        user_id=session_row.user_id,
-                        service_account_id=session_row.service_account_id,
+                        user_id=acting.user_id,
+                        service_account_id=acting.service_account_id,
                         session_id=session_id,
                         source_event_id=event_id,
                         kind=inbox_row.kind,
@@ -738,13 +817,11 @@ class SessionStore:
                     )
                     db.add(item)
                     await db.flush()
-                    # Publish to the owner's inbox channel, keyed by the
-                    # session's principal (a user, or a service account for ops
-                    # chats), so the live unread badge updates for both. The
-                    # one-principal CHECK guarantees this is non-null.
-                    principal_id = (
-                        session_row.user_id or session_row.service_account_id
-                    )
+                    # Publish to the acting principal's inbox channel (a user,
+                    # or a service account for ops chats) so the live unread
+                    # badge updates. The one-principal CHECK guarantees this is
+                    # non-null.
+                    principal_id = acting.user_id or acting.service_account_id
                     inbox_publish = (item.id, inbox_row.kind, principal_id)
 
             await db.commit()

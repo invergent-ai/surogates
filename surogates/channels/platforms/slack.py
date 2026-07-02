@@ -430,6 +430,7 @@ def parse(body: dict, *, bot_user_id: str) -> InboundMessage | None:
         media_urls=media_urls,
         media_types=media_types,
         is_dm=is_dm,
+        is_group_dm=channel_type == "mpim",
         is_mention=is_mention,
         ts=ts,
         source={
