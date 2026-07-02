@@ -13,7 +13,7 @@ Covers:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -49,7 +49,8 @@ class _FakeDeliveryService:
         self._items = items or []
         self.claimed: list[tuple[str, str]] = []  # (channel, worker_id)
         self.delivered: list[tuple[int, str | None]] = []  # (id, message_id)
-        self.failed: list[tuple[int, str]] = []  # (id, error)
+        self.failed: list[tuple[int, str]] = []  # (id, error) — will retry
+        self.dead: list[tuple[int, str]] = []  # (id, error) — terminal, no retry
 
     async def claim_batch(
         self, channel: str, worker_id: str, *, limit: int = 50
@@ -64,6 +65,9 @@ class _FakeDeliveryService:
 
     async def mark_failed(self, outbox_id: int, error: str) -> None:
         self.failed.append((outbox_id, error))
+
+    async def mark_dead(self, outbox_id: int, error: str) -> None:
+        self.dead.append((outbox_id, error))
 
 
 class _FakePlatform:
@@ -1911,4 +1915,85 @@ class TestLiveProgressDispatcher:
         # mark_delivered still called (coalesced away)
         assert len(delivery.delivered) == 1
         assert delivery.delivered[0][0] == 5
+        assert delivery.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: permanent-error classification + age cap (no infinite retries)
+# ---------------------------------------------------------------------------
+
+
+class TestPermanentDeliveryFailures:
+    def test_is_permanent_classifies_known_codes(self):
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        # A read-only channel / archived / dead auth never succeeds on retry.
+        assert is_permanent_delivery_error(
+            "The server responded with: {'ok': False, "
+            "'error': 'restricted_action_read_only_channel'}"
+        )
+        assert is_permanent_delivery_error("is_archived")
+        assert is_permanent_delivery_error("token_revoked")
+        # Transient / unknown errors are retryable.
+        assert not is_permanent_delivery_error("ratelimited")
+        assert not is_permanent_delivery_error("network timeout")
+        assert not is_permanent_delivery_error("channel_not_found")  # age-cap handles it
+
+    async def test_permanent_result_error_marks_dead_not_failed(self):
+        item = _FakeOutboxItem(id=71, destination={"channel_identifier": APP_ID})
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(result=SendResult(
+            success=False,
+            error="The server responded with: {'ok': False, "
+                  "'error': 'restricted_action_read_only_channel'}",
+        ))
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery, cache=_FakeCache(_KNOWN_CACHE),
+        )
+        await dispatcher.deliver_batch(platform)
+
+        assert delivery.dead and delivery.dead[0][0] == 71
+        assert delivery.failed == []  # not requeued
+
+    async def test_permanent_raised_error_marks_dead(self):
+        item = _FakeOutboxItem(id=72, destination={"channel_identifier": APP_ID})
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(raises=RuntimeError(
+            "chat_postMessage failed: ... 'error': 'restricted_action_read_only_channel'",
+        ))
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery, cache=_FakeCache(_KNOWN_CACHE),
+        )
+        await dispatcher.deliver_batch(platform)
+
+        assert delivery.dead and delivery.dead[0][0] == 72
+        assert delivery.failed == []
+
+    async def test_transient_error_still_retries(self):
+        item = _FakeOutboxItem(id=73, destination={"channel_identifier": APP_ID})
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakePlatform(raises=RuntimeError("ratelimited"))
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery, cache=_FakeCache(_KNOWN_CACHE),
+        )
+        await dispatcher.deliver_batch(platform)
+
+        assert delivery.failed and delivery.failed[0][0] == 73
+        assert delivery.dead == []
+
+    async def test_exhausted_old_item_stops_retrying(self):
+        # A transient error on an item older than the max delivery age is given
+        # up on (marked dead) instead of retried forever.
+        old = _FakeOutboxItem(
+            id=74, destination={"channel_identifier": APP_ID},
+            created_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        delivery = _FakeDeliveryService(items=[old])
+        platform = _FakePlatform(raises=RuntimeError("ratelimited"))
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery, cache=_FakeCache(_KNOWN_CACHE),
+        )
+        await dispatcher.deliver_batch(platform)
+
+        assert delivery.dead and delivery.dead[0][0] == 74
         assert delivery.failed == []

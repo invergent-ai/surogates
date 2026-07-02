@@ -37,6 +37,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from surogates.channels.credentials import resolve_channel_credentials
+from surogates.channels.delivery import delivery_exhausted, is_permanent_delivery_error
 from surogates.channels.inbound import ChannelInboundPipeline, InboundMessage, PipelineDeps
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
@@ -591,7 +592,7 @@ class ChannelDeliveryDispatcher:
                     item.id, platform.kind,
                 )
                 try:
-                    await self._delivery.mark_failed(item.id, str(exc))
+                    await self._record_delivery_failure(item, str(exc))
                 except Exception:
                     pass
 
@@ -626,6 +627,17 @@ class ChannelDeliveryDispatcher:
     # Private helpers
     # ------------------------------------------------------------------
 
+    async def _record_delivery_failure(self, item: Any, error: str) -> None:
+        """Requeue a failed delivery for retry — unless it is a permanent error
+        or the item has aged past the max delivery window, in which case drop
+        it (no infinite retries)."""
+        if is_permanent_delivery_error(error) or delivery_exhausted(
+            getattr(item, "created_at", None)
+        ):
+            await self._delivery.mark_dead(item.id, error)
+        else:
+            await self._delivery.mark_failed(item.id, error)
+
     async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> None:
         """Process a single outbox item: resolve creds and call platform.send.
 
@@ -639,7 +651,7 @@ class ChannelDeliveryDispatcher:
                 "[delivery] Outbox %d has no channel_identifier — marking failed",
                 item.id,
             )
-            await self._delivery.mark_failed(item.id, "missing channel_identifier")
+            await self._record_delivery_failure(item, "missing channel_identifier")
             return
 
         # 2. Resolve tenant from the routing cache.
@@ -650,8 +662,8 @@ class ChannelDeliveryDispatcher:
                 "channel may have been deprovisioned",
                 item.id, identifier,
             )
-            await self._delivery.mark_failed(
-                item.id, f"channel deprovisioned: {identifier}"
+            await self._record_delivery_failure(
+                item, f"channel deprovisioned: {identifier}"
             )
             return
 
@@ -775,7 +787,7 @@ class ChannelDeliveryDispatcher:
                 "[delivery] platform.send raised for outbox %d (%s): %s",
                 item.id, platform.kind, exc,
             )
-            await self._delivery.mark_failed(item.id, str(exc))
+            await self._record_delivery_failure(item, str(exc))
             return
 
         if result.success:
@@ -838,7 +850,7 @@ class ChannelDeliveryDispatcher:
                     )
         else:
             error = result.error or "send failed"
-            await self._delivery.mark_failed(item.id, error)
+            await self._record_delivery_failure(item, error)
 
 
 # ---------------------------------------------------------------------------
