@@ -26,6 +26,16 @@ def test_points_at_the_tools():
     assert "run_coding_agent" in s or "/code" in s  # the write path
 
 
+def test_steers_away_from_manual_git():
+    # The terminal has no git auth; the agent must use the coding tool to make
+    # changes, not git clone / gh directly.
+    s = render_repos_prompt(REPOS)
+    low = s.lower()
+    assert "do not" in low or "don't" in low
+    assert "git clone" in low or "gh" in low
+    assert "run_coding_agent" in s
+
+
 def test_instructs_to_include_links():
     s = render_repos_prompt(REPOS)
     assert "link" in s.lower()
