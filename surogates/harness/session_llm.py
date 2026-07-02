@@ -98,11 +98,53 @@ async def _close_partial_bundle(resolved: list[ResolvedLLM]) -> None:
             )
 
 
+def _validate_credential_scope(*, user_id: Any = None, service_account_id: Any = None) -> None:
+    if user_id is not None and service_account_id is not None:
+        raise ValueError("user_id and service_account_id are mutually exclusive")
+
+
+async def _resolve_vault_ref(
+    vault: Any,
+    ref: str,
+    *,
+    org_id: Any,
+    user_id: Any = None,
+    service_account_id: Any = None,
+) -> str | None:
+    """Resolve a vault ref under one principal scope, then org fallback.
+
+    A service-account or user scope is tried first; org scope (both principal
+    ids NULL) backstops it — BYO/model keys are seeded org-scoped.
+    """
+    _validate_credential_scope(
+        user_id=user_id,
+        service_account_id=service_account_id,
+    )
+
+    if service_account_id is not None:
+        value = await vault.resolve_ref(
+            ref,
+            org_id=org_id,
+            service_account_id=service_account_id,
+        )
+        if value is not None:
+            return value
+        return await vault.resolve_ref(ref, org_id=org_id, user_id=None)
+
+    value = await vault.resolve_ref(ref, org_id=org_id, user_id=user_id)
+    if value is not None:
+        return value
+    if user_id is not None:
+        return await vault.resolve_ref(ref, org_id=org_id, user_id=None)
+    return None
+
+
 async def build_session_llm_clients(
     ctx: AgentRuntimeContext,
     *,
     vault: Any,
     user_id: Any = None,
+    service_account_id: Any = None,
     settings: Any = None,
 ) -> SessionLLMClients:
     """Build the per-session LLM bundle.
@@ -129,6 +171,10 @@ async def build_session_llm_clients(
     aclose()d before the exception propagates so a flaky vault cannot
     leak ``AsyncOpenAI`` instances unboundedly.
     """
+    _validate_credential_scope(
+        user_id=user_id,
+        service_account_id=service_account_id,
+    )
     if ctx.llm_main is None:
         raise ValueError(
             f"agent {ctx.agent_id} has no llm_main configured — "
@@ -138,21 +184,16 @@ async def build_session_llm_clients(
     resolved: list[ResolvedLLM] = []
 
     async def _resolve(endpoint: LLMEndpoint) -> ResolvedLLM:
-        key = await vault.resolve_ref(
-            endpoint.api_key_ref, org_id=ctx.org_id, user_id=user_id,
+        # Resolve the model key under the session's credential principal
+        # (agent service account or user), falling back to the org-scoped
+        # credential — BYO model keys are seeded org-scoped.
+        key = await _resolve_vault_ref(
+            vault,
+            endpoint.api_key_ref,
+            org_id=ctx.org_id,
+            user_id=user_id,
+            service_account_id=service_account_id,
         )
-        # User-principal sessions fall back to the org-scoped credential
-        # when the user has no personal override.  Platform admission and
-        # BYO model keys are seeded org-scoped (``user_id IS NULL``), so a
-        # user-scoped lookup misses them; without this fallback the client
-        # is built with no key and ``AsyncOpenAI`` raises 'Missing
-        # credentials', failing every user-principal (webapp) session
-        # while service-account sessions keep working.  Mirrors the
-        # user->org fallback in ``mcp_proxy.loader``.
-        if key is None and user_id is not None:
-            key = await vault.resolve_ref(
-                endpoint.api_key_ref, org_id=ctx.org_id, user_id=None,
-            )
         client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url)
         slot = ResolvedLLM(client=client, model=endpoint.model)
         resolved.append(slot)
@@ -225,24 +266,29 @@ async def resolve_video_endpoint(
     *,
     vault: Any,
     user_id: Any = None,
+    service_account_id: Any = None,
     settings: Any = None,
 ) -> ResolvedVideoEndpoint | None:
     """Resolve the per-session video endpoint: context slot, then settings.
 
     The context slot carries a vault ref (resolved here, with the same
-    user→org credential fallback as the chat slots); the settings path
+    credential→org fallback as the chat slots); the settings path
     carries raw keys.  Returns ``None`` when neither configures a model —
     the generate_video tool then reports itself unavailable.
     """
+    _validate_credential_scope(
+        user_id=user_id,
+        service_account_id=service_account_id,
+    )
     endpoint = ctx.llm_video
     if endpoint is not None and endpoint.model:
-        key = await vault.resolve_ref(
-            endpoint.api_key_ref, org_id=ctx.org_id, user_id=user_id,
+        key = await _resolve_vault_ref(
+            vault,
+            endpoint.api_key_ref,
+            org_id=ctx.org_id,
+            user_id=user_id,
+            service_account_id=service_account_id,
         )
-        if key is None and user_id is not None:
-            key = await vault.resolve_ref(
-                endpoint.api_key_ref, org_id=ctx.org_id, user_id=None,
-            )
         return ResolvedVideoEndpoint(
             model=endpoint.model,
             base_url=endpoint.base_url,

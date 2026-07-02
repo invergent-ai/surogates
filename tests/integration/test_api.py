@@ -1397,6 +1397,70 @@ async def test_admin_list_credentials(client: AsyncClient, session_factory):
     assert {"API_KEY", "DB_PASSWORD"}.issubset(names)
 
 
+async def test_admin_credentials_service_account_scope_visible_and_deletable(
+    client, session_factory
+):
+    """Service-account-scoped credentials are not reported as org-scoped."""
+    from sqlalchemy import text
+
+    _, _, token, _ = await _create_test_tenant(
+        session_factory, permissions={"admin"}
+    )
+    org_id = await create_org(session_factory)
+    sa_id = uuid.uuid4()
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO service_accounts "
+                "(id, org_id, name, token_hash, token_prefix) "
+                "VALUES (:id, :org_id, :name, :hash, :prefix)"
+            ),
+            {
+                "id": sa_id,
+                "org_id": org_id,
+                "name": f"agent:{sa_id}",
+                "hash": f"h:{sa_id}",
+                "prefix": str(sa_id)[:8],
+            },
+        )
+        await db.commit()
+
+    create = await client.post(
+        "/v1/admin/credentials",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "org_id": str(org_id),
+            "service_account_id": str(sa_id),
+            "name": "agent-byo-key",
+            "value": "sk-agent",
+        },
+    )
+    assert create.status_code == 201
+    assert create.json()["service_account_id"] == str(sa_id)
+    assert create.json()["user_id"] is None
+
+    listed = await client.get(
+        f"/v1/admin/credentials?service_account_id={sa_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert listed.status_code == 200
+    assert listed.json()["credentials"] == [
+        {
+            "org_id": str(org_id),
+            "user_id": None,
+            "service_account_id": str(sa_id),
+            "name": "agent-byo-key",
+        }
+    ]
+
+    deleted = await client.delete(
+        f"/v1/admin/credentials?org_id={org_id}"
+        f"&service_account_id={sa_id}&name=agent-byo-key",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert deleted.status_code == 204
+
+
 async def test_admin_delete_credential(client: AsyncClient, session_factory):
     """DELETE removes the credential; subsequent delete returns 404."""
     org_id, _, token, _ = await _create_test_tenant(session_factory)

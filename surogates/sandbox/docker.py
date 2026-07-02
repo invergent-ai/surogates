@@ -348,6 +348,7 @@ class DockerSandbox:
                 user_id=uuid.UUID(spec.env.get("USER_ID", zero)),
                 session_id=session_uuid,
                 agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
+                is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

@@ -352,7 +352,7 @@ async def get_or_create_channel_session(
     async with session_factory() as db:
         result = await db.execute(
             select(SessionRow)
-            .where(SessionRow.user_id == user_id)
+            .where(SessionRow.org_id == org_id)
             .where(SessionRow.agent_id == agent_id)
             .where(SessionRow.channel == channel)
             .where(
@@ -370,6 +370,16 @@ async def get_or_create_channel_session(
     # are reused as-is. Anything else (failed, archived, …) — including as the
     # most recent — falls through to a fresh session.
     if existing_id is not None and existing_status in _RESUMABLE_STATUSES:
+        # Backfill multi_party onto the reused row so the memory gate reflects
+        # the current thread kind even for a session created before the flag
+        # existed (or under a path that never set it). The flag is stable for a
+        # given routing key, so this fires at most once per such session.
+        _incoming_multi_party = bool(config.get("multi_party"))
+        _existing_multi_party = bool((getattr(existing, "config", None) or {}).get("multi_party"))
+        if _existing_multi_party != _incoming_multi_party:
+            await session_store.update_session_config_key(
+                existing_id, "multi_party", _incoming_multi_party
+            )
         if existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(

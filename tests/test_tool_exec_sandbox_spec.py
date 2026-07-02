@@ -254,3 +254,59 @@ def test_spec_workspace_path_none_when_absent():
 
     assert spec.session_id == "root-1"
     assert spec.workspace_path is None
+
+
+def test_spec_env_uses_service_account_credential_subject():
+    org_id = uuid4()
+    service_account_id = uuid4()
+    agent_id = "agent-1"
+    session = SimpleNamespace(
+        id=uuid4(),
+        parent_id=None,
+        agent_id=agent_id,
+        config={"storage_bucket": "agent-a-bucket"},
+    )
+    tenant = SimpleNamespace(
+        org_id=org_id,
+        user_id=None,
+        service_account_id=service_account_id,
+    )
+
+    spec = _build_session_sandbox_spec(
+        session,
+        tenant=tenant,
+        sandbox_owner=sandbox_session_key(session),
+    )
+
+    assert spec.env["ORG_ID"] == str(org_id)
+    assert spec.env["USER_ID"] == str(service_account_id)
+    assert spec.env["SUROGATES_AGENT_ID"] == agent_id
+    assert spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] == "1"
+
+
+def test_spec_env_uses_user_credential_subject():
+    org_id = uuid4()
+    user_id = uuid4()
+    agent_id = "agent-1"
+    session = SimpleNamespace(
+        id=uuid4(),
+        parent_id=None,
+        agent_id=agent_id,
+        config={"storage_bucket": "agent-a-bucket"},
+    )
+    tenant = SimpleNamespace(
+        org_id=org_id,
+        user_id=user_id,
+        service_account_id=None,
+    )
+
+    spec = _build_session_sandbox_spec(
+        session,
+        tenant=tenant,
+        sandbox_owner=sandbox_session_key(session),
+    )
+
+    assert spec.env["ORG_ID"] == str(org_id)
+    assert spec.env["USER_ID"] == str(user_id)
+    assert spec.env["SUROGATES_AGENT_ID"] == agent_id
+    assert spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] == "0"

@@ -64,6 +64,48 @@ logger = logging.getLogger(__name__)
 #:   same model.
 ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 
+#: Channels whose sessions mint external secrets/tools under the agent's own
+#: service-account principal (when the agent has one) instead of the end user.
+#: One source of truth with the memory-boundary set so credential-switching and
+#: conversation-scoped memory isolation can never drift to different channels.
+from surogates.channels.memory_boundary import MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS  # noqa: E402
+
+
+def resolve_credential_principal(
+    *,
+    session: Any,
+    acting: Any,
+    agent_principal: Any | None,
+    managed_channels: frozenset[str] = MANAGED_CREDENTIAL_CHANNELS,
+):
+    """The principal external secrets/tools mint under for this wake.
+
+    The agent's own service account for a managed-channel session with a live
+    agent principal; otherwise the acting principal (Studio/web/api, or a channel
+    agent with no service account — fail-safe).
+    """
+    from surogates.session.acting_principal import ActingPrincipal
+
+    if session.channel in managed_channels and agent_principal is not None:
+        return ActingPrincipal(
+            user_id=None,
+            service_account_id=agent_principal.id,
+        )
+    return acting
+
+
+def principal_subject(principal: Any) -> tuple[Any, bool]:
+    """Return ``(subject_id, is_service_account)`` for a principal.
+
+    A user id (not a service account), a service-account id, or ``(None, False)``
+    for an empty principal shape.
+    """
+    if principal.user_id is not None:
+        return principal.user_id, False
+    if principal.service_account_id is not None:
+        return principal.service_account_id, True
+    return None, False
+
 
 def _select_harness_token(
     *,
@@ -103,10 +145,10 @@ def _select_harness_token(
                 "tools:read",
             },
         )
-    if session.service_account_id is not None:
+    if tenant.service_account_id is not None:
         return create_service_account_session_token(
             org_id=tenant.org_id,
-            service_account_id=session.service_account_id,
+            service_account_id=tenant.service_account_id,
             session_id=session.id,
         )
     if session.channel in ANONYMOUS_CHANNELS:
@@ -150,7 +192,7 @@ def _filter_effective_tools(
 
     session_will_have_api_client = use_api_for_harness_tools and (
         tenant.user_id is not None
-        or session.service_account_id is not None
+        or tenant.service_account_id is not None
         or session.channel in ANONYMOUS_CHANNELS
     )
     if not session_will_have_api_client:
@@ -158,7 +200,7 @@ def _filter_effective_tools(
 
     session_is_anonymous_channel = (
         tenant.user_id is None
-        and session.service_account_id is None
+        and tenant.service_account_id is None
         and session.channel in ANONYMOUS_CHANNELS
     )
     if session_is_anonymous_channel:
@@ -480,6 +522,17 @@ async def _load_prompt_catalogs(
     return available_agents, available_skills
 
 
+def build_agent_principal_resolver(*, session_factory: Any):
+    """The cached agent_id -> service-account-principal resolver.
+
+    Its ``.cache`` is wired into the invalidator so ``agent_principal_changed``
+    events evict it; the resolver itself is called per wake in ``harness_factory``.
+    """
+    from surogates.runtime import make_cached_agent_principal_resolver
+
+    return make_cached_agent_principal_resolver(session_factory)
+
+
 def _install_worker_runtime_plumbing(state: dict, settings) -> None:
     """Wire PlatformClient + RuntimeConfigCache + FileBundleCache
     onto a worker state dict.
@@ -579,6 +632,7 @@ def _start_worker_invalidator(state: dict) -> None:
             memory_cache=state.get("memory_cache"),
             system_bundle_cache=state.get("system_bundle_cache"),
             mate_settings_cache=state.get("mate_settings_cache"),
+            agent_principal_cache=state.get("agent_principal_cache"),
         ),
         name="surogates-worker-runtime-invalidator",
     )
@@ -594,6 +648,20 @@ async def _stop_worker_invalidator(state: dict) -> None:
     except BaseException:  # noqa: BLE001 — cancellation expected
         pass
     state["runtime_invalidator_task"] = None
+
+
+def _memory_user_id(session, tenant) -> str | None:
+    """The user id whose personal memory this turn uses, or None for shared.
+
+    Keyed off the credential principal (``tenant``). Multi-party channel threads
+    carry no per-user memory (shared only); a session whose credential principal
+    is a service account — including a managed-channel session where the agent
+    acts as itself — is ``None`` (agent/shared memory, not any human's); a
+    single-user session (web / api / DM webapp) uses that user.
+    """
+    if (getattr(session, "config", None) or {}).get("multi_party"):
+        return None
+    return str(tenant.user_id) if tenant.user_id is not None else None
 
 
 def _build_r2_memory_keys(
@@ -840,6 +908,10 @@ async def run_worker(settings: Settings) -> None:
         "storage_backend": storage_backend,
     }
     _install_worker_runtime_plumbing(worker_state, settings)
+    agent_principal_resolver = build_agent_principal_resolver(
+        session_factory=session_factory,
+    )
+    worker_state["agent_principal_cache"] = agent_principal_resolver.cache
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
 
@@ -886,6 +958,28 @@ async def run_worker(settings: Settings) -> None:
         session = await session_store.get_session(session_id)
         session_org_id = UUID(str(session.org_id))
 
+        # The acting principal is whoever sent the message that triggered this
+        # wake — not the frozen session owner (they differ in a shared thread).
+        # Credentials, tools, memory, and the API-client token all derive from it.
+        # Resolve from the already-loaded session (no second sessions-row SELECT).
+        acting = await session_store.resolve_acting_principal_for_session(session)
+
+        # The credential principal is what external secrets/tools mint under.
+        # For a managed-channel session with a live agent service account, that
+        # is the agent itself (it acts as itself, not the human); otherwise the
+        # acting principal. ``acting`` is kept separately and passed to the
+        # harness so inbox routing, attribution, and automation ownership
+        # (/loop, /mission, /auto-research) still track the human sender.
+        agent_principal = await agent_principal_resolver(
+            session_org_id,
+            session.agent_id,
+        )
+        credential = resolve_credential_principal(
+            session=session,
+            acting=acting,
+            agent_principal=agent_principal,
+        )
+
         from sqlalchemy import select as sa_select
         from surogates.db.models import Org, User
 
@@ -893,9 +987,9 @@ async def run_worker(settings: Settings) -> None:
             org_row = (
                 await db.execute(sa_select(Org).where(Org.id == session_org_id))
             ).scalar_one_or_none()
-            if session.user_id is not None:
+            if credential.user_id is not None:
                 user_row = (
-                    await db.execute(sa_select(User).where(User.id == session.user_id))
+                    await db.execute(sa_select(User).where(User.id == credential.user_id))
                 ).scalar_one_or_none()
             else:
                 user_row = None
@@ -910,14 +1004,20 @@ async def run_worker(settings: Settings) -> None:
             settings=settings,
         )
 
+        # Multi-party (shared channel) threads carry no per-user memory or
+        # preferences — only shared conversation + agent/org memory — so one
+        # participant's personal context never surfaces for another.
+        _multi_party = bool((session.config or {}).get("multi_party"))
         tenant = TenantContext(
             org_id=session_org_id,
-            user_id=session.user_id,
+            user_id=credential.user_id,
             org_config=org_row.config if org_row else {},
-            user_preferences=user_row.preferences if user_row else {},
+            user_preferences={} if _multi_party else (
+                user_row.preferences if user_row else {}
+            ),
             permissions=frozenset(),
             asset_root=ctx.storage_key_prefix,
-            service_account_id=session.service_account_id,
+            service_account_id=credential.service_account_id,
         )
 
         # Proxy-mode MCP tool discovery. The worker shares one tool
@@ -933,7 +1033,7 @@ async def run_worker(settings: Settings) -> None:
         composio_mcp_tools: frozenset[str] = frozenset()
         if mcp_proxy_client is not None:
             try:
-                principal_user_id = session.user_id or session.service_account_id
+                principal_user_id, is_service_account = principal_subject(credential)
                 if principal_user_id is not None:
                     discovered_mcp_tools = set(
                         await mcp_proxy_client.discover_and_register(
@@ -941,7 +1041,7 @@ async def run_worker(settings: Settings) -> None:
                             user_id=principal_user_id,
                             session_id=session.id,
                             agent_id=ctx.agent_id,
-                            is_service_account=session.user_id is None,
+                            is_service_account=is_service_account,
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
@@ -967,7 +1067,9 @@ async def run_worker(settings: Settings) -> None:
         from surogates.tools.builtin.media_gen import MediaGenConfig
 
         llm_bundle = await build_session_llm_clients(
-            ctx, vault=credential_vault, user_id=tenant.user_id,
+            ctx, vault=credential_vault,
+            user_id=credential.user_id,
+            service_account_id=credential.service_account_id,
             settings=settings,
         )
 
@@ -993,7 +1095,9 @@ async def run_worker(settings: Settings) -> None:
         advisor_slot = llm_bundle.advisor
         image_slot = llm_bundle.image
         video_endpoint = await resolve_video_endpoint(
-            ctx, vault=credential_vault, user_id=tenant.user_id,
+            ctx, vault=credential_vault,
+            user_id=credential.user_id,
+            service_account_id=credential.service_account_id,
             settings=settings,
         )
         media_gen_config = MediaGenConfig(
@@ -1022,15 +1126,14 @@ async def run_worker(settings: Settings) -> None:
             ),
         )
 
-        # User-scoped memory dir for interactive sessions, org-shared
-        # memory dir for service-account sessions (no per-user context
-        # to carry forward).
+        # User-scoped memory dir for single-principal interactive sessions;
+        # org-shared memory dir for service-account sessions and multi-party
+        # channel threads (no single per-user context to carry forward).
         from pathlib import Path
 
-        if session.user_id is not None:
-            memory_dir = (
-                Path(tenant.asset_root) / "users" / str(session.user_id) / "memory"
-            )
+        _mem_user = _memory_user_id(session, tenant)
+        if _mem_user is not None:
+            memory_dir = Path(tenant.asset_root) / "users" / _mem_user / "memory"
         else:
             memory_dir = Path(tenant.asset_root) / "shared" / "memory"
 
@@ -1044,9 +1147,7 @@ async def run_worker(settings: Settings) -> None:
             mem_bucket = (
                 settings.storage.memory_bucket or settings.storage.bucket
             )
-            _user_id_str = (
-                str(session.user_id) if session.user_id else None
-            )
+            _user_id_str = _mem_user
             mem_keys = _build_r2_memory_keys(
                 session=session,
                 storage_key_prefix=ctx.storage_key_prefix,
@@ -1059,9 +1160,7 @@ async def run_worker(settings: Settings) -> None:
             # dashboards surface conflict rates per tenant.
             from surogates.audit.types import AuditType
 
-            _user_token = (
-                str(session.user_id) if session.user_id else "shared"
-            )
+            _user_token = _mem_user or "shared"
             _memory_channel = (
                 f"user.memory_changed:{ctx.org_id}:{_user_token}".encode()
             )
@@ -1083,7 +1182,11 @@ async def run_worker(settings: Settings) -> None:
                     await audit_store.emit(
                         org_id=session_org_id,
                         agent_id=ctx.agent_id,
-                        user_id=session.user_id,
+                        # Attribute to the memory owner this write actually
+                        # targeted: the acting user for a personal store, or None
+                        # for a shared/multi-party write (matches _mem_user, the
+                        # R2 key, and the Redis invalidation channel).
+                        user_id=tenant.user_id if _mem_user is not None else None,
                         type=(
                             AuditType.MEMORY_CONFLICT
                             if conflict_detected
@@ -1400,6 +1503,10 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent slash-command gating resolved from the runtime
             # config; the dispatch gate refuses disabled commands.
             slash_commands=ctx.slash_commands,
+            # The sending human/service account — owns automation they create
+            # (/loop, /mission, /auto-research), distinct from the agent
+            # credential principal the tenant carries on managed channels.
+            acting_principal=acting,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

@@ -129,6 +129,7 @@ class InboundMessage:
     ts: str
     source: dict
     is_bot: bool = False
+    is_group_dm: bool = False
     # Conversation privacy: "public" | "private" | "dm".  Default is the
     # fail-closed value so any constructor that omits it is treated as private.
     visibility: str = "private"
@@ -257,6 +258,58 @@ class PipelineDeps:
     attachments: _Attachments | None = None
     pending_input: _PendingInput | None = None
     input_nudge: _InputNudge | None = None
+
+
+# ---------------------------------------------------------------------------
+# Event-source helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_chat_type(msg) -> str:
+    """Normalized chat kind for routing + attribution.
+
+    'dm' only for a 1:1 direct message. A multi-person DM (``is_group_dm``) is a
+    multi-party conversation, so it is 'group' — like a channel — and its
+    messages get per-sender attribution, even though it stays DM-like for
+    mention gating.
+    """
+    return "dm" if (msg.is_dm and not msg.is_group_dm) else "group"
+
+
+def build_message_source(msg, *, platform: str, chat_type: str) -> dict:
+    """Source metadata for a USER_MESSAGE event.
+
+    Adapter-supplied metadata comes first; pipeline-derived keys win so an
+    adapter cannot shadow them. ``chat_type`` is the normalized chat kind
+    ('dm'/'group') and overrides any adapter-native value (Slack
+    ``channel_type``, Telegram ``supergroup``).
+    """
+    return {
+        **msg.source,
+        "platform": platform,
+        "chat_id": msg.identifier,
+        "chat_type": chat_type,
+        "user_id": msg.platform_user_id,
+        "user_name": msg.user_name,
+        "thread_id": msg.thread_key,
+        "ts": msg.ts,
+    }
+
+
+def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
+    """The resolved-principal fields to merge onto a USER_MESSAGE event.
+
+    ``principal_user_id`` is the Surogates user UUID (distinct from the
+    platform id in ``source.user_id``). API-channel senders can stamp a
+    service-account principal instead. Empty when no identity resolved.
+    """
+    if user_id is not None and service_account_id is not None:
+        raise ValueError("principal stamp requires exactly one principal id")
+    if user_id is not None:
+        return {"principal_user_id": str(user_id)}
+    if service_account_id is not None:
+        return {"principal_service_account_id": str(service_account_id)}
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +521,7 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Gate 6: Session resolution (get-or-create).
         # ------------------------------------------------------------------
-        chat_type = "dm" if msg.is_dm else "group"
+        chat_type = resolve_chat_type(msg)
         source = SessionSource(
             platform=routing.platform,
             chat_id=msg.identifier,
@@ -503,6 +556,7 @@ class ChannelInboundPipeline:
                 f"{routing.platform}_thread_key": msg.thread_key,
                 "channel_identifier": routing.identifier,
                 "memory_boundary": memory_boundary,
+                "multi_party": chat_type in ("group", "channel"),
             },
             session_factory=deps.session_factory,
         )
@@ -563,22 +617,21 @@ class ChannelInboundPipeline:
             "content": _content,
             "media_urls": msg.media_urls,
             "media_types": msg.media_types,
-            "source": {
-                # Adapter-supplied metadata first; pipeline-derived keys
-                # win so an adapter can't silently shadow them.
-                **msg.source,
-                "platform": routing.platform,
-                "chat_id": msg.identifier,
-                "user_id": msg.platform_user_id,
-                "user_name": msg.user_name,
-                "thread_id": msg.thread_key,
-                "ts": msg.ts,
-            },
+            "source": build_message_source(
+                msg, platform=routing.platform, chat_type=chat_type,
+            ),
         }
         if _images:
             event_data["images"] = _images
         if _attachments:
             event_data["attachments"] = _attachments
+
+        event_data.update(
+            build_principal_stamp(
+                user_id=identity.user_id,
+                service_account_id=None,
+            )
+        )
 
         _file_refs = [
             {"id": f.file_id, "name": f.filename}
@@ -675,7 +728,7 @@ class ChannelInboundPipeline:
 
         # Build the session key for the thread and check state. Mirror Gate 6's
         # chat_type derivation so the lookup key matches the stored key.
-        chat_type = "dm" if msg.is_dm else "group"
+        chat_type = resolve_chat_type(msg)
         source = SessionSource(
             platform=routing.platform,
             chat_id=msg.identifier,

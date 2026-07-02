@@ -120,9 +120,10 @@ def credential_access_event(
     consumer:
         What needed the credential (e.g. ``"mcp_server:github"``).
     scope:
-        ``"user"`` if resolved from the user's personal vault,
-        ``"org"`` if resolved from the org-wide vault, ``"missing"``
-        when the credential was not found.
+        ``"user"`` if resolved from a user's personal vault,
+        ``"service_account"`` if resolved from an agent service-account
+        vault, ``"org"`` if resolved from the org-wide vault, and
+        ``"missing"`` when the credential was not found.
     found:
         Whether the credential was successfully retrieved.
     """

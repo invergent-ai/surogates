@@ -312,6 +312,52 @@ class TestParsePlainMessage:
         assert result.ts == "1700000001.000100"
         assert result.thread_key is None  # DM without thread_ts
 
+    def test_mpim_message_is_group_dm_and_still_dm(self):
+        body = self._make_event_callback({
+            "type": "message",
+            "text": "hey team",
+            "user": "U3",
+            "channel": "G_MPIM",
+            "channel_type": "mpim",
+            "ts": "1700000003.000300",
+        })
+
+        result = parse(body, bot_user_id=BOT_USER_ID)
+
+        assert result is not None
+        assert result.is_dm is True         # DM-like: bypasses the mention gate
+        assert result.is_group_dm is True   # multi-party: gets attributed
+
+    def test_im_message_is_not_group_dm(self):
+        body = self._make_event_callback({
+            "type": "message",
+            "text": "hi",
+            "user": "U1",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1700000004.000400",
+        })
+
+        result = parse(body, bot_user_id=BOT_USER_ID)
+
+        assert result.is_dm is True
+        assert result.is_group_dm is False
+
+    def test_channel_message_is_not_group_dm(self):
+        body = self._make_event_callback({
+            "type": "message",
+            "text": "hi",
+            "user": "U2",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "1700000005.000500",
+        })
+
+        result = parse(body, bot_user_id=BOT_USER_ID)
+
+        assert result.is_dm is False
+        assert result.is_group_dm is False
+
     def test_channel_message_with_mention_is_mention_true(self):
         body = self._make_event_callback({
             "type": "message",
