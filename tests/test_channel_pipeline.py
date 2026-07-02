@@ -65,6 +65,11 @@ class _FakeRedis:
         self.zsets: dict[str, dict[str, float]] = {}
         self.kv: dict[str, Any] = {}
         self.lists: dict[str, list[str]] = {}
+        self.published: list[tuple[str, str]] = []
+
+    async def publish(self, channel: str, message: str) -> int:
+        self.published.append((channel, message))
+        return 1
 
     async def zadd(self, key: str, mapping: dict) -> None:
         if key not in self.zsets:

@@ -156,6 +156,16 @@ class InboundOutcome(str, Enum):
     DROPPED = "dropped"
     """Message discarded (duplicate, mention gate, bot filter, empty body)."""
 
+    INTERRUPTED = "interrupted"
+    """A ``/stop`` command — the running turn was interrupted out-of-band; no
+    session message was emitted or enqueued."""
+
+
+def is_stop_command(text: str | None) -> bool:
+    """True for a bare ``/stop`` (or ``/cancel``) message — a request to
+    interrupt the running turn, not a prompt to process."""
+    return (text or "").strip().lower() in ("/stop", "/cancel")
+
 
 # ---------------------------------------------------------------------------
 # Dependency bundle
@@ -563,6 +573,32 @@ class ChannelInboundPipeline:
 
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
+
+        # ------------------------------------------------------------------
+        # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
+        # would queue behind the busy worker and never reach it in time (a
+        # long coding run, say), so publish the interrupt directly: the
+        # worker's interrupt listener picks it up and cancels the in-flight
+        # run.  No USER_MESSAGE is emitted and the session is not enqueued.
+        # ------------------------------------------------------------------
+        if is_stop_command(msg.text):
+            from surogates.config import INTERRUPT_CHANNEL_PREFIX
+            try:
+                await deps.redis.publish(
+                    f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}", "channel_stop",
+                )
+            except Exception:
+                logger.warning(
+                    "[channels] /stop interrupt publish failed", exc_info=True,
+                )
+            if deps.input_nudge is not None:
+                try:
+                    await deps.input_nudge(
+                        session_id, msg, "⏹ Stopping the current run…",
+                    )
+                except Exception:
+                    logger.warning("[channels] /stop ack failed", exc_info=True)
+            return InboundOutcome.INTERRUPTED
 
         # While a question is pending, a plain in-thread reply is NOT the answer
         # (the user must use the Answer button / modal). Intercept: nudge and
