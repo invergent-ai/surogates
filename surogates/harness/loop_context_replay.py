@@ -395,5 +395,12 @@ class ContextReplayMixin:
             return cached
 
         prompt = self._prompt.build()
+        # Tell the agent which GitHub repos it can act on (so it doesn't guess
+        # names) and to link the issues/commits/PRs it mentions.
+        from surogates.coding_agents.repo_resolve import render_repos_prompt
+
+        repos_section = render_repos_prompt(self._coding_repos)
+        if repos_section:
+            prompt = f"{prompt}\n\n{repos_section}"
         self._system_prompt_cache.set(session.id, prompt)
         return prompt
