@@ -40,6 +40,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_interrupt_reason(data: Any) -> str:
+    """Extract the interrupt reason from a pub/sub payload, tolerantly.
+
+    Accepts the canonical JSON (``{"reason": ...}``) or a bare string — some
+    publishers send just the reason (``channel_stop``, ``mission_cancel_cascade``).
+    Never raises: a malformed payload must not drop the interrupt signal.
+    """
+    if data is None:
+        return "interrupted"
+    if isinstance(data, bytes):
+        data = data.decode(errors="replace")
+    data = str(data).strip()
+    if not data:
+        return "interrupted"
+    try:
+        payload = json.loads(data)
+    except (ValueError, TypeError):
+        return data  # a bare-string publish IS the reason
+    if isinstance(payload, dict):
+        return str(payload.get("reason") or "interrupted")
+    if isinstance(payload, str) and payload:
+        return payload
+    return "interrupted"
+
+
 # Maximum number of retry attempts for a single session.
 _MAX_RETRIES: int = 3
 
@@ -769,8 +795,6 @@ class Orchestrator:
         when a session is paused.  This listener delivers the signal to
         the running harness on this worker.
         """
-        import json as _json
-
         pubsub = self.redis.pubsub()
         await pubsub.psubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
         logger.info("Interrupt listener subscribed to %s:*", INTERRUPT_CHANNEL_PREFIX)
@@ -792,12 +816,7 @@ class Orchestrator:
                     session_id_str = channel.rsplit(":", 1)[-1]
                     session_id = UUID(session_id_str)
 
-                    data = message.get("data", b"{}")
-                    if isinstance(data, bytes):
-                        data = data.decode()
-                    payload = _json.loads(data) if data else {}
-                    reason = payload.get("reason", "interrupted")
-
+                    reason = _parse_interrupt_reason(message.get("data"))
                     await self._handle_interrupt_signal(session_id, reason)
                 except Exception:
                     logger.warning(

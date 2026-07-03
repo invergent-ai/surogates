@@ -582,10 +582,13 @@ class ChannelInboundPipeline:
         # run.  No USER_MESSAGE is emitted and the session is not enqueued.
         # ------------------------------------------------------------------
         if is_stop_command(msg.text):
+            import json as _json
+
             from surogates.config import INTERRUPT_CHANNEL_PREFIX
             try:
                 await deps.redis.publish(
-                    f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}", "channel_stop",
+                    f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
+                    _json.dumps({"reason": "channel_stop"}),
                 )
             except Exception:
                 logger.warning(

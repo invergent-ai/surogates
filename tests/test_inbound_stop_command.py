@@ -49,9 +49,13 @@ async def test_stop_command_publishes_interrupt_and_suppresses_turn():
     assert result == InboundOutcome.INTERRUPTED
     # interrupt published on the session's channel — out-of-band, so it reaches
     # the busy worker's listener instead of queuing behind the running tool.
-    assert deps.redis.published == [
-        (f"surogates:interrupt:{SESSION_ID}", "channel_stop"),
-    ]
+    # Data is canonical JSON so the listener's json.loads doesn't choke.
+    import json
+
+    assert len(deps.redis.published) == 1
+    ch, data = deps.redis.published[0]
+    assert ch == f"surogates:interrupt:{SESSION_ID}"
+    assert json.loads(data) == {"reason": "channel_stop"}
     # NOT enqueued for normal processing, and no USER_MESSAGE emitted.
     assert not deps._enqueued
     assert not any(
