@@ -1,15 +1,20 @@
-"""Built-in ``github`` tool — read-only GitHub REST API for the agent's repos.
+"""Built-in ``github`` tool — scoped GitHub REST API for the agent's repos.
 
 The agent connects a GitHub PAT + a set of repositories in the Tools tab (the
 same credential the coding tool uses to check out and open PRs).  This tool
-lets the agent *answer questions* about those repos — issues, pull requests,
-files, commits, diffs, search — without a checkout, by proxying authenticated
-``GET`` requests to the GitHub REST API.
+lets the agent both *answer questions* about those repos — issues, pull
+requests, files, commits, diffs, search — and *act* on them — open/close/comment
+issues and PRs, add labels, write files — without a checkout, by proxying
+authenticated requests to the GitHub REST API.
 
-Read-only (``GET`` only) and scoped to the configured repos: a request must
-target ``/repos/<owner>/<repo>/…`` for a configured repo, or ``/search/…``
-qualified to a configured repo.  The PAT rides in the ``Authorization`` header
-only — never in argv, the returned data, or an event.
+Scoped to the configured repos: a request must target ``/repos/<owner>/<repo>/…``
+for a configured repo, or (read-only) ``/search/…`` qualified to a configured
+repo.  ``GET`` is read-only; ``POST``/``PATCH``/``PUT``/``DELETE`` writes are
+allowed on sub-resources of a configured repo but never on the repository
+itself (no root-level delete/rename) or admin endpoints like ``transfer``.  A
+write needs the connected PAT to carry the matching scope — the tool does not
+widen the token.  The PAT rides in the ``Authorization`` header only — never in
+argv, the returned data, or an event.
 
 Required kwargs (injected by the harness dispatch): ``tenant``,
 ``credential_vault``, ``session_config`` (carrying the agent's ``repos``).
@@ -43,6 +48,14 @@ _MEDIA_ACCEPT = {
 
 _SLUG_RE = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", re.IGNORECASE)
 
+_WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+_METHODS = frozenset({"GET"}) | _WRITE_METHODS
+
+# Repo sub-resources that reconfigure or hand off the whole repository — writes
+# to these are refused even for a configured repo (they are not day-to-day
+# issue/PR/content edits and are hard or impossible to undo).
+_PROTECTED_REPO_SUBRESOURCES = frozenset({"transfer"})
+
 
 def github_repo_slugs(repos: Sequence[Mapping[str, str]]) -> set[str]:
     """The ``owner/repo`` slugs (lowercased) for the configured repositories."""
@@ -54,14 +67,22 @@ def github_repo_slugs(repos: Sequence[Mapping[str, str]]) -> set[str]:
     return slugs
 
 
-def authorize_github_read(
-    path: str, params: Mapping[str, Any] | None, repos: Sequence[Mapping[str, str]],
+def authorize_github_request(
+    method: str,
+    path: str,
+    params: Mapping[str, Any] | None,
+    repos: Sequence[Mapping[str, str]],
 ) -> tuple[bool, str]:
-    """Return ``(allowed, reason)`` for a GitHub REST path against *repos*.
+    """Return ``(allowed, reason)`` for a GitHub REST call against *repos*.
 
-    Allowed: ``/repos/<owner>/<repo>/…`` for a configured repo, or
-    ``/search/…`` whose ``q`` is scoped to configured repos via ``repo:``.
+    Allowed: ``/repos/<owner>/<repo>/…`` for a configured repo (any method), or
+    ``/search/…`` (``GET`` only) whose ``q`` is scoped to configured repos via
+    ``repo:``.  Writes (``POST``/``PATCH``/``PUT``/``DELETE``) are further
+    refused on the repository itself and on protected admin sub-resources.
     """
+    method = method.upper()
+    is_write = method in _WRITE_METHODS
+
     slugs = github_repo_slugs(repos)
     if not slugs:
         return False, "No repository is configured for this agent (Tools tab)."
@@ -73,15 +94,31 @@ def authorize_github_read(
 
     if segs[0] == "repos" and len(segs) >= 3:
         slug = f"{segs[1]}/{segs[2]}".lower()
-        if slug in slugs:
-            return True, ""
-        return (
-            False,
-            f"'{slug}' is not a configured repository. Configured: "
-            f"{', '.join(sorted(slugs))}.",
-        )
+        if slug not in slugs:
+            return (
+                False,
+                f"'{slug}' is not a configured repository. Configured: "
+                f"{', '.join(sorted(slugs))}.",
+            )
+        if is_write:
+            if len(segs) == 3:
+                return (
+                    False,
+                    f"Refusing a repository-level {method} on '{slug}': the github "
+                    "tool will not delete or reconfigure the repo itself, only its "
+                    "sub-resources (issues, pulls, comments, labels, contents, …).",
+                )
+            if segs[3].lower() in _PROTECTED_REPO_SUBRESOURCES:
+                return (
+                    False,
+                    f"Refusing a {method} on '{slug}/{segs[3]}': this admin action "
+                    "is blocked by the github tool.",
+                )
+        return True, ""
 
     if segs[0] == "search" and len(segs) >= 2:
+        if is_write:
+            return False, "Search is read-only; use GET."
         q = query.get("q", "")
         if re.search(r"\b(?:org|user):", q, re.IGNORECASE):
             return False, "Search must target a configured repo (repo:<owner>/<repo>), not org:/user:."
@@ -103,16 +140,23 @@ def authorize_github_read(
 _SCHEMA = ToolSchema(
     name="github",
     description=(
-        "Read-only GitHub REST API for the agent's configured repositories — "
-        "answer questions about issues, pull requests, files, commits, diffs, "
-        "and search WITHOUT checking out the repo. Give the REST 'path' (and "
-        "optional 'params'); scoped to configured repos, GET-only. Examples: "
-        "list open issues → path='/repos/{owner}/{repo}/issues', "
-        "params={'state':'open'}; a PR's diff → path='/repos/{owner}/{repo}/pulls/{n}', "
-        "media_type='diff'; a file → path='/repos/{owner}/{repo}/contents/{filepath}'; "
-        "recent commits → path='/repos/{owner}/{repo}/commits'; search issues → "
+        "GitHub REST API for the agent's configured repositories, WITHOUT "
+        "checking out the repo. Read (GET, the default): issues, pull requests, "
+        "files, commits, diffs, search. Write (set 'method' to POST/PATCH/PUT/"
+        "DELETE with a 'body'): open/close/comment issues and PRs, add labels, "
+        "write files. Scoped to configured repos; writes act only on the repo's "
+        "sub-resources, never on the repository itself (no root delete/rename) "
+        "and need the connected token to carry write scope. Read examples: list "
+        "open issues → path='/repos/{owner}/{repo}/issues', params={'state':'open'}; "
+        "a PR's diff → path='/repos/{owner}/{repo}/pulls/{n}', media_type='diff'; a "
+        "file → path='/repos/{owner}/{repo}/contents/{filepath}'; search issues → "
         "path='/search/issues', params={'q':'repo:{owner}/{repo} is:open label:bug'}. "
-        "To make code changes and open a PR, use run_coding_agent instead."
+        "Write examples: open an issue → method='POST', "
+        "path='/repos/{owner}/{repo}/issues', body={'title':'…','body':'…'}; comment "
+        "→ method='POST', path='/repos/{owner}/{repo}/issues/{n}/comments', "
+        "body={'body':'…'}; close → method='PATCH', "
+        "path='/repos/{owner}/{repo}/issues/{n}', body={'state':'closed'}. To make "
+        "code changes across many files and open a PR, prefer run_coding_agent."
     ),
     parameters={
         "type": "object",
@@ -121,9 +165,20 @@ _SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "GitHub REST API path, e.g. /repos/{owner}/{repo}/issues",
             },
+            "method": {
+                "type": "string",
+                "enum": ["GET", "POST", "PATCH", "PUT", "DELETE"],
+                "description": "HTTP method. Default 'GET' (read-only). Use POST/PATCH/"
+                               "PUT/DELETE to write; pass the payload in 'body'.",
+            },
             "params": {
                 "type": "object",
                 "description": "Query parameters (e.g. {'state':'open','per_page':20}).",
+            },
+            "body": {
+                "type": "object",
+                "description": "JSON request body for write methods (e.g. "
+                               "{'title':'Bug','body':'…'} when creating an issue).",
             },
             "media_type": {
                 "type": "string",
@@ -148,7 +203,14 @@ def register(registry: ToolRegistry) -> None:
     )
 
 
-async def _github_get(path: str, params: Mapping[str, Any], pat: str, media_type: str) -> str:
+async def _github_request(
+    method: str,
+    path: str,
+    params: Mapping[str, Any],
+    body: Mapping[str, Any] | None,
+    pat: str,
+    media_type: str,
+) -> str:
     import httpx
 
     path_only, _, qs = path.partition("?")
@@ -161,27 +223,30 @@ async def _github_get(path: str, params: Mapping[str, Any], pat: str, media_type
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "surogate-agent",
     }
+    request_kwargs: dict[str, Any] = {"params": query, "headers": headers}
+    if method != "GET" and body is not None:
+        request_kwargs["json"] = body
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                f"{_API_BASE}/{path_only.strip('/')}", params=query, headers=headers,
+            resp = await client.request(
+                method, f"{_API_BASE}/{path_only.strip('/')}", **request_kwargs,
             )
     except httpx.HTTPError as exc:
         return json.dumps({"error": f"GitHub request failed: {exc}"})
 
     text = resp.text or ""
     truncated = len(text) > _MAX_BODY
-    body = text[:_MAX_BODY]
+    body_text = text[:_MAX_BODY]
     if resp.status_code >= 400:
-        message = body
+        message = body_text
         try:
-            message = (json.loads(text) or {}).get("message", body)
+            message = (json.loads(text) or {}).get("message", body_text)
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
         return json.dumps({"status": resp.status_code, "error": message})
 
-    data: Any = body
-    if accept == _MEDIA_ACCEPT["json"] and not truncated:
+    data: Any = body_text or None
+    if accept == _MEDIA_ACCEPT["json"] and text and not truncated:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
@@ -197,6 +262,12 @@ async def _github_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     path = (arguments.get("path") or "").strip()
     if not path:
         return json.dumps({"error": "path is required, e.g. /repos/{owner}/{repo}/issues"})
+
+    method = (arguments.get("method") or "GET").strip().upper()
+    if method not in _METHODS:
+        return json.dumps({
+            "error": f"Unsupported method '{method}'. Use one of {sorted(_METHODS)}.",
+        })
 
     tenant = kwargs.get("tenant")
     vault = kwargs.get("credential_vault")
@@ -223,8 +294,11 @@ async def _github_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         })
 
     params = arguments.get("params") or {}
-    ok, reason = authorize_github_read(path, params, repos)
+    ok, reason = authorize_github_request(method, path, params, repos)
     if not ok:
         return json.dumps({"error": reason, "code": "out_of_scope"})
 
-    return await _github_get(path, params, pat, arguments.get("media_type") or "json")
+    return await _github_request(
+        method, path, params, arguments.get("body"), pat,
+        arguments.get("media_type") or "json",
+    )
