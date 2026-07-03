@@ -73,7 +73,7 @@ LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
 # webp/svg/etc.) before parsing.  pdfgrep is a nice CLI for full-text
 # PDF search.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git \
+        git openssh-client \
         ripgrep \
         curl \
         jq \
