@@ -52,6 +52,7 @@ class ToolRuntime:
             ask_user_question,
             browser,
             channel_files,
+            channel_messages,
             coding_agent,
             coordinator,
             cron,
@@ -105,6 +106,7 @@ class ToolRuntime:
             arbor_tools,  # idea_tree, dispatch_experiments, merge_experiment (research missions)
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)
+            channel_messages,  # fetch_channel_messages (read recent channel messages)
         ]
 
         for mod in modules:
