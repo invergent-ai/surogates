@@ -141,3 +141,108 @@ async def test_codex_writeback_surfaced():
     # Refreshed codex auth re-stored into the vault.
     stored = json.loads(creds._vault.stored["code_cred:openai"])
     assert stored["auth_json"]["tokens"]["access_token"] == "fresh"
+
+
+class _FakeSummaryClient:
+    def __init__(self, content):
+        self._content = content
+        self.calls = []
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self._content))],
+        )
+
+
+async def test_channel_heartbeat_uses_summary_model(monkeypatch):
+    # Fire the heartbeat on every progress delta so a single run triggers it.
+    monkeypatch.setattr(
+        "surogates.coding_agents.run_core.CHANNEL_UPDATE_INTERVAL", 0.0,
+    )
+    store = _FakeStore()
+    creds = CodingAgentCredentials(_FakeVault({
+        "code_cred:anthropic": CredentialBundle(
+            provider="anthropic", auth_mode="oauth",
+            token_kind="setup_token", oauth_token="sk-ant-oat01-x",
+        ).to_json(),
+    }))
+    polls = [
+        {
+            "ok": True, "done": False, "exit_code": None, "offset": 40,
+            "new_output": json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text",
+                                         "text": "Editing the search tool"}]},
+            }) + "\n",
+        },
+        {
+            "ok": True, "done": True, "exit_code": 0, "offset": 120,
+            "new_output": json.dumps({"type": "result", "result": "Done."}) + "\n",
+        },
+    ]
+    execute, _calls = _sbx(polls)
+    summary = _FakeSummaryClient("Adding fuzzy matching to the search tool")
+    outcome = await execute_coding_run(
+        store=store, tenant=_tenant(),
+        session=SimpleNamespace(id=uuid4(), channel="slack"),
+        credentials=creds, agent="claude", provider="anthropic",
+        prompt="add fuzzy matching", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+        summary_client=summary, summary_model="gpt-x",
+    )
+    assert outcome.status == "ok"
+    updates = [
+        d["text"] for et, d in store.events
+        if et == EventType.CODE_RUN_CHANNEL_UPDATE
+    ]
+    # The ack plus at least one throttled heartbeat carrying the model summary.
+    assert any("Adding fuzzy matching to the search tool" in t for t in updates)
+    # The run transcript reached the summary model.
+    assert summary.calls
+    assert "Editing the search tool" in summary.calls[0]["messages"][-1]["content"]
+
+
+async def test_channel_heartbeat_falls_back_without_summary_model(monkeypatch):
+    # With no summary model, the heartbeat still carries a transcript-derived hint.
+    monkeypatch.setattr(
+        "surogates.coding_agents.run_core.CHANNEL_UPDATE_INTERVAL", 0.0,
+    )
+    store = _FakeStore()
+    creds = CodingAgentCredentials(_FakeVault({
+        "code_cred:anthropic": CredentialBundle(
+            provider="anthropic", auth_mode="oauth",
+            token_kind="setup_token", oauth_token="sk-ant-oat01-x",
+        ).to_json(),
+    }))
+    polls = [
+        {
+            "ok": True, "done": False, "exit_code": None, "offset": 40,
+            "new_output": json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text",
+                                         "text": "Editing the search tool"}]},
+            }) + "\n",
+        },
+        {
+            "ok": True, "done": True, "exit_code": 0, "offset": 120,
+            "new_output": json.dumps({"type": "result", "result": "Done."}) + "\n",
+        },
+    ]
+    execute, _calls = _sbx(polls)
+    outcome = await execute_coding_run(
+        store=store, tenant=_tenant(),
+        session=SimpleNamespace(id=uuid4(), channel="slack"),
+        credentials=creds, agent="claude", provider="anthropic",
+        prompt="edit", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+    )
+    assert outcome.status == "ok"
+    updates = [
+        d["text"] for et, d in store.events
+        if et == EventType.CODE_RUN_CHANNEL_UPDATE
+    ]
+    assert any("Editing the search tool" in t for t in updates)

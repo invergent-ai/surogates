@@ -171,6 +171,8 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         # promptly (kills the pod-side CLI) instead of polling to completion.
         should_cancel=lambda: is_interrupted(),
         repo=repo, git_pat=pat, branch=branch,
+        summary_client=kwargs.get("summary_llm_client"),
+        summary_model=kwargs.get("summary_model"),
     )
 
     if outcome.status == "not_connected":
