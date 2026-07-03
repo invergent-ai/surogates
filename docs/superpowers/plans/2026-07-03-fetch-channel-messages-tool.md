@@ -17,6 +17,16 @@
 - `limit` default 50, clamped to `1..200`. `since` accepts ISO date (`2026-07-01`) or relative (`24h`, `7d`); invalid `since` → HTTP 400. `user` accepts bare id (`U063…`) or mention (`<@U063…>`), normalized to bare id.
 - Do NOT run `uv run` in this repo; run pytest via the ambient venv (`pytest ...`).
 
+## Progress
+
+- [x] Task 1: Add `author_id` to `RawMessage` and populate it
+- [ ] Task 2: Pure filter/format core + parameterized header (in progress)
+- [ ] Task 3: `message_fetch.py` orchestrator
+- [ ] Task 4: Server route + `_resolve_session` split
+- [ ] Task 5: Harness API client method
+- [ ] Task 6: Builtin tool + runtime/router registration
+- [ ] Task 7: Full-suite regression + branch wrap-up
+
 ---
 
 ### Task 1: Add `author_id` to `RawMessage` and populate it

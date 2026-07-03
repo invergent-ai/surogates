@@ -161,3 +161,18 @@ async def test_fetch_handles_non_dict_slack_response():
     assert meta.name == "eng" and meta.purpose == "prod"   # info_resp.get survived
     assert [m.text for m in msgs] == ["hello"]             # hist.get('messages') survived
     assert msgs[0].author == "name-U1"                     # users_info.get survived
+
+
+async def test_fetch_populates_author_id():
+    """author_id carries the raw Slack user id; author stays the display name."""
+    info = {"name": "surogate", "is_im": False, "is_mpim": False}
+    page = {"messages": [
+        {"user": "U063C2DB7GW", "text": "hi", "ts": "3.0"},
+    ], "has_more": False, "response_metadata": {"next_cursor": ""}}
+    p = _platform_with(FakeClient(info, [page]))
+    out = await p.fetch_channel_context(
+        creds={"bot_token": "xoxb"}, channel_id="C1", limits=BackfillLimits())
+    assert out is not None
+    _meta, msgs = out
+    assert msgs[0].author == "name-U063C2DB7GW"   # display name resolved
+    assert msgs[0].author_id == "U063C2DB7GW"     # raw Slack id preserved

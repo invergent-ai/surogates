@@ -1302,6 +1302,7 @@ class SlackPlatform:
                         author=author,
                         text=(m.get("text") or "").strip(),
                         files=files,
+                        author_id=(m.get("user") or ""),
                     ))
                 cursor = (hist.get("response_metadata") or {}).get("next_cursor") or ""
                 if not hist.get("has_more") or not cursor:

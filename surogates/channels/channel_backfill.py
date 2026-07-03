@@ -43,6 +43,7 @@ class RawMessage:
     author: str
     text: str
     files: tuple[tuple[str, str], ...] = ()
+    author_id: str = ""
 
 
 @dataclass(frozen=True)
