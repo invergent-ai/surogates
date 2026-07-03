@@ -24,7 +24,10 @@ def _configure_logging(level: str) -> None:
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
         stream=sys.stderr,
     )
-    # Silence noisy third-party loggers.
+    # Silence noisy third-party loggers.  The AWS/S3 clients are
+    # pathologically chatty at DEBUG (~40 lines per S3 call) and will
+    # flood the worker log whenever log_level is DEBUG, so clamp them to
+    # WARNING regardless of the root level.
     for name in (
         "uvicorn.access",
         "httpcore",
@@ -32,7 +35,12 @@ def _configure_logging(level: str) -> None:
         "hpack",
         "openai",
         "sse_starlette",
-        "kubernetes_asyncio"
+        "kubernetes_asyncio",
+        "botocore",
+        "aiobotocore",
+        "boto3",
+        "urllib3",
+        "s3transfer",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
