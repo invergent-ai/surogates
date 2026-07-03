@@ -16,9 +16,10 @@ def _platform(context_result, *, capture=None):
     descriptor = types.SimpleNamespace(
         vault_refs=lambda identifier: {"bot_token": "bot_token"})
 
-    async def _fetch_channel_context(*, creds, channel_id, limits):
+    async def _fetch_channel_context(*, creds, channel_id, limits, include_bots=False):
         if capture is not None:
             capture["limits"] = limits
+            capture["include_bots"] = include_bots
         return context_result
 
     return types.SimpleNamespace(
@@ -28,6 +29,20 @@ def _platform(context_result, *, capture=None):
 class _Vault:
     async def resolve_ref(self, ref, *, org_id):
         return "xoxb-token"
+
+
+async def test_read_path_requests_bot_messages():
+    """The on-demand tool must read bot/app posts (daily reports), so it asks
+    fetch_channel_context to include them."""
+    capture = {}
+    meta = ChannelMeta(name="reports", topic="", purpose="")
+    msgs = [RawMessage(ts=NOW - 10, author="bot", text="PostHog Daily", author_id="U1")]
+    platform = _platform((meta, msgs), capture=capture)
+    await fetch_channel_messages(
+        platform=platform, vault=_Vault(),
+        session=_session({"channel_identifier": "A1", "slack_channel_id": "C1"}),
+        limit=50, since=None, user=None, now=NOW)
+    assert capture["include_bots"] is True
 
 
 async def test_happy_path_filters_and_formats():

@@ -163,6 +163,60 @@ async def test_fetch_handles_non_dict_slack_response():
     assert msgs[0].author == "name-U1"                     # users_info.get survived
 
 
+def _cell(text):
+    return {"type": "rich_text", "elements": [
+        {"type": "rich_text_section", "elements": [{"type": "text", "text": text}]}]}
+
+
+_REPORT_MSG = {
+    "user": "U_WEBHOOK", "bot_id": "B_REPORT", "ts": "5.0",
+    "text": ":bar_chart: PostHog Daily",   # fallback summary; tables live in blocks
+    "blocks": [
+        {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+            {"type": "text", "text": "PostHog Daily"}]}]},
+        {"type": "table", "rows": [
+            [_cell("Metric"), _cell("24h")],
+            [_cell("Active Users (PV)"), _cell("17")],
+        ]},
+    ],
+}
+
+
+async def test_fetch_drops_bot_messages_by_default():
+    """The trigger/backfill path (include_bots=False) still drops bot posts."""
+    info = {"name": "reports", "is_im": False, "is_mpim": False}
+    page = {"messages": [
+        dict(_REPORT_MSG),
+        {"user": "U1", "text": "human msg", "ts": "4.0"},
+    ], "has_more": False, "response_metadata": {"next_cursor": ""}}
+    p = _platform_with(FakeClient(info, [page]))
+    out = await p.fetch_channel_context(
+        creds={"bot_token": "xoxb"}, channel_id="C1", limits=BackfillLimits())
+    assert out is not None
+    _meta, msgs = out
+    assert [m.text for m in msgs] == ["human msg"]   # bot report dropped
+
+
+async def test_fetch_include_bots_keeps_reports_and_renders_tables():
+    """The read path (include_bots=True) keeps bot reports and flattens their
+    Block Kit tables into the message text an agent reads."""
+    info = {"name": "reports", "is_im": False, "is_mpim": False}
+    page = {"messages": [
+        dict(_REPORT_MSG),
+        {"user": "U1", "text": "human msg", "ts": "4.0"},
+    ], "has_more": False, "response_metadata": {"next_cursor": ""}}
+    p = _platform_with(FakeClient(info, [page]))
+    out = await p.fetch_channel_context(
+        creds={"bot_token": "xoxb"}, channel_id="C1",
+        limits=BackfillLimits(), include_bots=True)
+    assert out is not None
+    _meta, msgs = out
+    assert [m.author_id for m in msgs] == ["U_WEBHOOK", "U1"]   # report kept
+    report_text = msgs[0].text
+    assert "Metric | 24h" in report_text
+    assert "Active Users (PV) | 17" in report_text     # table data recovered
+
+
 async def test_fetch_populates_author_id():
     """author_id carries the raw Slack user id; author stays the display name."""
     info = {"name": "surogate", "is_im": False, "is_mpim": False}

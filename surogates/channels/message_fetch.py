@@ -83,7 +83,7 @@ async def fetch_channel_messages(
         pages = _FILTER_MAX_PAGES if (user_query or since_cutoff is not None) else 1
         limits = BackfillLimits(max_pages=pages)
         result = await platform.fetch_channel_context(
-            creds=creds, channel_id=channel_id, limits=limits,
+            creds=creds, channel_id=channel_id, limits=limits, include_bots=True,
         )
     except Exception:
         _log.warning(

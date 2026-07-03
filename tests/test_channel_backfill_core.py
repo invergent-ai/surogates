@@ -1,7 +1,7 @@
 from surogates.channels.channel_backfill import (
     BACKFILL_HEADER,
     BackfillLimits, RawMessage, ChannelMeta,
-    filter_messages, bound_messages, format_context_block,
+    filter_messages, bound_messages, format_context_block, render_blocks,
 )
 
 DAY = 86400.0
@@ -15,6 +15,58 @@ def test_filter_drops_bots_subtypes_and_own():
     ]
     kept = filter_messages(msgs, bot_user_id="U_BOT")
     assert [m["text"] for m in kept] == ["hello"]
+
+def test_filter_keeps_bots_when_drop_bots_false():
+    """The read path keeps bot/app posts (daily reports) but still drops the
+    agent's own posts and Slack system messages."""
+    msgs = [
+        {"user": "U_HUMAN", "text": "hello", "ts": "4.0"},
+        {"user": "U_WEBHOOK", "bot_id": "B1", "text": "PostHog Daily", "ts": "3.0"},
+        {"user": "U_BOT", "text": "i am agent", "ts": "2.0"},              # own bot
+        {"user": "U_HUMAN", "subtype": "channel_join", "text": "joined", "ts": "1.0"},
+    ]
+    kept = filter_messages(msgs, bot_user_id="U_BOT", drop_bots=False)
+    assert [m["text"] for m in kept] == ["hello", "PostHog Daily"]
+
+def test_filter_keeps_block_only_bot_message_when_drop_bots_false():
+    """A bot message with no text but Block Kit content is readable."""
+    msgs = [{"user": "U_WEBHOOK", "bot_id": "B1", "text": "",
+             "blocks": [{"type": "table", "rows": []}], "ts": "1.0"}]
+    kept = filter_messages(msgs, bot_user_id="U_BOT", drop_bots=False)
+    assert len(kept) == 1
+
+def test_render_blocks_flattens_rich_text_and_table():
+    blocks = [
+        {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+            {"type": "emoji", "name": "bar_chart"},
+            {"type": "text", "text": " PostHog Daily", "style": {"italic": True}},
+        ]}]},
+        {"type": "table", "rows": [
+            [_cell("Metric"), _cell("24h"), _cell("Prev 24h")],
+            [_cell("Active Users (PV)"), _cell("17"), _cell("10")],
+            [_cell("Total Events"), _cell("287"), _cell("194")],
+        ]},
+    ]
+    out = render_blocks(blocks)
+    assert "PostHog Daily" in out
+    assert "Metric | 24h | Prev 24h" in out
+    assert "Active Users (PV) | 17 | 10" in out
+    assert "Total Events | 287 | 194" in out
+
+def test_render_blocks_strips_mailto_scheme_from_bare_links():
+    blocks = [{"type": "table", "rows": [
+        [{"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+            {"type": "link", "url": "mailto:user@example.com"}]}]}]]}]
+    assert render_blocks(blocks) == "user@example.com"
+
+def test_render_blocks_empty_returns_empty_string():
+    assert render_blocks([]) == ""
+    assert render_blocks([{"type": "divider"}]) == ""
+
+def _cell(text):
+    """A Block Kit table cell (itself a rich_text block)."""
+    return {"type": "rich_text", "elements": [
+        {"type": "rich_text_section", "elements": [{"type": "text", "text": text}]}]}
 
 def test_bound_message_cap_keeps_newest_returns_oldest_first():
     now = 100 * DAY

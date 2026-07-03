@@ -69,6 +69,7 @@ from surogates.channels.channel_backfill import (
     ChannelMeta,
     RawMessage,
     filter_messages,
+    render_blocks,
     warm_cache as _warm_cache_fn,
 )
 from surogates.channels.inbound import InboundFileRef, InboundMessage
@@ -1261,12 +1262,17 @@ class SlackPlatform:
 
     async def fetch_channel_context(
         self, *, creds: dict, channel_id: str, limits: BackfillLimits,
+        include_bots: bool = False,
     ) -> tuple[ChannelMeta, list[RawMessage]] | None:
         """Fetch channel metadata + recent history (newest-first).
 
         Returns None for DMs/MPDMs (v1 is channel-only), when the bot is not a
         member, or on any Slack error. Bounding by count/token/age is the
         coordinator's job; here we only honour the page + time budgets.
+
+        With *include_bots* True (the on-demand read path) bot- and app-posted
+        messages are kept and their Block Kit tables are flattened into text;
+        the default (trigger/backfill path) drops them.
         """
         bot_token: str = (creds or {}).get("bot_token") or ""
         if not bot_token:
@@ -1317,7 +1323,9 @@ class SlackPlatform:
                         break
                     raise
                 msgs = hist.get("messages") or []
-                for m in filter_messages(msgs, bot_user_id=bot_user_id):
+                for m in filter_messages(
+                    msgs, bot_user_id=bot_user_id, drop_bots=not include_bots
+                ):
                     try:
                         ts = float(m.get("ts") or 0.0)
                     except (TypeError, ValueError):
@@ -1328,10 +1336,20 @@ class SlackPlatform:
                         for f in (m.get("files") or [])
                         if f.get("id")
                     )
+                    text = (m.get("text") or "").strip()
+                    blocks = m.get("blocks") or []
+                    # The `text` field is only a fallback summary for block-based
+                    # posts; render the blocks when they carry a table (report
+                    # data absent from `text`) or when `text` is empty.
+                    if blocks and (
+                        not text
+                        or any(b.get("type") == "table" for b in blocks)
+                    ):
+                        text = (render_blocks(blocks) or text).strip()
                     raw.append(RawMessage(
                         ts=ts,
                         author=author,
-                        text=(m.get("text") or "").strip(),
+                        text=text,
                         files=files,
                         author_id=(m.get("user") or ""),
                     ))
