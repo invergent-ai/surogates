@@ -1,4 +1,5 @@
 from surogates.channels.channel_backfill import (
+    BACKFILL_HEADER,
     BackfillLimits, RawMessage, ChannelMeta,
     filter_messages, bound_messages, format_context_block,
 )
@@ -42,7 +43,7 @@ def test_format_block_has_header_and_oldest_first():
             RawMessage(ts=now - 1, author="Bob", text="second")]
     block = format_context_block(meta, msgs, now=now)
     assert block is not None
-    assert "[channel context" in block and "[/channel context]" in block
+    assert block.startswith(BACKFILL_HEADER) and "[/channel context]" in block
     assert "#eng-infra" in block and "keep prod up" in block
     assert block.index("Alice: first") < block.index("Bob: second")
 

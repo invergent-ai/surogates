@@ -1,4 +1,4 @@
-"""The github tool proxies authenticated, scoped, read-only GitHub API calls."""
+"""The github tool proxies authenticated, scoped GitHub API calls (read + write)."""
 
 from __future__ import annotations
 
@@ -119,3 +119,78 @@ async def test_diff_media_type_sets_accept_header():
     )
     assert route.calls.last.request.headers["Accept"] == "application/vnd.github.diff"
     assert "diff --git" in json.loads(out)["data"]
+
+
+@respx.mock
+async def test_post_creates_issue_with_body():
+    route = respx.post(url__regex=r"https://api\.github\.com/repos/acme/api/issues").mock(
+        return_value=httpx.Response(201, json={"number": 12, "title": "Bug"}),
+    )
+    out = await _github_handler(
+        {
+            "path": "/repos/acme/api/issues",
+            "method": "POST",
+            "body": {"title": "Bug", "body": "It broke"},
+        },
+        **_kwargs(),
+    )
+    assert route.called
+    req = route.calls.last.request
+    assert req.method == "POST"
+    assert req.headers["Authorization"] == f"Bearer {_PAT}"
+    assert json.loads(req.content) == {"title": "Bug", "body": "It broke"}
+
+    data = json.loads(out)
+    assert data["status"] == 201
+    assert data["data"]["number"] == 12
+    assert _PAT not in out
+
+
+@respx.mock
+async def test_patch_closes_issue():
+    route = respx.patch(url__regex=r"https://api\.github\.com/repos/acme/api/issues/5").mock(
+        return_value=httpx.Response(200, json={"number": 5, "state": "closed"}),
+    )
+    out = await _github_handler(
+        {
+            "path": "/repos/acme/api/issues/5",
+            "method": "patch",  # case-insensitive
+            "body": {"state": "closed"},
+        },
+        **_kwargs(),
+    )
+    assert route.calls.last.request.method == "PATCH"
+    assert json.loads(out)["data"]["state"] == "closed"
+
+
+@respx.mock
+async def test_delete_returns_empty_body_as_null():
+    route = respx.delete(
+        url__regex=r"https://api\.github\.com/repos/acme/api/issues/comments/9",
+    ).mock(return_value=httpx.Response(204))
+    out = await _github_handler(
+        {"path": "/repos/acme/api/issues/comments/9", "method": "DELETE"}, **_kwargs(),
+    )
+    assert route.calls.last.request.method == "DELETE"
+    data = json.loads(out)
+    assert data["status"] == 204
+    assert data["data"] is None
+
+
+@respx.mock
+async def test_write_to_repo_root_blocked_without_calling_github():
+    route = respx.route(url__regex=r"https://api\.github\.com/.*").mock(
+        return_value=httpx.Response(200, json={}),
+    )
+    out = await _github_handler(
+        {"path": "/repos/acme/api", "method": "DELETE"}, **_kwargs(),
+    )
+    assert json.loads(out)["code"] == "out_of_scope"
+    assert not route.called  # never hit GitHub for a blocked repo-level delete
+
+
+async def test_unsupported_method_rejected():
+    out = await _github_handler(
+        {"path": "/repos/acme/api/issues", "method": "HEAD"}, **_kwargs(),
+    )
+    assert "Unsupported method" in json.loads(out)["error"]

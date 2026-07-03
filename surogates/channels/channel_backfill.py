@@ -10,6 +10,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -43,6 +44,7 @@ class RawMessage:
     author: str
     text: str
     files: tuple[tuple[str, str], ...] = ()
+    author_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,12 +100,76 @@ def _fmt_ts(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
+BACKFILL_HEADER = (
+    "[recent channel history — snapshot; use fetch_channel_messages "
+    "for more or newer messages]"
+)
+MESSAGES_HEADER = "[channel messages]"
+
+_REL_SINCE = re.compile(r"^\s*(\d+)\s*([hd])\s*$", re.IGNORECASE)
+
+
+def normalize_user(value: str | None) -> str:
+    """Strip a Slack mention wrapper to a bare user id ('<@U063>' -> 'U063').
+
+    Handles the ``<@ID>`` mention form (including the ``<@ID|handle>`` variant)
+    and a leading ``@``; returns the bare id, or ``""`` when *value* is empty.
+    """
+    v = (value or "").strip()
+    if v.startswith("<@") and v.endswith(">"):
+        v = v[2:-1].split("|", 1)[0]
+    elif v.startswith("@"):
+        v = v[1:]
+    return v.strip()
+
+
+def parse_since(value: str | None, *, now: float) -> float | None:
+    """Return an epoch cutoff for *value*, or None when empty.
+
+    Accepts relative windows ('24h', '7d') evaluated against *now*, or an ISO
+    date ('2026-07-01') meaning midnight UTC on that date. Raises ValueError on
+    anything else so the caller can surface a 400 rather than broaden silently.
+    """
+    v = (value or "").strip()
+    if not v:
+        return None
+    m = _REL_SINCE.match(v)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        return now - n * (3600 if unit == "h" else 86400)
+    try:
+        d = datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"Unparseable 'since' value: {value!r}") from exc
+    return d.timestamp()
+
+
+def filter_messages_for_query(
+    messages: list[RawMessage], *, since_cutoff: float | None,
+    user_id: str, limit: int,
+) -> list[RawMessage]:
+    """Filter newest-first *messages* by since/user, take the newest *limit*,
+    and return them oldest-first for natural reading order."""
+    out: list[RawMessage] = []
+    for m in messages:  # newest-first
+        if since_cutoff is not None and m.ts < since_cutoff:
+            continue
+        if user_id and m.author_id != user_id:
+            continue
+        out.append(m)
+        if len(out) >= max(1, limit):
+            break
+    return list(reversed(out))
+
+
 def format_context_block(
-    meta: ChannelMeta, messages: list[RawMessage], *, now: float
+    meta: ChannelMeta, messages: list[RawMessage], *, now: float,
+    header: str = BACKFILL_HEADER,
 ) -> str | None:
     if not messages:
         return None
-    lines = ["[channel context - history before the agent joined]"]
+    lines = [header]
     lines.append(f"Channel: #{meta.name}" if meta.name else "Channel: (unnamed)")
     if meta.topic:
         lines.append(f"Topic: {meta.topic}")

@@ -119,6 +119,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # call the ops server endpoint that downloads/ingests the Slack file;
     # no sandbox isolation needed or available.
     "fetch_channel_file": ToolLocation.HARNESS,
+    # Channel message read — same rationale: needs the session-scoped API
+    # client to call the ops server; no sandbox isolation.
+    "fetch_channel_messages": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,

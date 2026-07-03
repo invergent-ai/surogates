@@ -52,6 +52,7 @@ class ToolRuntime:
             ask_user_question,
             browser,
             channel_files,
+            channel_messages,
             coding_agent,
             coordinator,
             cron,
@@ -99,12 +100,13 @@ class ToolRuntime:
             coordinator,
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
-            github,  # github (read-only GitHub REST for the agent's repos)
+            github,  # github (scoped GitHub REST — read + writes — for the agent's repos)
             task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
             board_tools,  # share_note, read_board, expand_note (coordination board)
             arbor_tools,  # idea_tree, dispatch_experiments, merge_experiment (research missions)
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)
+            channel_messages,  # fetch_channel_messages (read recent channel messages)
         ]
 
         for mod in modules:

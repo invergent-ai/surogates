@@ -9,10 +9,12 @@ the server.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 
 import surogates.channels.platforms  # noqa: F401  # ensure SlackPlatform self-registers in this process
 
@@ -24,6 +26,7 @@ from surogates.channels.file_fetch import (
     ChannelFileUnavailable,
     fetch_channel_file,
 )
+from surogates.channels.message_fetch import fetch_channel_messages
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.channels.registry import registry
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -45,9 +48,9 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-async def _resolve_session_bucket(
+async def _resolve_session(
     store: SessionStore, session_id: UUID, tenant: TenantContext,
-) -> tuple[Any, str]:
+) -> Any:
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -60,6 +63,13 @@ async def _resolve_session_bucket(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    return session
+
+
+async def _resolve_session_bucket(
+    store: SessionStore, session_id: UUID, tenant: TenantContext,
+) -> tuple[Any, str]:
+    session = await _resolve_session(store, session_id, tenant)
     bucket = session.config.get("storage_bucket")
     if not bucket:
         raise HTTPException(
@@ -118,3 +128,50 @@ async def fetch_channel_file_route(
         )
     except ChannelFileUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
+
+
+class _ChannelMessagesBody(BaseModel):
+    limit: int | None = None
+    since: str | None = None
+    user: str | None = None
+
+
+@router.post("/sessions/{session_id}/channel-messages")
+async def fetch_channel_messages_route(
+    session_id: UUID,
+    body: _ChannelMessagesBody,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict:
+    """Read recent messages from this session's Slack channel."""
+    store = _get_session_store(request)
+    session = await _resolve_session(store, session_id, tenant)
+
+    # Ambient sessions carry a slack channel_id but channel="ambient".
+    channel = effective_channel_platform(session)
+    if channel != "slack":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Channel-message fetch is only supported for Slack sessions.",
+        )
+
+    platform = registry.get("slack")
+    if platform is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Slack platform is not available.",
+        )
+
+    try:
+        return await fetch_channel_messages(
+            platform=platform,
+            vault=request.app.state.credential_vault,
+            session=session,
+            limit=body.limit if body.limit is not None else 50,
+            since=body.since,
+            user=body.user,
+            now=time.time(),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
