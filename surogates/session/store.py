@@ -98,11 +98,16 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             )
     elif event_type == EventType.CODE_RUN_CHANNEL_UPDATE:
         # A throttled "still working" heartbeat during a coding run — delivered
-        # as a normal (non-intermediate) message so channels aren't silent for
-        # the minutes a run takes (code-run PROGRESS is web-UI-only).
+        # so channels aren't silent for the minutes a run takes (code-run
+        # PROGRESS is web-UI-only). The ``code_run`` marker lets edit-capable
+        # platforms fold every heartbeat into a single message that is edited in
+        # place (latest activity only) rather than a wall of separate posts.
         text = data.get("text")
         if text and isinstance(text, str):
             payload["content"] = text
+            run_id = data.get("run_id")
+            if run_id:
+                payload["code_run"] = str(run_id)
     elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
         questions = data.get("questions") or []
         if questions:

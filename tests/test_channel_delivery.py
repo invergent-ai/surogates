@@ -1997,3 +1997,94 @@ class TestPermanentDeliveryFailures:
 
         assert delivery.dead and delivery.dead[0][0] == 74
         assert delivery.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: coding-run heartbeats edit ONE message in place (latest activity)
+# ---------------------------------------------------------------------------
+
+
+class _CodeRunRedis:
+    """A get/set/delete-only Redis fake for the code-run ts handshake.
+
+    (Distinct from the fuller ``_FakeRedis`` above so it doesn't shadow it —
+    the bot-message tests need ``exists``/``sadd`` which this does not provide;
+    the code-run path best-effort-swallows those missing methods.)
+    """
+
+    def __init__(self) -> None:
+        self.kv: dict[str, Any] = {}
+
+    async def get(self, k: str) -> Any:
+        return self.kv.get(k)
+
+    async def set(self, k: str, v: Any, ex: int | None = None) -> None:
+        self.kv[k] = v
+
+    async def delete(self, *ks: str) -> None:
+        for k in ks:
+            self.kv.pop(k, None)
+
+
+class _EditPlatform(_FakePlatform):
+    """Slack-like: edits when destination carries update_ts, else posts fresh."""
+
+    supports_edit = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edits: list[str | None] = []
+
+    async def send(self, item: Any, *, creds: dict) -> SendResult:
+        seen = item.destination.get("update_ts")
+        self.edits.append(seen)
+        # A fresh post returns a new ts; an edit keeps the same message.
+        return SendResult(success=True, message_id=seen or "posted-ts-1")
+
+
+class TestCodeRunEditInPlace:
+    async def test_first_heartbeat_posts_then_subsequent_edit(self):
+        session_id = uuid4()
+        dest = {"channel_identifier": APP_ID, "channel_id": "C001"}
+        payload = {"content": "🛠️ Still working…", "code_run": "run7"}
+        items = [
+            _FakeOutboxItem(id=1, session_id=session_id, dedupe_key="slack:1",
+                            destination=dict(dest), payload=dict(payload)),
+            _FakeOutboxItem(id=2, session_id=session_id, dedupe_key="slack:2",
+                            destination=dict(dest), payload=dict(payload)),
+        ]
+        delivery = _FakeDeliveryService(items=items)
+        platform = _EditPlatform()
+        redis = _CodeRunRedis()
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE), redis=redis,
+        )
+
+        await dispatcher.deliver_batch(platform)
+
+        # First posts (no update_ts), second edits the recorded message.
+        assert platform.edits == [None, "posted-ts-1"]
+        # The run's message ts is recorded in Redis for the next heartbeat.
+        from surogates.channels.channel_progress import code_run_key
+        assert code_run_key("slack", session_id, "run7") in redis.kv
+
+    async def test_second_run_gets_its_own_message(self):
+        session_id = uuid4()
+        dest = {"channel_identifier": APP_ID, "channel_id": "C001"}
+        items = [
+            _FakeOutboxItem(id=1, session_id=session_id, dedupe_key="slack:1",
+                            destination=dict(dest),
+                            payload={"content": "a", "code_run": "runA"}),
+            _FakeOutboxItem(id=2, session_id=session_id, dedupe_key="slack:2",
+                            destination=dict(dest),
+                            payload={"content": "b", "code_run": "runB"}),
+        ]
+        platform = _EditPlatform()
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=_FakeDeliveryService(items=items),
+            cache=_FakeCache(_KNOWN_CACHE), redis=_CodeRunRedis(),
+        )
+        await dispatcher.deliver_batch(platform)
+        # Neither edits — each run posts its own fresh main message.
+        assert platform.edits == [None, None]

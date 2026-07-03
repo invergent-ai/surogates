@@ -120,3 +120,15 @@ def render_code_run_update(repo: Mapping[str, str] | None, activity: str | None)
     line = _activity_line(activity)
     tail = f" — {line}" if line else ""
     return f"🛠️ Still working{_repo_where(repo)}…{tail}"
+
+
+def render_code_run_done(agent: str, repo: Mapping[str, str] | None, *, ok: bool) -> str:
+    """The terminal state for the edited-in-place main coding message.
+
+    Replaces the trailing 'still working' heartbeat once the run ends so the
+    message doesn't linger as if the run were still going — the detailed result
+    (PR link or error) arrives as its own message.
+    """
+    if ok:
+        return f"✅ {agent} finished{_repo_where(repo)}."
+    return f"⚠️ {agent} stopped{_repo_where(repo)}."

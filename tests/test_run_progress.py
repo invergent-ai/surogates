@@ -6,6 +6,7 @@ import pytest
 
 from surogates.coding_agents.run_progress import (
     render_code_run_ack,
+    render_code_run_done,
     render_code_run_update,
     summarize_progress_activity,
 )
@@ -54,6 +55,15 @@ def test_update_truncates_long_activity():
 def test_update_empty_activity_ok():
     s = render_code_run_update(REPO, "")
     assert "acme/api" in s
+
+
+def test_done_ok_and_error_states():
+    ok = render_code_run_done("claude", REPO, ok=True)
+    assert "claude" in ok and "acme/api" in ok
+    assert "working" not in ok  # no longer "still working"
+    err = render_code_run_done("claude", REPO, ok=False)
+    assert "acme/api" in err
+    assert ok != err
 
 
 # --- summary-model activity line -------------------------------------------

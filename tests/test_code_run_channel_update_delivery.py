@@ -14,9 +14,19 @@ def test_channel_update_delivered_as_message():
     p = _build_channel_payload(
         EventType.CODE_RUN_CHANNEL_UPDATE, {"text": "🛠️ Still working…"}, "slack",
     )
-    assert p == {"content": "🛠️ Still working…"}
+    assert p["content"] == "🛠️ Still working…"
     # not marked intermediate → delivered, not suppressed/folded
     assert "intermediate" not in p
+
+
+def test_channel_update_carries_run_marker_for_edit_in_place():
+    # The run_id becomes a ``code_run`` marker so edit-capable platforms fold
+    # every heartbeat into one message edited in place.
+    p = _build_channel_payload(
+        EventType.CODE_RUN_CHANNEL_UPDATE,
+        {"text": "🛠️ Still working…", "run_id": "run7"}, "slack",
+    )
+    assert p == {"content": "🛠️ Still working…", "code_run": "run7"}
 
 
 def test_channel_update_empty_text_not_delivered():
