@@ -22,8 +22,8 @@
 - [x] Task 1: Add `author_id` to `RawMessage` and populate it
 - [x] Task 2: Pure filter/format core + parameterized header
 - [x] Task 3: `message_fetch.py` orchestrator
-- [ ] Task 4: Server route + `_resolve_session` split (in progress)
-- [ ] Task 5: Harness API client method
+- [x] Task 4: Server route + `_resolve_session` split
+- [ ] Task 5: Harness API client method (in progress)
 - [ ] Task 6: Builtin tool + runtime/router registration
 - [ ] Task 7: Full-suite regression + branch wrap-up
 
