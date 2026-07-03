@@ -70,11 +70,16 @@ def parse_media_markers(text: str) -> tuple[list[str], str]:
 def normalize_workspace_path(raw: str) -> str | None:
     """Normalize a marker path to a workspace-relative POSIX path, or ``None``.
 
-    Strips a leading ``/workspace/`` or ``workspace/`` then a leading ``/``.
+    Strips a leading workspace-root prefix then a leading ``/``. The Slack
+    prompt tells the model to emit ``MEDIA:/absolute/path``, and the agent
+    sandbox mounts the workspace at its ``/root`` home — so a marker for a
+    generated file arrives as ``/root/media/images/x.png`` and must resolve to
+    the workspace-relative key ``media/images/x.png`` (not ``root/media/…``,
+    which does not exist in storage). ``/workspace/`` is also accepted.
     Returns ``None`` for empty paths or paths that escape the workspace (``..``).
     """
     s = (raw or "").strip().strip("`\"'").strip()
-    for prefix in ("/workspace/", "workspace/"):
+    for prefix in ("/workspace/", "workspace/", "/root/", "root/"):
         if s.startswith(prefix):
             s = s[len(prefix):]
             break

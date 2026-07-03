@@ -62,6 +62,17 @@ class TestNormalizeWorkspacePath:
     def test_nested_path_preserved(self):
         assert normalize_workspace_path("/workspace/media/a.png") == "media/a.png"
 
+    def test_sandbox_home_prefix_stripped(self):
+        # The Slack prompt tells the model to emit MEDIA:/absolute/path, and the
+        # agent sandbox mounts the workspace at its /root home. A marker like
+        # MEDIA:/root/media/images/x.png must resolve to the workspace-relative
+        # key media/images/x.png, not root/media/images/x.png (which 404s).
+        assert (
+            normalize_workspace_path("/root/media/images/x.png")
+            == "media/images/x.png"
+        )
+        assert normalize_workspace_path("root/report.md") == "report.md"
+
     def test_traversal_and_empty_rejected(self):
         assert normalize_workspace_path("../etc/passwd") is None
         assert normalize_workspace_path("/workspace/../x") is None
