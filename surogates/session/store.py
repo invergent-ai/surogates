@@ -62,7 +62,12 @@ _DELIVERABLE_EVENTS = frozenset({
     EventType.LLM_RESPONSE,
     EventType.INBOX_INPUT_REQUIRED,
     EventType.CODE_RUN_CHANNEL_UPDATE,
+    EventType.SESSION_STOPPED,
 })
+
+# Delivered to the channel when a /stop actually halts the running turn, so the
+# user gets a terminal confirmation after the optimistic "Stopping…" ack.
+_STOPPED_CONFIRMATION = "⏹ Stopped."
 
 
 _INBOX_EVENTS = frozenset({
@@ -108,6 +113,8 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             run_id = data.get("run_id")
             if run_id:
                 payload["code_run"] = str(run_id)
+    elif event_type == EventType.SESSION_STOPPED:
+        payload["content"] = _STOPPED_CONFIRMATION
     elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
         questions = data.get("questions") or []
         if questions:

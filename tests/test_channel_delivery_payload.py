@@ -8,7 +8,11 @@ Verifies that:
 """
 
 from surogates.session.events import EventType
-from surogates.session.store import _build_channel_payload
+from surogates.session.store import (
+    _DELIVERABLE_EVENTS,
+    _STOPPED_CONFIRMATION,
+    _build_channel_payload,
+)
 
 
 def test_intermediate_llm_response_tagged_intermediate():
@@ -34,3 +38,16 @@ def test_input_required_payload_slack_only():
     data = {"questions": [{"q": "?"}], "tool_call_id": "t1", "context": "ctx"}
     assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "slack")["input_prompt"] is True
     assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "telegram") == {}
+
+
+def test_session_stopped_is_deliverable():
+    assert EventType.SESSION_STOPPED in _DELIVERABLE_EVENTS
+
+
+def test_session_stopped_payload_confirms_stop_on_every_channel():
+    # /stop confirmation must reach any non-web channel (delivery is gated by
+    # channel elsewhere), not just Slack.
+    for channel in ("slack", "telegram", "teams"):
+        p = _build_channel_payload(EventType.SESSION_STOPPED, {}, channel)
+        assert p["content"] == _STOPPED_CONFIRMATION
+        assert not p.get("intermediate")

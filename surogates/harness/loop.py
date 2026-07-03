@@ -716,6 +716,17 @@ class AgentHarness(
                     "worker_id": self._worker_id,
                 },
             )
+        # A channel /stop aborts out-of-band and leaves the session 'active'
+        # (so the SESSION_PAUSE above never fires). The inbound handler only
+        # posted an optimistic "Stopping…" ack, so emit a deliverable
+        # confirmation here — the point at which the turn has actually halted —
+        # so the channel gets a terminal "stopped" message.
+        if reason_msg == "channel_stop":
+            await self._store.emit_event(
+                session.id,
+                EventType.SESSION_STOPPED,
+                {"reason": "channel_stop", "worker_id": self._worker_id},
+            )
         self._clear_interrupt()
 
     # ------------------------------------------------------------------
