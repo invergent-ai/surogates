@@ -25,7 +25,7 @@
 - [x] Task 4: Server route + `_resolve_session` split
 - [x] Task 5: Harness API client method
 - [x] Task 6: Builtin tool + runtime/router registration
-- [ ] Task 7: Full-suite regression + branch wrap-up (in progress)
+- [x] Task 7: Full-suite regression + branch wrap-up (48 new/touched tests pass; full suite has 39 pre-existing failures identical to origin/master — zero introduced)
 
 ---
 
