@@ -44,6 +44,15 @@ def _configure_logging(level: str) -> None:
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
 
+    # Suppress urllib3's InsecureRequestWarning / connection warnings so
+    # they don't spam stderr outside the logging machinery.
+    try:
+        import urllib3
+
+        urllib3.disable_warnings()
+    except Exception:
+        pass
+
 
 # -- subcommands -------------------------------------------------------------
 
