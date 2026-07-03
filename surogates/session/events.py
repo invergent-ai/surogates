@@ -64,6 +64,10 @@ class EventType(str, Enum):
     # Session lifecycle
     SESSION_START = "session.start"
     SESSION_PAUSE = "session.pause"
+    # A channel /stop aborted the running turn out-of-band (the session stays
+    # 'active', unlike /pause). Emitted at the abort point so channels get a
+    # delivered "stopped" confirmation after the optimistic inbound ack.
+    SESSION_STOPPED = "session.stopped"
     SESSION_RESUME = "session.resume"
     SESSION_COMPLETE = "session.complete"
     SESSION_FAIL = "session.fail"
