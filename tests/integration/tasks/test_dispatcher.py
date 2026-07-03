@@ -1,7 +1,6 @@
 """Integration tests for ``tasks_tick`` (promote, finalize, enqueue)."""
 from __future__ import annotations
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -336,6 +335,44 @@ async def test_enqueue_claims_ready_task_and_spawns(
 
     # zadd called at least once (for our task; may be more for leftovers).
     assert redis.zadd.await_count >= 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_enqueue_blocks_task_with_unknown_agent_def(
+    session_factory, session_store, org_id: uuid.UUID, parent_session,
+):
+    """A ready task whose agent_def_name resolves to nothing is BLOCKED (not
+    rolled back to 'ready'), so the dispatcher stops re-attempting/logging it
+    every tick. attempt_count nets to 0 so an unblock gets a clean attempt."""
+    async with session_factory() as db:
+        t = Task(
+            org_id=org_id, parent_session_id=parent_session.id,
+            goal="research", status="ready",
+            agent_def_name="nonexistent-role",
+        )
+        db.add(t)
+        await db.commit()
+        tid = t.id
+
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    def tenant_for_task(task):
+        return MagicMock(org_id=task.org_id)
+
+    await _enqueue_ready_tasks(
+        session_factory=session_factory,
+        redis=redis,
+        session_store=session_store,
+        tenant_for_task=tenant_for_task,
+    )
+
+    async with session_factory() as db:
+        t = await db.get(Task, tid)
+        assert t.status == "blocked"  # not 'ready' → no infinite retry
+        assert t.blocked_reason and "nonexistent-role" in t.blocked_reason
+        assert t.attempt_count == 0  # claim's +1 undone
+        assert t.current_session_id is None
 
 
 @pytest.mark.asyncio(loop_scope="session")

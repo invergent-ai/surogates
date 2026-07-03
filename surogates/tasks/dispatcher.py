@@ -178,7 +178,10 @@ async def _enqueue_ready_tasks(
     lock on the task row would block the subsequent FK validation lock
     that ``create_child_session``'s INSERT into ``sessions`` acquires.
     """
-    from surogates.tasks.spawn import _create_session_for_task
+    from surogates.tasks.spawn import (
+        UnknownAgentDefError,
+        _create_session_for_task,
+    )
 
     enqueued = 0
     # Tasks whose spawn raised within this tick.  Excluded from
@@ -247,12 +250,25 @@ async def _enqueue_ready_tasks(
                 tenant=tenant,
                 file_bundle_cache=file_bundle_cache,
             )
+        except UnknownAgentDefError as exc:
+            # Permanent config error: the referenced agent_def does not exist
+            # in the catalog / bundle, so retrying can never succeed. Block the
+            # task (a first-class "needs attention" state surfaced in the UI,
+            # self-heals via unblock_task) instead of rolling it back to
+            # 'ready' and re-attempting every tick forever — the latter spammed
+            # the worker log indefinitely for a single misconfigured task.
+            logger.warning(
+                "tasks_tick: blocking task %s (unknown agent_def): %s",
+                claimed.id, exc,
+            )
+            failed_this_tick.add(claimed.id)
+            await _block_claim(session_factory, claimed.id, reason=str(exc))
+            continue
         except ValueError as exc:
-            # Config-level error (unknown agent_def_name, missing
-            # workspace fields on the parent session). Rolling back
-            # gives a human a chance to fix the catalog / config; the
-            # within-tick exclusion prevents hot-looping on this same
-            # row for the rest of THIS tick.
+            # Other config-level error (e.g. missing workspace fields on the
+            # parent session), which may be transient. Rolling back gives a
+            # human a chance to fix the config; the within-tick exclusion
+            # prevents hot-looping on this same row for the rest of THIS tick.
             logger.warning(
                 "tasks_tick: spawn failed for task %s: %s",
                 claimed.id, exc,
@@ -297,6 +313,38 @@ async def _enqueue_ready_tasks(
         enqueued += 1
 
     return enqueued
+
+
+async def _block_claim(
+    session_factory: async_sessionmaker, task_id: UUID, *, reason: str,
+) -> None:
+    """Best-effort: move a claimed task to ``blocked`` with ``blocked_reason``
+    (a permanent config error — the referenced agent_def does not exist).
+
+    Decrements ``attempt_count`` to undo the claim's increment so the block
+    doesn't burn a retry budget: once the catalog is fixed and the task is
+    unblocked (``unblock_task`` → ``ready``), it gets a clean attempt. Unlike
+    ``_rollback_claim`` this leaves the task OUT of the ``ready`` pool, so the
+    dispatcher stops re-attempting (and re-logging) it every tick.
+    """
+    try:
+        async with session_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task_id)
+                .values(
+                    status="blocked",
+                    blocked_reason=reason[:500],
+                    attempt_count=Task.attempt_count - 1,
+                )
+            )
+            await db.commit()
+    except Exception:
+        logger.exception(
+            "tasks_tick: block for task %s failed; finalize step will "
+            "recover by treating the attempt as crashed",
+            task_id,
+        )
 
 
 async def _rollback_claim(

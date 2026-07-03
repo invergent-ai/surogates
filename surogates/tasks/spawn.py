@@ -34,6 +34,18 @@ from surogates.tools.builtin.coordinator import (
 logger = logging.getLogger(__name__)
 
 
+class UnknownAgentDefError(ValueError):
+    """A task references an ``agent_def_name`` that resolves to no enabled
+    AgentDef in the tenant catalog / agent bundle.
+
+    A *permanent* config error: retrying the spawn cannot succeed until the
+    catalog or bundle is fixed. The dispatcher blocks the task (surfaced for a
+    human, self-heals via ``unblock_task``) rather than rolling it back to
+    ``ready`` and re-attempting every tick forever. Subclasses ``ValueError``
+    so existing ``except ValueError`` handlers keep catching it.
+    """
+
+
 def _build_task_worker_config(agent_def: Any | None, task: Any) -> dict[str, Any]:
     """Build the worker config dict for a task-backed Session.
 
@@ -157,7 +169,7 @@ async def _create_session_for_task(
             session_factory=session_factory, bundle=resolved_bundle,
         )
         if agent_def is None:
-            raise ValueError(
+            raise UnknownAgentDefError(
                 f"Task {task.id} references agent_def_name="
                 f"{task.agent_def_name!r}, but no enabled AgentDef with that "
                 f"name exists in the tenant catalog."
