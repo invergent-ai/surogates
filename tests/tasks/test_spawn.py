@@ -187,8 +187,13 @@ async def test_create_session_for_task_resolves_agent_def_when_set():
 
 @pytest.mark.asyncio
 async def test_create_session_for_task_unknown_agent_def_raises():
-    """If agent_def_name resolves to None, raise — silent fallback would mask config bugs."""
-    from surogates.tasks.spawn import _create_session_for_task
+    """An unknown agent_def_name raises UnknownAgentDefError (a ValueError
+    subclass) — silent fallback would mask config bugs, and the specific type
+    lets the dispatcher block (not infinitely retry) the task."""
+    from surogates.tasks.spawn import (
+        UnknownAgentDefError,
+        _create_session_for_task,
+    )
 
     task = _make_task(goal="g", agent_def_name="nonexistent")
     parent = _make_session(id=task.parent_session_id, agent_id="agent-1")
@@ -200,10 +205,11 @@ async def test_create_session_for_task_unknown_agent_def_raises():
         "surogates.tasks.spawn.resolve_agent_by_name",
         new=AsyncMock(return_value=None),
     ):
-        with pytest.raises(ValueError, match="nonexistent"):
+        with pytest.raises(UnknownAgentDefError, match="nonexistent") as exc_info:
             await _create_session_for_task(
                 task,
                 session_store=store,
                 session_factory=None,
                 tenant=MagicMock(org_id=task.org_id),
             )
+    assert isinstance(exc_info.value, ValueError)  # back-compat for except ValueError
