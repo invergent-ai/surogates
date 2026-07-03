@@ -61,6 +61,7 @@ class LeaseNotHeldError(Exception):
 _DELIVERABLE_EVENTS = frozenset({
     EventType.LLM_RESPONSE,
     EventType.INBOX_INPUT_REQUIRED,
+    EventType.CODE_RUN_CHANNEL_UPDATE,
 })
 
 
