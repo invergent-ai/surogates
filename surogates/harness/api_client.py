@@ -352,6 +352,36 @@ class HarnessAPIClient:
         except httpx.HTTPStatusError as exc:
             return _error_response(exc)
 
+    async def fetch_channel_messages(
+        self, *, limit: int | None = None, since: str | None = None,
+        user: str | None = None,
+    ) -> str:
+        """Read recent messages from this session's Slack channel.
+
+        Requires a session-scoped client. Returns a JSON string with the
+        formatted ``messages_block`` (and ``count``/``channel``/``note``), or
+        the standard error envelope.
+        """
+        if self._session_id is None:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "Channel-message fetch requires a session-scoped API "
+                        "client; session_id is not set."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        try:
+            data = await self._post(
+                f"/v1/sessions/{self._session_id}/channel-messages",
+                {"limit": limit, "since": since, "user": user},
+            )
+            return json.dumps({"success": True, **data}, ensure_ascii=False)
+        except httpx.HTTPStatusError as exc:
+            return _error_response(exc)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
