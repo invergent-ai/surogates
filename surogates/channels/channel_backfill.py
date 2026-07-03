@@ -54,18 +54,142 @@ class ChannelMeta:
     purpose: str
 
 
-def filter_messages(messages: list[dict], *, bot_user_id: str) -> list[dict]:
-    """Drop own-bot messages, other bots, and any subtyped system message."""
+# Slack system / noise message subtypes — joins, topic changes, etc. — carry
+# nothing an agent needs to read, so they are dropped on every path.
+_SYSTEM_SUBTYPES = frozenset({
+    "channel_join", "channel_leave", "channel_topic", "channel_purpose",
+    "channel_name", "channel_archive", "channel_unarchive",
+    "group_join", "group_leave", "group_topic", "group_purpose",
+    "group_name", "group_archive", "group_unarchive",
+    "pinned_item", "unpinned_item", "bot_add", "bot_remove", "tombstone",
+})
+
+
+def filter_messages(
+    messages: list[dict], *, bot_user_id: str, drop_bots: bool = True
+) -> list[dict]:
+    """Filter raw Slack messages for agent consumption.
+
+    Always drops the agent's own posts and Slack system messages (joins, topic
+    changes, …). When *drop_bots* is True — the trigger/backfill path — it also
+    drops every bot- or app-posted message and any subtyped message, so the
+    agent never wakes on or is seeded with automated posts. When False — the
+    on-demand ``fetch_channel_messages`` read path — bot/app posts are kept:
+    reading a channel's daily report bots is the whole point of that tool.
+    """
     out: list[dict] = []
     for m in messages:
         if bot_user_id and m.get("user") == bot_user_id:
             continue
-        if m.get("bot_id") or m.get("subtype"):
+        if (m.get("subtype") or "") in _SYSTEM_SUBTYPES:
             continue
-        if not (m.get("text") or "").strip() and not (m.get("files") or []):
+        if drop_bots and (m.get("bot_id") or m.get("subtype")):
+            continue
+        if (
+            not (m.get("text") or "").strip()
+            and not (m.get("files") or [])
+            and not (m.get("blocks") or [])
+        ):
             continue
         out.append(m)
     return out
+
+
+def _render_leaf(el: dict) -> str:
+    """Render one Block Kit rich-text leaf element to text."""
+    t = el.get("type")
+    if t == "text":
+        return el.get("text") or ""
+    if t == "emoji":
+        return f":{el.get('name', '')}:"
+    if t == "link":
+        url = el.get("url") or ""
+        for scheme in ("mailto:", "tel:"):
+            if url.startswith(scheme):
+                url = url[len(scheme):]
+                break
+        return el.get("text") or url
+    if t == "user":
+        return f"@{el.get('user_id', '')}"
+    if t == "usergroup":
+        return f"@{el.get('usergroup_id', '')}"
+    if t == "channel":
+        return f"#{el.get('channel_id', '')}"
+    if t == "broadcast":
+        return f"@{el.get('range', '')}"
+    return el.get("text") or ""
+
+
+def _render_leaves(elements) -> str:
+    return "".join(_render_leaf(x) for x in (elements or []))
+
+
+def _render_rich_text_container(el: dict) -> str:
+    """Render a rich_text container (section / list / quote / preformatted)."""
+    t = el.get("type")
+    if t == "rich_text_list":
+        ordered = el.get("style") == "ordered"
+        lines = []
+        for i, item in enumerate(el.get("elements") or [], start=1):
+            body = _render_leaves(item.get("elements"))
+            if body:
+                lines.append(f"{i}. {body}" if ordered else f"- {body}")
+        return "\n".join(lines)
+    body = _render_leaves(el.get("elements"))
+    if t == "rich_text_quote":
+        return "\n".join(f"> {ln}" if ln else ">" for ln in body.split("\n"))
+    return body  # rich_text_section, rich_text_preformatted
+
+
+def _render_rich_text_block(block: dict) -> str:
+    return "".join(
+        _render_rich_text_container(el) for el in (block.get("elements") or []))
+
+
+def _render_table_block(block: dict) -> str:
+    """Render a Block Kit table as pipe-delimited rows (each cell is itself a
+    rich_text block)."""
+    lines = []
+    for row in block.get("rows") or []:
+        cells = [
+            _render_rich_text_block(cell).strip().replace("\n", " ")
+            for cell in row
+        ]
+        lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _plain_text(obj) -> str:
+    return obj.get("text") or "" if isinstance(obj, dict) else ""
+
+
+def render_blocks(blocks: list[dict]) -> str:
+    """Flatten Slack Block Kit *blocks* to plain text.
+
+    Bot-posted reports (daily stats, compliance scans, …) carry their substance
+    in ``rich_text`` and ``table`` blocks while the message ``text`` field holds
+    only a short fallback summary. Rendering the blocks lets tabular report data
+    survive into the text an agent reads. Unknown block types are skipped;
+    returns ``""`` when nothing renders.
+    """
+    parts: list[str] = []
+    for b in blocks or []:
+        t = b.get("type")
+        if t == "rich_text":
+            parts.append(_render_rich_text_block(b))
+        elif t == "table":
+            parts.append(_render_table_block(b))
+        elif t in ("section", "header"):
+            parts.append(_plain_text(b.get("text")))
+            for field in b.get("fields") or []:
+                parts.append(_plain_text(field))
+        elif t == "context":
+            parts.append(" ".join(
+                _plain_text(e) or _render_leaf(e)
+                for e in (b.get("elements") or [])))
+        # divider / image / actions / … carry no readable text — skip.
+    rendered = "\n".join(p for p in parts if p and p.strip())
+    return re.sub(r"\n{3,}", "\n\n", rendered).strip()
 
 
 def _est_tokens(text: str) -> int:
