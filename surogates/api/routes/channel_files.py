@@ -167,7 +167,7 @@ async def fetch_channel_messages_route(
             platform=platform,
             vault=request.app.state.credential_vault,
             session=session,
-            limit=body.limit if body.limit is not None else 50,
+            limit=body.limit,
             since=body.since,
             user=body.user,
             now=time.time(),

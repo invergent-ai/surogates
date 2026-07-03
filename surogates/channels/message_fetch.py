@@ -10,6 +10,7 @@ result with a human-readable ``note`` rather than an error; an unparseable
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from surogates.channels.channel_backfill import (
@@ -22,16 +23,25 @@ from surogates.channels.channel_backfill import (
 )
 from surogates.channels.credentials import resolve_channel_credentials
 
+_log = logging.getLogger(__name__)
+
 _MAX_LIMIT = 200
 _DEFAULT_LIMIT = 50
+# When a since/user filter is set, the newest page alone can miss matches on a
+# busy channel; scan a few bounded pages so the filter sees the real window.
+# fetch_channel_context still honours its own per-fetch time budget.
+_FILTER_MAX_PAGES = 5
 
 
 def _clamp_limit(limit: Any) -> int:
+    """Coerce a caller-supplied limit to 1..200; None/garbage/non-positive → default."""
     try:
         n = int(limit)
     except (TypeError, ValueError):
         return _DEFAULT_LIMIT
-    return max(1, min(_MAX_LIMIT, n))
+    if n < 1:
+        return _DEFAULT_LIMIT
+    return min(_MAX_LIMIT, n)
 
 
 def _empty(note: str, channel: str = "") -> dict:
@@ -56,21 +66,31 @@ async def fetch_channel_messages(
         return _empty("This session is not bound to a Slack channel.")
 
     since_cutoff = parse_since(since, now=now)  # may raise ValueError
-    user_id = normalize_user(user)
+    user_query = normalize_user(user)
     n = _clamp_limit(limit)
 
-    refs = platform.descriptor.vault_refs(identifier)
-    creds = await resolve_channel_credentials(
-        vault=vault, kind="slack", identifier=identifier,
-        org_id=str(session.org_id), refs=refs,
-    )
-    if not (creds or {}).get("bot_token"):
-        return _empty("No Slack bot token is configured for this channel.")
+    try:
+        refs = platform.descriptor.vault_refs(identifier)
+        creds = await resolve_channel_credentials(
+            vault=vault, kind="slack", identifier=identifier,
+            org_id=str(session.org_id), refs=refs,
+        )
+        if not (creds or {}).get("bot_token"):
+            return _empty("No Slack bot token is configured for this channel.")
 
-    limits = BackfillLimits(max_messages=n, max_pages=1)
-    result = await platform.fetch_channel_context(
-        creds=creds, channel_id=channel_id, limits=limits,
-    )
+        # A since/user filter needs more than the newest page to cover its
+        # window; a plain "recent messages" call only needs one page.
+        pages = _FILTER_MAX_PAGES if (user_query or since_cutoff is not None) else 1
+        limits = BackfillLimits(max_pages=pages)
+        result = await platform.fetch_channel_context(
+            creds=creds, channel_id=channel_id, limits=limits,
+        )
+    except Exception:
+        _log.warning(
+            "fetch_channel_messages failed for channel %s", channel_id,
+            exc_info=True)
+        return _empty("Could not read this channel's history right now.")
+
     if result is None:
         return _empty(
             "Could not read this channel's history (the bot may not be a "
@@ -78,9 +98,9 @@ async def fetch_channel_messages(
 
     meta, messages = result
     picked = filter_messages_for_query(
-        messages, since_cutoff=since_cutoff, user_id=user_id, limit=n)
+        messages, since_cutoff=since_cutoff, user=user_query, limit=n)
     if not picked:
-        scope = " from that user" if user_id else ""
+        scope = " from that user" if user_query else ""
         return _empty(
             f"No messages found{scope} in the requested window.",
             channel=meta.name)

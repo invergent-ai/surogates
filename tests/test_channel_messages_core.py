@@ -42,24 +42,41 @@ def test_parse_since_invalid_raises():
         parse_since("2024-13-01", now=NOW)
 
 
-def test_filter_by_user_and_limit_returns_oldest_first():
+def test_parse_since_zero_window_raises():
+    # A '0h'/'0d' window is degenerate (cutoff == now → matches nothing); reject
+    # it so the agent gets feedback instead of a silent empty result.
+    with pytest.raises(ValueError):
+        parse_since("0h", now=NOW)
+    with pytest.raises(ValueError):
+        parse_since("0d", now=NOW)
+
+
+def test_filter_by_user_id_and_limit_returns_oldest_first():
     msgs = [  # newest-first, as fetch_channel_context returns
         _msg(NOW - 10, "U1"), _msg(NOW - 20, "U2"),
         _msg(NOW - 30, "U1"), _msg(NOW - 40, "U1"),
     ]
-    out = filter_messages_for_query(msgs, since_cutoff=None, user_id="U1", limit=2)
+    out = filter_messages_for_query(msgs, since_cutoff=None, user="U1", limit=2)
     assert [m.ts for m in out] == [NOW - 30, NOW - 10]  # newest 2 of U1, oldest-first
+
+
+def test_filter_by_display_name_case_insensitive():
+    # The rendered channel block shows display names, not U-ids, so a name query
+    # must match the author's display name (here 'name-U1').
+    msgs = [_msg(NOW - 10, "U1"), _msg(NOW - 20, "U2")]
+    out = filter_messages_for_query(msgs, since_cutoff=None, user="NAME-u1", limit=50)
+    assert [m.author_id for m in out] == ["U1"]
 
 
 def test_filter_by_since_drops_older():
     msgs = [_msg(NOW - 10, "U1"), _msg(NOW - 100, "U1")]
     out = filter_messages_for_query(
-        msgs, since_cutoff=NOW - 50, user_id="", limit=50)
+        msgs, since_cutoff=NOW - 50, user="", limit=50)
     assert [m.ts for m in out] == [NOW - 10]
 
 
 def test_filter_empty_input_returns_empty():
-    assert filter_messages_for_query([], since_cutoff=None, user_id="", limit=50) == []
+    assert filter_messages_for_query([], since_cutoff=None, user="", limit=50) == []
 
 
 def test_format_block_uses_custom_header():

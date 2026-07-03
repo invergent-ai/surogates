@@ -136,6 +136,8 @@ def parse_since(value: str | None, *, now: float) -> float | None:
     m = _REL_SINCE.match(v)
     if m:
         n = int(m.group(1))
+        if n <= 0:
+            raise ValueError(f"'since' window must be positive: {value!r}")
         unit = m.group(2).lower()
         return now - n * (3600 if unit == "h" else 86400)
     try:
@@ -145,9 +147,23 @@ def parse_since(value: str | None, *, now: float) -> float | None:
     return d.timestamp()
 
 
+def _matches_user(message: RawMessage, query: str) -> bool:
+    """Match a normalized user *query* against a message's Slack id or name.
+
+    A ``U…`` id matches exactly (case-insensitive); a name query matches when it
+    is a case-insensitive substring of the author's display name. The rendered
+    channel block shows display names, not ids, so an agent filtering by the
+    name it sees ("Flavius") must match — not only the raw id or ``<@U…>`` form.
+    """
+    if not query:
+        return True
+    q = query.lower()
+    return message.author_id.lower() == q or q in (message.author or "").lower()
+
+
 def filter_messages_for_query(
     messages: list[RawMessage], *, since_cutoff: float | None,
-    user_id: str, limit: int,
+    user: str, limit: int,
 ) -> list[RawMessage]:
     """Filter newest-first *messages* by since/user, take the newest *limit*,
     and return them oldest-first for natural reading order."""
@@ -155,7 +171,7 @@ def filter_messages_for_query(
     for m in messages:  # newest-first
         if since_cutoff is not None and m.ts < since_cutoff:
             continue
-        if user_id and m.author_id != user_id:
+        if not _matches_user(m, user):
             continue
         out.append(m)
         if len(out) >= max(1, limit):
