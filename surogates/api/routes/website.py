@@ -756,9 +756,8 @@ async def end_website_session(
 ) -> None:
     """Explicit end-of-visit hook: marks the session completed and clears the cookie.
 
-    Optional — sessions also auto-reset by the idle-reset job.  Useful
-    for single-page apps that want to release server resources when
-    the visitor closes the chat.
+    Useful for single-page apps that want to release server resources
+    when the visitor closes the chat.
     """
     claims = await _load_and_authorize_session(request, session_id)
     header_csrf = request.headers.get(CSRF_HEADER_NAME)
