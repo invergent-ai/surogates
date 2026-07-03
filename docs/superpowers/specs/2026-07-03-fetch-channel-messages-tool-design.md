@@ -51,7 +51,12 @@ server.
      the mention wrapper is stripped to the bare id.
 
    Handler validates it has a session-scoped `api_client` (else structured error),
-   then delegates to `api_client.fetch_channel_messages(limit, since, user)`.
+   normalizes `limit`/`user`, then delegates to
+   `api_client.fetch_channel_messages(limit=limit, since=since, user=user)`.
+   Add the tool to `surogates/tools/runtime.py`'s builtin module list and to
+   `TOOL_LOCATIONS` in `surogates/tools/router.py` so it is routed through the
+   harness like `fetch_channel_file`. Update channel-tool allow-list tests that
+   currently enumerate native channel tools.
 
 2. **Harness API client** — `fetch_channel_messages(...)` in
    `surogates/harness/api_client.py`, alongside `fetch_channel_file`. Requires
@@ -60,61 +65,89 @@ server.
    error-envelope shape as `fetch_channel_file`.
 
 3. **Server route** — `POST /sessions/{session_id}/channel-messages` in
-   `surogates/api/routes/channel_files.py`. Reuses the session-store lookup and
-   tenant-ownership guard, and the `effective_channel_platform(session) == "slack"`
-   check. Resolves `bot_token` from the credential vault via
-   `resolve_channel_credentials`, derives the channel id from the session source,
-   builds a `BackfillLimits` (defaults, `max_pages=1`), calls
-   `platform.fetch_channel_context(...)`, then runs the pure filter/format core and
-   returns `{"messages_block": <str|None>, "count": <int>, "channel": <name>}`.
+   `surogates/api/routes/channel_files.py` (served externally under `/v1` by the
+   app router prefix). Reuses the session-store lookup and tenant-ownership guard,
+   and the `effective_channel_platform(session) == "slack"` check. Do not reuse
+   `_resolve_session_bucket` directly: message history does not need a workspace
+   bucket, so split the existing helper into a bucket-free `_resolve_session(...)`
+   plus the current bucket wrapper for file fetches.
+
+   Resolve `bot_token` from the credential vault with
+   `platform.descriptor.vault_refs(identifier)` and `resolve_channel_credentials`,
+   where `identifier = session.config["channel_identifier"]`. Read the Slack
+   channel id from `session.config["slack_channel_id"]`; if either value is
+   missing, return an empty result with a clear `note` instead of attempting a
+   Slack call. Build a `BackfillLimits` with `max_messages` set to the requested
+   capped limit and `max_pages=1`, call `platform.fetch_channel_context(...)`,
+   then run the pure filter/format core and return
+   `{"messages_block": <str|None>, "count": <int>, "channel": <name>, "note": <str|None>}`.
 
 4. **Filter + format core** — a pure function in `channel_backfill.py`
    (no I/O, unit-testable): given `meta`, `messages`, and `{since, user, limit}`,
-   filter by `since` (drop older) and `user` (match `RawMessage.author`/id), take
-   the newest `limit`, and render via the shared formatter. `RawMessage` currently
-   carries a resolved display-name `author`; to filter by id the core needs the
-   raw user id — extend `RawMessage`/`fetch_channel_context` to also carry the
-   Slack user id (`author_id`), or filter on the id inside the platform before
-   name resolution. Chosen: add `author_id` to `RawMessage` so the core stays pure
-   and the block can still show display names. (Confirm during implementation that
-   no other `RawMessage` construction site breaks.)
+   filter by `since` (drop older) and `user` (match `RawMessage.author_id`, with
+   mention form already normalized), take the newest `limit`, reverse to
+   oldest-first, and render via the shared formatter. Parse `since` in one helper:
+   ISO dates mean midnight UTC on that date, and relative windows (`24h`, `7d`)
+   are evaluated against the route's `now`. Invalid `since` values produce a
+   structured 400 rather than silently broadening the query.
+
+   `RawMessage` currently carries a resolved display-name `author`; to filter by
+   id the core needs the raw Slack user id. Chosen: add
+   `author_id: str = ""` to `RawMessage` so existing tests and construction sites
+   using `RawMessage(ts, author, text)` keep working, while
+   `SlackPlatform.fetch_channel_context` populates it from `m["user"]`. The block
+   continues to show display names via `author`.
 
 5. **Backfill reframe** — parameterize `format_context_block`'s header (currently
    the hardcoded `[channel context - history before the agent joined]` at
    `channel_backfill.py:106`) with a `header:` argument. Backfill passes a neutral
-   header such as `[recent channel history — snapshot; call fetch_channel_messages
+   header such as `[recent channel history — snapshot; use fetch_channel_messages
    for more or newer messages]`; the tool passes its own (e.g. `[channel messages]`
    with the applied filters noted). One formatter, two callers.
 
 ### Data flow
 
 ```
-agent → fetch_channel_messages(limit, since, user)          [tool, sandbox side]
+agent → fetch_channel_messages(limit, since, user)          [tool, harness side]
       → api_client.fetch_channel_messages → POST .../channel-messages
-      → route: resolve session + creds + channel_id          [server side]
+      → route: resolve session + creds + config slack_channel_id [server side]
       → SlackPlatform.fetch_channel_context (conversations.history, bot token)
       → filter_and_format(meta, messages, since, user, limit) [pure core]
-      → {messages_block, count, channel} → JSON to the tool → model
+      → {messages_block, count, channel, note} → JSON to the tool → model
 ```
 
 ### Error handling
 
 - No session-scoped client / no `session_id` → structured `{"success": False,
   error}` from the tool/client (no HTTP call).
+- Invalid `limit` → clamp to `1..200`; missing limit defaults to 50. Invalid
+  `since` → 400 with a clear detail string.
 - Non-Slack session → 400 (mirrors file route).
+- Missing `channel_identifier`, missing `slack_channel_id`, or no Slack bot token
+  → empty result with `count: 0` and a clear `note` (configuration issue, not a
+  server crash).
 - Slack error / bot not a member / DM → `fetch_channel_context` returns `None` →
-  route returns `{"messages_block": None, "count": 0}` with a clear note, not a 500.
+  route returns `{"messages_block": None, "count": 0, "note": <str>}` rather than
+  a 500.
 - Empty result after filtering → `messages_block: None`, `count: 0`, note that no
   messages matched.
 
 ## Testing
 
-- **Pure core** (`test_channel_backfill_*` sibling): since filter, user filter
-  (by id and by mention form), limit cap, empty input, header parameterization.
+- **Pure core** (`test_channel_backfill_*` sibling): since filter, user-id
+  filter, limit cap, empty input, header parameterization.
 - **Tool handler** (like `test_fetch_channel_file_tool.py`): missing api_client
-  error; delegates with parsed args; `<@U…>` → bare id normalization.
+  error; delegates with parsed args; `<@U…>` → bare id normalization; harness
+  routing is registered.
+- **Harness API client** (like `test_api_client_channel_file.py`): posts to the
+  session-scoped `/v1/sessions/{sid}/channel-messages` path with a JSON body,
+  requires `session_id`, maps HTTP errors to the standard error envelope.
 - **Route** (like `test_channel_files_route.py`): happy path, non-Slack 400,
-  tenant-ownership 404, `fetch_channel_context` returns None → empty block.
+  tenant-ownership 404, missing channel config returns empty result, no bot token
+  returns empty result, `fetch_channel_context` returns None → empty block.
+- **Slack platform** (`test_slack_fetch_channel_context.py`): `RawMessage.author_id`
+  is populated from the message `user` id while `author` remains the resolved
+  display name.
 - **Regression**: existing backfill tests still pass after header parameterization.
 
 ## Rollout
