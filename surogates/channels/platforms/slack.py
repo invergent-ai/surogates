@@ -789,6 +789,7 @@ class SlackPlatform:
             ANSWER_ACTION_ID,
             MODAL_CALLBACK_ID,
             ModalErrors,
+            build_answered_blocks,
             build_question_modal,
             parse_modal_submission,
         )
@@ -825,10 +826,19 @@ class SlackPlatform:
                 )
                 if not pending:
                     return Response(status_code=200)
+                # Carry the clicked message's coordinates through the modal so
+                # the submit handler can replace the Answer button with the
+                # submitted answer.  view_submission payloads don't include them.
+                container = payload.get("container") or {}
+                message = payload.get("message") or {}
+                channel_id = (payload.get("channel") or {}).get("id") or ""
+                message_ts = container.get("message_ts") or message.get("ts") or ""
                 view = build_question_modal(
                     session_id=session_id,
                     tool_call_id=pending["tool_call_id"],
                     questions=pending["questions"],
+                    channel=channel_id,
+                    message_ts=message_ts,
                 )
                 await self._get_client((creds or {}).get("bot_token") or "").views_open(
                     trigger_id=payload.get("trigger_id"),
@@ -854,12 +864,33 @@ class SlackPlatform:
                 parsed = parse_modal_submission(view, pending["questions"])
                 if isinstance(parsed, ModalErrors):
                     return JSONResponse(parsed.to_response(), status_code=200)
-                await interactive_input.resolve_input_response(
+                resolved = await interactive_input.resolve_input_response(
                     deps.session_store,
                     session_id=parsed.session_id,
                     tool_call_id=parsed.tool_call_id,
                     responses=parsed.responses,
                 )
+                # On the winning submit, replace the now-dead Answer button with
+                # the submitted answer.  Stale/duplicate submits (resolved False)
+                # leave the message the first submitter already updated.
+                channel_id = meta.get("channel") or ""
+                message_ts = meta.get("message_ts") or ""
+                if resolved and channel_id and message_ts:
+                    answered_text, answered_blocks = build_answered_blocks(parsed.responses)
+                    try:
+                        await self._get_client(
+                            (creds or {}).get("bot_token") or ""
+                        ).chat_update(
+                            channel=channel_id,
+                            ts=message_ts,
+                            text=answered_text,
+                            blocks=answered_blocks,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[SlackPlatform] /interact answered chat_update failed",
+                            exc_info=True,
+                        )
             except Exception:
                 logger.warning("[SlackPlatform] /interact view_submission resolve failed", exc_info=True)
             return Response(status_code=200)

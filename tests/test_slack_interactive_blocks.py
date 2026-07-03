@@ -42,7 +42,12 @@ def test_modal_has_deterministic_ids_and_metadata():
 
     assert view["type"] == "modal"
     assert view["callback_id"] == MODAL_CALLBACK_ID
-    assert json.loads(view["private_metadata"]) == {"session_id": "s1", "tool_call_id": "tc1"}
+    assert json.loads(view["private_metadata"]) == {
+        "session_id": "s1",
+        "tool_call_id": "tc1",
+        "channel": "",
+        "message_ts": "",
+    }
     block_ids = [b["block_id"] for b in view["blocks"]]
     assert block_ids == ["q0_choice", "q0_other", "q1_other"]
 
@@ -108,3 +113,39 @@ def test_parse_free_text_answer():
     assert parsed.responses == [
         {"question": "Anything else?", "answer": "use a tunnel", "is_other": True},
     ]
+
+
+def test_modal_embeds_message_coords_in_metadata():
+    view = build_question_modal(
+        session_id="s1",
+        tool_call_id="tc1",
+        questions=[Q_FREE],
+        channel="C1",
+        message_ts="100.0",
+    )
+
+    meta = json.loads(view["private_metadata"])
+    assert meta["session_id"] == "s1"
+    assert meta["tool_call_id"] == "tc1"
+    assert meta["channel"] == "C1"
+    assert meta["message_ts"] == "100.0"
+
+
+def test_answered_blocks_render_qa_without_button():
+    from surogates.channels.platforms.slack_interactive import build_answered_blocks
+
+    text, blocks = build_answered_blocks(
+        [
+            {"question": "Which color?", "answer": "blue", "is_other": False},
+            {"question": "Anything else?", "answer": "make it bold", "is_other": True},
+        ],
+    )
+
+    # The button is gone: no actions block survives the replacement.
+    assert all(b.get("type") != "actions" for b in blocks)
+    flat = json.dumps(blocks)
+    assert "Answered" in flat
+    assert "Which color?" in flat and "blue" in flat
+    assert "Anything else?" in flat and "make it bold" in flat
+    # Fallback text carries the answers for notifications/accessibility.
+    assert "blue" in text and "make it bold" in text
