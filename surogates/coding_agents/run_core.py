@@ -14,6 +14,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 from surogates.coding_agents.agents import CodeResult, build_invocation
@@ -25,6 +26,7 @@ from surogates.coding_agents.run_progress import (
     CHANNEL_UPDATE_INTERVAL,
     render_code_run_ack,
     render_code_run_update,
+    summarize_progress_activity,
 )
 from surogates.coding_agents.runner import run_code_agent
 from surogates.session.events import EventType
@@ -74,6 +76,8 @@ async def execute_coding_run(
     repo: dict | None = None,
     git_pat: str | None = None,
     branch: str | None = None,
+    summary_client: Any | None = None,
+    summary_model: str | None = None,
     now: float | None = None,
 ) -> CodingRunOutcome:
     """Run one coding agent end to end, emitting CODE_RUN_* events.
@@ -175,8 +179,13 @@ async def execute_coding_run(
             {"run_id": run_id, "agent": agent, "text": render_code_run_ack(agent, repo)},
         )
 
+    # The heartbeat summarises the whole run so far, not the tiny delta that
+    # happens to arrive at throttle time (which is often a bare tool marker).
+    transcript_parts: list[str] = []
+
     async def _emit_progress(chunk: str) -> None:
         nonlocal last_update
+        transcript_parts.append(chunk)
         await store.emit_event(
             session.id,
             EventType.CODE_RUN_PROGRESS,
@@ -184,12 +193,16 @@ async def execute_coding_run(
         )
         if wants_updates and time.monotonic() - last_update >= CHANNEL_UPDATE_INTERVAL:
             last_update = time.monotonic()
+            transcript = "".join(transcript_parts)
+            summary = await summarize_progress_activity(
+                summary_client, summary_model, transcript,
+            )
             await store.emit_event(
                 session.id,
                 EventType.CODE_RUN_CHANNEL_UPDATE,
                 {
                     "run_id": run_id, "agent": agent,
-                    "text": render_code_run_update(repo, chunk),
+                    "text": render_code_run_update(repo, summary or transcript),
                 },
             )
 

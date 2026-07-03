@@ -215,6 +215,8 @@ class CodeCommandMixin:
                 ),
                 started_metadata={"source_event_id": source_event_id},
                 repo=repo, git_pat=git_pat, branch=branch,
+                summary_client=self._summary_client,
+                summary_model=self._summary_model,
             )
         except Exception as exc:  # provisioning/build failure — report cleanly
             logger.warning("/code run failed: %s", exc)
