@@ -2,7 +2,7 @@
 
 Text-only Kubernetes manifest templates that the operations team
 applies to deploy the platform-level scheduled-work ticker and the
-consolidated cleanup + idle-reset CronJobs.
+cleanup CronJob.
 
 ## Files
 
@@ -13,9 +13,6 @@ consolidated cleanup + idle-reset CronJobs.
 - `cleanup-cronjob.yaml.template` -- the CronJob that runs
   `python -m surogates.jobs.platform_cleanup` every 6 hours (default
   schedule).
-- `idle-reset-cronjob.yaml.template` -- the CronJob that runs
-  `python -m surogates.jobs.platform_idle_reset` every 5 minutes
-  (default schedule).
 
 ## Placeholders
 
@@ -33,7 +30,7 @@ choice:
 | `{{ redis_secret }}` | K8s Secret name holding `SUROGATES_REDIS__URL` |
 | `{{ ops_api_url }}` | URL of the surogate-ops API (e.g. `https://ops.example.com`) |
 | `{{ ops_api_token_secret }}` | K8s Secret holding a runtime-scope API token |
-| `{{ schedule }}` | Cron expression for the CronJob (defaults: cleanup `"0 */6 * * *"`, idle-reset `"*/5 * * * *"`) |
+| `{{ schedule }}` | Cron expression for the CronJob (default: cleanup `"0 */6 * * *"`) |
 
 ## Rollout
 
@@ -57,8 +54,7 @@ choice:
 The Python code provides the substrate (lock + ticker + cleanup
 scripts) but does NOT wire the production defaults for
 `platform_cleanup._default_agent_iter` /
-`_default_cleanup_for_agent` /
-`platform_idle_reset._default_*`.  Those functions raise
+`_default_cleanup_for_agent`.  Those functions raise
 `NotImplementedError` today.  The follow-up wires the surogate-ops
 API client + the per-agent cleanup body.
 
