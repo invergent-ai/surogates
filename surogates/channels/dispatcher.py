@@ -696,10 +696,24 @@ class ChannelDeliveryDispatcher:
                 await self._delivery.mark_delivered(item.id, provider_message_id=None)
                 return
 
-        # Thinking-placeholder: if inbound posted one for this session and it is
-        # for this channel, edit it instead of posting a fresh reply.
+        # Coding-run heartbeat: fold every update for a run into a single "main
+        # coding message" edited in place (latest activity only), independent of
+        # the turn's Thinking-placeholder lifecycle. The first heartbeat finds no
+        # recorded ts and posts fresh; later ones edit it.
+        code_run_id = item.payload.get("code_run")
         update_ts = None
-        if self._redis is not None:
+        if code_run_id and supports_edit and self._redis is not None:
+            from surogates.channels.channel_progress import read_code_run_ts
+            update_ts = await read_code_run_ts(
+                self._redis, platform.kind, item.session_id, code_run_id,
+                item.destination.get("channel_id", ""),
+            )
+            if update_ts is not None:
+                item.destination["update_ts"] = update_ts
+        # Thinking-placeholder: if inbound posted one for this session and it is
+        # for this channel, edit it instead of posting a fresh reply. Skipped for
+        # coding-run heartbeats so they never hijack the turn's placeholder.
+        elif not code_run_id and self._redis is not None:
             from surogates.channels.channel_progress import take_progress_update
             update_ts = await take_progress_update(
                 self._redis, platform.kind, item.session_id,
@@ -797,9 +811,27 @@ class ChannelDeliveryDispatcher:
             if self._redis is not None:
                 from surogates.channels.channel_progress import (
                     clear_placeholder,
+                    set_code_run_ts,
                     set_placeholder,
                 )
-                if intermediate:
+                if code_run_id and supports_edit:
+                    # Record (or refresh) this run's main-message ts so the next
+                    # heartbeat edits it in place instead of posting anew.
+                    ts = result.message_id or update_ts
+                    if ts:
+                        try:
+                            await set_code_run_ts(
+                                self._redis, platform.kind, item.session_id,
+                                code_run_id,
+                                channel=item.destination.get("channel_id", ""),
+                                ts=ts,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "[delivery] set_code_run_ts failed for outbox %d — ignoring",
+                                item.id,
+                            )
+                elif intermediate:
                     ts = result.message_id or update_ts
                     if ts:
                         try:

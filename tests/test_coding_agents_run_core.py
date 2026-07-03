@@ -195,15 +195,20 @@ async def test_channel_heartbeat_uses_summary_model(monkeypatch):
         summary_client=summary, summary_model="gpt-x",
     )
     assert outcome.status == "ok"
-    updates = [
-        d["text"] for et, d in store.events
-        if et == EventType.CODE_RUN_CHANNEL_UPDATE
+    channel_events = [
+        d for et, d in store.events if et == EventType.CODE_RUN_CHANNEL_UPDATE
     ]
+    updates = [d["text"] for d in channel_events]
     # The ack plus at least one throttled heartbeat carrying the model summary.
     assert any("Adding fuzzy matching to the search tool" in t for t in updates)
     # The run transcript reached the summary model.
     assert summary.calls
     assert "Editing the search tool" in summary.calls[0]["messages"][-1]["content"]
+    # Every update carries the run_id → delivery edits ONE main message in place.
+    assert all(d.get("run_id") for d in channel_events)
+    assert len({d["run_id"] for d in channel_events}) == 1
+    # The final update settles the message so it no longer reads "still working".
+    assert "still working" not in updates[-1].lower()
 
 
 async def test_channel_heartbeat_falls_back_without_summary_model(monkeypatch):

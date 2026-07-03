@@ -1,6 +1,7 @@
 from surogates.channels.channel_progress import (
     progress_key, set_placeholder, read_placeholder, clear_placeholder,
     take_progress_update, post_placeholder_once,
+    code_run_key, read_code_run_ts, set_code_run_ts,
 )
 
 
@@ -98,3 +99,35 @@ async def test_post_once_does_not_store_when_post_returns_none():
         r, "slack", "s1", post=_post, channel="C1", thread_ts=None)
     assert ts is None
     assert await read_placeholder(r, "slack", "s1") is None
+
+
+# --- coding-run main-message ts (edit-in-place heartbeats) -----------------
+
+
+def test_code_run_key_shape():
+    assert code_run_key("slack", "s1", "run7") == "channel-coderun:slack:s1:run7"
+
+
+async def test_code_run_ts_roundtrip_same_channel():
+    r = FakeRedis()
+    await set_code_run_ts(r, "slack", "s1", "run7", channel="C1", ts="111.1")
+    assert await read_code_run_ts(r, "slack", "s1", "run7", "C1") == "111.1"
+    assert r.ttl[code_run_key("slack", "s1", "run7")] == 1800
+
+
+async def test_code_run_ts_absent_returns_none():
+    # First heartbeat: nothing recorded yet → post fresh.
+    assert await read_code_run_ts(FakeRedis(), "slack", "s1", "run7", "C1") is None
+
+
+async def test_code_run_ts_channel_mismatch_returns_none():
+    r = FakeRedis()
+    await set_code_run_ts(r, "slack", "s1", "run7", channel="C1", ts="111.1")
+    assert await read_code_run_ts(r, "slack", "s1", "run7", "C_OTHER") is None
+
+
+async def test_code_run_ts_is_per_run():
+    # A second run in the same session gets its own message (own key).
+    r = FakeRedis()
+    await set_code_run_ts(r, "slack", "s1", "runA", channel="C1", ts="1.1")
+    assert await read_code_run_ts(r, "slack", "s1", "runB", "C1") is None

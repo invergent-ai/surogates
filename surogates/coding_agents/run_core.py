@@ -25,6 +25,7 @@ from surogates.coding_agents.credentials import (
 from surogates.coding_agents.run_progress import (
     CHANNEL_UPDATE_INTERVAL,
     render_code_run_ack,
+    render_code_run_done,
     render_code_run_update,
     summarize_progress_activity,
 )
@@ -245,6 +246,19 @@ async def execute_coding_run(
             "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
         },
     )
+
+    # Settle the edited-in-place channel message so it no longer reads "still
+    # working"; the detailed result is replayed as its own message.
+    if wants_updates:
+        await store.emit_event(
+            session.id,
+            EventType.CODE_RUN_CHANNEL_UPDATE,
+            {
+                "run_id": run_id, "agent": agent,
+                "text": render_code_run_done(agent, repo, ok=not result.error),
+            },
+        )
+
     return CodingRunOutcome(
         status="ok", result=result, result_event_id=result_event_id,
         branch=branch, checkout_dir=checkout_dir,

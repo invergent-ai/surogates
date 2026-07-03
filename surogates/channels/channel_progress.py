@@ -56,6 +56,46 @@ async def take_progress_update(redis, kind: str, session_id, channel_id: str) ->
     return ph.get("ts") or None
 
 
+def code_run_key(kind: str, session_id, run_id: str) -> str:
+    return f"channel-coderun:{kind}:{session_id}:{run_id}"
+
+
+async def read_code_run_ts(
+    redis, kind: str, session_id, run_id: str, channel_id: str,
+) -> str | None:
+    """The ts of this run's 'main coding message' to edit, or None.
+
+    Returns the recorded ts only when it was posted to the *same* channel (a
+    different channel means the run's message lives elsewhere — post fresh).
+    None when no message has been posted for this run yet (the first heartbeat
+    posts it) or the record is malformed.
+    """
+    raw = await redis.get(code_run_key(kind, session_id, run_id))
+    if not raw:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or obj.get("channel") != channel_id:
+        return None
+    return obj.get("ts") or None
+
+
+async def set_code_run_ts(
+    redis, kind: str, session_id, run_id: str, *, channel: str, ts: str,
+    ttl_s: int = 1800,
+) -> None:
+    """Record (and refresh the TTL of) this run's main-message ts for editing."""
+    await redis.set(
+        code_run_key(kind, session_id, run_id),
+        json.dumps({"channel": channel, "ts": ts}),
+        ex=ttl_s,
+    )
+
+
 async def post_placeholder_once(
     redis, kind: str, session_id, *, post, channel: str, thread_ts,
 ) -> str | None:
