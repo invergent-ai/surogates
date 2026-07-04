@@ -53,6 +53,9 @@ class _PodEntry:
     pod_ip: str = ""
     token: str = ""
     status: SandboxStatus = SandboxStatus.PENDING
+    # SSH remote-access resources reaped alongside the pod.
+    ssh_secret_name: str | None = None
+    ssh_netpol_name: str | None = None
 
 
 class K8sSandbox:
@@ -87,6 +90,9 @@ class K8sSandbox:
         s3fs_image: str = "ghcr.io/invergent-ai/s3fs-fuse:latest",
         s3_endpoint: str = "",
         mcp_proxy_url: str = "",
+        ssh_agent_image: str = "ghcr.io/invergent-ai/surogates-ssh-agent:latest",
+        ssh_egress_enforced: bool = False,
+        ssh_egress_baseline_cidrs: list[str] | None = None,
     ) -> None:
         self._namespace = namespace
         self._service_account = service_account
@@ -96,8 +102,14 @@ class K8sSandbox:
         self._s3fs_image = s3fs_image
         self._s3_endpoint = s3_endpoint
         self._mcp_proxy_url = mcp_proxy_url
+        # Isolated ssh-agent sidecar image + egress enforcement for the SSH
+        # remote-access feature (see ``_build_ssh_sidecar`` / NetworkPolicy).
+        self._ssh_agent_image = ssh_agent_image
+        self._ssh_egress_enforced = ssh_egress_enforced
+        self._ssh_egress_baseline_cidrs = list(ssh_egress_baseline_cidrs or ())
         self._pods: dict[str, _PodEntry] = {}
         self._api: client.CoreV1Api | None = None
+        self._net_api: client.NetworkingV1Api | None = None
         self._client = ExecutorHTTPClient()
 
     # ------------------------------------------------------------------
@@ -128,6 +140,16 @@ class K8sSandbox:
             self._api = client.CoreV1Api()
         return self._api
 
+    async def _get_net_api(self) -> client.NetworkingV1Api:
+        """Return a cached NetworkingV1Api client (SSH egress policies).
+
+        Reuses the same in-cluster/kubeconfig loading as ``_get_api``.
+        """
+        if self._net_api is None:
+            await self._get_api()
+            self._net_api = client.NetworkingV1Api()
+        return self._net_api
+
     # ------------------------------------------------------------------
     # Sandbox protocol
     # ------------------------------------------------------------------
@@ -139,20 +161,33 @@ class K8sSandbox:
         pod_name = f"sandbox-{sandbox_id[:12]}"
         secret_name = f"sandbox-s3-{sandbox_id[:12]}"
 
+        # SSH remote-access requires enforced egress; refuse rather than
+        # silently degrade to config-only host scoping.
+        self._require_ssh_egress_enforced(spec)
+
         # 1. Create K8s Secret with session-scoped S3 credentials.
         await self._create_s3_secret(api, secret_name)
+
+        # 1b. Create the in-memory SSH key Secret (sidecar-only) when needed.
+        ssh_secret_name: str | None = None
+        if spec.ssh_key_material:
+            ssh_secret_name = f"sandbox-ssh-{sandbox_id[:12]}"
+            await self._create_ssh_secret(api, ssh_secret_name, spec.ssh_key_material)
 
         # 2. Build and create the pod.
         executor_token = secrets.token_urlsafe(32)
         pod_manifest = self._build_pod_manifest(
             sandbox_id, pod_name, secret_name, spec,
             executor_token=executor_token,
+            ssh_secret_name=ssh_secret_name,
         )
         try:
             await api.create_namespaced_pod(self._namespace, pod_manifest)
         except ApiException as exc:
             logger.error("Failed to create sandbox pod %s: %s", pod_name, exc)
             await self._delete_secret_safe(api, secret_name)
+            if ssh_secret_name:
+                await self._delete_secret_safe(api, ssh_secret_name)
             raise SandboxUnavailableError(
                 self._classify_create_pod_failure(exc),
             ) from exc
@@ -164,6 +199,7 @@ class K8sSandbox:
             namespace=self._namespace,
             spec=spec,
             token=executor_token,
+            ssh_secret_name=ssh_secret_name,
         )
         self._pods[sandbox_id] = entry
 
@@ -272,6 +308,7 @@ class K8sSandbox:
         spec: SandboxSpec,
         *,
         executor_token: str,
+        ssh_secret_name: str | None = None,
     ) -> client.V1Pod:
         """Build the K8s pod manifest for a sandbox."""
         # Parse resources from spec for s3fs mount.  s3fs accepts
@@ -416,6 +453,55 @@ class K8sSandbox:
             ],
         )
 
+        containers = [sandbox_container, s3fs_container]
+        volumes = [
+            client.V1Volume(
+                name="workspace",
+                empty_dir=client.V1EmptyDirVolumeSource(),
+            ),
+            # On-disk cache for the geesefs sidecar. Sized to bound
+            # node ephemeral-storage pressure; if a session needs
+            # more, the cache evicts LRU rather than failing writes.
+            client.V1Volume(
+                name="geesefs-cache",
+                empty_dir=client.V1EmptyDirVolumeSource(
+                    size_limit="2Gi",
+                ),
+            ),
+        ]
+        automount_sa_token = None
+
+        # Isolated ssh-agent sidecar: holds the private key(s) in a separate
+        # container the untrusted sandbox cannot read or ptrace.  The main
+        # container gets ONLY the auth socket (a shared in-memory volume); the
+        # key Secret is mounted solely into the sidecar.
+        if spec.ssh_key_material and ssh_secret_name:
+            sandbox_container.volume_mounts.append(
+                client.V1VolumeMount(
+                    name="ssh-agent-sock", mount_path="/ssh-agent",
+                ),
+            )
+            volumes.extend([
+                client.V1Volume(
+                    name="ssh-agent-sock",
+                    empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
+                ),
+                client.V1Volume(
+                    name="ssh-keys",
+                    secret=client.V1SecretVolumeSource(
+                        secret_name=ssh_secret_name, default_mode=0o400,
+                    ),
+                ),
+                client.V1Volume(
+                    name="ssh-tmp",
+                    empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
+                ),
+            ])
+            containers.append(self._build_ssh_sidecar(spec, ssh_secret_name))
+            # The sidecar (and the sandbox) need no K8s API access; withholding
+            # the SA token shrinks the blast radius of the untrusted container.
+            automount_sa_token = False
+
         return client.V1Pod(
             metadata=client.V1ObjectMeta(
                 name=pod_name,
@@ -432,22 +518,9 @@ class K8sSandbox:
                 service_account_name=self._service_account,
                 active_deadline_seconds=_DEFAULT_ACTIVE_DEADLINE,
                 restart_policy="Never",
-                volumes=[
-                    client.V1Volume(
-                        name="workspace",
-                        empty_dir=client.V1EmptyDirVolumeSource(),
-                    ),
-                    # On-disk cache for the geesefs sidecar. Sized to bound
-                    # node ephemeral-storage pressure; if a session needs
-                    # more, the cache evicts LRU rather than failing writes.
-                    client.V1Volume(
-                        name="geesefs-cache",
-                        empty_dir=client.V1EmptyDirVolumeSource(
-                            size_limit="2Gi",
-                        ),
-                    ),
-                ],
-                containers=[sandbox_container, s3fs_container],
+                automount_service_account_token=automount_sa_token,
+                volumes=volumes,
+                containers=containers,
             ),
         )
 
@@ -479,6 +552,119 @@ class K8sSandbox:
         except ApiException as exc:
             if exc.status != 409:  # Already exists — OK
                 raise
+
+    # ------------------------------------------------------------------
+    # SSH remote-access: isolated ssh-agent sidecar
+    # ------------------------------------------------------------------
+
+    async def _create_ssh_secret(
+        self, api: client.CoreV1Api, secret_name: str,
+        ssh_key_material: dict[str, dict[str, str]],
+    ) -> None:
+        """Create the in-memory Secret holding the SSH private key(s).
+
+        Mounted solely into the ssh-agent sidecar (never the main container).
+        K8s Secret volumes are tmpfs-backed, and the Secret is reaped with the
+        pod so no key material outlives the session.
+        """
+        data: dict[str, str] = {}
+        for name, mat in ssh_key_material.items():
+            data[f"id_{name}"] = mat.get("private_key", "")
+            data[f"pass_{name}"] = mat.get("passphrase", "")
+        secret = client.V1Secret(
+            metadata=client.V1ObjectMeta(
+                name=secret_name,
+                namespace=self._namespace,
+                labels={"app": "surogates-sandbox"},
+            ),
+            string_data=data,
+        )
+        try:
+            await api.create_namespaced_secret(self._namespace, secret)
+        except ApiException as exc:
+            if exc.status != 409:
+                raise
+
+    def _build_ssh_sidecar(
+        self, spec: SandboxSpec, ssh_secret_name: str,
+    ) -> client.V1Container:
+        """Build the isolated ssh-agent sidecar container.
+
+        Runs as a distinct non-root uid with a read-only root filesystem and no
+        Linux capabilities.  Loads each key into the agent (passphrase fed via
+        ``SSH_ASKPASS`` non-interactively) then idles holding the socket.  The
+        untrusted sandbox container shares only the auth socket.
+        """
+        key_names = sorted(spec.ssh_key_material)
+        add_lines = "\n".join(
+            (
+                f'if [ -s /ssh-keys/pass_{n} ]; then '
+                f'cat /ssh-keys/pass_{n} > /tmp/askpass_in; '
+                f'SSH_ASKPASS=/tmp/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=:0 '
+                f'ssh-add /ssh-keys/id_{n} < /dev/null; '
+                f'else ssh-add /ssh-keys/id_{n} < /dev/null; fi'
+            )
+            for n in key_names
+        )
+        script = (
+            "set -eu\n"
+            "umask 077\n"
+            "cat > /tmp/askpass <<'EOF'\n#!/bin/sh\ncat /tmp/askpass_in\nEOF\n"
+            "chmod 0700 /tmp/askpass\n"
+            'eval "$(ssh-agent -a /ssh-agent/auth.sock)"\n'
+            f"{add_lines}\n"
+            "rm -f /tmp/askpass_in\n"
+            "while kill -0 \"$SSH_AGENT_PID\" 2>/dev/null; do sleep 5; done\n"
+        )
+        return client.V1Container(
+            name="ssh-agent",
+            image=self._ssh_agent_image,
+            command=["/bin/sh", "-c", script],
+            security_context=client.V1SecurityContext(
+                run_as_non_root=True,
+                run_as_user=65532,
+                read_only_root_filesystem=True,
+                allow_privilege_escalation=False,
+                capabilities=client.V1Capabilities(drop=["ALL"]),
+            ),
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "10m", "memory": "32Mi"},
+                limits={"cpu": "100m", "memory": "64Mi"},
+            ),
+            volume_mounts=[
+                client.V1VolumeMount(
+                    name="ssh-agent-sock", mount_path="/ssh-agent",
+                ),
+                client.V1VolumeMount(
+                    name="ssh-keys", mount_path="/ssh-keys", read_only=True,
+                ),
+                client.V1VolumeMount(name="ssh-tmp", mount_path="/tmp"),
+            ],
+        )
+
+    def _require_ssh_egress_enforced(self, spec: SandboxSpec) -> None:
+        """Fail closed when SSH is requested but egress cannot be enforced.
+
+        Host scoping is enforced by NetworkPolicy egress, not by the in-sandbox
+        ssh config.  If the cluster is not configured to enforce it, refuse the
+        SSH session rather than silently degrade to config-only controls.
+        """
+        if spec.ssh_key_material and not self._ssh_egress_enforced:
+            raise SandboxUnavailableError(
+                "SSH targets require enforced egress (ssh_egress_enforced); "
+                "refusing to provision an SSH-enabled sandbox.",
+            )
+
+    async def _delete_network_policy_safe(
+        self, api: client.CoreV1Api, name: str,
+    ) -> None:
+        """Delete the SSH NetworkPolicy, ignoring 404."""
+        try:
+            net_api = await self._get_net_api()
+            await net_api.delete_namespaced_network_policy(name, self._namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("Failed to delete network policy %s: %s", name, exc)
 
     async def _delete_secret_safe(self, api: client.CoreV1Api, secret_name: str) -> None:
         """Delete a secret, ignoring 404."""
@@ -531,6 +717,10 @@ class K8sSandbox:
                 logger.warning("Failed to delete pod %s: %s", entry.pod_name, exc)
 
         await self._delete_secret_safe(api, entry.secret_name)
+        if entry.ssh_secret_name:
+            await self._delete_secret_safe(api, entry.ssh_secret_name)
+        if entry.ssh_netpol_name:
+            await self._delete_network_policy_safe(api, entry.ssh_netpol_name)
 
     # ------------------------------------------------------------------
     # Status mapping

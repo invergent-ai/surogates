@@ -368,6 +368,15 @@ class SandboxSettings(BaseSettings):
     # In-cluster S3 endpoint for sandbox pods (they can't use the host NodePort).
     # If empty, falls back to storage.endpoint.
     k8s_s3_endpoint: str = ""
+    # Isolated ssh-agent sidecar image for SSH remote-access sessions.
+    k8s_ssh_agent_image: str = "ghcr.io/invergent-ai/surogates-ssh-agent:latest"
+    # SSH host scoping is enforced by NetworkPolicy egress.  Must be True for
+    # the cluster's CNI to actually enforce it; when False, SSH-enabled
+    # sessions fail closed rather than run without a network boundary.
+    ssh_egress_enforced: bool = False
+    # CIDRs the sandbox always needs egress to (DNS, S3/workspace, MCP proxy,
+    # runtime APIs) in addition to the resolved SSH target IPs.
+    ssh_egress_baseline_cidrs: list[str] = Field(default_factory=list)
 
 
 class BrowserSettings(BaseSettings):
