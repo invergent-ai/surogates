@@ -39,6 +39,12 @@ from surogates.tools.utils.workspace_sandbox import (
 
 logger = logging.getLogger(__name__)
 
+# Writable dir for the generated ssh config, known_hosts and PATH wrappers.
+# ``ssh`` reads its user config from the passwd home (read-only in the sandbox),
+# so we can't rely on ``$HOME/.ssh/config``; the wrappers under ``bin/`` force
+# ``-F <this dir>/config`` instead.
+_SSH_DIR = "/tmp/surogates-ssh"
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,27 +90,51 @@ def _ssh_hosts_from_env() -> list[str]:
 
 
 def _setup_ssh_home(child_env: dict[str, str]) -> None:
-    """Write the pinned ssh config/known_hosts into the child's HOME.
+    """Install a writable ssh config + a PATH ``ssh`` wrapper that loads it.
 
-    No-op unless the session is SSH-enabled.  Rewrites on every command so the
-    strict host-key config is re-pinned and cannot be persistently weakened by
-    the agent editing the files between commands.  Files are non-secret.
+    No-op unless the session is SSH-enabled (``SUROGATES_SSH_TARGETS`` set to a
+    non-empty JSON list).  ``ssh`` reads its user config from the *passwd* home
+    (read-only in the sandbox), not ``$HOME``, so a config written under the
+    child's HOME is never loaded.  Instead we write config/known_hosts into a
+    fixed writable dir and shadow ``ssh``/``scp``/``sftp`` on PATH with thin
+    wrappers that force ``-F <config>``.  Rewriting on every command re-pins the
+    strict host-key config so the agent cannot persistently weaken it.  All
+    files are non-secret (the private key lives in the isolated ssh-agent).
     """
     raw = os.environ.get("SUROGATES_SSH_TARGETS", "")
     if not raw:
-        return
-    home = child_env.get("HOME")
-    if not home:
         return
     try:
         targets = json.loads(raw)
     except ValueError:
         return
-    from surogates.ssh_access.resolve import write_ssh_home
+    if not targets:
+        return
+    from surogates.ssh_access.resolve import build_ssh_config
 
-    write_ssh_home(
-        home, targets, os.environ.get("SUROGATES_SSH_KNOWN_HOSTS", ""),
-    )
+    bin_dir = os.path.join(_SSH_DIR, "bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    os.chmod(_SSH_DIR, 0o700)
+
+    known_hosts_path = os.path.join(_SSH_DIR, "known_hosts")
+    with open(known_hosts_path, "w", encoding="utf-8") as fh:
+        fh.write(os.environ.get("SUROGATES_SSH_KNOWN_HOSTS", ""))
+    os.chmod(known_hosts_path, 0o600)
+
+    config_path = os.path.join(_SSH_DIR, "config")
+    with open(config_path, "w", encoding="utf-8") as fh:
+        fh.write(build_ssh_config(targets, known_hosts_path=known_hosts_path))
+    os.chmod(config_path, 0o600)
+
+    for tool in ("ssh", "scp", "sftp"):
+        wrapper = os.path.join(bin_dir, tool)
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write(
+                f"#!/bin/sh\nexec /usr/bin/{tool} -F {config_path} \"$@\"\n",
+            )
+        os.chmod(wrapper, 0o755)
+
+    child_env["PATH"] = bin_dir + ":" + child_env.get("PATH", "")
 
 
 def _get_srt_settings_path(workspace_path: str) -> str:

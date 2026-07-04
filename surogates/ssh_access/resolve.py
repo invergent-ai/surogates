@@ -90,12 +90,19 @@ def validate_targets(raw: Sequence[Mapping[str, Any]] | None) -> list[dict]:
     return out
 
 
-def build_ssh_config(targets: Sequence[Mapping[str, Any]]) -> str:
-    """Render ``~/.ssh/config`` from targets (no secret; safe for the sandbox).
+def build_ssh_config(
+    targets: Sequence[Mapping[str, Any]],
+    known_hosts_path: str = "~/.ssh/known_hosts",
+) -> str:
+    """Render ``ssh_config`` from targets (no secret; safe for the sandbox).
 
-    Every host authenticates only through the agent socket (``IdentityAgent``
-    + ``IdentitiesOnly``) and verifies against the pinned ``known_hosts``
-    (``StrictHostKeyChecking yes``).
+    Each host verifies against the pinned ``known_hosts``
+    (``StrictHostKeyChecking yes`` + ``UserKnownHostsFile <known_hosts_path>``).
+    Authentication uses the agent's key via ``SSH_AUTH_SOCK`` (ssh consults the
+    agent socket by default) — we deliberately emit neither ``IdentityAgent``
+    (the ``${SSH_AUTH_SOCK}`` form isn't reliably expanded in ssh_config) nor
+    ``IdentitiesOnly yes`` (which, with no ``IdentityFile``, would suppress the
+    agent's keys and break publickey auth).
     """
     blocks: list[str] = []
     for t in targets or ():
@@ -107,10 +114,8 @@ def build_ssh_config(targets: Sequence[Mapping[str, Any]]) -> str:
         if t.get("user"):
             lines.append(f"    User {t['user']}")
         lines.extend([
-            "    IdentityAgent ${SSH_AUTH_SOCK}",
-            "    IdentitiesOnly yes",
             "    StrictHostKeyChecking yes",
-            "    UserKnownHostsFile ~/.ssh/known_hosts",
+            f"    UserKnownHostsFile {known_hosts_path}",
         ])
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) + ("\n" if blocks else "")
@@ -149,12 +154,12 @@ def write_ssh_home(
     ssh_dir = Path(home) / ".ssh"
     ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(ssh_dir, 0o700)
-    cfg = ssh_dir / "config"
-    cfg.write_text(build_ssh_config(targets), encoding="utf-8")
-    os.chmod(cfg, 0o600)
     kh = ssh_dir / "known_hosts"
     kh.write_text(known_hosts or "", encoding="utf-8")
     os.chmod(kh, 0o600)
+    cfg = ssh_dir / "config"
+    cfg.write_text(build_ssh_config(targets, known_hosts_path=str(kh)), encoding="utf-8")
+    os.chmod(cfg, 0o600)
 
 
 def render_ssh_targets_prompt(targets: Sequence[Mapping[str, Any]] | None) -> str:
