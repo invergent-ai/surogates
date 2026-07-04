@@ -70,14 +70,17 @@ def test_validate_rejects_metachar_key_name():
         validate_targets([{**_T, "key_name": "foo;bar"}])
 
 
-def test_config_pins_socket_and_strict_checking():
-    cfg = build_ssh_config(validate_targets([_T]))
+def test_config_pins_known_hosts_and_strict_checking():
+    cfg = build_ssh_config(validate_targets([_T]), known_hosts_path="/x/known_hosts")
     assert "Host deploy" in cfg
     assert "HostName deploy.example.com" in cfg
     assert "User ubuntu" in cfg
-    assert "IdentityAgent ${SSH_AUTH_SOCK}" in cfg
     assert "StrictHostKeyChecking yes" in cfg
-    assert "IdentitiesOnly yes" in cfg
+    assert "UserKnownHostsFile /x/known_hosts" in cfg
+    # The agent-key-blocking / unreliable directives must be gone: with no
+    # IdentityFile they would suppress the ssh-agent key (publickey denied).
+    assert "IdentitiesOnly" not in cfg
+    assert "IdentityAgent" not in cfg
 
 
 def test_config_empty_for_no_targets():
