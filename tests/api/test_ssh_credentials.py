@@ -95,6 +95,19 @@ async def test_reject_bad_name():
     assert resp.status_code == 422
 
 
+async def test_reject_metachar_name():
+    # A shell metachar / space in the name must be rejected (it would flow
+    # into the vault ref and the sidecar's id_<name>/pass_<name> filenames).
+    app = _make_app(tenant=_tenant(), ctx=_ctx(), vault=_FakeVault())
+    async with _client(app) as client:
+        for bad in ("a;b", "a b"):
+            resp = await client.post(
+                "/v1/api/ssh-credentials/credential",
+                json={"name": bad, "private_key": _KEY},
+            )
+            assert resp.status_code == 422, bad
+
+
 async def test_delete_ssh_key():
     vault = _FakeVault()
     vault.stored[(ORG, "ssh_key:prod")] = SSHKeyBundle(private_key=_KEY).to_json()

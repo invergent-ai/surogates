@@ -48,6 +48,28 @@ def test_validate_normalizes_blank_user_to_none():
     assert out[0]["port"] == 22
 
 
+def test_validate_rejects_newline_in_alias():
+    # An embedded newline would forge extra ~/.ssh/config directives.
+    with pytest.raises(ValueError):
+        validate_targets([{**_T, "alias": "deploy\nHost evil"}])
+
+
+def test_validate_rejects_newline_in_host():
+    with pytest.raises(ValueError):
+        validate_targets([{**_T, "host": "deploy.example.com\n    StrictHostKeyChecking no"}])
+
+
+def test_validate_rejects_newline_in_user():
+    with pytest.raises(ValueError):
+        validate_targets([{**_T, "user": "ubuntu\nHost evil"}])
+
+
+def test_validate_rejects_metachar_key_name():
+    # A shell metachar in key_name reaches the sidecar's shell script.
+    with pytest.raises(ValueError):
+        validate_targets([{**_T, "key_name": "foo;bar"}])
+
+
 def test_config_pins_socket_and_strict_checking():
     cfg = build_ssh_config(validate_targets([_T]))
     assert "Host deploy" in cfg

@@ -169,11 +169,35 @@ class K8sSandbox:
         # 1. Create K8s Secret with session-scoped S3 credentials.
         await self._create_s3_secret(api, secret_name)
 
-        # 1b. Create the in-memory SSH key Secret (sidecar-only) when needed.
+        # 1b. Create the SSH resources (in-memory key Secret + egress
+        # NetworkPolicy) BEFORE the pod, so the egress boundary exists before
+        # the workload can open any outbound connection.  Fail closed: if
+        # EITHER step raises (API error OR a plain connection error), tear down
+        # every resource created so far — the SSH secret, the netpol, and the
+        # S3 secret — so we never leave a half-provisioned SSH pod or an
+        # orphaned Secret behind.
         ssh_secret_name: str | None = None
+        ssh_netpol_name: str | None = None
         if spec.ssh_key_material:
             ssh_secret_name = f"sandbox-ssh-{sandbox_id[:12]}"
-            await self._create_ssh_secret(api, ssh_secret_name, spec.ssh_key_material)
+            try:
+                await self._create_ssh_secret(
+                    api, ssh_secret_name, spec.ssh_key_material,
+                )
+                ssh_netpol_name = await self._apply_ssh_network_policy(
+                    spec, sandbox_id, pod_name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to provision SSH resources for %s: %s", pod_name, exc,
+                )
+                await self._delete_secret_safe(api, ssh_secret_name)
+                if ssh_netpol_name:
+                    await self._delete_network_policy_safe(api, ssh_netpol_name)
+                await self._delete_secret_safe(api, secret_name)
+                raise SandboxUnavailableError(
+                    f"Could not provision SSH resources for {pod_name}: {exc}",
+                ) from exc
 
         # 2. Build and create the pod.
         executor_token = secrets.token_urlsafe(32)
@@ -189,6 +213,8 @@ class K8sSandbox:
             await self._delete_secret_safe(api, secret_name)
             if ssh_secret_name:
                 await self._delete_secret_safe(api, ssh_secret_name)
+            if ssh_netpol_name:
+                await self._delete_network_policy_safe(api, ssh_netpol_name)
             raise SandboxUnavailableError(
                 self._classify_create_pod_failure(exc),
             ) from exc
@@ -201,22 +227,9 @@ class K8sSandbox:
             spec=spec,
             token=executor_token,
             ssh_secret_name=ssh_secret_name,
+            ssh_netpol_name=ssh_netpol_name,
         )
         self._pods[sandbox_id] = entry
-
-        # 2b. Apply the SSH egress NetworkPolicy before the pod can make
-        # outbound connections (the agent only runs ssh well after provision
-        # returns).  Failure here must not leave a half-provisioned SSH pod.
-        try:
-            entry.ssh_netpol_name = await self._apply_ssh_network_policy(
-                spec, sandbox_id, pod_name,
-            )
-        except ApiException as exc:
-            logger.error("Failed to apply SSH network policy for %s: %s", pod_name, exc)
-            await self._destroy_entry(api, entry)
-            raise SandboxUnavailableError(
-                f"Could not enforce SSH egress for {pod_name}: {exc}",
-            ) from exc
 
         # 3. Wait for the pod to become ready (the readinessProbe gates
         # on the executor daemon being up AND /workspace being FUSE-
@@ -231,6 +244,7 @@ class K8sSandbox:
         except Exception as exc:
             logger.error("Sandbox pod %s failed to become ready", pod_name, exc_info=True)
             await self._destroy_entry(api, entry)
+            self._pods.pop(sandbox_id, None)
             raise SandboxUnavailableError(
                 f"Sandbox pod {pod_name} failed to become ready: {exc}",
             ) from exc
@@ -485,6 +499,7 @@ class K8sSandbox:
             ),
         ]
         automount_sa_token = None
+        pod_security_context = None
 
         # Isolated ssh-agent sidecar: holds the private key(s) in a separate
         # container the untrusted sandbox cannot read or ptrace.  The main
@@ -504,7 +519,11 @@ class K8sSandbox:
                 client.V1Volume(
                     name="ssh-keys",
                     secret=client.V1SecretVolumeSource(
-                        secret_name=ssh_secret_name, default_mode=0o400,
+                        # 0o440 (group-readable): with the pod's fsGroup=65532
+                        # the sidecar's gid can read the key.  The volume is
+                        # mounted ONLY in the sidecar, so this is not a
+                        # cross-container exposure.
+                        secret_name=ssh_secret_name, default_mode=0o440,
                     ),
                 ),
                 client.V1Volume(
@@ -516,6 +535,11 @@ class K8sSandbox:
             # The sidecar (and the sandbox) need no K8s API access; withholding
             # the SA token shrinks the blast radius of the untrusted container.
             automount_sa_token = False
+            # fsGroup group-owns the mounted key + the shared socket dir under
+            # gid 65532 and adds it as a supplemental group to every container,
+            # so the sidecar can read the key and the main container (different
+            # uid) can connect to the agent socket over the shared group.
+            pod_security_context = client.V1PodSecurityContext(fs_group=65532)
 
         return client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -534,6 +558,7 @@ class K8sSandbox:
                 active_deadline_seconds=_DEFAULT_ACTIVE_DEADLINE,
                 restart_policy="Never",
                 automount_service_account_token=automount_sa_token,
+                security_context=pod_security_context,
                 volumes=volumes,
                 containers=containers,
             ),
@@ -627,6 +652,11 @@ class K8sSandbox:
             "cat > /tmp/askpass <<'EOF'\n#!/bin/sh\ncat /tmp/askpass_in\nEOF\n"
             "chmod 0700 /tmp/askpass\n"
             'eval "$(ssh-agent -a /ssh-agent/auth.sock)"\n'
+            # ssh-agent creates the socket 0600 owned by this sidecar's uid.
+            # The main sandbox container runs as a different uid but shares the
+            # pod fsGroup (65532) as a supplemental group, so widen the socket
+            # to 0660 to let it connect to the agent over the group.
+            "chmod 0660 /ssh-agent/auth.sock\n"
             f"{add_lines}\n"
             "rm -f /tmp/askpass_in\n"
             "while kill -0 \"$SSH_AGENT_PID\" 2>/dev/null; do sleep 5; done\n"
@@ -708,7 +738,21 @@ class K8sSandbox:
         nothing else.  This is the enforceable host-scoping boundary.
         """
         egress = [
+            # DNS only — scoped to the cluster's kube-dns pods (a single peer
+            # carrying both selectors ANDs them: kube-dns pods *within*
+            # kube-system).  An unscoped port-53 rule would match every
+            # destination, opening a DNS-tunnel / exfil path.
             client.V1NetworkPolicyEgressRule(
+                to=[
+                    client.V1NetworkPolicyPeer(
+                        namespace_selector=client.V1LabelSelector(
+                            match_labels={"kubernetes.io/metadata.name": "kube-system"},
+                        ),
+                        pod_selector=client.V1LabelSelector(
+                            match_labels={"k8s-app": "kube-dns"},
+                        ),
+                    ),
+                ],
                 ports=[
                     client.V1NetworkPolicyPort(protocol=proto, port=53)
                     for proto in ("UDP", "TCP")

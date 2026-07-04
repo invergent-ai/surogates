@@ -35,9 +35,13 @@ def test_netpol_scopes_egress_to_targets_and_baseline():
     assert np.spec.pod_selector.match_labels["surogates.ai/sandbox-id"] == "sid1"
     assert np.spec.policy_types == ["Egress"]
     assert np.metadata.name == "ssh-sandbox-x"
-    # DNS egress present (first rule, no `to`, ports 53)
-    dns_ports = {p.port for p in (np.spec.egress[0].ports or [])}
+    # DNS egress present (first rule), ports 53 only, scoped to kube-dns
+    # rather than open to all destinations.
+    dns_rule = np.spec.egress[0]
+    dns_ports = {p.port for p in (dns_rule.ports or [])}
     assert dns_ports == {53}
+    assert dns_rule.to  # non-empty: not open to every destination
+    assert dns_rule.to[0].pod_selector.match_labels["k8s-app"] == "kube-dns"
 
 
 def test_netpol_target_rule_restricts_to_port():

@@ -6,6 +6,8 @@ resolves it under the same principal.  Plaintext never returned.
 """
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
@@ -25,9 +27,15 @@ class SSHKeySubmit(BaseModel):
     passphrase: str | None = Field(default=None, repr=False)
 
 
+# A key name becomes part of a vault ref and of the sidecar shell script
+# (``id_<name>``/``pass_<name>``); restrict it to a conservative charset so a
+# metacharacter cannot inject into either.
+_VALID_KEY_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def _vault_name(name: str) -> str:
     n = (name or "").strip()
-    if not n or "/" in n or ":" in n:
+    if not _VALID_KEY_NAME.match(n):
         raise HTTPException(status_code=422, detail="invalid key name")
     return f"{SSH_KEY_PREFIX}{n}"
 

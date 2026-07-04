@@ -33,6 +33,9 @@ def test_manifest_has_isolated_ssh_sidecar():
     assert "ssh-agent" in names
     assert pod.spec.automount_service_account_token is False
     assert not getattr(pod.spec, "share_process_namespace", None)
+    # fsGroup lets the sidecar read the group-readable key and the main
+    # container connect to the group-accessible agent socket.
+    assert pod.spec.security_context.fs_group == 65532
 
 
 def test_sidecar_is_hardened_and_key_only_in_sidecar():
@@ -57,7 +60,7 @@ def test_sidecar_is_hardened_and_key_only_in_sidecar():
     assert "workspace" in main_vols and "workspace" not in sidecar_vols
 
 
-def test_socket_volume_is_in_memory_and_keys_are_0400():
+def test_socket_volume_is_in_memory_and_keys_are_0440():
     pod = _backend()._build_pod_manifest(
         "sid1", "sandbox-x", "sec", _ssh_spec(),
         executor_token="t", ssh_secret_name="sandbox-ssh-x",
@@ -66,7 +69,19 @@ def test_socket_volume_is_in_memory_and_keys_are_0400():
     assert sock.empty_dir.medium == "Memory"
     keys = next(v for v in pod.spec.volumes if v.name == "ssh-keys")
     assert keys.secret.secret_name == "sandbox-ssh-x"
-    assert keys.secret.default_mode == 0o400
+    # Group-readable so the sidecar's fsGroup gid can read the key (the
+    # volume is mounted only in the sidecar, so this is not an exposure).
+    assert keys.secret.default_mode == 0o440
+
+
+def test_sidecar_widens_socket_perms_for_group_access():
+    pod = _backend()._build_pod_manifest(
+        "sid1", "sandbox-x", "sec", _ssh_spec(),
+        executor_token="t", ssh_secret_name="sandbox-ssh-x",
+    )
+    sidecar = next(c for c in pod.spec.containers if c.name == "ssh-agent")
+    script = sidecar.command[-1]
+    assert "chmod 0660 /ssh-agent/auth.sock" in script
 
 
 def test_no_sidecar_without_key_material():
@@ -77,6 +92,9 @@ def test_no_sidecar_without_key_material():
     assert {c.name for c in pod.spec.containers} == {"sandbox", "s3fs"}
     assert pod.spec.automount_service_account_token is None
     assert not any(v.name == "ssh-keys" for v in pod.spec.volumes)
+    # Non-ssh pods carry no pod-level security context (fsGroup only exists
+    # to bridge the ssh sidecar/main-container key + socket sharing).
+    assert getattr(pod.spec, "security_context", None) is None
 
 
 def test_require_ssh_egress_enforced_fails_closed():

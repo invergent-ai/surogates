@@ -8,12 +8,21 @@ reach the sandbox.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from surogates.ssh_access.bundle import SSHKeyBundle
 
 SSH_KEY_PREFIX = "ssh_key:"
+
+# Defense-in-depth against ``~/.ssh/config`` injection (a newline in
+# ``alias``/``host``/``user`` would forge extra config directives) and
+# sidecar-script injection (a metachar in ``key_name`` reaches a shell).
+# ``alias``/``user``/``key_name`` are conservative identifiers; ``host`` also
+# allows ``:`` for IPv6 literals — but neither permits whitespace/newlines.
+_IDENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
 def ssh_key_ref(name: str) -> str:
@@ -54,6 +63,15 @@ def validate_targets(raw: Sequence[Mapping[str, Any]] | None) -> list[dict]:
         key_name = str(t.get("key_name", "")).strip()
         if not alias or not host or not key_name:
             raise ValueError("each ssh target needs alias, host, and key_name")
+        if not _IDENT_RE.match(alias):
+            raise ValueError(f"invalid ssh target alias: {alias!r}")
+        if not _HOST_RE.match(host):
+            raise ValueError(f"invalid ssh target host: {host!r}")
+        if not _IDENT_RE.match(key_name):
+            raise ValueError(f"invalid ssh target key_name: {key_name!r}")
+        user = str(t.get("user", "")).strip()
+        if user and not _IDENT_RE.match(user):
+            raise ValueError(f"invalid ssh target user: {user!r}")
         if alias in seen:
             raise ValueError(f"duplicate ssh target alias: {alias}")
         seen.add(alias)
@@ -65,7 +83,7 @@ def validate_targets(raw: Sequence[Mapping[str, Any]] | None) -> list[dict]:
             "alias": alias,
             "host": host,
             "port": port,
-            "user": str(t.get("user", "")).strip() or None,
+            "user": user or None,
             "key_name": key_name,
             "host_key": (str(t.get("host_key")).strip() if t.get("host_key") else None),
         })
