@@ -436,6 +436,43 @@ async def test_recover_requeues_stalled_dynamic_loop_across_tenants(
     ) is not None
 
 
+async def test_recover_stalled_loops_reaps_expired_active_schedule(
+    session_factory, redis_client
+):
+    """The recovery sweep also transitions schedules past their expires_at
+    from 'active' to 'completed' — a cron loop that expired between ticks can
+    never be re-claimed, so this is the only thing that reaps it.
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    now = datetime.now(timezone.utc)
+
+    zombie = await scheduled_store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-a",
+        name="Expired loop",
+        prompt="tick",
+        schedule=parse_schedule("1m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=now - timedelta(minutes=1),
+        expires_at=now - timedelta(hours=1),
+    )
+
+    await recover_stalled_loops(
+        scheduled_store=scheduled_store,
+        redis=redis_client,
+        stale_seconds=1,
+        limit=100,
+    )
+
+    reaped = await scheduled_store.get(zombie.id)
+    assert reaped.status == "completed"
+    assert reaped.next_run_at is None
+
+
 async def test_mark_run_failed_reschedules_and_releases_claim(
     session_factory, redis_client,
 ):

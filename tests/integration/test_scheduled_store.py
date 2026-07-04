@@ -580,3 +580,111 @@ async def test_sa_principal_cancel_and_pause_resume_round_trip(session_factory):
         schedule_id=sa_schedule.id,
     )
     assert deleted is True
+
+
+async def test_expire_active_schedules_sweeps_expired_active_rows(session_factory):
+    """A cron loop whose expires_at falls between ticks expires *unclaimed*
+    (claim_due excludes expires_at <= now), so mark_run_created never runs and
+    the row is stuck status='active' forever. expire_active_schedules is the
+    independent sweep that transitions those zombies to 'completed'.
+    """
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    now = datetime.now(timezone.utc)
+
+    # Zombie: active, due, but already expired.
+    zombie = await store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-z",
+        name="Expired loop",
+        prompt="tick",
+        schedule=parse_schedule("1m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=now - timedelta(minutes=1),
+        expires_at=now - timedelta(hours=1),
+    )
+    # Healthy: active, no expiry — must NOT be swept. next_run_at is in the
+    # future so the row never enters other tests' cross-tenant claim pool.
+    healthy = await store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-h",
+        name="Live loop",
+        prompt="tick",
+        schedule=parse_schedule("1m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=now + timedelta(days=1),
+        expires_at=None,
+    )
+    # Active with a future expiry — must NOT be swept. Also kept not-due.
+    future = await store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-f",
+        name="Future-expiry loop",
+        prompt="tick",
+        schedule=parse_schedule("1m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=now + timedelta(days=1),
+        expires_at=now + timedelta(days=1),
+    )
+
+    swept = await store.expire_active_schedules()
+
+    assert [r.id for r in swept] == [zombie.id]
+    z = await store.get(zombie.id)
+    assert z.status == "completed"
+    assert z.next_run_at is None
+    assert (await store.get(healthy.id)).status == "active"
+    assert (await store.get(future.id)).status == "active"
+
+
+async def test_expire_active_schedules_is_idempotent(session_factory):
+    """A second sweep with nothing newly expired returns no rows and leaves
+    already-completed schedules untouched (never re-touches them)."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    now = datetime.now(timezone.utc)
+
+    await store.create(
+        org_id=org_id,
+        user_id=user_id,
+        agent_id="agent-z",
+        name="Expired loop",
+        prompt="tick",
+        schedule=parse_schedule("1m"),
+        source="loop",
+        created_from_session_id=None,
+        next_run_at=now - timedelta(minutes=1),
+        expires_at=now - timedelta(hours=1),
+    )
+
+    first = await store.expire_active_schedules()
+    assert len(first) == 1
+    second = await store.expire_active_schedules()
+    assert second == []
+
+
+async def test_expiry_sweep_partial_index_exists(session_factory):
+    """The partial index backing expire_active_schedules must be created so the
+    per-tick sweep range-scans the expired rows instead of scanning+sorting the
+    whole active set."""
+    async with session_factory() as db:
+        result = await db.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'idx_scheduled_sessions_expiry'"
+            )
+        )
+        indexdef = result.scalar_one_or_none()
+
+    assert indexdef is not None, "idx_scheduled_sessions_expiry was not created"
+    assert "expires_at" in indexdef
+    # Partial index restricted to active rows.
+    assert "status" in indexdef and "active" in indexdef

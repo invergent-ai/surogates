@@ -420,6 +420,61 @@ class ScheduledSessionStore:
             await db.commit()
         return rows
 
+    async def expire_active_schedules(
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int = 100,
+    ) -> list[ScheduledSession]:
+        """Transition schedules past ``expires_at`` from ``active`` to
+        ``completed``.
+
+        The claim queries (:meth:`claim_due` / :meth:`find_due_across_tenants`)
+        exclude rows with ``expires_at <= now()``, and the expiry check in
+        :meth:`mark_run_created` only runs on a successful claim. A schedule
+        whose ``expires_at`` falls between its last run and its next due instant
+        therefore expires *unclaimed* — it can never be claimed again, so the
+        completion code never runs and the row is stuck ``active`` forever
+        (still ``next_run_at``-due, never firing). This independent sweep reaps
+        those zombies regardless of claimability.
+
+        ``agent_id=None`` sweeps across all tenants (platform ticker); passing
+        an ``agent_id`` scopes to one tenant. Returns the swept rows.
+        """
+        agent_filter = "" if agent_id is None else "AND s.agent_id = :agent_id"
+        query = text(
+            f"""
+            WITH expired AS (
+                SELECT s.id
+                FROM scheduled_sessions s
+                WHERE s.status = 'active'
+                  {agent_filter}
+                  AND s.expires_at IS NOT NULL
+                  AND s.expires_at <= now()
+                ORDER BY s.expires_at ASC
+                LIMIT :limit
+                FOR UPDATE OF s SKIP LOCKED
+            )
+            UPDATE scheduled_sessions s
+            SET status = 'completed',
+                next_run_at = NULL,
+                locked_by = NULL,
+                locked_until = NULL,
+                updated_at = now()
+            FROM expired
+            WHERE s.id = expired.id
+            RETURNING s.*
+            """
+        )
+        params: dict[str, Any] = {"limit": int(limit)}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        async with self._sf() as db:
+            result = await db.execute(query, params)
+            rows = [ScheduledSession.model_validate(dict(row._mapping)) for row in result]
+            await db.commit()
+        return rows
+
     async def mark_run_created(
         self,
         schedule: ScheduledSession,

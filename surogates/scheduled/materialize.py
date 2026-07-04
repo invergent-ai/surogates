@@ -142,9 +142,10 @@ async def recover_stalled_loops(
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
 ) -> None:
-    """Sweep dynamic loops whose run stalled, across all tenants.
+    """Sweep dynamic loops whose run stalled, across all tenants, and reap
+    schedules that have passed their ``expires_at``.
 
-    Two failure modes:
+    Two dynamic-loop failure modes:
 
     * The worker died mid-run (run row still ``active`` but its lease
       lapsed and it hasn't progressed) — re-enqueue the same run so a
@@ -152,7 +153,19 @@ async def recover_stalled_loops(
     * The run reached a terminal state without rescheduling (never called
       ``loop_wait``) — :meth:`recover_stalled_dynamic_loops` reschedules
       it with the fallback delay.
+
+    Plus the expiry sweep: a schedule whose ``expires_at`` falls between its
+    last run and its next due instant expires *unclaimed* (the claim query
+    excludes expired rows), so it never reaches the completion code and stays
+    ``active`` forever. :meth:`expire_active_schedules` transitions those.
     """
+    expired = await scheduled_store.expire_active_schedules(limit=limit)
+    for schedule in expired:
+        logger.info(
+            "Expired schedule %s (past expires_at) → completed",
+            schedule.id,
+        )
+
     retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
         stale_seconds=stale_seconds,
         limit=limit,

@@ -144,6 +144,13 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_due
 CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_lock
     ON scheduled_sessions (locked_until);
 
+-- expire_active_schedules (the per-tick expiry sweep) filters+orders active
+-- schedules by expires_at.  Partial index over active rows only so the planner
+-- range-scans the expired rows instead of scanning + sorting the active set.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_expiry
+    ON scheduled_sessions (expires_at)
+    WHERE status = 'active';
+
 
 -- BYO Firebase self-registration: namespaced ``auth_provider`` plus
 -- partial unique index guarantees that two BYO Firebase projects can
