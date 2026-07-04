@@ -81,6 +81,11 @@ export interface AgentChatMessage {
   iterationIndex?: number;
   iterationSummary?: AgentChatIterationSummary;
   turnSummary?: AgentChatTurnSummary;
+  loopResult?: {
+    runSessionId?: string;
+    scheduledSessionId?: string;
+    runCompletedAt?: string;
+  };
 }
 
 export interface AgentChatIterationSummary {
@@ -512,7 +517,8 @@ export type AgentChatEventType =
   | "browser.control_returned"
   | "ask_user_question.response"
   | "iteration.summary"
-  | "turn.summary";
+  | "turn.summary"
+  | "loop.result";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;

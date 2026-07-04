@@ -99,6 +99,24 @@ export function applyAgentChatEvent(
         },
       ]);
 
+    case "loop.result":
+      return withMessages(nextState, [
+        ...nextState.messages,
+        {
+          id: `evt-${event.eventId}`,
+          role: "assistant",
+          content: stringValue(event.data.content),
+          createdAt: new Date(),
+          status: "complete",
+          loopResult: {
+            runSessionId: stringValue(event.data.run_session_id) || undefined,
+            scheduledSessionId:
+              stringValue(event.data.scheduled_session_id) || undefined,
+            runCompletedAt: stringValue(event.data.run_completed_at) || undefined,
+          },
+        },
+      ]);
+
     case "artifact.created":
     case "artifact.updated":
       return withMessages(nextState, [

@@ -671,4 +671,37 @@ describe("insufficient credits (402 token-credit gate)", () => {
     expect(errMsg?.errorInfo?.insufficientCredits).toBeFalsy();
     expect(errMsg?.errorInfo?.retryable).toBe(true);
   });
+
+  it("appends loop.result as completed assistant output", () => {
+    const running = {
+      ...createInitialAgentChatState(),
+      isRunning: false,
+    };
+
+    const next = applyAgentChatEvent(running, {
+      type: "loop.result",
+      eventId: 42,
+      data: {
+        content: "Loop says: done.",
+        run_session_id: "run-1",
+        scheduled_session_id: "schedule-1",
+        run_completed_at: "2026-07-03T12:00:00Z",
+      },
+    });
+
+    expect(next.isRunning).toBe(false);
+    expect(next.lastEventId).toBe(42);
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]).toMatchObject({
+      id: "evt-42",
+      role: "assistant",
+      content: "Loop says: done.",
+      status: "complete",
+      loopResult: {
+        runSessionId: "run-1",
+        scheduledSessionId: "schedule-1",
+        runCompletedAt: "2026-07-03T12:00:00Z",
+      },
+    });
+  });
 });
