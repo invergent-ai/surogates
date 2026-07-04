@@ -20,7 +20,7 @@
 - [x] Task 6: Surogates web raw event type
 - [x] Task 7: Ops observability view
 - [x] Task 8: Ops frontend thread rendering
-- [ ] Task 9: Final verification
+- [x] Task 9: Final verification
 
 ---
 
