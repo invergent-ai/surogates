@@ -106,3 +106,36 @@ async def test_resolve_ssh_key_service_account_principal():
 async def test_resolve_ssh_key_missing_returns_none():
     vault = _FakeVault({})
     assert await resolve_ssh_key(vault, org_id="o1", name="nope") is None
+
+
+def test_write_ssh_home_creates_config_and_known_hosts(tmp_path):
+    from surogates.ssh_access.resolve import write_ssh_home
+    import os
+
+    write_ssh_home(str(tmp_path), [_T], _T["host_key"] + "\n")
+    ssh = tmp_path / ".ssh"
+    assert "Host deploy" in (ssh / "config").read_text()
+    assert "StrictHostKeyChecking yes" in (ssh / "config").read_text()
+    assert (ssh / "known_hosts").read_text().strip() == _T["host_key"]
+    assert oct(os.stat(ssh).st_mode)[-3:] == "700"
+    assert oct(os.stat(ssh / "config").st_mode)[-3:] == "600"
+    assert oct(os.stat(ssh / "known_hosts").st_mode)[-3:] == "600"
+
+
+def test_write_ssh_home_overwrites_tampered_files(tmp_path):
+    from surogates.ssh_access.resolve import write_ssh_home
+
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "config").write_text("Host evil\n  StrictHostKeyChecking no\n")
+    write_ssh_home(str(tmp_path), [_T], _T["host_key"])
+    text = (ssh / "config").read_text()
+    assert "evil" not in text
+    assert "StrictHostKeyChecking yes" in text
+
+
+def test_write_ssh_home_noop_without_targets(tmp_path):
+    from surogates.ssh_access.resolve import write_ssh_home
+
+    write_ssh_home(str(tmp_path), [], "")
+    assert not (tmp_path / ".ssh").exists()

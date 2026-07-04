@@ -7,6 +7,8 @@ reach the sandbox.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from surogates.ssh_access.bundle import SSHKeyBundle
@@ -110,6 +112,31 @@ def ssh_key_names(targets: Sequence[Mapping[str, Any]]) -> list[str]:
         if name and name not in out:
             out.append(name)
     return out
+
+
+def write_ssh_home(
+    home: str, targets: Sequence[Mapping[str, Any]], known_hosts: str,
+) -> None:
+    """Write ``<home>/.ssh/config`` + ``known_hosts`` (no secrets) for the terminal.
+
+    Called just before an SSH-enabled command runs, under the child's ``HOME``.
+    Rewriting on every invocation re-pins ``known_hosts`` and restores the
+    strict config, so the agent cannot persistently weaken host-key checking by
+    editing the files between commands.  Both files are non-secret (the private
+    key lives in the isolated ssh-agent), so writing them into the workspace
+    home is safe.
+    """
+    if not targets:
+        return
+    ssh_dir = Path(home) / ".ssh"
+    ssh_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(ssh_dir, 0o700)
+    cfg = ssh_dir / "config"
+    cfg.write_text(build_ssh_config(targets), encoding="utf-8")
+    os.chmod(cfg, 0o600)
+    kh = ssh_dir / "known_hosts"
+    kh.write_text(known_hosts or "", encoding="utf-8")
+    os.chmod(kh, 0o600)
 
 
 def render_ssh_targets_prompt(targets: Sequence[Mapping[str, Any]] | None) -> str:
