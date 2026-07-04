@@ -33,9 +33,8 @@ def test_manifest_has_isolated_ssh_sidecar():
     assert "ssh-agent" in names
     assert pod.spec.automount_service_account_token is False
     assert not getattr(pod.spec, "share_process_namespace", None)
-    # fsGroup lets the sidecar read the group-readable key and the main
-    # container connect to the group-accessible agent socket.
-    assert pod.spec.security_context.fs_group == 65532
+    # fsGroup = the sandbox uid so the sidecar reads the group-readable key.
+    assert pod.spec.security_context.fs_group == 1000
 
 
 def test_sidecar_is_hardened_and_key_only_in_sidecar():
@@ -74,14 +73,17 @@ def test_socket_volume_is_in_memory_and_keys_are_0440():
     assert keys.secret.default_mode == 0o440
 
 
-def test_sidecar_widens_socket_perms_for_group_access():
+def test_sidecar_runs_as_sandbox_uid_for_agent_access():
+    # ssh-agent enforces a same-uid client check: the sidecar MUST run as the
+    # sandbox container's uid, or the main container's ssh can't use the socket.
     pod = _backend()._build_pod_manifest(
         "sid1", "sandbox-x", "sec", _ssh_spec(),
         executor_token="t", ssh_secret_name="sandbox-ssh-x",
     )
     sidecar = next(c for c in pod.spec.containers if c.name == "ssh-agent")
-    script = sidecar.command[-1]
-    assert "chmod 0660 /ssh-agent/auth.sock" in script
+    assert sidecar.security_context.run_as_user == 1000
+    # No socket-widening chmod — same-uid ownership is sufficient.
+    assert "chmod 0660" not in sidecar.command[-1]
 
 
 def test_no_sidecar_without_key_material():

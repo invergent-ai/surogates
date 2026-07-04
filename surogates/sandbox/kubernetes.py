@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 # Safety: max lifetime for a sandbox pod (seconds).
 _DEFAULT_ACTIVE_DEADLINE = 3600  # 1 hour
 
+# The uid the agent-sandbox image runs as. The SSH sidecar must run as this
+# same uid: ssh-agent enforces same-uid (a client at a different uid is reset
+# at the protocol layer, so a differently-uid'd sidecar can never be used by
+# the main container). Container isolation (separate mount + PID namespaces)
+# provides the key isolation, not the uid, so matching uids is safe. Must match
+# the ``ghcr.io/invergent-ai/surogates-agent-sandbox`` image's USER.
+_SANDBOX_UID = 1000
+
 
 @dataclass
 class _PodEntry:
@@ -539,7 +547,12 @@ class K8sSandbox:
             # gid 65532 and adds it as a supplemental group to every container,
             # so the sidecar can read the key and the main container (different
             # uid) can connect to the agent socket over the shared group.
-            pod_security_context = client.V1PodSecurityContext(fs_group=65532)
+            # fsGroup = the sandbox uid so the key Secret (mode 0440) is
+            # readable by the sidecar (as a supplemental group) and the socket
+            # lands in a group the containers share.
+            pod_security_context = client.V1PodSecurityContext(
+                fs_group=_SANDBOX_UID,
+            )
 
         return client.V1Pod(
             metadata=client.V1ObjectMeta(
@@ -652,11 +665,10 @@ class K8sSandbox:
             "cat > /tmp/askpass <<'EOF'\n#!/bin/sh\ncat /tmp/askpass_in\nEOF\n"
             "chmod 0700 /tmp/askpass\n"
             'eval "$(ssh-agent -a /ssh-agent/auth.sock)"\n'
-            # ssh-agent creates the socket 0600 owned by this sidecar's uid.
-            # The main sandbox container runs as a different uid but shares the
-            # pod fsGroup (65532) as a supplemental group, so widen the socket
-            # to 0660 to let it connect to the agent over the group.
-            "chmod 0660 /ssh-agent/auth.sock\n"
+            # The socket is created 0600 owned by this sidecar's uid, which is
+            # the same uid as the main container (_SANDBOX_UID) — so the main
+            # container connects as the owner and ssh-agent's same-uid check
+            # passes. No socket widening needed.
             f"{add_lines}\n"
             "rm -f /tmp/askpass_in\n"
             "while kill -0 \"$SSH_AGENT_PID\" 2>/dev/null; do sleep 5; done\n"
@@ -667,7 +679,9 @@ class K8sSandbox:
             command=["/bin/sh", "-c", script],
             security_context=client.V1SecurityContext(
                 run_as_non_root=True,
-                run_as_user=65532,
+                # Same uid as the main sandbox container — required for
+                # ssh-agent's same-uid client check (see _SANDBOX_UID).
+                run_as_user=_SANDBOX_UID,
                 read_only_root_filesystem=True,
                 allow_privilege_escalation=False,
                 capabilities=client.V1Capabilities(drop=["ALL"]),
