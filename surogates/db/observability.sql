@@ -681,7 +681,8 @@ WHERE e.type IN (
     'expert.failure',
     'expert.endorse',
     'expert.override',
-    'user.feedback'
+    'user.feedback',
+    'loop.result'
 );
 
 

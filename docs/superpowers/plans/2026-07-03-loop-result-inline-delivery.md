@@ -18,7 +18,7 @@
 - [x] Task 4: SDK event registration + reducer
 - [x] Task 5: SDK chat-thread affordance
 - [x] Task 6: Surogates web raw event type
-- [ ] Task 7: Ops observability view
+- [x] Task 7: Ops observability view
 - [ ] Task 8: Ops frontend thread rendering
 - [ ] Task 9: Final verification
 
