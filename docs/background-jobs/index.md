@@ -163,6 +163,32 @@ ends the schedule early. Use `/loop list` and `/loop cancel <id>` to
 manage them. See [Commands](../commands/index.md) for the full slash-command
 reference.
 
+### Run result delivery
+
+A scheduled run executes on its own `channel="scheduled"` child session, so
+each run's output is surfaced back to the conversation that created the loop:
+
+- **Channel-origin loops** (Slack, Telegram, Teams): a run's deliverable
+  events resolve to the **parent** session's channel and routing config, so
+  every run is posted back into the origin channel. Without this resolution a
+  run strands under the `scheduled` channel, which no delivery loop drains.
+- **Web / API-origin loops**: a run's final answer is emitted as a
+  `loop.result` event on the **parent** session and appears inline in the
+  originating conversation — web clients receive it over the session SSE
+  stream, API clients by polling `GET /sessions/{id}/events`. For these runs
+  the otherwise-redundant `inbox.task_complete` card is suppressed. A
+  `loop.result` is never replayed into the parent agent's context and never
+  wakes (re-enqueues) the parent; a run with no text output emits nothing.
+
+### Expiry reaping
+
+Because the claim query skips rows whose `expires_at` has passed, a loop that
+expires in the gap between its last run and its next due instant would
+otherwise remain `active` forever — due, but never firing. The platform
+ticker's periodic recovery pass sweeps any `active` schedule past its
+`expires_at` (across all tenants) and transitions it to `completed`, so an
+expired loop never lingers as a non-firing `active` row.
+
 ## `training_collector` -- Expert Training Data Export
 
 The training collector extracts successful conversation trajectories from the event log and writes them as JSONL files to the tenant's Garage bucket.

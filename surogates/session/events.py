@@ -217,3 +217,6 @@ class EventType(str, Enum):
     INBOX_TASK_COMPLETE = "inbox.task_complete"
     INBOX_GOVERNANCE_GATE = "inbox.governance_gate"
     INBOX_PROGRESS_CHECKIN = "inbox.progress_checkin"
+
+    # Scheduled loop run result surfaced inline on a web/api parent session.
+    LOOP_RESULT = "loop.result"

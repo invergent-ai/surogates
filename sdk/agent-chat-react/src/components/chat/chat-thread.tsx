@@ -959,6 +959,7 @@ function TextEntry({
         <TimelineIndicator className="size-2 border-none bg-foreground/40" />
       </TimelineHeader>
       <TimelineContent>
+        <LoopResultAffordance message={entry.msg} />
         <MessageResponse>{cleaned}</MessageResponse>
         {entry.isFinalTurnText && entry.msg.status === "complete" && (
           <TurnFeedback msg={entry.msg} />
@@ -1765,6 +1766,22 @@ function deriveFileArtifactsFromMessages(
 // keep their existing markers so we don't lose their visibility in
 // Simple mode.
 
+function LoopResultAffordance({ message }: { message?: ChatMessageType }) {
+  if (!message?.loopResult) return null;
+  const completedAt = message.loopResult.runCompletedAt
+    ? new Date(message.loopResult.runCompletedAt)
+    : null;
+  const time =
+    completedAt && !Number.isNaN(completedAt.getTime())
+      ? completedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : "";
+  return (
+    <div className="text-xs text-muted-foreground/70">
+      From loop{time ? ` · ${time}` : ""}
+    </div>
+  );
+}
+
 function SimpleAssistantGroup({
   messages,
   isRunning,
@@ -1916,11 +1933,14 @@ function SimpleAssistantGroup({
           })}
         </div>
         {finalText && (
-          <SimpleFinalAnswer
-            text={finalText}
-            isStreaming={tail?.status === "streaming"}
-            tail={tail}
-          />
+          <div className="space-y-1">
+            <LoopResultAffordance message={tail} />
+            <SimpleFinalAnswer
+              text={finalText}
+              isStreaming={tail?.status === "streaming"}
+              tail={tail}
+            />
+          </div>
         )}
         {effectiveTurnSummary && !hideTurnSummary && (
           <TurnSummaryCard
