@@ -2737,8 +2737,9 @@ class AgentHarness(
                     try:
                         from surogates.harness.tool_exec import _build_session_sandbox_spec
                         sandbox_owner = sandbox_session_key(session)
-                        sandbox_spec = _build_session_sandbox_spec(
+                        sandbox_spec = await _build_session_sandbox_spec(
                             session, self._tenant, sandbox_owner,
+                            credential_vault=self._credential_vault,
                         )
                         await self._sandbox_pool.ensure(sandbox_owner, sandbox_spec)
                     except Exception:

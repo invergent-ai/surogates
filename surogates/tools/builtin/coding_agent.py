@@ -80,12 +80,14 @@ def register(registry: ToolRegistry) -> None:
 
 
 def _build_ensure(
-    sandbox_pool: Any, session: Any, tenant: Any, owner: str,
+    sandbox_pool: Any, session: Any, tenant: Any, owner: str, vault: Any,
 ) -> Callable[[], Awaitable[None]]:
     async def _ensure() -> None:
         from surogates.harness.tool_exec import _build_session_sandbox_spec
 
-        spec = _build_session_sandbox_spec(session, tenant, owner)
+        spec = await _build_session_sandbox_spec(
+            session, tenant, owner, credential_vault=vault,
+        )
         await sandbox_pool.ensure(owner, spec)
 
     return _ensure
@@ -165,7 +167,7 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         agent=agent, provider=provider, prompt=augmented,
         model=arguments.get("model"), effort=arguments.get("effort"),
         read_only=False,
-        ensure_sandbox=_build_ensure(sandbox_pool, session, tenant, owner),
+        ensure_sandbox=_build_ensure(sandbox_pool, session, tenant, owner, vault),
         execute=_execute,
         # Poll the global interrupt so a session/mission cancel stops the run
         # promptly (kills the pod-side CLI) instead of polling to completion.

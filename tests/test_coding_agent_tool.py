@@ -108,7 +108,7 @@ async def test_handler_runs_repo_and_returns_pr_url(monkeypatch):
     sandbox = _sandbox(_result_poll("Opened https://github.com/acme/api/pull/42"))
 
     import surogates.tools.builtin.coding_agent as mod
-    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner, vault: _aw_none)
 
     out = await _run_coding_agent_handler(
         {"agent": "claude", "prompt": "implement the feature"},
@@ -133,7 +133,7 @@ async def test_handler_notes_when_no_pr_url(monkeypatch):
     sandbox = _sandbox(_result_poll("I made the change but could not push."))
 
     import surogates.tools.builtin.coding_agent as mod
-    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner, vault: _aw_none)
 
     out = await _run_coding_agent_handler(
         {"agent": "claude", "prompt": "do it"},
@@ -181,7 +181,7 @@ async def test_handler_selects_requested_repo(monkeypatch):
     sandbox = _sandbox(_result_poll("https://github.com/acme/web/pull/7"))
 
     import surogates.tools.builtin.coding_agent as mod
-    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner, vault: _aw_none)
 
     out = await _run_coding_agent_handler(
         {"agent": "claude", "prompt": "do it", "repo": "web"},
@@ -199,7 +199,7 @@ async def test_handler_not_connected_returns_error(monkeypatch):
     store = _FakeStore(session)
     vault = _FakeVault({"git_pat": "github_pat_abc"})
     import surogates.tools.builtin.coding_agent as mod
-    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner, vault: _aw_none)
     out = await _run_coding_agent_handler(
         {"agent": "codex", "prompt": "review"},
         tenant=_tenant(), session_id=str(session.id), session_store=store,
@@ -246,7 +246,7 @@ async def test_handler_cancels_on_interrupt(monkeypatch):
     async def ensure(owner, spec):
         return None
 
-    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner: _aw_none)
+    monkeypatch.setattr(mod, "_build_ensure", lambda sp, s, t, owner, vault: _aw_none)
 
     out = await _run_coding_agent_handler(
         {"agent": "claude", "prompt": "long task"},
