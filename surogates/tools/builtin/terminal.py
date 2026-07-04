@@ -65,37 +65,105 @@ _DEFAULT_CWD = os.getenv("TERMINAL_CWD", os.getcwd())
 # ---------------------------------------------------------------------------
 
 
+def _ssh_hosts_from_env() -> list[str]:
+    """Sorted SSH target hosts from the sandbox env, or empty when SSH is off.
+
+    Presence of any host means the session is SSH-enabled: ``~/.ssh`` (which
+    then holds only the non-secret config/known_hosts — the private key is in
+    the isolated ssh-agent) becomes readable, and the hosts join the srt
+    network allowlist.
+    """
+    raw = os.environ.get("SUROGATES_SSH_TARGETS", "")
+    if not raw:
+        return []
+    try:
+        targets = json.loads(raw)
+    except ValueError:
+        return []
+    return sorted({str(t.get("host", "")) for t in targets if t.get("host")})
+
+
+def _setup_ssh_home(child_env: dict[str, str]) -> None:
+    """Write the pinned ssh config/known_hosts into the child's HOME.
+
+    No-op unless the session is SSH-enabled.  Rewrites on every command so the
+    strict host-key config is re-pinned and cannot be persistently weakened by
+    the agent editing the files between commands.  Files are non-secret.
+    """
+    raw = os.environ.get("SUROGATES_SSH_TARGETS", "")
+    if not raw:
+        return
+    home = child_env.get("HOME")
+    if not home:
+        return
+    try:
+        targets = json.loads(raw)
+    except ValueError:
+        return
+    from surogates.ssh_access.resolve import write_ssh_home
+
+    write_ssh_home(
+        home, targets, os.environ.get("SUROGATES_SSH_KNOWN_HOSTS", ""),
+    )
+
+
 def _get_srt_settings_path(workspace_path: str) -> str:
     """Return the path to the per-workspace srt settings file.
 
     Creates the file if it doesn't exist.  The settings restrict writes
-    to the workspace directory and block reads of secrets.
+    to the workspace directory and block reads of secrets.  For SSH-enabled
+    sessions the host allowlist and ``~/.ssh`` read policy differ, so the
+    SSH host set feeds the settings-file hash to force a regenerate.
     """
     import hashlib
-    ws_hash = hashlib.sha256(workspace_path.encode()).hexdigest()[:12]
+
+    ssh_hosts = _ssh_hosts_from_env()
+    ssh_enabled = bool(ssh_hosts)
+    seed = workspace_path + ("|ssh:" + ",".join(ssh_hosts) if ssh_enabled else "")
+    ws_hash = hashlib.sha256(seed.encode()).hexdigest()[:12]
     from surogates.config import load_settings
     settings_dir = Path(load_settings().sandbox.srt_settings_dir)
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / f"srt-{ws_hash}.json"
 
     if not settings_path.exists():
+        deny_read = [
+            "~/.aws",
+            "~/.gnupg",
+            "~/.kube",
+            "~/.docker",
+            # /code run credentials live pod-local under
+            # /tmp/.code-runs and in the vendor CLI config dirs.  Deny
+            # reads so code the agent runs via the terminal can't
+            # exfiltrate the user's coding-agent plan token.
+            "/tmp/.code-runs",
+            "auth.json",
+            "$CODEX_HOME",
+            "$CLAUDE_CONFIG_DIR",
+        ]
+        # Only deny ~/.ssh when SSH is NOT enabled.  With SSH enabled the dir
+        # holds only the non-secret config + known_hosts (the private key never
+        # touches the main container), and ssh must read them.
+        if not ssh_enabled:
+            deny_read.insert(0, "~/.ssh")
+        allowed_domains = [
+            "github.com",
+            "*.github.com",
+            "*.githubusercontent.com",
+            "pypi.org",
+            "*.pypi.org",
+            "files.pythonhosted.org",
+            "npmjs.org",
+            "*.npmjs.org",
+            "registry.npmjs.org",
+            # Coding-agent (/code) vendor API endpoints.
+            "api.anthropic.com",
+            "api.openai.com",
+            "chatgpt.com",
+        ] + ssh_hosts
         settings = {
             "filesystem": {
-                "denyRead": [
-                    "~/.ssh",
-                    "~/.aws",
-                    "~/.gnupg",
-                    "~/.kube",
-                    "~/.docker",
-                    # /code run credentials live pod-local under
-                    # /tmp/.code-runs and in the vendor CLI config dirs.  Deny
-                    # reads so code the agent runs via the terminal can't
-                    # exfiltrate the user's coding-agent plan token.
-                    "/tmp/.code-runs",
-                    "auth.json",
-                    "$CODEX_HOME",
-                    "$CLAUDE_CONFIG_DIR",
-                ],
+                "denyRead": deny_read,
                 "allowWrite": [workspace_path],
                 "denyWrite": [
                     ".env",
@@ -106,21 +174,7 @@ def _get_srt_settings_path(workspace_path: str) -> str:
                 ],
             },
             "network": {
-                "allowedDomains": [
-                    "github.com",
-                    "*.github.com",
-                    "*.githubusercontent.com",
-                    "pypi.org",
-                    "*.pypi.org",
-                    "files.pythonhosted.org",
-                    "npmjs.org",
-                    "*.npmjs.org",
-                    "registry.npmjs.org",
-                    # Coding-agent (/code) vendor API endpoints.
-                    "api.anthropic.com",
-                    "api.openai.com",
-                    "chatgpt.com",
-                ],
+                "allowedDomains": allowed_domains,
                 "deniedDomains": [],
             },
             "mandatoryDenySearchDepth": 3,
@@ -255,6 +309,9 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
 # and s3fs's locking/rename semantics deadlock uv mid-install.
 _ALWAYS_INHERIT = frozenset({
     "HOME",
+    # The isolated ssh-agent socket for SSH-enabled sessions; lets `ssh`
+    # authenticate without ever seeing the private key.
+    "SSH_AUTH_SOCK",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -541,6 +598,7 @@ async def _terminal_handler(
             if workspace_path:
                 bg_env["HOME"] = workspace_path
                 bg_env.pop("CDPATH", None)
+            _setup_ssh_home(bg_env)
             session = process_registry.spawn(
                 command=command,
                 cwd=workdir,
@@ -592,6 +650,11 @@ async def _terminal_handler(
             # XDG config dir — redirect to workspace to avoid srt denials
             # on $HOME/.config/ access attempts.
             child_env["XDG_CONFIG_HOME"] = os.path.join(workspace_path, ".config")
+
+        # Pin the ssh config/known_hosts into the child HOME for SSH-enabled
+        # sessions (no-op otherwise).  Must happen before srt-wrapping so the
+        # files exist when `ssh` reads them.
+        _setup_ssh_home(child_env)
 
         # Wrap command with Anthropic Sandbox Runtime (srt) for OS-level
         # filesystem and network isolation via bubblewrap + seccomp.
