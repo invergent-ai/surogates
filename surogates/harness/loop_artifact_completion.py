@@ -510,6 +510,27 @@ class ArtifactCompletionMixin:
             )
         return out
 
+    async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
+        """Return the web/api parent that should receive this loop run result."""
+        config = session.config or {}
+        is_scheduled_run = (
+            session.channel == "scheduled"
+            or bool(config.get("scheduled_session_id"))
+        )
+        if not is_scheduled_run or session.parent_id is None:
+            return None
+
+        from surogates.session.store import SessionNotFoundError
+
+        try:
+            parent = await self._store.get_session(session.parent_id)
+        except SessionNotFoundError:
+            return None
+
+        if parent.channel not in {"web", "api"}:
+            return None
+        return parent
+
     async def _complete_session(
         self,
         session: Session,
