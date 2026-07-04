@@ -1534,6 +1534,9 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent git repos the coding tool / /code check out; overlaid
             # onto the wake-local session inside AgentHarness.wake.
             coding_repos=ctx.repos,
+            # Per-agent SSH targets the terminal connects to via the isolated
+            # ssh-agent; overlaid onto the wake-local session alongside repos.
+            ssh_targets=ctx.ssh_targets,
             # The sending human/service account — owns automation they create
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.

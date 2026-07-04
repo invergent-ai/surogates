@@ -386,6 +386,7 @@ class AgentHarness(
         composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
         coding_repos: tuple[dict[str, str], ...] = (),
+        ssh_targets: tuple[dict[str, Any], ...] = (),
         acting_principal: Any | None = None,
     ) -> None:
         self._store = session_store
@@ -408,6 +409,10 @@ class AgentHarness(
         # onto the wake-local session config (see ``_overlay_repos``) rather
         # than in the worker's harness factory.
         self._coding_repos: tuple[dict[str, str], ...] = tuple(coding_repos or ())
+        # Per-agent SSH targets the terminal may connect to via the isolated
+        # ssh-agent.  Overlaid onto the wake-local session config alongside
+        # repos (see ``_overlay_repos``).
+        self._ssh_targets: tuple[dict[str, Any], ...] = tuple(ssh_targets or ())
         self._llm = llm_client
         self._tenant = tenant
         # Who actually SENT this turn — the owner of any automation they create
@@ -783,17 +788,21 @@ class AgentHarness(
         return name in self._slash_commands.commands
 
     def _overlay_repos(self, session: Session) -> Session:
-        """Overlay the agent's configured repos onto a wake-local session.
+        """Overlay the agent's configured repos + ssh targets onto a wake-local session.
 
         ``wake`` re-fetches the session from the store, so the runtime-projected
-        repos are applied here so ``/code`` and the coding tool can read
-        ``session.config['repos']``.  Never written back to the persisted row;
-        with no repos configured the session is returned unchanged.
+        repos/ssh_targets are applied here so ``/code``, the coding tool, and the
+        sandbox spec builder can read ``session.config['repos']`` /
+        ``session.config['ssh_targets']``.  Never written back to the persisted
+        row; with nothing configured the session is returned unchanged.
         """
-        if not self._coding_repos:
+        if not self._coding_repos and not self._ssh_targets:
             return session
         config = dict(session.config or {})
-        config["repos"] = [dict(repo) for repo in self._coding_repos]
+        if self._coding_repos:
+            config["repos"] = [dict(repo) for repo in self._coding_repos]
+        if self._ssh_targets:
+            config["ssh_targets"] = [dict(t) for t in self._ssh_targets]
         return session.model_copy(update={"config": config})
 
     def _slash_command_block_reason(self, content: str | None) -> str | None:
