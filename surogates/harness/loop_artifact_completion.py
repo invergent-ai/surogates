@@ -18,6 +18,7 @@ from surogates.harness.loop_artifacts import (
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
 from surogates.harness.loop_messages import (
     _as_aware_utc,
+    _is_scheduled_run,
     _last_assistant_message_excerpt,
     _latest_user_message_text,
     _seconds_since,
@@ -513,12 +514,7 @@ class ArtifactCompletionMixin:
 
     async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
         """Return the web/api parent that should receive this loop run result."""
-        config = session.config or {}
-        is_scheduled_run = (
-            session.channel == "scheduled"
-            or bool(config.get("scheduled_session_id"))
-        )
-        if not is_scheduled_run or session.parent_id is None:
+        if not _is_scheduled_run(session) or session.parent_id is None:
             return None
 
         from surogates.session.store import SessionNotFoundError
