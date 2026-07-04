@@ -39,6 +39,7 @@ export type EventType =
   | "user.message"
   | "llm.request"
   | "llm.response"
+  | "loop.result"
   | "llm.thinking"
   | "llm.delta"
   | "tool.call"
