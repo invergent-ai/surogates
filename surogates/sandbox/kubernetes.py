@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -202,6 +203,20 @@ class K8sSandbox:
             ssh_secret_name=ssh_secret_name,
         )
         self._pods[sandbox_id] = entry
+
+        # 2b. Apply the SSH egress NetworkPolicy before the pod can make
+        # outbound connections (the agent only runs ssh well after provision
+        # returns).  Failure here must not leave a half-provisioned SSH pod.
+        try:
+            entry.ssh_netpol_name = await self._apply_ssh_network_policy(
+                spec, sandbox_id, pod_name,
+            )
+        except ApiException as exc:
+            logger.error("Failed to apply SSH network policy for %s: %s", pod_name, exc)
+            await self._destroy_entry(api, entry)
+            raise SandboxUnavailableError(
+                f"Could not enforce SSH egress for {pod_name}: {exc}",
+            ) from exc
 
         # 3. Wait for the pod to become ready (the readinessProbe gates
         # on the executor daemon being up AND /workspace being FUSE-
@@ -654,6 +669,99 @@ class K8sSandbox:
                 "SSH targets require enforced egress (ssh_egress_enforced); "
                 "refusing to provision an SSH-enabled sandbox.",
             )
+
+    async def _resolve_target_ips(self, spec: SandboxSpec) -> list[tuple[str, int]]:
+        """Resolve each SSH target host to ``(ip, port)`` pairs.
+
+        Kubernetes-native NetworkPolicy has no FQDN selector, so we pin the
+        resolved IPs at provision time.  IP churn within the pod's ≤1h lifetime
+        is an accepted limitation.  Unresolvable hosts contribute no egress rule
+        (the connection then simply fails — still fail-closed).
+        """
+        loop = asyncio.get_running_loop()
+        out: list[tuple[str, int]] = []
+        for t in spec.ssh_targets:
+            port = int(t.get("port") or 22)
+            host = t.get("host")
+            if not host:
+                continue
+            try:
+                infos = await loop.getaddrinfo(
+                    host, port, type=socket.SOCK_STREAM,
+                )
+            except OSError:
+                logger.warning("Could not resolve SSH target host %s", host)
+                continue
+            for info in infos:
+                ip = info[4][0]
+                if (ip, port) not in out:
+                    out.append((ip, port))
+        return out
+
+    def _build_ssh_network_policy(
+        self, pod_name: str, sandbox_id: str, target_ips: list[tuple[str, int]],
+    ) -> client.V1NetworkPolicy:
+        """Build the pod-scoped egress NetworkPolicy for an SSH session.
+
+        Allows DNS, the operator-configured baseline CIDRs (S3/workspace, MCP
+        proxy, runtime APIs), and each resolved SSH target ``ip/32:port`` — and
+        nothing else.  This is the enforceable host-scoping boundary.
+        """
+        egress = [
+            client.V1NetworkPolicyEgressRule(
+                ports=[
+                    client.V1NetworkPolicyPort(protocol=proto, port=53)
+                    for proto in ("UDP", "TCP")
+                ],
+            ),
+        ]
+        for cidr in self._ssh_egress_baseline_cidrs:
+            egress.append(
+                client.V1NetworkPolicyEgressRule(
+                    to=[client.V1NetworkPolicyPeer(
+                        ip_block=client.V1IPBlock(cidr=cidr),
+                    )],
+                ),
+            )
+        for ip, port in target_ips:
+            egress.append(
+                client.V1NetworkPolicyEgressRule(
+                    to=[client.V1NetworkPolicyPeer(
+                        ip_block=client.V1IPBlock(cidr=f"{ip}/32"),
+                    )],
+                    ports=[client.V1NetworkPolicyPort(protocol="TCP", port=port)],
+                ),
+            )
+        return client.V1NetworkPolicy(
+            metadata=client.V1ObjectMeta(
+                name=f"ssh-{pod_name}",
+                namespace=self._namespace,
+                labels={"app": "surogates-sandbox"},
+            ),
+            spec=client.V1NetworkPolicySpec(
+                pod_selector=client.V1LabelSelector(
+                    match_labels={"surogates.ai/sandbox-id": sandbox_id},
+                ),
+                policy_types=["Egress"],
+                egress=egress,
+            ),
+        )
+
+    async def _apply_ssh_network_policy(
+        self, spec: SandboxSpec, sandbox_id: str, pod_name: str,
+    ) -> str | None:
+        """Create the SSH egress NetworkPolicy; return its name (or None)."""
+        if not spec.ssh_key_material:
+            return None
+        target_ips = await self._resolve_target_ips(spec)
+        np = self._build_ssh_network_policy(pod_name, sandbox_id, target_ips)
+        net_api = await self._get_net_api()
+        try:
+            await net_api.create_namespaced_network_policy(self._namespace, np)
+        except ApiException as exc:
+            if exc.status != 409:
+                raise
+        return np.metadata.name
 
     async def _delete_network_policy_safe(
         self, api: client.CoreV1Api, name: str,
