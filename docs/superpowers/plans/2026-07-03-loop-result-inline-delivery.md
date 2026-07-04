@@ -14,7 +14,7 @@
 
 - [x] Task 1: Backend event type + replay/outbox guards
 - [x] Task 2: Backend parent-resolution helper
-- [ ] Task 3: Backend inline emission + inbox suppression + cursor fallback
+- [x] Task 3: Backend inline emission + inbox suppression + cursor fallback
 - [ ] Task 4: SDK event registration + reducer
 - [ ] Task 5: SDK chat-thread affordance
 - [ ] Task 6: Surogates web raw event type

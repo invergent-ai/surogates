@@ -23,6 +23,7 @@ from surogates.harness.loop_messages import (
     _seconds_since,
     _should_notify_parent_on_completion,
 )
+from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -614,26 +615,67 @@ class ArtifactCompletionMixin:
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
 
-        await self._store.emit_event(
+        session_complete_event_id = await self._store.emit_event(
             session.id,
             EventType.SESSION_COMPLETE,
             complete_data,
         )
-        inbox_event_id = await self._store.emit_event(
-            session.id,
-            EventType.INBOX_TASK_COMPLETE,
-            {
-                "outcome": (
-                    "success"
-                    if reason in {"stop", "done", "complete", "completed"}
-                    else reason
-                ),
-                "summary": _last_assistant_message_excerpt(messages),
-                "duration_seconds": _seconds_since(session.created_at),
-                "session_title": session.title or "Task complete",
-                "error": None,
-            },
+        outcome = (
+            "success"
+            if reason in {"stop", "done", "complete", "completed"}
+            else reason
         )
+
+        loop_result_parent = None
+        try:
+            loop_result_parent = await self._resolve_loop_result_parent(session)
+        except Exception:
+            logger.debug(
+                "Failed to resolve loop.result parent for %s",
+                session.id,
+                exc_info=True,
+            )
+
+        if loop_result_parent is not None:
+            try:
+                child_events = await self._store.get_events(session.id)
+                content = extract_final_response(child_events, fallback="").strip()
+                if content:
+                    await self._store.emit_event(
+                        loop_result_parent.id,
+                        EventType.LOOP_RESULT,
+                        {
+                            "run_session_id": str(session.id),
+                            "scheduled_session_id": str(
+                                (session.config or {}).get("scheduled_session_id") or ""
+                            ),
+                            "content": content,
+                            "outcome": outcome,
+                            "duration_seconds": _seconds_since(session.created_at),
+                            "run_completed_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to emit loop.result on parent %s for run %s",
+                    loop_result_parent.id,
+                    session.id,
+                    exc_info=True,
+                )
+
+        inbox_event_id: int | None = None
+        if loop_result_parent is None:
+            inbox_event_id = await self._store.emit_event(
+                session.id,
+                EventType.INBOX_TASK_COMPLETE,
+                {
+                    "outcome": outcome,
+                    "summary": _last_assistant_message_excerpt(messages),
+                    "duration_seconds": _seconds_since(session.created_at),
+                    "session_title": session.title or "Task complete",
+                    "error": None,
+                },
+            )
         try:
             await self._store.update_session_status(session.id, "completed")
         except Exception:
@@ -670,7 +712,13 @@ class ArtifactCompletionMixin:
 
         # Advance cursor to the latest event.
         cursor_target = (
-            through_event_id if through_event_id is not None else inbox_event_id
+            through_event_id
+            if through_event_id is not None
+            else (
+                inbox_event_id
+                if inbox_event_id is not None
+                else session_complete_event_id
+            )
         )
         try:
             await self._store.advance_harness_cursor(
