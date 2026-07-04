@@ -669,3 +669,22 @@ async def test_expire_active_schedules_is_idempotent(session_factory):
     assert len(first) == 1
     second = await store.expire_active_schedules()
     assert second == []
+
+
+async def test_expiry_sweep_partial_index_exists(session_factory):
+    """The partial index backing expire_active_schedules must be created so the
+    per-tick sweep range-scans the expired rows instead of scanning+sorting the
+    whole active set."""
+    async with session_factory() as db:
+        result = await db.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE indexname = 'idx_scheduled_sessions_expiry'"
+            )
+        )
+        indexdef = result.scalar_one_or_none()
+
+    assert indexdef is not None, "idx_scheduled_sessions_expiry was not created"
+    assert "expires_at" in indexdef
+    # Partial index restricted to active rows.
+    assert "status" in indexdef and "active" in indexdef

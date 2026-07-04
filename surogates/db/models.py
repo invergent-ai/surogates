@@ -601,6 +601,11 @@ class ScheduledSession(Base):
             postgresql_where=text("status = 'active'"),
         ),
         Index("idx_scheduled_sessions_lock", "locked_until"),
+        Index(
+            "idx_scheduled_sessions_expiry",
+            "expires_at",
+            postgresql_where=text("status = 'active'"),
+        ),
         CheckConstraint(
             "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
             name="ck_scheduled_sessions_one_principal",
