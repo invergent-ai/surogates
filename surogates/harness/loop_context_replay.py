@@ -402,5 +402,11 @@ class ContextReplayMixin:
         repos_section = render_repos_prompt(self._coding_repos)
         if repos_section:
             prompt = f"{prompt}\n\n{repos_section}"
+        # Tell the agent which SSH hosts its terminal is authenticated for.
+        from surogates.ssh_access.resolve import render_ssh_targets_prompt
+
+        ssh_section = render_ssh_targets_prompt(self._ssh_targets)
+        if ssh_section:
+            prompt = f"{prompt}\n\n{ssh_section}"
         self._system_prompt_cache.set(session.id, prompt)
         return prompt
