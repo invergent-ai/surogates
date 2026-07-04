@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import secrets
 import uuid
@@ -115,6 +116,15 @@ class DockerSandbox:
 
         mode, detail = self._workspace_mode(spec)
         env = self._build_env(spec, sandbox_id, token, mode, detail)
+
+        # SSH remote-access (dev-only, non-production isolation): start a local
+        # ssh-agent on the host and bind-mount its socket into the container.
+        ssh_mount_args: list[str] = []
+        if spec.ssh_key_material:
+            from surogates.sandbox.ssh_agent_local import start_local_ssh_agent
+
+            sock = await start_local_ssh_agent(sandbox_id, spec.ssh_key_material)
+            ssh_mount_args = ["-v", f"{os.path.dirname(sock)}:/ssh-agent"]
         # Docker is the local-dev backend: the configured image (docker_image)
         # is authoritative, so a developer's locally-built image is used rather
         # than the production ghcr reference that SandboxSpec.image defaults to.
@@ -145,6 +155,7 @@ class DockerSandbox:
                 ]
             elif mode == "bind":
                 args += ["-v", f"{detail}:/workspace"]
+            args += ssh_mount_args
             for key, value in env.items():
                 args += ["-e", f"{key}={value}"]
             args.append(image)
@@ -230,6 +241,9 @@ class DockerSandbox:
             return
         await self._docker.run(["stop", entry.container_id])
         await self._docker.run(["rm", entry.container_id])
+        from surogates.sandbox.ssh_agent_local import stop_local_ssh_agent
+
+        await stop_local_ssh_agent(sandbox_id)
         logger.info("Destroyed docker sandbox %s", sandbox_id)
 
     async def destroy_for_session(self, session_id: str) -> None:
