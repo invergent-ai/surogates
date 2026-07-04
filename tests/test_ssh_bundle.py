@@ -36,5 +36,8 @@ def test_validate_rejects_non_key():
         validate_private_key("not a key")
 
 
-def test_validate_accepts_and_strips():
-    assert validate_private_key(f"  {_KEY}  ") == _KEY.strip()
+def test_validate_accepts_and_ensures_trailing_newline():
+    # _KEY already ends with a newline; surrounding whitespace is stripped and
+    # exactly one trailing newline is guaranteed (ssh-add requires it).
+    assert validate_private_key(f"  {_KEY}  ") == _KEY
+    assert validate_private_key(_KEY.strip()) == _KEY

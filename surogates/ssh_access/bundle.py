@@ -22,7 +22,8 @@ def validate_private_key(value: str) -> str:
         raise ValueError(
             "Expected a PEM/OpenSSH private key (-----BEGIN … PRIVATE KEY-----).",
         )
-    return v
+    # OpenSSH/ssh-add rejects a key without a trailing newline; guarantee one.
+    return v + "\n"
 
 
 @dataclass

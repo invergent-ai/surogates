@@ -707,6 +707,7 @@ def create_app() -> FastAPI:
         scheduled_work,
         sessions,
         skills,
+        ssh_credentials,
         tools,
         transparency,
         website,
@@ -750,6 +751,12 @@ def create_app() -> FastAPI:
     # agent SA's bare ``surg_sk_`` token (auth middleware only accepts /v1/api/*).
     app.include_router(
         git_credentials.router, prefix="/v1/api", tags=["git-credentials"],
+    )
+    app.include_router(ssh_credentials.router, prefix="/v1", tags=["ssh-credentials"])
+    # Also at /v1/api so ops can forward SSH-key store/list/delete under the
+    # agent SA's bare ``surg_sk_`` token (auth middleware only accepts /v1/api/*).
+    app.include_router(
+        ssh_credentials.router, prefix="/v1/api", tags=["ssh-credentials"],
     )
     app.include_router(memory.router, prefix="/v1", tags=["memory"])
     app.include_router(prompts.router, prefix="/v1", tags=["prompts"])
