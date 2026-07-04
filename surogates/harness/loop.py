@@ -387,6 +387,7 @@ class AgentHarness(
         slash_commands: SlashCommandConfig | None = None,
         coding_repos: tuple[dict[str, str], ...] = (),
         ssh_targets: tuple[dict[str, Any], ...] = (),
+        agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
     ) -> None:
         self._store = session_store
@@ -413,6 +414,9 @@ class AgentHarness(
         # ssh-agent.  Overlaid onto the wake-local session config alongside
         # repos (see ``_overlay_repos``).
         self._ssh_targets: tuple[dict[str, Any], ...] = tuple(ssh_targets or ())
+        # The agent's service account id — SSH keys are agent-owned and resolved
+        # under it regardless of the session's channel-gated credential principal.
+        self._agent_service_account_id: str | None = agent_service_account_id
         self._llm = llm_client
         self._tenant = tenant
         # Who actually SENT this turn — the owner of any automation they create
@@ -803,6 +807,10 @@ class AgentHarness(
             config["repos"] = [dict(repo) for repo in self._coding_repos]
         if self._ssh_targets:
             config["ssh_targets"] = [dict(t) for t in self._ssh_targets]
+            # Carry the agent SA id so the spec builder resolves the agent-owned
+            # SSH keys under it (not the session's credential principal).
+            if self._agent_service_account_id:
+                config["agent_service_account_id"] = self._agent_service_account_id
         return session.model_copy(update={"config": config})
 
     def _slash_command_block_reason(self, content: str | None) -> str | None:

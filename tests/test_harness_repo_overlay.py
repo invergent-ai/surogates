@@ -46,7 +46,7 @@ _SSH_TARGETS = (
 )
 
 
-def _harness(coding_repos=(), ssh_targets=()) -> AgentHarness:
+def _harness(coding_repos=(), ssh_targets=(), agent_service_account_id=None) -> AgentHarness:
     return AgentHarness(
         session_store=AsyncMock(),
         tool_registry=ToolRegistry(),
@@ -59,6 +59,7 @@ def _harness(coding_repos=(), ssh_targets=()) -> AgentHarness:
         sandbox_pool=MagicMock(spec=SandboxPool),
         coding_repos=coding_repos,
         ssh_targets=ssh_targets,
+        agent_service_account_id=agent_service_account_id,
     )
 
 
@@ -111,3 +112,18 @@ def test_overlay_noop_when_no_repos_or_targets():
 def test_overlay_sets_both_repos_and_ssh_targets():
     out = _harness(_REPOS, _SSH_TARGETS)._overlay_repos(_session())
     assert out.config["repos"] and out.config["ssh_targets"]
+
+
+def test_overlay_carries_agent_sa_with_ssh_targets():
+    out = _harness(
+        ssh_targets=_SSH_TARGETS, agent_service_account_id="sa-123",
+    )._overlay_repos(_session())
+    assert out.config["agent_service_account_id"] == "sa-123"
+
+
+def test_overlay_omits_agent_sa_without_ssh_targets():
+    # The agent SA id is only carried for SSH; a repos-only overlay omits it.
+    out = _harness(
+        _REPOS, agent_service_account_id="sa-123",
+    )._overlay_repos(_session())
+    assert "agent_service_account_id" not in out.config

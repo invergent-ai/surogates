@@ -184,14 +184,31 @@ async def _apply_ssh_access(
     if not targets:
         return
 
+    # SSH keys are agent-owned: the ops key-management route always stores them
+    # under the agent's service account.  Resolve under that SA regardless of
+    # the session's channel-gated credential principal, so web/api/Studio
+    # sessions (whose principal is the acting user, not the agent SA) find the
+    # key too — not only managed Slack/Telegram sessions.  Without a resolved
+    # agent SA there are no agent-owned keys to load, so fail closed.
+    from uuid import UUID
+
+    agent_sa_id = (getattr(session, "config", None) or {}).get(
+        "agent_service_account_id",
+    )
+    if not agent_sa_id:
+        return
+    try:
+        agent_sa_uuid = UUID(str(agent_sa_id))
+    except (ValueError, TypeError):
+        logger.warning("Invalid agent_service_account_id for session; skipping SSH")
+        return
+
     org_id = getattr(tenant, "org_id", None)
-    user_id = getattr(tenant, "user_id", None)
-    service_account_id = getattr(tenant, "service_account_id", None)
     material: dict[str, dict[str, str]] = {}
     for name in ssh_key_names(targets):
         bundle = await resolve_ssh_key(
             credential_vault, org_id=org_id, name=name,
-            user_id=user_id, service_account_id=service_account_id,
+            service_account_id=agent_sa_uuid,
         )
         if bundle is None:
             continue

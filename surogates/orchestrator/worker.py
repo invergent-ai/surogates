@@ -1540,6 +1540,11 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent SSH targets the terminal connects to via the isolated
             # ssh-agent; overlaid onto the wake-local session alongside repos.
             ssh_targets=ctx.ssh_targets,
+            # SSH keys are agent-owned; resolve them under the agent SA on every
+            # channel (not just managed ones), so web/api sessions find them.
+            agent_service_account_id=(
+                str(agent_principal.id) if agent_principal is not None else None
+            ),
             # The sending human/service account — owns automation they create
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.
