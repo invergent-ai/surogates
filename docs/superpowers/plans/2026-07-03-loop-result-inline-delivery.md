@@ -10,6 +10,20 @@
 
 ---
 
+## Progress
+
+- [x] Task 1: Backend event type + replay/outbox guards
+- [ ] Task 2: Backend parent-resolution helper
+- [ ] Task 3: Backend inline emission + inbox suppression + cursor fallback
+- [ ] Task 4: SDK event registration + reducer
+- [ ] Task 5: SDK chat-thread affordance
+- [ ] Task 6: Surogates web raw event type
+- [ ] Task 7: Ops observability view
+- [ ] Task 8: Ops frontend thread rendering
+- [ ] Task 9: Final verification
+
+---
+
 ## Scope And Repos
 
 - Spec: `/work/surogates/docs/superpowers/specs/2026-07-03-loop-result-inline-delivery-design.md`.
