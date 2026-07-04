@@ -896,13 +896,27 @@ class SessionStore:
             if session_id not in self._channel_cache:
                 async with self._sf() as db:
                     row = await db.get(SessionRow, session_id)
-                    if row:
-                        self._channel_cache[session_id] = (
-                            row.channel or "web",
-                            row.config or {},
-                        )
-                    else:
+                    if row is None:
                         return
+                    channel = row.channel or "web"
+                    config = row.config or {}
+                    # Scheduled/loop runs carry channel="scheduled" and do not
+                    # hold the origin channel's routing config, so their
+                    # deliverable events would strand under the "scheduled"
+                    # channel that no delivery loop drains. Resolve delivery to
+                    # the channel that created the schedule via the parent
+                    # session. A detached run (no parent) has no origin channel,
+                    # so there is nothing to deliver.
+                    if channel == "scheduled":
+                        parent_id = getattr(row, "parent_id", None)
+                        if parent_id is None:
+                            return
+                        parent = await db.get(SessionRow, parent_id)
+                        if parent is None:
+                            return
+                        channel = parent.channel or "web"
+                        config = parent.config or {}
+                    self._channel_cache[session_id] = (channel, config)
 
             channel, config = self._channel_cache[session_id]
 

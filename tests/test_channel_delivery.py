@@ -628,6 +628,158 @@ class TestDeliverySeamPipelineKeys:
 
 
 # ---------------------------------------------------------------------------
+# Tests: scheduled/loop child sessions deliver to their origin channel
+# ---------------------------------------------------------------------------
+
+
+class TestScheduledDeliveryResolvesParentChannel:
+    """A /loop run session has channel='scheduled' and lacks the origin
+    channel's routing config. Its deliverable events must be enqueued to the
+    channel that created the schedule (the parent session), resolved from the
+    parent's channel + config — otherwise the row is stranded under the
+    'scheduled' channel, which no delivery loop ever drains.
+    """
+
+    @staticmethod
+    def _make_store(child_row, parent_row):
+        import unittest.mock as mock  # noqa: F401
+        from surogates.session import store as store_mod
+
+        child_id = child_row.id
+        parent_id = parent_row.id
+
+        class _FakeSF:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, model, pk):
+                if pk == child_id:
+                    return child_row
+                if pk == parent_id:
+                    return parent_row
+                return None
+
+            def add(self, obj):
+                pass
+
+            async def commit(self):
+                pass
+
+        ss = object.__new__(store_mod.SessionStore)
+        ss._sf = _FakeSF()
+        ss._channel_cache = {}
+        return ss
+
+    async def _capture(self, child_row, parent_row):
+        import unittest.mock as mock
+        from surogates.session.events import EventType
+
+        captured: list[dict] = []
+
+        class _FakeOutbox:
+            id = None
+
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+        ss = self._make_store(child_row, parent_row)
+        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
+            await ss._enqueue_channel_delivery(
+                session_id=child_row.id,
+                event_id=77,
+                event_type=EventType.LLM_RESPONSE,
+                data={"message": {"content": "Hello! 👋"}},
+            )
+        return captured
+
+    async def test_scheduled_child_delivers_to_parent_slack_channel(self):
+        from types import SimpleNamespace
+
+        parent_id = uuid4()
+        child = SimpleNamespace(
+            id=uuid4(),
+            channel="scheduled",
+            parent_id=parent_id,
+            config={
+                "scheduled_source": "loop",
+                "workspace_boundary": "slack:d:D0ARYMB35TR",
+            },
+        )
+        parent = SimpleNamespace(
+            id=parent_id,
+            channel="slack",
+            parent_id=None,
+            config={
+                "slack_channel_id": "D0ARYMB35TR",
+                "slack_thread_key": None,
+                "channel_identifier": "A0ASHN5GN2G",
+            },
+        )
+
+        captured = await self._capture(child, parent)
+
+        assert len(captured) == 1, (
+            f"expected the scheduled run to enqueue one outbox row, got {len(captured)}"
+        )
+        row = captured[0]
+        assert row["channel"] == "slack", (
+            f"scheduled child must deliver under the parent's channel 'slack', "
+            f"got {row['channel']!r} (stranded under an undrained channel)"
+        )
+        assert row["dedupe_key"] == "slack:77"
+        assert row["destination"]["channel_id"] == "D0ARYMB35TR"
+        assert row["destination"]["channel_identifier"] == "A0ASHN5GN2G"
+        assert row["payload"]["content"] == "Hello! 👋"
+
+    async def test_detached_scheduled_child_without_parent_is_skipped(self):
+        """A scheduled run with no parent (detached schedule) has no origin
+        channel — nothing to deliver, and it must not strand a 'scheduled' row.
+        """
+        from types import SimpleNamespace
+
+        child = SimpleNamespace(
+            id=uuid4(),
+            channel="scheduled",
+            parent_id=None,
+            config={"scheduled_source": "loop"},
+        )
+
+        captured = await self._capture(child, child)
+        assert captured == [], (
+            f"detached scheduled run must not enqueue any outbox row, got {captured!r}"
+        )
+
+    async def test_scheduled_child_of_web_parent_enqueues_nothing(self):
+        """A web-origin loop's run must not strand a spurious 'scheduled' outbox
+        row. Web delivery is SSE + inbox (a separate path), never the outbox, so
+        resolving to the web parent returns early with nothing enqueued.
+        """
+        from types import SimpleNamespace
+
+        parent_id = uuid4()
+        child = SimpleNamespace(
+            id=uuid4(),
+            channel="scheduled",
+            parent_id=parent_id,
+            config={"scheduled_source": "loop"},
+        )
+        parent = SimpleNamespace(
+            id=parent_id, channel="web", parent_id=None, config={}
+        )
+
+        captured = await self._capture(child, parent)
+        assert captured == [], (
+            f"web-origin scheduled run must not enqueue an outbox row, got {captured!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # FIX 2: mark_bot_message called after successful delivery
 # ---------------------------------------------------------------------------
 
