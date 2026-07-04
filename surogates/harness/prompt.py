@@ -54,6 +54,17 @@ MODELS_REQUIRING_DISCIPLINE: tuple[str, ...] = (
     "surogate",
 )
 
+# Channels that render agent output as chat messages with native media
+# attachments but have NO artifact panel -- the create_artifact surface
+# only exists in the Surogate Studio web app.  When create_artifact is
+# loaded on one of these channels the agent is told to deliver visual
+# output as an image via MEDIA: instead (guidance/artifact_in_channel).
+# SMS and CLI are excluded because they can't carry image attachments;
+# cron is excluded because its delivery destination varies.
+CHANNELS_WITHOUT_ARTIFACT_PANEL: frozenset[str] = frozenset({
+    "slack", "discord", "telegram", "whatsapp", "signal", "email",
+})
+
 # Maximum bytes to read from any single memory/skill file.
 _MAX_FILE_BYTES: int = 32_768
 
@@ -777,6 +788,19 @@ class PromptBuilder:
             hint = self._prompts.platform_hint(channel)
             if hint:
                 parts.append(f"\n## Platform\n{hint}")
+            # create_artifact renders into the Studio web panel, which these
+            # channels don't have -- tell the agent to deliver visual output
+            # as an image via MEDIA: instead.  Appended after the platform
+            # hint so it lands late in the prompt (overriding the earlier
+            # guidance/artifact block) and can reference the MEDIA: mechanism
+            # the hint just described.
+            if (
+                "create_artifact" in self._available_tools
+                and channel in CHANNELS_WITHOUT_ARTIFACT_PANEL
+            ):
+                parts.append(
+                    "\n" + self._prompts.get("guidance/artifact_in_channel")
+                )
 
         return "\n".join(parts)
 
