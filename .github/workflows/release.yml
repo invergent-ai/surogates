@@ -48,6 +48,8 @@ jobs:
             name: surogates-s3fs
           - dir: browser
             name: surogates-agent-browser
+          - dir: ssh-agent
+            name: surogates-ssh-agent
     steps:
       - uses: actions/checkout@v4
 

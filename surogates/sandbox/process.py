@@ -67,6 +67,14 @@ class ProcessSandbox:
         }
         restricted_env.update(spec.env)
 
+        # SSH remote-access (dev-only, non-production isolation): start a local
+        # ssh-agent on the worker host and point the sandbox at its socket.
+        if spec.ssh_key_material:
+            from surogates.sandbox.ssh_agent_local import start_local_ssh_agent
+
+            sock = await start_local_ssh_agent(sandbox_id, spec.ssh_key_material)
+            restricted_env["SSH_AUTH_SOCK"] = sock
+
         entry = _SandboxEntry(
             sandbox_id=sandbox_id,
             workdir=workdir,
@@ -241,6 +249,12 @@ class ProcessSandbox:
                 await entry.process.wait()
             except ProcessLookupError:
                 pass
+
+        # Tear down the dev-only local ssh-agent, if any.
+        if entry.spec.ssh_key_material:
+            from surogates.sandbox.ssh_agent_local import stop_local_ssh_agent
+
+            await stop_local_ssh_agent(sandbox_id)
 
         # Remove the temporary directory tree.
         try:

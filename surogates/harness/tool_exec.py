@@ -56,10 +56,12 @@ def build_workspace_source_ref(
     return f"s3://{storage_bucket}/{workspace_prefix}"
 
 
-def _build_session_sandbox_spec(
+async def _build_session_sandbox_spec(
     session: Any,
     tenant: Any,
     sandbox_owner: str,
+    *,
+    credential_vault: Any = None,
 ) -> Any:
     """Build the SandboxSpec used to provision *session*'s sandbox.
 
@@ -144,7 +146,91 @@ def _build_session_sandbox_spec(
     sandbox_spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] = (
         "1" if is_service_account else "0"
     )
+    await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
+
+
+async def _apply_ssh_access(
+    session: Any, tenant: Any, sandbox_spec: Any, credential_vault: Any,
+) -> None:
+    """Resolve SSH key material worker-side and populate the spec.
+
+    Non-secret target data + ``known_hosts`` go into ``env`` (they reach the
+    main container so the executor can write ``~/.ssh``); private keys go into
+    ``ssh_key_material`` (delivered only to the isolated ssh-agent, never to the
+    main container's env or the workspace).  Targets whose key does not resolve,
+    or which have no pinned ``host_key``, are dropped (fail closed).
+    """
+    import json as _json
+
+    from surogates.ssh_access.resolve import (
+        build_known_hosts,
+        resolve_ssh_key,
+        ssh_key_names,
+        validate_targets,
+    )
+
+    raw = (getattr(session, "config", None) or {}).get("ssh_targets") or []
+    if not raw or credential_vault is None:
+        return
+    try:
+        targets = validate_targets(raw)
+    except ValueError:
+        logger.warning("Invalid ssh_targets for session; skipping SSH access")
+        return
+    # Unpinned targets fail closed — StrictHostKeyChecking would reject them and
+    # we never blind-accept a host key inside the sandbox.
+    targets = [t for t in targets if t.get("host_key")]
+    if not targets:
+        return
+
+    # SSH keys are agent-owned: the ops key-management route always stores them
+    # under the agent's service account.  Resolve under that SA regardless of
+    # the session's channel-gated credential principal, so web/api/Studio
+    # sessions (whose principal is the acting user, not the agent SA) find the
+    # key too — not only managed Slack/Telegram sessions.  Without a resolved
+    # agent SA there are no agent-owned keys to load, so fail closed.
+    from uuid import UUID
+
+    agent_sa_id = (getattr(session, "config", None) or {}).get(
+        "agent_service_account_id",
+    )
+    if not agent_sa_id:
+        return
+    try:
+        agent_sa_uuid = UUID(str(agent_sa_id))
+    except (ValueError, TypeError):
+        logger.warning("Invalid agent_service_account_id for session; skipping SSH")
+        return
+
+    org_id = getattr(tenant, "org_id", None)
+    material: dict[str, dict[str, str]] = {}
+    for name in ssh_key_names(targets):
+        bundle = await resolve_ssh_key(
+            credential_vault, org_id=org_id, name=name,
+            service_account_id=agent_sa_uuid,
+        )
+        if bundle is None:
+            continue
+        material[name] = {
+            "private_key": bundle.private_key,
+            "passphrase": bundle.passphrase or "",
+        }
+    # Only keep targets whose key actually resolved.
+    targets = [t for t in targets if t["key_name"] in material]
+    if not targets:
+        return
+
+    sandbox_spec.ssh_targets = targets
+    sandbox_spec.ssh_key_material = material
+    # Non-secret transport into the main container (host_key travels via
+    # known_hosts, not the targets JSON, so the config file stays minimal).
+    public_targets = [
+        {k: v for k, v in t.items() if k != "host_key"} for t in targets
+    ]
+    sandbox_spec.env["SUROGATES_SSH_TARGETS"] = _json.dumps(public_targets)
+    sandbox_spec.env["SUROGATES_SSH_KNOWN_HOSTS"] = build_known_hosts(targets)
+    sandbox_spec.env["SSH_AUTH_SOCK"] = "/ssh-agent/auth.sock"
 
 
 def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
@@ -1337,7 +1423,9 @@ async def execute_single_tool(
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key
             sandbox_owner = sandbox_session_key(session)
-            sandbox_spec = _build_session_sandbox_spec(session, tenant, sandbox_owner)
+            sandbox_spec = await _build_session_sandbox_spec(
+                session, tenant, sandbox_owner, credential_vault=credential_vault,
+            )
             await sandbox_pool.ensure(sandbox_owner, sandbox_spec)
             # Dispatch to the sandbox pod — runs the real Python tool handler
             # inside the sandbox via tool-executor.

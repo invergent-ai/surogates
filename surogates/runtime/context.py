@@ -28,6 +28,7 @@ mutation would let one session's edits leak into another's.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "AgentRuntimeContext",
@@ -146,6 +147,12 @@ class AgentRuntimeContext:
     # default so a runtime-config payload that predates this field keeps the
     # no-repo coding behavior.
     repos: tuple[dict[str, str], ...] = ()
+
+    # Per-agent SSH targets the terminal may connect to via the isolated
+    # ssh-agent.  Each entry: ``{"alias","host","port","user","key_name",
+    # "host_key"}``.  Empty by default so a payload predating this field keeps
+    # the no-SSH behavior.
+    ssh_targets: tuple[dict[str, Any], ...] = ()
 
     # Per-agent slash-command gating.  Defaults to fully permissive so a
     # runtime-config payload that predates this field keeps every command.

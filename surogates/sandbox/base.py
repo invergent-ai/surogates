@@ -102,6 +102,14 @@ class SandboxSpec:
     # Host-bindable workspace path when one exists. Docker bind-mounts it;
     # K8sSandbox ignores it (its workspace is mounted by the s3fs sidecar).
     workspace_path: str | None = None
+    # SSH remote-access (non-secret): targets whose ssh_config/known_hosts the
+    # main container may read. Populated by the spec builder only when the
+    # agent has ssh_targets and their keys resolve.
+    ssh_targets: list[dict] = field(default_factory=list)
+    # SSH key material (SECRET): ``{key_name: {"private_key", "passphrase"}}``.
+    # Consumed only by the k8s backend (in-memory Secret into the isolated
+    # sidecar) and the dev-only local agent. NEVER placed in ``env`` or logged.
+    ssh_key_material: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def default_sandbox_spec() -> SandboxSpec:

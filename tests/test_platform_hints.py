@@ -53,6 +53,68 @@ def _make_session(channel: str = "web", workspace_path: str | None = None):
 
 
 # ---------------------------------------------------------------------------
+# Artifact-in-channel guidance
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactInChannel:
+    """create_artifact has no panel in messaging channels, so the builder
+    injects guidance to deliver visual output as an image via MEDIA:."""
+
+    _MARKER = "no artifact panel"
+
+    def test_slack_with_artifact_tool_gets_image_guidance(self, tmp_path: Path):
+        tenant = _make_tenant(tmp_path)
+        session = _make_session(channel="slack")
+        builder = PromptBuilder(
+            tenant, session=session, available_tools={"create_artifact"},
+        )
+        prompt = builder.build()
+        assert self._MARKER in prompt
+        assert "MEDIA:" in prompt
+
+    def test_all_media_channels_get_guidance(self, tmp_path: Path):
+        for channel in ("slack", "discord", "telegram", "whatsapp",
+                        "signal", "email"):
+            tenant = _make_tenant(tmp_path)
+            session = _make_session(channel=channel)
+            builder = PromptBuilder(
+                tenant, session=session,
+                available_tools={"create_artifact"},
+            )
+            prompt = builder.build()
+            assert self._MARKER in prompt, f"missing for {channel}"
+
+    def test_web_channel_no_guidance(self, tmp_path: Path):
+        # The Studio web app HAS the artifact panel -- no override there.
+        tenant = _make_tenant(tmp_path)
+        session = _make_session(channel="web")
+        builder = PromptBuilder(
+            tenant, session=session, available_tools={"create_artifact"},
+        )
+        prompt = builder.build()
+        assert self._MARKER not in prompt
+
+    def test_sms_channel_no_guidance(self, tmp_path: Path):
+        # SMS can't carry image attachments, so the image advice doesn't apply.
+        tenant = _make_tenant(tmp_path)
+        session = _make_session(channel="sms")
+        builder = PromptBuilder(
+            tenant, session=session, available_tools={"create_artifact"},
+        )
+        prompt = builder.build()
+        assert self._MARKER not in prompt
+
+    def test_no_artifact_tool_no_guidance(self, tmp_path: Path):
+        # Without the tool loaded, the override would be noise.
+        tenant = _make_tenant(tmp_path)
+        session = _make_session(channel="slack")
+        builder = PromptBuilder(tenant, session=session, available_tools=set())
+        prompt = builder.build()
+        assert self._MARKER not in prompt
+
+
+# ---------------------------------------------------------------------------
 # Platform hints in PromptBuilder
 # ---------------------------------------------------------------------------
 

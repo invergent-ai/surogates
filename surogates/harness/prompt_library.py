@@ -49,6 +49,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/brainstorming_gate",
     "guidance/ask_user_question",
     "guidance/artifact",
+    "guidance/artifact_in_channel",
     "guidance/browser",
     "guidance/web_search",
     "guidance/loop_wait",

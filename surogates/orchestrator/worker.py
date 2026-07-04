@@ -783,6 +783,9 @@ async def run_worker(settings: Settings) -> None:
             s3fs_image=settings.sandbox.k8s_s3fs_image,
             s3_endpoint=settings.sandbox.k8s_s3_endpoint,
             mcp_proxy_url=settings.mcp_proxy_url,
+            ssh_agent_image=settings.sandbox.k8s_ssh_agent_image,
+            ssh_egress_enforced=settings.sandbox.ssh_egress_enforced,
+            ssh_egress_baseline_cidrs=settings.sandbox.ssh_egress_baseline_cidrs,
         )
     elif settings.sandbox.backend == "docker":
         from surogates.sandbox.docker import DockerSandbox
@@ -1534,6 +1537,14 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent git repos the coding tool / /code check out; overlaid
             # onto the wake-local session inside AgentHarness.wake.
             coding_repos=ctx.repos,
+            # Per-agent SSH targets the terminal connects to via the isolated
+            # ssh-agent; overlaid onto the wake-local session alongside repos.
+            ssh_targets=ctx.ssh_targets,
+            # SSH keys are agent-owned; resolve them under the agent SA on every
+            # channel (not just managed ones), so web/api sessions find them.
+            agent_service_account_id=(
+                str(agent_principal.id) if agent_principal is not None else None
+            ),
             # The sending human/service account — owns automation they create
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.

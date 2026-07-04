@@ -21,6 +21,7 @@ declare -A IMAGES=(
   [sandbox]="surogates-agent-sandbox"
   [s3fs]="surogates-s3fs"
   [browser]="surogates-agent-browser"
+  [ssh-agent]="surogates-ssh-agent"
 )
 PUSH="${PUSH:-1}"
 
