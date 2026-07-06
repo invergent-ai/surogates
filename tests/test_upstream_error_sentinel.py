@@ -401,3 +401,49 @@ class TestRetryRoutingOnSentinel:
 
         assert msg["content"] == "recovered"
         assert streaming_mock.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Safety: what the user actually sees in the worst case (all retries fail)
+# ---------------------------------------------------------------------------
+
+
+def _has_cjk(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+class TestTerminalErrorIsSafe:
+    async def test_exhausted_retries_surface_clean_english_error(self) -> None:
+        """When every attempt is a sentinel and there is no fallback, the error
+        that reaches the user is a fixed English classification -- never the
+        raw Chinese string."""
+        from surogates.harness.error_classify import classify_harness_error
+
+        activate_fallback = MagicMock(return_value=False)
+        get_current_model = MagicMock(return_value=None)
+
+        raised: Exception | None = None
+        try:
+            await _run_with_retry(
+                stream_side_effect=[_SENTINEL_RESULT] * 5,
+                activate_fallback=activate_fallback,
+                get_current_model=get_current_model,
+            )
+        except Exception as exc:  # noqa: BLE001 - asserting on the surfaced error
+            raised = exc
+
+        assert raised is not None
+        # The exception message itself carries no gateway text.
+        assert not _has_cjk(str(raised)), "raw CJK leaked into the raised error"
+
+        # This is exactly what the loop feeds to the user-facing crash event.
+        info = classify_harness_error(raised)
+        assert info.category == "invalid_response"
+        assert info.title == "The model returned an empty or malformed response."
+        assert not _has_cjk(info.title)
+        assert not _has_cjk(info.detail)
+        assert info.retryable is True
+
+    def test_sentinel_itself_would_be_flagged_cjk(self) -> None:
+        """Sanity check the CJK detector actually fires on the gateway string."""
+        assert _has_cjk(SENTINEL) is True
