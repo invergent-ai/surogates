@@ -158,3 +158,59 @@ class TestEstimateCost:
         cost = estimate_cost("gpt-5.4-nano", input_tokens=100_000, output_tokens=50_000)
         # 100k * 0.0002/1k + 50k * 0.00125/1k = 0.02 + 0.0625 = 0.0825
         assert abs(cost - 0.0825) < 1e-9
+
+
+class TestOpus48Cost:
+    """claude-opus-4-8 pricing + cache-read discount (the prod base model)."""
+
+    def test_opus_4_8_in_catalog(self):
+        info = get_model_info("claude-opus-4-8")
+        assert info is not None
+        assert info.id == "claude-opus-4-8"
+        # Opus 4.8 lists at $5 / $25 per 1M tokens.
+        assert info.input_cost_per_1k == 0.005
+        assert info.output_cost_per_1k == 0.025
+
+    def test_opus_4_8_cost_is_nonzero(self):
+        # Regression: the model was missing from the catalog, so estimate_cost
+        # returned 0.0 and sessions.estimated_cost_usd never accrued.
+        cost = estimate_cost("claude-opus-4-8", input_tokens=1000, output_tokens=1000)
+        assert cost == pytest.approx(0.005 + 0.025)
+
+    def test_cache_read_defaults_to_no_discount(self):
+        # Backward compatible: omitting cache_read_tokens matches the old 3-arg
+        # behaviour (whole prompt billed at the input rate).
+        cost = estimate_cost("claude-opus-4-8", input_tokens=1000, output_tokens=0)
+        assert cost == pytest.approx(0.005)
+
+    def test_fully_cached_input_billed_at_cache_rate(self):
+        # All input served from cache -> 10% of the input rate.
+        cost = estimate_cost(
+            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            cache_read_tokens=1000,
+        )
+        assert cost == pytest.approx(0.005 * 0.1)
+
+    def test_partial_cache_splits_rates(self):
+        # 400 of 1000 input tokens cached: 600 @ full + 400 @ 10%.
+        cost = estimate_cost(
+            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            cache_read_tokens=400,
+        )
+        expected = (600 / 1000) * 0.005 + (400 / 1000) * (0.005 * 0.1)
+        assert cost == pytest.approx(expected)
+
+    def test_cache_read_capped_at_input(self):
+        # Defensive: cache_read_tokens can never exceed input_tokens.
+        cost = estimate_cost(
+            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            cache_read_tokens=5000,
+        )
+        assert cost == pytest.approx(0.005 * 0.1)
+
+    def test_cache_discount_ignored_for_unknown_model(self):
+        cost = estimate_cost(
+            "nonexistent-model", input_tokens=1000, output_tokens=1000,
+            cache_read_tokens=1000,
+        )
+        assert cost == 0.0
