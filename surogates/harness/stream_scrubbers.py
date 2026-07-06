@@ -70,11 +70,13 @@ def is_upstream_error_sentinel(text: str | None) -> bool:
         return False
     if any(stripped.startswith(sentinel) for sentinel in UPSTREAM_ERROR_SENTINELS):
         return True
-    return any(
-        stripped.startswith(marker)
-        or (len(stripped) < _MAX_SENTINEL_MESSAGE_LEN and marker in stripped)
-        for marker in _UPSTREAM_SENTINEL_MARKERS
-    )
+    # A marker counts as a gateway error only when the message is itself
+    # error-shaped -- short and self-contained.  A long reply that opens with or
+    # merely quotes the phrase is real content (see module docstring), so the
+    # length guard applies before any marker check.
+    if len(stripped) >= _MAX_SENTINEL_MESSAGE_LEN:
+        return False
+    return any(marker in stripped for marker in _UPSTREAM_SENTINEL_MARKERS)
 
 
 class StreamingThinkScrubber:
@@ -401,7 +403,15 @@ class StreamingSentinelScrubber:
             # Still a proper prefix of some sentinel -- keep holding.
             return ""
 
-        # Diverged: real content.  Flush the buffer and stop matching.
+        # Diverged from every known sentinel.  If the held text already carries
+        # the distinctive gateway marker (which by construction cannot collide
+        # with legitimate assistant text), this is a drifted gateway error --
+        # suppress it rather than leak the raw CJK.  Otherwise it is real
+        # content: flush the buffer and pass through.
+        if is_upstream_error_sentinel(self._buf):
+            self._matched = True
+            self._buf = ""
+            return ""
         self._passthrough = True
         out, self._buf = self._buf, ""
         return out
@@ -412,14 +422,14 @@ class StreamingSentinelScrubber:
             return ""
         out, self._buf = self._buf, ""
         candidate = out.lstrip()
-        if (
+        # Suppress a drifted error that completed the distinctive marker, or a
+        # stream that ended mid-sentinel while still holding a CJK-bearing prefix
+        # of a known sentinel (a truncated gateway error).  A lone shared lead-in
+        # (e.g. "⚠️") has no CJK / marker and is emitted normally.
+        if is_upstream_error_sentinel(out) or (
             _contains_cjk(candidate)
             and any(sentinel.startswith(candidate) for sentinel in self._sentinels)
         ):
-            # Stream ended mid-sentinel while still holding a gateway-error
-            # prefix that already contains CJK -- a truncated error.  Suppress
-            # it so no partial Chinese ever reaches the user.  A lone shared
-            # lead-in (e.g. "⚠️") has no CJK and is emitted normally.
             self._matched = True
             return ""
         return out

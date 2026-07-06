@@ -235,3 +235,39 @@ def test_contains_cjk_detects_sentinel_body_not_emoji() -> None:
     assert _contains_cjk("⚠️") is False
     assert _contains_cjk("⚠️ Warning: low battery") is False
     assert _contains_cjk("") is False
+
+
+def test_is_upstream_error_sentinel_ignores_long_reply_starting_with_marker() -> None:
+    # A long legitimate reply that OPENS with the marker phrase is real content,
+    # not a gateway error -- the module docstring promises exactly this, but the
+    # unguarded ``startswith(marker)`` branch used to blank it.
+    long_reply = (
+        "上游模型未返回任何内容 is the exact phrase this reseller gateway emits "
+        "when its own upstream fails. Here is a full explanation of the cause "
+        "and how to handle it in production: " + "detail. " * 20
+    )
+    assert len(long_reply) >= 200
+    assert is_upstream_error_sentinel(long_reply) is False
+
+
+def test_sentinel_scrubber_suppresses_drifted_wording_keeping_marker() -> None:
+    # The gateway keeps its distinctive marker but drifts the surrounding
+    # wording; the streaming path must suppress it, not leak raw CJK.
+    scrubber = StreamingSentinelScrubber()
+    drifted = "⚠️ 上游模型未返回任何内容，请稍后重试或更换模型。"
+
+    visible = _feed_all(scrubber, [drifted])
+
+    assert "上游模型" not in visible
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_drifted_variant_split_across_chunks() -> None:
+    scrubber = StreamingSentinelScrubber()
+    # Marker completes across chunks, then the trailing wording drifts.
+    chunks = ["⚠️ 上游模型未返回", "任何内容，请稍后重试。"]
+
+    visible = _feed_all(scrubber, chunks)
+
+    assert "上游模型" not in visible
+    assert scrubber.matched is True
