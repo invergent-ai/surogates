@@ -337,13 +337,15 @@ class ContextCompressor:
         results and replaces older ones with a short placeholder.  No-op when
         disabled (``prune_browser_state=False``).
 
-        Safe to run on every turn: it rewrites only the ephemeral per-call
-        message list -- never the durable event log -- and preserves tool-call
-        pairing.  The model always keeps the current page state, while older
-        snapshots, which the agent never re-reads (it re-fetches state on
-        demand), stop being re-sent on every subsequent call.  This also lowers
-        the token estimate that gates compaction, so compaction fires less
-        often.
+        Safe to run on every turn: it preserves tool-call pairing and does not
+        itself write the durable event log.  (A later compaction runs on the
+        already-pruned view, so superseded snapshots it would otherwise
+        summarise are dropped -- an intended part of the reduction, not a
+        separate write path.)  The model always keeps the current page state,
+        while older snapshots, which the agent never re-reads (it re-fetches
+        state on demand), stop being re-sent on every subsequent call.  This
+        also lowers the token estimate that gates compaction, so compaction
+        fires less often.
         """
         if not self._prune_browser_state:
             return messages
