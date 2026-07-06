@@ -45,7 +45,9 @@ from surogates.harness.sanitize import (
 )
 from surogates.harness.stream_scrubbers import (
     StreamingContextScrubber,
+    StreamingSentinelScrubber,
     StreamingThinkScrubber,
+    is_upstream_error_sentinel,
 )
 from surogates.harness.tool_exec import tool_call_arguments_look_incomplete
 from surogates.session.events import EventType
@@ -583,6 +585,29 @@ async def call_llm_with_retry(
                     current_model = get_current_model()
                     if current_model:
                         create_kwargs["model"] = current_model
+                    continue
+                raise ValueError("LLM returned empty response")
+
+            # Upstream-gateway error sentinel: the provider fabricated an
+            # error string as normal content (already suppressed from the
+            # user downstream).  Treat the turn as an empty upstream response:
+            # prefer a fallback provider, otherwise retry in place with
+            # backoff -- the fault is typically transient (a per-turn safety
+            # trip or rate limit) and clears on a subsequent attempt.
+            if usage_data.get("upstream_error_sentinel"):
+                logger.warning(
+                    "Upstream gateway returned an error sentinel for session "
+                    "%s (iteration %d, attempt %d/%d); suppressed from the "
+                    "user, retrying / failing over.",
+                    session.id, iteration, attempt, MAX_LLM_RETRIES,
+                )
+                if activate_fallback():
+                    current_model = get_current_model()
+                    if current_model:
+                        create_kwargs["model"] = current_model
+                    continue
+                if attempt < MAX_LLM_RETRIES:
+                    await asyncio.sleep(jittered_backoff(attempt))
                     continue
                 raise ValueError("LLM returned empty response")
 
@@ -1197,6 +1222,9 @@ async def call_llm_streaming_inner(
     reasoning_parts: list[str] = []
     think_scrubber = StreamingThinkScrubber()
     context_scrubber = StreamingContextScrubber()
+    # Suppresses upstream-gateway error strings fabricated as normal content
+    # (see StreamingSentinelScrubber) so they are never streamed to the user.
+    sentinel_scrubber = StreamingSentinelScrubber()
 
     # Streaming tool execution: track which tool call slots have been
     # notified to the on_tool_call_complete callback.  A slot is
@@ -1394,7 +1422,9 @@ async def call_llm_streaming_inner(
             # Text content delta.
             text_delta = getattr(delta, "content", None)
             if text_delta:
-                visible_delta = context_scrubber.feed(think_scrubber.feed(text_delta))
+                visible_delta = sentinel_scrubber.feed(
+                    context_scrubber.feed(think_scrubber.feed(text_delta))
+                )
                 if visible_delta:
                     content_or_tool_emitted = True
                     content_parts.append(visible_delta)
@@ -1457,8 +1487,14 @@ async def call_llm_streaming_inner(
                     # Streaming tool execution: when a new higher-index slot
                     # appears, all lower-index slots are fully formed.  Fire
                     # the callback so the StreamingToolExecutor can start
-                    # executing concurrency-safe tools immediately.
-                    if on_tool_call_complete is not None and idx > _highest_known_slot:
+                    # executing concurrency-safe tools immediately.  Skip once a
+                    # gateway error sentinel is detected -- its tool calls are
+                    # fabricated junk and must not be executed.
+                    if (
+                        on_tool_call_complete is not None
+                        and not sentinel_scrubber.matched
+                        and idx > _highest_known_slot
+                    ):
                         for prev_slot in sorted(tool_calls_acc):
                             if prev_slot < idx and prev_slot not in _notified_slots:
                                 prev_entry = tool_calls_acc[prev_slot]
@@ -1516,7 +1552,10 @@ async def call_llm_streaming_inner(
     if stop_reason is not None:
         interrupted = True
 
-    tail_delta = context_scrubber.feed(think_scrubber.flush()) + context_scrubber.flush()
+    tail_scrubbed = (
+        context_scrubber.feed(think_scrubber.flush()) + context_scrubber.flush()
+    )
+    tail_delta = sentinel_scrubber.feed(tail_scrubbed) + sentinel_scrubber.flush()
     if tail_delta:
         content_parts.append(tail_delta)
         await store.emit_event(
@@ -1534,8 +1573,10 @@ async def call_llm_streaming_inner(
 
     # Notify any remaining tool call slots that haven't been reported yet.
     # This covers the last tool call in the batch (no higher index follows)
-    # and the case where only a single tool call was generated.
-    if on_tool_call_complete is not None:
+    # and the case where only a single tool call was generated.  A detected
+    # gateway error sentinel means the whole turn is fabricated -- its tool
+    # calls must never reach the executor.
+    if on_tool_call_complete is not None and not sentinel_scrubber.matched:
         for slot in sorted(tool_calls_acc):
             if slot not in _notified_slots:
                 entry = tool_calls_acc[slot]
@@ -1568,6 +1609,17 @@ async def call_llm_streaming_inner(
     if partial_tool_names:
         usage_data["partial_tool_call"] = True
         usage_data["partial_tool_names"] = partial_tool_names
+
+    if sentinel_scrubber.matched:
+        # The whole turn was an upstream-gateway error fabricated as content.
+        # Drop the (already-suppressed) content and its bogus tool calls, and
+        # flag the turn so ``call_llm_with_retry`` treats it as an empty
+        # upstream response and fails over / retries.
+        assistant_message["content"] = ""
+        assistant_message.pop("tool_calls", None)
+        usage_data["upstream_error_sentinel"] = True
+        usage_data.pop("partial_tool_call", None)
+        usage_data.pop("partial_tool_names", None)
 
     return sanitize_response_message(assistant_message), usage_data
 
@@ -1705,5 +1757,13 @@ async def call_llm_non_streaming(
         "cache_read_tokens": cache_read_tokens,
         "finish_reason": choice.finish_reason,
     }
+
+    if is_upstream_error_sentinel(assistant_message_dict.get("content")):
+        # An upstream-gateway error fabricated as normal content.  Blank it and
+        # drop the bogus tool calls so it is never persisted or shown, and flag
+        # the turn for retry / failover in ``call_llm_with_retry``.
+        assistant_message_dict["content"] = ""
+        assistant_message_dict.pop("tool_calls", None)
+        usage_data["upstream_error_sentinel"] = True
 
     return sanitize_response_message(assistant_message_dict), usage_data

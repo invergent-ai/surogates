@@ -2,7 +2,59 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Final
+
+# ---------------------------------------------------------------------------
+# Upstream-gateway error sentinels
+# ---------------------------------------------------------------------------
+#
+# Some third-party OpenAI-compatible gateways (e.g. yunwu.ai) do not surface an
+# error status when their own upstream returns nothing.  Instead they fabricate
+# a normal-looking chat completion whose ``content`` is a hardcoded error string
+# -- often localized -- and attach ``finish_reason='tool_calls'`` with a bogus
+# tool call.  Because it arrives as ordinary streamed content, it bypasses every
+# empty-response guard and is shown verbatim to the end user.
+#
+# These are the exact strings such gateways emit.  ``StreamingSentinelScrubber``
+# suppresses them mid-stream; ``is_upstream_error_sentinel`` recognises a fully
+# assembled message.  Both are content filters only -- they never alter a
+# genuine model response (see the "must stay green" tests).
+UPSTREAM_ERROR_SENTINELS: Final[tuple[str, ...]] = (
+    # yunwu.ai — "Upstream model returned no content. Possible causes: safety
+    # policy triggered, upstream rate-limited, or the model ended on this
+    # input. Retry or simplify the input."
+    "⚠️ 上游模型未返回任何内容。可能原因：触发了安全策略、上游限流、"
+    "或模型对当前输入直接结束。请重试或简化输入后再试。",
+)
+
+# Distinctive fragments that uniquely identify a gateway error even if the
+# surrounding wording drifts.  Kept long and gateway-specific so they can never
+# collide with legitimate assistant text.
+_UPSTREAM_SENTINEL_MARKERS: Final[tuple[str, ...]] = (
+    "上游模型未返回任何内容",
+)
+
+# On flush, a held buffer that is a proper prefix of a sentinel this long or
+# longer is treated as a truncated gateway error and suppressed.  Short shared
+# prefixes (e.g. a lone "⚠️") fall below the bar and are emitted normally.
+_MIN_SUPPRESSED_PREFIX_LEN: Final[int] = 8
+
+
+def is_upstream_error_sentinel(text: str | None) -> bool:
+    """Return ``True`` if *text* is a known upstream-gateway error string.
+
+    Matches a message that *is* (starts with) a full sentinel, or that contains
+    a distinctive gateway marker.  Used to filter fully assembled messages on
+    both the streaming and non-streaming paths.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if any(stripped.startswith(sentinel) for sentinel in UPSTREAM_ERROR_SENTINELS):
+        return True
+    return any(marker in stripped for marker in _UPSTREAM_SENTINEL_MARKERS)
 
 
 class StreamingThinkScrubber:
@@ -268,3 +320,83 @@ class StreamingContextScrubber:
             if tag_lower.startswith(lower[-size:]):
                 return size
         return 0
+
+
+class StreamingSentinelScrubber:
+    """Suppress upstream-gateway error strings without leaking split fragments.
+
+    A gateway error (see :data:`UPSTREAM_ERROR_SENTINELS`) replaces the whole
+    message content, so it always begins at the start of the turn.  This
+    scrubber holds back content only while the accumulated text is still a
+    prefix of a known sentinel:
+
+      * the moment it matches a full sentinel, the turn is flagged
+        (:attr:`matched`) and the rest of the message is swallowed;
+      * the moment it diverges from every sentinel, it flushes the held text
+        and passes everything through verbatim thereafter.
+
+    Because holding stops at the first divergence, a legitimate message pays at
+    most a few characters of buffering (e.g. ``"⚠️ Note: ..."`` diverges from
+    ``"⚠️ 上游..."`` immediately) and is never altered.
+    """
+
+    def __init__(self, sentinels: tuple[str, ...] = UPSTREAM_ERROR_SENTINELS) -> None:
+        self._sentinels: tuple[str, ...] = tuple(sentinels)
+        self._buf = ""
+        self._passthrough = False
+        self._matched = False
+
+    @property
+    def matched(self) -> bool:
+        """Whether the turn's content was a suppressed gateway error string."""
+        return self._matched
+
+    def reset(self) -> None:
+        self._buf = ""
+        self._passthrough = False
+        self._matched = False
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+        if self._matched:
+            # Whole turn is a gateway error -- swallow any trailing fragments.
+            return ""
+        if self._passthrough:
+            return text
+
+        self._buf += text
+        candidate = self._buf.lstrip()
+        if not candidate:
+            # Only leading whitespace so far -- keep holding; it may precede a
+            # sentinel and will be emitted verbatim on divergence/flush.
+            return ""
+
+        if any(candidate.startswith(sentinel) for sentinel in self._sentinels):
+            self._matched = True
+            self._buf = ""
+            return ""
+
+        if any(sentinel.startswith(candidate) for sentinel in self._sentinels):
+            # Still a proper prefix of some sentinel -- keep holding.
+            return ""
+
+        # Diverged: real content.  Flush the buffer and stop matching.
+        self._passthrough = True
+        out, self._buf = self._buf, ""
+        return out
+
+    def flush(self) -> str:
+        if self._matched:
+            self._buf = ""
+            return ""
+        out, self._buf = self._buf, ""
+        candidate = out.lstrip()
+        if (
+            len(candidate) >= _MIN_SUPPRESSED_PREFIX_LEN
+            and any(sentinel.startswith(candidate) for sentinel in self._sentinels)
+        ):
+            # Stream ended mid-sentinel -- a truncated gateway error.  Suppress.
+            self._matched = True
+            return ""
+        return out
