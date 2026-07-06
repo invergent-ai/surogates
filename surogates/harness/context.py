@@ -86,6 +86,79 @@ def _estimate_messages_tokens_rough(messages: list[dict[str, Any]]) -> int:
     return total
 
 
+# Tools whose results are fully superseded by the next call of the same tool.
+# The agent acts only on the most recent snapshot (and re-fetches state on
+# demand), so older results are dead weight that can be pruned eagerly instead
+# of waiting for a compaction pass.
+_SUPERSEDED_STATE_TOOLS: frozenset[str] = frozenset({"browser_get_state"})
+
+
+def prune_superseded_tool_results(
+    messages: list[dict[str, Any]],
+    *,
+    tool_names: frozenset[str] | set[str],
+    keep_last: int,
+    placeholder: str,
+    min_chars: int = 200,
+) -> tuple[list[dict[str, Any]], int]:
+    """Replace all but the most recent ``keep_last`` results of ``tool_names``.
+
+    A tool result is identified by mapping its ``tool_call_id`` back to the
+    ``name`` of the assistant ``tool_call`` that produced it.  For each targeted
+    tool, every result except the most recent ``keep_last`` has its content
+    replaced with ``placeholder`` -- provided the content is a string longer
+    than ``min_chars`` and not already the placeholder.
+
+    ``tool_call_id`` and every other field are preserved, so tool-call pairing
+    is never broken.  The input list and its dicts are not mutated; changed
+    messages are shallow-copied into a new list.
+
+    Returns ``(new_messages, pruned_count)``.
+    """
+    if not messages or keep_last < 0:
+        return messages, 0
+
+    # 1. Map tool_call_id -> tool name from the assistant tool_calls, so we can
+    #    tell which "role: tool" results belong to the targeted tools (the
+    #    result messages themselves carry only the id, not the name).
+    id_to_name: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            call_id = tc.get("id")
+            name = (tc.get("function") or {}).get("name")
+            if call_id and name:
+                id_to_name[call_id] = name
+
+    # 2. Indices of targeted tool-result messages, in conversation order.
+    target_indices: list[int] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "tool":
+            continue
+        if id_to_name.get(msg.get("tool_call_id")) in tool_names:
+            target_indices.append(i)
+
+    if len(target_indices) <= keep_last:
+        return messages, 0
+
+    # 3. Everything except the most recent ``keep_last`` is prunable.
+    prune_indices = set(target_indices[: len(target_indices) - keep_last])
+
+    result = list(messages)
+    pruned = 0
+    for i in prune_indices:
+        content = result[i].get("content")
+        if not isinstance(content, str):
+            continue
+        if content == placeholder or len(content) <= min_chars:
+            continue
+        result[i] = {**result[i], "content": placeholder}
+        pruned += 1
+
+    return result, pruned
+
+
 class ContextCompressor:
     """Compresses conversation context when approaching the model's context limit.
 
@@ -105,6 +178,8 @@ class ContextCompressor:
         protect_first_n: int = 3,
         protect_last_n: int = 20,
         summary_target_ratio: float = 0.20,
+        prune_browser_state: bool = True,
+        browser_state_keep_last: int = 2,
         quiet_mode: bool = False,
         summary_model_override: str | None = None,
         base_url: str = "",
@@ -138,6 +213,8 @@ class ContextCompressor:
         self.protect_last_n = protect_last_n
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
         self.quiet_mode = quiet_mode
+        self._prune_browser_state = prune_browser_state
+        self._browser_state_keep_last = max(0, browser_state_keep_last)
 
         self.threshold_tokens = int(self.context_length * threshold_percent)
         self.compression_count = 0
@@ -249,6 +326,38 @@ class ContextCompressor:
                 pruned += 1
 
         return result, pruned
+
+    def prune_stale_browser_states(
+        self, messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Drop superseded browser page snapshots from the replayed history.
+
+        Keeps the most recent ``browser_state_keep_last`` ``browser_get_state``
+        results and replaces older ones with a short placeholder.  No-op when
+        disabled (``prune_browser_state=False``).
+
+        Safe to run on every turn: it rewrites only the ephemeral per-call
+        message list -- never the durable event log -- and preserves tool-call
+        pairing.  The model always keeps the current page state, while older
+        snapshots, which the agent never re-reads (it re-fetches state on
+        demand), stop being re-sent on every subsequent call.  This also lowers
+        the token estimate that gates compaction, so compaction fires less
+        often.
+        """
+        if not self._prune_browser_state:
+            return messages
+        pruned_messages, pruned_count = prune_superseded_tool_results(
+            messages,
+            tool_names=_SUPERSEDED_STATE_TOOLS,
+            keep_last=self._browser_state_keep_last,
+            placeholder=_PRUNED_TOOL_PLACEHOLDER,
+        )
+        if pruned_count and not self.quiet_mode:
+            logger.info(
+                "Pruned %d superseded browser state(s) before LLM call",
+                pruned_count,
+            )
+        return pruned_messages
 
     # ------------------------------------------------------------------
     # Summarisation

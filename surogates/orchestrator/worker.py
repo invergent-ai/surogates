@@ -1147,6 +1147,8 @@ async def run_worker(settings: Settings) -> None:
             base_url=settings.llm.base_url,
             api_key=settings.llm.api_key,
             model_overrides=settings.llm.models,
+            prune_browser_state=settings.llm.prune_browser_state,
+            browser_state_keep_last=settings.llm.browser_state_keep_last,
             summary_model_override=(
                 summary_slot.model if summary_slot is not None else None
             ),
