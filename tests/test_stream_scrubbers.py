@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from surogates.harness.stream_scrubbers import (
+    UPSTREAM_ERROR_SENTINELS,
     StreamingContextScrubber,
+    StreamingSentinelScrubber,
     StreamingThinkScrubber,
+    is_upstream_error_sentinel,
 )
+
+_SENTINEL = UPSTREAM_ERROR_SENTINELS[0]
 
 
 def _feed_all(scrubber, chunks: list[str]) -> str:
@@ -73,3 +78,196 @@ def test_context_scrubber_flushes_false_partial_tag() -> None:
     visible = _feed_all(scrubber, ["Use <memory as a word"])
 
     assert visible == "Use <memory as a word"
+
+
+# ---------------------------------------------------------------------------
+# StreamingSentinelScrubber — suppress upstream-gateway error strings
+# ---------------------------------------------------------------------------
+
+
+def test_sentinel_scrubber_suppresses_whole_string_single_chunk() -> None:
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, [_SENTINEL])
+
+    assert visible == ""
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_string_split_across_chunks() -> None:
+    scrubber = StreamingSentinelScrubber()
+    third = len(_SENTINEL) // 3
+    chunks = [_SENTINEL[:third], _SENTINEL[third : 2 * third], _SENTINEL[2 * third :]]
+
+    visible = _feed_all(scrubber, chunks)
+
+    assert visible == ""
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_char_by_char() -> None:
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, list(_SENTINEL))
+
+    assert visible == ""
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_passes_normal_text_untouched() -> None:
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["Here is ", "your answer."])
+
+    assert visible == "Here is your answer."
+    assert scrubber.matched is False
+
+
+def test_sentinel_scrubber_keeps_legit_warning_sharing_emoji_prefix() -> None:
+    scrubber = StreamingSentinelScrubber()
+    legit = "⚠️ Note: the disk is almost full, consider cleanup."
+
+    visible = _feed_all(scrubber, [legit])
+
+    assert visible == legit
+    assert scrubber.matched is False
+
+
+def test_sentinel_scrubber_keeps_legit_warning_split_across_chunks() -> None:
+    scrubber = StreamingSentinelScrubber()
+    # Shares "⚠️ " with the sentinel, then diverges on the next character.
+    visible = _feed_all(scrubber, ["⚠️", " Warn", "ing: low battery"])
+
+    assert visible == "⚠️ Warning: low battery"
+    assert scrubber.matched is False
+
+
+def test_sentinel_scrubber_flushes_lone_emoji() -> None:
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["⚠️"])
+
+    # A lone shared lead-in has no CJK -> it is legitimate output.
+    assert visible == "⚠️"
+    assert scrubber.matched is False
+
+
+def test_sentinel_scrubber_suppresses_truncated_sentinel_on_flush() -> None:
+    scrubber = StreamingSentinelScrubber()
+    # Stream dies partway through the sentinel — still a gateway error.
+    partial = _SENTINEL[: len(_SENTINEL) // 2]
+
+    visible = _feed_all(scrubber, [partial])
+
+    assert visible == ""
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_short_truncated_cjk_prefix() -> None:
+    # Regression: a stream cut just past the emoji into the first CJK chars
+    # (e.g. "⚠️ 上游模") must NOT leak the partial Chinese to the user.
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["⚠️ 上游模"])
+
+    assert visible == ""
+    assert "上游" not in visible
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_emits_short_non_cjk_prefix() -> None:
+    # "⚠️ " (emoji + space) shares the lead-in but has no CJK -> legitimate.
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["⚠️ "])
+
+    assert visible == "⚠️ "
+    assert scrubber.matched is False
+
+
+def test_sentinel_scrubber_emits_text_following_divergence() -> None:
+    scrubber = StreamingSentinelScrubber()
+    # Diverges from the sentinel after "⚠️ 上游" -> everything must be emitted.
+    text = "⚠️ 上游 status: all systems normal."
+
+    visible = _feed_all(scrubber, [text])
+
+    assert visible == text
+    assert scrubber.matched is False
+
+
+def test_is_upstream_error_sentinel_matches_full_and_marker() -> None:
+    assert is_upstream_error_sentinel(_SENTINEL) is True
+    assert is_upstream_error_sentinel("  " + _SENTINEL + "\n") is True
+    # Distinctive marker embedded in a slightly different wrapper.
+    assert is_upstream_error_sentinel("提示：上游模型未返回任何内容，请重试") is True
+
+
+def test_is_upstream_error_sentinel_ignores_legit_text() -> None:
+    assert is_upstream_error_sentinel("") is False
+    assert is_upstream_error_sentinel(None) is False
+    assert is_upstream_error_sentinel("Here is your answer.") is False
+    assert is_upstream_error_sentinel("⚠️ Note: disk almost full") is False
+
+
+def test_is_upstream_error_sentinel_ignores_long_quote_of_marker() -> None:
+    # A long, legitimate reply that merely explains/quotes the gateway phrase
+    # must NOT be suppressed (it is not itself a gateway error).
+    long_legit = (
+        "When the platform routes through a reseller gateway, you may see a "
+        "message like '上游模型未返回任何内容'. Here is what that means and how "
+        "to handle it: " + "the upstream provider returned no content. " * 8
+    )
+    assert len(long_legit) >= 200
+    assert is_upstream_error_sentinel(long_legit) is False
+
+
+def test_is_upstream_error_sentinel_still_matches_short_marker_message() -> None:
+    # A short, self-contained message containing the marker is a gateway error.
+    assert is_upstream_error_sentinel("上游模型未返回任何内容，请稍后重试") is True
+
+
+def test_contains_cjk_detects_sentinel_body_not_emoji() -> None:
+    from surogates.harness.stream_scrubbers import _contains_cjk
+
+    assert _contains_cjk("上游模型") is True
+    assert _contains_cjk(_SENTINEL) is True
+    assert _contains_cjk("⚠️") is False
+    assert _contains_cjk("⚠️ Warning: low battery") is False
+    assert _contains_cjk("") is False
+
+
+def test_is_upstream_error_sentinel_ignores_long_reply_starting_with_marker() -> None:
+    # A long legitimate reply that OPENS with the marker phrase is real content,
+    # not a gateway error -- the module docstring promises exactly this, but the
+    # unguarded ``startswith(marker)`` branch used to blank it.
+    long_reply = (
+        "上游模型未返回任何内容 is the exact phrase this reseller gateway emits "
+        "when its own upstream fails. Here is a full explanation of the cause "
+        "and how to handle it in production: " + "detail. " * 20
+    )
+    assert len(long_reply) >= 200
+    assert is_upstream_error_sentinel(long_reply) is False
+
+
+def test_sentinel_scrubber_suppresses_drifted_wording_keeping_marker() -> None:
+    # The gateway keeps its distinctive marker but drifts the surrounding
+    # wording; the streaming path must suppress it, not leak raw CJK.
+    scrubber = StreamingSentinelScrubber()
+    drifted = "⚠️ 上游模型未返回任何内容，请稍后重试或更换模型。"
+
+    visible = _feed_all(scrubber, [drifted])
+
+    assert "上游模型" not in visible
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_drifted_variant_split_across_chunks() -> None:
+    scrubber = StreamingSentinelScrubber()
+    # Marker completes across chunks, then the trailing wording drifts.
+    chunks = ["⚠️ 上游模型未返回", "任何内容，请稍后重试。"]
+
+    visible = _feed_all(scrubber, chunks)
+
+    assert "上游模型" not in visible
+    assert scrubber.matched is True
