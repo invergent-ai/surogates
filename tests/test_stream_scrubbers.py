@@ -147,7 +147,7 @@ def test_sentinel_scrubber_flushes_lone_emoji() -> None:
 
     visible = _feed_all(scrubber, ["⚠️"])
 
-    # Below the truncation threshold -> a lone emoji is legitimate output.
+    # A lone shared lead-in has no CJK -> it is legitimate output.
     assert visible == "⚠️"
     assert scrubber.matched is False
 
@@ -161,6 +161,28 @@ def test_sentinel_scrubber_suppresses_truncated_sentinel_on_flush() -> None:
 
     assert visible == ""
     assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_suppresses_short_truncated_cjk_prefix() -> None:
+    # Regression: a stream cut just past the emoji into the first CJK chars
+    # (e.g. "⚠️ 上游模") must NOT leak the partial Chinese to the user.
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["⚠️ 上游模"])
+
+    assert visible == ""
+    assert "上游" not in visible
+    assert scrubber.matched is True
+
+
+def test_sentinel_scrubber_emits_short_non_cjk_prefix() -> None:
+    # "⚠️ " (emoji + space) shares the lead-in but has no CJK -> legitimate.
+    scrubber = StreamingSentinelScrubber()
+
+    visible = _feed_all(scrubber, ["⚠️ "])
+
+    assert visible == "⚠️ "
+    assert scrubber.matched is False
 
 
 def test_sentinel_scrubber_emits_text_following_divergence() -> None:
@@ -186,3 +208,13 @@ def test_is_upstream_error_sentinel_ignores_legit_text() -> None:
     assert is_upstream_error_sentinel(None) is False
     assert is_upstream_error_sentinel("Here is your answer.") is False
     assert is_upstream_error_sentinel("⚠️ Note: disk almost full") is False
+
+
+def test_contains_cjk_detects_sentinel_body_not_emoji() -> None:
+    from surogates.harness.stream_scrubbers import _contains_cjk
+
+    assert _contains_cjk("上游模型") is True
+    assert _contains_cjk(_SENTINEL) is True
+    assert _contains_cjk("⚠️") is False
+    assert _contains_cjk("⚠️ Warning: low battery") is False
+    assert _contains_cjk("") is False

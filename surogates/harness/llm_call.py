@@ -601,13 +601,21 @@ async def call_llm_with_retry(
                     "user, retrying / failing over.",
                     session.id, iteration, attempt, MAX_LLM_RETRIES,
                 )
+                # A fabricated turn may have dispatched a bogus tool call into
+                # the streaming executor before the sentinel was recognised.
+                # Discard that executor so nothing from the error turn survives
+                # into the retry.
+                if on_stream_retry is not None:
+                    active_on_tool_call_complete = on_stream_retry()
                 if activate_fallback():
                     current_model = get_current_model()
                     if current_model:
                         create_kwargs["model"] = current_model
                     continue
                 if attempt < MAX_LLM_RETRIES:
-                    await asyncio.sleep(jittered_backoff(attempt))
+                    await interruptible_sleep(
+                        jittered_backoff(attempt), interrupt_check,
+                    )
                     continue
                 raise ValueError("LLM returned empty response")
 

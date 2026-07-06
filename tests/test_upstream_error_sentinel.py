@@ -326,17 +326,21 @@ async def _run_with_retry(
     stream_side_effect: Any,
     activate_fallback: Any,
     get_current_model: Any,
+    interrupt_check: Any = None,
+    on_stream_retry: Any = None,
 ):
     from unittest.mock import patch
 
     from surogates.harness.llm_call import call_llm_with_retry
 
+    sleep_mock = AsyncMock()
     with (
         patch(
             "surogates.harness.llm_call.call_llm_streaming",
             AsyncMock(side_effect=stream_side_effect),
         ) as streaming_mock,
-        patch("surogates.harness.llm_call.asyncio.sleep", AsyncMock()),
+        # Patch the interruptible backoff so the retry path uses no real delay.
+        patch("surogates.harness.llm_call.interruptible_sleep", sleep_mock),
     ):
         result = await call_llm_with_retry(
             session=_make_session(),
@@ -345,13 +349,14 @@ async def _run_with_retry(
             llm_client=MagicMock(),
             store=AsyncMock(),
             streaming_enabled=True,
-            interrupt_check=lambda: False,
+            interrupt_check=interrupt_check or (lambda: False),
             rotate_credential=lambda *a, **k: False,
             activate_fallback=activate_fallback,
             get_current_model=get_current_model,
             set_streaming_enabled=lambda _enabled: None,
+            on_stream_retry=on_stream_retry,
         )
-    return result, streaming_mock
+    return result, streaming_mock, sleep_mock
 
 
 _SENTINEL_RESULT = ({"role": "assistant", "content": ""}, {"upstream_error_sentinel": True})
@@ -364,7 +369,7 @@ class TestRetryRoutingOnSentinel:
         activate_fallback = MagicMock(return_value=True)
         get_current_model = MagicMock(return_value="backup-model")
 
-        (msg, _usage), streaming_mock = await _run_with_retry(
+        (msg, _usage), streaming_mock, _sleep = await _run_with_retry(
             stream_side_effect=[_SENTINEL_RESULT, _GOOD_RESULT],
             activate_fallback=activate_fallback,
             get_current_model=get_current_model,
@@ -393,7 +398,7 @@ class TestRetryRoutingOnSentinel:
         activate_fallback = MagicMock(return_value=False)
         get_current_model = MagicMock(return_value=None)
 
-        (msg, _usage), streaming_mock = await _run_with_retry(
+        (msg, _usage), streaming_mock, _sleep = await _run_with_retry(
             stream_side_effect=[_SENTINEL_RESULT, _GOOD_RESULT],
             activate_fallback=activate_fallback,
             get_current_model=get_current_model,
@@ -401,6 +406,44 @@ class TestRetryRoutingOnSentinel:
 
         assert msg["content"] == "recovered"
         assert streaming_mock.await_count == 2
+
+    async def test_in_place_backoff_is_interruptible(self) -> None:
+        """The retry backoff must use the interruptible sleep wired to
+        interrupt_check, so a user Stop is honoured mid-backoff."""
+        activate_fallback = MagicMock(return_value=False)
+        get_current_model = MagicMock(return_value=None)
+        interrupt_check = lambda: False  # noqa: E731
+
+        (msg, _usage), _streaming, sleep_mock = await _run_with_retry(
+            stream_side_effect=[_SENTINEL_RESULT, _GOOD_RESULT],
+            activate_fallback=activate_fallback,
+            get_current_model=get_current_model,
+            interrupt_check=interrupt_check,
+        )
+
+        assert msg["content"] == "recovered"
+        assert sleep_mock.await_count == 1
+        # Second positional arg is the interrupt callback (not a bare sleep).
+        _seconds, passed_interrupt = sleep_mock.await_args.args
+        assert passed_interrupt is interrupt_check
+
+    async def test_sentinel_retry_discards_streaming_executor(self) -> None:
+        """A fabricated turn may dispatch a bogus tool into the executor; the
+        retry must discard it via on_stream_retry before re-issuing."""
+        activate_fallback = MagicMock(return_value=False)
+        get_current_model = MagicMock(return_value=None)
+        fresh_cb = MagicMock()
+        on_stream_retry = MagicMock(return_value=fresh_cb)
+
+        (msg, _usage), _streaming, _sleep = await _run_with_retry(
+            stream_side_effect=[_SENTINEL_RESULT, _GOOD_RESULT],
+            activate_fallback=activate_fallback,
+            get_current_model=get_current_model,
+            on_stream_retry=on_stream_retry,
+        )
+
+        assert msg["content"] == "recovered"
+        assert on_stream_retry.called, "executor was not discarded on sentinel retry"
 
 
 # ---------------------------------------------------------------------------

@@ -34,10 +34,19 @@ _UPSTREAM_SENTINEL_MARKERS: Final[tuple[str, ...]] = (
     "上游模型未返回任何内容",
 )
 
-# On flush, a held buffer that is a proper prefix of a sentinel this long or
-# longer is treated as a truncated gateway error and suppressed.  Short shared
-# prefixes (e.g. a lone "⚠️") fall below the bar and are emitted normally.
-_MIN_SUPPRESSED_PREFIX_LEN: Final[int] = 8
+
+def _contains_cjk(text: str) -> bool:
+    """True if *text* contains a CJK ideograph.
+
+    The gateway error strings are Chinese; a lone shared lead-in such as the
+    ``⚠️`` warning emoji contains none.  Used on flush to distinguish a
+    truncated gateway error (suppress) from an innocuous prefix (emit).
+    """
+    return any(
+        "㐀" <= ch <= "鿿"  # CJK Unified Ideographs (incl. Ext-A)
+        or "豈" <= ch <= "﫿"  # CJK Compatibility Ideographs
+        for ch in text
+    )
 
 
 def is_upstream_error_sentinel(text: str | None) -> bool:
@@ -393,10 +402,13 @@ class StreamingSentinelScrubber:
         out, self._buf = self._buf, ""
         candidate = out.lstrip()
         if (
-            len(candidate) >= _MIN_SUPPRESSED_PREFIX_LEN
+            _contains_cjk(candidate)
             and any(sentinel.startswith(candidate) for sentinel in self._sentinels)
         ):
-            # Stream ended mid-sentinel -- a truncated gateway error.  Suppress.
+            # Stream ended mid-sentinel while still holding a gateway-error
+            # prefix that already contains CJK -- a truncated error.  Suppress
+            # it so no partial Chinese ever reaches the user.  A lone shared
+            # lead-in (e.g. "⚠️") has no CJK and is emitted normally.
             self._matched = True
             return ""
         return out
