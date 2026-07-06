@@ -293,7 +293,18 @@ class LLMSettings(BaseSettings):
     #         context_window: 204800
     #         max_output_tokens: 4096
     models: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    
+
+    # Eagerly drop superseded browser page snapshots from the replayed history
+    # before each LLM call: keep the most recent ``browser_state_keep_last``
+    # ``browser_get_state`` results and replace older ones with a short
+    # placeholder.  The agent only ever acts on the current page state (and
+    # re-fetches on demand), so this cuts input tokens on long browser sessions
+    # -- and lowers compaction frequency -- without changing behaviour.  Set
+    # ``prune_browser_state: false`` to restore the prior behaviour (prune only
+    # during compaction).
+    prune_browser_state: bool = True
+    browser_state_keep_last: int = 2
+
     summary_model: str = ""  # cheap model for context compression summaries
     summary_base_url: str = ""  # optional auxiliary endpoint for summaries
     summary_api_key: str = ""  # optional auxiliary API key for summaries

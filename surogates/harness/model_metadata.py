@@ -70,6 +70,14 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.015,
         supports_vision=True,
     ),
+    "claude-opus-4-8": ModelInfo(
+        id="claude-opus-4-8",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.005,
+        output_cost_per_1k=0.025,
+        supports_vision=True,
+    ),
     "claude-opus-4-7": ModelInfo(
         id="claude-opus-4-7",
         context_window=1_000_000,
@@ -333,21 +341,42 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / _CHARS_PER_TOKEN + 0.5))
 
 
+# Cached-input reads are billed at a fraction of the normal input rate
+# (Anthropic / Bedrock ephemeral cache reads are ~0.1x the input price).
+_CACHE_READ_DISCOUNT: float = 0.1
+
+
 def estimate_cost(
     model_id: str,
     input_tokens: int,
     output_tokens: int,
+    cache_read_tokens: int = 0,
 ) -> float:
     """Estimate the USD cost for a single LLM call.
+
+    ``cache_read_tokens`` is the portion of ``input_tokens`` that was served
+    from the provider's prompt cache; those tokens are billed at
+    ``_CACHE_READ_DISCOUNT`` times the input rate rather than the full rate.
+    Defaults to ``0`` for backward compatibility.
 
     Returns ``0.0`` if the model is not in the catalog.
     """
     info = get_model_info(model_id)
     if info is None:
         return 0.0
-    input_cost = (input_tokens / 1000.0) * info.input_cost_per_1k
+    # The harness reaches every provider (including Claude, via the yunwu /
+    # OpenRouter gateways) over the OpenAI-compatible Chat Completions API, so
+    # ``input_tokens`` (prompt_tokens) is INCLUSIVE of cache reads and
+    # ``cache_read_tokens`` is a subset of it -- verified against the live
+    # upstream (cached 64,551 < prompt 79,694).  Cap the cached bucket at input
+    # so a stray count never makes uncached negative, bill it at the discounted
+    # rate, and bill the remainder at the full input rate.
+    cached = max(0, min(cache_read_tokens, input_tokens))
+    uncached = input_tokens - cached
+    input_cost = (uncached / 1000.0) * info.input_cost_per_1k
+    cache_cost = (cached / 1000.0) * info.input_cost_per_1k * _CACHE_READ_DISCOUNT
     output_cost = (output_tokens / 1000.0) * info.output_cost_per_1k
-    return input_cost + output_cost
+    return input_cost + cache_cost + output_cost
 
 
 # ---------------------------------------------------------------------------

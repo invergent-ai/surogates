@@ -1061,6 +1061,13 @@ class AgentHarness(
                 model=session.model or self._default_model,
             )
 
+            # 6b. Drop superseded browser page snapshots.  Old
+            # ``browser_get_state`` results are never re-read (the agent
+            # re-fetches page state on demand), so replacing all but the most
+            # recent few with a short placeholder cuts input tokens on long
+            # browser sessions and lowers how often compaction fires.
+            messages = self._compressor.prune_stale_browser_states(messages)
+
             # 7. Compress context if needed.
             messages = await self._engineer_context(
                 session, all_events, messages,
@@ -1866,10 +1873,13 @@ class AgentHarness(
                 "context_window": self._compressor.context_length,
             }
 
-            # Compute cost estimate.
+            # Compute cost estimate (cache reads billed at the discounted rate).
             from surogates.harness.model_metadata import estimate_cost
 
-            cost = estimate_cost(model_id, input_tokens, output_tokens)
+            cost = estimate_cost(
+                model_id, input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens,
+            )
             if cost > 0:
                 response_data["cost_usd"] = cost
 
@@ -3664,15 +3674,20 @@ class AgentHarness(
             # Emit the summary as an LLM_RESPONSE event.
             input_tokens = usage_data.get("input_tokens", 0)
             output_tokens = usage_data.get("output_tokens", 0)
+            cache_read_tokens = usage_data.get("cache_read_tokens", 0)
 
             from surogates.harness.model_metadata import estimate_cost
 
-            cost = estimate_cost(model_id, input_tokens, output_tokens)
+            cost = estimate_cost(
+                model_id, input_tokens, output_tokens,
+                cache_read_tokens=cache_read_tokens,
+            )
 
             if cost_tracker is not None:
                 cost_tracker.record_call(
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    cache_read_tokens=cache_read_tokens,
                     cost_usd=cost,
                 )
 
@@ -3681,6 +3696,7 @@ class AgentHarness(
                 "model": usage_data.get("model", model_id),
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
                 "finish_reason": "budget_exhausted",
             }
             if turn_id is not None:
