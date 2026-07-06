@@ -1626,8 +1626,6 @@ async def call_llm_streaming_inner(
         assistant_message["content"] = ""
         assistant_message.pop("tool_calls", None)
         usage_data["upstream_error_sentinel"] = True
-        usage_data.pop("partial_tool_call", None)
-        usage_data.pop("partial_tool_names", None)
 
     return sanitize_response_message(assistant_message), usage_data
 
