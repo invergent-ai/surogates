@@ -364,13 +364,15 @@ def estimate_cost(
     info = get_model_info(model_id)
     if info is None:
         return 0.0
-    cached = max(0, cache_read_tokens)
-    # Two provider usage shapes exist: OpenAI / Qwen report ``input_tokens``
-    # INCLUSIVE of cache reads (``cached <= input``), while Anthropic-native
-    # reports them as separate additive buckets (``input_tokens`` excludes
-    # cache reads).  When ``cached`` exceeds ``input`` we are in the latter
-    # shape, so bill all of ``input`` rather than dropping the excess cache.
-    uncached = input_tokens - cached if cached <= input_tokens else input_tokens
+    # The harness reaches every provider (including Claude, via the yunwu /
+    # OpenRouter gateways) over the OpenAI-compatible Chat Completions API, so
+    # ``input_tokens`` (prompt_tokens) is INCLUSIVE of cache reads and
+    # ``cache_read_tokens`` is a subset of it -- verified against the live
+    # upstream (cached 64,551 < prompt 79,694).  Cap the cached bucket at input
+    # so a stray count never makes uncached negative, bill it at the discounted
+    # rate, and bill the remainder at the full input rate.
+    cached = max(0, min(cache_read_tokens, input_tokens))
+    uncached = input_tokens - cached
     input_cost = (uncached / 1000.0) * info.input_cost_per_1k
     cache_cost = (cached / 1000.0) * info.input_cost_per_1k * _CACHE_READ_DISCOUNT
     output_cost = (output_tokens / 1000.0) * info.output_cost_per_1k
