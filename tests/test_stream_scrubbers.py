@@ -210,6 +210,23 @@ def test_is_upstream_error_sentinel_ignores_legit_text() -> None:
     assert is_upstream_error_sentinel("⚠️ Note: disk almost full") is False
 
 
+def test_is_upstream_error_sentinel_ignores_long_quote_of_marker() -> None:
+    # A long, legitimate reply that merely explains/quotes the gateway phrase
+    # must NOT be suppressed (it is not itself a gateway error).
+    long_legit = (
+        "When the platform routes through a reseller gateway, you may see a "
+        "message like '上游模型未返回任何内容'. Here is what that means and how "
+        "to handle it: " + "the upstream provider returned no content. " * 8
+    )
+    assert len(long_legit) >= 200
+    assert is_upstream_error_sentinel(long_legit) is False
+
+
+def test_is_upstream_error_sentinel_still_matches_short_marker_message() -> None:
+    # A short, self-contained message containing the marker is a gateway error.
+    assert is_upstream_error_sentinel("上游模型未返回任何内容，请稍后重试") is True
+
+
 def test_contains_cjk_detects_sentinel_body_not_emoji() -> None:
     from surogates.harness.stream_scrubbers import _contains_cjk
 

@@ -34,6 +34,12 @@ _UPSTREAM_SENTINEL_MARKERS: Final[tuple[str, ...]] = (
     "上游模型未返回任何内容",
 )
 
+# A marker only counts as a gateway error when the message is itself
+# error-shaped: short and self-contained.  A long legitimate reply that merely
+# quotes/translates the phrase is not suppressed.  The real sentinel is ~60
+# chars, so this leaves generous headroom.
+_MAX_SENTINEL_MESSAGE_LEN: Final[int] = 200
+
 
 def _contains_cjk(text: str) -> bool:
     """True if *text* contains a CJK ideograph.
@@ -52,9 +58,10 @@ def _contains_cjk(text: str) -> bool:
 def is_upstream_error_sentinel(text: str | None) -> bool:
     """Return ``True`` if *text* is a known upstream-gateway error string.
 
-    Matches a message that *is* (starts with) a full sentinel, or that contains
-    a distinctive gateway marker.  Used to filter fully assembled messages on
-    both the streaming and non-streaming paths.
+    Matches a message that *is* (starts with) a full sentinel, or that is a
+    short, error-shaped message containing a distinctive gateway marker.  A long
+    legitimate reply that merely quotes the marker is not matched.  Callers pass
+    already-flattened text (see ``_message_content_as_text``).
     """
     if not text:
         return False
@@ -63,7 +70,11 @@ def is_upstream_error_sentinel(text: str | None) -> bool:
         return False
     if any(stripped.startswith(sentinel) for sentinel in UPSTREAM_ERROR_SENTINELS):
         return True
-    return any(marker in stripped for marker in _UPSTREAM_SENTINEL_MARKERS)
+    return any(
+        stripped.startswith(marker)
+        or (len(stripped) < _MAX_SENTINEL_MESSAGE_LEN and marker in stripped)
+        for marker in _UPSTREAM_SENTINEL_MARKERS
+    )
 
 
 class StreamingThinkScrubber:

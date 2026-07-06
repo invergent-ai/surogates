@@ -315,6 +315,25 @@ class TestNonStreamingSentinelGuard:
         assert msg["content"] == "All good."
         assert "upstream_error_sentinel" not in usage
 
+    async def test_structured_list_content_sentinel_blanked(self) -> None:
+        # Content may arrive as a list of blocks (multimodal/structured). The
+        # guard must flatten it (no AttributeError) and still detect the error.
+        response = _non_streaming_response(
+            [{"type": "text", "text": SENTINEL}],
+        )
+        msg, usage = await _run_non_streaming(response)
+
+        assert msg.get("content", "") == ""
+        assert usage.get("upstream_error_sentinel") is True
+
+    async def test_structured_list_content_legit_untouched(self) -> None:
+        content = [{"type": "text", "text": "All good."}]
+        response = _non_streaming_response(content)
+        msg, usage = await _run_non_streaming(response)
+
+        assert msg["content"] == content
+        assert "upstream_error_sentinel" not in usage
+
 
 # ---------------------------------------------------------------------------
 # Retry / failover routing in call_llm_with_retry

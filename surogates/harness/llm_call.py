@@ -1764,7 +1764,12 @@ async def call_llm_non_streaming(
         "finish_reason": choice.finish_reason,
     }
 
-    if is_upstream_error_sentinel(assistant_message_dict.get("content")):
+    # Flatten first: content may still be a list of blocks here (the loop
+    # coerces it to text only after this returns), and is_upstream_error_sentinel
+    # expects text.
+    if is_upstream_error_sentinel(
+        _message_content_as_text(assistant_message_dict.get("content"))
+    ):
         # An upstream-gateway error fabricated as normal content.  Blank it and
         # drop the bogus tool calls so it is never persisted or shown, and flag
         # the turn for retry / failover in ``call_llm_with_retry``.
