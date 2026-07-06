@@ -200,13 +200,17 @@ class TestOpus48Cost:
         expected = (600 / 1000) * 0.005 + (400 / 1000) * (0.005 * 0.1)
         assert cost == pytest.approx(expected)
 
-    def test_cache_read_capped_at_input(self):
-        # Defensive: cache_read_tokens can never exceed input_tokens.
+    def test_exclusive_usage_shape_bills_input_plus_cache(self):
+        # Anthropic-native usage shape: input_tokens EXCLUDES cache reads, so
+        # cache_read can exceed input_tokens.  Both buckets must be billed
+        # (input at full rate, cache at the discounted rate) rather than
+        # capping cache at input and silently dropping the rest.
         cost = estimate_cost(
-            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
-            cache_read_tokens=5000,
+            "claude-opus-4-8", input_tokens=500, output_tokens=0,
+            cache_read_tokens=20000,
         )
-        assert cost == pytest.approx(0.005 * 0.1)
+        expected = (500 / 1000) * 0.005 + (20000 / 1000) * (0.005 * 0.1)
+        assert cost == pytest.approx(expected)
 
     def test_cache_discount_ignored_for_unknown_model(self):
         cost = estimate_cost(

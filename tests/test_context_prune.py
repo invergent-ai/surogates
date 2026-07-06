@@ -223,3 +223,27 @@ def test_llmsettings_defaults_enable_pruning():
     settings = LLMSettings()
     assert settings.prune_browser_state is True
     assert settings.browser_state_keep_last == 2
+
+
+def test_method_never_clears_current_state_even_at_keep_last_zero():
+    # Misconfiguration guard: keep_last=0 must never blind the agent by
+    # clearing the current page state — the most recent state always survives.
+    c = _compressor(prune_browser_state=True, browser_state_keep_last=0)
+    out = c.prune_stale_browser_states(_browser_session(3))
+    results = [m for m in out if m.get("role") == "tool"]
+    assert results[-1]["content"] == f"{BIG}#3"
+
+
+def test_no_target_tool_results_returns_input_unchanged():
+    # Non-browser session: nothing to prune, returns the same list (exercises
+    # the cheap early-return, no scan of tool results needed).
+    msgs = [
+        {"role": "system", "content": "sys"},
+        _asst_call("f1", "read_file"),
+        _tool_result("f1", BIG),
+        _asst_call("f2", "list_dir"),
+        _tool_result("f2", BIG),
+    ]
+    out, count = _prune(msgs, keep_last=1)
+    assert count == 0
+    assert out is msgs

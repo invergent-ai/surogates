@@ -118,27 +118,28 @@ def prune_superseded_tool_results(
     if not messages or keep_last < 0:
         return messages, 0
 
-    # 1. Map tool_call_id -> tool name from the assistant tool_calls, so we can
-    #    tell which "role: tool" results belong to the targeted tools (the
-    #    result messages themselves carry only the id, not the name).
-    id_to_name: dict[str, str] = {}
+    # 1. Collect the tool_call_ids belonging to the targeted tools (a result
+    #    message carries only the id, not the tool name).  Most sessions never
+    #    call these tools, so an empty set lets us skip the result scan
+    #    entirely instead of walking the whole history twice every turn.
+    target_ids: set[str] = set()
     for msg in messages:
         if msg.get("role") != "assistant":
             continue
         for tc in msg.get("tool_calls") or []:
-            call_id = tc.get("id")
-            name = (tc.get("function") or {}).get("name")
-            if call_id and name:
-                id_to_name[call_id] = name
+            if (tc.get("function") or {}).get("name") in tool_names:
+                call_id = tc.get("id")
+                if call_id:
+                    target_ids.add(call_id)
+    if not target_ids:
+        return messages, 0
 
-    # 2. Indices of targeted tool-result messages, in conversation order.
-    target_indices: list[int] = []
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "tool":
-            continue
-        if id_to_name.get(msg.get("tool_call_id")) in tool_names:
-            target_indices.append(i)
-
+    # 2. Indices of the targeted tool-result messages, in conversation order.
+    target_indices = [
+        i
+        for i, msg in enumerate(messages)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") in target_ids
+    ]
     if len(target_indices) <= keep_last:
         return messages, 0
 
@@ -214,7 +215,7 @@ class ContextCompressor:
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
         self.quiet_mode = quiet_mode
         self._prune_browser_state = prune_browser_state
-        self._browser_state_keep_last = max(0, browser_state_keep_last)
+        self._browser_state_keep_last = browser_state_keep_last
 
         self.threshold_tokens = int(self.context_length * threshold_percent)
         self.compression_count = 0
@@ -349,7 +350,9 @@ class ContextCompressor:
         pruned_messages, pruned_count = prune_superseded_tool_results(
             messages,
             tool_names=_SUPERSEDED_STATE_TOOLS,
-            keep_last=self._browser_state_keep_last,
+            # Never below 1: the current page state must always survive, or the
+            # agent is left with no DOM to act on.
+            keep_last=max(1, self._browser_state_keep_last),
             placeholder=_PRUNED_TOOL_PLACEHOLDER,
         )
         if pruned_count and not self.quiet_mode:
