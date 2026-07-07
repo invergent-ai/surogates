@@ -365,3 +365,65 @@ def test_view_context_note_skips_non_user_events_when_searching():
         _view_context_note(events)
         == "The user is currently viewing **training_run** tr_77 (Pretrain epoch 3)."
     )
+
+
+def test_view_context_note_renders_page_with_doc_and_resource():
+    events = [
+        _user_event(
+            {
+                "metadata": {
+                    "view_context": {
+                        "mode": "develop",
+                        "page": "Models",
+                        "docPath": "develop/features/models",
+                        "resource": {
+                            "kind": "model",
+                            "id": "m-9",
+                            "name": "llama-3b",
+                        },
+                    }
+                }
+            }
+        ),
+    ]
+    note = _view_context_note(events)
+    assert note == (
+        "The user is currently on the **Models** page (develop mode). "
+        "To explain this page, its settings, or concepts, read its "
+        'documentation: call read_doc("develop/features/models"). '
+        'They are viewing model "llama-3b" (id m-9).'
+    )
+
+
+def test_view_context_note_page_without_doc_omits_read_doc():
+    events = [
+        _user_event(
+            {"metadata": {"view_context": {"mode": "develop", "page": "Experts", "docPath": None}}}
+        ),
+    ]
+    assert (
+        _view_context_note(events)
+        == "The user is currently on the **Experts** page (develop mode)."
+    )
+
+
+def test_view_context_note_page_includes_tab():
+    events = [
+        _user_event(
+            {
+                "metadata": {
+                    "view_context": {
+                        "mode": "work",
+                        "page": "Configure agent",
+                        "docPath": "work/workflow/configure-agent",
+                        "tab": "governance",
+                        "resource": {"kind": "agent", "id": "agt_1"},
+                    }
+                }
+            }
+        ),
+    ]
+    note = _view_context_note(events)
+    assert 'on the "governance" tab.' in note
+    assert 'read_doc("work/workflow/configure-agent")' in note
+    assert "They are viewing agent (id agt_1)." in note

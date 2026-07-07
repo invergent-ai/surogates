@@ -55,15 +55,26 @@ def _initial_system_message(system_prompt: str, browser_pause_notice: str | None
 def _view_context_note_from_metadata(metadata: Any) -> str | None:
     """Pure helper: render the view-context note from a metadata dict.
 
+    The Platform Copilot attaches a ``view_context`` describing the Studio
+    page the user is looking at. The current shape carries ``page`` plus a
+    ``docPath`` (the product-doc that explains that screen) and an optional
+    ``resource``; older Studio builds send a flat ``{kind, id, name}`` — both
+    are rendered so a version skew never drops the note.
+
     Returns ``None`` when *metadata* is missing, not a dict, lacks
-    ``view_context``, or the inner ``view_context`` payload is malformed
-    (not a dict, missing ``kind``/``id``).
+    ``view_context``, or the payload is malformed.
     """
     if not isinstance(metadata, dict):
         return None
     view_context = metadata.get("view_context")
     if not isinstance(view_context, dict):
         return None
+
+    # Current shape: a page descriptor with the doc that explains it.
+    if view_context.get("page"):
+        return _page_view_context_note(view_context)
+
+    # Backward-compatible flat resource shape.
     kind = view_context.get("kind")
     target_id = view_context.get("id")
     if not kind or not target_id:
@@ -72,7 +83,32 @@ def _view_context_note_from_metadata(metadata: Any) -> str | None:
     name = view_context.get("name")
     if name:
         note += f" ({name})"
+    return note + "."
+
+
+def _page_view_context_note(view_context: dict[str, Any]) -> str:
+    """Render the page-descriptor form of a ``view_context`` payload."""
+    note = f"The user is currently on the **{view_context.get('page')}** page"
+    mode = view_context.get("mode")
+    if mode:
+        note += f" ({mode} mode)"
+    tab = view_context.get("tab")
+    if tab:
+        note += f' on the "{tab}" tab'
     note += "."
+
+    doc_path = view_context.get("docPath")
+    if doc_path:
+        note += (
+            " To explain this page, its settings, or concepts, read its "
+            f'documentation: call read_doc("{doc_path}").'
+        )
+
+    resource = view_context.get("resource")
+    if isinstance(resource, dict) and resource.get("kind") and resource.get("id"):
+        name = resource.get("name")
+        named = f' "{name}"' if name else ""
+        note += f" They are viewing {resource['kind']}{named} (id {resource['id']})."
     return note
 
 
