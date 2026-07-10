@@ -270,6 +270,7 @@ async def _list_recent_sessions(
     limit: int,
     current_session_id: UUID | None = None,
     service_account_id: UUID | None = None,
+    owner_scope: bool = False,
 ) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
@@ -279,20 +280,24 @@ async def _list_recent_sessions(
             agent_id=agent_id,
             service_account_id=service_account_id,
             limit=limit + 5,  # fetch extra to skip current
+            any_principal=owner_scope,
         )
 
-        # Resolve current session lineage to exclude it
+        # Resolve current session lineage to exclude it -- the walked root
+        # is what appears in the roots-only listing, not the child itself.
         current_root: UUID | None = None
         if current_session_id:
             try:
-                sid = current_session_id
+                root = current_session_id
                 visited: set[UUID] = set()
-                while sid and sid not in visited:
-                    visited.add(sid)
-                    s = await session_store.get_session(sid)
+                while root not in visited:
+                    visited.add(root)
+                    s = await session_store.get_session(root)
                     parent = s.parent_id if s else None
-                    sid = parent if parent else None
-                current_root = current_session_id
+                    if not parent:
+                        break
+                    root = parent
+                current_root = root
             except Exception:
                 current_root = current_session_id
 
@@ -320,7 +325,7 @@ async def _list_recent_sessions(
             except Exception:
                 pass
 
-            results.append({
+            entry = {
                 "session_id": str(sid),
                 "title": s.title or None,
                 "channel": s.channel,
@@ -328,7 +333,9 @@ async def _list_recent_sessions(
                 "last_active": _format_timestamp(s.updated_at),
                 "message_count": s.message_count,
                 "preview": preview,
-            })
+            }
+            _attach_session_user(entry, s.user_id, owner_scope)
+            results.append(entry)
             if len(results) >= limit:
                 break
 
@@ -352,6 +359,80 @@ async def _list_recent_sessions(
 # ---------------------------------------------------------------------------
 
 
+def _attach_session_user(
+    entry: dict[str, Any],
+    user_id: Any,
+    owner_scope: bool,
+) -> None:
+    """Under owner scope, stamp the session's owning user onto a result
+    entry so the console can tell principals apart. ``None`` means a
+    principal-less or service-account-owned session."""
+    if owner_scope:
+        entry["user_id"] = str(user_id) if user_id else None
+
+
+# Matches ops_chat_service_account_name in surogate-ops
+# (server/services/agent_forward.py): "ops-chat-{org_id}-{user_id}".
+# Only surogate-ops's live-chat forwarder authenticates with these
+# accounts; creating one with a matching name requires org-admin rights.
+_OPS_CHAT_SA_PREFIX = "ops-chat-"
+
+
+async def _is_owner_scoped(
+    session_store: Any,
+    service_account_id: UUID | None,
+    session_config: Any,
+) -> bool:
+    """Return ``True`` when the calling session is an ops console chat on a
+    managed (non-system) agent.
+
+    Owner scope widens search from "the caller's own sessions" to "every
+    principal's sessions for this org + agent" -- mirroring the ops
+    Sessions Explorer, where ``GET /api/sessions`` defaults to
+    ``scope="all"`` for managed agents but forces ``scope="mine"`` on
+    system agents (copilot chats are private per user).  All three
+    conditions are server-controlled:
+
+    - ``config.ops.user_id`` must be stamped (``create_live_session`` in
+      surogate-ops).  The public session API copies client config
+      verbatim, so this alone is forgeable -- hence the next check.
+      The same stamp is parsed in ``orchestrator/mcp_client.py`` and
+      ``tools/mcp/client.py``; keep all three in sync.
+    - the session principal must be a service account whose name carries
+      the ops live-chat prefix.  End-user surfaces (web SPA, website
+      widget, managed channels) never run under a service account, and an
+      org API token's own service account cannot match the prefix unless
+      an org admin deliberately named it so.
+    - ``config.agent_type`` must be absent: surogate-ops always stamps it
+      for system agents, and their sessions must stay private per user.
+    """
+    if service_account_id is None:
+        return False
+    if not isinstance(session_config, dict):
+        return False
+    ops = session_config.get("ops")
+    if not (isinstance(ops, dict) and ops.get("user_id")):
+        return False
+    if session_config.get("agent_type"):
+        return False
+    try:
+        from sqlalchemy import text as sa_text
+
+        async with session_store._sf() as db:
+            row = await db.execute(
+                sa_text("SELECT name FROM service_accounts WHERE id = :id"),
+                {"id": service_account_id},
+            )
+            name = row.scalar_one_or_none()
+    except Exception:
+        logger.warning(
+            "Owner-scope service-account lookup failed; staying principal-scoped",
+            exc_info=True,
+        )
+        return False
+    return bool(name) and name.startswith(_OPS_CHAT_SA_PREFIX)
+
+
 async def session_search(
     query: str,
     role_filter: str | None = None,
@@ -363,6 +444,7 @@ async def session_search(
     agent_id: str = "",
     current_session_id: UUID | None = None,
     auxiliary_fn: Any | None = None,
+    owner_scope: bool = False,
 ) -> str:
     """Search past sessions and return focused summaries of matching conversations.
 
@@ -414,6 +496,7 @@ async def session_search(
             limit,
             current_session_id,
             service_account_id=service_account_id,
+            owner_scope=owner_scope,
         )
 
     query = query.strip()
@@ -446,15 +529,25 @@ async def session_search(
         raw_results: list[dict[str, Any]] = []
         try:
             async with session_store._sf() as db:
-                principal_column = (
-                    "s.service_account_id"
-                    if service_account_id is not None
-                    else "s.user_id"
-                )
-                principal_param = (
-                    service_account_id
-                    if service_account_id is not None
-                    else user_id
+                params: dict[str, Any] = {
+                    "query": query,
+                    "org_id": org_id,
+                    "agent_id": agent_id,
+                    "limit": 50,  # Get more matches to find unique sessions
+                }
+                # Owner scope (ops console sessions only -- see
+                # _is_owner_scoped) drops the principal predicate so the
+                # search spans every user's sessions for this org + agent.
+                if owner_scope:
+                    principal_clause = ""
+                elif service_account_id is not None:
+                    principal_clause = "AND s.service_account_id = :principal_id"
+                    params["principal_id"] = service_account_id
+                else:
+                    principal_clause = "AND s.user_id = :principal_id"
+                    params["principal_id"] = user_id
+                hidden_clause = "AND s.channel NOT IN ({})".format(
+                    ", ".join(f"'{c}'" for c in _HIDDEN_SESSION_CHANNELS)
                 )
                 # Build full-text search query using PostgreSQL ts_vector
                 # Search event data->>'content' across all sessions for this org
@@ -470,6 +563,7 @@ async def session_search(
                            s.model,
                            s.title,
                            s.parent_id,
+                           s.user_id,
                            ts_rank(
                                to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', '')),
                                plainto_tsquery('english', :query)
@@ -477,7 +571,8 @@ async def session_search(
                     FROM events e
                     JOIN sessions s ON s.id = e.session_id
                     WHERE s.org_id = :org_id
-                      AND {principal_column} = :principal_id
+                      {principal_clause}
+                      {hidden_clause}
                       AND s.agent_id = :agent_id
                       AND s.status != 'archived'
                       AND to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', ''))
@@ -486,13 +581,6 @@ async def session_search(
                     LIMIT :limit
                     """
                 )
-                params: dict[str, Any] = {
-                    "query": query,
-                    "org_id": org_id,
-                    "principal_id": principal_param,
-                    "agent_id": agent_id,
-                    "limit": 50,  # Get more matches to find unique sessions
-                }
 
                 result = await db.execute(fts_query, params)
                 rows = result.mappings().all()
@@ -509,6 +597,7 @@ async def session_search(
                         "model": row["model"],
                         "title": row["title"],
                         "parent_id": row["parent_id"],
+                        "user_id": row["user_id"],
                         "rank": row["rank"],
                     })
         except Exception as e:
@@ -649,6 +738,7 @@ async def session_search(
                 "model": match_info.get("model"),
                 "title": match_info.get("title"),
             }
+            _attach_session_user(entry, match_info.get("user_id"), owner_scope)
 
             if result_val:
                 entry["summary"] = result_val
@@ -707,7 +797,10 @@ SESSION_SEARCH_SCHEMA = ToolSchema(
         "phrases for exact match (\"docker networking\"), boolean (python NOT java), prefix (deploy*). "
         "IMPORTANT: Use OR between keywords for best results — FTS5 defaults to AND which misses "
         "sessions that only mention some terms. If a broad OR query returns nothing, try individual "
-        "keyword searches in parallel. Returns summaries of the top matching sessions."
+        "keyword searches in parallel. Returns summaries of the top matching sessions.\n\n"
+        "In an ops console session, results span EVERY user of this agent and each result carries "
+        "a user_id — attribute those conversations to that user, never to yourself or the person "
+        "you are talking to."
     ),
     parameters={
         "type": "object",
@@ -792,6 +885,10 @@ async def _session_search_handler(
     if isinstance(current_session_id, str):
         current_session_id = UUID(current_session_id)
 
+    owner_scope = await _is_owner_scoped(
+        store, service_account_id, kwargs.get("session_config"),
+    )
+
     return await session_search(
         query=arguments.get("query", ""),
         role_filter=arguments.get("role_filter"),
@@ -803,4 +900,5 @@ async def _session_search_handler(
         agent_id=agent_id,
         current_session_id=current_session_id,
         auxiliary_fn=auxiliary_fn,
+        owner_scope=owner_scope,
     )

@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, not_, select, text, update, delete, func, or_, tuple_
+from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -661,6 +661,7 @@ class SessionStore:
         limit: int = 50,
         offset: int = 0,
         include_descendants: bool = False,
+        any_principal: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
 
@@ -674,14 +675,24 @@ class SessionStore:
         the tree (the chat sidebar) can show a collapsed-children indicator
         without a separate per-session tree fetch.  Pagination still applies to
         roots only; descendants ride along with their root.
+
+        When *any_principal* is set the principal filter is dropped and the
+        listing spans every user/service-account within the org + agent.
+        Callers own the authorization decision -- the only in-tree user is the
+        ops owner-console scope of ``session_search`` (see
+        ``_is_owner_scoped`` there), which requires a service-account
+        principal plus the ops-stamped session config.
         """
-        if (user_id is None) == (service_account_id is None):
-            raise ValueError("list_sessions requires exactly one principal id")
-        principal_filter = (
-            SessionRow.service_account_id == service_account_id
-            if service_account_id is not None
-            else SessionRow.user_id == user_id
-        )
+        if any_principal:
+            principal_filter = true()
+        else:
+            if (user_id is None) == (service_account_id is None):
+                raise ValueError("list_sessions requires exactly one principal id")
+            principal_filter = (
+                SessionRow.service_account_id == service_account_id
+                if service_account_id is not None
+                else SessionRow.user_id == user_id
+            )
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
