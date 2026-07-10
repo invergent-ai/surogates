@@ -177,10 +177,12 @@ class McpProxyClient:
 
             # Forward the chat user's identity to the upstream MCP server
             # via the MCP ``_meta`` channel. The dev-mode client builds
-            # the same payload in ``surogates.tools.mcp.client``; keep
-            # them in sync so platform MCP servers (e.g. surogate-ops's
-            # copilot) authorise proxy-mode calls the same way they
-            # authorise dev-mode calls.
+            # the same payload in ``surogates.tools.mcp.client``, and
+            # ``_is_owner_scoped`` in ``tools.builtin.session_search``
+            # gates on the same ``config.ops`` stamp; keep all three in
+            # sync so platform MCP servers (e.g. surogate-ops's copilot)
+            # authorise proxy-mode calls the same way they authorise
+            # dev-mode calls.
             meta_payload: dict[str, Any] = {}
             session_config = kwargs.get("session_config") or {}
             ops_meta = (
