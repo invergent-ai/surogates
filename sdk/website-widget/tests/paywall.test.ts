@@ -182,4 +182,53 @@ describe('WebsiteAgent paywall run flow', () => {
       buyUrl: 'https://studio.example/buy/helper',
     });
   });
+
+  it('drops the cached anonymous session on sign_in_required so the next send re-bootstraps with a token', async () => {
+    const bootBody = {
+      session_id: 's-1',
+      csrf_token: 'csrf',
+      expires_at: 123,
+      agent_name: 'helper',
+    };
+    const bootstrapBodies: Array<string | undefined> = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes('/messages')) {
+        return jsonResponse(402, { detail: { code: 'sign_in_required' } });
+      }
+      bootstrapBodies.push(init?.body ? String(init.body) : undefined);
+      return jsonResponse(201, bootBody);
+    }) as unknown as typeof fetch;
+
+    let token: string | null = null;
+    const agent = new WebsiteAgent({
+      apiUrl: 'https://api',
+      publishableKey: 'surg_wk_k',
+      getFirebaseIdToken: () => token,
+    });
+
+    const runOnce = () =>
+      new Promise<void>((resolve) => {
+        agent
+          .run({
+            threadId: 't-1',
+            runId: 'r-1',
+            messages: [{ id: 'm-1', role: 'user', content: 'hi' }],
+            state: {},
+            tools: [],
+            context: [],
+            forwardedProps: {},
+          })
+          .subscribe({ error: () => resolve(), complete: () => resolve() });
+      });
+
+    await runOnce();
+    expect(bootstrapBodies).toEqual([undefined]);
+
+    token = 'fb-token';
+    await runOnce();
+    expect(bootstrapBodies).toHaveLength(2);
+    expect(JSON.parse(String(bootstrapBodies[1]))).toEqual({
+      firebase_id_token: 'fb-token',
+    });
+  });
 });

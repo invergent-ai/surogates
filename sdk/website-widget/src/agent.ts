@@ -291,6 +291,16 @@ export class WebsiteAgent extends AbstractAgent {
           code: err.code,
           ...(err.buyUrl !== undefined && { buyUrl: err.buyUrl }),
         };
+        if (err.code === 'sign_in_required') {
+          // The buyer identity binds at bootstrap, and this session
+          // bootstrapped anonymously. Drop it so the next send
+          // re-bootstraps — picking up whatever token
+          // getFirebaseIdToken returns after the visitor signs in —
+          // instead of paywalling a signed-in customer until a full
+          // page reload.
+          this.bootstrapResult = undefined;
+          this.cursor = 0;
+        }
       }
       subscriber.next({
         type: EventType.RUN_ERROR,

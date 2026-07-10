@@ -39,7 +39,7 @@ class _FakeStore:
     def __init__(self):
         self.updates: list[tuple] = []
 
-    async def update_session_config_key(self, session_id, key, value):
+    async def append_session_config_list(self, session_id, key, value):
         self.updates.append((session_id, key, value))
 
 
@@ -147,7 +147,7 @@ async def test_paid_with_buyer_reserves_and_pins_receipt():
         {
             "agent_id": "a-1",
             "firebase_uid": "fb-1",
-            "estimated_tokens": 100 // 4 + 16,
+            "estimated_tokens": (100 + 16) // 4,
             "email": "b@example.com",
             "name": "B",
         },
@@ -155,7 +155,7 @@ async def test_paid_with_buyer_reserves_and_pins_receipt():
     assert store.updates == [
         (
             session.id,
-            "commerce_reservation",
+            "commerce_reservations",
             {
                 "entitlement_id": "ent-1",
                 "reserved_tokens": 41,
@@ -248,7 +248,29 @@ async def test_resolve_buyer_verifies_and_returns_identity(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resolve_buyer_invalid_token_401(monkeypatch):
+async def test_resolve_buyer_normalizes_claims(monkeypatch):
+    async def fake_verify(token, project):
+        return {"sub": "fb-2", "email": "  MiXeD@Example.COM "}
+
+    monkeypatch.setattr(website, "verify_firebase_id_token", fake_verify)
+    request = _request(
+        runtime_payload={"project_id": "p-1"},
+        firebase_rows={
+            "p-1": SimpleNamespace(firebase_project_id="fb-project"),
+        },
+    )
+    buyer = await website._resolve_commerce_buyer(request, "a-1", "id-token")
+    assert buyer == {
+        "firebase_uid": "fb-2",
+        "email": "mixed@example.com",
+        "name": "mixed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_buyer_invalid_token_degrades_to_anonymous(
+    monkeypatch,
+):
     from surogates.tenant.auth.firebase import FirebaseTokenError
 
     async def fake_verify(token, project):
@@ -261,23 +283,23 @@ async def test_resolve_buyer_invalid_token_401(monkeypatch):
             "p-1": SimpleNamespace(firebase_project_id="fb-project"),
         },
     )
-    with pytest.raises(HTTPException) as exc_info:
+    assert (
         await website._resolve_commerce_buyer(request, "a-1", "id-token")
-    assert exc_info.value.status_code == 401
+    ) is None
 
 
 @pytest.mark.asyncio
-async def test_resolve_buyer_unconfigured_firebase_401():
+async def test_resolve_buyer_unconfigured_firebase_degrades():
     request = _request(
         runtime_payload={"project_id": "p-1"}, firebase_rows={},
     )
-    with pytest.raises(HTTPException) as exc_info:
+    assert (
         await website._resolve_commerce_buyer(request, "a-1", "id-token")
-    assert exc_info.value.status_code == 401
+    ) is None
 
 
 @pytest.mark.asyncio
-async def test_resolve_buyer_missing_subject_401(monkeypatch):
+async def test_resolve_buyer_missing_subject_degrades(monkeypatch):
     async def fake_verify(token, project):
         return {"email": "b@example.com"}
 
@@ -288,6 +310,6 @@ async def test_resolve_buyer_missing_subject_401(monkeypatch):
             "p-1": SimpleNamespace(firebase_project_id="fb-project"),
         },
     )
-    with pytest.raises(HTTPException) as exc_info:
+    assert (
         await website._resolve_commerce_buyer(request, "a-1", "id-token")
-    assert exc_info.value.status_code == 401
+    ) is None

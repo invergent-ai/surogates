@@ -384,21 +384,38 @@ async def _enforce_website_rate_limit(
 
 
 def _estimate_turn_tokens(content: str) -> int:
-    """~4-chars/token heuristic, matching what ops reserves for the
-    hosted buy page so a visitor's hold is the same either way."""
-    return len(content) // 4 + 16
+    """~4-chars/token heuristic — the same shape ops's
+    estimate_prompt_tokens computes for the hosted buy page
+    ((chars + 16) // 4 with the per-message framing overhead), so a
+    visitor's hold is the same through either surface."""
+    return (len(content) + 16) // 4
 
 
 async def _resolve_commerce_buyer(
     request: Request, agent_id: str, firebase_id_token: str,
-) -> dict:
+) -> dict | None:
     """Verify a visitor-supplied Firebase ID token and return the buyer
-    identity to pin on the session.
+    identity to pin on the session, or ``None`` when no identity can
+    be bound.
 
     Verification runs against the agent project's own Firebase (the
     same one the buy page and self-registration use), so the returned
-    ``firebase_uid`` IS the buyer identity ops meters against.
+    ``firebase_uid`` IS the buyer identity ops meters against. Claim
+    normalisation is shared with the ``/auth/firebase/exchange`` flow
+    so both paths derive the identical identity for the same user.
+
+    Failures degrade to an anonymous session rather than failing the
+    bootstrap: binding an identity only matters for monetized agents,
+    and those enforce at message time (a missing buyer 402s with
+    ``sign_in_required``, which the widget answers by re-bootstrapping
+    with a fresh token) — a stale token or an unconfigured project
+    must not break the widget for free agents.
     """
+    from surogates.api.routes.auth import (
+        _display_name_from_firebase_claims,
+        _email_from_firebase_claims,
+    )
+
     runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
     firebase_cache = getattr(request.app.state, "firebase_config_cache", None)
     payload: dict = {}
@@ -415,33 +432,32 @@ async def _resolve_commerce_buyer(
         except LookupError:
             fb = None
     if fb is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=(
-                "Sign-in is not available for this agent "
-                "(no Firebase auth configured)."
-            ),
+        logger.info(
+            "Ignoring firebase_id_token at website bootstrap for agent "
+            "%s: project has no Firebase auth configured",
+            agent_id,
         )
+        return None
     try:
         claims = await verify_firebase_id_token(
             firebase_id_token, fb.firebase_project_id,
         )
     except FirebaseTokenError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc),
-        ) from exc
+        logger.info(
+            "Ignoring invalid firebase_id_token at website bootstrap "
+            "for agent %s: %s",
+            agent_id,
+            exc,
+        )
+        return None
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Firebase token subject is missing.",
-        )
-    email = claims.get("email")
-    name = claims.get("name")
+        return None
+    email, _verified = _email_from_firebase_claims(claims)
     return {
         "firebase_uid": subject,
-        "email": email if isinstance(email, str) and email else None,
-        "name": name if isinstance(name, str) and name else None,
+        "email": email,
+        "name": _display_name_from_firebase_claims(claims, email),
     }
 
 
@@ -509,9 +525,12 @@ async def _authorize_commerce_turn(
         ) from exc
     if receipt.get("entitlement_id"):
         store = _get_session_store(request)
-        await store.update_session_config_key(
+        # Appended, not overwritten: a second message can land while a
+        # turn is still running, and each hold must survive until the
+        # worker's settlement takes the whole list atomically.
+        await store.append_session_config_list(
             session.id,
-            "commerce_reservation",
+            "commerce_reservations",
             {
                 "entitlement_id": receipt["entitlement_id"],
                 "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
@@ -595,9 +614,11 @@ async def bootstrap_website_session(
     # later message inherits it from the session row rather than
     # re-verifying a client-supplied token per message.
     if body is not None and body.firebase_id_token:
-        config["commerce_buyer"] = await _resolve_commerce_buyer(
+        buyer = await _resolve_commerce_buyer(
             request, agent_id, body.firebase_id_token,
         )
+        if buyer is not None:
+            config["commerce_buyer"] = buyer
 
     session = await store.create_session(
         session_id=session_id,

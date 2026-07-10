@@ -49,10 +49,17 @@ function snapshot(messages: ReadonlyArray<{ id?: string; role?: string; content?
   return out;
 }
 
+/** Only render CTA links with a web protocol — the buy URL rides in
+ * from server config, but an SDK running on third-party sites must
+ * not let any upstream compromise turn it into a `javascript:` URI. */
+function safeBuyUrl(url: string | undefined): string | undefined {
+  return url && /^https?:\/\//i.test(url) ? url : undefined;
+}
+
 /** Visitor-facing copy per paywall sentinel from the server. */
 function paywallCopy(code: string): string {
   if (code === 'sign_in_required') {
-    return 'This assistant requires an account. Get access, then sign in on this site and reopen the chat.';
+    return 'This assistant requires an account. Get access, sign in on this site, then send your message again.';
   }
   if (code === 'subscription_required') {
     return 'This assistant requires an active subscription.';
@@ -269,10 +276,10 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
       {paywall && (
         <div class="surg-paywall">
           <span>{paywallCopy(paywall.code)}</span>
-          {paywall.buyUrl && (
+          {safeBuyUrl(paywall.buyUrl) && (
             <a
               class="surg-paywall-cta"
-              href={paywall.buyUrl}
+              href={safeBuyUrl(paywall.buyUrl)}
               target="_blank"
               rel="noopener noreferrer"
             >
