@@ -528,6 +528,91 @@ class ArtifactCompletionMixin:
             return None
         return parent
 
+    async def _settle_commerce_reservation(
+        self,
+        session: Session,
+        cost_tracker: SessionCostTracker | None,
+    ) -> None:
+        """Settle the monetized-turn holds pinned at message accept.
+
+        Takes the whole ``commerce_reservations`` list from the LIVE
+        session config atomically (not the session object loaded at
+        wake start — follow-up messages may have appended holds since),
+        then debits the wake's total LLM usage (input + output, the
+        same summing the hosted buy page's forwarder reports) against
+        the oldest hold. The remaining holds release with zero usage:
+        their messages were folded into this wake, so the total already
+        charges their consumption. Best-effort throughout — a hold
+        whose settlement fails is reclaimed by the ops reservation
+        reaper, and a debit that arrives after the reaper released the
+        hold still charges the usage without double-releasing.
+        Without a cost tracker each hold's reserved amount is consumed
+        as the floor: content may already have been delivered, and a
+        hold must never turn into a free turn.
+        """
+        # Channel gate, not a config gate: the wake-time session object
+        # is stale, and a hold appended after wake start must still be
+        # taken — only website sessions ever carry these, so every
+        # other channel skips the extra round trip.
+        if getattr(session, "channel", None) != "website" and not (
+            (session.config or {}).get("commerce_reservations")
+        ):
+            return
+        client = getattr(self, "_platform_client", None)
+        if client is None:
+            logger.warning(
+                "Session %s carries commerce reservations but the "
+                "worker has no platform client; leaving the holds to "
+                "the ops reaper",
+                session.id,
+            )
+            return
+        try:
+            taken = await self._store.pop_session_config_key(
+                session.id, "commerce_reservations",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to take commerce reservations for session %s; "
+                "the ops reaper will release them",
+                session.id,
+                exc_info=True,
+            )
+            return
+        reservations = [r for r in (taken or []) if isinstance(r, dict)]
+        if not reservations:
+            return
+        actual_total = (
+            cost_tracker.total_input_tokens + cost_tracker.total_output_tokens
+            if cost_tracker is not None
+            else None
+        )
+        for index, reservation in enumerate(reservations):
+            reserved = int(reservation.get("reserved_tokens") or 0)
+            if actual_total is None:
+                actual = reserved
+            else:
+                actual = actual_total if index == 0 else 0
+            try:
+                await client.commerce_debit(
+                    session.agent_id,
+                    entitlement_id=str(
+                        reservation.get("entitlement_id") or "",
+                    ),
+                    reserved_tokens=reserved,
+                    actual_tokens=actual,
+                    reservation_id=reservation.get("reservation_id") or None,
+                )
+            except Exception:
+                logger.warning(
+                    "Commerce settlement failed for session %s "
+                    "(reservation %s); the ops reservation reaper will "
+                    "release the hold",
+                    session.id,
+                    reservation.get("reservation_id"),
+                    exc_info=True,
+                )
+
     async def _complete_session(
         self,
         session: Session,
@@ -610,6 +695,8 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
+
+        await self._settle_commerce_reservation(session, cost_tracker)
 
         session_complete_event_id = await self._store.emit_event(
             session.id,

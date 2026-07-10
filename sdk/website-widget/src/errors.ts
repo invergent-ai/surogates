@@ -80,3 +80,29 @@ export class SurogatesNetworkError extends SurogatesError {
     this.name = 'SurogatesNetworkError';
   }
 }
+
+/**
+ * The agent is monetized and the visitor has no usable entitlement
+ * (HTTP 402).  ``code`` is the machine sentinel from the server --
+ * ``sign_in_required`` (no buyer identity bound to the session),
+ * ``subscription_required``, or ``insufficient_tokens`` -- and
+ * ``buyUrl`` is the hosted buy page where access can be purchased.
+ * Non-retryable until the visitor signs in / buys; the widget renders
+ * it as a paywall panel rather than a generic failure.
+ */
+export class SurogatesPaywallError extends SurogatesError {
+  /** Machine sentinel identifying which gate refused the message. */
+  readonly code: string;
+  /** Hosted buy page for this agent, when the platform exposes one. */
+  readonly buyUrl?: string;
+
+  constructor(
+    message: string,
+    opts: { code: string; buyUrl?: string; detail?: string },
+  ) {
+    super(message, { status: 402, ...(opts.detail !== undefined && { detail: opts.detail }) });
+    this.name = 'SurogatesPaywallError';
+    this.code = opts.code;
+    if (opts.buyUrl !== undefined) this.buyUrl = opts.buyUrl;
+  }
+}

@@ -634,6 +634,69 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
+    async def append_session_config_list(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Append ``value`` to the list at ``config[key]`` atomically.
+
+        The row lock makes concurrent appends compose instead of
+        overwriting each other — required for per-turn records (e.g.
+        commerce reservations) that several in-flight requests may
+        write to the same session.
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            existing = config.get(key)
+            items = list(existing) if isinstance(existing, list) else []
+            items.append(value)
+            config[key] = items
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+
+    async def pop_session_config_key(
+        self, session_id: UUID, key: str,
+    ) -> Any:
+        """Atomically read-and-remove ``config[key]``; ``None`` if absent.
+
+        The take is exclusive under the row lock, so exactly one caller
+        observes the value — a writer appending concurrently lands
+        either before the take (and is included) or after (and stays
+        for the next take).
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            if key not in config:
+                return None
+            value = config.pop(key)
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+            return value
+
     async def emit_synthetic_user_message(
         self,
         session_id: UUID,

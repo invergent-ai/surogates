@@ -943,6 +943,7 @@ async def run_worker(settings: Settings) -> None:
     worker_state["agent_principal_cache"] = agent_principal_resolver.cache
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
+    platform_client = worker_state["platform_client"]
 
     # Credential vault — required for per-session ``vault://<name>``
     # resolution.  Pod cannot serve sessions without it.
@@ -1551,6 +1552,9 @@ async def run_worker(settings: Settings) -> None:
             # (/loop, /mission, /auto-research), distinct from the agent
             # credential principal the tenant carries on managed channels.
             acting_principal=acting,
+            # Settlement of monetized website turns
+            # (``commerce_reservation`` on the session config).
+            platform_client=platform_client,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.

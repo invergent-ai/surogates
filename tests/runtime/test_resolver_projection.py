@@ -167,3 +167,33 @@ def test_missing_optional_collections_default_safely():
     assert ctx.mcp_server_ids == ()
     assert ctx.governance == {}
     assert ctx.api_web_url is None
+
+
+def test_commerce_fields_default_free_when_absent():
+    from surogates.runtime import build_agent_runtime_context
+
+    ctx = build_agent_runtime_context(_minimum_payload())
+    assert ctx.commerce_mode == "free"
+    assert ctx.commerce_buy_url is None
+
+
+def test_commerce_fields_project_when_present():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["commerce_mode"] = "subscription_required"
+    payload["commerce_buy_url"] = "https://studio.example/buy/a-1"
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.commerce_mode == "subscription_required"
+    assert ctx.commerce_buy_url == "https://studio.example/buy/a-1"
+
+
+def test_commerce_empty_strings_normalise_to_safe_defaults():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["commerce_mode"] = ""
+    payload["commerce_buy_url"] = ""
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.commerce_mode == "free"
+    assert ctx.commerce_buy_url is None

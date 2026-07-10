@@ -29,11 +29,27 @@ from typing import Any
 
 import httpx
 
-__all__ = ["PlatformAuthError", "PlatformClient"]
+__all__ = [
+    "CommercePaymentRequiredError",
+    "PlatformAuthError",
+    "PlatformClient",
+]
 
 
 class PlatformAuthError(RuntimeError):
     """Surogate-ops rejected our bearer token (401)."""
+
+
+class CommercePaymentRequiredError(RuntimeError):
+    """Ops refused a commerce authorization with 402.
+
+    ``detail`` carries the machine sentinel (``subscription_required``
+    / ``insufficient_tokens``) the widget maps to its paywall copy.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 class PlatformClient:
@@ -322,6 +338,90 @@ class PlatformClient:
         resp = await self._client.delete(
             f"/api/agents/agents/{agent_id}/composio/connections/{toolkit}",
             params={"user_id": user_id},
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def commerce_authorize(
+        self,
+        agent_id: str,
+        *,
+        firebase_uid: str,
+        estimated_tokens: int,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Reserve tokens for one end-user turn on a monetized agent.
+
+        Returns the reservation receipt
+        ``{entitlement_id, reserved_tokens, reservation_id}`` (all-zero
+        /empty for free-mode agents).  Raises:
+
+        * :class:`CommercePaymentRequiredError` on 402 — the visitor
+          must buy access; ``detail`` is the paywall sentinel.
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        body: dict = {
+            "firebase_uid": firebase_uid,
+            "estimated_tokens": estimated_tokens,
+        }
+        if email is not None:
+            body["email"] = email
+        if name is not None:
+            body["name"] = name
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/commerce/authorize",
+            json=body,
+        )
+        if resp.status_code == 402:
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail") or "")
+            except ValueError:
+                pass
+            raise CommercePaymentRequiredError(
+                detail or "payment_required",
+            )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def commerce_debit(
+        self,
+        agent_id: str,
+        *,
+        entitlement_id: str,
+        reserved_tokens: int,
+        actual_tokens: int,
+        reservation_id: str | None = None,
+    ) -> dict:
+        """Settle a reservation with the turn's actual token usage.
+
+        Returns ``{"debited_tokens": int}``.  Raises
+        :class:`PlatformAuthError` on 401, ``httpx.HTTPStatusError`` on
+        any other non-2xx.  Callers treat failures as best-effort — an
+        unsettled hold is reclaimed by the ops reservation reaper.
+        """
+        body: dict = {
+            "entitlement_id": entitlement_id,
+            "reserved_tokens": reserved_tokens,
+            "actual_tokens": actual_tokens,
+        }
+        if reservation_id:
+            body["reservation_id"] = reservation_id
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/commerce/debit",
+            json=body,
         )
         if resp.status_code == 401:
             raise PlatformAuthError(

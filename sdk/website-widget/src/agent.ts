@@ -54,7 +54,7 @@ import {
   sendMessage,
 } from './protocol.js';
 import { type SurogatesFrame, Translator } from './translator.js';
-import { SurogatesAuthError } from './errors.js';
+import { SurogatesAuthError, SurogatesPaywallError } from './errors.js';
 import { SURG_EVENT } from './constants.js';
 
 /**
@@ -69,6 +69,21 @@ export interface WebsiteAgentConfig extends AgentConfig {
   apiUrl: string;
   /** Publishable key issued by ops (``surg_wk_...``). */
   publishableKey: string;
+  /**
+   * Supplies the signed-in visitor's Firebase ID token at bootstrap.
+   * Required to chat with monetized agents: sites that authenticate
+   * end users against the agent project's Firebase pass a getter
+   * here, the SDK sends the token with the session bootstrap, and the
+   * server binds the verified buyer identity to the visitor session.
+   * Returning ``null``/``undefined`` (or omitting the hook) keeps the
+   * session anonymous — monetized agents then answer with a
+   * ``sign_in_required`` paywall instead of replies.
+   */
+  getFirebaseIdToken?: () =>
+    | Promise<string | null | undefined>
+    | string
+    | null
+    | undefined;
 }
 
 /** Set of Surogates SSE event names the agent subscribes to by default. */
@@ -90,10 +105,19 @@ export class WebsiteAgent extends AbstractAgent {
   readonly apiUrl: string;
   readonly publishableKey: string;
 
+  /**
+   * Details of the last paywall refusal (RUN_ERROR ``code:
+   * 'paywall'``).  The AG-UI ``RUN_ERROR`` event only carries a
+   * message + code string, so the structured sentinel and buy URL are
+   * exposed here for UIs to read when they receive that code.
+   */
+  lastPaywall: { code: string; buyUrl?: string } | undefined;
+
   /** Cached bootstrap result.  ``undefined`` until the first ``run()``. */
   private bootstrapResult: BootstrapResult | undefined;
   /** Monotonic cursor across runs.  Passed to the SSE ``?after=`` param. */
   private cursor = 0;
+  private readonly getFirebaseIdToken: WebsiteAgentConfig['getFirebaseIdToken'];
 
   constructor(config: WebsiteAgentConfig) {
     super(config);
@@ -106,6 +130,7 @@ export class WebsiteAgent extends AbstractAgent {
     // Strip a trailing slash so ``${apiUrl}/v1/...`` never double-slashes.
     this.apiUrl = config.apiUrl.replace(/\/+$/, '');
     this.publishableKey = config.publishableKey;
+    this.getFirebaseIdToken = config.getFirebaseIdToken;
   }
 
   /**
@@ -119,10 +144,16 @@ export class WebsiteAgent extends AbstractAgent {
    */
   async ensureBootstrapped(): Promise<BootstrapResult> {
     if (this.bootstrapResult) return this.bootstrapResult;
+    // Resolved per bootstrap (not cached) so cookie-expiry recovery
+    // picks up a token the visitor acquired after the first attempt.
+    const firebaseIdToken = this.getFirebaseIdToken
+      ? await this.getFirebaseIdToken()
+      : undefined;
     this.bootstrapResult = await bootstrap(
       this.apiUrl,
       this.publishableKey,
       this.agentId,
+      firebaseIdToken ?? undefined,
     );
     return this.bootstrapResult;
   }
@@ -251,7 +282,26 @@ export class WebsiteAgent extends AbstractAgent {
       if (ctx.terminated) return;
       ctx.terminated = true;
       const message = err instanceof Error ? err.message : String(err);
-      const code = err instanceof SurogatesAuthError ? 'auth' : 'error';
+      let code = 'error';
+      if (err instanceof SurogatesAuthError) {
+        code = 'auth';
+      } else if (err instanceof SurogatesPaywallError) {
+        code = 'paywall';
+        this.lastPaywall = {
+          code: err.code,
+          ...(err.buyUrl !== undefined && { buyUrl: err.buyUrl }),
+        };
+        if (err.code === 'sign_in_required') {
+          // The buyer identity binds at bootstrap, and this session
+          // bootstrapped anonymously. Drop it so the next send
+          // re-bootstraps — picking up whatever token
+          // getFirebaseIdToken returns after the visitor signs in —
+          // instead of paywalling a signed-in customer until a full
+          // page reload.
+          this.bootstrapResult = undefined;
+          this.cursor = 0;
+        }
+      }
       subscriber.next({
         type: EventType.RUN_ERROR,
         message,

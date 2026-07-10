@@ -178,6 +178,15 @@ class AgentRuntimeContext:
     bundle_hub_ref: str | None = None
     bundle_version: str | None = None
 
+    # Monetization gate for runtime channels (website widget).  "free"
+    # means no enforcement — the safe default for payloads that predate
+    # the field AND for platforms whose commerce rollout flag is off
+    # (ops reports "free" for every agent until then).
+    commerce_mode: str = "free"
+    # Hosted buy page unpaid visitors are sent to.  ``None`` for free
+    # agents or when ops has no public frontend URL configured.
+    commerce_buy_url: str | None = None
+
     @property
     def asset_root(self) -> str:
         """Path to the tenant's on-disk asset directory.
