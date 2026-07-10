@@ -29,6 +29,7 @@ import {
 import {
   SurogatesAuthError,
   SurogatesNetworkError,
+  SurogatesPaywallError,
   SurogatesProtocolError,
   SurogatesRateLimitError,
 } from './errors.js';
@@ -141,18 +142,34 @@ async function doFetch(
   return response;
 }
 
-/** Pull the ``detail`` string out of the server's error body, best-effort. */
-async function extractDetail(response: Response): Promise<string | undefined> {
+/** Pull the raw ``detail`` value out of the server's error body, best-effort.
+ * Usually a string; the commerce 402 sends a structured object
+ * (``{code, buy_url}``), so callers branch on the runtime type. */
+async function extractDetailValue(response: Response): Promise<unknown> {
   try {
     const body = (await response.json()) as { detail?: unknown };
-    return typeof body.detail === 'string' ? body.detail : undefined;
+    return body?.detail;
   } catch {
     return undefined;
   }
 }
 
 async function raiseForStatus(response: Response, action: string): Promise<never> {
-  const detail = await extractDetail(response);
+  const detailValue = await extractDetailValue(response);
+  const detail = typeof detailValue === 'string' ? detailValue : undefined;
+  if (response.status === 402) {
+    const structured =
+      detailValue && typeof detailValue === 'object'
+        ? (detailValue as { code?: unknown; buy_url?: unknown })
+        : {};
+    const code = typeof structured.code === 'string' ? structured.code : detail || 'payment_required';
+    const buyUrl = typeof structured.buy_url === 'string' ? structured.buy_url : undefined;
+    throw new SurogatesPaywallError(`${action} requires access (402)`, {
+      code,
+      ...(buyUrl !== undefined && { buyUrl }),
+      ...(detail !== undefined && { detail }),
+    });
+  }
   if (response.status === 401 || response.status === 403) {
     throw new SurogatesAuthError(`${action} rejected (${response.status})`, {
       status: response.status,
@@ -198,6 +215,7 @@ export async function bootstrap(
   apiUrl: string,
   publishableKey: string,
   agentId?: string,
+  firebaseIdToken?: string,
 ): Promise<BootstrapResult> {
   const response = await doFetch(apiUrl + withAgentId(PATH_BOOTSTRAP, agentId), {
     method: 'POST',
@@ -205,6 +223,13 @@ export async function bootstrap(
       Authorization: `Bearer ${publishableKey}`,
       'Content-Type': 'application/json',
     },
+    // Binds a signed-in end user to the visitor session — required
+    // before a monetized agent accepts messages.  Anonymous
+    // bootstraps send no body at all, preserving the historical wire
+    // shape byte-for-byte.
+    ...(firebaseIdToken
+      ? { body: JSON.stringify({ firebase_id_token: firebaseIdToken }) }
+      : {}),
   });
   // Accept any 2xx -- the route currently declares 201, but a future
   // server change to 200 (or a proxy that strips the status to 200)

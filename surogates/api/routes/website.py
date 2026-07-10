@@ -62,9 +62,17 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.runtime.platform_client import (
+    CommercePaymentRequiredError,
+    PlatformAuthError,
+)
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
+from surogates.tenant.auth.firebase import (
+    FirebaseTokenError,
+    verify_firebase_id_token,
+)
 from surogates.tenant.auth.jwt import InvalidTokenError
 
 logger = logging.getLogger(__name__)
@@ -106,6 +114,20 @@ class BootstrapResponse(BaseModel):
     csrf_token: str
     expires_at: int
     agent_name: str
+
+
+class BootstrapRequest(BaseModel):
+    """Optional bootstrap body.
+
+    ``firebase_id_token`` binds a signed-in end user to the visitor
+    session — required before a monetized agent will accept messages.
+    The embedding site supplies it via the widget's
+    ``getFirebaseIdToken`` hook (same Firebase project the agent's
+    self-registration and hosted buy page use). Anonymous bootstraps
+    (no body) keep working unchanged for free agents.
+    """
+
+    firebase_id_token: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -356,6 +378,148 @@ async def _enforce_website_rate_limit(
         )
 
 
+# ---------------------------------------------------------------------------
+# Commerce enforcement (monetized agents)
+# ---------------------------------------------------------------------------
+
+
+def _estimate_turn_tokens(content: str) -> int:
+    """~4-chars/token heuristic, matching what ops reserves for the
+    hosted buy page so a visitor's hold is the same either way."""
+    return len(content) // 4 + 16
+
+
+async def _resolve_commerce_buyer(
+    request: Request, agent_id: str, firebase_id_token: str,
+) -> dict:
+    """Verify a visitor-supplied Firebase ID token and return the buyer
+    identity to pin on the session.
+
+    Verification runs against the agent project's own Firebase (the
+    same one the buy page and self-registration use), so the returned
+    ``firebase_uid`` IS the buyer identity ops meters against.
+    """
+    runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
+    firebase_cache = getattr(request.app.state, "firebase_config_cache", None)
+    payload: dict = {}
+    if runtime_cache is not None:
+        try:
+            payload = await runtime_cache.get(agent_id) or {}
+        except LookupError:
+            payload = {}
+    project_id = payload.get("project_id")
+    fb = None
+    if firebase_cache is not None and project_id:
+        try:
+            fb = await firebase_cache.get(project_id)
+        except LookupError:
+            fb = None
+    if fb is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Sign-in is not available for this agent "
+                "(no Firebase auth configured)."
+            ),
+        )
+    try:
+        claims = await verify_firebase_id_token(
+            firebase_id_token, fb.firebase_project_id,
+        )
+    except FirebaseTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc),
+        ) from exc
+    subject = claims.get("sub")
+    if not isinstance(subject, str) or not subject:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Firebase token subject is missing.",
+        )
+    email = claims.get("email")
+    name = claims.get("name")
+    return {
+        "firebase_uid": subject,
+        "email": email if isinstance(email, str) and email else None,
+        "name": name if isinstance(name, str) and name else None,
+    }
+
+
+async def _authorize_commerce_turn(
+    request: Request, session, content: str,
+) -> None:
+    """Gate one visitor message behind the agent's monetization mode.
+
+    Free agents (the default, and every agent while the platform's
+    commerce rollout flag is off — ops reports them as free) return
+    immediately.  Monetized agents require a session-bound buyer
+    identity and a successful ops-side token reservation; the receipt
+    is pinned on ``session.config`` for the worker to settle after the
+    turn.  402 details are structured (``{"code", "buy_url"}``) so the
+    widget can render a paywall instead of a generic error.
+    """
+    runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
+    if runtime_cache is None:
+        return
+    try:
+        payload = await runtime_cache.get(str(session.agent_id)) or {}
+    except LookupError:
+        return
+    mode = str(payload.get("commerce_mode") or "free")
+    if mode == "free":
+        return
+    buy_url = payload.get("commerce_buy_url")
+    buyer = (session.config or {}).get("commerce_buyer") or {}
+    if not buyer.get("firebase_uid"):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": "sign_in_required", "buy_url": buy_url},
+        )
+    client = getattr(request.app.state, "platform_client", None)
+    if client is None:
+        logger.error("platform_client is not wired on app.state")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Access checks are temporarily unavailable; try again.",
+        )
+    try:
+        receipt = await client.commerce_authorize(
+            str(session.agent_id),
+            firebase_uid=buyer["firebase_uid"],
+            estimated_tokens=_estimate_turn_tokens(content),
+            email=buyer.get("email"),
+            name=buyer.get("name"),
+        )
+    except CommercePaymentRequiredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail={"code": exc.detail, "buy_url": buy_url},
+        ) from exc
+    except Exception as exc:
+        # Fail closed: a paid agent must not serve free turns because
+        # the metering plane blinked.
+        logger.error(
+            "Commerce authorization failed for session %s: %s",
+            session.id,
+            exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Access checks are temporarily unavailable; try again.",
+        ) from exc
+    if receipt.get("entitlement_id"):
+        store = _get_session_store(request)
+        await store.update_session_config_key(
+            session.id,
+            "commerce_reservation",
+            {
+                "entitlement_id": receipt["entitlement_id"],
+                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
+                "reservation_id": receipt.get("reservation_id") or "",
+            },
+        )
+
+
 @router.post(
     "/website/sessions",
     response_model=BootstrapResponse,
@@ -364,6 +528,7 @@ async def _enforce_website_rate_limit(
 async def bootstrap_website_session(
     request: Request,
     response: Response,
+    body: BootstrapRequest | None = None,
 ) -> BootstrapResponse:
     """Exchange a publishable key + approved origin for a session cookie.
 
@@ -425,6 +590,14 @@ async def bootstrap_website_session(
     # knob while the session is in flight.
     if settings.website.session_message_cap:
         config["session_message_cap"] = settings.website.session_message_cap
+
+    # Server-verified buyer identity, pinned at bootstrap so every
+    # later message inherits it from the session row rather than
+    # re-verifying a client-supplied token per message.
+    if body is not None and body.firebase_id_token:
+        config["commerce_buyer"] = await _resolve_commerce_buyer(
+            request, agent_id, body.firebase_id_token,
+        )
 
     session = await store.create_session(
         session_id=session_id,
@@ -534,6 +707,8 @@ async def send_website_message(
                 "Session message cap reached; bootstrap a new session to continue."
             ),
         )
+
+    await _authorize_commerce_turn(request, session, body.content)
 
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")

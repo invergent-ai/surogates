@@ -389,6 +389,7 @@ class AgentHarness(
         ssh_targets: tuple[dict[str, Any], ...] = (),
         agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
+        platform_client: Any | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -434,6 +435,10 @@ class AgentHarness(
                 service_account_id=tenant.service_account_id,
             )
         )
+        # Management-plane client for monetized-turn settlement
+        # (``_settle_commerce_reservation``).  Optional: sessions
+        # without a commerce reservation never touch it.
+        self._platform_client = platform_client
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor

@@ -528,6 +528,69 @@ class ArtifactCompletionMixin:
             return None
         return parent
 
+    async def _settle_commerce_reservation(
+        self,
+        session: Session,
+        cost_tracker: SessionCostTracker | None,
+    ) -> None:
+        """Settle the monetized-turn hold pinned at message accept.
+
+        Debits the turn's actual LLM usage (input + output, the same
+        summing the hosted buy page's forwarder reports) against the
+        reservation the website channel wrote to ``session.config``.
+        Best-effort: a failed settlement leaves the hold for the ops
+        reservation reaper, which releases it after the stale window.
+        Without a cost tracker the reserved amount is consumed as the
+        floor — content may already have been delivered, and a hold
+        must never turn into a free turn.
+        """
+        reservation = (session.config or {}).get("commerce_reservation")
+        if not reservation:
+            return
+        client = getattr(self, "_platform_client", None)
+        if client is None:
+            logger.warning(
+                "Session %s carries a commerce reservation but the "
+                "worker has no platform client; leaving the hold to "
+                "the ops reaper",
+                session.id,
+            )
+            return
+        reserved = int(reservation.get("reserved_tokens") or 0)
+        if cost_tracker is not None:
+            actual = (
+                cost_tracker.total_input_tokens
+                + cost_tracker.total_output_tokens
+            )
+        else:
+            actual = reserved
+        try:
+            await client.commerce_debit(
+                session.agent_id,
+                entitlement_id=str(reservation.get("entitlement_id") or ""),
+                reserved_tokens=reserved,
+                actual_tokens=actual,
+                reservation_id=reservation.get("reservation_id") or None,
+            )
+        except Exception:
+            logger.warning(
+                "Commerce settlement failed for session %s; the ops "
+                "reservation reaper will release the hold",
+                session.id,
+                exc_info=True,
+            )
+            return
+        try:
+            await self._store.clear_session_config_key(
+                session.id, "commerce_reservation",
+            )
+        except Exception:
+            logger.debug(
+                "Failed to clear settled commerce reservation for %s",
+                session.id,
+                exc_info=True,
+            )
+
     async def _complete_session(
         self,
         session: Session,
@@ -610,6 +673,8 @@ class ArtifactCompletionMixin:
         }
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
+
+        await self._settle_commerce_reservation(session, cost_tracker)
 
         session_complete_event_id = await self._store.emit_event(
             session.id,

@@ -178,6 +178,31 @@ export const WIDGET_STYLES = `
   flex-shrink: 0;
 }
 
+.surg-paywall {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 16px;
+  padding: 12px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  border-radius: 10px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.surg-paywall-cta {
+  align-self: flex-start;
+  padding: 6px 14px;
+  background: var(--surg-accent, #0f172a);
+  color: #ffffff;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.surg-paywall-cta:hover { opacity: 0.9; }
+
 .surg-composer {
   display: flex;
   gap: 8px;

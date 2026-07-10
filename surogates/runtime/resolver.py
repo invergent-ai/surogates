@@ -109,6 +109,8 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         # a Hub fetch against an empty ref).
         bundle_hub_ref=payload.get("bundle_hub_ref") or None,
         bundle_version=payload.get("bundle_version") or None,
+        commerce_mode=str(payload.get("commerce_mode") or "free"),
+        commerce_buy_url=payload.get("commerce_buy_url") or None,
     )
 
 

@@ -49,6 +49,20 @@ function snapshot(messages: ReadonlyArray<{ id?: string; role?: string; content?
   return out;
 }
 
+/** Visitor-facing copy per paywall sentinel from the server. */
+function paywallCopy(code: string): string {
+  if (code === 'sign_in_required') {
+    return 'This assistant requires an account. Get access, then sign in on this site and reopen the chat.';
+  }
+  if (code === 'subscription_required') {
+    return 'This assistant requires an active subscription.';
+  }
+  if (code === 'insufficient_tokens') {
+    return 'You’re out of tokens for this assistant.';
+  }
+  return 'This assistant requires paid access.';
+}
+
 /** Map an SDK error (thrown or via RUN_ERROR) to visitor-facing copy. */
 function friendlyError(err: { code?: string; message?: string } | unknown): string {
   if (err instanceof SurogatesAuthError) {
@@ -91,6 +105,7 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
   const [messages, setMessages] = useState<ChatMessage[]>(() => snapshot(agent.messages));
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paywall, setPaywall] = useState<{ code: string; buyUrl?: string } | null>(null);
   const [input, setInput] = useState('');
   // Only the async input is state; the title is derived at render so a
   // configured title (incl. live handle.update()) always wins, falling back
@@ -112,10 +127,16 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
       onRunStartedEvent: () => {
         setRunning(true);
         setError(null);
+        setPaywall(null);
       },
       onRunFinishedEvent: () => setRunning(false),
       onRunErrorEvent: ({ event }) => {
         setRunning(false);
+        const code = (event as { code?: string }).code;
+        if (code === 'paywall') {
+          setPaywall(agent.lastPaywall ?? { code: 'payment_required' });
+          return;
+        }
         setError(friendlyError(event));
       },
     });
@@ -244,6 +265,22 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
       </div>
 
       {error && <div class="surg-error">{error}</div>}
+
+      {paywall && (
+        <div class="surg-paywall">
+          <span>{paywallCopy(paywall.code)}</span>
+          {paywall.buyUrl && (
+            <a
+              class="surg-paywall-cta"
+              href={paywall.buyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Get access
+            </a>
+          )}
+        </div>
+      )}
 
       <div class="surg-composer">
         <textarea
