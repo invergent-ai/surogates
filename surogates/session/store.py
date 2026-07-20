@@ -1088,21 +1088,41 @@ class SessionStore:
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
-                if channel == "telegram" and "telegram_reply_to_message_id" in config:
-                    # Reply threading tracks the latest inbound message id in
-                    # session config (written by the channels process), so it
-                    # must be read fresh — the per-session config cache above
-                    # is primed once and would pin every reply to the first
-                    # message.  Gated on the cached config carrying the key at
-                    # all, so sessions that never use reply threading pay no
-                    # extra query.  Best-effort: a read failure falls back to
-                    # the cached value rather than dropping the delivery.
+                # Two destination fields track the *latest* inbound message in
+                # session config (written by the channels process) and must be
+                # read fresh — the per-session config cache above is primed
+                # once and would pin every reply to the first message:
+                # ``telegram_reply_to_message_id`` (reply threading) and, for
+                # collapsed single-session conversations that span every
+                # thread of a chat, the ``*_thread_key`` reply destination.
+                # Gated on the cached config carrying the marker/key at all,
+                # so ordinary sessions pay no extra query.  Best-effort: a
+                # read failure falls back to the cached values rather than
+                # dropping the delivery.
+                needs_fresh_reply = (
+                    channel == "telegram"
+                    and "telegram_reply_to_message_id" in config
+                )
+                needs_fresh_thread = bool(config.get("single_session"))
+                if needs_fresh_reply or needs_fresh_thread:
                     try:
                         fresh = await db.get(SessionRow, session_id)
-                        if fresh is not None:
+                        fresh_config = (
+                            fresh.config or {} if fresh is not None else config
+                        )
+                        if needs_fresh_reply:
                             destination["reply_to_message_id"] = (
-                                fresh.config or {}
-                            ).get("telegram_reply_to_message_id")
+                                fresh_config.get("telegram_reply_to_message_id")
+                            )
+                        if needs_fresh_thread:
+                            if channel == "slack":
+                                destination["thread_ts"] = fresh_config.get(
+                                    "slack_thread_key"
+                                )
+                            elif channel == "telegram":
+                                destination["message_thread_id"] = (
+                                    fresh_config.get("telegram_thread_key")
+                                )
                     except Exception:
                         pass
                 outbox = DeliveryOutbox(

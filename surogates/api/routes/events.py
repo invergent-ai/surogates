@@ -11,7 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import (
+    require_session_visible,
+    require_user_writable_session,
+)
 from surogates.config import enqueue_session, load_settings
 from surogates.harness.outcomes import build_defined_outcome_from_event
 from surogates.session.events import EventType
@@ -112,13 +115,14 @@ def _require_service_account_api_route(
 
 
 async def _verify_session_access(
-    store: SessionStore, session_id: UUID, tenant: TenantContext
+    request: Request, store: SessionStore, session_id: UUID, tenant: TenantContext
 ) -> None:
     """Raise 404 if the session does not exist or does not belong to the tenant.
 
     Session-scoped service-account JWTs are additionally restricted to
     the single session they were minted for — see
-    :meth:`TenantContext.covers_session`.
+    :meth:`TenantContext.covers_session`.  Hidden multi-era web sessions
+    ("multi session" capability off) 404 too.
     """
     try:
         session = await store.get_session(session_id)
@@ -132,6 +136,7 @@ async def _verify_session_access(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
 
 
 def _rubric_text_or_422(rubric: DefineOutcomeRubric | None) -> str:
@@ -176,7 +181,7 @@ async def send_session_events(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    await _verify_session_access(store, session_id, tenant)
+    await _verify_session_access(request, store, session_id, tenant)
     session = await store.get_session(session_id)
     require_user_writable_session(session)
 
@@ -282,6 +287,7 @@ async def stream_events(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     if not tenant.owns_session(session_check.org_id, session_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    await require_session_visible(request, session_check)
 
     # Pre-loop fast-close for terminal sessions used to live here, but it
     # raced with concurrent POST /messages: a message landing between the
@@ -500,7 +506,7 @@ async def poll_events(
 ) -> PollEventsResponse:
     """Fetch events in a single request (non-streaming alternative to SSE)."""
     store = _get_session_store(request)
-    await _verify_session_access(store, session_id, tenant)
+    await _verify_session_access(request, store, session_id, tenant)
 
     if limit < 1:
         limit = 1

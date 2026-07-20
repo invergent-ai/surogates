@@ -361,14 +361,22 @@ async def _reusable_cookie_session(
         session = await store.get_session(claims.session_id)
     except SessionNotFoundError:
         return None
+    config = session.config or {}
     if (
         session.agent_id != agent_id
         or session.channel != WEBSITE_CHANNEL
         or session.status not in _REUSABLE_WEBSITE_STATUSES
         # Only the canonical single-session conversation qualifies — a
         # cookie left over from a multi-session era is not adopted.
-        or (session.config or {}).get("single_session") is not True
+        or config.get("single_session") is not True
     ):
+        return None
+    # A capped-out session must not be reused: the 429 on send tells the
+    # visitor to bootstrap a new session, so the bootstrap has to
+    # actually deliver one (message_count never resets and the cap is
+    # pinned at creation).
+    cap = config.get("session_message_cap") or 0
+    if cap and (session.message_count or 0) >= cap:
         return None
     return session
 
@@ -716,6 +724,19 @@ async def bootstrap_website_session(
             publishable_key=publishable_key,
         )
         if existing is not None:
+            # Buyer identity pins at bootstrap (see the fresh-create path
+            # below), and the sign-in recovery flow re-bootstraps with a
+            # Firebase token expecting exactly that — so a reused session
+            # must absorb the token too, or a signed-in buyer would 402
+            # forever against their buyer-less canonical session.
+            if body is not None and body.firebase_id_token:
+                buyer = await _resolve_commerce_buyer(
+                    request, agent_id, body.firebase_id_token,
+                )
+                if buyer is not None:
+                    await _get_session_store(request).update_session_config_key(
+                        existing.id, "commerce_buyer", buyer,
+                    )
             csrf_token = generate_csrf_token()
             cookie_token = create_website_session_token(
                 session_id=existing.id,

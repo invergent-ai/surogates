@@ -32,7 +32,10 @@ from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _inline_extension_kind, _materialize_for_cache, _try_inline_attachment,
     _apply_inline_total_budget,
 )
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import (
+    is_multi_era_web_session,
+    require_user_writable_session,
+)
 from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
@@ -383,12 +386,7 @@ async def _get_session_for_tenant(
             detail=f"Session {session_id} not found.",
         )
 
-    if (
-        not multi_session
-        and session.channel == "web"
-        and session.parent_id is None
-        and (session.config or {}).get("single_session") is not True
-    ):
+    if not multi_session and is_multi_era_web_session(session):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
@@ -476,6 +474,10 @@ async def create_session(
     Archiving the dedicated session is how a user deliberately starts
     over.
     """
+    # The canonical-conversation stamp is server-owned: a client-supplied
+    # value would let users pre-stamp sessions while multi-session is on
+    # and keep them past a later lockdown.
+    body.config.pop("single_session", None)
     if not agent_runtime.multi_session and tenant.user_id is not None:
         existing = await _get_session_store(request).get_reusable_channel_session(
             org_id=tenant.org_id,
@@ -620,7 +622,7 @@ async def send_message(
                 )
 
         session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-            store, session_id, tenant,
+            request, store, session_id, tenant,
         )
         storage = _get_storage(request)
 

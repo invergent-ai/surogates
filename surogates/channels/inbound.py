@@ -599,9 +599,34 @@ class ChannelInboundPipeline:
                 "channel_identifier": routing.identifier,
                 "memory_boundary": memory_boundary,
                 "multi_party": chat_type in ("group", "channel"),
+                # Marks the session as a collapsed single-session
+                # conversation; delivery reads the thread key fresh for
+                # these (see the outbox enqueue in the session store).
+                **({"single_session": True} if single_session else {}),
             },
             session_factory=deps.session_factory,
         )
+
+        if single_session:
+            # The collapsed session spans every thread of the chat, but
+            # delivery destinations come from session config — stamped at
+            # creation, they would pin every reply to the first-ever
+            # thread.  Track the latest inbound thread instead; the store
+            # re-reads it fresh at enqueue (same remedy as
+            # ``telegram_reply_to_message_id``).  Best-effort: a failed
+            # write falls back to the previous thread, never drops the
+            # message.
+            try:
+                await deps.session_store.update_session_config_key(
+                    session_id,
+                    f"{routing.platform}_thread_key",
+                    msg.thread_key,
+                )
+            except Exception:
+                logger.warning(
+                    "[channels] recording single-session thread key failed",
+                    exc_info=True,
+                )
 
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))

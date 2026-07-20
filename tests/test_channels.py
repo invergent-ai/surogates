@@ -109,7 +109,7 @@ class TestBuildSessionKey:
         # "multi session" off: every thread continues the same conversation.
         assert key == "agent:slack:dm:C1"
 
-    def test_single_session_overrides_per_user_groups(self):
+    def test_single_session_keeps_per_user_groups_split(self):
         source = SessionSource(
             platform="telegram",
             chat_id="CHAT_ID",
@@ -120,8 +120,9 @@ class TestBuildSessionKey:
         key = build_session_key(
             source, per_user_groups=True, single_session=True,
         )
-        # One shared session per chat: no user split, no thread suffix.
-        assert key == "agent:telegram:group:CHAT_ID"
+        # Thread suffix folds, but the per-user split survives — merging
+        # users would share one conversation context across people.
+        assert key == "agent:telegram:group:CHAT_ID:USER1"
 
     def test_single_session_keeps_dm_shape(self):
         source = SessionSource(

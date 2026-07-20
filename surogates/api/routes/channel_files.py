@@ -29,6 +29,7 @@ from surogates.channels.file_fetch import (
 from surogates.channels.message_fetch import fetch_channel_messages
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.channels.registry import registry
+from surogates.api.session_guards import require_session_visible
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -49,7 +50,7 @@ def _get_session_store(request: Request) -> SessionStore:
 
 
 async def _resolve_session(
-    store: SessionStore, session_id: UUID, tenant: TenantContext,
+    request: Request, store: SessionStore, session_id: UUID, tenant: TenantContext,
 ) -> Any:
     try:
         session = await store.get_session(session_id)
@@ -63,13 +64,14 @@ async def _resolve_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
     return session
 
 
 async def _resolve_session_bucket(
-    store: SessionStore, session_id: UUID, tenant: TenantContext,
+    request: Request, store: SessionStore, session_id: UUID, tenant: TenantContext,
 ) -> tuple[Any, str]:
-    session = await _resolve_session(store, session_id, tenant)
+    session = await _resolve_session(request, store, session_id, tenant)
     bucket = session.config.get("storage_bucket")
     if not bucket:
         raise HTTPException(
@@ -88,7 +90,7 @@ async def fetch_channel_file_route(
 ) -> dict:
     """Download a file shared in this session's channel into the workspace."""
     store = _get_session_store(request)
-    session, bucket = await _resolve_session_bucket(store, session_id, tenant)
+    session, bucket = await _resolve_session_bucket(request, store, session_id, tenant)
 
     # Ambient sessions carry a slack channel_id but channel="ambient".
     channel = effective_channel_platform(session)
@@ -145,7 +147,7 @@ async def fetch_channel_messages_route(
 ) -> dict:
     """Read recent messages from this session's Slack channel."""
     store = _get_session_store(request)
-    session = await _resolve_session(store, session_id, tenant)
+    session = await _resolve_session(request, store, session_id, tenant)
 
     # Ambient sessions carry a slack channel_id but channel="ambient".
     channel = effective_channel_platform(session)

@@ -35,14 +35,10 @@ import { slashCommandEnabled } from "@/stores/capabilities-slice";
 //   - phone sheet   : `data-mode="sheet"` always renders expanded.
 // We use Tailwind v4's `group-data-[mode=sheet]:*` variants together with
 // `lg:*` to flip between compact (icons only) and expanded (full content).
-const showExpanded =
-  "hidden lg:flex group-data-[mode=sheet]:flex";
-const showExpandedInline =
-  "hidden lg:inline group-data-[mode=sheet]:inline";
-const showExpandedBlock =
-  "hidden lg:block group-data-[mode=sheet]:block";
-const hideOnExpanded =
-  "block lg:hidden group-data-[mode=sheet]:hidden";
+const showExpanded = "hidden lg:flex group-data-[mode=sheet]:flex";
+const showExpandedInline = "hidden lg:inline group-data-[mode=sheet]:inline";
+const showExpandedBlock = "hidden lg:block group-data-[mode=sheet]:block";
+const hideOnExpanded = "block lg:hidden group-data-[mode=sheet]:hidden";
 
 export function SessionSidebar() {
   const navigate = useNavigate();
@@ -196,48 +192,48 @@ export function SessionSidebar() {
           back into pre-restriction sessions. */}
       <div className="min-h-0 flex-1 flex flex-col">
         {!singleSession && (
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
-          {/* Compact (md only, not sheet): icon-only list */}
-          <div className={hideOnExpanded}>
-            {sessions.map((session) => {
-              const isActive = session.id === activeSessionId;
-              return (
-                <button
-                  key={session.id}
-                  type="button"
-                  onClick={() => handleSelectSession(session.id)}
-                  aria-label={session.title ?? "New session"}
-                  className={cn(
-                    "flex items-center justify-center w-full py-2 transition-colors border-l-2",
-                    isActive
-                      ? "bg-line text-foreground border-l-primary"
-                      : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
-                  )}
-                >
-                  <MessageSquareIcon className="w-4 h-4 shrink-0" />
-                </button>
-              );
-            })}
-          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto py-1">
+            {/* Compact (md only, not sheet): icon-only list */}
+            <div className={hideOnExpanded}>
+              {sessions.map((session) => {
+                const isActive = session.id === activeSessionId;
+                return (
+                  <button
+                    key={session.id}
+                    type="button"
+                    onClick={() => handleSelectSession(session.id)}
+                    aria-label={session.title ?? "New session"}
+                    className={cn(
+                      "flex items-center justify-center w-full py-2 transition-colors border-l-2",
+                      isActive
+                        ? "bg-line text-foreground border-l-primary"
+                        : "bg-transparent text-subtle hover:bg-input hover:text-foreground border-l-transparent",
+                    )}
+                  >
+                    <MessageSquareIcon className="w-4 h-4 shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
 
-          {/* Expanded (lg+ or sheet): SessionTreePanel */}
-          <div className={showExpandedBlock}>
-            <SessionTreePanel
-              adapter={surogatesWebChatAdapter}
-              loadList
-              sessionId={activeSessionId ?? undefined}
-              activeSessionId={activeSessionId ?? undefined}
-              hideHeader
-              onSessionSelect={handleSelectSession}
-              onSessionDelete={handleSessionDeleted}
-            />
-            {!sessionsLoading && sessions.length === 0 && (
-              <div className="px-4 py-8 text-center text-sm text-faint">
-                No sessions yet
-              </div>
-            )}
+            {/* Expanded (lg+ or sheet): SessionTreePanel */}
+            <div className={showExpandedBlock}>
+              <SessionTreePanel
+                adapter={surogatesWebChatAdapter}
+                loadList
+                sessionId={activeSessionId ?? undefined}
+                activeSessionId={activeSessionId ?? undefined}
+                hideHeader
+                onSessionSelect={handleSelectSession}
+                onSessionDelete={handleSessionDeleted}
+              />
+              {!sessionsLoading && sessions.length === 0 && (
+                <div className="px-4 py-8 text-center text-sm text-faint">
+                  No sessions yet
+                </div>
+              )}
+            </div>
           </div>
-        </div>
         )}
 
         {/* Missions + Scheduled work — expanded only */}

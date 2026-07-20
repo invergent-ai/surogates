@@ -162,6 +162,23 @@ async def test_single_session_creates_canonical_marked_session():
     assert session.channel == "web"
 
 
+async def test_client_supplied_marker_is_stripped():
+    org_id, user_id = uuid4(), uuid4()
+    store = _Store(reusable=None)
+
+    await sessions_route.create_session(
+        sessions_route.CreateSessionRequest(config={"single_session": True}),
+        _request(store, _Storage()),
+        Response(),
+        _tenant(org_id, user_id),
+        _runtime("support-bot", org_id, multi_session=True),
+    )
+
+    # The canonical stamp is server-owned: a pre-stamped session created
+    # while multi-session is on would bypass a later lockdown.
+    assert "single_session" not in store.created[0]["config"]
+
+
 async def test_multi_session_on_always_creates():
     org_id, user_id = uuid4(), uuid4()
     existing = SimpleNamespace(

@@ -18,6 +18,8 @@ os.environ.setdefault(
     "SUROGATES_AUTH_JWT_SECRET", "test-secret-key-for-tests-0123456789"
 )
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -56,12 +58,16 @@ class _Store:
     def __init__(self, sessions=None):
         self.sessions = sessions or {}
         self.created: list[dict] = []
+        self.config_writes: list[tuple] = []
 
     async def get_session(self, session_id):
         try:
             return self.sessions[session_id]
         except KeyError:
             raise SessionNotFoundError(f"session {session_id} not found")
+
+    async def update_session_config_key(self, session_id, key, value):
+        self.config_writes.append((session_id, key, value))
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -127,13 +133,18 @@ def _live_session(
     status="active",
     agent_id="hero-agent",
     marked=True,
+    config=None,
+    message_count=0,
 ):
+    base_config = {"single_session": True} if marked else {}
+    base_config.update(config or {})
     return SimpleNamespace(
         id=session_id,
         agent_id=agent_id,
         channel="website",
         status=status,
-        config={"single_session": True} if marked else {},
+        config=base_config,
+        message_count=message_count,
     )
 
 
@@ -228,6 +239,59 @@ async def test_single_session_reuses_completed_session():
     assert r.status_code == 200
     assert r.json()["session_id"] == str(session_id)
     assert store.created == []
+
+
+async def test_single_session_capped_session_not_reused():
+    org_id, session_id = uuid.uuid4(), uuid.uuid4()
+    store = _Store({
+        session_id: _live_session(
+            session_id,
+            config={"session_message_cap": 5},
+            message_count=5,
+        ),
+    })
+    app = _app(org_id, store, multi_session=False)
+
+    r = await _post(app, cookie=_cookie(session_id, org_id))
+
+    # The 429 on send tells the visitor to bootstrap a new session; the
+    # bootstrap must actually deliver one instead of the capped session.
+    assert r.status_code == 201
+    assert len(store.created) == 1
+    assert r.json()["session_id"] != str(session_id)
+
+
+async def test_single_session_reuse_pins_buyer_from_token():
+    org_id, session_id = uuid.uuid4(), uuid.uuid4()
+    store = _Store({session_id: _live_session(session_id)})
+    app = _app(org_id, store, multi_session=False)
+    buyer = {"firebase_uid": "fb-1", "email": "buyer@acme.com"}
+
+    with patch.object(
+        website, "_resolve_commerce_buyer",
+        new=AsyncMock(return_value=buyer),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="https://widget",
+            cookies={COOKIE_NAME: _cookie(session_id, org_id)},
+        ) as c:
+            r = await c.post(
+                "/v1/website/sessions",
+                headers={
+                    "Authorization": f"Bearer {_KEY}",
+                    "Origin": _ORIGIN,
+                    "Content-Type": "application/json",
+                },
+                json={"firebase_id_token": "tok-123"},
+            )
+
+    # Reuse must absorb the sign-in token — the paywall recovery flow
+    # re-bootstraps expecting the buyer to pin onto the session.
+    assert r.status_code == 200
+    assert r.json()["session_id"] == str(session_id)
+    assert store.config_writes == [(session_id, "commerce_buyer", buyer)]
 
 
 async def test_multi_session_on_always_creates():

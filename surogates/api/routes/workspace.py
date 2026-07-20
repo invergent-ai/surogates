@@ -20,7 +20,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFil
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import (
+    require_session_visible,
+    require_user_writable_session,
+)
 from surogates.session.models import Session
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
@@ -211,7 +214,7 @@ def _require_service_account_api_route(
 
 
 async def _get_workspace_session_bucket_and_root(
-    store: SessionStore, session_id: UUID, tenant: TenantContext,
+    request: Request, store: SessionStore, session_id: UUID, tenant: TenantContext,
 ) -> tuple[Session, str, str]:
     """Resolve session, bucket, and workspace-root id for storage access.
 
@@ -234,6 +237,7 @@ async def _get_workspace_session_bucket_and_root(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
 
     bucket = session.config.get("storage_bucket")
     if not bucket:
@@ -380,7 +384,7 @@ async def get_workspace_tree(
     store = _get_session_store(request)
     storage = _get_storage(request)
     session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-        store, session_id, tenant,
+        request, store, session_id, tenant,
     )
 
     prefix = boundary_workspace_prefix(session.config, session, root_id)
@@ -419,7 +423,7 @@ async def get_workspace_file(
     store = _get_session_store(request)
     storage = _get_storage(request)
     session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-        store, session_id, tenant,
+        request, store, session_id, tenant,
     )
 
     is_text = _is_text_key(path)
@@ -500,7 +504,7 @@ async def upload_file(
     store = _get_session_store(request)
     storage = _get_storage(request)
     session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-        store, session_id, tenant
+        request, store, session_id, tenant
     )
     require_user_writable_session(session)
 
@@ -544,7 +548,7 @@ async def download_file(
     store = _get_session_store(request)
     storage = _get_storage(request)
     session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-        store, session_id, tenant,
+        request, store, session_id, tenant,
     )
 
     storage_key = boundary_workspace_key(session.config, session, root_id, path)
@@ -593,7 +597,7 @@ async def delete_file(
     store = _get_session_store(request)
     storage = _get_storage(request)
     session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-        store, session_id, tenant
+        request, store, session_id, tenant
     )
     require_user_writable_session(session)
 

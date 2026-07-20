@@ -307,7 +307,7 @@ def patched_send_message(monkeypatch):
             lambda _req: _FakeStorage(workspace_files),
         )
 
-        async def _get_bucket_and_root(_store, _sid, _tenant):
+        async def _get_bucket_and_root(_request, _store, _sid, _tenant):
             return session, "test-bucket", "root/"
 
         monkeypatch.setattr(

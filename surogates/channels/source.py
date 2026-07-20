@@ -71,11 +71,11 @@ def build_session_key(
       to its own session.
 
     *single_session* implements the agent's "multi session" capability
-    being off: the key collapses to one session per chat — thread
-    suffixes are dropped (every thread continues the same conversation)
-    and *per_user_groups* is ignored (a per-user split inside a group
-    would mint extra sessions).  DMs already map one-to-one to the user,
-    so their key shape is unchanged.
+    being off: thread suffixes are dropped so every thread continues the
+    same conversation.  *per_user_groups* still applies — collapsing the
+    per-user split would merge different users' conversation state into
+    one shared context, the opposite of "one session per user".  DMs
+    already map one-to-one to the user, so their key shape is unchanged.
 
     Returns a colon-separated string suitable for use as a Redis key or
     database lookup value, e.g.::
@@ -86,7 +86,7 @@ def build_session_key(
     """
     parts: list[str] = ["agent", source.platform, source.chat_type, source.chat_id]
 
-    if source.chat_type in ("group", "channel") and per_user_groups and not single_session:
+    if source.chat_type in ("group", "channel") and per_user_groups:
         parts.append(source.user_id)
 
     if source.thread_id and not single_session:

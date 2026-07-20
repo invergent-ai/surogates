@@ -25,6 +25,7 @@ from surogates.artifacts.store import (
     ArtifactStore,
 )
 from surogates.session.events import EventType
+from surogates.api.session_guards import require_session_visible
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.backend import StorageBackend
 from surogates.session.attachment_ingest import workspace_root_id
@@ -89,6 +90,7 @@ def _require_service_account_api_route(
 
 
 async def _resolve_storage_bucket(
+    request: Request,
     store: SessionStore,
     session_id: UUID,
     tenant: TenantContext,
@@ -106,6 +108,7 @@ async def _resolve_storage_bucket(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
     bucket = session.config.get("storage_bucket")
     if not bucket:
         raise HTTPException(
@@ -131,7 +134,7 @@ async def list_artifacts(
 ) -> ArtifactListResponse:
     """List every artifact that belongs to the session, oldest first."""
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(store, session_id, tenant)
+    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
     artifact_store = ArtifactStore(
         _get_storage(request),
         session_id=session_id,
@@ -161,7 +164,7 @@ async def get_artifact(
     """Fetch a single artifact's metadata and full payload."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(store, session_id, tenant)
+    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
     artifact_store = ArtifactStore(
         _get_storage(request),
         session_id=session_id,
@@ -204,7 +207,7 @@ async def create_artifact(
     bucket and is fetched by the UI via :func:`get_artifact`.
     """
     store = _get_session_store(request)
-    session, bucket = await _resolve_storage_bucket(store, session_id, tenant)
+    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
 
     try:
         body.validate_spec()
