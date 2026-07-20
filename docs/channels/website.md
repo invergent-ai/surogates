@@ -63,6 +63,18 @@ The Helm chart packages it into the `{release}-website` Secret and injects it as
 | `allowed_origins` | Comma-separated, exact-match list (scheme + host + port). Wildcards not supported; every embedding domain must be enumerated. |
 | `session_message_cap` | Per-session message ceiling. `0` means "no cap"; a non-zero value triggers HTTP 429 on the message endpoint when reached. Materialised onto `session.config` at bootstrap so the cap a visitor was admitted under stays stable for the whole session. |
 
+### Per-agent overrides via channel routing
+
+The global fields above are deployment-wide fallbacks. When Studio's
+Website channel form is used, the per-agent `channel_routing` row's
+`config` carries `allowed_origins` (list) and `session_message_cap`,
+and those take precedence for that agent's key: bootstrap checks the
+per-agent allow-list, the session cookie records its publishable key
+(`channel_identifier` claim), and every later request re-resolves the
+routing row — so deactivating the channel in Studio cuts live visitor
+sessions with 403, and origin-list changes apply to in-flight sessions
+without a redeploy.
+
 ### What is *not* on the channel
 
 The channel deliberately does **not** carry agent-defining fields — `model`, `system_prompt`, `tool_allow_list`, `skill_pins` — because a channel is a transport, not an agent. Different visitor populations that genuinely need different model behaviour, prompts, or tool surfaces are different agents and belong in different deployments.
