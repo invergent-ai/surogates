@@ -175,7 +175,11 @@ def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     if not patterns:
         return None
     alternation = "|".join(re.escape(p) for p in patterns)
-    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+    # Lookarounds, not \b: a word boundary needs a \w on one side, so
+    # patterns that start or end with punctuation ("@bot", "libra!") would
+    # never match after a space.  (?<!\w)/(?!\w) behaves like \b for plain
+    # words and still works for punctuated patterns.
+    return re.compile(rf"(?<!\w)(?:{alternation})(?!\w)", re.IGNORECASE)
 
 
 def is_stop_command(text: str | None) -> bool:

@@ -120,6 +120,10 @@ class ChannelWebhookDispatcher:
         self._deps_factory = deps_factory
         self._settings = settings
         self._registry = registry
+        # Strong refs to fire-and-forget ack tasks: the event loop keeps
+        # only weak references, so an unreferenced task can be garbage
+        # collected mid-execution.
+        self._ack_tasks: set = set()
 
     # ------------------------------------------------------------------
     # App factory
@@ -403,7 +407,9 @@ class ChannelWebhookDispatcher:
                             "[dispatcher] ack_received failed on %s",
                             platform.kind, exc_info=True,
                         )
-                asyncio.get_running_loop().create_task(_ack_task())
+                task = asyncio.get_running_loop().create_task(_ack_task())
+                self._ack_tasks.add(task)
+                task.add_done_callback(self._ack_tasks.discard)
             return Response(status_code=200)
 
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.

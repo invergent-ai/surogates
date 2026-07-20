@@ -57,6 +57,20 @@ async def test_mention_pattern_grants_processing():
     assert result == InboundOutcome.PROCESSED
 
 
+async def test_mention_pattern_with_punctuation_matches():
+    """Patterns starting with non-word chars ("@bot") must still match —
+    a plain \\b boundary would silently never fire for them."""
+    deps = _make_deps()
+    msg = _make_msg(text="hey @libra run the report", is_mention=False)
+    result = await ChannelInboundPipeline().handle(
+        msg,
+        routing=_make_routing(),
+        config={**_make_config(require_mention=True), "mention_patterns": "@libra"},
+        deps=deps,
+    )
+    assert result == InboundOutcome.PROCESSED
+
+
 async def test_mention_pattern_miss_still_gated():
     deps = _make_deps()
     msg = _make_msg(text="unrelated chatter", is_mention=False)
