@@ -389,16 +389,21 @@ class ChannelWebhookDispatcher:
                 msg, routing=routing, config=config, deps=deps
             )
             # Platform-native received-ack (e.g. Telegram emoji reaction)
-            # for messages that were accepted for processing. Best-effort.
+            # for messages that were accepted for processing. Fired without
+            # awaiting: it is best-effort decoration, and a slow platform
+            # API call here would delay the webhook 200 (which platforms
+            # treat as a redelivery signal).
             ack = getattr(platform, "ack_received", None)
             if ack is not None and outcome is InboundOutcome.PROCESSED:
-                try:
-                    await ack(msg, creds=creds, config=config)
-                except Exception:
-                    logger.warning(
-                        "[dispatcher] ack_received failed on %s", platform.kind,
-                        exc_info=True,
-                    )
+                async def _ack_task(ack=ack, msg=msg, creds=creds, config=config):
+                    try:
+                        await ack(msg, creds=creds, config=config)
+                    except Exception:
+                        logger.warning(
+                            "[dispatcher] ack_received failed on %s",
+                            platform.kind, exc_info=True,
+                        )
+                asyncio.get_running_loop().create_task(_ack_task())
             return Response(status_code=200)
 
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.

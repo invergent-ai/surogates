@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from enum import Enum
 from typing import Any, Awaitable, Callable
 from uuid import UUID
@@ -160,6 +161,21 @@ class InboundOutcome(str, Enum):
     INTERRUPTED = "interrupted"
     """A ``/stop`` command — the running turn was interrupted out-of-band; no
     session message was emitted or enqueued."""
+
+
+@lru_cache(maxsize=256)
+def _mention_pattern_regex(csv: str) -> re.Pattern | None:
+    """Compile a routing config's ``mention_patterns`` CSV into one regex.
+
+    Cached per distinct config string — the gate runs on every group
+    message, and routing configs change rarely.  ``None`` when no patterns
+    are configured.
+    """
+    patterns = [p.strip() for p in csv.split(",") if p.strip()]
+    if not patterns:
+        return None
+    alternation = "|".join(re.escape(p) for p in patterns)
+    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
 
 
 def is_stop_command(text: str | None) -> bool:
@@ -607,67 +623,13 @@ class ChannelInboundPipeline:
             return InboundOutcome.INTERRUPTED
 
         # While a question is pending, the platforms diverge on what a plain
-        # reply means:
-        #   - Slack has a modal surface, so a plain in-thread reply is NOT
-        #     the answer — nudge toward the Answer button and suppress the
-        #     turn so it doesn't pile into a blocked worker.
-        #   - Telegram has no modal; a plain reply IS the answer — resolve
-        #     the durable pending record with it and ack.
+        # reply means — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in ("slack", "telegram"):
-            try:
-                pending = await deps.pending_input(session_id)
-            except Exception:
-                logger.warning("[channels] pending input lookup failed - continuing", exc_info=True)
-                pending = None
-            if pending and routing.platform == "slack":
-                if deps.input_nudge is not None:
-                    try:
-                        await deps.input_nudge(
-                            session_id,
-                            msg,
-                            "I'm waiting on your answer - tap *Answer* above, or use the web inbox.",
-                        )
-                    except Exception:
-                        logger.warning("[channels] pending input nudge failed", exc_info=True)
-                return InboundOutcome.DROPPED
-            if pending and msg.text.strip():  # telegram
-                from surogates.channels.platforms.telegram_interactive import (
-                    resolve_text_answer,
-                )
-                from surogates.session.interactive_input import (
-                    resolve_input_response,
-                )
-
-                responses = resolve_text_answer(
-                    pending.get("questions") or [], msg.text,
-                )
-                resolved = False
-                try:
-                    resolved = await resolve_input_response(
-                        deps.session_store,
-                        session_id=session_id,
-                        tool_call_id=pending.get("tool_call_id", ""),
-                        responses=responses,
-                    )
-                except Exception:
-                    logger.warning(
-                        "[channels] pending input resolution failed", exc_info=True,
-                    )
-                if resolved:
-                    if deps.input_nudge is not None:
-                        try:
-                            await deps.input_nudge(
-                                session_id, msg, "✅ Got it — continuing.",
-                            )
-                        except Exception:
-                            logger.warning(
-                                "[channels] answer ack failed", exc_info=True,
-                            )
-                    return InboundOutcome.DROPPED
-                # Resolution lost a race (the button answered first) or
-                # failed — the text is a real user message, not an answer;
-                # fall through so it becomes a normal turn instead of
-                # vanishing.
+            intercepted = await self._intercept_pending_input(
+                msg, routing=routing, deps=deps, session_id=session_id,
+            )
+            if intercepted is not None:
+                return intercepted
 
         # Seed channel history on the first message of a Slack channel session
         # (lazy fallback for channels where the join event was missed). Best
@@ -675,32 +637,9 @@ class ChannelInboundPipeline:
         if deps.backfill is not None and routing.platform == "slack" and not msg.is_dm:
             await deps.backfill(session_id, msg.identifier, routing)
 
-        # Telegram reply threading: remember which inbound message the reply
-        # should attach to. "all" tracks the latest message; "first" pins the
-        # session's opening message; anything else leaves replies unthreaded.
-        # Groups only — replying to the only other party in a DM is noise.
-        _tg_message_id = (msg.source or {}).get("message_id")
-        if (
-            routing.platform == "telegram"
-            and not msg.is_dm
-            and _tg_message_id is not None
-        ):
-            reply_to_mode = str(config.get("reply_to_mode") or "").lower()
-            try:
-                if reply_to_mode == "all":
-                    await deps.session_store.update_session_config_key(
-                        session_id, "telegram_reply_to_message_id", _tg_message_id,
-                    )
-                elif reply_to_mode == "first":
-                    session_row = await deps.session_store.get_session(session_id)
-                    if "telegram_reply_to_message_id" not in (session_row.config or {}):
-                        await deps.session_store.update_session_config_key(
-                            session_id, "telegram_reply_to_message_id", _tg_message_id,
-                        )
-            except Exception:
-                logger.warning(
-                    "[channels] recording reply-to message id failed", exc_info=True,
-                )
+        await self._record_reply_target(
+            msg, routing=routing, config=config, deps=deps, session_id=session_id,
+        )
 
         # Download + ingest platform file attachments into the harness's
         # images/attachments event shapes. Best-effort: never drop the message.
@@ -785,6 +724,111 @@ class ChannelInboundPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
+    async def _intercept_pending_input(
+        msg: InboundMessage,
+        *,
+        routing: Any,
+        deps: PipelineDeps,
+        session_id: Any,
+    ) -> InboundOutcome | None:
+        """Handle a message that arrives while ``ask_user_question`` waits.
+
+        The platforms diverge on what a plain reply means:
+
+        - Slack has a modal surface, so a plain in-thread reply is NOT the
+          answer — nudge toward the Answer button and suppress the turn so
+          it doesn't pile into a blocked worker.
+        - Telegram has no modal; a plain reply IS the answer — resolve the
+          durable pending record with it and ack.
+
+        Returns the outcome when the message was consumed, or ``None`` to
+        continue normal processing (no question pending, or a Telegram
+        resolution lost the race against a button tap — the text is then a
+        real user message, not an answer, and must not vanish).
+        """
+        try:
+            pending = await deps.pending_input(session_id)
+        except Exception:
+            logger.warning(
+                "[channels] pending input lookup failed - continuing", exc_info=True,
+            )
+            return None
+        if not pending:
+            return None
+
+        async def _nudge(text: str) -> None:
+            if deps.input_nudge is None:
+                return
+            try:
+                await deps.input_nudge(session_id, msg, text)
+            except Exception:
+                logger.warning("[channels] pending input nudge failed", exc_info=True)
+
+        if routing.platform == "slack":
+            await _nudge(
+                "I'm waiting on your answer - tap *Answer* above, or use the web inbox."
+            )
+            return InboundOutcome.DROPPED
+
+        if not msg.text.strip():
+            return None
+
+        from surogates.channels.platforms.telegram_interactive import (
+            resolve_text_answer,
+        )
+        from surogates.session.interactive_input import resolve_input_response
+
+        resolved = False
+        try:
+            resolved = await resolve_input_response(
+                deps.session_store,
+                session_id=session_id,
+                tool_call_id=pending.get("tool_call_id", ""),
+                responses=resolve_text_answer(pending.get("questions") or [], msg.text),
+            )
+        except Exception:
+            logger.warning("[channels] pending input resolution failed", exc_info=True)
+        if resolved:
+            await _nudge("✅ Got it — continuing.")
+            return InboundOutcome.DROPPED
+        return None
+
+    @staticmethod
+    async def _record_reply_target(
+        msg: InboundMessage,
+        *,
+        routing: Any,
+        config: dict,
+        deps: PipelineDeps,
+        session_id: Any,
+    ) -> None:
+        """Remember which inbound message the outbound reply should attach to.
+
+        Driven by the routing config's ``reply_to_mode`` (today only
+        Telegram routings carry it): ``all`` tracks the latest message,
+        ``first`` pins the session's opening message, anything else leaves
+        replies unthreaded.  Groups only — replying to the only other party
+        in a DM is noise.  Best-effort; never raises.
+        """
+        reply_to_mode = str(config.get("reply_to_mode") or "").lower()
+        message_id = (msg.source or {}).get("message_id")
+        if msg.is_dm or message_id is None or reply_to_mode not in ("all", "first"):
+            return
+        key = f"{routing.platform}_reply_to_message_id"
+        try:
+            if reply_to_mode == "first":
+                session_row = await deps.session_store.get_session(session_id)
+                if key in (session_row.config or {}):
+                    return
+            await deps.session_store.update_session_config_key(
+                session_id, key, message_id,
+            )
+        except Exception:
+            logger.warning(
+                "[channels] recording reply-to message id failed", exc_info=True,
+            )
+
+    @staticmethod
     def _evaluate_mention_gate(msg: InboundMessage, config: dict) -> bool:
         """Decide whether the message passes static mention-gating rules.
 
@@ -813,15 +857,8 @@ class ChannelInboundPipeline:
         # can't be @-mentioned by non-members): CSV in routing config,
         # matched case-insensitively on word boundaries — plain containment
         # would let "max" fire on "maximum" and invite accidental triggers.
-        raw_patterns = config.get("mention_patterns") or ""
-        if isinstance(raw_patterns, str):
-            patterns = [p.strip() for p in raw_patterns.split(",") if p.strip()]
-        else:
-            patterns = [str(p).strip() for p in raw_patterns if str(p).strip()]
-        text = msg.text or ""
-        if patterns and any(
-            re.search(rf"\b{re.escape(p)}\b", text, re.IGNORECASE) for p in patterns
-        ):
+        pattern = _mention_pattern_regex(str(config.get("mention_patterns") or ""))
+        if pattern is not None and pattern.search(msg.text or ""):
             return True
 
         return False

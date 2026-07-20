@@ -38,9 +38,7 @@ def split_text(text: str, limit: int) -> list[str]:
         window = remaining[: limit + 1]
         cut = -1
         for sep in _SEPARATORS:
-            idx = window.rfind(sep, 0, limit + 1 if sep != " " else limit + 1)
-            # For multi-char separators the cut point is the separator start;
-            # for a space it is the space itself.
+            idx = window.rfind(sep)
             if idx >= int(limit * _MIN_FILL):
                 cut = idx
                 sep_len = len(sep)

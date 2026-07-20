@@ -304,20 +304,15 @@ def _agent_allowed_origins(routing_config: dict) -> tuple[str, ...] | None:
     """Per-agent origin allow-list from routing config, or ``None`` when the
     agent has not configured one (fall back to the deployment-global list).
 
-    Accepts both the projected list form and a legacy CSV string.
+    Ops projects a parsed list; a CSV string is accepted too so a
+    hand-written routing row behaves the same.  Both funnel through
+    :func:`parse_allowed_origins` so normalization has one home.
     """
     raw = routing_config.get("allowed_origins")
     if raw is None:
         return None
-    if isinstance(raw, str):
-        origins = parse_allowed_origins(raw)
-    else:
-        origins = tuple(
-            normalize_origin(str(origin))
-            for origin in raw
-            if str(origin).strip()
-        )
-    return origins or None
+    csv = raw if isinstance(raw, str) else ",".join(str(origin) for origin in raw)
+    return parse_allowed_origins(csv) or None
 
 
 async def _load_and_authorize_session(

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -37,6 +37,12 @@ from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.platforms.telegram_format import render_html, render_plain
+from surogates.channels.platforms.telegram_interactive import (
+    build_answered_text,
+    build_input_prompt,
+    parse_callback_data,
+    tool_call_digest,
+)
 from surogates.channels.text_split import split_text
 
 __all__ = [
@@ -543,44 +549,59 @@ class TelegramPlatform:
     _MAX_MESSAGE_CHARS = 4096
     _MAX_SOURCE_CHUNK = 3500
 
+    async def _api(
+        self, bot_token: str, method: str, payload: dict[str, Any],
+    ) -> tuple[dict | None, str]:
+        """POST one Bot API *method*.  Never raises.
+
+        Returns ``(result, "")`` on ``ok``, ``(None, error)`` on any API
+        rejection or HTTP failure — the single transport primitive every
+        best-effort caller (send, acks, edits, nudges) shares so error
+        handling cannot drift between them.
+        """
+        try:
+            resp = await self._http.post(_bot_api_url(bot_token, method), json=payload)
+            data = resp.json()
+        except Exception as exc:
+            logger.warning("[TelegramPlatform] %s failed: %s", method, exc)
+            return None, str(exc)
+        if data.get("ok"):
+            return data.get("result") or {}, ""
+        error: str = data.get("description", "Telegram API error")
+        logger.debug("[TelegramPlatform] %s ok=false: %s", method, error)
+        return None, error
+
     async def _post_text(
         self,
-        api_url: str,
+        bot_token: str,
         base: dict[str, Any],
         *,
         html_text: str,
-        plain_text: str,
+        plain_text: Callable[[], str],
     ) -> tuple[str | None, str | None]:
         """POST one message, preferring HTML with a plain-text retry.
 
         Returns ``(message_id, None)`` on success, ``(None, error)`` on
         failure.  A parse rejection of the HTML body (Telegram's
-        "can't parse entities") is retried once as plain text so a
+        "can't parse entities") is retried once as plain text — rendered
+        lazily via the *plain_text* thunk, since the retry is rare — so a
         formatting edge case never loses the reply.
         """
-        attempts: list[dict[str, Any]] = [
+        result, error = await self._api(
+            bot_token, "sendMessage",
             {**base, "text": html_text, "parse_mode": "HTML"},
-            {**base, "text": plain_text},
-        ]
-        error: str | None = None
-        for attempt_no, payload in enumerate(attempts):
-            try:
-                resp = await self._http.post(api_url, json=payload)
-                data = resp.json()
-            except Exception as exc:
-                logger.error("[TelegramPlatform] sendMessage failed: %s", exc)
-                return None, str(exc)
-            if data.get("ok"):
-                return str(data["result"]["message_id"]), None
-            error = data.get("description", "Telegram API error")
-            if attempt_no == 0 and "parse" in error.lower():
-                logger.warning(
-                    "[TelegramPlatform] HTML rejected (%s); retrying as plain text",
-                    error,
-                )
-                continue
+        )
+        if result is None and "parse" in error.lower():
+            logger.warning(
+                "[TelegramPlatform] HTML rejected (%s); retrying as plain text",
+                error,
+            )
+            result, error = await self._api(
+                bot_token, "sendMessage", {**base, "text": plain_text()},
+            )
+        if result is None:
             return None, error
-        return None, error
+        return str(result["message_id"]), None
 
     async def send(self, item: Any, *, creds: dict) -> SendResult:
         """Post an outbox item to Telegram via ``sendMessage``.
@@ -610,7 +631,6 @@ class TelegramPlatform:
             redelivery retry cannot spam duplicates.
         """
         bot_token: str = creds.get("bot_token") or ""
-        api_url = _bot_api_url(bot_token, "sendMessage")
 
         chat_id = item.destination.get("chat_id")
         message_thread_id: Any = item.destination.get("message_thread_id")
@@ -621,13 +641,27 @@ class TelegramPlatform:
             base["message_thread_id"] = message_thread_id
 
         if item.payload.get("input_prompt"):
-            return await self._send_input_prompt(item, api_url=api_url, base=base)
+            return await self._send_input_prompt(item, bot_token=bot_token, base=base)
 
         text: str = item.payload.get("content", "")
-        chunks = split_text(text, self._MAX_SOURCE_CHUNK) or [text]
+
+        # Build every outgoing body up front — (html_text, lazy plain) —
+        # so a single delivery loop owns the partial-failure bookkeeping.
+        # A chunk whose HTML rendering overflows the cap (pathological
+        # escaping inflation) is downgraded to plain sub-chunks.
+        outgoing: list[tuple[str, Callable[[], str]]] = []
+        for chunk in split_text(text, self._MAX_SOURCE_CHUNK) or [text]:
+            html_text = render_html(chunk)
+            if len(html_text) <= self._MAX_MESSAGE_CHARS:
+                outgoing.append((html_text, lambda c=chunk: render_plain(c)))
+            else:
+                outgoing.extend(
+                    (sub, lambda s=sub: s)
+                    for sub in split_text(render_plain(chunk), self._MAX_MESSAGE_CHARS)
+                )
 
         last_id: str | None = None
-        for index, chunk in enumerate(chunks):
+        for index, (html_text, plain_text) in enumerate(outgoing):
             chunk_base = dict(base)
             if reply_to and index == 0:
                 # allow_sending_without_reply: a user-deleted reply target
@@ -636,24 +670,8 @@ class TelegramPlatform:
                     "message_id": reply_to,
                     "allow_sending_without_reply": True,
                 }
-            html_text = render_html(chunk)
-            plain_text = render_plain(chunk)
-            if len(html_text) > self._MAX_MESSAGE_CHARS:
-                # Pathological escaping inflation — deliver plain sub-chunks
-                # rather than risking a hard API rejection.
-                sub_error: str | None = None
-                for sub in split_text(plain_text, self._MAX_MESSAGE_CHARS):
-                    msg_id, sub_error = await self._post_text(
-                        api_url, chunk_base, html_text=sub, plain_text=sub,
-                    )
-                    if msg_id is None:
-                        break
-                    last_id = msg_id
-                if sub_error is not None:
-                    break
-                continue
             msg_id, error = await self._post_text(
-                api_url, chunk_base, html_text=html_text, plain_text=plain_text,
+                bot_token, chunk_base, html_text=html_text, plain_text=plain_text,
             )
             if msg_id is None:
                 if last_id is not None:
@@ -667,19 +685,15 @@ class TelegramPlatform:
         return SendResult(success=True, message_id=last_id)
 
     async def _send_input_prompt(
-        self, item: Any, *, api_url: str, base: dict[str, Any],
+        self, item: Any, *, bot_token: str, base: dict[str, Any],
     ) -> SendResult:
         """Post an ``ask_user_question`` prompt with inline-keyboard choices.
 
-        The button ``callback_data`` carries only coordinates
-        (``si:<session>:<q>:<c>``); the durable pending-input record is the
-        source of truth when the button is tapped (see
+        The button ``callback_data`` carries only coordinates plus a
+        tool-call digest; the durable pending-input record is the source of
+        truth when the button is tapped (see
         :meth:`handle_non_message_update`).
         """
-        from surogates.channels.platforms.telegram_interactive import (
-            build_input_prompt,
-        )
-
         html_text, plain_text, reply_markup = build_input_prompt(
             session_id=str(getattr(item, "session_id", "")),
             questions=item.payload.get("questions") or [],
@@ -690,7 +704,7 @@ class TelegramPlatform:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         msg_id, error = await self._post_text(
-            api_url, payload, html_text=html_text, plain_text=plain_text,
+            bot_token, payload, html_text=html_text, plain_text=lambda: plain_text,
         )
         if msg_id is None:
             return SendResult(success=False, error=error or "send failed")
@@ -717,13 +731,10 @@ class TelegramPlatform:
         private delivery fails.
         """
         bot_token: str = creds.get("bot_token") or ""
-        api_url = _bot_api_url(bot_token, "sendMessage")
-        try:
-            resp = await self._http.post(api_url, json={"chat_id": sender_id, "text": text})
-            return bool(resp.json().get("ok"))
-        except Exception as exc:
-            logger.error("[TelegramPlatform] send_private failed: %s", exc)
-            return False
+        result, _ = await self._api(
+            bot_token, "sendMessage", {"chat_id": sender_id, "text": text}
+        )
+        return result is not None
 
     # ------------------------------------------------------------------
     # handle_non_message_update — callback_query ack-only
@@ -747,20 +758,10 @@ class TelegramPlatform:
                 payload["message_thread_id"] = int(thread_ts)
             except (TypeError, ValueError):
                 pass
-        try:
-            resp = await self._http.post(
-                _bot_api_url(bot_token, "sendMessage"), json=payload
-            )
-            data = resp.json()
-            if data.get("ok"):
-                return str(data["result"]["message_id"])
+        result, _ = await self._api(bot_token, "sendMessage", payload)
+        if result is None:
             return None
-        except Exception:
-            logger.warning(
-                "[TelegramPlatform] post_input_nudge failed for %s",
-                channel, exc_info=True,
-            )
-            return None
+        return str(result["message_id"])
 
     # ------------------------------------------------------------------
     # download_file — resolve a file_id via getFile and fetch the bytes
@@ -781,18 +782,13 @@ class TelegramPlatform:
         file_id = url or ""
         if not bot_token or not file_id:
             return None
-        try:
-            resp = await self._http.post(
-                _bot_api_url(bot_token, "getFile"), json={"file_id": file_id}
+        result, error = await self._api(bot_token, "getFile", {"file_id": file_id})
+        if result is None:
+            logger.warning(
+                "[TelegramPlatform] getFile failed for %s: %s", file_id, error,
             )
-            data = resp.json()
-            if not data.get("ok"):
-                logger.warning(
-                    "[TelegramPlatform] getFile failed for %s: %s",
-                    file_id, data.get("description", ""),
-                )
-                return None
-            result = data.get("result") or {}
+            return None
+        try:
             file_path = result.get("file_path") or ""
             declared = result.get("file_size")
             if not file_path or ".." in file_path:
@@ -845,17 +841,15 @@ class TelegramPlatform:
         message_id = (msg.source or {}).get("message_id")
         if not bot_token or message_id is None:
             return
-        try:
-            await self._http.post(
-                _bot_api_url(bot_token, "setMessageReaction"),
-                json={
-                    "chat_id": msg.identifier,
-                    "message_id": message_id,
-                    "reaction": [{"type": "emoji", "emoji": "👀"}],
-                },
-            )
-        except Exception as exc:
-            logger.debug("[TelegramPlatform] setMessageReaction failed: %s", exc)
+        await self._api(
+            bot_token,
+            "setMessageReaction",
+            {
+                "chat_id": msg.identifier,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": "👀"}],
+            },
+        )
 
     async def _answer_callback(
         self, bot_token: str, callback_id: str, text: str | None = None,
@@ -866,12 +860,92 @@ class TelegramPlatform:
         payload: dict[str, Any] = {"callback_query_id": callback_id}
         if text:
             payload["text"] = text
+        await self._api(bot_token, "answerCallbackQuery", payload)
+
+    async def _resolve_input_callback(
+        self, callback_query: dict, *, bot_token: str, deps: Any,
+    ) -> str | None:
+        """Resolve an input-prompt button tap against the durable record.
+
+        Returns the ack text to show the tapper (``None`` = silent ack).
+        Every guard failure — malformed data, unknown session, foreign
+        chat, stale button — degrades to an ack with no side effects.
+        """
+        from surogates.session.interactive_input import (
+            pending_input_for_session,
+            resolve_input_response,
+        )
+
+        parsed = parse_callback_data(callback_query.get("data") or "")
+        store = getattr(deps, "session_store", None)
+        if parsed is None or store is None:
+            return None
+        session_id_raw, _question_index, choice_index, digest = parsed
+
         try:
-            await self._http.post(
-                _bot_api_url(bot_token, "answerCallbackQuery"), json=payload
+            from uuid import UUID
+
+            session_id = UUID(session_id_raw)
+            session = await store.get_session(session_id)
+        except Exception:
+            logger.warning(
+                "[TelegramPlatform] callback for unknown session %r",
+                session_id_raw,
             )
-        except Exception as exc:
-            logger.debug("[TelegramPlatform] answerCallbackQuery failed: %s", exc)
+            return None
+
+        # Anti-forgery: the callback must originate from the chat this
+        # session is bound to — callback_data is attacker-visible, the chat
+        # binding is not attacker-controllable.
+        chat_id = str(
+            ((callback_query.get("message") or {}).get("chat") or {}).get("id", "")
+        )
+        bound_chat = str((session.config or {}).get("telegram_channel_id", ""))
+        if not chat_id or chat_id != bound_chat:
+            logger.warning(
+                "[TelegramPlatform] callback chat %r does not match session chat %r",
+                chat_id, bound_chat,
+            )
+            return None
+
+        pending = await pending_input_for_session(store, session_id=session_id)
+        if not pending or tool_call_digest(pending.get("tool_call_id", "")) != digest:
+            # No pending question, or the button belongs to an EARLIER
+            # prompt than the one currently pending — a stale button must
+            # never resolve a newer question with its coordinates.
+            return "This question was already answered."
+
+        questions: list = pending.get("questions") or []
+        choices = (questions[0] if questions else {}).get("choices") or []
+        if choice_index < 0 or choice_index >= len(choices):
+            return None
+        prompt = (questions[0].get("prompt") if questions else "") or "Question 1"
+        answer = choices[choice_index].get("label") or ""
+        responses = [{"question": prompt, "answer": answer, "is_other": False}]
+
+        resolved = await resolve_input_response(
+            store,
+            session_id=session_id,
+            tool_call_id=pending.get("tool_call_id", ""),
+            responses=responses,
+        )
+        if not resolved:
+            return "This question was already answered."
+
+        # Replace the button message with the recorded answer. Best-effort.
+        message_id = (callback_query.get("message") or {}).get("message_id")
+        if message_id is not None:
+            await self._api(
+                bot_token,
+                "editMessageText",
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": build_answered_text(responses),
+                    "parse_mode": "HTML",
+                },
+            )
+        return "Got it."
 
     async def handle_non_message_update(
         self, body: Any, *, routing: Any, creds: dict, deps: Any
@@ -879,9 +953,9 @@ class TelegramPlatform:
         """Handle non-message Telegram updates.
 
         ``callback_query`` updates from input-prompt buttons
-        (``si:<session>:<q>:<c>`` callback data) resolve the session's
-        durable pending ``ask_user_question`` record: the choice is written
-        via :func:`resolve_input_response` (which emits the
+        (``si:<session>:<q>:<c>:<digest>`` callback data) resolve the
+        session's durable pending ``ask_user_question`` record: the choice
+        is written via ``resolve_input_response`` (which emits the
         ``ASK_USER_QUESTION_RESPONSE`` event the waiting tool polls for),
         the button message is edited to show the answer, and the callback is
         acked.  Stale or foreign callbacks are acked without side effects.
@@ -900,104 +974,13 @@ class TelegramPlatform:
         if callback_query is None:
             return False
 
-        from surogates.channels.platforms.telegram_interactive import (
-            build_answered_text,
-            parse_callback_data,
-            tool_call_digest,
-        )
-        from surogates.session.interactive_input import (
-            pending_input_for_session,
-            resolve_input_response,
-        )
-
         bot_token: str = creds.get("bot_token") or ""
-        callback_id: str = str(callback_query.get("id", ""))
-        parsed = parse_callback_data(callback_query.get("data") or "")
-        store = getattr(deps, "session_store", None)
-        if parsed is None or store is None:
-            await self._answer_callback(bot_token, callback_id)
-            return True
-        session_id_raw, _question_index, choice_index, digest = parsed
-
-        try:
-            from uuid import UUID
-
-            session_id = UUID(session_id_raw)
-            session = await store.get_session(session_id)
-        except Exception:
-            logger.warning(
-                "[TelegramPlatform] callback for unknown session %r",
-                session_id_raw,
-            )
-            await self._answer_callback(bot_token, callback_id)
-            return True
-
-        # Anti-forgery: the callback must originate from the chat this
-        # session is bound to — callback_data is attacker-visible, the chat
-        # binding is not attacker-controllable.
-        chat_id = str(
-            ((callback_query.get("message") or {}).get("chat") or {}).get("id", "")
+        ack_text = await self._resolve_input_callback(
+            callback_query, bot_token=bot_token, deps=deps,
         )
-        bound_chat = str((session.config or {}).get("telegram_channel_id", ""))
-        if not chat_id or chat_id != bound_chat:
-            logger.warning(
-                "[TelegramPlatform] callback chat %r does not match session chat %r",
-                chat_id, bound_chat,
-            )
-            await self._answer_callback(bot_token, callback_id)
-            return True
-
-        pending = await pending_input_for_session(store, session_id=session_id)
-        if not pending or tool_call_digest(pending.get("tool_call_id", "")) != digest:
-            # No pending question, or the button belongs to an EARLIER
-            # prompt than the one currently pending — a stale button must
-            # never resolve a newer question with its coordinates.
-            await self._answer_callback(
-                bot_token, callback_id, "This question was already answered."
-            )
-            return True
-
-        questions: list = pending.get("questions") or []
-        choices = (questions[0] if questions else {}).get("choices") or []
-        if choice_index < 0 or choice_index >= len(choices):
-            await self._answer_callback(bot_token, callback_id)
-            return True
-        prompt = (questions[0].get("prompt") if questions else "") or "Question 1"
-        answer = choices[choice_index].get("label") or ""
-        responses = [{"question": prompt, "answer": answer, "is_other": False}]
-
-        resolved = await resolve_input_response(
-            store,
-            session_id=session_id,
-            tool_call_id=pending.get("tool_call_id", ""),
-            responses=responses,
+        await self._answer_callback(
+            bot_token, str(callback_query.get("id", "")), ack_text
         )
-        if not resolved:
-            await self._answer_callback(
-                bot_token, callback_id, "This question was already answered."
-            )
-            return True
-
-        # Replace the button message with the recorded answer. Best-effort.
-        message = callback_query.get("message") or {}
-        message_id = message.get("message_id")
-        if message_id is not None:
-            try:
-                await self._http.post(
-                    _bot_api_url(bot_token, "editMessageText"),
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": message_id,
-                        "text": build_answered_text(responses),
-                        "parse_mode": "HTML",
-                    },
-                )
-            except Exception as exc:
-                logger.debug(
-                    "[TelegramPlatform] editMessageText failed: %s", exc
-                )
-
-        await self._answer_callback(bot_token, callback_id, "Got it.")
         return True
 
 

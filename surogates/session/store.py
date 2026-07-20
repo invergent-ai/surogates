@@ -19,6 +19,10 @@ from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from surogates.channels.constants import (
+    ADAPTER_CHANNELS,
+    INTERACTIVE_PROMPT_CHANNELS,
+)
 from surogates.db.models import (
     Event as EventRow,
     IdeaNode,
@@ -84,11 +88,6 @@ _INBOX_EVENTS = frozenset({
 # returning thousands of rows on every poll.
 _MAX_LISTED_DESCENDANTS = 1000
 
-# Channels with a registered outbound delivery adapter (a delivery loop that
-# claims their outbox rows).  Must match the platforms registered in
-# surogates.channels.platforms — an outbox row for any other channel value
-# would never be claimed and sit "pending" forever.
-_ADAPTER_CHANNELS = frozenset({"slack", "telegram"})
 
 
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
@@ -121,13 +120,10 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
-    elif event_type == EventType.INBOX_INPUT_REQUIRED and channel in (
-        "slack",
-        "telegram",
+    elif (
+        event_type == EventType.INBOX_INPUT_REQUIRED
+        and channel in INTERACTIVE_PROMPT_CHANNELS
     ):
-        # Slack renders an Answer button + modal; Telegram an inline
-        # keyboard. Other channels have no interactive prompt surface, so a
-        # content-less input_prompt row must not be enqueued for them.
         questions = data.get("questions") or []
         if questions:
             payload = {
@@ -1010,7 +1006,7 @@ class SessionStore:
             # Everything else (web/website SSE, api/task/delegation/worker
             # consumers, ambient's gated mate_ambient_post path) has no claimer
             # — rows for those channels would sit "pending" forever.
-            if channel not in _ADAPTER_CHANNELS:
+            if channel not in ADAPTER_CHANNELS:
                 return
 
             # Build channel-specific destination from session config.
@@ -1039,13 +1035,15 @@ class SessionStore:
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
-                if channel == "telegram":
+                if channel == "telegram" and "telegram_reply_to_message_id" in config:
                     # Reply threading tracks the latest inbound message id in
                     # session config (written by the channels process), so it
                     # must be read fresh — the per-session config cache above
                     # is primed once and would pin every reply to the first
-                    # message.  Best-effort: a read failure falls back to the
-                    # cached value rather than dropping the delivery.
+                    # message.  Gated on the cached config carrying the key at
+                    # all, so sessions that never use reply threading pay no
+                    # extra query.  Best-effort: a read failure falls back to
+                    # the cached value rather than dropping the delivery.
                     try:
                         fresh = await db.get(SessionRow, session_id)
                         if fresh is not None:
