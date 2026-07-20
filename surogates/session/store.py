@@ -242,6 +242,44 @@ class SessionStore:
             return None
         return Session.model_validate(row)
 
+    async def get_reusable_channel_session(
+        self,
+        *,
+        org_id: UUID,
+        user_id: UUID,
+        agent_id: str,
+        channel: str,
+    ) -> Session | None:
+        """Return the user's newest reusable session on *channel*, if any.
+
+        The lookup behind the single-session ("multi session" off)
+        capability: top-level sessions only, newest first, skipping
+        ``archived`` (a deliberate close unlocks a fresh session) and
+        ``failed`` (never funnel a user back into a broken session).
+        There is no unique constraint enforcing one row — callers treat
+        this as get-before-create and accept the benign race of two
+        near-simultaneous first messages.
+        """
+        reusable = ("active", "processing", "paused", "completed")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(
+                    SessionRow.org_id == org_id,
+                    SessionRow.user_id == user_id,
+                    SessionRow.agent_id == agent_id,
+                    SessionRow.channel == channel,
+                    SessionRow.parent_id.is_(None),
+                    SessionRow.status.in_(reusable),
+                )
+                .order_by(SessionRow.created_at.desc())
+                .limit(1)
+            )
+            row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return Session.model_validate(row)
+
     async def get_session(self, session_id: UUID) -> Session:
         """Fetch a single session by ID.  Raises ``SessionNotFoundError``."""
         async with self._sf() as db:

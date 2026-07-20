@@ -11,7 +11,15 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text as _sql_text
 
@@ -433,11 +441,28 @@ async def _create_session(
 async def create_session(
     body: CreateSessionRequest,
     request: Request,
+    response: Response,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> Session:
-    """Create a new session for the authenticated user."""
+    """Create a new session for the authenticated user.
+
+    With the agent's "multi session" capability off, each user keeps one
+    web session: the newest reusable one is returned (200 instead of
+    201) rather than creating another.  Archived/failed sessions don't
+    count, so archiving is how a user deliberately starts over.
+    """
+    if not agent_runtime.multi_session and tenant.user_id is not None:
+        existing = await _get_session_store(request).get_reusable_channel_session(
+            org_id=tenant.org_id,
+            user_id=tenant.user_id,
+            agent_id=agent_runtime.agent_id,
+            channel="web",
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return existing
     return await _create_session(
         body,
         request,

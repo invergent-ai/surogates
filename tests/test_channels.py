@@ -97,6 +97,45 @@ class TestBuildSessionKey:
         # Threads are always appended.
         assert key == "agent:slack:dm:C1:T1"
 
+    def test_single_session_collapses_thread(self):
+        source = SessionSource(
+            platform="slack",
+            chat_id="C1",
+            chat_type="dm",
+            user_id="U1",
+            thread_id="T1",
+        )
+        key = build_session_key(source, single_session=True)
+        # "multi session" off: every thread continues the same conversation.
+        assert key == "agent:slack:dm:C1"
+
+    def test_single_session_overrides_per_user_groups(self):
+        source = SessionSource(
+            platform="telegram",
+            chat_id="CHAT_ID",
+            chat_type="group",
+            user_id="USER1",
+            thread_id="THREAD_99",
+        )
+        key = build_session_key(
+            source, per_user_groups=True, single_session=True,
+        )
+        # One shared session per chat: no user split, no thread suffix.
+        assert key == "agent:telegram:group:CHAT_ID"
+
+    def test_single_session_keeps_dm_shape(self):
+        source = SessionSource(
+            platform="slack",
+            chat_id="C123",
+            chat_type="dm",
+            user_id="U456",
+        )
+        assert (
+            build_session_key(source, single_session=True)
+            == build_session_key(source)
+            == "agent:slack:dm:C123"
+        )
+
 
 class TestSessionSourceImmutability:
     """SessionSource is frozen."""

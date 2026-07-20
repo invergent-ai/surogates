@@ -315,6 +315,61 @@ def _agent_allowed_origins(routing_config: dict) -> tuple[str, ...] | None:
     return parse_allowed_origins(csv) or None
 
 
+# Statuses a single-session bootstrap may funnel the visitor back into.
+# ``completed`` counts: an idle-completed conversation is still "their
+# session" and the worker resumes it on the next message.  ``failed``
+# and ``archived`` don't — never trap a visitor in a broken session, and
+# the explicit end-of-visit hook clears the cookie anyway.
+_REUSABLE_WEBSITE_STATUSES = frozenset(
+    {"active", "processing", "paused", "completed"}
+)
+
+
+async def _reusable_cookie_session(
+    request: Request,
+    *,
+    agent_id: str,
+    org_uuid: UUID,
+    normalized_origin: str,
+    publishable_key: str,
+):
+    """The visitor's cookie-bound session, for single-session bootstraps.
+
+    With the agent's "multi session" capability off, a re-bootstrap from
+    a browser still holding a valid session cookie must return the
+    visitor to their existing conversation instead of minting a new
+    session.  The cookie is trusted only when its claims bind to the
+    same publishable key, org and origin this bootstrap resolved; on a
+    missing/invalid cookie, any claim mismatch, or a session that is
+    gone or not reusable, the caller falls through to a fresh create.
+    """
+    raw = request.cookies.get(COOKIE_NAME)
+    if not raw:
+        return None
+    try:
+        claims = decode_website_session_token(raw)
+    except InvalidTokenError:
+        return None
+    if (
+        claims.channel_identifier != publishable_key
+        or claims.origin != normalized_origin
+        or claims.org_id != org_uuid
+    ):
+        return None
+    store = _get_session_store(request)
+    try:
+        session = await store.get_session(claims.session_id)
+    except SessionNotFoundError:
+        return None
+    if (
+        session.agent_id != agent_id
+        or session.channel != WEBSITE_CHANNEL
+        or session.status not in _REUSABLE_WEBSITE_STATUSES
+    ):
+        return None
+    return session
+
+
 async def _load_and_authorize_session(
     request: Request,
     path_session_id: UUID,
@@ -647,6 +702,37 @@ async def bootstrap_website_session(
     normalized_origin = normalize_origin(request_origin)
 
     publishable_key = _extract_bearer(request) or ""
+
+    if routing_config.get("multi_session") is False:
+        existing = await _reusable_cookie_session(
+            request,
+            agent_id=agent_id,
+            org_uuid=org_uuid,
+            normalized_origin=normalized_origin,
+            publishable_key=publishable_key,
+        )
+        if existing is not None:
+            csrf_token = generate_csrf_token()
+            cookie_token = create_website_session_token(
+                session_id=existing.id,
+                org_id=org_uuid,
+                origin=normalized_origin,
+                csrf_token=csrf_token,
+                channel_identifier=publishable_key,
+            )
+            _set_session_cookie(
+                response,
+                token=cookie_token,
+                expires_seconds=DEFAULT_SESSION_TTL_SECONDS,
+            )
+            response.status_code = status.HTTP_200_OK
+            return BootstrapResponse(
+                session_id=existing.id,
+                csrf_token=csrf_token,
+                expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
+                agent_name=agent_id,
+            )
+
     config: dict = {
         "storage_bucket": bucket,
         "workspace_path": storage.resolve_workspace_path(bucket, session_id),

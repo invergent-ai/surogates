@@ -169,6 +169,13 @@ class AgentRuntimeContext:
     # Defaults True (browser tools have always been available).
     browser_enabled: bool = True
 
+    # "Multi session" capability.  When False each end-user gets exactly
+    # one session per channel — the create routes reuse the latest
+    # reusable session instead of creating another.  Defaults True so a
+    # runtime-config payload that predates this field keeps unlimited
+    # sessions.
+    multi_session: bool = True
+
     # File-bundle reference.  Both optional so agents that haven't
     # been onboarded to Hub-backed bundles yet still work.
     # ``bundle_hub_ref`` is the Hub repository in ``<owner>/<repo>``

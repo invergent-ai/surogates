@@ -89,6 +89,9 @@ class AuthConfigResponse(BaseModel):
     # disabled commands from the composer menu + navbar.  "clear" has no
     # flag and is always present.
     slash_commands: list[str] = Field(default_factory=list)
+    # "Multi session" capability.  When False each user keeps one session
+    # per channel; the SPA hides "New chat" and pins the conversation.
+    multi_session: bool = True
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -122,6 +125,7 @@ async def auth_config(
             self_registration_enabled=False,
             firebase=None,
             slash_commands=slash_commands,
+            multi_session=agent_runtime.multi_session,
         )
     try:
         fb = await cache.get(project_id)
@@ -131,11 +135,13 @@ async def auth_config(
             self_registration_enabled=False,
             firebase=None,
             slash_commands=slash_commands,
+            multi_session=agent_runtime.multi_session,
         )
     return AuthConfigResponse(
         agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
         slash_commands=slash_commands,
+        multi_session=agent_runtime.multi_session,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,

@@ -564,7 +564,16 @@ class ChannelInboundPipeline:
             thread_id=msg.thread_key,
             chat_name=msg.identifier,
         )
-        session_key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
+        # "multi session" off (ops projects the agent capability into the
+        # routing config) collapses the key to one session per chat:
+        # threads fold into the parent conversation and per_user_groups
+        # is overridden.  Absent key = capability on (default).
+        single_session = config.get("multi_session") is False
+        session_key = build_session_key(
+            source,
+            per_user_groups=bool(config.get("per_user_groups", False)),
+            single_session=single_session,
+        )
 
         from surogates.channels.memory_boundary import boundary_token
 
@@ -902,5 +911,9 @@ class ChannelInboundPipeline:
             user_id=msg.platform_user_id,
             thread_id=thread_key,
         )
-        key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
+        key = build_session_key(
+            source,
+            per_user_groups=bool(config.get("per_user_groups", False)),
+            single_session=config.get("multi_session") is False,
+        )
         return await deps.state.get_session(key) is not None

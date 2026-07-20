@@ -56,6 +56,7 @@ def build_session_key(
     source: SessionSource,
     *,
     per_user_groups: bool = False,
+    single_session: bool = False,
 ) -> str:
     """Derive a deterministic routing key from a :class:`SessionSource`.
 
@@ -69,6 +70,13 @@ def build_session_key(
     * **Threads** -- appended to the parent key so that each thread maps
       to its own session.
 
+    *single_session* implements the agent's "multi session" capability
+    being off: the key collapses to one session per chat — thread
+    suffixes are dropped (every thread continues the same conversation)
+    and *per_user_groups* is ignored (a per-user split inside a group
+    would mint extra sessions).  DMs already map one-to-one to the user,
+    so their key shape is unchanged.
+
     Returns a colon-separated string suitable for use as a Redis key or
     database lookup value, e.g.::
 
@@ -78,10 +86,10 @@ def build_session_key(
     """
     parts: list[str] = ["agent", source.platform, source.chat_type, source.chat_id]
 
-    if source.chat_type in ("group", "channel") and per_user_groups:
+    if source.chat_type in ("group", "channel") and per_user_groups and not single_session:
         parts.append(source.user_id)
 
-    if source.thread_id:
+    if source.thread_id and not single_session:
         parts.append(source.thread_id)
 
     return ":".join(parts)

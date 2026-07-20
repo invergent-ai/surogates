@@ -104,6 +104,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         slash_commands=_slash_commands(payload.get("slash_commands")),
         brainstorming_gate=bool(payload.get("brainstorming_gate", True)),
         browser_enabled=bool(payload.get("browser_enabled", True)),
+        multi_session=bool(payload.get("multi_session", True)),
         # bundle reference.  Empty strings → None
         # (a misconfigured payload that ships "" must not turn into
         # a Hub fetch against an empty ref).
