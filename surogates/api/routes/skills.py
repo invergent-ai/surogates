@@ -240,15 +240,12 @@ async def _authorize_session_for_staging(
     from surogates.api.routes.sessions import _get_session_for_tenant
     from surogates.runtime import agent_runtime_context_dep
 
-    # ``_get_session_for_tenant`` requires ``agent_id`` to gate
+    # ``_get_session_for_tenant`` requires the runtime context to gate
     # cross-agent session reads.  Resolve it via
     # ``agent_runtime_context_dep`` so the staging helper stays in
     # lock-step with every other session-scoped route.
     agent_runtime = await agent_runtime_context_dep(request)
-    return await _get_session_for_tenant(
-        request, session_id, tenant, agent_runtime.agent_id,
-        multi_session=agent_runtime.multi_session,
-    )
+    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
 
 async def _stage_skill_for_session(

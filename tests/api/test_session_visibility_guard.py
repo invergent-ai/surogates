@@ -18,6 +18,15 @@ from surogates.api.session_guards import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _clear_multi_session_memo():
+    from surogates.api import session_guards
+
+    session_guards._multi_session_memo.clear()
+    yield
+    session_guards._multi_session_memo.clear()
+
+
 class _Cache:
     def __init__(self, payload=None, error=None):
         self.payload = payload

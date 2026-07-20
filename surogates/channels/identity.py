@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.db.models import ChannelIdentity as ChannelIdentityRow
 from surogates.db.models import Session as SessionRow
@@ -302,7 +303,7 @@ def make_cached_identity_resolver(
 # Statuses whose session is reused for a routing key. completed/paused are
 # idle-but-resumable (re-activated on reuse); active/processing are in flight.
 # Any other status (failed, archived, …) starts a fresh session.
-_RESUMABLE_STATUSES = ("active", "processing", "paused", "completed")
+_RESUMABLE_STATUSES = REUSABLE_SESSION_STATUSES
 
 
 async def get_or_create_channel_session(
@@ -379,10 +380,35 @@ async def get_or_create_channel_session(
         # existed (or under a path that never set it). The flag is stable for a
         # given routing key, so this fires at most once per such session.
         _incoming_multi_party = bool(config.get("multi_party"))
-        _existing_multi_party = bool((getattr(existing, "config", None) or {}).get("multi_party"))
+        _existing_config = getattr(existing, "config", None) or {}
+        _existing_multi_party = bool(_existing_config.get("multi_party"))
         if _existing_multi_party != _incoming_multi_party:
             await session_store.update_session_config_key(
                 existing_id, "multi_party", _incoming_multi_party
+            )
+        # Single-session sync.  A collapsed conversation spans every
+        # thread of its chat, but delivery destinations come from session
+        # config — stamped once at creation, they would pin every reply
+        # to the first-ever thread.  Track the latest inbound thread here
+        # (the store re-reads it fresh at enqueue, the same remedy as
+        # ``telegram_reply_to_message_id``), skipping the write when
+        # unchanged.  The marker itself is synced both ways because DM
+        # routing keys are identical in both capability modes, so one
+        # session can straddle a flip.
+        _incoming_single = bool(config.get("single_session"))
+        _marker_changed = (
+            bool(_existing_config.get("single_session")) != _incoming_single
+        )
+        if _marker_changed:
+            await session_store.update_session_config_key(
+                existing_id, "single_session", _incoming_single,
+            )
+        _thread_field = f"{channel}_thread_key"
+        if (_incoming_single or _marker_changed) and (
+            _existing_config.get(_thread_field) != config.get(_thread_field)
+        ):
+            await session_store.update_session_config_key(
+                existing_id, _thread_field, config.get(_thread_field),
             )
         # Backfill boundary partitioning onto sessions created before the
         # thread's boundary was known (or before workspace partitioning

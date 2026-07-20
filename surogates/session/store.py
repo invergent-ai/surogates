@@ -47,7 +47,12 @@ from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     build_inbox_row,
 )
-from surogates.session.models import Event, Session, SessionLease
+from surogates.session.models import (
+    REUSABLE_SESSION_STATUSES,
+    Event,
+    Session,
+    SessionLease,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +138,19 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 "context": strip_next_action_blocks(data.get("context", "") or ""),
             }
     return payload
+
+
+# The canonical-conversation stamp, as a SQL predicate.  The stamp is a
+# JSON boolean, so ``astext`` compares against the string form.
+_SINGLE_SESSION_MARKER = SessionRow.config["single_session"].astext == "true"
+
+# Delivery-destination field per adapter channel and the session-config
+# key it is read from.  Used by both the cached destination build and
+# the single-session fresh re-read at enqueue — keep them in lockstep.
+_THREAD_DEST_FIELDS = {
+    "slack": ("thread_ts", "slack_thread_key"),
+    "telegram": ("message_thread_id", "telegram_thread_key"),
+}
 
 
 class SessionStore:
@@ -263,7 +281,6 @@ class SessionStore:
         callers treat this as get-before-create and accept the benign
         race of two near-simultaneous first messages.
         """
-        reusable = ("active", "processing", "paused", "completed")
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -273,8 +290,8 @@ class SessionStore:
                     SessionRow.agent_id == agent_id,
                     SessionRow.channel == channel,
                     SessionRow.parent_id.is_(None),
-                    SessionRow.status.in_(reusable),
-                    SessionRow.config["single_session"].astext == "true",
+                    SessionRow.status.in_(REUSABLE_SESSION_STATUSES),
+                    _SINGLE_SESSION_MARKER,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(1)
@@ -811,11 +828,7 @@ class SessionStore:
                 if service_account_id is not None
                 else SessionRow.user_id == user_id
             )
-        marker_filter = (
-            SessionRow.config["single_session"].astext == "true"
-            if single_session_only
-            else true()
-        )
+        marker_filter = _SINGLE_SESSION_MARKER if single_session_only else true()
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -1064,16 +1077,17 @@ class SessionStore:
 
             # Build channel-specific destination from session config.
             destination: dict[str, Any] = {}
+            thread_dest, thread_key = _THREAD_DEST_FIELDS.get(channel, (None, None))
             if channel == "slack":
                 destination = {
                     "channel_id": config.get("slack_channel_id", ""),
-                    "thread_ts": config.get("slack_thread_key"),
+                    thread_dest: config.get(thread_key),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "telegram":
                 destination = {
                     "chat_id": config.get("telegram_channel_id", ""),
-                    "message_thread_id": config.get("telegram_thread_key"),
+                    thread_dest: config.get(thread_key),
                     "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
@@ -1114,15 +1128,8 @@ class SessionStore:
                             destination["reply_to_message_id"] = (
                                 fresh_config.get("telegram_reply_to_message_id")
                             )
-                        if needs_fresh_thread:
-                            if channel == "slack":
-                                destination["thread_ts"] = fresh_config.get(
-                                    "slack_thread_key"
-                                )
-                            elif channel == "telegram":
-                                destination["message_thread_id"] = (
-                                    fresh_config.get("telegram_thread_key")
-                                )
+                        if needs_fresh_thread and thread_dest is not None:
+                            destination[thread_dest] = fresh_config.get(thread_key)
                     except Exception:
                         pass
                 outbox = DeliveryOutbox(

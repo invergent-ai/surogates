@@ -80,6 +80,9 @@ export function ChatPage() {
   useEffect(() => {
     if (multiSession !== false || sessionsLoading) return;
     if (activeSessionId || params.sessionId) return;
+    // The list is already server-filtered to canonical roots (archived
+    // and children excluded); only "failed" needs re-excluding to
+    // mirror the server's create-time reuse pick.
     const pinned = sessions.find((s) => s.status !== "failed");
     if (pinned) {
       setActiveSession(pinned.id);

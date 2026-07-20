@@ -14,6 +14,17 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+# Statuses a conversation may be resumed/reused in.  ``completed`` counts
+# (the worker resumes it on the next message); ``failed`` and ``archived``
+# never do — a broken session is not funneled back to, and archiving is
+# the deliberate fresh start.  Shared by the channel get-or-create
+# (channels/identity), the single-session reuse lookups (session/store),
+# and the website bootstrap (api/routes/website).
+REUSABLE_SESSION_STATUSES: tuple[str, ...] = (
+    "active", "processing", "paused", "completed",
+)
+
+
 class Session(BaseModel):
     """Snapshot of a session's metadata and aggregate counters."""
 

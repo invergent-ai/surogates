@@ -18,6 +18,7 @@ from dataclasses import dataclass
 __all__ = [
     "SessionSource",
     "build_session_key",
+    "build_session_key_for_config",
 ]
 
 
@@ -93,3 +94,20 @@ def build_session_key(
         parts.append(source.thread_id)
 
     return ":".join(parts)
+
+
+def build_session_key_for_config(source: SessionSource, config: dict) -> str:
+    """Derive the routing key from a channel routing config.
+
+    The config→flags convention lives here, once: ``per_user_groups`` is
+    truthy-on, while ``multi_session`` is explicit-``False``-off (absent =
+    on).  Both inbound call sites (session resolution and the thread-gate
+    existence check) must derive identically or routing forks.
+    """
+    from surogates.channels.constants import multi_session_disabled
+
+    return build_session_key(
+        source,
+        per_user_groups=bool(config.get("per_user_groups", False)),
+        single_session=multi_session_disabled(config),
+    )

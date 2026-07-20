@@ -37,7 +37,11 @@ from uuid import UUID
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from surogates.channels.dedup import MessageDeduplicator
-from surogates.channels.source import SessionSource, build_session_key
+from surogates.channels.constants import multi_session_disabled
+from surogates.channels.source import (
+    SessionSource,
+    build_session_key_for_config,
+)
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -565,15 +569,10 @@ class ChannelInboundPipeline:
             chat_name=msg.identifier,
         )
         # "multi session" off (ops projects the agent capability into the
-        # routing config) collapses the key to one session per chat:
-        # threads fold into the parent conversation and per_user_groups
-        # is overridden.  Absent key = capability on (default).
-        single_session = config.get("multi_session") is False
-        session_key = build_session_key(
-            source,
-            per_user_groups=bool(config.get("per_user_groups", False)),
-            single_session=single_session,
-        )
+        # routing config) folds thread suffixes so every thread continues
+        # the same conversation; see build_session_key_for_config.
+        single_session = multi_session_disabled(config)
+        session_key = build_session_key_for_config(source, config)
 
         from surogates.channels.memory_boundary import boundary_token
 
@@ -606,27 +605,6 @@ class ChannelInboundPipeline:
             },
             session_factory=deps.session_factory,
         )
-
-        if single_session:
-            # The collapsed session spans every thread of the chat, but
-            # delivery destinations come from session config — stamped at
-            # creation, they would pin every reply to the first-ever
-            # thread.  Track the latest inbound thread instead; the store
-            # re-reads it fresh at enqueue (same remedy as
-            # ``telegram_reply_to_message_id``).  Best-effort: a failed
-            # write falls back to the previous thread, never drops the
-            # message.
-            try:
-                await deps.session_store.update_session_config_key(
-                    session_id,
-                    f"{routing.platform}_thread_key",
-                    msg.thread_key,
-                )
-            except Exception:
-                logger.warning(
-                    "[channels] recording single-session thread key failed",
-                    exc_info=True,
-                )
 
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
@@ -936,9 +914,5 @@ class ChannelInboundPipeline:
             user_id=msg.platform_user_id,
             thread_id=thread_key,
         )
-        key = build_session_key(
-            source,
-            per_user_groups=bool(config.get("per_user_groups", False)),
-            single_session=config.get("multi_session") is False,
-        )
+        key = build_session_key_for_config(source, config)
         return await deps.state.get_session(key) is not None

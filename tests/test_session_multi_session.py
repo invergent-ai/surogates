@@ -253,15 +253,18 @@ def _get_request(store):
     )
 
 
+def _fake_runtime(multi_session):
+    return SimpleNamespace(agent_id="support-bot", multi_session=multi_session)
+
+
 async def test_access_block_hides_unmarked_web_session_when_off():
     from fastapi import HTTPException
 
     session = _session("web")
-    with __import__("pytest").raises(HTTPException) as exc:
+    with pytest.raises(HTTPException) as exc:
         await sessions_route._get_session_for_tenant(
             _get_request(_GetStore(session)), session.id,
-            _owning_tenant(session), "support-bot",
-            multi_session=False,
+            _owning_tenant(session), _fake_runtime(multi_session=False),
         )
     assert exc.value.status_code == 404
 
@@ -274,8 +277,7 @@ async def test_access_allows_canonical_and_children_and_other_channels():
     for session in (canonical, child, api_session):
         got = await sessions_route._get_session_for_tenant(
             _get_request(_GetStore(session)), session.id,
-            _owning_tenant(session), "support-bot",
-            multi_session=False,
+            _owning_tenant(session), _fake_runtime(multi_session=False),
         )
         assert got is session
 
@@ -284,7 +286,6 @@ async def test_access_unrestricted_when_capability_on():
     session = _session("web")  # unmarked multi-era session
     got = await sessions_route._get_session_for_tenant(
         _get_request(_GetStore(session)), session.id,
-        _owning_tenant(session), "support-bot",
-        multi_session=True,
+        _owning_tenant(session), _fake_runtime(multi_session=True),
     )
     assert got is session
