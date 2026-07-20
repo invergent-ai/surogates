@@ -197,3 +197,19 @@ def test_commerce_empty_strings_normalise_to_safe_defaults():
     ctx = build_agent_runtime_context(payload)
     assert ctx.commerce_mode == "free"
     assert ctx.commerce_buy_url is None
+
+
+def test_multi_session_defaults_true_when_absent():
+    from surogates.runtime import build_agent_runtime_context
+
+    ctx = build_agent_runtime_context(_minimum_payload())
+    assert ctx.multi_session is True
+
+
+def test_multi_session_projects_false():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["multi_session"] = False
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.multi_session is False

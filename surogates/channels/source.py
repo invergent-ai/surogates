@@ -18,6 +18,7 @@ from dataclasses import dataclass
 __all__ = [
     "SessionSource",
     "build_session_key",
+    "build_session_key_for_config",
 ]
 
 
@@ -56,6 +57,7 @@ def build_session_key(
     source: SessionSource,
     *,
     per_user_groups: bool = False,
+    single_session: bool = False,
 ) -> str:
     """Derive a deterministic routing key from a :class:`SessionSource`.
 
@@ -69,6 +71,13 @@ def build_session_key(
     * **Threads** -- appended to the parent key so that each thread maps
       to its own session.
 
+    *single_session* implements the agent's "multi session" capability
+    being off: thread suffixes are dropped so every thread continues the
+    same conversation.  *per_user_groups* still applies — collapsing the
+    per-user split would merge different users' conversation state into
+    one shared context, the opposite of "one session per user".  DMs
+    already map one-to-one to the user, so their key shape is unchanged.
+
     Returns a colon-separated string suitable for use as a Redis key or
     database lookup value, e.g.::
 
@@ -81,7 +90,24 @@ def build_session_key(
     if source.chat_type in ("group", "channel") and per_user_groups:
         parts.append(source.user_id)
 
-    if source.thread_id:
+    if source.thread_id and not single_session:
         parts.append(source.thread_id)
 
     return ":".join(parts)
+
+
+def build_session_key_for_config(source: SessionSource, config: dict) -> str:
+    """Derive the routing key from a channel routing config.
+
+    The config→flags convention lives here, once: ``per_user_groups`` is
+    truthy-on, while ``multi_session`` is explicit-``False``-off (absent =
+    on).  Both inbound call sites (session resolution and the thread-gate
+    existence check) must derive identically or routing forks.
+    """
+    from surogates.channels.constants import multi_session_disabled
+
+    return build_session_key(
+        source,
+        per_user_groups=bool(config.get("per_user_groups", False)),
+        single_session=multi_session_disabled(config),
+    )

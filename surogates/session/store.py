@@ -47,7 +47,12 @@ from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     build_inbox_row,
 )
-from surogates.session.models import Event, Session, SessionLease
+from surogates.session.models import (
+    REUSABLE_SESSION_STATUSES,
+    Event,
+    Session,
+    SessionLease,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +138,19 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 "context": strip_next_action_blocks(data.get("context", "") or ""),
             }
     return payload
+
+
+# The canonical-conversation stamp, as a SQL predicate.  The stamp is a
+# JSON boolean, so ``astext`` compares against the string form.
+_SINGLE_SESSION_MARKER = SessionRow.config["single_session"].astext == "true"
+
+# Delivery-destination field per adapter channel and the session-config
+# key it is read from.  Used by both the cached destination build and
+# the single-session fresh re-read at enqueue — keep them in lockstep.
+_THREAD_DEST_FIELDS = {
+    "slack": ("thread_ts", "slack_thread_key"),
+    "telegram": ("message_thread_id", "telegram_thread_key"),
+}
 
 
 class SessionStore:
@@ -236,6 +254,47 @@ class SessionStore:
                     SessionRow.org_id == org_id,
                     SessionRow.idempotency_key == idempotency_key,
                 )
+            )
+            row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        return Session.model_validate(row)
+
+    async def get_reusable_channel_session(
+        self,
+        *,
+        org_id: UUID,
+        user_id: UUID,
+        agent_id: str,
+        channel: str,
+    ) -> Session | None:
+        """Return the user's canonical single-session conversation, if any.
+
+        The lookup behind the single-session ("multi session" off)
+        capability.  Only sessions stamped ``config.single_session``
+        qualify — the dedicated conversation created while the
+        capability was off.  Sessions from a multi-session era are never
+        adopted; they stay hidden until the capability is re-enabled.
+        Skips ``archived`` (a deliberate close unlocks a fresh dedicated
+        session) and ``failed`` (never funnel a user back into a broken
+        session).  There is no unique constraint enforcing one row —
+        callers treat this as get-before-create and accept the benign
+        race of two near-simultaneous first messages.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(
+                    SessionRow.org_id == org_id,
+                    SessionRow.user_id == user_id,
+                    SessionRow.agent_id == agent_id,
+                    SessionRow.channel == channel,
+                    SessionRow.parent_id.is_(None),
+                    SessionRow.status.in_(REUSABLE_SESSION_STATUSES),
+                    _SINGLE_SESSION_MARKER,
+                )
+                .order_by(SessionRow.created_at.desc())
+                .limit(1)
             )
             row = result.scalar_one_or_none()
         if row is None:
@@ -733,8 +792,13 @@ class SessionStore:
         offset: int = 0,
         include_descendants: bool = False,
         any_principal: bool = False,
+        single_session_only: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
+
+        With *single_session_only* the page is restricted to roots stamped
+        ``config.single_session`` — the "multi session off" listing, where
+        multi-era conversations stay hidden.
 
         Delegation children (``parent_id IS NOT NULL``) are excluded from the
         page itself -- they belong under their parent in the session tree, not
@@ -764,6 +828,7 @@ class SessionStore:
                 if service_account_id is not None
                 else SessionRow.user_id == user_id
             )
+        marker_filter = _SINGLE_SESSION_MARKER if single_session_only else true()
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -773,6 +838,7 @@ class SessionStore:
                     SessionRow.agent_id == agent_id,
                     SessionRow.status != "archived",
                     SessionRow.parent_id.is_(None),
+                    marker_filter,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)
@@ -1011,16 +1077,17 @@ class SessionStore:
 
             # Build channel-specific destination from session config.
             destination: dict[str, Any] = {}
+            thread_dest, thread_key = _THREAD_DEST_FIELDS.get(channel, (None, None))
             if channel == "slack":
                 destination = {
                     "channel_id": config.get("slack_channel_id", ""),
-                    "thread_ts": config.get("slack_thread_key"),
+                    thread_dest: config.get(thread_key),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
             elif channel == "telegram":
                 destination = {
                     "chat_id": config.get("telegram_channel_id", ""),
-                    "message_thread_id": config.get("telegram_thread_key"),
+                    thread_dest: config.get(thread_key),
                     "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
@@ -1035,21 +1102,34 @@ class SessionStore:
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
-                if channel == "telegram" and "telegram_reply_to_message_id" in config:
-                    # Reply threading tracks the latest inbound message id in
-                    # session config (written by the channels process), so it
-                    # must be read fresh — the per-session config cache above
-                    # is primed once and would pin every reply to the first
-                    # message.  Gated on the cached config carrying the key at
-                    # all, so sessions that never use reply threading pay no
-                    # extra query.  Best-effort: a read failure falls back to
-                    # the cached value rather than dropping the delivery.
+                # Two destination fields track the *latest* inbound message in
+                # session config (written by the channels process) and must be
+                # read fresh — the per-session config cache above is primed
+                # once and would pin every reply to the first message:
+                # ``telegram_reply_to_message_id`` (reply threading) and, for
+                # collapsed single-session conversations that span every
+                # thread of a chat, the ``*_thread_key`` reply destination.
+                # Gated on the cached config carrying the marker/key at all,
+                # so ordinary sessions pay no extra query.  Best-effort: a
+                # read failure falls back to the cached values rather than
+                # dropping the delivery.
+                needs_fresh_reply = (
+                    channel == "telegram"
+                    and "telegram_reply_to_message_id" in config
+                )
+                needs_fresh_thread = bool(config.get("single_session"))
+                if needs_fresh_reply or needs_fresh_thread:
                     try:
                         fresh = await db.get(SessionRow, session_id)
-                        if fresh is not None:
+                        fresh_config = (
+                            fresh.config or {} if fresh is not None else config
+                        )
+                        if needs_fresh_reply:
                             destination["reply_to_message_id"] = (
-                                fresh.config or {}
-                            ).get("telegram_reply_to_message_id")
+                                fresh_config.get("telegram_reply_to_message_id")
+                            )
+                        if needs_fresh_thread and thread_dest is not None:
+                            destination[thread_dest] = fresh_config.get(thread_key)
                     except Exception:
                         pass
                 outbox = DeliveryOutbox(

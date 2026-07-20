@@ -7,7 +7,7 @@ from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import BackgroundTasks, UploadFile
+from fastapi import BackgroundTasks, Response, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
 from surogates.api.routes import prompts as prompts_route
@@ -243,6 +243,7 @@ async def test_create_web_session_uses_agent_bucket_and_session_path():
     response = await sessions_route.create_session(
         sessions_route.CreateSessionRequest(),
         request,
+        Response(),
         _tenant(org_id, user_id),
         _runtime(store.agent_id, org_id),
     )

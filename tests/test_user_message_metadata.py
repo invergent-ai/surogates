@@ -136,7 +136,9 @@ def patched_send_message(monkeypatch):
             service_account_id=None,
             session_scope_id=None,
         )
-        agent_runtime = SimpleNamespace(agent_id=session.agent_id)
+        agent_runtime = SimpleNamespace(
+            agent_id=session.agent_id, multi_session=True,
+        )
 
         response = await send_message(
             session_id=session.id,

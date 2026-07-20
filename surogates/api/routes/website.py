@@ -70,7 +70,9 @@ from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
     PlatformAuthError,
 )
+from surogates.channels.constants import multi_session_disabled
 from surogates.session.events import EventType
+from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
 from surogates.tenant.auth.firebase import (
@@ -244,8 +246,14 @@ def _clear_session_cookie(response: Response) -> None:
 
 async def _resolve_claims_from_cookie(
     request: Request,
-) -> WebsiteSessionClaims:
+    *,
+    optional: bool = False,
+) -> WebsiteSessionClaims | None:
     """Decode the session cookie from *request* or raise 401.
+
+    With ``optional`` a missing/invalid cookie returns ``None`` instead
+    (the single-session bootstrap probes the cookie without failing the
+    request).
 
     The decoded claims are the authority for session ownership on
     messages/events — the cookie carries the session id, org, origin,
@@ -255,6 +263,8 @@ async def _resolve_claims_from_cookie(
     """
     raw = request.cookies.get(COOKIE_NAME)
     if not raw:
+        if optional:
+            return None
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing website session cookie; call POST /v1/website/sessions first.",
@@ -262,6 +272,8 @@ async def _resolve_claims_from_cookie(
     try:
         return decode_website_session_token(raw)
     except InvalidTokenError as exc:
+        if optional:
+            return None
         logger.debug("Invalid website session cookie: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -313,6 +325,58 @@ def _agent_allowed_origins(routing_config: dict) -> tuple[str, ...] | None:
         return None
     csv = raw if isinstance(raw, str) else ",".join(str(origin) for origin in raw)
     return parse_allowed_origins(csv) or None
+
+
+async def _reusable_cookie_session(
+    request: Request,
+    *,
+    agent_id: str,
+    org_uuid: UUID,
+    normalized_origin: str,
+    publishable_key: str,
+):
+    """The visitor's cookie-bound session, for single-session bootstraps.
+
+    With the agent's "multi session" capability off, a re-bootstrap from
+    a browser still holding a valid session cookie must return the
+    visitor to their existing conversation instead of minting a new
+    session.  The cookie is trusted only when its claims bind to the
+    same publishable key, org and origin this bootstrap resolved; on a
+    missing/invalid cookie, any claim mismatch, or a session that is
+    gone or not reusable, the caller falls through to a fresh create.
+    """
+    claims = await _resolve_claims_from_cookie(request, optional=True)
+    if claims is None:
+        return None
+    if (
+        claims.channel_identifier != publishable_key
+        or claims.origin != normalized_origin
+        or claims.org_id != org_uuid
+    ):
+        return None
+    store = _get_session_store(request)
+    try:
+        session = await store.get_session(claims.session_id)
+    except SessionNotFoundError:
+        return None
+    config = session.config or {}
+    if (
+        session.agent_id != agent_id
+        or session.channel != WEBSITE_CHANNEL
+        or session.status not in REUSABLE_SESSION_STATUSES
+        # Only the canonical single-session conversation qualifies — a
+        # cookie left over from a multi-session era is not adopted.
+        or config.get("single_session") is not True
+    ):
+        return None
+    # A capped-out session must not be reused: the 429 on send tells the
+    # visitor to bootstrap a new session, so the bootstrap has to
+    # actually deliver one (message_count never resets and the cap is
+    # pinned at creation).
+    cap = config.get("session_message_cap") or 0
+    if cap and (session.message_count or 0) >= cap:
+        return None
+    return session
 
 
 async def _load_and_authorize_session(
@@ -583,6 +647,40 @@ async def _authorize_commerce_turn(
         )
 
 
+def _issue_bootstrap_response(
+    response: Response,
+    *,
+    session_id: UUID,
+    org_uuid: UUID,
+    origin: str,
+    publishable_key: str,
+    agent_id: str,
+) -> BootstrapResponse:
+    """Mint the CSRF token + session cookie and build the bootstrap body.
+
+    The cookie-mint contract (TTL, claim set, response shape) has one
+    home — both the fresh-create and single-session reuse paths return
+    through here.
+    """
+    csrf_token = generate_csrf_token()
+    cookie_token = create_website_session_token(
+        session_id=session_id,
+        org_id=org_uuid,
+        origin=origin,
+        csrf_token=csrf_token,
+        channel_identifier=publishable_key,
+    )
+    _set_session_cookie(
+        response, token=cookie_token, expires_seconds=DEFAULT_SESSION_TTL_SECONDS,
+    )
+    return BootstrapResponse(
+        session_id=session_id,
+        csrf_token=csrf_token,
+        expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
+        agent_name=agent_id,
+    )
+
+
 @router.post(
     "/website/sessions",
     response_model=BootstrapResponse,
@@ -647,12 +745,52 @@ async def bootstrap_website_session(
     normalized_origin = normalize_origin(request_origin)
 
     publishable_key = _extract_bearer(request) or ""
+
+    single_session = multi_session_disabled(routing_config)
+    if single_session:
+        existing = await _reusable_cookie_session(
+            request,
+            agent_id=agent_id,
+            org_uuid=org_uuid,
+            normalized_origin=normalized_origin,
+            publishable_key=publishable_key,
+        )
+        if existing is not None:
+            # Buyer identity pins at bootstrap (see the fresh-create path
+            # below), and the sign-in recovery flow re-bootstraps with a
+            # Firebase token expecting exactly that — so a reused session
+            # must absorb the token too, or a signed-in buyer would 402
+            # forever against their buyer-less canonical session.
+            if body is not None and body.firebase_id_token:
+                buyer = await _resolve_commerce_buyer(
+                    request, agent_id, body.firebase_id_token,
+                )
+                if buyer is not None and (
+                    (existing.config or {}).get("commerce_buyer") != buyer
+                ):
+                    await store.update_session_config_key(
+                        existing.id, "commerce_buyer", buyer,
+                    )
+            response.status_code = status.HTTP_200_OK
+            return _issue_bootstrap_response(
+                response,
+                session_id=existing.id,
+                org_uuid=org_uuid,
+                origin=normalized_origin,
+                publishable_key=publishable_key,
+                agent_id=agent_id,
+            )
+
     config: dict = {
         "storage_bucket": bucket,
         "workspace_path": storage.resolve_workspace_path(bucket, session_id),
         "website_origin": normalized_origin,
         "channel_identifier": publishable_key,
     }
+    if single_session:
+        # The fresh session becomes the visitor's canonical conversation
+        # that every later re-bootstrap resolves to.
+        config["single_session"] = True
     # Materialise the message cap onto session.config so the route's
     # 429 enforcement is decoupled from settings — the cookie-bound
     # cap stays stable for the visitor even if ops adjusts the channel
@@ -704,23 +842,13 @@ async def bootstrap_website_session(
             detail="Failed to provision session workspace; try again.",
         )
 
-    csrf_token = generate_csrf_token()
-    cookie_token = create_website_session_token(
+    return _issue_bootstrap_response(
+        response,
         session_id=session.id,
-        org_id=org_uuid,
+        org_uuid=org_uuid,
         origin=normalized_origin,
-        csrf_token=csrf_token,
-        channel_identifier=publishable_key,
-    )
-    _set_session_cookie(
-        response, token=cookie_token, expires_seconds=DEFAULT_SESSION_TTL_SECONDS,
-    )
-
-    return BootstrapResponse(
-        session_id=session.id,
-        csrf_token=csrf_token,
-        expires_at=int(time.time()) + DEFAULT_SESSION_TTL_SECONDS,
-        agent_name=agent_id,
+        publishable_key=publishable_key,
+        agent_id=agent_id,
     )
 
 

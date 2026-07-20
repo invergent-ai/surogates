@@ -119,7 +119,9 @@ def patched_update_session(monkeypatch):
             service_account_id=None,
             session_scope_id=None,
         )
-        agent_runtime = SimpleNamespace(agent_id=target.agent_id)
+        agent_runtime = SimpleNamespace(
+            agent_id=target.agent_id, multi_session=True,
+        )
 
         response = await update_session(
             session_id=target.id,

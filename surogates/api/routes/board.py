@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from surogates.board.render import render_board
 from surogates.board.store import BoardStore
 from surogates.config import get_board_settings
+from surogates.api.session_guards import require_session_visible
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -75,6 +76,7 @@ async def get_session_board(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
     raw_group = (session.config or {}).get("context_group_id")
     if not raw_group:
         raise HTTPException(

@@ -11,7 +11,15 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text as _sql_text
 
@@ -24,7 +32,10 @@ from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _inline_extension_kind, _materialize_for_cache, _try_inline_attachment,
     _apply_inline_total_budget,
 )
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import (
+    require_session_visible,
+    require_user_writable_session,
+)
 from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
@@ -335,7 +346,7 @@ async def _get_session_for_tenant(
     request: Request,
     session_id: UUID,
     tenant: TenantContext,
-    agent_id: str,
+    agent_runtime: AgentRuntimeContext,
 ) -> Session:
     """Fetch a session and verify it belongs to the tenant's org and this agent.
 
@@ -346,8 +357,10 @@ async def _get_session_for_tenant(
     into the same 404 so callers cannot probe session existence across
     scopes.
 
-    ``agent_id`` is supplied by the caller (typically from
-    :func:`surogates.runtime.agent_runtime_context_dep`).
+    ``agent_runtime`` is the per-request context from
+    :func:`surogates.runtime.agent_runtime_context_dep`; its resolved
+    ``multi_session`` feeds :func:`require_session_visible`, which owns
+    the hidden-multi-era-session 404 contract.
     """
     store = _get_session_store(request)
     try:
@@ -358,13 +371,17 @@ async def _get_session_for_tenant(
             detail=f"Session {session_id} not found.",
         )
 
-    if session.agent_id != agent_id or not tenant.owns_session(
+    if session.agent_id != agent_runtime.agent_id or not tenant.owns_session(
         session.org_id, session_id
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+
+    await require_session_visible(
+        request, session, multi_session=agent_runtime.multi_session,
+    )
 
     return session
 
@@ -433,11 +450,38 @@ async def _create_session(
 async def create_session(
     body: CreateSessionRequest,
     request: Request,
+    response: Response,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> Session:
-    """Create a new session for the authenticated user."""
+    """Create a new session for the authenticated user.
+
+    With the agent's "multi session" capability off, each user keeps one
+    dedicated web conversation: the canonical session (stamped
+    ``config.single_session`` at creation) is returned (200 instead of
+    201) rather than creating another.  Multi-era sessions are never
+    adopted — they stay hidden until the capability is re-enabled.
+    Archiving the dedicated session is how a user deliberately starts
+    over.
+    """
+    # The canonical-conversation stamp is server-owned: a client-supplied
+    # value would let users pre-stamp sessions while multi-session is on
+    # and keep them past a later lockdown.
+    body.config.pop("single_session", None)
+    if not agent_runtime.multi_session and tenant.user_id is not None:
+        existing = await _get_session_store(request).get_reusable_channel_session(
+            org_id=tenant.org_id,
+            user_id=tenant.user_id,
+            agent_id=agent_runtime.agent_id,
+            channel="web",
+        )
+        if existing is not None:
+            response.status_code = status.HTTP_200_OK
+            return existing
+        # First contact in single-session mode: the fresh session becomes
+        # the canonical conversation every later create resolves to.
+        body.config = {**body.config, "single_session": True}
     return await _create_session(
         body,
         request,
@@ -504,9 +548,7 @@ async def send_message(
     """Send a user message to a session, triggering agent processing."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(
-        request, session_id, tenant, agent_runtime.agent_id,
-    )
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
@@ -568,7 +610,7 @@ async def send_message(
                 )
 
         session, bucket, root_id = await _get_workspace_session_bucket_and_root(
-            store, session_id, tenant,
+            request, store, session_id, tenant,
         )
         storage = _get_storage(request)
 
@@ -797,7 +839,7 @@ async def confirm_disclosure(
     enforcement is enabled.  Typically called by the frontend after
     showing the AI disclosure notice to the user.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
     governance = getattr(request.app.state, "governance_gate", None)
     if governance is not None:
@@ -814,7 +856,7 @@ async def get_session(
 ) -> Session:
     """Retrieve metadata for a single session."""
     _require_service_account_api_route(request, tenant)
-    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
 
 def _tree_node_from_row(row: dict) -> SessionTreeNode:
@@ -881,7 +923,7 @@ async def get_session_tree(
     ``session.config.agent_type``) so the frontend can display badges
     for sub-agent types without extra lookups.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -948,7 +990,7 @@ async def get_session_children(
     Authorization: the parent session must belong to this tenant and
     agent; child rows inherit tenancy.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -1007,6 +1049,10 @@ async def list_sessions(
         limit=limit,
         offset=offset,
         include_descendants=include_descendants,
+        # Multi session off: only the canonical single-session
+        # conversation (and its subtree) is listed — multi-era chats
+        # stay hidden until the capability is re-enabled.
+        single_session_only=not agent_runtime.multi_session,
     )
 
     # Pagination is over roots; any descendants ride along with their root, so
@@ -1027,7 +1073,7 @@ async def pause_session(
     """Pause an active session."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
@@ -1063,7 +1109,7 @@ async def resume_session(
 ) -> Session:
     """Resume a paused session."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
 
     if session.status != "paused":
@@ -1105,7 +1151,7 @@ async def retry_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
 
     if session.status not in ("failed", "paused"):
@@ -1240,7 +1286,7 @@ async def update_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
 
     await store.update_session_title(session_id, body.title)
@@ -1265,7 +1311,7 @@ async def delete_session(
     """Archive (soft-delete) a session and delete its workspace storage."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
 
     archived_sessions = await store.archive_session_tree_and_delete_schedules(

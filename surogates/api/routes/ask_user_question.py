@@ -15,7 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, update
 
-from surogates.api.session_guards import require_user_writable_session
+from surogates.api.session_guards import (
+    require_session_visible,
+    require_user_writable_session,
+)
 from surogates.db.models import InboxItem
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -120,6 +123,7 @@ async def respond_to_ask_user_question(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
     require_user_writable_session(session)
 
     # Sanity-check the tool_call_id format -- short, printable, no newlines.

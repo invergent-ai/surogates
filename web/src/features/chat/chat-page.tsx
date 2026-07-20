@@ -37,6 +37,8 @@ export function ChatPage() {
   const upsertSession = useAppStore((s) => s.upsertSession);
   const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
   const slashCommands = useAppStore((s) => s.slashCommands);
+  const multiSession = useAppStore((s) => s.multiSession);
+  const sessions = useAppStore((s) => s.sessions);
 
   // Load initial data on mount
   useEffect(() => {
@@ -67,6 +69,35 @@ export function ChatPage() {
     chatRouteState.nextActiveSessionId,
     chatRouteState.redirectTo,
     activeSessionId,
+    setActiveSession,
+    navigate,
+  ]);
+
+  // "Multi session" off pins the user to their single conversation: when
+  // nothing is selected, adopt the newest usable session so a reload or a
+  // bare /chat lands back in it instead of an empty composer.  The list is
+  // newest-first, matching the server's reuse pick on create.
+  useEffect(() => {
+    if (multiSession !== false || sessionsLoading) return;
+    if (activeSessionId || params.sessionId) return;
+    // The list is already server-filtered to canonical roots (archived
+    // and children excluded); only "failed" needs re-excluding to
+    // mirror the server's create-time reuse pick.
+    const pinned = sessions.find((s) => s.status !== "failed");
+    if (pinned) {
+      setActiveSession(pinned.id);
+      void navigate({
+        to: "/chat/$sessionId",
+        params: { sessionId: pinned.id },
+        replace: true,
+      });
+    }
+  }, [
+    multiSession,
+    sessionsLoading,
+    activeSessionId,
+    params.sessionId,
+    sessions,
     setActiveSession,
     navigate,
   ]);

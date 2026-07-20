@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from surogates.session.events import EventType
+from surogates.api.session_guards import require_session_visible
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import PrincipalKind, TenantContext
@@ -150,6 +151,7 @@ async def submit_feedback(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {session_id} not found.",
         )
+    await require_session_visible(request, session)
 
     if target is None:
         raise HTTPException(

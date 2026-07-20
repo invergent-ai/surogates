@@ -11,7 +11,21 @@ of literals scattered per file.
 
 from __future__ import annotations
 
-__all__ = ["ADAPTER_CHANNELS", "INTERACTIVE_PROMPT_CHANNELS"]
+__all__ = [
+    "ADAPTER_CHANNELS",
+    "INTERACTIVE_PROMPT_CHANNELS",
+    "multi_session_disabled",
+]
+
+
+def multi_session_disabled(config: dict) -> bool:
+    """Whether a routing/channel config turns the "multi session" capability off.
+
+    Only an explicit ``False`` counts — an absent key means the capability
+    is on (the default), so this must never be "simplified" to
+    ``not config.get(...)``.
+    """
+    return config.get("multi_session") is False
 
 #: Channels with a registered outbound delivery adapter (a delivery loop
 #: that claims their outbox rows).  Must match the platforms registered in

@@ -16,6 +16,9 @@ import { fetchAuthConfig } from "@/api/auth";
 export type CapabilitiesSlice = {
   slashCommands: string[] | null;
   agentId: string | null;
+  // "Multi session" capability. ``null`` = unknown (fail open — multi on);
+  // ``false`` pins each user to one session per channel.
+  multiSession: boolean | null;
 
   fetchCapabilities: () => Promise<void>;
 };
@@ -28,12 +31,17 @@ export const createCapabilitiesSlice: StateCreator<
 > = (set) => ({
   slashCommands: null,
   agentId: null,
+  multiSession: null,
 
   fetchCapabilities: async () => {
     // ``fetchAuthConfig`` already degrades to a safe fallback on error
     // (no ``slash_commands`` / ``agent_id`` fields), which map to ``null``.
     const config = await fetchAuthConfig();
-    set({ slashCommands: config.slash_commands ?? null, agentId: config.agent_id ?? null });
+    set({
+      slashCommands: config.slash_commands ?? null,
+      agentId: config.agent_id ?? null,
+      multiSession: config.multi_session ?? null,
+    });
   },
 });
 

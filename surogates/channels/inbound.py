@@ -37,7 +37,11 @@ from uuid import UUID
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from surogates.channels.dedup import MessageDeduplicator
-from surogates.channels.source import SessionSource, build_session_key
+from surogates.channels.constants import multi_session_disabled
+from surogates.channels.source import (
+    SessionSource,
+    build_session_key_for_config,
+)
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -564,7 +568,11 @@ class ChannelInboundPipeline:
             thread_id=msg.thread_key,
             chat_name=msg.identifier,
         )
-        session_key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
+        # "multi session" off (ops projects the agent capability into the
+        # routing config) folds thread suffixes so every thread continues
+        # the same conversation; see build_session_key_for_config.
+        single_session = multi_session_disabled(config)
+        session_key = build_session_key_for_config(source, config)
 
         from surogates.channels.memory_boundary import boundary_token
 
@@ -590,6 +598,10 @@ class ChannelInboundPipeline:
                 "channel_identifier": routing.identifier,
                 "memory_boundary": memory_boundary,
                 "multi_party": chat_type in ("group", "channel"),
+                # Marks the session as a collapsed single-session
+                # conversation; delivery reads the thread key fresh for
+                # these (see the outbox enqueue in the session store).
+                **({"single_session": True} if single_session else {}),
             },
             session_factory=deps.session_factory,
         )
@@ -902,5 +914,5 @@ class ChannelInboundPipeline:
             user_id=msg.platform_user_id,
             thread_id=thread_key,
         )
-        key = build_session_key(source, per_user_groups=bool(config.get("per_user_groups", False)))
+        key = build_session_key_for_config(source, config)
         return await deps.state.get_session(key) is not None
