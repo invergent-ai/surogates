@@ -1,182 +1,106 @@
-# Slack Integration Guide
+# Slack Channel
 
-Connect your Surogates agent to Slack so users can interact with it via DMs and channel @mentions.
+Connect an agent to Slack so users can interact with it via DMs, channel
+@mentions, threads, slash commands, and Block Kit buttons. The integration
+is **webhook-based** (Slack Events API): Slack POSTs events to the shared
+channels service (`surogates channels`), which resolves the owning agent
+per app, verifies the signature, and feeds the shared inbound pipeline.
+Socket Mode is not used.
 
-## Prerequisites
+## How it works
 
-- Surogates API server and worker running
-- PostgreSQL and Redis accessible
-- A Slack workspace where you have admin permissions
-
-## 1. Create a Slack App
-
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** → **From scratch**
-2. Name it (e.g., "Surogates Agent") and select your workspace
-3. Under **Socket Mode**, click **Enable Socket Mode** and generate an app-level token with `connections:write` scope — this is your `SUROGATES_SLACK_APP_TOKEN` (starts with `xapp-`)
-
-## 2. Configure Bot Permissions
-
-Go to **OAuth & Permissions** → **Scopes** → **Bot Token Scopes** and add:
-
-| Scope               | Purpose                       |
-| ------------------- | ----------------------------- |
-| `app_mentions:read` | Detect @mentions in channels  |
-| `channels:history`  | Read channel messages         |
-| `channels:read`     | List channels                 |
-| `chat:write`        | Send messages                 |
-| `files:read`        | Download file attachments     |
-| `files:write`       | Upload agent files            |
-| `groups:history`    | Read private channel messages |
-| `groups:read`       | List private channels         |
-| `im:history`        | Read DM messages              |
-| `im:read`           | List DMs                      |
-| `im:write`          | Open DMs                      |
-| `mpim:history`      | Read group DM messages        |
-| `reactions:read`    | Read reactions                |
-| `reactions:write`   | Add/remove reactions          |
-| `users:read`        | Resolve user names            |
-
-These scopes also let the agent read channel metadata and recent history when it joins a channel.
-
-## 3. Subscribe to Events
-
-Go to **Event Subscriptions** → **Enable Events**, then under **Subscribe to bot events** add:
-
-- `message.channels`
-- `message.groups`
-- `message.im`
-- `message.mpim`
-- `app_mention`
-- `member_joined_channel` — lets the agent pre-fetch a channel's recent history when it is added
-
-If using the AI Assistant feature (optional):
-
-- `assistant_thread_started`
-- `assistant_thread_context_changed`
-
-### Channel context on join
-
-When the agent is added to a channel (or on its first message there), it backfills the channel's metadata and recent history — the most recent messages, bounded to roughly 7 days / 200 messages / 8k tokens — so it has context from the first reply. This needs the `channels:history` / `groups:history` read scopes and the `member_joined_channel` bot event above. DMs and group DMs are not backfilled. Private-channel history is only readable in channels the bot is a member of, and stays isolated to that channel's memory.
-
-## 4. Install the App
-
-Click **Install to Workspace** and authorize. Copy the **Bot User OAuth Token** — this is your `SUROGATES_SLACK_BOT_TOKEN` (starts with `xoxb-`).
-
-## 5. Link Slack Users
-
-Slack users must link their account to a Surogates user before they can interact with the agent. This happens automatically via **self-registration**:
-
-1. An unlinked Slack user sends a message to the bot
-2. The bot replies with an ephemeral message containing a pairing link and code
-3. The user clicks the link, logs in to the Surogates web UI, and clicks "Link"
-4. Their Slack ID is bound to their Surogates account — future messages work instantly
-
-The pairing code expires after 10 minutes and is single-use. Users are rate-limited to one code per 10 minutes.
-
-### Admin Registration (alternative)
-
-Admins can also link users manually via the API:
-
-```bash
-curl -X POST http://localhost:8000/v1/admin/channel-identities \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "SUROGATES_USER_UUID",
-    "platform": "slack",
-    "platform_user_id": "U0123ABCDEF"
-  }'
+```
+Slack → POST https://<channels-host>/slack/{app_id}            (events)
+        POST https://<channels-host>/slack/{app_id}/interact   (buttons/modals)
+        POST https://<channels-host>/slack/{app_id}/commands   (slash commands)
+             │  verify v0 HMAC signature (vault signing_secret, ±5min replay window)
+             ▼
+        channel_routing lookup (ops) → (org, agent, config)
+             ▼
+        shared inbound pipeline → session → worker
+             ▼
+        delivery_outbox → chat.postMessage / chat.update / files_upload_v2
 ```
 
-## 6. Configure and Run
+- **Routing** — each Slack app maps to one agent via a `channel_routing`
+  row (kind `slack`, identifier = App ID) managed by Studio's Channels
+  form in `surogate-ops`; resolved with a 30s cache invalidated over
+  Redis pub/sub.
+- **Credentials** — `bot_token` (`xoxb-`) and `signing_secret` live in
+  the per-tenant credential vault. There is no app-level `xapp-` token —
+  that was the retired Socket Mode design.
+- **Webhook registration is manual**: paste the three request URLs shown
+  in Studio into the Slack app console (Event Subscriptions,
+  Interactivity & Shortcuts, Slash Commands).
 
-### Option A: Environment Variables
+## Setup
 
-```bash
-export SUROGATES_SLACK_APP_TOKEN="xapp-1-..."
-export SUROGATES_SLACK_BOT_TOKEN="xoxb-..."
-SUROGATES_CONFIG=config.dev.yaml surogates channel slack
-```
+1. Create an app at [api.slack.com/apps](https://api.slack.com/apps)
+   (From scratch), in the target workspace.
+2. **OAuth & Permissions → Bot Token Scopes**: `app_mentions:read`,
+   `channels:history`, `channels:read`, `chat:write`, `files:read`,
+   `files:write`, `groups:history`, `groups:read`, `im:history`,
+   `im:read`, `im:write`, `mpim:history`, `reactions:read`,
+   `reactions:write`, `users:read`.
+3. **Event Subscriptions → bot events**: `message.channels`,
+   `message.groups`, `message.im`, `message.mpim`, `app_mention`,
+   `member_joined_channel` (enables history backfill on join).
+4. Install the app, copy the **App ID**, **Bot Token**, and **Signing
+   Secret** into Studio → agent → **Channels** → **Slack**, and save.
+   The platform validates the bot token against Slack (`auth.test`) at
+   save time — an invalid token deactivates the channel — and shows the
+   request URLs to paste back into the Slack console.
 
-### Option B: Config File
+## Identity
 
-Add to your `config.yaml`:
+Same two policies as every channel (`identity_policy`): **shadow**
+auto-provisions a user per Slack sender (channel membership is the
+authorization boundary); **linked** requires a pairing code + account
+link before any session is created.
 
-```yaml
-slack:
-  app_token: "xapp-1-..."
-  bot_token: "xoxb-..."
-  require_mention: true
-  allow_bots: "none"
-```
+## Sessions & behavior
 
-Then run:
+Session keying: `agent:slack:{chat_type}:{channel_id}[:{thread_ts}]` —
+DMs get one session per user, channels share a session, threads get their
+own.
 
-```bash
-SUROGATES_CONFIG=config.yaml surogates channel slack
-```
+- **Mention gating**: `require_mention` gates channel messages on
+  @mention; threads the bot participated in stay open;
+  `free_response_channels` bypasses the gate; `allow_bots`
+  (`none`/`mentions`/`all`) controls other bots.
+- **Progress**: the bot posts a "_Thinking…_" placeholder and edits it in
+  place with intermediate narration and coding-run heartbeats; the final
+  answer replaces it.
+- **Backfill**: on joining a channel (or first message there) the bot
+  seeds the session with recent channel history (~7 days / 200 messages /
+  8k tokens). DMs are not backfilled.
+- **Long replies** are split at natural boundaries to stay under Slack's
+  message-size limit and posted sequentially in the same thread.
+- `/stop` (or `/cancel`) interrupts the running turn out-of-band.
 
-### Option C: VSCode
+## Files
 
-Set `SUROGATES_SLACK_BOT_TOKEN` and `SUROGATES_SLACK_APP_TOKEN` in your shell environment, then use the **"Surogates: Channel (Slack)"** launch configuration, or **"Surogates: Full Stack + Slack"** to start everything together.
+- **Inbound** attachments are downloaded (bot-token auth, 20 MB / 10
+  files caps) and ingested into the session workspace; the agent can also
+  fetch older shared files on demand.
+- **Outbound**: `MEDIA:<workspace-path>` markers in a reply upload the
+  referenced workspace files via `files_upload_v2` into the thread.
 
-## 7. Test It
+## Interactive input (`ask_user_question`)
 
-- **DM the bot** — send a message directly. The bot responds immediately.
-- **@mention in a channel** — type `@Surogates Agent hello`. The bot responds in a thread.
-- **Thread replies** — once mentioned in a thread, the bot responds to all follow-up messages in that thread without needing another @mention.
+Mid-run questions render as a Block Kit message with an **Answer**
+button that opens a modal (choices, free-text "Other"). Submitting the
+modal resolves the durable pending record, replaces the button message
+with the recorded answer, and wakes the waiting tool. While a question
+is pending, plain replies get a nudge toward the Answer button instead
+of piling onto the blocked worker.
 
-## Behavior Configuration
+## Ops notes
 
-### Mention Gating
-
-By default, the bot only responds in channels when @mentioned. Configure this:
-
-```yaml
-slack:
-  require_mention: true # default: require @mention in channels
-  free_response_channels: "C123,C456" # channels where no mention needed
-```
-
-### Bot Message Handling
-
-Control whether the bot responds to other bots:
-
-```yaml
-slack:
-  allow_bots: "none"       # ignore all bot messages (default)
-  allow_bots: "mentions"   # respond to bots only if they @mention us
-  allow_bots: "all"        # respond to all bot messages (except our own)
-```
-
-### Threading
-
-```yaml
-slack:
-  reply_in_thread: true # respond in thread (default)
-  reply_broadcast: false # also post to channel when replying in thread
-```
-
-## Multi-Workspace
-
-For Slack apps installed in multiple workspaces (e.g., via OAuth distribution), provide comma-separated bot tokens:
-
-```bash
-export SUROGATES_SLACK_BOT_TOKEN="xoxb-workspace1-token,xoxb-workspace2-token"
-```
-
-Each workspace is authenticated independently. The adapter routes API calls to the correct workspace based on the channel's team ID.
-
-## Slash Commands (Optional)
-
-Register a slash command `/surogates` in your Slack app settings to allow users to invoke the agent via `/surogates <message>`. The command is treated as a regular message.
-
-## Troubleshooting
-
-| Problem                            | Solution                                                                                                              |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Bot doesn't respond in channels    | Check `require_mention` is `true` and you're @mentioning it                                                           |
-| "Your Slack account is not linked" | Click the pairing link the bot sent, log in, and link your account. Or ask an admin to register via the API (step 5). |
-| Bot responds twice                 | Check for duplicate Socket Mode connections (only one adapter process per app token)                                  |
-| File attachments not working       | Ensure `files:read` scope is added and the bot is in the channel                                                      |
-| Rate limit errors in logs          | Normal for thread context fetching — the adapter retries automatically                                                |
+- Enable the platform on the channels deployment via the runtime config
+  (`channels.slack.enabled: true`); routing rows control which apps are
+  live.
+- Delivery is a durable outbox: transient failures retry every 30s and
+  dead-letter after 30 minutes or on permanent errors.
+- Unknown app ids are fast-acked with 200 and no side effects; the URL
+  verification challenge is answered automatically.

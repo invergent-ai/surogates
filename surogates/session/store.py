@@ -19,6 +19,10 @@ from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
+from surogates.channels.constants import (
+    ADAPTER_CHANNELS,
+    INTERACTIVE_PROMPT_CHANNELS,
+)
 from surogates.db.models import (
     Event as EventRow,
     IdeaNode,
@@ -85,6 +89,7 @@ _INBOX_EVENTS = frozenset({
 _MAX_LISTED_DESCENDANTS = 1000
 
 
+
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
     deliver. LLM_RESPONSE rows carry ``intermediate`` (True when the assistant
@@ -115,7 +120,10 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
-    elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
+    elif (
+        event_type == EventType.INBOX_INPUT_REQUIRED
+        and channel in INTERACTIVE_PROMPT_CHANNELS
+    ):
         questions = data.get("questions") or []
         if questions:
             payload = {
@@ -941,8 +949,8 @@ class SessionStore:
             except Exception:
                 pass
 
-        # Channel delivery: enqueue deliverable events to the outbox
-        # for non-web channels (Slack, Teams, Telegram, etc.).
+        # Channel delivery: enqueue deliverable events to the outbox for
+        # adapter-backed channels (Slack, Telegram).
         if event_type in _DELIVERABLE_EVENTS:
             await self._enqueue_channel_delivery(
                 session_id,
@@ -994,13 +1002,11 @@ class SessionStore:
 
             channel, config = self._channel_cache[session_id]
 
-            # Web sessions use SSE — no outbox delivery needed.
-            if channel == "web":
-                return
-
-            # Ambient sessions reason privately; their only outbound path is
-            # the gated mate_ambient_post tool. Never auto-deliver them.
-            if channel == "ambient":
+            # Only channels with a registered delivery adapter get outbox rows.
+            # Everything else (web/website SSE, api/task/delegation/worker
+            # consumers, ambient's gated mate_ambient_post path) has no claimer
+            # — rows for those channels would sit "pending" forever.
+            if channel not in ADAPTER_CHANNELS:
                 return
 
             # Build channel-specific destination from session config.
@@ -1011,20 +1017,13 @@ class SessionStore:
                     "thread_ts": config.get("slack_thread_key"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
-            elif channel == "teams":
-                destination = {
-                    "conversation_id": config.get("teams_channel_id", ""),
-                    "activity_id": config.get("teams_thread_key"),
-                    "channel_identifier": config.get("channel_identifier", ""),
-                }
             elif channel == "telegram":
                 destination = {
                     "chat_id": config.get("telegram_channel_id", ""),
                     "message_thread_id": config.get("telegram_thread_key"),
+                    "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
-            else:
-                destination = {"session_id": str(session_id)}
 
             # Build payload: extract the user-facing content from the event.
             payload = _build_channel_payload(event_type, data, channel)
@@ -1036,6 +1035,23 @@ class SessionStore:
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
+                if channel == "telegram" and "telegram_reply_to_message_id" in config:
+                    # Reply threading tracks the latest inbound message id in
+                    # session config (written by the channels process), so it
+                    # must be read fresh — the per-session config cache above
+                    # is primed once and would pin every reply to the first
+                    # message.  Gated on the cached config carrying the key at
+                    # all, so sessions that never use reply threading pay no
+                    # extra query.  Best-effort: a read failure falls back to
+                    # the cached value rather than dropping the delivery.
+                    try:
+                        fresh = await db.get(SessionRow, session_id)
+                        if fresh is not None:
+                            destination["reply_to_message_id"] = (
+                                fresh.config or {}
+                            ).get("telegram_reply_to_message_id")
+                    except Exception:
+                        pass
                 outbox = DeliveryOutbox(
                     session_id=session_id,
                     event_id=event_id,

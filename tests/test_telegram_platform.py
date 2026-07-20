@@ -367,8 +367,22 @@ class TestParse:
     # Message with no text → None
     # ------------------------------------------------------------------
 
-    def test_message_without_text_returns_none(self):
-        """A photo-only message with no text (or caption) returns None."""
+    def test_message_without_text_or_media_returns_none(self):
+        """A message with neither text nor media returns None."""
+        update = {
+            "update_id": 200,
+            "message": {
+                "message_id": 10,
+                "from": {"id": 1, "is_bot": False, "first_name": "Alice"},
+                "chat": {"id": 111, "type": "private"},
+                "date": 1700000005,
+                # No "text", no media keys
+            },
+        }
+        assert parse(update, bot_username=BOT_USERNAME) is None
+
+    def test_photo_only_message_is_processable(self):
+        """A photo-only message now parses into a media-bearing message."""
         update = {
             "update_id": 200,
             "message": {
@@ -377,10 +391,12 @@ class TestParse:
                 "chat": {"id": 111, "type": "private"},
                 "date": 1700000005,
                 "photo": [{"file_id": "abc", "width": 100, "height": 100, "file_size": 1000}],
-                # No "text" key
             },
         }
-        assert parse(update, bot_username=BOT_USERNAME) is None
+        msg = parse(update, bot_username=BOT_USERNAME)
+        assert msg is not None
+        assert msg.kind == "image"
+        assert msg.files and msg.files[0].file_id == "abc"
 
     def test_message_with_empty_text_returns_none(self):
         update = _private_message(text="")

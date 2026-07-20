@@ -1491,10 +1491,10 @@ class TestInputRequiredOutboxDelivery:
 
         assert captured == []
 
-    async def test_telegram_input_required_does_not_enqueue_prompt_payload(self):
-        """Only Slack renders the interactive modal.  A non-Slack channel must
-        not enqueue a content-less input_prompt row — Telegram's send() reads
-        payload['content'] ('' here) and the API rejects an empty-text message.
+    async def test_telegram_input_required_enqueues_prompt_payload(self):
+        """Telegram renders questions as an inline keyboard, so its
+        INBOX_INPUT_REQUIRED events must enqueue the input_prompt payload —
+        send() routes them to _send_input_prompt, never the plain-text path.
         """
         import unittest.mock as mock
         from uuid import uuid4
@@ -1542,7 +1542,12 @@ class TestInputRequiredOutboxDelivery:
                 data={"tool_call_id": "tc1", "questions": [{"prompt": "q"}]},
             )
 
-        assert captured == []
+        assert len(captured) == 1
+        payload = captured[0]["payload"]
+        assert payload["input_prompt"] is True
+        assert payload["tool_call_id"] == "tc1"
+        assert payload["questions"] == [{"prompt": "q"}]
+        assert captured[0]["destination"]["chat_id"] == "-100123456789"
 
     async def test_slack_input_required_no_tool_call_id_still_enqueues(self):
         """questions present but no tool_call_id key must still enqueue (gate is questions-only)."""

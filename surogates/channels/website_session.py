@@ -96,6 +96,12 @@ class WebsiteSessionClaims:
     csrf_token: str
     issued_at: int
     expires_at: int
+    # Publishable key the session bootstrapped through.  Lets every later
+    # request re-resolve the per-agent channel_routing row (origin
+    # allow-list, active flag) without a client-supplied key.  Empty for
+    # cookies minted before this claim existed — callers fall back to the
+    # deployment-global settings in that case.
+    channel_identifier: str = ""
 
 
 def create_website_session_token(
@@ -104,6 +110,7 @@ def create_website_session_token(
     org_id: UUID,
     origin: str,
     csrf_token: str,
+    channel_identifier: str = "",
     expires_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
 ) -> str:
     """Sign a JWT binding a website session to its org + origin + CSRF.
@@ -122,6 +129,7 @@ def create_website_session_token(
         "org_id": str(org_id),
         "origin": origin,
         "csrf": csrf_token,
+        "channel_identifier": channel_identifier,
         "iat": now,
         "exp": now + expires_seconds,
     }
@@ -166,6 +174,7 @@ def decode_website_session_token(token: str) -> WebsiteSessionClaims:
             csrf_token=str(payload["csrf"]),
             issued_at=int(payload["iat"]),
             expires_at=int(payload["exp"]),
+            channel_identifier=str(payload.get("channel_identifier") or ""),
         )
     except (ValueError, TypeError) as exc:
         raise InvalidTokenError(f"Website-session token has malformed claims: {exc}") from exc

@@ -34,10 +34,13 @@ def test_tool_call_only_response_yields_empty_payload():
     assert _build_channel_payload(EventType.LLM_RESPONSE, data, "slack") == {}
 
 
-def test_input_required_payload_slack_only():
+def test_input_required_payload_interactive_channels_only():
+    # Slack (Answer button + modal) and Telegram (inline keyboard) can render
+    # a question; channels with no interactive surface must get no row.
     data = {"questions": [{"q": "?"}], "tool_call_id": "t1", "context": "ctx"}
     assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "slack")["input_prompt"] is True
-    assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "telegram") == {}
+    assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "telegram")["input_prompt"] is True
+    assert _build_channel_payload(EventType.INBOX_INPUT_REQUIRED, data, "teams") == {}
 
 
 def test_session_stopped_is_deliverable():

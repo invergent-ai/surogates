@@ -38,7 +38,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.channels.delivery import delivery_exhausted, is_permanent_delivery_error
-from surogates.channels.inbound import ChannelInboundPipeline, InboundMessage, PipelineDeps
+from surogates.channels.inbound import (
+    ChannelInboundPipeline,
+    InboundMessage,
+    InboundOutcome,
+    PipelineDeps,
+)
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
 
@@ -115,6 +120,10 @@ class ChannelWebhookDispatcher:
         self._deps_factory = deps_factory
         self._settings = settings
         self._registry = registry
+        # Strong refs to fire-and-forget ack tasks: the event loop keeps
+        # only weak references, so an unreferenced task can be garbage
+        # collected mid-execution.
+        self._ack_tasks: set = set()
 
     # ------------------------------------------------------------------
     # App factory
@@ -380,7 +389,27 @@ class ChannelWebhookDispatcher:
             # ----------------------------------------------------------------
             # Step 9: Run inbound pipeline.
             # ----------------------------------------------------------------
-            await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+            outcome = await pipeline.handle(
+                msg, routing=routing, config=config, deps=deps
+            )
+            # Platform-native received-ack (e.g. Telegram emoji reaction)
+            # for messages that were accepted for processing. Fired without
+            # awaiting: it is best-effort decoration, and a slow platform
+            # API call here would delay the webhook 200 (which platforms
+            # treat as a redelivery signal).
+            ack = getattr(platform, "ack_received", None)
+            if ack is not None and outcome is InboundOutcome.PROCESSED:
+                async def _ack_task(ack=ack, msg=msg, creds=creds, config=config):
+                    try:
+                        await ack(msg, creds=creds, config=config)
+                    except Exception:
+                        logger.warning(
+                            "[dispatcher] ack_received failed on %s",
+                            platform.kind, exc_info=True,
+                        )
+                task = asyncio.get_running_loop().create_task(_ack_task())
+                self._ack_tasks.add(task)
+                task.add_done_callback(self._ack_tasks.discard)
             return Response(status_code=200)
 
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.
