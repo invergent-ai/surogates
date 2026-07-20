@@ -38,7 +38,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.channels.delivery import delivery_exhausted, is_permanent_delivery_error
-from surogates.channels.inbound import ChannelInboundPipeline, InboundMessage, PipelineDeps
+from surogates.channels.inbound import (
+    ChannelInboundPipeline,
+    InboundMessage,
+    InboundOutcome,
+    PipelineDeps,
+)
 from surogates.channels.registry import ChannelPlatform, ChannelRegistry, VerificationResult
 from surogates.channels.resolve import resolve_tenant
 
@@ -380,7 +385,20 @@ class ChannelWebhookDispatcher:
             # ----------------------------------------------------------------
             # Step 9: Run inbound pipeline.
             # ----------------------------------------------------------------
-            await pipeline.handle(msg, routing=routing, config=config, deps=deps)
+            outcome = await pipeline.handle(
+                msg, routing=routing, config=config, deps=deps
+            )
+            # Platform-native received-ack (e.g. Telegram emoji reaction)
+            # for messages that were accepted for processing. Best-effort.
+            ack = getattr(platform, "ack_received", None)
+            if ack is not None and outcome is InboundOutcome.PROCESSED:
+                try:
+                    await ack(msg, creds=creds, config=config)
+                except Exception:
+                    logger.warning(
+                        "[dispatcher] ack_received failed on %s", platform.kind,
+                        exc_info=True,
+                    )
             return Response(status_code=200)
 
         # Assign a unique name so FastAPI doesn't complain about duplicate routes.

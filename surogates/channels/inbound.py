@@ -603,16 +603,51 @@ class ChannelInboundPipeline:
                     logger.warning("[channels] /stop ack failed", exc_info=True)
             return InboundOutcome.INTERRUPTED
 
-        # While a question is pending, a plain in-thread reply is NOT the answer
-        # (the user must use the Answer button / modal). Intercept: nudge and
-        # suppress the turn so it doesn't pile into a blocked worker.
-        if deps.pending_input is not None and routing.platform == "slack":
+        # While a question is pending, the platforms diverge on what a plain
+        # reply means:
+        #   - Slack has a modal surface, so a plain in-thread reply is NOT
+        #     the answer — nudge toward the Answer button and suppress the
+        #     turn so it doesn't pile into a blocked worker.
+        #   - Telegram has no modal; a plain reply IS the answer — resolve
+        #     the durable pending record with it and ack.
+        if deps.pending_input is not None and routing.platform in ("slack", "telegram"):
             try:
                 pending = await deps.pending_input(session_id)
             except Exception:
                 logger.warning("[channels] pending input lookup failed - continuing", exc_info=True)
                 pending = None
             if pending:
+                if routing.platform == "telegram" and msg.text.strip():
+                    from surogates.channels.platforms.telegram_interactive import (
+                        resolve_text_answer,
+                    )
+                    from surogates.session.interactive_input import (
+                        resolve_input_response,
+                    )
+
+                    responses = resolve_text_answer(
+                        pending.get("questions") or [], msg.text,
+                    )
+                    resolved = False
+                    try:
+                        resolved = await resolve_input_response(
+                            deps.session_store,
+                            session_id=session_id,
+                            tool_call_id=pending.get("tool_call_id", ""),
+                            responses=responses,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[channels] pending input resolution failed", exc_info=True,
+                        )
+                    if resolved and deps.input_nudge is not None:
+                        try:
+                            await deps.input_nudge(
+                                session_id, msg, "✅ Got it — continuing.",
+                            )
+                        except Exception:
+                            logger.warning("[channels] answer ack failed", exc_info=True)
+                    return InboundOutcome.DROPPED
                 if deps.input_nudge is not None:
                     try:
                         await deps.input_nudge(
@@ -630,13 +665,39 @@ class ChannelInboundPipeline:
         if deps.backfill is not None and routing.platform == "slack" and not msg.is_dm:
             await deps.backfill(session_id, msg.identifier, routing)
 
-        # Download + ingest Slack file attachments into the harness's
+        # Telegram reply threading: remember which inbound message the reply
+        # should attach to. "all" tracks the latest message; "first" pins the
+        # session's opening message; anything else leaves replies unthreaded.
+        # Groups only — replying to the only other party in a DM is noise.
+        _tg_message_id = (msg.source or {}).get("message_id")
+        if (
+            routing.platform == "telegram"
+            and not msg.is_dm
+            and _tg_message_id is not None
+        ):
+            reply_to_mode = str(config.get("reply_to_mode") or "").lower()
+            try:
+                if reply_to_mode == "all":
+                    await deps.session_store.update_session_config_key(
+                        session_id, "telegram_reply_to_message_id", _tg_message_id,
+                    )
+                elif reply_to_mode == "first":
+                    session_row = await deps.session_store.get_session(session_id)
+                    if "telegram_reply_to_message_id" not in (session_row.config or {}):
+                        await deps.session_store.update_session_config_key(
+                            session_id, "telegram_reply_to_message_id", _tg_message_id,
+                        )
+            except Exception:
+                logger.warning(
+                    "[channels] recording reply-to message id failed", exc_info=True,
+                )
+
+        # Download + ingest platform file attachments into the harness's
         # images/attachments event shapes. Best-effort: never drop the message.
         _images: list = []
         _attachments: list = []
         _att_note = ""
-        if (deps.attachments is not None and routing.platform == "slack"
-                and getattr(msg, "files", None)):
+        if deps.attachments is not None and getattr(msg, "files", None):
             try:
                 _ingested = await deps.attachments(session_id, msg)
                 _images = _ingested.get("images") or []
@@ -737,6 +798,19 @@ class ChannelInboundPipeline:
         # Explicit @mention → process.
         if msg.is_mention:
             return True
+
+        # Extra mention patterns (e.g. a nickname for a Telegram bot that
+        # can't be @-mentioned by non-members): CSV in routing config,
+        # matched case-insensitively against the text.
+        raw_patterns = config.get("mention_patterns") or ""
+        if isinstance(raw_patterns, str):
+            patterns = [p.strip().lower() for p in raw_patterns.split(",") if p.strip()]
+        else:
+            patterns = [str(p).strip().lower() for p in raw_patterns if str(p).strip()]
+        if patterns:
+            text = (msg.text or "").lower()
+            if any(p in text for p in patterns):
+                return True
 
         return False
 

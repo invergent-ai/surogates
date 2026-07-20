@@ -274,7 +274,7 @@ def _make_deps_factory(
                 if data is None:
                     skipped.append(safe_display_name(safe))
                     continue
-                path = f"uploads/slack/{ts}-{index}-{safe}"
+                path = f"uploads/{platform.kind}/{ts}-{index}-{safe}"
                 try:
                     out = await ingest_attachment_bytes(
                         storage, session=session, root_id=root_id, bucket=bucket,

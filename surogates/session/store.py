@@ -1033,6 +1033,21 @@ class SessionStore:
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
+                if channel == "telegram":
+                    # Reply threading tracks the latest inbound message id in
+                    # session config (written by the channels process), so it
+                    # must be read fresh — the per-session config cache above
+                    # is primed once and would pin every reply to the first
+                    # message.  Best-effort: a read failure falls back to the
+                    # cached value rather than dropping the delivery.
+                    try:
+                        fresh = await db.get(SessionRow, session_id)
+                        if fresh is not None:
+                            destination["reply_to_message_id"] = (
+                                fresh.config or {}
+                            ).get("telegram_reply_to_message_id")
+                    except Exception:
+                        pass
                 outbox = DeliveryOutbox(
                     session_id=session_id,
                     event_id=event_id,
