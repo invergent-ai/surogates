@@ -344,6 +344,8 @@ async def _get_session_for_tenant(
     session_id: UUID,
     tenant: TenantContext,
     agent_id: str,
+    *,
+    multi_session: bool = True,
 ) -> Session:
     """Fetch a session and verify it belongs to the tenant's org and this agent.
 
@@ -356,6 +358,13 @@ async def _get_session_for_tenant(
 
     ``agent_id`` is supplied by the caller (typically from
     :func:`surogates.runtime.agent_runtime_context_dep`).
+
+    With ``multi_session=False`` (the agent capability turned off),
+    top-level web-channel sessions that are NOT the canonical
+    single-session conversation (``config.single_session``) 404 too:
+    multi-era chats are hidden AND unreachable — deep links included —
+    until the capability is re-enabled.  Children (delegation subtree of
+    the canonical session) and non-web channels are unaffected.
     """
     store = _get_session_store(request)
     try:
@@ -368,6 +377,17 @@ async def _get_session_for_tenant(
 
     if session.agent_id != agent_id or not tenant.owns_session(
         session.org_id, session_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found.",
+        )
+
+    if (
+        not multi_session
+        and session.channel == "web"
+        and session.parent_id is None
+        and (session.config or {}).get("single_session") is not True
     ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -449,9 +469,12 @@ async def create_session(
     """Create a new session for the authenticated user.
 
     With the agent's "multi session" capability off, each user keeps one
-    web session: the newest reusable one is returned (200 instead of
-    201) rather than creating another.  Archived/failed sessions don't
-    count, so archiving is how a user deliberately starts over.
+    dedicated web conversation: the canonical session (stamped
+    ``config.single_session`` at creation) is returned (200 instead of
+    201) rather than creating another.  Multi-era sessions are never
+    adopted — they stay hidden until the capability is re-enabled.
+    Archiving the dedicated session is how a user deliberately starts
+    over.
     """
     if not agent_runtime.multi_session and tenant.user_id is not None:
         existing = await _get_session_store(request).get_reusable_channel_session(
@@ -463,6 +486,9 @@ async def create_session(
         if existing is not None:
             response.status_code = status.HTTP_200_OK
             return existing
+        # First contact in single-session mode: the fresh session becomes
+        # the canonical conversation every later create resolves to.
+        body.config = {**body.config, "single_session": True}
     return await _create_session(
         body,
         request,
@@ -531,6 +557,7 @@ async def send_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(
         request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
     )
     require_user_writable_session(session)
 
@@ -822,7 +849,10 @@ async def confirm_disclosure(
     enforcement is enabled.  Typically called by the frontend after
     showing the AI disclosure notice to the user.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
 
     governance = getattr(request.app.state, "governance_gate", None)
     if governance is not None:
@@ -839,7 +869,10 @@ async def get_session(
 ) -> Session:
     """Retrieve metadata for a single session."""
     _require_service_account_api_route(request, tenant)
-    return await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    return await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
 
 
 def _tree_node_from_row(row: dict) -> SessionTreeNode:
@@ -906,7 +939,10 @@ async def get_session_tree(
     ``session.config.agent_type``) so the frontend can display badges
     for sub-agent types without extra lookups.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -973,7 +1009,10 @@ async def get_session_children(
     Authorization: the parent session must belong to this tenant and
     agent; child rows inherit tenancy.
     """
-    await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
 
     session_factory = request.app.state.session_factory
     agent_id = agent_runtime.agent_id
@@ -1032,6 +1071,10 @@ async def list_sessions(
         limit=limit,
         offset=offset,
         include_descendants=include_descendants,
+        # Multi session off: only the canonical single-session
+        # conversation (and its subtree) is listed — multi-era chats
+        # stay hidden until the capability is re-enabled.
+        single_session_only=not agent_runtime.multi_session,
     )
 
     # Pagination is over roots; any descendants ride along with their root, so
@@ -1052,7 +1095,10 @@ async def pause_session(
     """Pause an active session."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
 
     if session.status not in ("active", "processing", "paused"):
         raise HTTPException(
@@ -1088,7 +1134,10 @@ async def resume_session(
 ) -> Session:
     """Resume a paused session."""
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
     require_user_writable_session(session)
 
     if session.status != "paused":
@@ -1130,7 +1179,10 @@ async def retry_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
     require_user_writable_session(session)
 
     if session.status not in ("failed", "paused"):
@@ -1265,7 +1317,10 @@ async def update_session(
     """
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
     require_user_writable_session(session)
 
     await store.update_session_title(session_id, body.title)
@@ -1290,7 +1345,10 @@ async def delete_session(
     """Archive (soft-delete) a session and delete its workspace storage."""
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
-    session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime.agent_id)
+    session = await _get_session_for_tenant(
+        request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
+    )
     require_user_writable_session(session)
 
     archived_sessions = await store.archive_session_tree_and_delete_schedules(

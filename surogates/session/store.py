@@ -250,15 +250,18 @@ class SessionStore:
         agent_id: str,
         channel: str,
     ) -> Session | None:
-        """Return the user's newest reusable session on *channel*, if any.
+        """Return the user's canonical single-session conversation, if any.
 
         The lookup behind the single-session ("multi session" off)
-        capability: top-level sessions only, newest first, skipping
-        ``archived`` (a deliberate close unlocks a fresh session) and
-        ``failed`` (never funnel a user back into a broken session).
-        There is no unique constraint enforcing one row — callers treat
-        this as get-before-create and accept the benign race of two
-        near-simultaneous first messages.
+        capability.  Only sessions stamped ``config.single_session``
+        qualify — the dedicated conversation created while the
+        capability was off.  Sessions from a multi-session era are never
+        adopted; they stay hidden until the capability is re-enabled.
+        Skips ``archived`` (a deliberate close unlocks a fresh dedicated
+        session) and ``failed`` (never funnel a user back into a broken
+        session).  There is no unique constraint enforcing one row —
+        callers treat this as get-before-create and accept the benign
+        race of two near-simultaneous first messages.
         """
         reusable = ("active", "processing", "paused", "completed")
         async with self._sf() as db:
@@ -271,6 +274,7 @@ class SessionStore:
                     SessionRow.channel == channel,
                     SessionRow.parent_id.is_(None),
                     SessionRow.status.in_(reusable),
+                    SessionRow.config["single_session"].astext == "true",
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(1)
@@ -771,8 +775,13 @@ class SessionStore:
         offset: int = 0,
         include_descendants: bool = False,
         any_principal: bool = False,
+        single_session_only: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
+
+        With *single_session_only* the page is restricted to roots stamped
+        ``config.single_session`` — the "multi session off" listing, where
+        multi-era conversations stay hidden.
 
         Delegation children (``parent_id IS NOT NULL``) are excluded from the
         page itself -- they belong under their parent in the session tree, not
@@ -802,6 +811,11 @@ class SessionStore:
                 if service_account_id is not None
                 else SessionRow.user_id == user_id
             )
+        marker_filter = (
+            SessionRow.config["single_session"].astext == "true"
+            if single_session_only
+            else true()
+        )
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -811,6 +825,7 @@ class SessionStore:
                     SessionRow.agent_id == agent_id,
                     SessionRow.status != "archived",
                     SessionRow.parent_id.is_(None),
+                    marker_filter,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)

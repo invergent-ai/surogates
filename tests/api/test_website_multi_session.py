@@ -121,13 +121,19 @@ def _cookie(session_id, org_id, *, origin=_ORIGIN, key=_KEY):
     )
 
 
-def _live_session(session_id, *, status="active", agent_id="hero-agent"):
+def _live_session(
+    session_id,
+    *,
+    status="active",
+    agent_id="hero-agent",
+    marked=True,
+):
     return SimpleNamespace(
         id=session_id,
         agent_id=agent_id,
         channel="website",
         status=status,
-        config={},
+        config={"single_session": True} if marked else {},
     )
 
 
@@ -158,7 +164,7 @@ async def test_single_session_reuses_cookie_bound_session():
     assert r.json()["csrf_token"]
 
 
-async def test_single_session_without_cookie_creates():
+async def test_single_session_without_cookie_creates_marked():
     org_id = uuid.uuid4()
     store = _Store()
     app = _app(org_id, store, multi_session=False)
@@ -167,6 +173,23 @@ async def test_single_session_without_cookie_creates():
 
     assert r.status_code == 201
     assert len(store.created) == 1
+    # The fresh session is stamped as the visitor's canonical
+    # conversation for later re-bootstraps.
+    assert store.created[0]["config"]["single_session"] is True
+
+
+async def test_single_session_ignores_multi_era_cookie():
+    org_id, session_id = uuid.uuid4(), uuid.uuid4()
+    store = _Store({session_id: _live_session(session_id, marked=False)})
+    app = _app(org_id, store, multi_session=False)
+
+    r = await _post(app, cookie=_cookie(session_id, org_id))
+
+    # The cookie points at an unmarked (multi-era) session — never
+    # adopted; a fresh canonical session is minted instead.
+    assert r.status_code == 201
+    assert len(store.created) == 1
+    assert r.json()["session_id"] != str(session_id)
 
 
 async def test_single_session_ignores_cookie_from_other_key():

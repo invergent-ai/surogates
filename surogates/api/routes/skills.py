@@ -247,6 +247,7 @@ async def _authorize_session_for_staging(
     agent_runtime = await agent_runtime_context_dep(request)
     return await _get_session_for_tenant(
         request, session_id, tenant, agent_runtime.agent_id,
+        multi_session=agent_runtime.multi_session,
     )
 
 

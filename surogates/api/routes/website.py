@@ -365,6 +365,9 @@ async def _reusable_cookie_session(
         session.agent_id != agent_id
         or session.channel != WEBSITE_CHANNEL
         or session.status not in _REUSABLE_WEBSITE_STATUSES
+        # Only the canonical single-session conversation qualifies — a
+        # cookie left over from a multi-session era is not adopted.
+        or (session.config or {}).get("single_session") is not True
     ):
         return None
     return session
@@ -703,7 +706,8 @@ async def bootstrap_website_session(
 
     publishable_key = _extract_bearer(request) or ""
 
-    if routing_config.get("multi_session") is False:
+    single_session = routing_config.get("multi_session") is False
+    if single_session:
         existing = await _reusable_cookie_session(
             request,
             agent_id=agent_id,
@@ -739,6 +743,10 @@ async def bootstrap_website_session(
         "website_origin": normalized_origin,
         "channel_identifier": publishable_key,
     }
+    if single_session:
+        # The fresh session becomes the visitor's canonical conversation
+        # that every later re-bootstrap resolves to.
+        config["single_session"] = True
     # Materialise the message cap onto session.config so the route's
     # 429 enforcement is decoupled from settings — the cookie-bound
     # cap stays stable for the visitor even if ops adjusts the channel

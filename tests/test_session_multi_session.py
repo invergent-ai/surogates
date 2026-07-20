@@ -38,10 +38,15 @@ class _Store:
         self.created: list[dict] = []
         self.reusable = reusable
         self.reusable_lookups: list[dict] = []
+        self.list_calls: list[dict] = []
 
     async def get_reusable_channel_session(self, **kwargs):
         self.reusable_lookups.append(kwargs)
         return self.reusable
+
+    async def list_sessions(self, **kwargs):
+        self.list_calls.append(kwargs)
+        return []
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -137,7 +142,7 @@ async def test_single_session_returns_existing_web_session_with_200():
     ]
 
 
-async def test_single_session_creates_when_none_reusable():
+async def test_single_session_creates_canonical_marked_session():
     org_id, user_id = uuid4(), uuid4()
     store = _Store(reusable=None)
 
@@ -151,6 +156,9 @@ async def test_single_session_creates_when_none_reusable():
 
     assert len(store.created) == 1
     assert store.created[0]["channel"] == "web"
+    # The fresh session is stamped as the canonical single-session
+    # conversation so every later create/list/access resolves to it.
+    assert store.created[0]["config"]["single_session"] is True
     assert session.channel == "web"
 
 
@@ -172,4 +180,94 @@ async def test_multi_session_on_always_creates():
 
     assert store.reusable_lookups == []
     assert len(store.created) == 1
+    # No marker on multi-session creates.
+    assert "single_session" not in store.created[0]["config"]
     assert session.id != existing.id
+
+
+async def test_list_hides_multi_era_sessions_when_capability_off():
+    org_id, user_id = uuid4(), uuid4()
+    store = _Store()
+
+    await sessions_route.list_sessions(
+        _request(store, _Storage()),
+        _tenant(org_id, user_id),
+        _runtime("support-bot", org_id, multi_session=False),
+    )
+    await sessions_route.list_sessions(
+        _request(store, _Storage()),
+        _tenant(org_id, user_id),
+        _runtime("support-bot", org_id, multi_session=True),
+    )
+
+    assert store.list_calls[0]["single_session_only"] is True
+    assert store.list_calls[1]["single_session_only"] is False
+
+
+def _session(channel="web", *, parent_id=None, config=None):
+    return SimpleNamespace(
+        id=uuid4(),
+        org_id=uuid4(),
+        agent_id="support-bot",
+        status="active",
+        channel=channel,
+        parent_id=parent_id,
+        config=config or {},
+    )
+
+
+class _GetStore:
+    def __init__(self, session):
+        self._session = session
+
+    async def get_session(self, session_id):
+        return self._session
+
+
+def _owning_tenant(session):
+    tenant = SimpleNamespace(org_id=session.org_id)
+    tenant.owns_session = lambda org_id, session_id: True
+    return tenant
+
+
+def _get_request(store):
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(session_store=store)),
+    )
+
+
+async def test_access_block_hides_unmarked_web_session_when_off():
+    from fastapi import HTTPException
+
+    session = _session("web")
+    with __import__("pytest").raises(HTTPException) as exc:
+        await sessions_route._get_session_for_tenant(
+            _get_request(_GetStore(session)), session.id,
+            _owning_tenant(session), "support-bot",
+            multi_session=False,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_access_allows_canonical_and_children_and_other_channels():
+    canonical = _session("web", config={"single_session": True})
+    child = _session("web", parent_id=uuid4())
+    api_session = _session("api")
+
+    for session in (canonical, child, api_session):
+        got = await sessions_route._get_session_for_tenant(
+            _get_request(_GetStore(session)), session.id,
+            _owning_tenant(session), "support-bot",
+            multi_session=False,
+        )
+        assert got is session
+
+
+async def test_access_unrestricted_when_capability_on():
+    session = _session("web")  # unmarked multi-era session
+    got = await sessions_route._get_session_for_tenant(
+        _get_request(_GetStore(session)), session.id,
+        _owning_tenant(session), "support-bot",
+        multi_session=True,
+    )
+    assert got is session
