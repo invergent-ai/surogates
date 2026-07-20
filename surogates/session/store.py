@@ -84,6 +84,12 @@ _INBOX_EVENTS = frozenset({
 # returning thousands of rows on every poll.
 _MAX_LISTED_DESCENDANTS = 1000
 
+# Channels with a registered outbound delivery adapter (a delivery loop that
+# claims their outbox rows).  Must match the platforms registered in
+# surogates.channels.platforms — an outbox row for any other channel value
+# would never be claimed and sit "pending" forever.
+_ADAPTER_CHANNELS = frozenset({"slack", "telegram"})
+
 
 def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> dict:
     """Extract the deliverable payload from an event. Empty dict = nothing to
@@ -994,13 +1000,11 @@ class SessionStore:
 
             channel, config = self._channel_cache[session_id]
 
-            # Web sessions use SSE — no outbox delivery needed.
-            if channel == "web":
-                return
-
-            # Ambient sessions reason privately; their only outbound path is
-            # the gated mate_ambient_post tool. Never auto-deliver them.
-            if channel == "ambient":
+            # Only channels with a registered delivery adapter get outbox rows.
+            # Everything else (web/website SSE, api/task/delegation/worker
+            # consumers, ambient's gated mate_ambient_post path) has no claimer
+            # — rows for those channels would sit "pending" forever.
+            if channel not in _ADAPTER_CHANNELS:
                 return
 
             # Build channel-specific destination from session config.
@@ -1011,20 +1015,13 @@ class SessionStore:
                     "thread_ts": config.get("slack_thread_key"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
-            elif channel == "teams":
-                destination = {
-                    "conversation_id": config.get("teams_channel_id", ""),
-                    "activity_id": config.get("teams_thread_key"),
-                    "channel_identifier": config.get("channel_identifier", ""),
-                }
             elif channel == "telegram":
                 destination = {
                     "chat_id": config.get("telegram_channel_id", ""),
                     "message_thread_id": config.get("telegram_thread_key"),
+                    "reply_to_message_id": config.get("telegram_reply_to_message_id"),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
-            else:
-                destination = {"session_id": str(session_id)}
 
             # Build payload: extract the user-facing content from the event.
             payload = _build_channel_payload(event_type, data, channel)
