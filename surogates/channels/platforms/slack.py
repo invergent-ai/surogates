@@ -74,6 +74,7 @@ from surogates.channels.channel_backfill import (
 )
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
+from surogates.channels.text_split import split_text
 
 
 def _form_timestamp() -> str:
@@ -492,6 +493,10 @@ class SlackPlatform:
 
     kind = "slack"
     supports_edit = True
+
+    # Slack rejects chat.postMessage over ~40k chars (msg_too_long); stay
+    # under it with headroom for Slack's own escaping.
+    _MAX_MESSAGE_CHARS = 39000
     topology = "webhook"
 
     _THINKING_TEXT = "_Thinking…_"
@@ -1003,30 +1008,46 @@ class SlackPlatform:
         text: str = item.payload.get("content", "")
         thread_ts: str | None = item.destination.get("thread_ts")
 
-        kwargs: dict[str, Any] = {
-            "channel": channel_id,
-            "text": text,
-        }
-        if thread_ts:
-            kwargs["thread_ts"] = thread_ts
+        # Slack rejects chat.postMessage bodies over ~40k chars with
+        # msg_too_long; split long replies at natural boundaries and post
+        # them sequentially so the full answer still lands.
+        chunks = split_text(text, self._MAX_MESSAGE_CHARS) or [text]
 
         update_ts = item.destination.get("update_ts")
+        edited_ts: str | None = None
         if update_ts:
             try:
-                edited = await client.chat_update(channel=channel_id, ts=update_ts, text=text)
-                return SendResult(success=True, message_id=edited.get("ts") or update_ts)
+                edited = await client.chat_update(
+                    channel=channel_id, ts=update_ts, text=chunks[0],
+                )
+                edited_ts = edited.get("ts") or update_ts
+                chunks = chunks[1:]
             except Exception as exc:
                 logger.warning(
                     "[SlackPlatform] chat_update failed (%s); posting a fresh message", exc,
                 )
-                # fall through to a fresh post so the reply still lands
+                # fall through to fresh posts so the reply still lands
 
-        try:
-            result = await client.chat_postMessage(**kwargs)
-            return SendResult(success=True, message_id=result.get("ts"))
-        except Exception as exc:
-            logger.error("[SlackPlatform] chat_postMessage failed: %s", exc)
-            return SendResult(success=False, error=str(exc))
+        last_ts: str | None = edited_ts
+        for chunk in chunks:
+            kwargs: dict[str, Any] = {
+                "channel": channel_id,
+                "text": chunk,
+            }
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+            try:
+                result = await client.chat_postMessage(**kwargs)
+                last_ts = result.get("ts") or last_ts
+            except Exception as exc:
+                logger.error("[SlackPlatform] chat_postMessage failed: %s", exc)
+                if last_ts is not None:
+                    # Part of the reply already landed — report success with
+                    # the last delivered ts rather than re-delivering the
+                    # whole message on retry (duplicate spam).
+                    return SendResult(success=True, message_id=last_ts)
+                return SendResult(success=False, error=str(exc))
+        return SendResult(success=True, message_id=last_ts)
 
     # ------------------------------------------------------------------
     # download_file — fetch a private Slack file URL
