@@ -170,6 +170,10 @@ export interface AuthConfigResponse {
   // The agent this deployment serves, echoed from the runtime config.
   // Absent on older backends — consumers treat "absent" as null.
   agent_id?: string;
+  // "Multi session" capability. False pins each user to one session per
+  // channel (no "New chat"). Absent on a fetch error or an older backend
+  // — consumers treat "absent" as "unknown" and fail open (multi on).
+  multi_session?: boolean;
 }
 
 /** Fetch the runtime auth config. Falls back to "disabled" on any error

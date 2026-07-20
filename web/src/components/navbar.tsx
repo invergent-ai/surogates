@@ -54,6 +54,9 @@ export function SessionSidebar() {
   const sessionsLoading = useAppStore((s) => s.sessionsLoading);
   const user = useAppStore((s) => s.user);
   const slashCommands = useAppStore((s) => s.slashCommands);
+  // "Multi session" off pins each user to one conversation: no "New
+  // chat", no session picker.  ``null`` (unknown) fails open.
+  const singleSession = useAppStore((s) => s.multiSession) === false;
   const { theme, setTheme } = useTheme();
   const { unreadCount } = useInboxUnreadCount(surogatesWebChatAdapter);
   const viewMode = useChatViewMode();
@@ -120,18 +123,20 @@ export function SessionSidebar() {
           "p-1.5 lg:p-3 group-data-[mode=sheet]:p-3",
         )}
       >
-        <Button
-          variant="outline"
-          onClick={handleNewSession}
-          className={cn(
-            "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
-            "justify-center px-0 lg:justify-start lg:px-3",
-            "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
-          )}
-        >
-          <PlusIcon className="w-4 h-4" />
-          <span className={showExpandedInline}>New chat</span>
-        </Button>
+        {!singleSession && (
+          <Button
+            variant="outline"
+            onClick={handleNewSession}
+            className={cn(
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "justify-center px-0 lg:justify-start lg:px-3",
+              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
+            )}
+          >
+            <PlusIcon className="w-4 h-4" />
+            <span className={showExpandedInline}>New chat</span>
+          </Button>
+        )}
         {!isSimpleMode && (
           <Button
             variant="ghost"
@@ -186,8 +191,11 @@ export function SessionSidebar() {
         </Button>
       </div>
 
-      {/* Sessions list */}
+      {/* Sessions list — hidden entirely in single-session mode: the one
+          conversation is always active, so a picker only invites hopping
+          back into pre-restriction sessions. */}
       <div className="min-h-0 flex-1 flex flex-col">
+        {!singleSession && (
         <div className="min-h-0 flex-1 overflow-y-auto py-1">
           {/* Compact (md only, not sheet): icon-only list */}
           <div className={hideOnExpanded}>
@@ -230,6 +238,7 @@ export function SessionSidebar() {
             )}
           </div>
         </div>
+        )}
 
         {/* Missions + Scheduled work — expanded only */}
         <div
