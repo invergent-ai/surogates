@@ -18,15 +18,19 @@ needs to talk to the deployment's agent embedded on a public website:
   headers, so the CSRF header isn't required (GETs are safe by
   CSRF's standard assumption — nothing is mutated).
 
-The channel on-switch and the origin allow-list come from
-:class:`WebsiteSettings` (global, per-deployment).  The agent identity
-is resolved per-request from the publishable key via
+The deployment-wide on-switch comes from :class:`WebsiteSettings`; the
+agent identity is resolved per-request from the publishable key via
 ``channel_routing(website:<key>)`` -- the same mechanism the
-Slack/Telegram adapters use -- so each agent has its own key.  Origin
-validation is the conjunction of two checks: the configured allow-list
-(authoritative) and the session cookie's ``origin`` claim (anchors a
-bootstrapped session to the embed it came from).  A request must
-satisfy both.
+Slack/Telegram adapters use -- so each agent has its own key.  The
+origin allow-list and session message cap are per-agent when the
+routing row's ``config`` carries them (projected from Studio's Website
+channel form), falling back to the global :class:`WebsiteSettings`
+values otherwise.  Origin validation is the conjunction of two checks:
+the effective allow-list (authoritative) and the session cookie's
+``origin`` claim (anchors a bootstrapped session to the embed it came
+from).  A request must satisfy both; cookie-authenticated calls also
+re-resolve the routing row so deactivating the channel cuts live
+sessions.
 """
 
 from __future__ import annotations
@@ -290,6 +294,32 @@ def _enforce_origin_binding(
         )
 
 
+def _routing_channel_config(routing: dict | None) -> dict:
+    """The per-agent behavior blob projected into ``channel_routing.config``."""
+    config = (routing or {}).get("config")
+    return config if isinstance(config, dict) else {}
+
+
+def _agent_allowed_origins(routing_config: dict) -> tuple[str, ...] | None:
+    """Per-agent origin allow-list from routing config, or ``None`` when the
+    agent has not configured one (fall back to the deployment-global list).
+
+    Accepts both the projected list form and a legacy CSV string.
+    """
+    raw = routing_config.get("allowed_origins")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        origins = parse_allowed_origins(raw)
+    else:
+        origins = tuple(
+            normalize_origin(str(origin))
+            for origin in raw
+            if str(origin).strip()
+        )
+    return origins or None
+
+
 async def _load_and_authorize_session(
     request: Request,
     path_session_id: UUID,
@@ -300,6 +330,13 @@ async def _load_and_authorize_session(
     must match the claim so a visitor of one session cannot target
     another visitor's session by swapping the URL — the session JWT
     scopes to exactly one session.
+
+    When the cookie names its bootstrap ``channel_identifier``, the
+    per-agent routing row is re-resolved on every call: turning the
+    agent's website channel off (row deactivated) cuts live sessions
+    with 403, and a per-agent origin allow-list — when configured —
+    replaces the deployment-global one.  Cookies minted before the
+    claim existed keep the legacy global-only behavior.
     """
     settings = _get_settings(request)
     _require_website_enabled(settings)
@@ -311,8 +348,20 @@ async def _load_and_authorize_session(
             detail=f"Session {path_session_id} not found.",
         )
 
-    request_origin = _extract_origin(request)
     allowed = parse_allowed_origins(settings.website.allowed_origins)
+    cache = getattr(request.app.state, "channel_routing_cache", None)
+    if claims.channel_identifier and cache is not None:
+        routing = await cache.get(f"website:{claims.channel_identifier}")
+        if not routing or not routing.get("agent_id"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The website channel for this agent has been turned off.",
+            )
+        agent_origins = _agent_allowed_origins(_routing_channel_config(routing))
+        if agent_origins is not None:
+            allowed = agent_origins
+
+    request_origin = _extract_origin(request)
     _enforce_origin_binding(claims, request_origin, allowed)
     return claims
 
@@ -565,7 +614,10 @@ async def bootstrap_website_session(
     )
 
     request_origin = _extract_origin(request)
-    allowed = parse_allowed_origins(settings.website.allowed_origins)
+    routing_config = _routing_channel_config(routing)
+    allowed = _agent_allowed_origins(routing_config)
+    if allowed is None:
+        allowed = parse_allowed_origins(settings.website.allowed_origins)
     if not origin_allowed(request_origin, allowed):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -598,17 +650,25 @@ async def bootstrap_website_session(
     bucket = agent_session_bucket(settings.storage.bucket)
     normalized_origin = normalize_origin(request_origin)
 
+    publishable_key = _extract_bearer(request) or ""
     config: dict = {
         "storage_bucket": bucket,
         "workspace_path": storage.resolve_workspace_path(bucket, session_id),
         "website_origin": normalized_origin,
+        "channel_identifier": publishable_key,
     }
     # Materialise the message cap onto session.config so the route's
     # 429 enforcement is decoupled from settings — the cookie-bound
     # cap stays stable for the visitor even if ops adjusts the channel
-    # knob while the session is in flight.
-    if settings.website.session_message_cap:
-        config["session_message_cap"] = settings.website.session_message_cap
+    # knob while the session is in flight.  A per-agent cap from the
+    # routing config takes precedence over the deployment-global one.
+    try:
+        agent_cap = int(routing_config.get("session_message_cap") or 0)
+    except (TypeError, ValueError):
+        agent_cap = 0
+    cap = agent_cap or settings.website.session_message_cap
+    if cap:
+        config["session_message_cap"] = cap
 
     # Server-verified buyer identity, pinned at bootstrap so every
     # later message inherits it from the session row rather than
@@ -654,6 +714,7 @@ async def bootstrap_website_session(
         org_id=org_uuid,
         origin=normalized_origin,
         csrf_token=csrf_token,
+        channel_identifier=publishable_key,
     )
     _set_session_cookie(
         response, token=cookie_token, expires_seconds=DEFAULT_SESSION_TTL_SECONDS,
