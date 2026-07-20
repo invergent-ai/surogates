@@ -168,6 +168,44 @@ async def test_telegram_dm_never_records_reply_to():
     assert store.config_writes == []
 
 
+async def test_telegram_plain_reply_falls_through_when_resolution_races(monkeypatch):
+    """A reply that loses the answer race (button tapped first) must become a
+    normal turn, not vanish."""
+    deps = _make_deps()
+
+    async def pending_input(session_id):
+        return {"tool_call_id": "tc9", "questions": [{"prompt": "Deploy?"}], "context": ""}
+
+    deps.pending_input = pending_input
+    monkeypatch.setattr(
+        "surogates.session.interactive_input.resolve_input_response",
+        AsyncMock(return_value=False),
+    )
+
+    msg = _make_msg(is_dm=True, text="also check the invoice", ts="910.0")
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_telegram_routing(), config=_make_config(), deps=deps,
+    )
+
+    assert result == InboundOutcome.PROCESSED
+    assert deps._enqueued
+    assert any(t == EventType.USER_MESSAGE for _, t, _ in deps.session_store.events)
+
+
+async def test_caption_less_media_passes_body_gate():
+    """Telegram attachments arrive with empty text and empty media_urls —
+    the files alone must count as a message body."""
+    deps = _make_deps()
+    msg = dataclasses.replace(
+        _make_msg(is_dm=True, text="", ts="911.0"),
+        files=[InboundFileRef(url="fid", filename="a.jpg", mime_type="image/jpeg", size=1, file_id="fid")],
+    )
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_telegram_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.PROCESSED
+
+
 async def test_telegram_files_reach_attachment_ingest():
     deps = _make_deps()
     ingested = []

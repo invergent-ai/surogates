@@ -630,7 +630,12 @@ class TelegramPlatform:
         for index, chunk in enumerate(chunks):
             chunk_base = dict(base)
             if reply_to and index == 0:
-                chunk_base["reply_parameters"] = {"message_id": reply_to}
+                # allow_sending_without_reply: a user-deleted reply target
+                # must degrade to a plain message, not fail the delivery.
+                chunk_base["reply_parameters"] = {
+                    "message_id": reply_to,
+                    "allow_sending_without_reply": True,
+                }
             html_text = render_html(chunk)
             plain_text = render_plain(chunk)
             if len(html_text) > self._MAX_MESSAGE_CHARS:
@@ -679,6 +684,7 @@ class TelegramPlatform:
             session_id=str(getattr(item, "session_id", "")),
             questions=item.payload.get("questions") or [],
             context=item.payload.get("context", ""),
+            tool_call_id=item.payload.get("tool_call_id", ""),
         )
         payload = dict(base)
         if reply_markup is not None:
@@ -722,6 +728,39 @@ class TelegramPlatform:
     # ------------------------------------------------------------------
     # handle_non_message_update — callback_query ack-only
     # ------------------------------------------------------------------
+
+    async def post_input_nudge(
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+    ) -> str | None:
+        """Post a short status line (answer ack, /stop ack) to the chat.
+
+        Same optional-member contract as the Slack implementation: the
+        pipeline's ``input_nudge`` hook getattr-dispatches to this. Returns
+        the message id, or ``None`` on any failure (never raises).
+        """
+        bot_token: str = (creds or {}).get("bot_token") or ""
+        if not bot_token or not channel:
+            return None
+        payload: dict[str, Any] = {"chat_id": channel, "text": text}
+        if thread_ts:
+            try:
+                payload["message_thread_id"] = int(thread_ts)
+            except (TypeError, ValueError):
+                pass
+        try:
+            resp = await self._http.post(
+                _bot_api_url(bot_token, "sendMessage"), json=payload
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return str(data["result"]["message_id"])
+            return None
+        except Exception:
+            logger.warning(
+                "[TelegramPlatform] post_input_nudge failed for %s",
+                channel, exc_info=True,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # download_file — resolve a file_id via getFile and fetch the bytes
@@ -864,6 +903,7 @@ class TelegramPlatform:
         from surogates.channels.platforms.telegram_interactive import (
             build_answered_text,
             parse_callback_data,
+            tool_call_digest,
         )
         from surogates.session.interactive_input import (
             pending_input_for_session,
@@ -877,7 +917,7 @@ class TelegramPlatform:
         if parsed is None or store is None:
             await self._answer_callback(bot_token, callback_id)
             return True
-        session_id_raw, _question_index, choice_index = parsed
+        session_id_raw, _question_index, choice_index, digest = parsed
 
         try:
             from uuid import UUID
@@ -908,7 +948,10 @@ class TelegramPlatform:
             return True
 
         pending = await pending_input_for_session(store, session_id=session_id)
-        if not pending:
+        if not pending or tool_call_digest(pending.get("tool_call_id", "")) != digest:
+            # No pending question, or the button belongs to an EARLIER
+            # prompt than the one currently pending — a stale button must
+            # never resolve a newer question with its coordinates.
             await self._answer_callback(
                 bot_token, callback_id, "This question was already answered."
             )

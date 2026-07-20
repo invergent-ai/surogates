@@ -27,6 +27,7 @@ the cache TTL).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Awaitable, Callable
@@ -387,9 +388,11 @@ class ChannelInboundPipeline:
         # Runs before the mention/firehose gates: an empty message (no text,
         # no media) is dropped outright and never becomes a firehose
         # observation, matching the Slack reference where the firehose helper
-        # also no-ops on empty text.
+        # also no-ops on empty text.  Media can arrive as pre-resolved
+        # ``media_urls`` or as platform file refs in ``files`` (Telegram
+        # attachments carry only file ids) — either counts as a body.
         # ------------------------------------------------------------------
-        if not msg.text and not msg.media_urls:
+        if not msg.text and not msg.media_urls and not msg.files:
             return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------
@@ -616,38 +619,7 @@ class ChannelInboundPipeline:
             except Exception:
                 logger.warning("[channels] pending input lookup failed - continuing", exc_info=True)
                 pending = None
-            if pending:
-                if routing.platform == "telegram" and msg.text.strip():
-                    from surogates.channels.platforms.telegram_interactive import (
-                        resolve_text_answer,
-                    )
-                    from surogates.session.interactive_input import (
-                        resolve_input_response,
-                    )
-
-                    responses = resolve_text_answer(
-                        pending.get("questions") or [], msg.text,
-                    )
-                    resolved = False
-                    try:
-                        resolved = await resolve_input_response(
-                            deps.session_store,
-                            session_id=session_id,
-                            tool_call_id=pending.get("tool_call_id", ""),
-                            responses=responses,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "[channels] pending input resolution failed", exc_info=True,
-                        )
-                    if resolved and deps.input_nudge is not None:
-                        try:
-                            await deps.input_nudge(
-                                session_id, msg, "✅ Got it — continuing.",
-                            )
-                        except Exception:
-                            logger.warning("[channels] answer ack failed", exc_info=True)
-                    return InboundOutcome.DROPPED
+            if pending and routing.platform == "slack":
                 if deps.input_nudge is not None:
                     try:
                         await deps.input_nudge(
@@ -658,6 +630,44 @@ class ChannelInboundPipeline:
                     except Exception:
                         logger.warning("[channels] pending input nudge failed", exc_info=True)
                 return InboundOutcome.DROPPED
+            if pending and msg.text.strip():  # telegram
+                from surogates.channels.platforms.telegram_interactive import (
+                    resolve_text_answer,
+                )
+                from surogates.session.interactive_input import (
+                    resolve_input_response,
+                )
+
+                responses = resolve_text_answer(
+                    pending.get("questions") or [], msg.text,
+                )
+                resolved = False
+                try:
+                    resolved = await resolve_input_response(
+                        deps.session_store,
+                        session_id=session_id,
+                        tool_call_id=pending.get("tool_call_id", ""),
+                        responses=responses,
+                    )
+                except Exception:
+                    logger.warning(
+                        "[channels] pending input resolution failed", exc_info=True,
+                    )
+                if resolved:
+                    if deps.input_nudge is not None:
+                        try:
+                            await deps.input_nudge(
+                                session_id, msg, "✅ Got it — continuing.",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "[channels] answer ack failed", exc_info=True,
+                            )
+                    return InboundOutcome.DROPPED
+                # Resolution lost a race (the button answered first) or
+                # failed — the text is a real user message, not an answer;
+                # fall through so it becomes a normal turn instead of
+                # vanishing.
 
         # Seed channel history on the first message of a Slack channel session
         # (lazy fallback for channels where the join event was missed). Best
@@ -801,16 +811,18 @@ class ChannelInboundPipeline:
 
         # Extra mention patterns (e.g. a nickname for a Telegram bot that
         # can't be @-mentioned by non-members): CSV in routing config,
-        # matched case-insensitively against the text.
+        # matched case-insensitively on word boundaries — plain containment
+        # would let "max" fire on "maximum" and invite accidental triggers.
         raw_patterns = config.get("mention_patterns") or ""
         if isinstance(raw_patterns, str):
-            patterns = [p.strip().lower() for p in raw_patterns.split(",") if p.strip()]
+            patterns = [p.strip() for p in raw_patterns.split(",") if p.strip()]
         else:
-            patterns = [str(p).strip().lower() for p in raw_patterns if str(p).strip()]
-        if patterns:
-            text = (msg.text or "").lower()
-            if any(p in text for p in patterns):
-                return True
+            patterns = [str(p).strip() for p in raw_patterns if str(p).strip()]
+        text = msg.text or ""
+        if patterns and any(
+            re.search(rf"\b{re.escape(p)}\b", text, re.IGNORECASE) for p in patterns
+        ):
+            return True
 
         return False
 

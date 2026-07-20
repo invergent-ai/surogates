@@ -16,6 +16,7 @@ from surogates.channels.platforms.telegram_interactive import (
     build_input_prompt,
     parse_callback_data,
     resolve_text_answer,
+    tool_call_digest,
 )
 
 BOT = "@my_test_bot"
@@ -201,7 +202,10 @@ class TestSend:
             creds={"bot_token": "tok"},
         )
         calls = _capture_send(route)
-        assert calls[0]["reply_parameters"] == {"message_id": 42}
+        assert calls[0]["reply_parameters"] == {
+            "message_id": 42,
+            "allow_sending_without_reply": True,
+        }
         assert all("reply_parameters" not in c for c in calls[1:])
 
     @respx.mock
@@ -254,17 +258,21 @@ QUESTIONS = [{"prompt": "Deploy to prod?", "choices": [{"label": "Yes"}, {"label
 class TestInteractive:
     def test_build_prompt_single_choice_question(self):
         html_text, plain_text, markup = build_input_prompt(
-            session_id="s-1", questions=QUESTIONS, context="Release 1.2 ready.",
+            session_id="s-1",
+            questions=QUESTIONS,
+            context="Release 1.2 ready.",
+            tool_call_id="tc-1",
         )
         assert "Deploy to prod?" in html_text and "Release 1.2" in plain_text
         rows = markup["inline_keyboard"]
         assert [r[0]["text"] for r in rows] == ["Yes", "No"]
-        assert rows[0][0]["callback_data"] == "si:s-1:0:0"
+        assert rows[0][0]["callback_data"] == f"si:s-1:0:0:{tool_call_digest('tc-1')}"
 
     def test_callback_data_fits_telegram_cap(self):
         _, _, markup = build_input_prompt(
             session_id="11111111-2222-3333-4444-555555555555",
             questions=QUESTIONS,
+            tool_call_id="toolu_" + "x" * 120,
         )
         for row in markup["inline_keyboard"]:
             assert len(row[0]["callback_data"].encode()) <= 64
@@ -276,9 +284,10 @@ class TestInteractive:
         assert markup is None
 
     def test_parse_callback_roundtrip(self):
-        assert parse_callback_data("si:abc:0:1") == ("abc", 0, 1)
+        assert parse_callback_data("si:abc:0:1:deadbeef") == ("abc", 0, 1, "deadbeef")
+        assert parse_callback_data("si:abc:0:1") is None
         assert parse_callback_data("nope") is None
-        assert parse_callback_data("si:abc:x:1") is None
+        assert parse_callback_data("si:abc:x:1:deadbeef") is None
 
     def test_resolve_text_answer_matches_choice(self):
         responses = resolve_text_answer(QUESTIONS, "yes")
@@ -340,7 +349,9 @@ class TestCallbackResolution:
         )
 
         p = TelegramPlatform()
-        body = self._callback_body("si:11111111-2222-3333-4444-555555555555:0:1")
+        body = self._callback_body(
+            f"si:11111111-2222-3333-4444-555555555555:0:1:{tool_call_digest('tc-1')}"
+        )
         handled = await p.handle_non_message_update(
             body, routing=None, creds={"bot_token": "tok"}, deps=deps,
         )
@@ -350,6 +361,32 @@ class TestCallbackResolution:
         assert kwargs["tool_call_id"] == "tc-1"
         assert kwargs["responses"][0]["answer"] == "No"
         assert edit_route.called and answer_route.called
+
+    @respx.mock
+    async def test_stale_button_does_not_answer_newer_question(self, monkeypatch):
+        respx.post(f"{API}/bottok/answerCallbackQuery").mock(
+            return_value=httpx.Response(200, json={"ok": True})
+        )
+        deps, _ = self._deps()
+        # A NEWER question is pending than the one the button was built for.
+        pending = {"tool_call_id": "tc-NEW", "questions": QUESTIONS, "context": ""}
+        monkeypatch.setattr(
+            "surogates.session.interactive_input.pending_input_for_session",
+            AsyncMock(return_value=pending),
+        )
+        resolve = AsyncMock(return_value=True)
+        monkeypatch.setattr(
+            "surogates.session.interactive_input.resolve_input_response", resolve,
+        )
+        p = TelegramPlatform()
+        body = self._callback_body(
+            f"si:11111111-2222-3333-4444-555555555555:0:1:{tool_call_digest('tc-OLD')}"
+        )
+        handled = await p.handle_non_message_update(
+            body, routing=None, creds={"bot_token": "tok"}, deps=deps,
+        )
+        assert handled is True
+        resolve.assert_not_awaited()
 
     @respx.mock
     async def test_chat_mismatch_is_rejected(self, monkeypatch):
@@ -362,7 +399,9 @@ class TestCallbackResolution:
             "surogates.session.interactive_input.resolve_input_response", resolve,
         )
         p = TelegramPlatform()
-        body = self._callback_body("si:11111111-2222-3333-4444-555555555555:0:1")
+        body = self._callback_body(
+            f"si:11111111-2222-3333-4444-555555555555:0:1:{tool_call_digest('tc-1')}"
+        )
         handled = await p.handle_non_message_update(
             body, routing=None, creds={"bot_token": "tok"}, deps=deps,
         )

@@ -121,7 +121,13 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
-    elif event_type == EventType.INBOX_INPUT_REQUIRED and channel == "slack":
+    elif event_type == EventType.INBOX_INPUT_REQUIRED and channel in (
+        "slack",
+        "telegram",
+    ):
+        # Slack renders an Answer button + modal; Telegram an inline
+        # keyboard. Other channels have no interactive prompt surface, so a
+        # content-less input_prompt row must not be enqueued for them.
         questions = data.get("questions") or []
         if questions:
             payload = {
@@ -947,8 +953,8 @@ class SessionStore:
             except Exception:
                 pass
 
-        # Channel delivery: enqueue deliverable events to the outbox
-        # for non-web channels (Slack, Teams, Telegram, etc.).
+        # Channel delivery: enqueue deliverable events to the outbox for
+        # adapter-backed channels (Slack, Telegram).
         if event_type in _DELIVERABLE_EVENTS:
             await self._enqueue_channel_delivery(
                 session_id,

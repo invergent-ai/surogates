@@ -601,8 +601,9 @@ async def bootstrap_website_session(
     """Exchange a publishable key + approved origin for a session cookie.
 
     The publishable key resolves the owning agent via ``channel_routing``
-    (``website:<key>``); the request Origin is checked against the global
-    allow-list.  Creates a fresh session owned by the agent's org (no user
+    (``website:<key>``); the request Origin is checked against the agent's
+    allow-list from the routing config, falling back to the deployment
+    global.  Creates a fresh session owned by the agent's org (no user
     row), mints the HttpOnly cookie the browser presents on subsequent
     requests, and returns the CSRF token echoed in ``X-CSRF-Token``.
     """

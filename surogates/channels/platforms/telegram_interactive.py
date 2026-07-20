@@ -5,9 +5,13 @@ Slack Block Kit flow:
 
 - A single question with choices renders as an ``inline_keyboard`` — one
   button per choice.  ``callback_data`` is capped at 64 bytes by Telegram,
-  so a button carries only ``si:<session_id>:<question>:<choice>``
-  (≤ 48 bytes); the question text and answer are re-resolved from the
-  durable pending-input record when the button is tapped.
+  so a button carries only coordinates plus a short digest of the
+  ``tool_call_id`` it belongs to:
+  ``si:<session_id>:<question>:<choice>:<digest>`` (≤ 56 bytes).  The
+  question text and answer are re-resolved from the durable pending-input
+  record when the button is tapped; the digest keeps a *stale* button (an
+  earlier prompt still visible in chat history) from resolving a newer
+  question with the wrong choice.
 - Free-text questions (and multi-question prompts) render as text; the
   visitor answers by simply replying, which the inbound pipeline resolves
   against the same durable record.
@@ -15,6 +19,7 @@ Slack Block Kit flow:
 
 from __future__ import annotations
 
+import hashlib
 import html
 
 __all__ = [
@@ -23,11 +28,17 @@ __all__ = [
     "parse_callback_data",
     "build_answered_text",
     "resolve_text_answer",
+    "tool_call_digest",
 ]
 
 CALLBACK_PREFIX = "si"
 
 _FREE_TEXT_HINT = "Reply to this message to answer in your own words."
+
+
+def tool_call_digest(tool_call_id: str) -> str:
+    """Short stable digest binding a button to one ``ask_user_question``."""
+    return hashlib.sha256((tool_call_id or "").encode()).hexdigest()[:8]
 
 
 def _esc(text: str) -> str:
@@ -39,6 +50,7 @@ def build_input_prompt(
     session_id: str,
     questions: list[dict],
     context: str = "",
+    tool_call_id: str = "",
 ) -> tuple[str, str, dict | None]:
     """Render an input prompt as ``(html_text, plain_text, reply_markup)``.
 
@@ -69,12 +81,15 @@ def build_input_prompt(
     single = questions[0] if len(questions) == 1 else None
     choices = (single or {}).get("choices") or []
     if single is not None and choices:
+        digest = tool_call_digest(tool_call_id)
         reply_markup = {
             "inline_keyboard": [
                 [
                     {
                         "text": (choice.get("label") or f"Choice {ci + 1}")[:64],
-                        "callback_data": f"{CALLBACK_PREFIX}:{session_id}:0:{ci}",
+                        "callback_data": (
+                            f"{CALLBACK_PREFIX}:{session_id}:0:{ci}:{digest}"
+                        ),
                     }
                 ]
                 for ci, choice in enumerate(choices)
@@ -90,20 +105,20 @@ def build_input_prompt(
     return "\n".join(lines_html), "\n".join(lines_plain), reply_markup
 
 
-def parse_callback_data(data: str) -> tuple[str, int, int] | None:
-    """Parse ``si:<session_id>:<question>:<choice>`` callback data.
+def parse_callback_data(data: str) -> tuple[str, int, int, str] | None:
+    """Parse ``si:<session_id>:<question>:<choice>:<digest>`` callback data.
 
-    Returns ``(session_id, question_index, choice_index)`` or ``None`` for
-    anything that is not a well-formed input callback.
+    Returns ``(session_id, question_index, choice_index, digest)`` or
+    ``None`` for anything that is not a well-formed input callback.
     """
     parts = (data or "").split(":")
-    if len(parts) != 4 or parts[0] != CALLBACK_PREFIX:
+    if len(parts) != 5 or parts[0] != CALLBACK_PREFIX:
         return None
-    session_id, q_raw, c_raw = parts[1], parts[2], parts[3]
-    if not session_id:
+    session_id, q_raw, c_raw, digest = parts[1], parts[2], parts[3], parts[4]
+    if not session_id or not digest:
         return None
     try:
-        return session_id, int(q_raw), int(c_raw)
+        return session_id, int(q_raw), int(c_raw), digest
     except ValueError:
         return None
 
