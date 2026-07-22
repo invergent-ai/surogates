@@ -69,6 +69,7 @@ from surogates.config import Settings, enqueue_session
 from surogates.api.routes._commerce_turn import (
     authorize_commerce_turn,
     estimate_turn_tokens,
+    get_session_store,
 )
 from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
@@ -158,14 +159,6 @@ def _get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def _get_session_store(request: Request) -> SessionStore:
-    store: SessionStore | None = getattr(request.app.state, "session_store", None)
-    if store is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Session store not available.",
-        )
-    return store
 
 
 def _require_website_enabled(settings: Settings) -> None:
@@ -358,7 +351,7 @@ async def _reusable_cookie_session(
         or claims.org_id != org_uuid
     ):
         return None
-    store = _get_session_store(request)
+    store = get_session_store(request)
     try:
         session = await store.get_session(claims.session_id)
     except SessionNotFoundError:
@@ -655,7 +648,7 @@ async def bootstrap_website_session(
             detail="Storage bucket is not configured (settings.storage.bucket is empty).",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     storage = request.app.state.storage
 
     session_id = uuid.uuid4()
@@ -796,7 +789,7 @@ async def send_website_message(
             detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -867,7 +860,7 @@ async def stream_website_events(
     origin and the deployment's live allow-list.
     """
     claims = await _load_and_authorize_session(request, session_id)
-    store = _get_session_store(request)
+    store = get_session_store(request)
 
     try:
         session_check = await asyncio.shield(store.get_session(session_id))
@@ -1066,7 +1059,7 @@ async def end_website_session(
             detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     await store.update_session_status(session_id, "completed")
     await store.emit_event(session_id, EventType.SESSION_COMPLETE, {})
     _clear_session_cookie(response)

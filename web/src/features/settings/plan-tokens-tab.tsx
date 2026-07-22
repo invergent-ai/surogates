@@ -42,6 +42,9 @@ interface CommerceOverview {
 
 const ACTIVE_SUB = new Set(["active", "trialing"]);
 
+const errorMessage = (e: unknown, fallback: string): string =>
+  e instanceof Error ? e.message : fallback;
+
 function formatPrice(amountCents: number, currency: string): string {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
@@ -69,9 +72,7 @@ export function PlanTokensTab() {
       setOverview((await r.json()) as CommerceOverview);
     } catch (e) {
       setError(
-        e instanceof Error
-          ? e.message
-          : "Plan information is temporarily unavailable.",
+        errorMessage(e, "Plan information is temporarily unavailable."),
       );
     }
   }, []);
@@ -98,9 +99,7 @@ export function PlanTokensTab() {
       }
       window.location.assign(body.url);
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Checkout is unavailable right now.",
-      );
+      setError(errorMessage(e, "Checkout is unavailable right now."));
       setBusyOfferId(null);
     }
   };

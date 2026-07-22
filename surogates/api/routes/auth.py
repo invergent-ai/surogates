@@ -541,7 +541,8 @@ async def me(
 
 # Lowercase handle: 3-32 chars of [a-z0-9._-], starting and ending
 # alphanumeric. Validated after lowercasing, so any case is accepted
-# on the wire.
+# on the wire. Mirrored as an inline regex in the web sign-up form
+# (web/src/features/auth/login-page.tsx) — keep both in lockstep.
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$")
 
 

@@ -27,6 +27,7 @@ import {
   sendFirebasePasswordReset,
   signInWithGoogle,
 } from "./firebase";
+import { updateCurrentUser } from "@/api/auth";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
 
 const TAGS = [
@@ -88,35 +89,50 @@ export function LoginPage() {
   // Sign-up collects full name / username / phone, but the account
   // only becomes exchangeable after e-mail verification — so the
   // profile waits in localStorage (keyed by e-mail) and is applied to
-  // /auth/me right after the first successful exchange.
+  // /auth/me right after the first successful exchange. All storage
+  // access is best-effort: private-mode browsers may refuse it, and
+  // sign-up must never fail over a profile stash.
+  const safeStorage = {
+    get(key: string): string | null {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
+    set(key: string, value: string): void {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+        /* best-effort by design */
+      }
+    },
+    remove(key: string): void {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* best-effort by design */
+      }
+    },
+  };
+
   const pendingProfileKey = (address: string) =>
     `surogates.pendingProfile.${address.trim().toLowerCase()}`;
 
   const stashPendingProfile = (address: string) => {
-    const profile = {
-      display_name: fullName.trim(),
-      username: username.trim().toLowerCase(),
-      phone: phone.trim(),
-    };
-    try {
-      localStorage.setItem(pendingProfileKey(address), JSON.stringify(profile));
-    } catch {
-      // Storage unavailable (private mode) — the user can still fill
-      // their profile later; sign-up must not fail over this.
-    }
+    safeStorage.set(
+      pendingProfileKey(address),
+      JSON.stringify({
+        display_name: fullName.trim(),
+        username: username.trim().toLowerCase(),
+        phone: phone.trim(),
+      }),
+    );
   };
 
-  const applyPendingProfile = async (
-    address: string | null | undefined,
-    accessToken: string,
-  ) => {
+  const applyPendingProfile = async (address: string | null | undefined) => {
     if (!address) return;
-    let raw: string | null = null;
-    try {
-      raw = localStorage.getItem(pendingProfileKey(address));
-    } catch {
-      return;
-    }
+    const raw = safeStorage.get(pendingProfileKey(address));
     if (!raw) return;
     try {
       const profile = JSON.parse(raw) as {
@@ -129,23 +145,11 @@ export function LoginPage() {
       if (profile.username) body.username = profile.username;
       if (profile.phone) body.phone = profile.phone;
       if (Object.keys(body).length > 0) {
-        await fetch("/api/v1/auth/me", {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
-          },
-          body: JSON.stringify(body),
-        });
+        // authFetch inside reads the freshly-stored access token.
+        await updateCurrentUser(body);
       }
     } finally {
-      try {
-        localStorage.removeItem(pendingProfileKey(address));
-      } catch {
-        // Storage may be unavailable (private mode) — the stale stash
-        // is harmless; it is keyed by e-mail and overwritten on the
-        // next sign-up attempt.
-      }
+      safeStorage.remove(pendingProfileKey(address));
     }
   };
 
@@ -180,7 +184,7 @@ export function LoginPage() {
     // Best-effort: a failed profile write must not block sign-in; the
     // stash is cleared either way and the user can edit their profile
     // later.
-    await applyPendingProfile(user.email, tokens.access_token).catch(() => {});
+    await applyPendingProfile(user.email).catch(() => {});
     void navigate({ to: getPostAuthRoute() });
   };
 
@@ -353,6 +357,8 @@ export function LoginPage() {
         setIsLoading(false);
         return;
       }
+      // Mirror of USERNAME_RE in surogates/api/routes/auth.py — keep
+      // both in lockstep.
       if (!/^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(username.trim().toLowerCase())) {
         setLoginError(
           "Username must be 3-32 characters: letters, digits, dots, dashes or underscores.",

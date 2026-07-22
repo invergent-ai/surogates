@@ -396,6 +396,18 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def _post_commerce(self, path: str, body: dict) -> dict:
+        """POST with the shared 401→PlatformAuthError translation the
+        commerce endpoints all need."""
+        resp = await self._client.post(path, json=body)
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def commerce_summary(
         self,
         agent_id: str,
@@ -414,16 +426,9 @@ class PlatformClient:
             body["email"] = email
         if name is not None:
             body["name"] = name
-        resp = await self._client.post(
-            f"/api/agents/agents/{agent_id}/commerce/summary", json=body,
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/summary", body,
         )
-        if resp.status_code == 401:
-            raise PlatformAuthError(
-                "surogate-ops rejected runtime token (401); "
-                "is the token revoked or missing the 'runtime' scope?",
-            )
-        resp.raise_for_status()
-        return resp.json()
 
     async def commerce_checkout(
         self,
@@ -445,16 +450,9 @@ class PlatformClient:
             body["email"] = email
         if name is not None:
             body["name"] = name
-        resp = await self._client.post(
-            f"/api/agents/agents/{agent_id}/commerce/checkout", json=body,
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/checkout", body,
         )
-        if resp.status_code == 401:
-            raise PlatformAuthError(
-                "surogate-ops rejected runtime token (401); "
-                "is the token revoked or missing the 'runtime' scope?",
-            )
-        resp.raise_for_status()
-        return resp.json()
 
     async def commerce_debit(
         self,

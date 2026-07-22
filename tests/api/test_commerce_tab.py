@@ -62,9 +62,9 @@ _SUMMARY = {
 @pytest.mark.asyncio
 async def test_overview_marks_purchasable_for_firebase_user(monkeypatch):
     async def ident(request, tenant):
-        return ("uid-1", "u@example.com", "U")
+        return {"firebase_uid": "uid-1", "email": "u@example.com", "name": "U"}
 
-    monkeypatch.setattr(commerce, "_firebase_identity", ident)
+    monkeypatch.setattr(commerce, "firebase_buyer_identity", ident)
     platform = _FakePlatform(summary=_SUMMARY)
     out = await commerce.commerce_overview(
         _request(platform), tenant=_TENANT, agent_runtime=_ctx(),
@@ -81,7 +81,7 @@ async def test_overview_disables_buying_without_firebase_identity(
     async def ident(request, tenant):
         return None
 
-    monkeypatch.setattr(commerce, "_firebase_identity", ident)
+    monkeypatch.setattr(commerce, "firebase_buyer_identity", ident)
     platform = _FakePlatform(summary=_SUMMARY)
     out = await commerce.commerce_overview(
         _request(platform), tenant=_TENANT, agent_runtime=_ctx(),
@@ -93,9 +93,9 @@ async def test_overview_disables_buying_without_firebase_identity(
 @pytest.mark.asyncio
 async def test_checkout_translates_ops_refusals(monkeypatch):
     async def ident(request, tenant):
-        return ("uid-1", None, None)
+        return {"firebase_uid": "uid-1", "email": None, "name": None}
 
-    monkeypatch.setattr(commerce, "_firebase_identity", ident)
+    monkeypatch.setattr(commerce, "firebase_buyer_identity", ident)
     refusal = httpx.HTTPStatusError(
         "400",
         request=httpx.Request("POST", "http://x"),
@@ -118,7 +118,7 @@ async def test_checkout_refuses_operator_accounts(monkeypatch):
     async def ident(request, tenant):
         return None
 
-    monkeypatch.setattr(commerce, "_firebase_identity", ident)
+    monkeypatch.setattr(commerce, "firebase_buyer_identity", ident)
     platform = _FakePlatform(checkout={"url": "x"})
     with pytest.raises(HTTPException) as err:
         await commerce.commerce_checkout(
@@ -133,9 +133,9 @@ async def test_checkout_refuses_operator_accounts(monkeypatch):
 @pytest.mark.asyncio
 async def test_checkout_returns_url(monkeypatch):
     async def ident(request, tenant):
-        return ("uid-1", "u@example.com", "U")
+        return {"firebase_uid": "uid-1", "email": "u@example.com", "name": "U"}
 
-    monkeypatch.setattr(commerce, "_firebase_identity", ident)
+    monkeypatch.setattr(commerce, "firebase_buyer_identity", ident)
     platform = _FakePlatform(checkout={"url": "https://stripe/xyz"})
     out = await commerce.commerce_checkout(
         commerce.CommerceCheckoutRequest(offer_id="off-1"),

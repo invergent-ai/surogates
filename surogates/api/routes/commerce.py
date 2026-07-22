@@ -19,8 +19,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
-
+from surogates.api.routes._commerce_turn import firebase_buyer_identity
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.runtime.platform_client import PlatformAuthError
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -39,30 +38,6 @@ class CommerceCheckoutResponse(BaseModel):
     url: str
 
 
-async def _firebase_identity(
-    request: Request, tenant: TenantContext,
-) -> tuple[str, str | None, str | None] | None:
-    """(firebase_uid, email, name) for the signed-in user, or ``None``
-    when the principal has no project-Firebase identity."""
-    if tenant.user_id is None:
-        return None
-    from surogates.db.models import User
-
-    session_factory = request.app.state.session_factory
-    async with session_factory() as db:
-        user = await db.scalar(
-            select(User).where(
-                User.id == tenant.user_id,
-                User.org_id == tenant.org_id,
-            )
-        )
-    if (
-        user is None
-        or not (user.auth_provider or "").startswith("firebase:")
-        or not user.external_id
-    ):
-        return None
-    return user.external_id, user.email, user.display_name
 
 
 def _platform_client(request: Request):
@@ -86,31 +61,13 @@ async def commerce_overview(
     ``purchasable`` tells the tab whether Buy buttons can work for
     this principal (it requires a Firebase identity to meter against).
     """
-    identity = await _firebase_identity(request, tenant)
+    identity = await firebase_buyer_identity(request, tenant)
     client = _platform_client(request)
-    if identity is None:
-        # Still show what the agent sells — with buying disabled. No
-        # identity is sent, so ops mints no buyer/entitlement row.
-        try:
-            summary = await client.commerce_summary(
-                str(agent_runtime.agent_id),
-            )
-        except (PlatformAuthError, httpx.HTTPError):
-            logger.warning("commerce summary unavailable", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Plan information is temporarily unavailable.",
-            )
-        summary["entitlement"] = None
-        summary["purchasable"] = False
-        return summary
-    uid, email, name = identity
     try:
+        # Identity-less principals get the offer list only — no
+        # identity is sent, so ops mints no buyer/entitlement row.
         summary = await client.commerce_summary(
-            str(agent_runtime.agent_id),
-            firebase_uid=uid,
-            email=email,
-            name=name,
+            str(agent_runtime.agent_id), **(identity or {}),
         )
     except (PlatformAuthError, httpx.HTTPError):
         logger.warning("commerce summary unavailable", exc_info=True)
@@ -118,7 +75,11 @@ async def commerce_overview(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Plan information is temporarily unavailable.",
         )
-    summary["purchasable"] = summary.get("mode") != "free"
+    if identity is None:
+        summary["entitlement"] = None
+    summary["purchasable"] = (
+        identity is not None and summary.get("mode") != "free"
+    )
     return summary
 
 
@@ -129,7 +90,7 @@ async def commerce_checkout(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> CommerceCheckoutResponse:
-    identity = await _firebase_identity(request, tenant)
+    identity = await firebase_buyer_identity(request, tenant)
     if identity is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -139,15 +100,12 @@ async def commerce_checkout(
                 "operator)."
             ),
         )
-    uid, email, name = identity
     client = _platform_client(request)
     try:
         payload = await client.commerce_checkout(
             str(agent_runtime.agent_id),
-            firebase_uid=uid,
             offer_id=body.offer_id,
-            email=email,
-            name=name,
+            **identity,
         )
     except httpx.HTTPStatusError as exc:
         detail = "Checkout is unavailable for this offer."

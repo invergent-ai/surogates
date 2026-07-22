@@ -47,13 +47,7 @@ async def authorize_commerce_turn(
     turn.  402 details are structured (``{"code", "buy_url"}``) so the
     widget can render a paywall instead of a generic error.
     """
-    runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
-    if runtime_cache is None:
-        return
-    try:
-        payload = await runtime_cache.get(str(session.agent_id)) or {}
-    except LookupError:
-        return
+    payload = await runtime_commerce_payload(request, str(session.agent_id))
     mode = str(payload.get("commerce_mode") or "free")
     if mode == "free":
         return
@@ -98,7 +92,7 @@ async def authorize_commerce_turn(
             detail="Access checks are temporarily unavailable; try again.",
         ) from exc
     if receipt.get("entitlement_id"):
-        store = _session_store(request)
+        store = get_session_store(request)
         # Appended, not overwritten: a second message can land while a
         # turn is still running, and each hold must survive until the
         # worker's settlement takes the whole list atomically.
@@ -113,8 +107,7 @@ async def authorize_commerce_turn(
         )
 
 
-
-def _session_store(request: Request) -> "SessionStore":
+def get_session_store(request: Request) -> "SessionStore":
     store = getattr(request.app.state, "session_store", None)
     if store is None:
         raise HTTPException(
@@ -122,3 +115,50 @@ def _session_store(request: Request) -> "SessionStore":
             detail="Session store not available.",
         )
     return store
+
+
+async def runtime_commerce_payload(request: Request, agent_id: str) -> dict:
+    """The agent's runtime-config payload, or ``{}`` when the cache is
+    absent or has no entry — reads as free mode either way. The single
+    cache-access point for commerce gating."""
+    runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
+    if runtime_cache is None:
+        return {}
+    try:
+        return await runtime_cache.get(agent_id) or {}
+    except LookupError:
+        return {}
+
+
+async def firebase_buyer_identity(
+    request: Request, tenant,
+) -> dict | None:
+    """``{firebase_uid, email, name}`` for the signed-in user, or
+    ``None`` when the principal has no project-Firebase identity —
+    the one rule for "can this user be metered/charged", shared by
+    the web message gate and the Plan & tokens tab."""
+    if getattr(tenant, "user_id", None) is None:
+        return None
+    from sqlalchemy import select
+
+    from surogates.db.models import User
+
+    session_factory = request.app.state.session_factory
+    async with session_factory() as db:
+        user = await db.scalar(
+            select(User).where(
+                User.id == tenant.user_id,
+                User.org_id == tenant.org_id,
+            )
+        )
+    if (
+        user is None
+        or not (user.auth_provider or "").startswith("firebase:")
+        or not user.external_id
+    ):
+        return None
+    return {
+        "firebase_uid": user.external_id,
+        "email": user.email,
+        "name": user.display_name,
+    }
