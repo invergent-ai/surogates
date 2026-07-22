@@ -154,6 +154,7 @@ export function LoginPage() {
   };
 
   const handleForgotPassword = async () => {
+    const firebaseConfig = authConfig.firebase;
     if (!firebaseConfig) return;
     if (!email.trim()) {
       setLoginError("Enter your email above first.");
