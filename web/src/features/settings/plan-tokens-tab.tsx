@@ -6,6 +6,7 @@
 // /v1/commerce endpoints (which front surogate-ops with the runtime
 // token) — the browser never talks to ops directly.
 
+import { BrandBeam } from "@invergent/agent-chat-react";
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "@/api/auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -197,36 +198,51 @@ export function PlanTokensTab() {
             <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               {section.label}
             </p>
-            {section.items.map((offer) => (
-              <div
-                key={offer.id}
-                data-testid={`plan-offer-${offer.id}`}
-                className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3"
-              >
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="text-sm font-medium">{offer.name}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatTokens(offer.token_amount)} tokens
-                    {offer.kind === "subscription"
-                      ? " every period"
-                      : " · one-time"}
-                  </span>
-                </div>
-                <span className="shrink-0 text-sm font-semibold tabular-nums">
-                  {formatPrice(offer.amount_cents, offer.currency)}
-                  {offer.kind === "subscription" && offer.billing_interval
-                    ? `/${offer.billing_interval}`
-                    : ""}
-                </span>
-                <Button
-                  size="sm"
-                  disabled={!overview.purchasable || busyOfferId !== null}
-                  onClick={() => void buy(offer.id)}
+            {section.items.map((offer, offerIndex) => {
+              const row = (
+                <div
+                  data-testid={`plan-offer-${offer.id}`}
+                  className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3"
                 >
-                  {busyOfferId === offer.id ? "Redirecting…" : section.verb}
-                </Button>
-              </div>
-            ))}
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="text-sm font-medium">{offer.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatTokens(offer.token_amount)} tokens
+                      {offer.kind === "subscription"
+                        ? " every period"
+                        : " · one-time"}
+                    </span>
+                  </div>
+                  <span className="shrink-0 text-sm font-semibold tabular-nums">
+                    {formatPrice(offer.amount_cents, offer.currency)}
+                    {offer.kind === "subscription" && offer.billing_interval
+                      ? `/${offer.billing_interval}`
+                      : ""}
+                  </span>
+                  <Button
+                    size="sm"
+                    disabled={!overview.purchasable || busyOfferId !== null}
+                    onClick={() => void buy(offer.id)}
+                  >
+                    {busyOfferId === offer.id ? "Redirecting…" : section.verb}
+                  </Button>
+                </div>
+              );
+              // The lead plan is the recommended one — it alone gets the
+              // brand beam so the highlight stays singular in the list.
+              return section.label === "Plans" && offerIndex === 0 ? (
+                <BrandBeam
+                  key={offer.id}
+                  size="md"
+                  strength={0.55}
+                  borderRadius={8}
+                >
+                  {row}
+                </BrandBeam>
+              ) : (
+                <div key={offer.id}>{row}</div>
+              );
+            })}
           </div>
         ))}
     </div>
