@@ -16,6 +16,7 @@ import {
   createUserWithEmailAndPassword,
   getAuth,
   sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   type Auth,
@@ -83,7 +84,14 @@ export function getRuntimeFirebaseAuth(config: FirebaseRuntimeConfig): Auth {
     app = initializeApp(
       {
         apiKey: config.api_key,
-        authDomain: config.auth_domain,
+        // The auth helpers are served same-origin on every surface:
+        // vite proxies /__ in dev, the harness API reverse-proxies it
+        // in production (see api/routes/firebase_auth_proxy.py).
+        // Using our own host as authDomain keeps the popup completion
+        // channel first-party, immune to third-party storage
+        // partitioning. The agent's domain must be in the Firebase
+        // project's authorized domains.
+        authDomain: window.location.host,
         projectId: config.project_id,
         appId: config.app_id ?? undefined,
         messagingSenderId: config.messaging_sender_id ?? undefined,
@@ -157,4 +165,14 @@ export async function resendFirebaseEmailVerification(
   user: User,
 ): Promise<void> {
   await sendEmailVerification(user);
+}
+
+/** Send the Firebase password-reset email for a self-registered
+ * account. Callers surface a neutral notice either way so the form
+ * doesn't leak whether the address is registered. */
+export async function sendFirebasePasswordReset(
+  config: FirebaseRuntimeConfig,
+  email: string,
+): Promise<void> {
+  await sendPasswordResetEmail(getRuntimeFirebaseAuth(config), email.trim());
 }

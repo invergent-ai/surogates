@@ -38,6 +38,11 @@ from surogates.api.session_guards import (
 )
 from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.api.routes._commerce_turn import (
+    authorize_commerce_turn,
+    firebase_buyer_identity,
+    runtime_commerce_payload,
+)
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -527,6 +532,8 @@ async def create_api_session(
     )
 
 
+
+
 @router.post(
     "/api/sessions/{session_id}/messages",
     response_model=SendMessageResponse,
@@ -797,6 +804,29 @@ async def send_message(
         len(body.images) if body.images else 0,
         len(attachments_payload) if attachments_payload else 0,
     )
+    # ── Commerce enforcement (monetized agents, web channel) ──
+    # The authenticated web user's Firebase identity IS the buyer
+    # identity ops meters against (exchange stores the Firebase uid as
+    # external_id), so their paid subscription/token-pack balance
+    # applies here exactly as on the hosted buy page: reserve before
+    # the turn, worker settles ``commerce_reservations`` after it.
+    # Operator-provisioned accounts (database/external providers, no
+    # Firebase uid) are the builder's own people and pass unmetered —
+    # granting them access is the operator's explicit choice.
+    if session.channel == "web" and tenant.user_id is not None:
+        payload = await runtime_commerce_payload(
+            request, str(session.agent_id),
+        )
+        if str(payload.get("commerce_mode") or "free") != "free":
+            buyer = await firebase_buyer_identity(request, tenant)
+            if buyer is not None:
+                await authorize_commerce_turn(
+                    request,
+                    session,
+                    body.content,
+                    buyer=buyer,
+                )
+
     event_data: dict = {"content": body.content}
     if body.images:
         event_data["images"] = [

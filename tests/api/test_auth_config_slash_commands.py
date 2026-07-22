@@ -29,6 +29,7 @@ async def test_auth_config_exposes_enabled_slash_commands():
     # No firebase cache → the early-return path; slash_commands must still
     # be populated.
     request.app.state.firebase_config_cache = None
+    request.app.state.runtime_config_cache = None
 
     resp = await auth_config(
         request, agent_runtime=_ctx(frozenset({"clear", "loop", "compress"}))
@@ -41,6 +42,7 @@ async def test_auth_config_exposes_enabled_slash_commands():
 async def test_auth_config_omits_disabled_slash_commands():
     request = MagicMock()
     request.app.state.firebase_config_cache = None
+    request.app.state.runtime_config_cache = None
 
     resp = await auth_config(request, agent_runtime=_ctx(frozenset({"clear"})))
 

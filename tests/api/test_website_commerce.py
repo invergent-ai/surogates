@@ -4,7 +4,7 @@ Covers the two route-level hooks:
 
 - ``_resolve_commerce_buyer`` — bootstrap-time Firebase verification
   that pins the buyer identity on the session config.
-- ``_authorize_commerce_turn`` — message-accept gate: free agents pass
+- ``authorize_commerce_turn`` — message-accept gate: free agents pass
   through untouched; monetized agents require a bound buyer and an
   ops-side reservation, with structured 402 details the widget maps to
   its paywall.
@@ -88,7 +88,7 @@ _PAID_PAYLOAD = {
 }
 
 
-# ── _authorize_commerce_turn ─────────────────────────────────────────
+# ── authorize_commerce_turn ─────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -97,21 +97,21 @@ async def test_free_mode_passes_without_touching_the_platform():
     request = _request(
         runtime_payload={"commerce_mode": "free"}, platform_client=client,
     )
-    await website._authorize_commerce_turn(request, _session(), "hello")
+    await website.authorize_commerce_turn(request, _session(), "hello")
     assert client.calls == []
 
 
 @pytest.mark.asyncio
 async def test_missing_runtime_cache_passes_through():
     request = _request()
-    await website._authorize_commerce_turn(request, _session(), "hello")
+    await website.authorize_commerce_turn(request, _session(), "hello")
 
 
 @pytest.mark.asyncio
 async def test_paid_without_buyer_402_sign_in_required():
     request = _request(runtime_payload=_PAID_PAYLOAD)
     with pytest.raises(HTTPException) as exc_info:
-        await website._authorize_commerce_turn(request, _session(), "hello")
+        await website.authorize_commerce_turn(request, _session(), "hello")
     assert exc_info.value.status_code == 402
     assert exc_info.value.detail == {
         "code": "sign_in_required",
@@ -141,7 +141,7 @@ async def test_paid_with_buyer_reserves_and_pins_receipt():
             },
         },
     )
-    await website._authorize_commerce_turn(request, session, "x" * 100)
+    await website.authorize_commerce_turn(request, session, "x" * 100)
 
     assert client.calls == [
         {
@@ -175,7 +175,7 @@ async def test_paid_402_from_ops_maps_to_structured_detail():
     )
     session = _session(config={"commerce_buyer": {"firebase_uid": "fb-1"}})
     with pytest.raises(HTTPException) as exc_info:
-        await website._authorize_commerce_turn(request, session, "hello")
+        await website.authorize_commerce_turn(request, session, "hello")
     assert exc_info.value.status_code == 402
     assert exc_info.value.detail == {
         "code": "insufficient_tokens",
@@ -191,7 +191,7 @@ async def test_paid_platform_failure_fails_closed_503():
     )
     session = _session(config={"commerce_buyer": {"firebase_uid": "fb-1"}})
     with pytest.raises(HTTPException) as exc_info:
-        await website._authorize_commerce_turn(request, session, "hello")
+        await website.authorize_commerce_turn(request, session, "hello")
     assert exc_info.value.status_code == 503
 
 
@@ -200,7 +200,7 @@ async def test_paid_without_platform_client_fails_closed_503():
     request = _request(runtime_payload=_PAID_PAYLOAD)
     session = _session(config={"commerce_buyer": {"firebase_uid": "fb-1"}})
     with pytest.raises(HTTPException) as exc_info:
-        await website._authorize_commerce_turn(request, session, "hello")
+        await website.authorize_commerce_turn(request, session, "hello")
     assert exc_info.value.status_code == 503
 
 
@@ -218,7 +218,7 @@ async def test_free_receipt_is_not_pinned():
         runtime_payload=_PAID_PAYLOAD, platform_client=client, store=store,
     )
     session = _session(config={"commerce_buyer": {"firebase_uid": "fb-1"}})
-    await website._authorize_commerce_turn(request, session, "hello")
+    await website.authorize_commerce_turn(request, session, "hello")
     assert store.updates == []
 
 

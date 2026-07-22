@@ -24,8 +24,10 @@ import {
   resendFirebaseEmailVerification,
   signInWithFirebaseEmail,
   signInWithGithub,
+  sendFirebasePasswordReset,
   signInWithGoogle,
 } from "./firebase";
+import { updateCurrentUser, type SignupProfile } from "@/api/auth";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
 
 const TAGS = [
@@ -60,6 +62,9 @@ export function LoginPage() {
     self_registration_enabled: false,
     firebase: null,
   });
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [phone, setPhone] = useState("");
   const [firebaseMode, setFirebaseMode] = useState<"sign-in" | "create">(
     "sign-in",
   );
@@ -81,15 +86,114 @@ export function LoginPage() {
     };
   }, []);
 
+  // Sign-up collects full name / username / phone, but the account
+  // only becomes exchangeable after e-mail verification — so the
+  // profile waits in localStorage (keyed by e-mail) and is applied to
+  // /auth/me right after the first successful exchange. All storage
+  // access is best-effort: private-mode browsers may refuse it, and
+  // sign-up must never fail over a profile stash.
+  const safeStorage = {
+    get(key: string): string | null {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
+    set(key: string, value: string): void {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+        /* best-effort by design */
+      }
+    },
+    remove(key: string): void {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* best-effort by design */
+      }
+    },
+  };
+
+  const pendingProfileKey = (address: string) =>
+    `surogates.pendingProfile.${address.trim().toLowerCase()}`;
+
+  const stashPendingProfile = (address: string) => {
+    safeStorage.set(
+      pendingProfileKey(address),
+      JSON.stringify({
+        display_name: fullName.trim(),
+        username: username.trim().toLowerCase(),
+        phone: phone.trim(),
+      }),
+    );
+  };
+
+  const applyPendingProfile = async (address: string | null | undefined) => {
+    if (!address) return;
+    const raw = safeStorage.get(pendingProfileKey(address));
+    if (!raw) return;
+    try {
+      const profile = JSON.parse(raw) as {
+        display_name?: string;
+        username?: string;
+        phone?: string;
+      };
+      const body: Record<string, string> = {};
+      if (profile.display_name) body.display_name = profile.display_name;
+      if (profile.username) body.username = profile.username;
+      if (profile.phone) body.phone = profile.phone;
+      if (Object.keys(body).length > 0) {
+        // authFetch inside reads the freshly-stored access token.
+        await updateCurrentUser(body);
+      }
+    } finally {
+      safeStorage.remove(pendingProfileKey(address));
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!firebaseConfig) return;
+    if (!email.trim()) {
+      setLoginError("Enter your email above first.");
+      return;
+    }
+    setLoginError(null);
+    try {
+      await sendFirebasePasswordReset(firebaseConfig, email);
+    } catch {
+      // Fall through to the neutral notice — the form must not leak
+      // whether an address is registered.
+    }
+    setLoginNotice(
+      "If an account exists for that email, a password-reset link is on its way.",
+    );
+  };
+
   const finishFirebaseUser = async (user: {
+    email?: string | null;
     getIdToken: (forceRefresh?: boolean) => Promise<string>;
   }) => {
     // Force-refresh the ID token so claims reflect the current
     // server-side state (notably ``email_verified`` after the user
     // returns from clicking the verification link).
     const idToken = await user.getIdToken(true);
-    const tokens = await exchangeFirebaseToken(idToken);
+    // New-user exchanges apply the sign-up profile atomically at
+    // creation; existing users are untouched by these fields and the
+    // PATCH relay below covers them instead.
+    const stashed = user.email
+      ? safeStorage.get(pendingProfileKey(user.email))
+      : null;
+    const tokens = await exchangeFirebaseToken(
+      idToken,
+      stashed ? (JSON.parse(stashed) as SignupProfile) : undefined,
+    );
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
+    // Best-effort: a failed profile write must not block sign-in; the
+    // stash is cleared either way and the user can edit their profile
+    // later.
+    await applyPendingProfile(user.email).catch(() => {});
     void navigate({ to: getPostAuthRoute() });
   };
 
@@ -257,6 +361,24 @@ export function LoginPage() {
     // ── Create-account mode: sign up via Firebase email/password. ──
     const firebaseConfig = authConfig.firebase;
     if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
+      if (!fullName.trim()) {
+        setLoginError("Please enter your full name.");
+        setIsLoading(false);
+        return;
+      }
+      // The handle rule comes from the backend (/auth/config);
+      // the literal is only a fallback for older backends.
+      const usernamePattern = new RegExp(
+        authConfig.username_pattern ?? "^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$",
+      );
+      if (!usernamePattern.test(username.trim().toLowerCase())) {
+        setLoginError(
+          "Username must be 3-32 characters: letters, digits, dots, dashes or underscores.",
+        );
+        setIsLoading(false);
+        return;
+      }
+      stashPendingProfile(email);
       try {
         const { user, verificationSent, verificationError } =
           await createFirebaseEmailAccount(firebaseConfig, email, password);
@@ -432,6 +554,56 @@ export function LoginPage() {
 
         {/* form */}
         <form onSubmit={handleLogin}>
+          {firebaseMode === "create" && firebasePasswordEnabled && (
+            <>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-full-name"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Full name
+                </Label>
+                <Input
+                  id="signup-full-name"
+                  value={fullName}
+                  onChange={(e) => { setFullName(e.target.value); clearError(); }}
+                  placeholder="Ada Lovelace"
+                  autoComplete="name"
+                />
+              </div>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-username"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Username
+                </Label>
+                <Input
+                  id="signup-username"
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); clearError(); }}
+                  placeholder="ada.lovelace"
+                  autoComplete="username"
+                />
+              </div>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-phone"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Phone <span className="text-faint">(optional)</span>
+                </Label>
+                <Input
+                  id="signup-phone"
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => { setPhone(e.target.value); clearError(); }}
+                  placeholder="+40 712 345 678"
+                  autoComplete="tel"
+                />
+              </div>
+            </>
+          )}
           <div className="mb-3.5">
             <Label htmlFor="login-email" className="mb-1.5 block text-subtle">
               Email
@@ -469,6 +641,15 @@ export function LoginPage() {
                 {showPassword ? "Hide" : "Show"}
               </Button>
             </div>
+            {firebaseMode === "sign-in" && firebasePasswordEnabled && (
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="mt-1.5 text-xs text-faint hover:text-foreground hover:underline"
+              >
+                Forgot password?
+              </button>
+            )}
           </div>
 
           {loginError && (
@@ -521,20 +702,40 @@ export function LoginPage() {
             )}
           </Button>
 
-          {firebasePasswordEnabled && (
-            <button
-              type="button"
-              className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
-              onClick={() => {
-                clearError();
-                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
-              }}
-            >
-              {firebaseMode === "create"
-                ? "Already have an account? Sign in"
-                : "New here? Create an account"}
-            </button>
-          )}
+          {(() => {
+            // Paid agents: new users belong on the buy page, where the
+            // account is created inside the purchase flow and they come
+            // back already entitled — local sign-up would only lead to
+            // the paywall. Free agents keep in-app self-registration.
+            const monetized =
+              (authConfig.commerce_mode ?? "free") !== "free" &&
+              !!authConfig.commerce_buy_url;
+            if (monetized) {
+              return (
+                <a
+                  href={authConfig.commerce_buy_url ?? "#"}
+                  className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
+                >
+                  New here? Get access →
+                </a>
+              );
+            }
+            if (!firebasePasswordEnabled) return null;
+            return (
+              <button
+                type="button"
+                className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
+                onClick={() => {
+                  clearError();
+                  setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
+                }}
+              >
+                {firebaseMode === "create"
+                  ? "Already have an account? Sign in"
+                  : "New here? Create an account"}
+              </button>
+            );
+          })()}
         </form>
 
         {/* ── Firebase self-registration ── */}

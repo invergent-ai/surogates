@@ -66,6 +66,11 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.api.routes._commerce_turn import (
+    authorize_commerce_turn,
+    estimate_turn_tokens,
+    get_session_store,
+)
 from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
     PlatformAuthError,
@@ -154,14 +159,6 @@ def _get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def _get_session_store(request: Request) -> SessionStore:
-    store: SessionStore | None = getattr(request.app.state, "session_store", None)
-    if store is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Session store not available.",
-        )
-    return store
 
 
 def _require_website_enabled(settings: Settings) -> None:
@@ -354,7 +351,7 @@ async def _reusable_cookie_session(
         or claims.org_id != org_uuid
     ):
         return None
-    store = _get_session_store(request)
+    store = get_session_store(request)
     try:
         session = await store.get_session(claims.session_id)
     except SessionNotFoundError:
@@ -491,14 +488,6 @@ async def _enforce_website_rate_limit(
 # ---------------------------------------------------------------------------
 
 
-def _estimate_turn_tokens(content: str) -> int:
-    """~4-chars/token heuristic — the same shape ops's
-    estimate_prompt_tokens computes for the hosted buy page
-    ((chars + 16) // 4 with the per-message framing overhead), so a
-    visitor's hold is the same through either surface."""
-    return (len(content) + 16) // 4
-
-
 async def _resolve_commerce_buyer(
     request: Request, agent_id: str, firebase_id_token: str,
 ) -> dict | None:
@@ -567,84 +556,6 @@ async def _resolve_commerce_buyer(
         "email": email,
         "name": _display_name_from_firebase_claims(claims, email),
     }
-
-
-async def _authorize_commerce_turn(
-    request: Request, session, content: str,
-) -> None:
-    """Gate one visitor message behind the agent's monetization mode.
-
-    Free agents (the default, and every agent while the platform's
-    commerce rollout flag is off — ops reports them as free) return
-    immediately.  Monetized agents require a session-bound buyer
-    identity and a successful ops-side token reservation; the receipt
-    is pinned on ``session.config`` for the worker to settle after the
-    turn.  402 details are structured (``{"code", "buy_url"}``) so the
-    widget can render a paywall instead of a generic error.
-    """
-    runtime_cache = getattr(request.app.state, "runtime_config_cache", None)
-    if runtime_cache is None:
-        return
-    try:
-        payload = await runtime_cache.get(str(session.agent_id)) or {}
-    except LookupError:
-        return
-    mode = str(payload.get("commerce_mode") or "free")
-    if mode == "free":
-        return
-    buy_url = payload.get("commerce_buy_url")
-    buyer = (session.config or {}).get("commerce_buyer") or {}
-    if not buyer.get("firebase_uid"):
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": "sign_in_required", "buy_url": buy_url},
-        )
-    client = getattr(request.app.state, "platform_client", None)
-    if client is None:
-        logger.error("platform_client is not wired on app.state")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Access checks are temporarily unavailable; try again.",
-        )
-    try:
-        receipt = await client.commerce_authorize(
-            str(session.agent_id),
-            firebase_uid=buyer["firebase_uid"],
-            estimated_tokens=_estimate_turn_tokens(content),
-            email=buyer.get("email"),
-            name=buyer.get("name"),
-        )
-    except CommercePaymentRequiredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": exc.detail, "buy_url": buy_url},
-        ) from exc
-    except Exception as exc:
-        # Fail closed: a paid agent must not serve free turns because
-        # the metering plane blinked.
-        logger.error(
-            "Commerce authorization failed for session %s: %s",
-            session.id,
-            exc,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Access checks are temporarily unavailable; try again.",
-        ) from exc
-    if receipt.get("entitlement_id"):
-        store = _get_session_store(request)
-        # Appended, not overwritten: a second message can land while a
-        # turn is still running, and each hold must survive until the
-        # worker's settlement takes the whole list atomically.
-        await store.append_session_config_list(
-            session.id,
-            "commerce_reservations",
-            {
-                "entitlement_id": receipt["entitlement_id"],
-                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
-                "reservation_id": receipt.get("reservation_id") or "",
-            },
-        )
 
 
 def _issue_bootstrap_response(
@@ -737,7 +648,7 @@ async def bootstrap_website_session(
             detail="Storage bucket is not configured (settings.storage.bucket is empty).",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     storage = request.app.state.storage
 
     session_id = uuid.uuid4()
@@ -878,7 +789,7 @@ async def send_website_message(
             detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     try:
         session = await store.get_session(session_id)
     except SessionNotFoundError:
@@ -914,7 +825,7 @@ async def send_website_message(
             ),
         )
 
-    await _authorize_commerce_turn(request, session, body.content)
+    await authorize_commerce_turn(request, session, body.content)
 
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
@@ -949,7 +860,7 @@ async def stream_website_events(
     origin and the deployment's live allow-list.
     """
     claims = await _load_and_authorize_session(request, session_id)
-    store = _get_session_store(request)
+    store = get_session_store(request)
 
     try:
         session_check = await asyncio.shield(store.get_session(session_id))
@@ -1148,7 +1059,7 @@ async def end_website_session(
             detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
         )
 
-    store = _get_session_store(request)
+    store = get_session_store(request)
     await store.update_session_status(session_id, "completed")
     await store.emit_event(session_id, EventType.SESSION_COMPLETE, {})
     _clear_session_cookie(response)

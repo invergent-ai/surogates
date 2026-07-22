@@ -8,7 +8,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+import re
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from surogates.audit import (
     AuditStore,
@@ -79,6 +82,9 @@ class FirebaseWebConfig(BaseModel):
     enabled_providers: list[str]
 
 
+USERNAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$"
+
+
 class AuthConfigResponse(BaseModel):
     """Runtime auth shape exposed by ``GET /v1/auth/config``."""
 
@@ -93,10 +99,28 @@ class AuthConfigResponse(BaseModel):
     # "Multi session" capability.  When False each user keeps one session
     # per channel; the SPA hides "New chat" and pins the conversation.
     multi_session: bool = True
+    # Username handle rule (source of truth: USERNAME_RE below). The
+    # sign-up form pre-validates with this so the client can never
+    # drift from the server.
+    username_pattern: str = USERNAME_PATTERN
+    # Monetization projection: on paid agents the login page routes
+    # NEW users to the buy page (account creation happens inside the
+    # purchase flow, so they arrive entitled); free agents keep local
+    # self-registration. Public data — the buy page itself is public.
+    commerce_mode: str = "free"
+    commerce_buy_url: str | None = None
 
 
 class FirebaseExchangeRequest(BaseModel):
     id_token: str
+    # Optional sign-up profile, applied atomically when this exchange
+    # auto-provisions a NEW user (the sign-up form collected them).
+    # Existing users are never overwritten here — profile edits go
+    # through PATCH /auth/me. Invalid or taken usernames are skipped
+    # rather than failing the sign-in.
+    display_name: str | None = None
+    username: str | None = None
+    phone: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +142,13 @@ async def auth_config(
     local login.
     """
     slash_commands = sorted(agent_runtime.slash_commands.commands)
+    from surogates.api.routes._commerce_turn import runtime_commerce_payload
+
+    commerce = await runtime_commerce_payload(
+        request, str(agent_runtime.agent_id),
+    )
+    commerce_mode = str(commerce.get("commerce_mode") or "free")
+    commerce_buy_url = commerce.get("commerce_buy_url")
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
@@ -127,6 +158,8 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            commerce_mode=commerce_mode,
+            commerce_buy_url=commerce_buy_url,
         )
     try:
         fb = await cache.get(project_id)
@@ -137,12 +170,16 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            commerce_mode=commerce_mode,
+            commerce_buy_url=commerce_buy_url,
         )
     return AuthConfigResponse(
         agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
         slash_commands=slash_commands,
         multi_session=agent_runtime.multi_session,
+        commerce_mode=commerce_mode,
+        commerce_buy_url=commerce_buy_url,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,
@@ -320,16 +357,45 @@ async def firebase_exchange(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Firebase token must include an email.",
                 )
+            requested_username = (
+                body.username.strip().lower() if body.username else None
+            )
+            if requested_username is not None and (
+                not USERNAME_RE.fullmatch(requested_username)
+                or await session.scalar(
+                    select(User.id).where(
+                        User.org_id == org_id,
+                        func.lower(User.username) == requested_username,
+                    )
+                )
+                is not None
+            ):
+                # Sign-in must not fail over the handle: skip it and
+                # let the user pick another via PATCH /auth/me.
+                requested_username = None
             user = User(
                 id=uuid.uuid4(),
                 org_id=org_id,
                 email=email,
-                display_name=_display_name_from_firebase_claims(claims, email),
+                display_name=(
+                    (body.display_name or "").strip()
+                    or _display_name_from_firebase_claims(claims, email)
+                ),
                 auth_provider=provider,
                 external_id=subject,
+                username=requested_username,
+                phone=(body.phone or "").strip() or None,
             )
             session.add(user)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # The username unique index caught a concurrent claim;
+                # retry once without it — account creation wins.
+                await session.rollback()
+                user.username = None
+                session.add(user)
+                await session.commit()
             await session.refresh(user)
 
         # Successful auth through THIS agent's web channel is
@@ -524,6 +590,8 @@ async def me(
         org_id=user.org_id,
         email=user.email,
         display_name=user.display_name,
+        username=user.username,
+        phone=user.phone,
         auth_provider=user.auth_provider,
         created_at=user.created_at,
     )
@@ -534,11 +602,20 @@ async def me(
 # ---------------------------------------------------------------------------
 
 
+# Lowercase handle: 3-32 chars of [a-z0-9._-], starting and ending
+# alphanumeric. Validated after lowercasing, so any case is accepted
+# on the wire. Served to clients via /auth/config's username_pattern —
+# one source of truth, no frontend mirror to drift.
+USERNAME_RE = re.compile(USERNAME_PATTERN)
+
+
 class UserUpdateRequest(BaseModel):
     """Payload for updating the current user's profile."""
 
     display_name: str | None = None
     email: str | None = None
+    username: str | None = None
+    phone: str | None = None
 
 
 @router.patch("/auth/me", response_model=UserResponse)
@@ -548,10 +625,26 @@ async def update_me(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> UserResponse:
     """Update profile fields for the currently authenticated user."""
-    if body.display_name is None and body.email is None:
+    if (
+        body.display_name is None
+        and body.email is None
+        and body.username is None
+        and body.phone is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No fields to update.",
+        )
+
+    username = body.username.strip().lower() if body.username is not None else None
+    if username is not None and not USERNAME_RE.fullmatch(username):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Username must be 3-32 characters (letters, digits, "
+                "dots, dashes, underscores) and start/end with a letter "
+                "or digit."
+            ),
         )
 
     session_factory = request.app.state.session_factory
@@ -581,8 +674,41 @@ async def update_me(
             user.display_name = stripped
         if body.email is not None:
             user.email = body.email
+        if username is not None:
+            taken = await session.scalar(
+                select(User.id).where(
+                    User.org_id == tenant.org_id,
+                    func.lower(User.username) == username,
+                    User.id != user.id,
+                )
+            )
+            if taken is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That username is already taken.",
+                )
+            user.username = username
+        if body.phone is not None:
+            # Optional field: an empty string clears it.
+            user.phone = body.phone.strip() or None
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            # Two org-scoped unique indexes can fire here: the
+            # username handle and the login-key e-mail. Name the right
+            # one — a mislabeled conflict sends the user fixing the
+            # wrong field.
+            constraint = str(getattr(exc, "orig", exc))
+            if "uq_users_org_lower_email" in constraint:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That email is already in use.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That username is already taken.",
+            )
         await session.refresh(user)
 
     return UserResponse(
@@ -590,6 +716,8 @@ async def update_me(
         org_id=user.org_id,
         email=user.email,
         display_name=user.display_name,
+        username=user.username,
+        phone=user.phone,
         auth_provider=user.auth_provider,
         created_at=user.created_at,
     )

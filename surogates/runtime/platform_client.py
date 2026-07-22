@@ -396,6 +396,64 @@ class PlatformClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def _post_commerce(self, path: str, body: dict) -> dict:
+        """POST with the shared 401→PlatformAuthError translation the
+        commerce endpoints all need."""
+        resp = await self._client.post(path, json=body)
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def commerce_summary(
+        self,
+        agent_id: str,
+        *,
+        firebase_uid: str | None = None,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """The agent's offers plus this end-user's entitlement — the
+        payload behind the web app's Plan & tokens tab. Raises
+        :class:`PlatformAuthError` on 401; other non-2xx propagate."""
+        body: dict = {}
+        if firebase_uid is not None:
+            body["firebase_uid"] = firebase_uid
+        if email is not None:
+            body["email"] = email
+        if name is not None:
+            body["name"] = name
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/summary", body,
+        )
+
+    async def commerce_checkout(
+        self,
+        agent_id: str,
+        *,
+        firebase_uid: str,
+        offer_id: str,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Mint a Stripe Checkout URL for an in-app purchase.
+
+        Returns ``{"url": str}``. 4xx refusals (inactive offer, seller
+        account not ready, …) surface as ``httpx.HTTPStatusError`` for
+        the route to translate; 401 raises
+        :class:`PlatformAuthError`."""
+        body: dict = {"firebase_uid": firebase_uid, "offer_id": offer_id}
+        if email is not None:
+            body["email"] = email
+        if name is not None:
+            body["name"] = name
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/commerce/checkout", body,
+        )
+
     async def commerce_debit(
         self,
         agent_id: str,
