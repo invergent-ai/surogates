@@ -84,13 +84,14 @@ export function getRuntimeFirebaseAuth(config: FirebaseRuntimeConfig): Auth {
     app = initializeApp(
       {
         apiKey: config.api_key,
-        // Dev serves the Firebase auth helpers same-origin (vite
-        // proxies /__ to the project's firebaseapp.com), which keeps
-        // the popup result channel working under browser storage
-        // partitioning. Production keeps the project auth domain.
-        authDomain: import.meta.env.DEV
-          ? window.location.host
-          : config.auth_domain,
+        // The auth helpers are served same-origin on every surface:
+        // vite proxies /__ in dev, the harness API reverse-proxies it
+        // in production (see api/routes/firebase_auth_proxy.py).
+        // Using our own host as authDomain keeps the popup completion
+        // channel first-party, immune to third-party storage
+        // partitioning. The agent's domain must be in the Firebase
+        // project's authorized domains.
+        authDomain: window.location.host,
         projectId: config.project_id,
         appId: config.app_id ?? undefined,
         messagingSenderId: config.messaging_sender_id ?? undefined,
