@@ -1598,6 +1598,20 @@ class AgentHarness(
             # - Sessions with explicit allowed_tools get exactly those.
             tool_filter = self._tool_filter_for_session(session)
 
+            # user_reports exposes other end-users' data — its schema is
+            # only offered to operator (Studio ops-chat) sessions.  The
+            # cheap config-only owner-scope check suffices here because
+            # the handler independently re-proves the full DB-backed
+            # predicate before returning anything.
+            from surogates.tools.owner_scope import owner_scope_config_ok
+
+            if not owner_scope_config_ok(
+                session.service_account_id, session.config,
+            ):
+                if tool_filter is None:
+                    tool_filter = set(self._tools.tool_names)
+                tool_filter = tool_filter - {"user_reports"}
+
             tool_schemas = filter_schemas_for_tenant(
                 self._tools.get_schemas(names=tool_filter),
                 has_agents=self._prompt.has_agents,

@@ -12,8 +12,9 @@ Studio page.
 Privacy is the whole design: reports describe OTHER end-users, so the
 tool is owner-scoped exactly like session_search's cross-principal
 mode (see tools/owner_scope.py — ops-chat service-account principal +
-server-stamped config, never conversation-inferred).  The worker also
-hides the tool's schema from non-operator sessions, but the handler
+server-stamped config, never conversation-inferred).  The harness
+strips the tool's schema from non-operator sessions (loop.py's tool
+filter) and the worker strips its prompt guidance, but the handler
 re-checks with the full database-backed predicate: a tool that
 trusted only schema visibility would be one prompt injection away
 from leaking every user's report.
@@ -248,7 +249,7 @@ async def _user_reports_handler(arguments: dict, **kwargs: Any) -> str:
 def register(registry: ToolRegistry) -> None:
     """Register the user_reports tool.
 
-    Always registered; the worker strips it from the LLM-visible
+    Always registered; the harness strips it from the LLM-visible
     schema for non-operator sessions, and the handler independently
     refuses without full owner scope.
     """

@@ -1380,12 +1380,12 @@ async def run_worker(settings: Settings) -> None:
                 for e in tool_registry.get_all()
                 if e.toolset == "browser"
             )
-        # user_reports exposes other end-users' data, so only operator
-        # (Studio ops-chat) sessions may even see its schema.  This is
-        # the cheap config-only approximation of owner scope — the
-        # handler re-proves it with the DB-backed predicate before
-        # returning anything (defense in depth, same rationale as the
-        # kb tools' handler-side checks).
+        # user_reports exposes other end-users' data, so non-operator
+        # sessions must not be primed with guidance about it.  This
+        # keeps the PROMPT fragments in sync; the LLM-visible schema is
+        # gated separately in the harness (loop.py's tool_filter, same
+        # config-only owner-scope check), and the handler re-proves the
+        # full DB-backed predicate before returning anything.
         from surogates.tools.owner_scope import owner_scope_config_ok
 
         if not owner_scope_config_ok(
