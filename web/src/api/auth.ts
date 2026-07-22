@@ -177,6 +177,10 @@ export interface AuthConfigResponse {
   // Username handle rule served by the backend (single source of
   // truth). Absent on older backends — callers fall back locally.
   username_pattern?: string;
+  // Monetization projection: paid agents route NEW users to the buy
+  // page (they arrive back entitled); free agents keep local sign-up.
+  commerce_mode?: string;
+  commerce_buy_url?: string | null;
 }
 
 /** Fetch the runtime auth config. Falls back to "disabled" on any error

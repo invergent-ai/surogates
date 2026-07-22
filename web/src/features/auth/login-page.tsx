@@ -702,20 +702,40 @@ export function LoginPage() {
             )}
           </Button>
 
-          {firebasePasswordEnabled && (
-            <button
-              type="button"
-              className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
-              onClick={() => {
-                clearError();
-                setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
-              }}
-            >
-              {firebaseMode === "create"
-                ? "Already have an account? Sign in"
-                : "New here? Create an account"}
-            </button>
-          )}
+          {(() => {
+            // Paid agents: new users belong on the buy page, where the
+            // account is created inside the purchase flow and they come
+            // back already entitled — local sign-up would only lead to
+            // the paywall. Free agents keep in-app self-registration.
+            const monetized =
+              (authConfig.commerce_mode ?? "free") !== "free" &&
+              !!authConfig.commerce_buy_url;
+            if (monetized) {
+              return (
+                <a
+                  href={authConfig.commerce_buy_url ?? "#"}
+                  className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
+                >
+                  New here? Get access →
+                </a>
+              );
+            }
+            if (!firebasePasswordEnabled) return null;
+            return (
+              <button
+                type="button"
+                className="mt-3 block text-center text-[11px] text-faint hover:text-foreground transition-colors"
+                onClick={() => {
+                  clearError();
+                  setFirebaseMode((m) => (m === "create" ? "sign-in" : "create"));
+                }}
+              >
+                {firebaseMode === "create"
+                  ? "Already have an account? Sign in"
+                  : "New here? Create an account"}
+              </button>
+            );
+          })()}
         </form>
 
         {/* ── Firebase self-registration ── */}

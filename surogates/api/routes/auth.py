@@ -103,6 +103,12 @@ class AuthConfigResponse(BaseModel):
     # sign-up form pre-validates with this so the client can never
     # drift from the server.
     username_pattern: str = USERNAME_PATTERN
+    # Monetization projection: on paid agents the login page routes
+    # NEW users to the buy page (account creation happens inside the
+    # purchase flow, so they arrive entitled); free agents keep local
+    # self-registration. Public data — the buy page itself is public.
+    commerce_mode: str = "free"
+    commerce_buy_url: str | None = None
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -136,6 +142,13 @@ async def auth_config(
     local login.
     """
     slash_commands = sorted(agent_runtime.slash_commands.commands)
+    from surogates.api.routes._commerce_turn import runtime_commerce_payload
+
+    commerce = await runtime_commerce_payload(
+        request, str(agent_runtime.agent_id),
+    )
+    commerce_mode = str(commerce.get("commerce_mode") or "free")
+    commerce_buy_url = commerce.get("commerce_buy_url")
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
@@ -145,6 +158,8 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            commerce_mode=commerce_mode,
+            commerce_buy_url=commerce_buy_url,
         )
     try:
         fb = await cache.get(project_id)
@@ -155,12 +170,16 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            commerce_mode=commerce_mode,
+            commerce_buy_url=commerce_buy_url,
         )
     return AuthConfigResponse(
         agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
         slash_commands=slash_commands,
         multi_session=agent_runtime.multi_session,
+        commerce_mode=commerce_mode,
+        commerce_buy_url=commerce_buy_url,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,

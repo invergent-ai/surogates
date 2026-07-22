@@ -27,6 +27,7 @@ def _ctx(**overrides) -> AgentRuntimeContext:
 async def test_auth_config_defaults_multi_session_on():
     request = MagicMock()
     request.app.state.firebase_config_cache = None
+    request.app.state.runtime_config_cache = None
 
     resp = await auth_config(request, agent_runtime=_ctx())
 
@@ -37,6 +38,7 @@ async def test_auth_config_defaults_multi_session_on():
 async def test_auth_config_projects_multi_session_off():
     request = MagicMock()
     request.app.state.firebase_config_cache = None
+    request.app.state.runtime_config_cache = None
 
     resp = await auth_config(request, agent_runtime=_ctx(multi_session=False))
 
