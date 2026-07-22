@@ -15,13 +15,19 @@ from sqlalchemy import text
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
+from sqlalchemy import select
+
 from surogates.db.agent_users import (
     BACKFILL_SQL,
     SOURCE_LOGIN,
     SOURCE_MANUAL,
     SOURCE_SESSION,
     ensure_agent_user,
+    remove_user_from_agent,
+    user_visibility,
+    visible_users_filter,
 )
+from surogates.db.models import User
 
 from .conftest import create_org, create_user
 from .test_api import TEST_AGENT_ID, _create_test_tenant, app, client  # noqa: F401
@@ -166,6 +172,120 @@ async def test_backfill_derives_bindings_from_sessions(
         ("agent-1", user_id, "backfill"),
         ("agent-2", other_user, "backfill"),
     ])
+
+
+async def test_visible_users_filter_bound_plus_orphans(session_factory):
+    org_id = await create_org(session_factory)
+    bound_a = await create_user(session_factory, org_id)
+    bound_b = await create_user(session_factory, org_id)
+    orphan = await create_user(session_factory, org_id)
+
+    async with session_factory() as db:
+        await ensure_agent_user(
+            db, org_id=org_id, agent_id="agent-a",
+            user_id=bound_a, source=SOURCE_MANUAL,
+        )
+        await ensure_agent_user(
+            db, org_id=org_id, agent_id="agent-b",
+            user_id=bound_b, source=SOURCE_MANUAL,
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        visible = (
+            (
+                await db.execute(
+                    select(User.id).where(
+                        User.org_id == org_id,
+                        visible_users_filter(org_id, "agent-a"),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # Agent A sees its own user and the unassigned orphan — but never
+    # agent B's user.
+    assert sorted(map(str, visible)) == sorted(map(str, [bound_a, orphan]))
+
+
+async def test_user_visibility_states(session_factory):
+    org_id = await create_org(session_factory)
+    bound = await create_user(session_factory, org_id)
+    orphan = await create_user(session_factory, org_id)
+
+    async with session_factory() as db:
+        await ensure_agent_user(
+            db, org_id=org_id, agent_id="agent-a",
+            user_id=bound, source=SOURCE_MANUAL,
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-a", user_id=bound,
+        ) == "bound"
+        # Another agent's tab must not see agent A's user.
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-b", user_id=bound,
+        ) is None
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-a", user_id=orphan,
+        ) == "orphan"
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-a", user_id=uuid.uuid4(),
+        ) is None
+
+
+async def test_remove_user_from_agent_semantics(session_factory):
+    org_id = await create_org(session_factory)
+    shared = await create_user(session_factory, org_id)
+    orphan = await create_user(session_factory, org_id)
+
+    async with session_factory() as db:
+        for agent in ("agent-a", "agent-b"):
+            await ensure_agent_user(
+                db, org_id=org_id, agent_id=agent,
+                user_id=shared, source=SOURCE_MANUAL,
+            )
+        await db.commit()
+
+    async def _user_exists(uid):
+        async with session_factory() as db:
+            return (
+                await db.execute(select(User.id).where(User.id == uid))
+            ).scalar_one_or_none() is not None
+
+    # Removing from one agent unbinds but the shared account survives.
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=shared,
+        )
+        await db.commit()
+    assert await _user_exists(shared)
+    assert await _bindings(session_factory, org_id, agent_id="agent-a") == []
+
+    # A tab the user isn't visible from cannot remove them.
+    async with session_factory() as db:
+        assert not await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=shared,
+        )
+
+    # Removing the last binding deletes the account.
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-b", user_id=shared,
+        )
+        await db.commit()
+    assert not await _user_exists(shared)
+
+    # An orphan is removable from any tab — plain account delete.
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=orphan,
+        )
+        await db.commit()
+    assert not await _user_exists(orphan)
 
 
 async def test_user_delete_cascades_bindings(session_factory):
