@@ -761,6 +761,7 @@ function ChatComposerInner({
           maxFiles={MAX_IMAGES_PER_MESSAGE + MAX_ATTACHMENTS_PER_MESSAGE}
           maxFileSize={MAX_ATTACHMENT_BYTES}
           onError={handlePromptInputError}
+          beamActive={status === "streaming"}
         >
           <PromptInputBody>
             <PromptInputTextarea

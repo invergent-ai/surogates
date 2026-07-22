@@ -17,6 +17,7 @@ import {
   ArtifactTitle,
 } from "../../ai-elements/artifact";
 import { Shimmer } from "../../ai-elements/shimmer";
+import { BrandBeam } from "../../ui/brand-beam";
 import {
   Dialog,
   DialogContent,
@@ -130,7 +131,13 @@ export function ArtifactBlock({
 
   return (
     <>
-      <Artifact className="my-2 w-full overflow-visible border-border">
+      <BrandBeam
+        size="pulse-inner"
+        active={!payload && !error}
+        strength={0.6}
+        className="w-full"
+      >
+        <Artifact className="my-2 w-full overflow-visible border-border">
         <ArtifactHeader>
           <div className="flex min-w-0 flex-col">
             <ArtifactTitle className="truncate">{name}</ArtifactTitle>
@@ -166,7 +173,8 @@ export function ArtifactBlock({
         <ArtifactContent className="p-0 overflow-visible">
           <ArtifactBody error={error} payload={payload} sessionId={sessionId} />
         </ArtifactContent>
-      </Artifact>
+        </Artifact>
+      </BrandBeam>
       <Dialog open={expanded} onOpenChange={setExpanded}>
         <DialogContent className="flex h-[95vh] w-[95vw] max-w-[95vw] flex-col gap-4 overflow-hidden p-6 sm:max-w-[95vw]">
           <DialogHeader>

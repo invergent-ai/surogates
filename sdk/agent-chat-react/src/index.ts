@@ -16,6 +16,15 @@ export {
   toolOrbState,
 } from "./runtime/orb-state";
 export type { OrbActivity, OrbState } from "./runtime/orb-state";
+export { BrandBeam } from "./components/ui/brand-beam";
+export type { BrandBeamProps } from "./components/ui/brand-beam";
+export { BorderBeam } from "./components/ui/border-beam";
+export type {
+  BorderBeamColorVariant,
+  BorderBeamProps,
+  BorderBeamSize,
+  BorderBeamTheme,
+} from "./components/ui/border-beam";
 export { MessageResponse } from "./components/ai-elements/message";
 export { BrowserLiveView } from "./components/browser/browser-live-view";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";
