@@ -25,13 +25,19 @@ from sqlalchemy.sql import func
 
 from surogates.channels.constants import END_USER_CHANNELS
 from surogates.db.models import (
+    Agent,
     AgentUser,
     AuditLog,
+    BrowserProfile,
     ChannelIdentity,
+    Credential,
     Event,
     InboxItem,
+    McpServer,
     Mission,
+    ScheduledSession,
     Session,
+    Skill,
     User,
 )
 
@@ -139,26 +145,31 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
     ``delete_agent_data`` discipline) because the ORM relationships
     are ``lazy="raise"`` and the ``user_id`` FKs carry no ``ondelete``
     — a bare ORM instance delete fails at flush for any user with
-    sessions or channel identities. Sessions/events/audit rows survive
-    with ``user_id`` detached (they are org history, not user
-    property); identity rows and the user's own inbox go with the
-    account. The FK-coverage test in the integration suite pins this
-    list against the schema. Caller commits.
+    sessions or channel identities. Rows the user owns outright
+    (identities, their inbox, private credentials — which must not be
+    promoted to org scope by NULLing) are deleted; everything else
+    references the user only for attribution and survives with
+    ``user_id`` detached (sessions and their history are org data, not
+    user property). The FK-coverage test in the integration suite pins
+    this list against the schema. Caller commits.
     """
     def scoped(model):
         return (model.user_id == user_id, model.org_id == org_id)
 
-    for stmt in (
-        delete(ChannelIdentity).where(*scoped(ChannelIdentity)),
-        delete(InboxItem).where(*scoped(InboxItem)),
-        delete(AgentUser).where(*scoped(AgentUser)),
-        update(Session).where(*scoped(Session)).values(user_id=None),
-        update(Event).where(*scoped(Event)).values(user_id=None),
-        update(AuditLog).where(*scoped(AuditLog)).values(user_id=None),
-        update(Mission).where(*scoped(Mission)).values(user_id=None),
-        delete(User).where(User.id == user_id, User.org_id == org_id),
-    ):
-        await db.execute(stmt)
+    owned = (ChannelIdentity, InboxItem, Credential, AgentUser)
+    attributed = (
+        Session, Event, AuditLog, Mission,
+        ScheduledSession, BrowserProfile, Skill, Agent, McpServer,
+    )
+    for model in owned:
+        await db.execute(delete(model).where(*scoped(model)))
+    for model in attributed:
+        await db.execute(
+            update(model).where(*scoped(model)).values(user_id=None)
+        )
+    await db.execute(
+        delete(User).where(User.id == user_id, User.org_id == org_id)
+    )
 
 
 async def remove_user_from_agent(

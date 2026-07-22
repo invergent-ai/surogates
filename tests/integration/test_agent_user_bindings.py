@@ -481,14 +481,16 @@ async def test_purge_covers_every_user_fk():
     import inspect
 
     covered = {
-        "channel_identities", "inbox_items", "agent_users", "sessions",
-        "events", "audit_log", "missions", "users",
+        # Deleted with the account (owned outright)…
+        "channel_identities", "inbox_items", "credentials", "agent_users",
+        # …or de-attributed (org history/resources survive ownerless).
+        "sessions", "events", "audit_log", "missions",
+        "scheduled_sessions", "browser_profiles", "skills", "agents",
+        "mcp_servers", "users",
     }
-    # Tables intentionally NOT purged: they belong to operator-side
-    # resources a deleted END-USER account must not take down.
-    exempt = {"agents", "browser_profiles", "credentials", "skills",
-              "mcp_servers", "tasks", "scheduled_sessions", "idea_nodes",
-              "research_runs"}
+    # Every users FK must be covered — a new table joins this list (and
+    # the purge implementation) deliberately, never by omission.
+    exempt: set[str] = set()
     referencing = {
         table.name
         for table in Base.metadata.tables.values()
@@ -503,6 +505,8 @@ async def test_purge_covers_every_user_fk():
     )
     # And the covered list must actually appear in the implementation.
     source = inspect.getsource(module.purge_user_account)
-    for name in ("ChannelIdentity", "InboxItem", "AgentUser", "Session",
-                 "Event", "AuditLog", "Mission", "User"):
+    for name in ("ChannelIdentity", "InboxItem", "Credential", "AgentUser",
+                 "Session", "Event", "AuditLog", "Mission",
+                 "ScheduledSession", "BrowserProfile", "Skill", "Agent",
+                 "McpServer", "User"):
         assert name in source
