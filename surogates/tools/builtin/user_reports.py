@@ -29,7 +29,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from surogates.db.ops_engine import get_ops_session_factory, init_ops_engine
+from surogates.db.ops_engine import ensure_ops_session_factory
 from surogates.db.ops_models import OpsAgent
 from surogates.tools.owner_scope import is_owner_scoped
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -65,36 +65,23 @@ _PARAMS = {
 }
 
 
-def _ensure_ops_session_factory():
-    """Ops session factory with the same lazy fallback as kb_tools."""
-    factory = get_ops_session_factory()
-    if factory is not None:
-        return factory
-
-    from surogates.config import Settings
-    settings = Settings()
-    if not settings.ops_db.url:
-        return None
-
-    return init_ops_engine(
-        settings.ops_db.url,
-        pool_size=settings.ops_db.pool_size,
-        pool_overflow=settings.ops_db.pool_overflow,
-    )
-
-
-async def _fetch_org_users(session_store: Any, org_id: UUID) -> list[Any]:
-    """All end-user rows of the org: (id, display_name, email,
+async def _fetch_org_users(
+    session_store: Any, org_id: UUID, user_id: UUID | None = None,
+) -> list[Any]:
+    """End-user rows of the org: (id, display_name, email,
     memory_summary).  Raw SQL via the store's session factory — the
-    same access idiom session_search uses."""
+    same access idiom session_search uses.  ``user_id`` narrows the
+    query to one row (still org-pinned) for id lookups."""
+    query = (
+        "SELECT id, display_name, email, memory_summary "
+        "FROM users WHERE org_id = :org_id"
+    )
+    params: dict[str, str] = {"org_id": str(org_id)}
+    if user_id is not None:
+        query += " AND id = :user_id"
+        params["user_id"] = str(user_id)
     async with session_store._sf() as db:
-        rows = await db.execute(
-            sa.text(
-                "SELECT id, display_name, email, memory_summary "
-                "FROM users WHERE org_id = :org_id",
-            ),
-            {"org_id": str(org_id)},
-        )
+        rows = await db.execute(sa.text(query), params)
         return list(rows)
 
 
@@ -106,14 +93,15 @@ def _report_payload(memory_summary: Any, agent_id: str) -> dict | None:
 
 
 def _match_user(rows: list[Any], needle: str) -> Any | None:
-    """Resolve by id, exact email, exact name, then unique partial name.
+    """Resolve by exact email, exact name, then unique partial name.
 
-    Ambiguity returns None rather than guessing — the LLM gets the
-    roster from action='list' to disambiguate.
+    Id needles never reach this — the handler resolves them with a
+    targeted query.  Ambiguity returns None rather than guessing — the
+    LLM gets the roster from action='list' to disambiguate.
     """
     lowered = needle.strip().lower()
     for row in rows:
-        if str(row.id).lower() == lowered or row.email.lower() == lowered:
+        if row.email.lower() == lowered:
             return row
     exact = [r for r in rows if r.display_name.lower() == lowered]
     if len(exact) == 1:
@@ -123,7 +111,7 @@ def _match_user(rows: list[Any], needle: str) -> Any | None:
 
 
 async def _fetch_overview(agent_id: str) -> dict | None:
-    factory = _ensure_ops_session_factory()
+    factory = ensure_ops_session_factory()
     if factory is None:
         return None
     async with factory() as db:
@@ -184,9 +172,8 @@ async def _user_reports_handler(arguments: dict, **kwargs: Any) -> str:
             },
         )
 
-    rows = await _fetch_org_users(session_store, org_id)
-
     if action == "list":
+        rows = await _fetch_org_users(session_store, org_id)
         entries = []
         for row in rows:
             payload = _report_payload(row.memory_summary, agent_id)
@@ -213,7 +200,18 @@ async def _user_reports_handler(arguments: dict, **kwargs: Any) -> str:
         return json.dumps(
             {"error": "action='get' requires the 'user' argument"},
         )
-    matched = _match_user(rows, needle)
+    try:
+        uid = UUID(needle)
+    except ValueError:
+        uid = None
+    if uid is not None:
+        # Id lookup: one org-pinned row instead of the full roster.
+        targeted = await _fetch_org_users(session_store, org_id, uid)
+        matched = targeted[0] if targeted else None
+    else:
+        matched = _match_user(
+            await _fetch_org_users(session_store, org_id), needle,
+        )
     if matched is None:
         return json.dumps(
             {

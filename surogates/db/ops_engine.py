@@ -90,3 +90,30 @@ def get_ops_session_factory() -> Optional[async_sessionmaker[AsyncSession]]:
     KB-related work entirely rather than fail at session-open time.
     """
     return _session_factory
+
+
+def ensure_ops_session_factory() -> Optional[async_sessionmaker[AsyncSession]]:
+    """Session factory with a lazy-init fallback for tool handlers.
+
+    Worker startup calls init_ops_engine(), but in some concurrency
+    configurations a tool handler may run in a context where the
+    module-global _session_factory was not yet set (e.g. import-order
+    timing in the asyncio task pool). Falling back to a fresh init
+    from Settings() makes handlers robust — at worst we pay a one-time
+    engine setup cost. None still means "ops DB not configured".
+    """
+    factory = get_ops_session_factory()
+    if factory is not None:
+        return factory
+
+    from surogates.config import Settings
+
+    settings = Settings()
+    if not settings.ops_db.url:
+        return None
+
+    return init_ops_engine(
+        settings.ops_db.url,
+        pool_size=settings.ops_db.pool_size,
+        pool_overflow=settings.ops_db.pool_overflow,
+    )

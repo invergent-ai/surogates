@@ -1610,7 +1610,13 @@ class AgentHarness(
             ):
                 if tool_filter is None:
                     tool_filter = set(self._tools.tool_names)
-                tool_filter = tool_filter - {"user_reports"}
+                # Gate by toolset (same mechanism as the worker's prompt
+                # fragments) so future tools in the group stay covered.
+                tool_filter = tool_filter - {
+                    e.name
+                    for e in self._tools.get_all()
+                    if e.toolset == "user_reports"
+                }
 
             tool_schemas = filter_schemas_for_tenant(
                 self._tools.get_schemas(names=tool_filter),
