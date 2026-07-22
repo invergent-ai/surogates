@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca. See /studio/LICENSE.AGPL-3.0
 
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -32,10 +34,24 @@ export default defineConfig(({ mode }) => {
     return `${stripped}${sep}agent_id=${devAgentId}`;
   };
 
+  // Firebase's popup helpers are always addressed as https://<authDomain>,
+  // and authDomain is this dev server's host — so the dev server must
+  // speak TLS. mkcert-minted localhost certs are picked up when present
+  // (see ~/.surogates/dev-tls); otherwise plain http still works for
+  // everything except Google/GitHub popup sign-in.
+  const tlsDir = path.join(os.homedir(), ".surogates", "dev-tls");
+  const certFile = path.join(tlsDir, "localhost.pem");
+  const keyFile = path.join(tlsDir, "localhost-key.pem");
+  const https =
+    fs.existsSync(certFile) && fs.existsSync(keyFile)
+      ? { cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) }
+      : undefined;
+
   return {
     plugins: [react(), tailwindcss()],
     server: {
       host: "0.0.0.0",
+      https,
       allowedHosts: true,
       proxy: {
         // Firebase auth helpers, served same-origin so the sign-in
