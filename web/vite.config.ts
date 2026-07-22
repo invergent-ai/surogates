@@ -38,6 +38,17 @@ export default defineConfig(({ mode }) => {
       host: "0.0.0.0",
       allowedHosts: true,
       proxy: {
+        // Firebase auth helpers, served same-origin so the sign-in
+        // popup/iframe channel survives browser storage partitioning
+        // (Firefox ETP breaks the cross-origin firebaseapp.com flow).
+        // The SPA uses location.host as authDomain in dev to match.
+        "/__": {
+          target: `https://${
+            env.VITE_DEV_FIREBASE_AUTH_DOMAIN || "example.firebaseapp.com"
+          }`,
+          changeOrigin: true,
+          secure: true,
+        },
         "/api": {
           target: "http://127.0.0.1:8000",
           changeOrigin: true,

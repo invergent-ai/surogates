@@ -83,7 +83,13 @@ export function getRuntimeFirebaseAuth(config: FirebaseRuntimeConfig): Auth {
     app = initializeApp(
       {
         apiKey: config.api_key,
-        authDomain: config.auth_domain,
+        // Dev serves the Firebase auth helpers same-origin (vite
+        // proxies /__ to the project's firebaseapp.com), which keeps
+        // the popup result channel working under browser storage
+        // partitioning. Production keeps the project auth domain.
+        authDomain: import.meta.env.DEV
+          ? window.location.host
+          : config.auth_domain,
         projectId: config.project_id,
         appId: config.app_id ?? undefined,
         messagingSenderId: config.messaging_sender_id ?? undefined,
