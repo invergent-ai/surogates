@@ -70,6 +70,7 @@ class ToolRuntime:
             skills,
             terminal,
             todo,
+            user_reports,
             vision,
             web_search,
         )
@@ -94,6 +95,7 @@ class ToolRuntime:
             expert,
             terminal,  # also registers the 'process' tool
             session_search,
+            user_reports,  # operator-only Users-page reports (owner-scoped)
             todo,
             ask_user_question,
             cron,

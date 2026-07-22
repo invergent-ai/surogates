@@ -35,7 +35,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from surogates.db.ops_engine import get_ops_session_factory, init_ops_engine
+from surogates.db.ops_engine import ensure_ops_session_factory
 from surogates.db.ops_models import (
     OpsKBWikiPage,
     OpsKnowledgeBase,
@@ -45,32 +45,6 @@ from surogates.storage.kb_hub import KBHubError, fetch_wiki_object
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_ops_session_factory():
-    """Return the ops session factory, lazily initializing if needed.
-
-    Worker startup calls init_ops_engine(), but in some concurrency
-    configurations the tool handler may run in a context where the
-    module-global _session_factory was not yet set (e.g. import-order
-    timing in the asyncio task pool). Falling back to a fresh init
-    from Settings() makes the handler robust — at worst we pay a
-    one-time engine setup cost.
-    """
-    factory = get_ops_session_factory()
-    if factory is not None:
-        return factory
-
-    from surogates.config import Settings
-    settings = Settings()
-    if not settings.ops_db.url:
-        return None
-
-    return init_ops_engine(
-        settings.ops_db.url,
-        pool_size=settings.ops_db.pool_size,
-        pool_overflow=settings.ops_db.pool_overflow,
-    )
 
 
 # Wiki content sits in Hub under wiki/<path>. The DB stores the
@@ -173,7 +147,7 @@ async def _kb_list_pages_handler(
 
     agent_id = _agent_id_from_kwargs(kwargs)
 
-    factory = _ensure_ops_session_factory()
+    factory = ensure_ops_session_factory()
     if factory is None:
         return (
             "Error: KB tools are unavailable -- the worker was started "
@@ -231,7 +205,7 @@ async def _kb_read_page_handler(
 
     agent_id = _agent_id_from_kwargs(kwargs)
 
-    factory = _ensure_ops_session_factory()
+    factory = ensure_ops_session_factory()
     if factory is None:
         return (
             "Error: KB tools are unavailable -- the worker was started "

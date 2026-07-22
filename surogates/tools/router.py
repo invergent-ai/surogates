@@ -48,6 +48,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "skill_view": ToolLocation.HARNESS,
     "skill_manage": ToolLocation.HARNESS,
     "session_search": ToolLocation.HARNESS,
+    # Reads users.memory_summary + the ops DB cohort cache — needs the
+    # worker's DB access, never the sandbox.
+    "user_reports": ToolLocation.HARNESS,
     "web_search": ToolLocation.HARNESS,
     "web_extract": ToolLocation.HARNESS,
     "web_crawl": ToolLocation.HARNESS,

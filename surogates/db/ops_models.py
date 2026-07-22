@@ -1,9 +1,10 @@
 """Minimal read-only models for ops DB tables we access at runtime.
 
 These mirror the writer-side schema in surogate-ops but expose only
-the columns the KB tools need. They're intentionally lightweight --
-no relationships, no event hooks, no validators -- because we just
-read rows and shape the output for the LLM.
+the columns runtime tools need (KB tools, user_reports). They're
+intentionally lightweight -- no relationships, no event hooks, no
+validators -- because we just read rows and shape the output for the
+LLM.
 
 Schema definitions of record live in surogate-ops; this module is
 purely an access pattern.
@@ -25,6 +26,20 @@ class OpsBase(DeclarativeBase):
     different engines and never touch each other.
     """
     pass
+
+
+class OpsAgent(OpsBase):
+    """Mirror of surogate-ops ``agents`` table.
+
+    Stripped to what the user_reports tool needs: identity plus the
+    cached cross-user overview report the ops Users page maintains.
+    """
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    cohort_report: Mapped[Optional[dict]] = mapped_column(
+        sa.JSON, nullable=True,
+    )
 
 
 class OpsKnowledgeBase(OpsBase):
