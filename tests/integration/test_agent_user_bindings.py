@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-from sqlalchemy import select
+from sqlalchemy import select, text as sa_text
 
 from surogates.db.agent_users import (
     BACKFILL_SQL,
@@ -33,7 +33,9 @@ from .conftest import create_org, create_user
 from .test_api import TEST_AGENT_ID, _create_test_tenant, app, client  # noqa: F401
 
 
-async def _bindings(session_factory, org_id, agent_id=None):
+async def _bindings(
+    session_factory, org_id, agent_id=None, include_removed=False,
+):
     async with session_factory() as db:
         query = (
             "SELECT agent_id, user_id, source FROM agent_users "
@@ -43,6 +45,8 @@ async def _bindings(session_factory, org_id, agent_id=None):
         if agent_id is not None:
             query += " AND agent_id = :agent_id"
             params["agent_id"] = agent_id
+        if not include_removed:
+            query += " AND removed_at IS NULL"
         rows = await db.execute(text(query + " ORDER BY created_at"), params)
         return [tuple(r) for r in rows]
 
@@ -89,6 +93,15 @@ async def test_create_session_enrolls_interactive_user_only(
     await session_store.create_session(
         user_id=None, org_id=org_id, agent_id="agent-api", channel="api",
     )
+    # Non-end-user channels never enroll, even with a user attached —
+    # browser_setup notably runs under the phantom agent id below.
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="browser-setup",
+        channel="browser_setup",
+    )
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-task", channel="task",
+    )
 
     rows = await _bindings(session_factory, org_id)
     assert rows == [("agent-web", user_id, SOURCE_SESSION)]
@@ -101,10 +114,28 @@ async def test_create_session_enrolls_interactive_user_only(
 
 
 async def test_login_enrolls_user_on_serving_agent(
-    client: AsyncClient, session_factory,
+    client: AsyncClient, app, session_factory,
 ):
     org_id, user_id, _, email = await _create_test_tenant(
         session_factory, password="bind-me-123",
+    )
+    # Enrollment requires the authenticated org to BE the serving
+    # agent's org — repin the test runtime context to this tenant.
+    from surogates.runtime import (
+        agent_runtime_context_dep,
+        build_agent_runtime_context,
+    )
+
+    previous = app.dependency_overrides[agent_runtime_context_dep]
+    app.dependency_overrides[agent_runtime_context_dep] = (
+        lambda: build_agent_runtime_context({
+            "agent_id": TEST_AGENT_ID,
+            "org_id": str(org_id),
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        })
     )
 
     resp = await client.post(
@@ -123,6 +154,7 @@ async def test_login_enrolls_user_on_serving_agent(
     )
     assert resp.status_code == 200
     assert await _bindings(session_factory, org_id, agent_id=TEST_AGENT_ID) == rows
+    app.dependency_overrides[agent_runtime_context_dep] = previous
 
 
 async def test_backfill_derives_bindings_from_sessions(
@@ -159,6 +191,15 @@ async def test_backfill_derives_bindings_from_sessions(
                 "'api', 'completed')"
             ),
             {"id": uuid.uuid4(), "org": org_id},
+        )
+        # User-attributed but non-interactive channel — filtered out.
+        await db.execute(
+            text(
+                "INSERT INTO sessions (id, org_id, agent_id, user_id, "
+                "channel, status) VALUES (:id, :org, 'browser-setup', "
+                ":uid, 'browser_setup', 'completed')"
+            ),
+            {"id": uuid.uuid4(), "org": org_id, "uid": user_id},
         )
         await db.commit()
 
@@ -236,6 +277,20 @@ async def test_user_visibility_states(session_factory):
             db, org_id=org_id, agent_id="agent-a", user_id=uuid.uuid4(),
         ) is None
 
+    # Removed-from-here is invisible too — and NOT an orphan.
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=bound,
+        )
+        await db.commit()
+    async with session_factory() as db:
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-a", user_id=bound,
+        ) is None
+        assert await user_visibility(
+            db, org_id=org_id, agent_id="agent-b", user_id=bound,
+        ) is None
+
 
 async def test_remove_user_from_agent_semantics(session_factory):
     org_id = await create_org(session_factory)
@@ -256,7 +311,8 @@ async def test_remove_user_from_agent_semantics(session_factory):
                 await db.execute(select(User.id).where(User.id == uid))
             ).scalar_one_or_none() is not None
 
-    # Removing from one agent unbinds but the shared account survives.
+    # Removing from one agent tombstones the binding; the account and
+    # the other agent's binding survive.
     async with session_factory() as db:
         assert await remove_user_from_agent(
             db, org_id=org_id, agent_id="agent-a", user_id=shared,
@@ -264,28 +320,140 @@ async def test_remove_user_from_agent_semantics(session_factory):
         await db.commit()
     assert await _user_exists(shared)
     assert await _bindings(session_factory, org_id, agent_id="agent-a") == []
+    removed_rows = await _bindings(
+        session_factory, org_id, agent_id="agent-a", include_removed=True,
+    )
+    assert len(removed_rows) == 1  # tombstoned, not deleted
 
-    # A tab the user isn't visible from cannot remove them.
+    # Already-removed user isn't visible from that tab anymore.
     async with session_factory() as db:
         assert not await remove_user_from_agent(
             db, org_id=org_id, agent_id="agent-a", user_id=shared,
         )
 
-    # Removing the last binding deletes the account.
+    # Removing the LAST active binding also tombstones — the account
+    # survives with its history (never a destructive delete for bound
+    # users).
     async with session_factory() as db:
         assert await remove_user_from_agent(
             db, org_id=org_id, agent_id="agent-b", user_id=shared,
         )
         await db.commit()
-    assert not await _user_exists(shared)
+    assert await _user_exists(shared)
 
-    # An orphan is removable from any tab — plain account delete.
+    # An orphan (no binding rows at all) is removable from any tab —
+    # that IS the account delete.
     async with session_factory() as db:
         assert await remove_user_from_agent(
             db, org_id=org_id, agent_id="agent-a", user_id=orphan,
         )
         await db.commit()
     assert not await _user_exists(orphan)
+
+
+async def test_orphan_purge_handles_history(session_store, session_factory):
+    """Account delete must survive sessions + channel identities —
+    the FKs carry no ondelete and the ORM relationships are
+    lazy="raise", so the purge detaches history explicitly."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    # History in a NON-enrollment channel → user stays an orphan.
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-x", channel="api",
+    )
+    async with session_factory() as db:
+        await db.execute(
+            sa_text(
+                "INSERT INTO channel_identities (id, org_id, user_id, "
+                "platform, platform_user_id, platform_meta) VALUES "
+                "(:id, :org, :uid, 'slack', 'U123', '{}')"
+            ),
+            {"id": uuid.uuid4(), "org": org_id, "uid": user_id},
+        )
+        await db.execute(
+            sa_text(
+                "INSERT INTO events (session_id, org_id, user_id, type, "
+                "data) VALUES (:sid, :org, :uid, 'user.message', '{}')"
+            ),
+            {"sid": session.id, "org": org_id, "uid": user_id},
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-x", user_id=user_id,
+        )
+        await db.commit()
+
+    async with session_factory() as db:
+        assert (
+            await db.execute(select(User.id).where(User.id == user_id))
+        ).scalar_one_or_none() is None
+        # The session survives, detached from the deleted account.
+        detached = (
+            await db.execute(
+                sa_text("SELECT user_id FROM sessions WHERE id = :sid"),
+                {"sid": session.id},
+            )
+        ).scalar_one_or_none()
+        assert detached is None
+
+
+async def test_tombstone_blocks_backfill_and_auto_enroll(
+    session_store, session_factory,
+):
+    """An operator's removal must survive both the migrate-time
+    backfill and the automatic session/login enrollment."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a", channel="web",
+    )
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=user_id,
+        )
+        await db.commit()
+
+    # Backfill re-derives from the surviving session rows…
+    async with session_factory() as db:
+        await db.execute(text(BACKFILL_SQL))
+        await db.commit()
+    # …and a new session re-fires the automatic enrollment…
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a", channel="web",
+    )
+    # …but the tombstone holds.
+    assert await _bindings(session_factory, org_id, agent_id="agent-a") == []
+
+    # The explicit manual re-attach is what brings the user back.
+    async with session_factory() as db:
+        await ensure_agent_user(
+            db, org_id=org_id, agent_id="agent-a", user_id=user_id,
+            source=SOURCE_MANUAL, reactivate=True,
+        )
+        await db.commit()
+    assert await _bindings(session_factory, org_id, agent_id="agent-a") == [
+        ("agent-a", user_id, SOURCE_MANUAL),
+    ]
+
+
+async def test_login_org_mismatch_does_not_enroll(
+    client: AsyncClient, app, session_factory,
+):
+    """body.org_id different from the serving agent's org must not
+    mint a cross-tenant binding (the test app's runtime context is
+    pinned to the zero org, so any real org mismatches)."""
+    org_id, user_id, _, email = await _create_test_tenant(
+        session_factory, password="cross-org-1",
+    )
+    resp = await client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "cross-org-1", "org_id": str(org_id)},
+    )
+    assert resp.status_code == 200
+    assert await _bindings(session_factory, org_id) == []
 
 
 async def test_user_delete_cascades_bindings(session_factory):

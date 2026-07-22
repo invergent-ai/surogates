@@ -273,6 +273,11 @@ class AgentUser(Base):
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
+    # Tombstone, not delete: a removed binding must keep existing so
+    # the backfill and the automatic login/session enrollment (both
+    # ON CONFLICT DO NOTHING) can never resurrect it. Cleared only by
+    # the explicit manual re-attach.
+    removed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
 
 # ---------------------------------------------------------------------------

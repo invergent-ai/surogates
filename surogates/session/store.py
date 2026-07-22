@@ -234,11 +234,16 @@ class SessionStore:
             db.add(row)
             # Initialise the cursor row so get_harness_cursor never 404s.
             db.add(SessionCursor(session_id=row.id, harness_cursor=0))
-            if user_id is not None and agent_id:
+            from surogates.db.agent_users import ENROLLMENT_CHANNELS
+
+            if user_id is not None and agent_id and channel in ENROLLMENT_CHANNELS:
                 # First user-attributed contact with an agent enrolls the
                 # user on it (idempotent) — this is what makes shadow
                 # users from Slack/Telegram, who never log in, appear on
-                # that agent's Users page.
+                # that agent's Users page. Gated to end-user channels:
+                # browser_setup/task/api sessions carry user_id too but
+                # must never mint a binding (browser_setup even runs
+                # under the phantom agent id "browser-setup").
                 from surogates.db.agent_users import (
                     SOURCE_SESSION,
                     ensure_agent_user,

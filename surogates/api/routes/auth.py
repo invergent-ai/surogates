@@ -418,8 +418,11 @@ async def login(
     user_id = UUID(result.user_id)
 
     # Successful auth through THIS agent's web channel is assignment
-    # intent — enroll the user on the serving agent.
-    if agent_runtime.agent_id:
+    # intent — enroll the user on the serving agent. Only when the
+    # authenticated org IS the serving agent's org: the body may carry
+    # a different org_id, and a binding pairing org X with org Y's
+    # agent would corrupt both tenants' rosters.
+    if agent_runtime.agent_id and str(org_id) == str(agent_runtime.org_id):
         async with session_factory() as enroll_session:
             await ensure_agent_user(
                 enroll_session,
