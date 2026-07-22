@@ -838,3 +838,26 @@ SELECT
           AND e.data->>'rating' = 'up'
     ) AS had_response_thumbs_up
 FROM sessions s;
+
+-- ── agent_users retrofits ────────────────────────────────────────────
+-- Tombstone column for operator removals (create_all never alters
+-- existing tables, so the retrofit lives here).
+ALTER TABLE agent_users ADD COLUMN IF NOT EXISTS removed_at timestamp;
+
+-- One account per (org, email): the login key and the Configure→Users
+-- attach-by-email guard both assume it. Guarded — legacy databases may
+-- already carry duplicates, and failing every migrate over old data
+-- would be worse than the (rare) race the index closes; the NOTICE
+-- makes the skip visible so the duplicates get cleaned deliberately.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM users
+        GROUP BY org_id, lower(email) HAVING count(*) > 1
+    ) THEN
+        RAISE NOTICE 'skipping uq_users_org_lower_email: duplicate emails exist';
+    ELSE
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_lower_email
+            ON users (org_id, lower(email));
+    END IF;
+END $$;

@@ -172,6 +172,17 @@ class User(Base):
             unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
+        # One account per (org, email), case-insensitive — email is the
+        # login key and the Configure→Users attach-by-email guard
+        # assumes it. Fresh databases get this from create_all; legacy
+        # databases get it from the guarded observability.sql retrofit,
+        # which skips (with a NOTICE) while old duplicates exist.
+        Index(
+            "uq_users_org_lower_email",
+            "org_id",
+            text("lower(email)"),
+            unique=True,
+        ),
     )
 
 
@@ -211,6 +222,73 @@ class ChannelIdentity(Base):
     user: Mapped[User] = relationship(
         back_populates="channel_identities", lazy="raise"
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent-user bindings
+# ---------------------------------------------------------------------------
+
+
+class AgentUser(Base):
+    """Membership of an end-user on one agent of the org.
+
+    User accounts are org-scoped (one account works against every
+    agent in the project); this table records which agents a user
+    actually belongs to, so per-agent surfaces (the Users page, its
+    reports) can show *that agent's* users instead of the whole org
+    roster.  A user of two agents has two rows — correct, since
+    memory and reports are already per-agent per-user.
+
+    Rows are written wherever assignment intent exists:
+
+    * ``manual``   — operator created the account on a specific agent
+      (Configure → Users, via the ops client).
+    * ``login``    — the user authenticated through an agent's web
+      channel (password or Firebase; the serving agent comes from the
+      runtime context).
+    * ``session``  — first interactive session with the agent (covers
+      Slack/Telegram shadow users, which never log in).
+    * ``backfill`` — derived from historical ``sessions`` rows by the
+      migrate-time backfill.
+
+    Enrollment is append-only and idempotent (INSERT .. ON CONFLICT DO
+    NOTHING on the unique triple); the binding does NOT gate
+    authentication — any org user can still log into any agent of the
+    org, gaining a ``login`` row in the process.
+    """
+
+    __tablename__ = "agent_users"
+    __table_args__ = (
+        UniqueConstraint(
+            "org_id", "agent_id", "user_id", name="uq_agent_users_org_agent_user"
+        ),
+        Index("idx_agent_users_org_agent", "org_id", "agent_id"),
+        Index("idx_agent_users_user", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    # Text, no FK — agents are management-plane entities mirrored into
+    # this database only as ids (same convention as sessions.agent_id).
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=func.now()
+    )
+    # Tombstone, not delete: a removed binding must keep existing so
+    # the backfill and the automatic login/session enrollment (both
+    # ON CONFLICT DO NOTHING) can never resurrect it. Cleared only by
+    # the explicit manual re-attach.
+    removed_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
 
 # ---------------------------------------------------------------------------
