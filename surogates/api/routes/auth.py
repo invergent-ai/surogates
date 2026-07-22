@@ -17,6 +17,7 @@ from surogates.audit import (
     auth_login_event,
     client_ip,
 )
+from surogates.db.agent_users import SOURCE_LOGIN, ensure_agent_user
 from surogates.db.models import ChannelIdentity, User
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.database import DatabaseAuthProvider
@@ -331,6 +332,18 @@ async def firebase_exchange(
             await session.commit()
             await session.refresh(user)
 
+        # Successful auth through THIS agent's web channel is
+        # assignment intent — enroll the user on the serving agent.
+        if agent_runtime.agent_id:
+            await ensure_agent_user(
+                session,
+                org_id=org_id,
+                agent_id=agent_runtime.agent_id,
+                user_id=user.id,
+                source=SOURCE_LOGIN,
+            )
+            await session.commit()
+
     permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
     access_token = create_access_token(
         org_id=org_id, user_id=user.id, permissions=permissions,
@@ -403,6 +416,20 @@ async def login(
         )
 
     user_id = UUID(result.user_id)
+
+    # Successful auth through THIS agent's web channel is assignment
+    # intent — enroll the user on the serving agent.
+    if agent_runtime.agent_id:
+        async with session_factory() as enroll_session:
+            await ensure_agent_user(
+                enroll_session,
+                org_id=org_id,
+                agent_id=agent_runtime.agent_id,
+                user_id=user_id,
+                source=SOURCE_LOGIN,
+            )
+            await enroll_session.commit()
+
     # Default permissions for authenticated users.
     permissions: set[str] = {"sessions:read", "sessions:write", "tools:read"}
 

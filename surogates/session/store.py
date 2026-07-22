@@ -234,6 +234,23 @@ class SessionStore:
             db.add(row)
             # Initialise the cursor row so get_harness_cursor never 404s.
             db.add(SessionCursor(session_id=row.id, harness_cursor=0))
+            if user_id is not None and agent_id:
+                # First user-attributed contact with an agent enrolls the
+                # user on it (idempotent) — this is what makes shadow
+                # users from Slack/Telegram, who never log in, appear on
+                # that agent's Users page.
+                from surogates.db.agent_users import (
+                    SOURCE_SESSION,
+                    ensure_agent_user,
+                )
+
+                await ensure_agent_user(
+                    db,
+                    org_id=org_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    source=SOURCE_SESSION,
+                )
             await db.commit()
             await db.refresh(row)
         return Session.model_validate(row)
