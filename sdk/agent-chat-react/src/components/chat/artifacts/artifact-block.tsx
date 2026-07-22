@@ -135,44 +135,45 @@ export function ArtifactBlock({
         size="pulse-inner"
         active={!payload && !error}
         strength={0.6}
+        borderRadius={10}
         className="w-full"
       >
         <Artifact className="my-2 w-full overflow-visible border-border">
-        <ArtifactHeader>
-          <div className="flex min-w-0 flex-col">
-            <ArtifactTitle className="truncate">{name}</ArtifactTitle>
-            <ArtifactDescription>{description}</ArtifactDescription>
-          </div>
-          <ArtifactActions>
-            <ArtifactAction
-              tooltip={copied ? "Copied!" : "Copy"}
-              label="Copy artifact"
-              icon={copied ? CheckIcon : CopyIcon}
-              disabled={!payload}
-              onClick={handleCopy}
-              className={
-                copied ? "text-emerald-500 hover:text-emerald-500" : ""
-              }
-            />
-            <ArtifactAction
-              tooltip="Download"
-              label="Download artifact"
-              icon={DownloadIcon}
-              disabled={!payload}
-              onClick={handleDownload}
-            />
-            <ArtifactAction
-              tooltip="Full screen"
-              label="Open artifact in full screen"
-              icon={Maximize2Icon}
-              disabled={!payload}
-              onClick={() => setExpanded(true)}
-            />
-          </ArtifactActions>
-        </ArtifactHeader>
-        <ArtifactContent className="p-0 overflow-visible">
-          <ArtifactBody error={error} payload={payload} sessionId={sessionId} />
-        </ArtifactContent>
+            <ArtifactHeader>
+            <div className="flex min-w-0 flex-col">
+              <ArtifactTitle className="truncate">{name}</ArtifactTitle>
+              <ArtifactDescription>{description}</ArtifactDescription>
+            </div>
+            <ArtifactActions>
+              <ArtifactAction
+                tooltip={copied ? "Copied!" : "Copy"}
+                label="Copy artifact"
+                icon={copied ? CheckIcon : CopyIcon}
+                disabled={!payload}
+                onClick={handleCopy}
+                className={
+                  copied ? "text-emerald-500 hover:text-emerald-500" : ""
+                }
+              />
+              <ArtifactAction
+                tooltip="Download"
+                label="Download artifact"
+                icon={DownloadIcon}
+                disabled={!payload}
+                onClick={handleDownload}
+              />
+              <ArtifactAction
+                tooltip="Full screen"
+                label="Open artifact in full screen"
+                icon={Maximize2Icon}
+                disabled={!payload}
+                onClick={() => setExpanded(true)}
+              />
+            </ArtifactActions>
+          </ArtifactHeader>
+          <ArtifactContent className="p-0 overflow-visible">
+            <ArtifactBody error={error} payload={payload} sessionId={sessionId} />
+          </ArtifactContent>
         </Artifact>
       </BrandBeam>
       <Dialog open={expanded} onOpenChange={setExpanded}>

@@ -15,16 +15,21 @@ export {
   messageOrbState,
   toolOrbState,
 } from "./runtime/orb-state";
-export type { OrbActivity, OrbState } from "./runtime/orb-state";
+export type {
+  OrbActivity,
+  OrbDerivationOptions,
+  OrbState,
+} from "./runtime/orb-state";
+export {
+  SIMPLE_MODE_HIDDEN_TOOLS,
+  SIMPLE_MODE_ORB_OPTIONS,
+  isHiddenSimpleTool,
+} from "./runtime/simple-mode";
+export { OrbShimmerLabel } from "./components/ai-elements/orb-label";
+export type { OrbShimmerLabelProps } from "./components/ai-elements/orb-label";
 export { BrandBeam } from "./components/ui/brand-beam";
 export type { BrandBeamProps } from "./components/ui/brand-beam";
-export { BorderBeam } from "./components/ui/border-beam";
-export type {
-  BorderBeamColorVariant,
-  BorderBeamProps,
-  BorderBeamSize,
-  BorderBeamTheme,
-} from "./components/ui/border-beam";
+export type { BorderBeamSize } from "./components/ui/border-beam";
 export { MessageResponse } from "./components/ai-elements/message";
 export { BrowserLiveView } from "./components/browser/browser-live-view";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";

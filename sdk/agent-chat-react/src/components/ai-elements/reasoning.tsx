@@ -23,9 +23,8 @@ import {
   useRef,
 } from "react";
 import { Streamdown } from "streamdown";
-import { ThinkingOrb } from "thinking-orbs";
 
-import { Shimmer } from "./shimmer";
+import { OrbShimmerLabel } from "./orb-label";
 
 interface ReasoningContextValue {
   isStreaming: boolean;
@@ -136,12 +135,7 @@ export type ReasoningTriggerProps = ComponentProps<
 
 const defaultGetThinkingMessage = (isStreaming: boolean, duration?: number) => {
   if (isStreaming || duration === 0) {
-    return (
-      <span className="flex items-center gap-2">
-        <ThinkingOrb state="solving" size={20} aria-label="Thinking" />
-        <Shimmer duration={1}>Thinking...</Shimmer>
-      </span>
-    );
+    return <OrbShimmerLabel state="solving" label="Thinking..." duration={1} />;
   }
   if (duration === undefined) {
     return <p className="text-muted-foreground italic">Thought for a few seconds</p>;

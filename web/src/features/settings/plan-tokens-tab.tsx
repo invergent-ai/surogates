@@ -189,8 +189,10 @@ export function PlanTokensTab() {
 
       {/* ── Offers ── */}
       {[
-        { label: "Plans", items: subscriptions, verb: "Subscribe" },
-        { label: "Token packs", items: packs, verb: "Buy" },
+        // highlightFirst: the lead plan is the recommended one and gets
+        // the brand beam; selection is a data flag, not display copy.
+        { label: "Plans", items: subscriptions, verb: "Subscribe", highlightFirst: true },
+        { label: "Token packs", items: packs, verb: "Buy", highlightFirst: false },
       ]
         .filter((s) => s.items.length > 0)
         .map((section) => (
@@ -198,8 +200,14 @@ export function PlanTokensTab() {
             <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               {section.label}
             </p>
-            {section.items.map((offer, offerIndex) => {
-              const row = (
+            {section.items.map((offer, offerIndex) => (
+              <BrandBeam
+                key={offer.id}
+                size="md"
+                strength={0.55}
+                borderRadius={8}
+                active={section.highlightFirst && offerIndex === 0}
+              >
                 <div
                   data-testid={`plan-offer-${offer.id}`}
                   className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3"
@@ -227,22 +235,8 @@ export function PlanTokensTab() {
                     {busyOfferId === offer.id ? "Redirecting…" : section.verb}
                   </Button>
                 </div>
-              );
-              // The lead plan is the recommended one — it alone gets the
-              // brand beam so the highlight stays singular in the list.
-              return section.label === "Plans" && offerIndex === 0 ? (
-                <BrandBeam
-                  key={offer.id}
-                  size="md"
-                  strength={0.55}
-                  borderRadius={8}
-                >
-                  {row}
-                </BrandBeam>
-              ) : (
-                <div key={offer.id}>{row}</div>
-              );
-            })}
+              </BrandBeam>
+            ))}
           </div>
         ))}
     </div>

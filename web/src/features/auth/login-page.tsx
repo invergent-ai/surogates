@@ -153,8 +153,9 @@ export function LoginPage() {
     }
   };
 
+  const firebaseConfig = authConfig.firebase;
+
   const handleForgotPassword = async () => {
-    const firebaseConfig = authConfig.firebase;
     if (!firebaseConfig) return;
     if (!email.trim()) {
       setLoginError("Enter your email above first.");
@@ -360,7 +361,6 @@ export function LoginPage() {
     setIsLoading(true);
 
     // ── Create-account mode: sign up via Firebase email/password. ──
-    const firebaseConfig = authConfig.firebase;
     if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
       if (!fullName.trim()) {
         setLoginError("Please enter your full name.");

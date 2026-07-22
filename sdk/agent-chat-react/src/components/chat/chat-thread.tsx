@@ -29,13 +29,16 @@ import {
   TimelineItem,
   TimelineSeparator,
 } from "../reui/timeline";
-import { Shimmer } from "../ai-elements/shimmer";
-import { ThinkingOrb } from "thinking-orbs";
+import { OrbShimmerLabel } from "../ai-elements/orb-label";
 import {
   deriveOrbActivity,
   messageOrbState,
   type OrbActivity,
 } from "../../runtime/orb-state";
+import {
+  SIMPLE_MODE_ORB_OPTIONS,
+  isHiddenSimpleTool,
+} from "../../runtime/simple-mode";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { CodeRunToolBlock } from "./tools/code-run-tool";
@@ -876,10 +879,7 @@ function TimelineEntryItem({
         <TimelineIndicator className="size-2 border-none bg-primary" />
       </TimelineHeader>
       <TimelineContent>
-        <span className="flex items-center gap-2 py-0.5">
-          <ThinkingOrb state="working" size={20} />
-          <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
-        </span>
+        <OrbShimmerLabel state="working" label="Working on it..." className="py-0.5" />
       </TimelineContent>
     </TimelineItem>
   );
@@ -1220,30 +1220,6 @@ function truncate(s: string, max: number): string {
  * memory) that don't help the user understand what the agent
  * *did*. Users who care can switch to Expert mode to see them.
  */
-const _SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
-  "list_files",
-  "search_files",
-  "session_search",
-  "skills_list",
-  "skill_view",
-  "skill_manage",
-  "process",
-  "memory",
-  // Shell commands and code execution are infrastructure plumbing the
-  // user doesn't need to see when the goal is to know *what* the
-  // agent accomplished, not *how*. Expert mode still has the full
-  // command + output block.
-  "terminal",
-  "execute_code",
-]);
-
-function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
-  if (_SIMPLE_MODE_HIDDEN_TOOLS.has(tc.toolName)) return true;
-  // Browser tools are an internal sub-grouped activity in Expert
-  // mode; in Simple mode we hide them outright.
-  if (tc.toolName.startsWith("browser_")) return true;
-  return false;
-}
 
 /**
  * The subset of an iteration's tool calls that should surface in
@@ -1253,7 +1229,7 @@ function _isHiddenSimpleTool(tc: ToolCallInfo): boolean {
  */
 function visibleToolCalls(message: ChatMessageType): ToolCallInfo[] {
   return (message.toolCalls ?? []).filter((tc) => {
-    if (_isHiddenSimpleTool(tc)) return false;
+    if (isHiddenSimpleTool(tc)) return false;
     const status = effectiveStatus(tc);
     if (status === "error" || status === "cancelled") return false;
     return true;
@@ -1292,7 +1268,7 @@ function liveIterationLabel(message: ChatMessageType): string {
   // surfaced in the label — an internal list_files running on its
   // own should read as a quiet "Thinking…", not "Running List Files…".
   const running = (message.toolCalls ?? []).filter(
-    (tc) => tc.status === "running" && !_isHiddenSimpleTool(tc),
+    (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
   );
   if (running.length === 0) return "Thinking…";
   if (running.length === 1) {
@@ -1629,23 +1605,14 @@ export function IterationGroup({
   //    ends. Without this stricter check, completed iterations would
   //    stay in the shimmer state forever (user-reported bug).
   if (isIterationLive(message)) {
-    const label = liveIterationLabel(message);
-    // Same hidden-tool filter as the label: a lone internal list_files
+    // Same hidden-tool policy as the label: a lone internal list_files
     // must not leak a "searching" orb next to the quiet "Thinking…".
-    const orbState = messageOrbState(message, {
-      toolFilter: (tc) => !_isHiddenSimpleTool(tc),
-    });
     return (
-      <div className="flex items-center gap-2 py-0.5 text-sm">
-        <ThinkingOrb
-          state={orbState}
-          size={20}
-          aria-label={label}
-        />
-        <Shimmer duration={3} spread={3} className="text-sm">
-          {label}
-        </Shimmer>
-      </div>
+      <OrbShimmerLabel
+        state={messageOrbState(message, SIMPLE_MODE_ORB_OPTIONS)}
+        label={liveIterationLabel(message)}
+        className="py-0.5"
+      />
     );
   }
 
@@ -2111,16 +2078,7 @@ function WorkingOnItIndicator({ activity }: { activity: OrbActivity }) {
   return (
     <Message from="assistant">
       <MessageContent>
-        <span className="flex items-center gap-2">
-          <ThinkingOrb
-            state={activity.state}
-            size={20}
-            aria-label={activity.label}
-          />
-          <Shimmer duration={3} spread={3} className="text-sm">
-            {activity.label}
-          </Shimmer>
-        </span>
+        <OrbShimmerLabel state={activity.state} label={activity.label} />
       </MessageContent>
     </Message>
   );
@@ -2194,9 +2152,7 @@ export function ChatThread({
     () =>
       deriveOrbActivity(
         messages,
-        viewMode === "simple"
-          ? { toolFilter: (tc) => !_isHiddenSimpleTool(tc) }
-          : {},
+        viewMode === "simple" ? SIMPLE_MODE_ORB_OPTIONS : undefined,
       ),
     [messages, viewMode],
   );

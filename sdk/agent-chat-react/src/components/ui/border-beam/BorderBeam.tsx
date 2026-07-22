@@ -1,7 +1,10 @@
 // Vendored from border-beam v1.3.0 (https://github.com/Jakubantalik/border-beam)
 // MIT License, Copyright (c) Jakub Antalik — see LICENSE-border-beam.md
 // Local modifications: 'brand' amber color variant; theme auto-detection
-// extended to honor an ancestor .dark/.light class or data-theme attribute.
+// extended to honor an ancestor .dark/.light class or data-theme attribute;
+// all per-instance overhead (generated <style> tag, theme/radius/visibility
+// observers) gated on active||fading so always-mounted inactive wrappers
+// cost nothing beyond a plain <div>.
 
 import {
   forwardRef,
@@ -34,7 +37,10 @@ function documentTheme(): 'dark' | 'light' | null {
   return null;
 }
 
-function useSystemTheme(): 'dark' | 'light' {
+// `enabled` gates the live subscriptions: inactive beam instances still
+// resolve the theme once on mount (and on re-activation) but hold no
+// matchMedia listener or <html> MutationObserver while dormant.
+function useSystemTheme(enabled: boolean): 'dark' | 'light' {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const fromDocument = documentTheme();
     if (fromDocument) return fromDocument;
@@ -43,7 +49,7 @@ function useSystemTheme(): 'dark' | 'light' {
   });
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (!enabled || typeof window === 'undefined') return;
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const resolve = () => {
@@ -65,7 +71,7 @@ function useSystemTheme(): 'dark' | 'light' {
       mediaQuery.removeEventListener('change', resolve);
       observer?.disconnect();
     };
-  }, []);
+  }, [enabled]);
 
   return theme;
 }
@@ -110,7 +116,6 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
   ) {
     const baseId = useId();
     const id = baseId.replace(/:/g, '-');
-    const systemTheme = useSystemTheme();
     const internalRef = useRef<HTMLDivElement>(null);
 
     const [isActive, setIsActive] = useState(active);
@@ -119,9 +124,15 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
     const [detectedRadius, setDetectedRadius] = useState<number | null>(null);
     const [pulseGlowScale, setPulseGlowScale] = useState<{ x: number; y: number }>({ x: 1, y: 1 });
 
+    // Everything below that costs anything — the generated <style> tag,
+    // the theme/radius/visibility observers — is gated on this, so an
+    // always-mounted wrapper with active=false is just a plain <div>.
+    const effectsOn = isActive || isFading;
+    const systemTheme = useSystemTheme(effectsOn);
+
     // Auto-detect child border radius when no explicit value is provided
     useEffect(() => {
-      if (customBorderRadius != null) return;
+      if (!effectsOn || customBorderRadius != null) return;
       const el = internalRef.current;
       if (!el) return;
 
@@ -141,7 +152,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
       const observer = new MutationObserver(detect);
       observer.observe(el, { childList: true, subtree: false });
       return () => observer.disconnect();
-    }, [customBorderRadius, children]);
+    }, [effectsOn, customBorderRadius, children]);
 
     useEffect(() => {
       if (active && !isActive && !isFading) {
@@ -155,6 +166,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
     // This stops per-frame painting entirely for hidden instances without changing
     // their logical active/fading state, so it never fires onActivate/onDeactivate.
     useEffect(() => {
+      if (!effectsOn) return;
       const el = internalRef.current;
       if (!el || typeof IntersectionObserver === 'undefined') return;
 
@@ -168,13 +180,13 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
 
       observer.observe(el);
       return () => observer.disconnect();
-    }, []);
+    }, [effectsOn]);
 
     // Pulse Outside glow geometry is authored in fixed pixels for a reference
     // element (~350x140). Measure the actual wrapped element and scale the glow
     // per-axis so the halo grows/shrinks to fit any component it's applied to.
     useEffect(() => {
-      if (size !== 'pulse-outside') {
+      if (!effectsOn || size !== 'pulse-outside') {
         setPulseGlowScale({ x: 1, y: 1 });
         return;
       }
@@ -209,7 +221,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
       const resizeObserver = new ResizeObserver(measure);
       resizeObserver.observe(child);
       return () => resizeObserver.disconnect();
-    }, [size, children]);
+    }, [effectsOn, size, children]);
 
     const handleAnimationEnd = useCallback(
       (e: AnimationEvent<HTMLDivElement>) => {
@@ -243,7 +255,9 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
 
     const cssStyles = useMemo(
       () =>
-        generateBeamCSS({
+        !effectsOn
+          ? ''
+          : generateBeamCSS({
           id,
           borderRadius: finalBorderRadius,
           borderWidth: sizeConfig.borderWidth,
@@ -262,6 +276,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
           hairlineOpacity: themeConfig.hairlineOpacity,
         }),
       [
+        effectsOn,
         id,
         finalBorderRadius,
         sizeConfig.borderWidth,
@@ -331,7 +346,7 @@ export const BorderBeam = forwardRef<HTMLDivElement, BorderBeamProps>(
 
     return (
       <>
-        <style>{cssStyles}</style>
+        {effectsOn && <style>{cssStyles}</style>}
         <div
           {...props}
           ref={setRefs}
