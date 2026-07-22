@@ -15,17 +15,25 @@ manual attach path reactivates the tombstoned row.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import func
 
-from surogates.db.models import AgentUser
-
-logger = logging.getLogger(__name__)
+from surogates.channels.constants import END_USER_CHANNELS
+from surogates.db.models import (
+    AgentUser,
+    AuditLog,
+    ChannelIdentity,
+    Event,
+    InboxItem,
+    Mission,
+    Session,
+    User,
+)
 
 # Where a binding came from. Kept as plain strings (not an enum) so a
 # future writer can add a source without a schema migration.
@@ -34,29 +42,41 @@ SOURCE_LOGIN = "login"
 SOURCE_SESSION = "session"
 SOURCE_BACKFILL = "backfill"
 
-# Channels whose sessions represent a real end-user talking to the
-# agent. Everything else (api, task, delegation, worker, scheduled,
-# ambient, browser_setup — which even uses the phantom agent id
-# "browser-setup") must never mint a binding. Mirrors the ops-side
-# USER_STATS_INTERACTIVE_CHANNELS so the roster and its stats agree.
-ENROLLMENT_CHANNELS = frozenset({"web", "website", "slack", "telegram"})
+# The channels that enroll users on agents — the canonical set lives in
+# channels/constants.py next to the adapter registry it must track.
+ENROLLMENT_CHANNELS = END_USER_CHANNELS
 
 # Idempotent backfill from historical sessions — safe to run on every
-# migrate. Interactive channels only (same set as ENROLLMENT_CHANNELS);
-# ON CONFLICT also guarantees a tombstoned (operator-removed) binding
-# is never resurrected by a re-run.
-BACKFILL_SQL = """
+# migrate. End-user channels only, generated from the same frozenset
+# the live enrollment uses so the two can never drift; ON CONFLICT
+# also guarantees a tombstoned (operator-removed) binding is never
+# resurrected by a re-run.
+BACKFILL_SQL = f"""
 INSERT INTO agent_users (id, org_id, agent_id, user_id, source, created_at)
 SELECT gen_random_uuid(), s.org_id, s.agent_id, s.user_id,
-       'backfill', MIN(s.created_at)
+       '{SOURCE_BACKFILL}', MIN(s.created_at)
 FROM sessions s
 WHERE s.user_id IS NOT NULL
   AND s.agent_id IS NOT NULL
   AND s.agent_id <> ''
-  AND s.channel IN ('web', 'website', 'slack', 'telegram')
+  AND s.channel IN ({", ".join(sorted(repr(c) for c in END_USER_CHANNELS))})
 GROUP BY s.org_id, s.agent_id, s.user_id
 ON CONFLICT (org_id, agent_id, user_id) DO NOTHING
 """
+
+
+def active_bound_user_ids(org_id: UUID, agent_ids: list[str]):
+    """Select of user ids actively bound (not tombstoned) to the agents.
+
+    The one definition of "this agent's users" — the Configure list,
+    the Users-page roster, and the assigned-flag reads all build on it
+    so removal semantics can never drift between surfaces.
+    """
+    return select(AgentUser.user_id).where(
+        AgentUser.org_id == org_id,
+        AgentUser.agent_id.in_(agent_ids),
+        AgentUser.removed_at.is_(None),
+    )
 
 
 def visible_users_filter(org_id: UUID, agent_id: str):
@@ -69,19 +89,13 @@ def visible_users_filter(org_id: UUID, agent_id: str):
     on this agent nor resurfaces everywhere as an orphan — re-adding
     them is the explicit attach path.
     """
-    from sqlalchemy import or_
-
-    from surogates.db.models import User
-
-    bound_here = select(AgentUser.user_id).where(
-        AgentUser.org_id == org_id,
-        AgentUser.agent_id == agent_id,
-        AgentUser.removed_at.is_(None),
-    )
     any_binding_row = select(AgentUser.user_id).where(
         AgentUser.org_id == org_id,
     )
-    return or_(User.id.in_(bound_here), User.id.not_in(any_binding_row))
+    return or_(
+        User.id.in_(active_bound_user_ids(org_id, [agent_id])),
+        User.id.not_in(any_binding_row),
+    )
 
 
 async def user_visibility(
@@ -97,55 +111,54 @@ async def user_visibility(
     exists in the org with no binding row at all (managed from any
     tab); ``None`` — nonexistent, another agent's user, or removed
     from this agent (re-add via the attach path, not edit-in-place).
+    One round trip: three EXISTS in a single SELECT.
     """
-    from surogates.db.models import User
-
-    user = (
-        await db.execute(
-            select(User.id).where(User.id == user_id, User.org_id == org_id)
-        )
-    ).scalar_one_or_none()
-    if user is None:
-        return None
-    bindings = (
-        (
-            await db.execute(
-                select(AgentUser.agent_id, AgentUser.removed_at).where(
-                    AgentUser.org_id == org_id,
-                    AgentUser.user_id == user_id,
-                )
-            )
-        )
-        .all()
+    user_rows = select(User.id).where(User.id == user_id, User.org_id == org_id)
+    any_binding = select(AgentUser.id).where(
+        AgentUser.org_id == org_id, AgentUser.user_id == user_id,
     )
-    if any(a == agent_id and removed is None for a, removed in bindings):
+    bound_here = any_binding.where(
+        AgentUser.agent_id == agent_id, AgentUser.removed_at.is_(None),
+    )
+    user_exists, has_bindings, is_bound = (
+        await db.execute(
+            select(exists(user_rows), exists(any_binding), exists(bound_here))
+        )
+    ).one()
+    if not user_exists:
+        return None
+    if is_bound:
         return "bound"
-    return "orphan" if not bindings else None
+    return "orphan" if not has_bindings else None
 
 
 async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
     """Hard-delete an account, detaching its history first.
 
-    Explicit raw-SQL cleanup (mirroring ops' ``delete_agent_data``
-    discipline) because the ORM relationships are ``lazy="raise"`` and
-    the ``user_id`` FKs carry no ``ondelete`` — a bare ORM delete
-    fails at flush for any user with sessions or channel identities.
-    Sessions/events/audit rows survive with ``user_id`` detached (they
-    are org history, not user property); identity rows and the user's
-    own inbox go with the account. Caller commits.
+    Explicit statement-per-table cleanup (mirroring ops'
+    ``delete_agent_data`` discipline) because the ORM relationships
+    are ``lazy="raise"`` and the ``user_id`` FKs carry no ``ondelete``
+    — a bare ORM instance delete fails at flush for any user with
+    sessions or channel identities. Sessions/events/audit rows survive
+    with ``user_id`` detached (they are org history, not user
+    property); identity rows and the user's own inbox go with the
+    account. The FK-coverage test in the integration suite pins this
+    list against the schema. Caller commits.
     """
-    params = {"uid": user_id, "org": org_id}
+    def scoped(model):
+        return (model.user_id == user_id, model.org_id == org_id)
+
     for stmt in (
-        "DELETE FROM channel_identities WHERE user_id = :uid AND org_id = :org",
-        "DELETE FROM inbox_items WHERE user_id = :uid AND org_id = :org",
-        "DELETE FROM agent_users WHERE user_id = :uid AND org_id = :org",
-        "UPDATE sessions SET user_id = NULL WHERE user_id = :uid AND org_id = :org",
-        "UPDATE events SET user_id = NULL WHERE user_id = :uid AND org_id = :org",
-        "UPDATE audit_log SET user_id = NULL WHERE user_id = :uid AND org_id = :org",
-        "UPDATE missions SET user_id = NULL WHERE user_id = :uid AND org_id = :org",
-        "DELETE FROM users WHERE id = :uid AND org_id = :org",
+        delete(ChannelIdentity).where(*scoped(ChannelIdentity)),
+        delete(InboxItem).where(*scoped(InboxItem)),
+        delete(AgentUser).where(*scoped(AgentUser)),
+        update(Session).where(*scoped(Session)).values(user_id=None),
+        update(Event).where(*scoped(Event)).values(user_id=None),
+        update(AuditLog).where(*scoped(AuditLog)).values(user_id=None),
+        update(Mission).where(*scoped(Mission)).values(user_id=None),
+        delete(User).where(User.id == user_id, User.org_id == org_id),
     ):
-        await db.execute(text(stmt), params)
+        await db.execute(stmt)
 
 
 async def remove_user_from_agent(
@@ -165,20 +178,25 @@ async def remove_user_from_agent(
     :func:`purge_user_account`. Returns False when the user isn't
     visible from this tab. Stages writes only — the caller commits.
     """
-    visibility = await user_visibility(
-        db, org_id=org_id, agent_id=agent_id, user_id=user_id,
-    )
-    if visibility == "bound":
-        await db.execute(
-            text(
-                "UPDATE agent_users SET removed_at = now() "
-                "WHERE org_id = :org AND agent_id = :agent "
-                "AND user_id = :uid AND removed_at IS NULL"
-            ),
-            {"org": org_id, "agent": agent_id, "uid": user_id},
+    # Tombstone-first: the common case is one UPDATE, no pre-reads.
+    result = await db.execute(
+        update(AgentUser)
+        .where(
+            AgentUser.org_id == org_id,
+            AgentUser.agent_id == agent_id,
+            AgentUser.user_id == user_id,
+            AgentUser.removed_at.is_(None),
         )
+        .values(removed_at=func.now())
+    )
+    if result.rowcount:
         return True
-    if visibility == "orphan":
+    if (
+        await user_visibility(
+            db, org_id=org_id, agent_id=agent_id, user_id=user_id,
+        )
+        == "orphan"
+    ):
         await purge_user_account(db, org_id=org_id, user_id=user_id)
         return True
     return False

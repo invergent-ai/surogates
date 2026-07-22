@@ -23,6 +23,11 @@ from surogates.channels.constants import (
     ADAPTER_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
 )
+from surogates.db.agent_users import (
+    ENROLLMENT_CHANNELS,
+    SOURCE_SESSION,
+    ensure_agent_user,
+)
 from surogates.db.models import (
     Event as EventRow,
     IdeaNode,
@@ -234,8 +239,6 @@ class SessionStore:
             db.add(row)
             # Initialise the cursor row so get_harness_cursor never 404s.
             db.add(SessionCursor(session_id=row.id, harness_cursor=0))
-            from surogates.db.agent_users import ENROLLMENT_CHANNELS
-
             if user_id is not None and agent_id and channel in ENROLLMENT_CHANNELS:
                 # First user-attributed contact with an agent enrolls the
                 # user on it (idempotent) — this is what makes shadow
@@ -244,11 +247,6 @@ class SessionStore:
                 # browser_setup/task/api sessions carry user_id too but
                 # must never mint a binding (browser_setup even runs
                 # under the phantom agent id "browser-setup").
-                from surogates.db.agent_users import (
-                    SOURCE_SESSION,
-                    ensure_agent_user,
-                )
-
                 await ensure_agent_user(
                     db,
                     org_id=org_id,

@@ -172,6 +172,17 @@ class User(Base):
             unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
+        # One account per (org, email), case-insensitive — email is the
+        # login key and the Configure→Users attach-by-email guard
+        # assumes it. Fresh databases get this from create_all; legacy
+        # databases get it from the guarded observability.sql retrofit,
+        # which skips (with a NOTICE) while old duplicates exist.
+        Index(
+            "uq_users_org_lower_email",
+            "org_id",
+            text("lower(email)"),
+            unique=True,
+        ),
     )
 
 

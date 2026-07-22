@@ -13,6 +13,7 @@ from __future__ import annotations
 
 __all__ = [
     "ADAPTER_CHANNELS",
+    "END_USER_CHANNELS",
     "INTERACTIVE_PROMPT_CHANNELS",
     "multi_session_disabled",
 ]
@@ -38,3 +39,13 @@ ADAPTER_CHANNELS = frozenset({"slack", "telegram"})
 #: outside this set must not receive content-less ``input_prompt`` outbox
 #: rows — their ``send`` would post an empty message.
 INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram"})
+
+#: Channels whose sessions represent a real end-user talking to the
+#: agent — the set that drives agent-user enrollment (``agent_users``)
+#: and, via the ops control plane, the Users-page activity stats.
+#: Everything else (api, task, delegation, worker, scheduled, ambient,
+#: browser_setup) must never mint a binding or count as end-user
+#: activity.  ``teams`` is pre-registered for the Phase-2 adapter
+#: (``channels/teams.py`` already pins ``channel='teams'``) so shipping
+#: it cannot silently split the roster from its stats.
+END_USER_CHANNELS = frozenset({"web", "website", "slack", "telegram", "teams"})

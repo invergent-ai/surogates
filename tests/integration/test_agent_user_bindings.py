@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-from sqlalchemy import select, text as sa_text
+from sqlalchemy import select
 
 from surogates.db.agent_users import (
     BACKFILL_SQL,
@@ -31,6 +31,17 @@ from surogates.db.models import User
 
 from .conftest import create_org, create_user
 from .test_api import TEST_AGENT_ID, _create_test_tenant, app, client  # noqa: F401
+
+
+async def _enroll(
+    session_factory, org_id, agent_id, user_id, source, reactivate=False,
+):
+    async with session_factory() as db:
+        await ensure_agent_user(
+            db, org_id=org_id, agent_id=agent_id, user_id=user_id,
+            source=source, reactivate=reactivate,
+        )
+        await db.commit()
 
 
 async def _bindings(
@@ -55,12 +66,7 @@ async def test_ensure_agent_user_idempotent_first_source_wins(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
 
-    async with session_factory() as db:
-        await ensure_agent_user(
-            db, org_id=org_id, agent_id="agent-a",
-            user_id=user_id, source=SOURCE_MANUAL,
-        )
-        await db.commit()
+    await _enroll(session_factory, org_id, "agent-a", user_id, SOURCE_MANUAL)
     async with session_factory() as db:
         await ensure_agent_user(
             db, org_id=org_id, agent_id="agent-a",
@@ -255,12 +261,7 @@ async def test_user_visibility_states(session_factory):
     bound = await create_user(session_factory, org_id)
     orphan = await create_user(session_factory, org_id)
 
-    async with session_factory() as db:
-        await ensure_agent_user(
-            db, org_id=org_id, agent_id="agent-a",
-            user_id=bound, source=SOURCE_MANUAL,
-        )
-        await db.commit()
+    await _enroll(session_factory, org_id, "agent-a", bound, SOURCE_MANUAL)
 
     async with session_factory() as db:
         assert await user_visibility(
@@ -363,7 +364,7 @@ async def test_orphan_purge_handles_history(session_store, session_factory):
     )
     async with session_factory() as db:
         await db.execute(
-            sa_text(
+            text(
                 "INSERT INTO channel_identities (id, org_id, user_id, "
                 "platform, platform_user_id, platform_meta) VALUES "
                 "(:id, :org, :uid, 'slack', 'U123', '{}')"
@@ -371,7 +372,7 @@ async def test_orphan_purge_handles_history(session_store, session_factory):
             {"id": uuid.uuid4(), "org": org_id, "uid": user_id},
         )
         await db.execute(
-            sa_text(
+            text(
                 "INSERT INTO events (session_id, org_id, user_id, type, "
                 "data) VALUES (:sid, :org, :uid, 'user.message', '{}')"
             ),
@@ -392,7 +393,7 @@ async def test_orphan_purge_handles_history(session_store, session_factory):
         # The session survives, detached from the deleted account.
         detached = (
             await db.execute(
-                sa_text("SELECT user_id FROM sessions WHERE id = :sid"),
+                text("SELECT user_id FROM sessions WHERE id = :sid"),
                 {"sid": session.id},
             )
         ).scalar_one_or_none()
@@ -459,12 +460,7 @@ async def test_login_org_mismatch_does_not_enroll(
 async def test_user_delete_cascades_bindings(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
-    async with session_factory() as db:
-        await ensure_agent_user(
-            db, org_id=org_id, agent_id="agent-a",
-            user_id=user_id, source=SOURCE_MANUAL,
-        )
-        await db.commit()
+    await _enroll(session_factory, org_id, "agent-a", user_id, SOURCE_MANUAL)
 
     async with session_factory() as db:
         await db.execute(
@@ -473,3 +469,40 @@ async def test_user_delete_cascades_bindings(session_factory):
         await db.commit()
 
     assert await _bindings(session_factory, org_id) == []
+
+
+async def test_purge_covers_every_user_fk():
+    """purge_user_account hardcodes per-table statements; this walks the
+    schema so a future table with a users FK fails HERE, not at runtime
+    on the rarely-exercised orphan-purge path."""
+    from surogates.db import agent_users as module
+    from surogates.db.models import Base
+
+    import inspect
+
+    covered = {
+        "channel_identities", "inbox_items", "agent_users", "sessions",
+        "events", "audit_log", "missions", "users",
+    }
+    # Tables intentionally NOT purged: they belong to operator-side
+    # resources a deleted END-USER account must not take down.
+    exempt = {"agents", "browser_profiles", "credentials", "skills",
+              "mcp_servers", "tasks", "scheduled_sessions", "idea_nodes",
+              "research_runs"}
+    referencing = {
+        table.name
+        for table in Base.metadata.tables.values()
+        for fk in table.foreign_keys
+        if fk.column.table.name == "users"
+    }
+    unaccounted = referencing - covered - exempt
+    assert not unaccounted, (
+        f"tables with a users FK not handled by purge_user_account or "
+        f"explicitly exempted: {sorted(unaccounted)} — extend the purge "
+        f"statement list or the exemption list deliberately"
+    )
+    # And the covered list must actually appear in the implementation.
+    source = inspect.getsource(module.purge_user_account)
+    for name in ("ChannelIdentity", "InboxItem", "AgentUser", "Session",
+                 "Event", "AuditLog", "Mission", "User"):
+        assert name in source
