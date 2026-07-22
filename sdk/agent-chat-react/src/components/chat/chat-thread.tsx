@@ -1630,10 +1630,15 @@ export function IterationGroup({
   //    stay in the shimmer state forever (user-reported bug).
   if (isIterationLive(message)) {
     const label = liveIterationLabel(message);
+    // Same hidden-tool filter as the label: a lone internal list_files
+    // must not leak a "searching" orb next to the quiet "Thinking…".
+    const orbState = messageOrbState(message, {
+      toolFilter: (tc) => !_isHiddenSimpleTool(tc),
+    });
     return (
       <div className="flex items-center gap-2 py-0.5 text-sm">
         <ThinkingOrb
-          state={messageOrbState(message)}
+          state={orbState}
           size={20}
           aria-label={label}
         />
@@ -2185,7 +2190,16 @@ export function ChatThread({
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
-  const orbActivity = useMemo(() => deriveOrbActivity(messages), [messages]);
+  const orbActivity = useMemo(
+    () =>
+      deriveOrbActivity(
+        messages,
+        viewMode === "simple"
+          ? { toolFilter: (tc) => !_isHiddenSimpleTool(tc) }
+          : {},
+      ),
+    [messages, viewMode],
+  );
   // Suppress the running shimmer while parked on a pending
   // ask_user_question — the agent is waiting on the user, not working.
   const showWorkingOnIt =

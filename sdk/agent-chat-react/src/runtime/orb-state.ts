@@ -93,13 +93,27 @@ export function toolOrbState(toolName: string): OrbState {
   return "working";
 }
 
+export interface OrbDerivationOptions {
+  /**
+   * Restricts which running tool calls may drive the orb. Simple mode
+   * passes its hidden-plumbing-tool filter here so an internal
+   * ``list_files`` reads as a quiet solving/working orb, matching the
+   * equally quiet "Thinking…" label — the orb must not leak activity
+   * the label deliberately hides.
+   */
+  toolFilter?: (tc: AgentChatToolCallInfo) => boolean;
+}
+
 function lastRunningToolCall(
   message: AgentChatMessage,
+  toolFilter?: (tc: AgentChatToolCallInfo) => boolean,
 ): AgentChatToolCallInfo | undefined {
   const calls = message.toolCalls ?? [];
   for (let i = calls.length - 1; i >= 0; i--) {
     const tc = calls[i];
-    if (tc && tc.status === "running") return tc;
+    if (tc && tc.status === "running" && (!toolFilter || toolFilter(tc))) {
+      return tc;
+    }
   }
   return undefined;
 }
@@ -107,22 +121,29 @@ function lastRunningToolCall(
 /**
  * Orb state for a single assistant message (one iteration). Priority:
  * a pending ``ask_user_question`` wins (the agent is parked on the
- * user), then the most recently started running tool, then the
- * reasoning stream (`solving`), then visible text streaming
- * (`composing`). A message with none of those — e.g. the request is in
- * flight but nothing has streamed yet — is plain `working`.
+ * user), then the most recently started running tool, then visible
+ * text streaming (`composing`), then the reasoning stream (`solving`).
+ * A message with none of those — e.g. the request is in flight but
+ * nothing has streamed yet — is plain `working`.
  */
-export function messageOrbState(message: AgentChatMessage): OrbState {
-  const running = lastRunningToolCall(message);
-  if (running) {
-    if (
-      message.toolCalls?.some(
-        (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
-      )
-    ) {
-      return "listening";
-    }
-    return toolOrbState(running.toolName);
+export function messageOrbState(
+  message: AgentChatMessage,
+  options: OrbDerivationOptions = {},
+): OrbState {
+  if (
+    message.toolCalls?.some(
+      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+    )
+  ) {
+    return "listening";
+  }
+  const running = lastRunningToolCall(message, options.toolFilter);
+  if (running) return toolOrbState(running.toolName);
+  if (message.toolCalls?.some((tc) => tc.status === "running")) {
+    // Only filtered-out (hidden) tools are running. The message's text
+    // is a finished preamble, not active writing — stay on the quiet
+    // generic state rather than leaking or misreporting the activity.
+    return "working";
   }
   if (message.status !== "streaming") return "working";
   if (message.content.length > 0) return "composing";
@@ -138,13 +159,16 @@ export function messageOrbState(message: AgentChatMessage): OrbState {
  * thread) and derives its state; a trailing user message means the
  * turn hasn't produced anything yet → `working`.
  */
-export function deriveOrbActivity(messages: AgentChatMessage[]): OrbActivity {
+export function deriveOrbActivity(
+  messages: AgentChatMessage[],
+  options: OrbDerivationOptions = {},
+): OrbActivity {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m) continue;
     if (m.role === "user") break;
     if (m.role !== "assistant") continue;
-    const state = messageOrbState(m);
+    const state = messageOrbState(m, options);
     return { state, label: ORB_STATE_LABELS[state] };
   }
   return { state: "working", label: ORB_STATE_LABELS.working };

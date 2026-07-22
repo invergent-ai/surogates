@@ -152,6 +152,31 @@ describe("messageOrbState", () => {
     expect(messageOrbState(assistant({ status: "complete" }))).toBe("working");
     expect(messageOrbState(assistant())).toBe("working");
   });
+
+  it("lets a toolFilter hide plumbing tools from the orb", () => {
+    const hidden = new Set(["list_files"]);
+    const msg = assistant({
+      content: "Let me check the workspace.",
+      toolCalls: [toolCall({ toolName: "list_files" })],
+    });
+    // Unfiltered the orb would leak "searching"; Simple mode's filter
+    // drops the hidden tool and the orb stays on the quiet generic
+    // state — NOT "composing", the preamble text is finished, and NOT
+    // the hidden tool's real activity.
+    expect(messageOrbState(msg)).toBe("searching");
+    expect(
+      messageOrbState(msg, {
+        toolFilter: (tc) => !hidden.has(tc.toolName),
+      }),
+    ).toBe("working");
+  });
+
+  it("keeps listening even when a toolFilter excludes ask_user_question", () => {
+    const msg = assistant({
+      toolCalls: [toolCall({ toolName: "ask_user_question" })],
+    });
+    expect(messageOrbState(msg, { toolFilter: () => false })).toBe("listening");
+  });
 });
 
 describe("deriveOrbActivity", () => {
