@@ -8,7 +8,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+import re
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from surogates.audit import (
     AuditStore,
@@ -524,6 +527,8 @@ async def me(
         org_id=user.org_id,
         email=user.email,
         display_name=user.display_name,
+        username=user.username,
+        phone=user.phone,
         auth_provider=user.auth_provider,
         created_at=user.created_at,
     )
@@ -534,11 +539,19 @@ async def me(
 # ---------------------------------------------------------------------------
 
 
+# Lowercase handle: 3-32 chars of [a-z0-9._-], starting and ending
+# alphanumeric. Validated after lowercasing, so any case is accepted
+# on the wire.
+USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$")
+
+
 class UserUpdateRequest(BaseModel):
     """Payload for updating the current user's profile."""
 
     display_name: str | None = None
     email: str | None = None
+    username: str | None = None
+    phone: str | None = None
 
 
 @router.patch("/auth/me", response_model=UserResponse)
@@ -548,10 +561,26 @@ async def update_me(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> UserResponse:
     """Update profile fields for the currently authenticated user."""
-    if body.display_name is None and body.email is None:
+    if (
+        body.display_name is None
+        and body.email is None
+        and body.username is None
+        and body.phone is None
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="No fields to update.",
+        )
+
+    username = body.username.strip().lower() if body.username is not None else None
+    if username is not None and not USERNAME_RE.fullmatch(username):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Username must be 3-32 characters (letters, digits, "
+                "dots, dashes, underscores) and start/end with a letter "
+                "or digit."
+            ),
         )
 
     session_factory = request.app.state.session_factory
@@ -581,8 +610,33 @@ async def update_me(
             user.display_name = stripped
         if body.email is not None:
             user.email = body.email
+        if username is not None:
+            taken = await session.scalar(
+                select(User.id).where(
+                    User.org_id == tenant.org_id,
+                    func.lower(User.username) == username,
+                    User.id != user.id,
+                )
+            )
+            if taken is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That username is already taken.",
+                )
+            user.username = username
+        if body.phone is not None:
+            # Optional field: an empty string clears it.
+            user.phone = body.phone.strip() or None
 
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # The partial unique index caught a concurrent claim the
+            # pre-check raced with.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That username is already taken.",
+            )
         await session.refresh(user)
 
     return UserResponse(
@@ -590,6 +644,8 @@ async def update_me(
         org_id=user.org_id,
         email=user.email,
         display_name=user.display_name,
+        username=user.username,
+        phone=user.phone,
         auth_provider=user.auth_provider,
         created_at=user.created_at,
     )

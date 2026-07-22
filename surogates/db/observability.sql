@@ -861,3 +861,12 @@ BEGIN
             ON users (org_id, lower(email));
     END IF;
 END $$;
+
+-- ── users: self-registration profile fields ─────────────────────────
+-- Full name lives in display_name; username is a per-org unique
+-- lowercase handle, phone is optional free-form.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
+    ON users (org_id, lower(username))
+    WHERE username IS NOT NULL;

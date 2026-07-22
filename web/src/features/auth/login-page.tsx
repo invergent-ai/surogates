@@ -24,6 +24,7 @@ import {
   resendFirebaseEmailVerification,
   signInWithFirebaseEmail,
   signInWithGithub,
+  sendFirebasePasswordReset,
   signInWithGoogle,
 } from "./firebase";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
@@ -60,6 +61,9 @@ export function LoginPage() {
     self_registration_enabled: false,
     firebase: null,
   });
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [phone, setPhone] = useState("");
   const [firebaseMode, setFirebaseMode] = useState<"sign-in" | "create">(
     "sign-in",
   );
@@ -81,7 +85,88 @@ export function LoginPage() {
     };
   }, []);
 
+  // Sign-up collects full name / username / phone, but the account
+  // only becomes exchangeable after e-mail verification — so the
+  // profile waits in localStorage (keyed by e-mail) and is applied to
+  // /auth/me right after the first successful exchange.
+  const pendingProfileKey = (address: string) =>
+    `surogates.pendingProfile.${address.trim().toLowerCase()}`;
+
+  const stashPendingProfile = (address: string) => {
+    const profile = {
+      display_name: fullName.trim(),
+      username: username.trim().toLowerCase(),
+      phone: phone.trim(),
+    };
+    try {
+      localStorage.setItem(pendingProfileKey(address), JSON.stringify(profile));
+    } catch {
+      // Storage unavailable (private mode) — the user can still fill
+      // their profile later; sign-up must not fail over this.
+    }
+  };
+
+  const applyPendingProfile = async (
+    address: string | null | undefined,
+    accessToken: string,
+  ) => {
+    if (!address) return;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(pendingProfileKey(address));
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    try {
+      const profile = JSON.parse(raw) as {
+        display_name?: string;
+        username?: string;
+        phone?: string;
+      };
+      const body: Record<string, string> = {};
+      if (profile.display_name) body.display_name = profile.display_name;
+      if (profile.username) body.username = profile.username;
+      if (profile.phone) body.phone = profile.phone;
+      if (Object.keys(body).length > 0) {
+        await fetch("/api/v1/auth/me", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify(body),
+        });
+      }
+    } finally {
+      try {
+        localStorage.removeItem(pendingProfileKey(address));
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    if (!firebaseConfig) return;
+    if (!email.trim()) {
+      setLoginError("Enter your email above first.");
+      return;
+    }
+    setLoginError(null);
+    try {
+      await sendFirebasePasswordReset(firebaseConfig, email);
+    } catch {
+      // Fall through to the neutral notice — the form must not leak
+      // whether an address is registered.
+    }
+    setLoginNotice(
+      "If an account exists for that email, a password-reset link is on its way.",
+    );
+  };
+
   const finishFirebaseUser = async (user: {
+    email?: string | null;
     getIdToken: (forceRefresh?: boolean) => Promise<string>;
   }) => {
     // Force-refresh the ID token so claims reflect the current
@@ -90,6 +175,10 @@ export function LoginPage() {
     const idToken = await user.getIdToken(true);
     const tokens = await exchangeFirebaseToken(idToken);
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
+    // Best-effort: a failed profile write must not block sign-in; the
+    // stash is cleared either way and the user can edit their profile
+    // later.
+    await applyPendingProfile(user.email, tokens.access_token).catch(() => {});
     void navigate({ to: getPostAuthRoute() });
   };
 
@@ -257,6 +346,19 @@ export function LoginPage() {
     // ── Create-account mode: sign up via Firebase email/password. ──
     const firebaseConfig = authConfig.firebase;
     if (firebaseMode === "create" && firebasePasswordEnabled && firebaseConfig) {
+      if (!fullName.trim()) {
+        setLoginError("Please enter your full name.");
+        setIsLoading(false);
+        return;
+      }
+      if (!/^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(username.trim().toLowerCase())) {
+        setLoginError(
+          "Username must be 3-32 characters: letters, digits, dots, dashes or underscores.",
+        );
+        setIsLoading(false);
+        return;
+      }
+      stashPendingProfile(email);
       try {
         const { user, verificationSent, verificationError } =
           await createFirebaseEmailAccount(firebaseConfig, email, password);
@@ -432,6 +534,56 @@ export function LoginPage() {
 
         {/* form */}
         <form onSubmit={handleLogin}>
+          {firebaseMode === "create" && firebasePasswordEnabled && (
+            <>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-full-name"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Full name
+                </Label>
+                <Input
+                  id="signup-full-name"
+                  value={fullName}
+                  onChange={(e) => { setFullName(e.target.value); clearError(); }}
+                  placeholder="Ada Lovelace"
+                  autoComplete="name"
+                />
+              </div>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-username"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Username
+                </Label>
+                <Input
+                  id="signup-username"
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); clearError(); }}
+                  placeholder="ada.lovelace"
+                  autoComplete="username"
+                />
+              </div>
+              <div className="mb-3.5">
+                <Label
+                  htmlFor="signup-phone"
+                  className="mb-1.5 block text-subtle"
+                >
+                  Phone <span className="text-faint">(optional)</span>
+                </Label>
+                <Input
+                  id="signup-phone"
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => { setPhone(e.target.value); clearError(); }}
+                  placeholder="+40 712 345 678"
+                  autoComplete="tel"
+                />
+              </div>
+            </>
+          )}
           <div className="mb-3.5">
             <Label htmlFor="login-email" className="mb-1.5 block text-subtle">
               Email
@@ -469,6 +621,15 @@ export function LoginPage() {
                 {showPassword ? "Hide" : "Show"}
               </Button>
             </div>
+            {firebaseMode === "sign-in" && firebasePasswordEnabled && (
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                className="mt-1.5 text-xs text-faint hover:text-foreground hover:underline"
+              >
+                Forgot password?
+              </button>
+            )}
           </div>
 
           {loginError && (

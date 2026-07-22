@@ -130,6 +130,10 @@ class User(Base):
     )
     external_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     password_hash: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Self-registration profile: a lowercase handle (unique per org via
+    # the partial index in observability.sql) and an optional phone.
+    username: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     memory_summary: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )

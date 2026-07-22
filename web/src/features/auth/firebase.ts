@@ -16,6 +16,7 @@ import {
   createUserWithEmailAndPassword,
   getAuth,
   sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   type Auth,
@@ -163,4 +164,14 @@ export async function resendFirebaseEmailVerification(
   user: User,
 ): Promise<void> {
   await sendEmailVerification(user);
+}
+
+/** Send the Firebase password-reset email for a self-registered
+ * account. Callers surface a neutral notice either way so the form
+ * doesn't leak whether the address is registered. */
+export async function sendFirebasePasswordReset(
+  config: FirebaseRuntimeConfig,
+  email: string,
+): Promise<void> {
+  await sendPasswordResetEmail(getRuntimeFirebaseAuth(config), email.trim());
 }

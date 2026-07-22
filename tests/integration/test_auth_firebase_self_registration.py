@@ -359,3 +359,106 @@ async def test_cross_project_uid_collision_resolves_to_different_users(
     assert providers == ["firebase:project-a", "firebase:project-b"], providers
     emails = sorted(u.email for u in rows)
     assert emails == ["alice@example.com", "bob@example.com"]
+
+
+async def _exchange_token(auth_client, monkeypatch, *, uid, email):
+    async def fake_verify(token: str, project_id: str) -> dict:
+        return {"sub": uid, "email": email, "email_verified": True}
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+    response = await auth_client.post(
+        "/v1/auth/firebase/exchange", json={"id_token": "t"},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]
+
+
+async def test_me_patch_persists_profile_fields(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    """Sign-up captures full name, username, and an optional phone —
+    stored on the same org-scoped user row the exchange minted."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+    token = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-prof", email="prof@example.com",
+    )
+
+    response = await auth_client.patch(
+        "/v1/auth/me",
+        json={
+            "display_name": "Ada Lovelace",
+            "username": "Ada.Lovelace",
+            "phone": "+40 712 345 678",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Usernames are case-insensitive login-style handles — normalised
+    # to lowercase on write.
+    assert body["username"] == "ada.lovelace"
+    assert body["phone"] == "+40 712 345 678"
+    assert body["display_name"] == "Ada Lovelace"
+
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id, User.email == "prof@example.com",
+            )
+        )
+    assert user.username == "ada.lovelace"
+    assert user.phone == "+40 712 345 678"
+
+
+async def test_me_patch_rejects_taken_username(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+    first = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-a", email="a@example.com",
+    )
+    r = await auth_client.patch(
+        "/v1/auth/me",
+        json={"username": "taken"},
+        headers={"Authorization": f"Bearer {first}"},
+    )
+    assert r.status_code == 200, r.text
+
+    second = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-b", email="b@example.com",
+    )
+    r = await auth_client.patch(
+        "/v1/auth/me",
+        json={"username": "TAKEN"},
+        headers={"Authorization": f"Bearer {second}"},
+    )
+    assert r.status_code == 409
+    # ...but re-saving your OWN username is not a conflict.
+    r = await auth_client.patch(
+        "/v1/auth/me",
+        json={"username": "taken"},
+        headers={"Authorization": f"Bearer {first}"},
+    )
+    assert r.status_code == 200, r.text
+
+
+async def test_me_patch_rejects_malformed_username(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+    token = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-c", email="c@example.com",
+    )
+    for bad in ("ab", "has space", "x" * 33, "emoji🙂"):
+        r = await auth_client.patch(
+            "/v1/auth/me",
+            json={"username": bad},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 422, bad

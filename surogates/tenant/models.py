@@ -73,6 +73,8 @@ class UserResponse(BaseModel):
     org_id: UUID
     email: str | None = None
     display_name: str | None = None
+    username: str | None = None
+    phone: str | None = None
     auth_provider: str
     created_at: datetime
 
