@@ -30,6 +30,12 @@ import {
   TimelineSeparator,
 } from "../reui/timeline";
 import { Shimmer } from "../ai-elements/shimmer";
+import { ThinkingOrb } from "thinking-orbs";
+import {
+  deriveOrbActivity,
+  messageOrbState,
+  type OrbActivity,
+} from "../../runtime/orb-state";
 import { BrowserActivityGroup } from "../browser/browser-activity-group";
 import { ToolCallBlock } from "./tool-call-block";
 import { CodeRunToolBlock } from "./tools/code-run-tool";
@@ -867,10 +873,13 @@ function TimelineEntryItem({
     <TimelineItem step={step}>
       <TimelineHeader>
         <TimelineSeparator style={{ backgroundColor: "var(--color-border)" }} />
-        <TimelineIndicator className="size-2 border-none bg-primary animate-pulse" />
+        <TimelineIndicator className="size-2 border-none bg-primary" />
       </TimelineHeader>
       <TimelineContent>
-        <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
+        <span className="flex items-center gap-2 py-0.5">
+          <ThinkingOrb state="working" size={20} />
+          <Shimmer duration={3} spread={3} className="text-sm">Working on it...</Shimmer>
+        </span>
       </TimelineContent>
     </TimelineItem>
   );
@@ -1622,7 +1631,12 @@ export function IterationGroup({
   if (isIterationLive(message)) {
     const label = liveIterationLabel(message);
     return (
-      <div className="py-0.5 text-sm">
+      <div className="flex items-center gap-2 py-0.5 text-sm">
+        <ThinkingOrb
+          state={messageOrbState(message)}
+          size={20}
+          aria-label={label}
+        />
         <Shimmer duration={3} spread={3} className="text-sm">
           {label}
         </Shimmer>
@@ -2088,13 +2102,20 @@ function RetryBanner({ indicator }: { indicator: RetryIndicator }) {
   );
 }
 
-function WorkingOnItIndicator() {
+function WorkingOnItIndicator({ activity }: { activity: OrbActivity }) {
   return (
     <Message from="assistant">
       <MessageContent>
-        <Shimmer duration={3} spread={3} className="text-sm">
-          Working on it...
-        </Shimmer>
+        <span className="flex items-center gap-2">
+          <ThinkingOrb
+            state={activity.state}
+            size={20}
+            aria-label={activity.label}
+          />
+          <Shimmer duration={3} spread={3} className="text-sm">
+            {activity.label}
+          </Shimmer>
+        </span>
       </MessageContent>
     </Message>
   );
@@ -2164,6 +2185,7 @@ export function ChatThread({
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
   const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
+  const orbActivity = useMemo(() => deriveOrbActivity(messages), [messages]);
   // Suppress the running shimmer while parked on a pending
   // ask_user_question — the agent is waiting on the user, not working.
   const showWorkingOnIt =
@@ -2364,7 +2386,7 @@ export function ChatThread({
                   />
                 );
               })}
-              {showWorkingOnIt && <WorkingOnItIndicator />}
+              {showWorkingOnIt && <WorkingOnItIndicator activity={orbActivity} />}
             </>
           )}
         </ConversationContent>

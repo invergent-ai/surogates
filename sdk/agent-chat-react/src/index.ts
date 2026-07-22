@@ -9,6 +9,13 @@ export {
 } from "./runtime/use-agent-chat-runtime";
 export { FetchSseEventStream } from "./runtime/fetch-sse-stream";
 export type { FetchSseEventStreamOptions } from "./runtime/fetch-sse-stream";
+export {
+  ORB_STATE_LABELS,
+  deriveOrbActivity,
+  messageOrbState,
+  toolOrbState,
+} from "./runtime/orb-state";
+export type { OrbActivity, OrbState } from "./runtime/orb-state";
 export { MessageResponse } from "./components/ai-elements/message";
 export { BrowserLiveView } from "./components/browser/browser-live-view";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";

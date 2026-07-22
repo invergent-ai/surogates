@@ -694,12 +694,14 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("Working on it");
   });
 
-  it("shows 'Working on it...' alongside a mid-stream text tail", () => {
+  it("shows the running indicator alongside a mid-stream text tail", () => {
     // The reducer keeps the message in status="streaming" until the
     // closing llm.response lands, but llm.delta cadence can stop long
     // before that (the model is still reasoning / about to call a
-    // tool). Showing the shimmer below the streamed text matches
+    // tool). Showing the indicator below the streamed text matches
     // Expert mode, which appends a thinking entry in the same window.
+    // A mid-stream text tail derives the "composing" orb activity, so
+    // the label reads "Writing…".
     const messages: ChatMessage[] = [
       {
         id: "user-1",
@@ -729,7 +731,7 @@ describe("Simple mode ChatThread rendering", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent).toContain("Working on it");
+    expect(dom.textContent).toContain("Writing…");
   });
 
   it("renders skill-only iterations so reasoning stays accessible", () => {
@@ -781,8 +783,9 @@ describe("Simple mode ChatThread rendering", () => {
     );
     // The iteration summary label surfaces (collapsed row).
     expect(dom.textContent).toContain("Loaded pptx skill");
-    // The shimmer also still appears below — the iteration is complete
-    // but the session is still running.
-    expect(dom.textContent).toContain("Working on it");
+    // The running indicator also still appears below — the iteration is
+    // complete but the session is still running, and the live reasoning
+    // stream derives the "solving" orb activity.
+    expect(dom.textContent).toContain("Solving…");
   });
 });
