@@ -38,6 +38,9 @@ from surogates.api.session_guards import (
 )
 from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.api.routes._commerce_turn import (
+    authorize_commerce_turn,
+)
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -527,6 +530,22 @@ async def create_api_session(
     )
 
 
+async def _load_tenant_user(request: Request, tenant: TenantContext):
+    """The authenticated user row, or None for non-user principals."""
+    from sqlalchemy import select
+
+    from surogates.db.models import User
+
+    session_factory = request.app.state.session_factory
+    async with session_factory() as db:
+        return await db.scalar(
+            select(User).where(
+                User.id == tenant.user_id,
+                User.org_id == tenant.org_id,
+            )
+        )
+
+
 @router.post(
     "/api/sessions/{session_id}/messages",
     response_model=SendMessageResponse,
@@ -797,6 +816,31 @@ async def send_message(
         len(body.images) if body.images else 0,
         len(attachments_payload) if attachments_payload else 0,
     )
+    # ── Commerce enforcement (monetized agents, web channel) ──
+    # The authenticated web user's Firebase identity IS the buyer
+    # identity ops meters against (exchange stores the Firebase uid as
+    # external_id), so their paid subscription/token-pack balance
+    # applies here exactly as on the hosted buy page: reserve before
+    # the turn, worker settles ``commerce_reservations`` after it.
+    # Operator-provisioned accounts (database/external providers, no
+    # Firebase uid) are the builder's own people and pass unmetered —
+    # granting them access is the operator's explicit choice.
+    if session.channel == "web" and tenant.user_id is not None:
+        principal = await _load_tenant_user(request, tenant)
+        if principal is not None and (
+            principal.auth_provider or ""
+        ).startswith("firebase:") and principal.external_id:
+            await authorize_commerce_turn(
+                request,
+                session,
+                body.content,
+                buyer={
+                    "firebase_uid": principal.external_id,
+                    "email": principal.email,
+                    "name": principal.display_name,
+                },
+            )
+
     event_data: dict = {"content": body.content}
     if body.images:
         event_data["images"] = [
