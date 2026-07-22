@@ -82,6 +82,9 @@ class FirebaseWebConfig(BaseModel):
     enabled_providers: list[str]
 
 
+USERNAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$"
+
+
 class AuthConfigResponse(BaseModel):
     """Runtime auth shape exposed by ``GET /v1/auth/config``."""
 
@@ -96,10 +99,22 @@ class AuthConfigResponse(BaseModel):
     # "Multi session" capability.  When False each user keeps one session
     # per channel; the SPA hides "New chat" and pins the conversation.
     multi_session: bool = True
+    # Username handle rule (source of truth: USERNAME_RE below). The
+    # sign-up form pre-validates with this so the client can never
+    # drift from the server.
+    username_pattern: str = USERNAME_PATTERN
 
 
 class FirebaseExchangeRequest(BaseModel):
     id_token: str
+    # Optional sign-up profile, applied atomically when this exchange
+    # auto-provisions a NEW user (the sign-up form collected them).
+    # Existing users are never overwritten here — profile edits go
+    # through PATCH /auth/me. Invalid or taken usernames are skipped
+    # rather than failing the sign-in.
+    display_name: str | None = None
+    username: str | None = None
+    phone: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -323,16 +338,45 @@ async def firebase_exchange(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Firebase token must include an email.",
                 )
+            requested_username = (
+                body.username.strip().lower() if body.username else None
+            )
+            if requested_username is not None and (
+                not USERNAME_RE.fullmatch(requested_username)
+                or await session.scalar(
+                    select(User.id).where(
+                        User.org_id == org_id,
+                        func.lower(User.username) == requested_username,
+                    )
+                )
+                is not None
+            ):
+                # Sign-in must not fail over the handle: skip it and
+                # let the user pick another via PATCH /auth/me.
+                requested_username = None
             user = User(
                 id=uuid.uuid4(),
                 org_id=org_id,
                 email=email,
-                display_name=_display_name_from_firebase_claims(claims, email),
+                display_name=(
+                    (body.display_name or "").strip()
+                    or _display_name_from_firebase_claims(claims, email)
+                ),
                 auth_provider=provider,
                 external_id=subject,
+                username=requested_username,
+                phone=(body.phone or "").strip() or None,
             )
             session.add(user)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # The username unique index caught a concurrent claim;
+                # retry once without it — account creation wins.
+                await session.rollback()
+                user.username = None
+                session.add(user)
+                await session.commit()
             await session.refresh(user)
 
         # Successful auth through THIS agent's web channel is
@@ -541,9 +585,9 @@ async def me(
 
 # Lowercase handle: 3-32 chars of [a-z0-9._-], starting and ending
 # alphanumeric. Validated after lowercasing, so any case is accepted
-# on the wire. Mirrored as an inline regex in the web sign-up form
-# (web/src/features/auth/login-page.tsx) — keep both in lockstep.
-USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$")
+# on the wire. Served to clients via /auth/config's username_pattern —
+# one source of truth, no frontend mirror to drift.
+USERNAME_RE = re.compile(USERNAME_PATTERN)
 
 
 class UserUpdateRequest(BaseModel):

@@ -486,3 +486,80 @@ async def test_me_patch_labels_email_conflict_correctly(
     )
     assert r.status_code == 409, r.text
     assert r.json()["detail"] == "That email is already in use."
+
+
+async def test_exchange_applies_signup_profile_atomically(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    """The sign-up form's profile rides the first exchange — the new
+    user row is born complete, no follow-up PATCH required."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+
+    async def fake_verify(token: str, project_id: str) -> dict:
+        return {
+            "sub": "uid-atomic",
+            "email": "atomic@example.com",
+            "email_verified": True,
+        }
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+    r = await auth_client.post(
+        "/v1/auth/firebase/exchange",
+        json={
+            "id_token": "t",
+            "display_name": "Atomic User",
+            "username": "Atomic.User",
+            "phone": "+40 700 111 222",
+        },
+    )
+    assert r.status_code == 200, r.text
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id, User.email == "atomic@example.com",
+            )
+        )
+    assert user.display_name == "Atomic User"
+    assert user.username == "atomic.user"
+    assert user.phone == "+40 700 111 222"
+
+
+async def test_exchange_skips_taken_username_without_failing(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+    token = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-h1", email="h1@example.com",
+    )
+    r = await auth_client.patch(
+        "/v1/auth/me",
+        json={"username": "wanted"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200
+
+    async def fake_verify(token: str, project_id: str) -> dict:
+        return {
+            "sub": "uid-h2",
+            "email": "h2@example.com",
+            "email_verified": True,
+        }
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+    r = await auth_client.post(
+        "/v1/auth/firebase/exchange",
+        json={"id_token": "t", "username": "WANTED"},
+    )
+    assert r.status_code == 200, r.text
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id, User.email == "h2@example.com",
+            )
+        )
+    assert user is not None
+    assert user.username is None

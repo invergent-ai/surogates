@@ -27,7 +27,7 @@ import {
   sendFirebasePasswordReset,
   signInWithGoogle,
 } from "./firebase";
-import { updateCurrentUser } from "@/api/auth";
+import { updateCurrentUser, type SignupProfile } from "@/api/auth";
 import { storeAuthTokens, getPostAuthRoute } from "./session";
 
 const TAGS = [
@@ -179,7 +179,16 @@ export function LoginPage() {
     // server-side state (notably ``email_verified`` after the user
     // returns from clicking the verification link).
     const idToken = await user.getIdToken(true);
-    const tokens = await exchangeFirebaseToken(idToken);
+    // New-user exchanges apply the sign-up profile atomically at
+    // creation; existing users are untouched by these fields and the
+    // PATCH relay below covers them instead.
+    const stashed = user.email
+      ? safeStorage.get(pendingProfileKey(user.email))
+      : null;
+    const tokens = await exchangeFirebaseToken(
+      idToken,
+      stashed ? (JSON.parse(stashed) as SignupProfile) : undefined,
+    );
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
     // Best-effort: a failed profile write must not block sign-in; the
     // stash is cleared either way and the user can edit their profile
@@ -357,9 +366,12 @@ export function LoginPage() {
         setIsLoading(false);
         return;
       }
-      // Mirror of USERNAME_RE in surogates/api/routes/auth.py — keep
-      // both in lockstep.
-      if (!/^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(username.trim().toLowerCase())) {
+      // The handle rule comes from the backend (/auth/config);
+      // the literal is only a fallback for older backends.
+      const usernamePattern = new RegExp(
+        authConfig.username_pattern ?? "^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$",
+      );
+      if (!usernamePattern.test(username.trim().toLowerCase())) {
         setLoginError(
           "Username must be 3-32 characters: letters, digits, dots, dashes or underscores.",
         );

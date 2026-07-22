@@ -174,6 +174,9 @@ export interface AuthConfigResponse {
   // channel (no "New chat"). Absent on a fetch error or an older backend
   // — consumers treat "absent" as "unknown" and fail open (multi on).
   multi_session?: boolean;
+  // Username handle rule served by the backend (single source of
+  // truth). Absent on older backends — callers fall back locally.
+  username_pattern?: string;
 }
 
 /** Fetch the runtime auth config. Falls back to "disabled" on any error
@@ -191,7 +194,16 @@ export async function fetchAuthConfig(): Promise<AuthConfigResponse> {
 }
 
 /** Exchange a Firebase ID token for Surogates access + refresh tokens. */
-export async function exchangeFirebaseToken(idToken: string): Promise<{
+export interface SignupProfile {
+  display_name?: string;
+  username?: string;
+  phone?: string;
+}
+
+export async function exchangeFirebaseToken(
+  idToken: string,
+  profile?: SignupProfile,
+): Promise<{
   access_token: string;
   refresh_token: string;
   token_type: string;
@@ -199,7 +211,7 @@ export async function exchangeFirebaseToken(idToken: string): Promise<{
   const response = await fetch("/api/v1/auth/firebase/exchange", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id_token: idToken }),
+    body: JSON.stringify({ id_token: idToken, ...(profile ?? {}) }),
   });
   if (!response.ok) {
     const data = (await response.json().catch(() => null)) as
