@@ -142,7 +142,9 @@ export function LoginPage() {
       try {
         localStorage.removeItem(pendingProfileKey(address));
       } catch {
-        // ignore
+        // Storage may be unavailable (private mode) — the stale stash
+        // is harmless; it is keyed by e-mail and overwritten on the
+        // next sign-up attempt.
       }
     }
   };

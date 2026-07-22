@@ -400,14 +400,16 @@ class PlatformClient:
         self,
         agent_id: str,
         *,
-        firebase_uid: str,
+        firebase_uid: str | None = None,
         email: str | None = None,
         name: str | None = None,
     ) -> dict:
         """The agent's offers plus this end-user's entitlement — the
         payload behind the web app's Plan & tokens tab. Raises
         :class:`PlatformAuthError` on 401; other non-2xx propagate."""
-        body: dict = {"firebase_uid": firebase_uid}
+        body: dict = {}
+        if firebase_uid is not None:
+            body["firebase_uid"] = firebase_uid
         if email is not None:
             body["email"] = email
         if name is not None:

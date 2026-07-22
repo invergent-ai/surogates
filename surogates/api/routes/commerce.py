@@ -89,11 +89,11 @@ async def commerce_overview(
     identity = await _firebase_identity(request, tenant)
     client = _platform_client(request)
     if identity is None:
-        # Still show what the agent sells — with buying disabled.
+        # Still show what the agent sells — with buying disabled. No
+        # identity is sent, so ops mints no buyer/entitlement row.
         try:
             summary = await client.commerce_summary(
                 str(agent_runtime.agent_id),
-                firebase_uid="__none__",
             )
         except (PlatformAuthError, httpx.HTTPError):
             logger.warning("commerce summary unavailable", exc_info=True)

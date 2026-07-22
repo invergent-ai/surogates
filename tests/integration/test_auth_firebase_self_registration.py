@@ -462,3 +462,27 @@ async def test_me_patch_rejects_malformed_username(
             headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 422, bad
+
+
+async def test_me_patch_labels_email_conflict_correctly(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    """An e-mail collision must not masquerade as a username conflict —
+    the org-scoped e-mail unique index fires on commit and the error
+    names the right field."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+    await _exchange_token(
+        auth_client, monkeypatch, uid="uid-mail-1", email="one@example.com",
+    )
+    token = await _exchange_token(
+        auth_client, monkeypatch, uid="uid-mail-2", email="two@example.com",
+    )
+    r = await auth_client.patch(
+        "/v1/auth/me",
+        json={"email": "one@example.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "That email is already in use."

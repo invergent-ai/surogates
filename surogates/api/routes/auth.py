@@ -630,9 +630,17 @@ async def update_me(
 
         try:
             await session.commit()
-        except IntegrityError:
-            # The partial unique index caught a concurrent claim the
-            # pre-check raced with.
+        except IntegrityError as exc:
+            # Two org-scoped unique indexes can fire here: the
+            # username handle and the login-key e-mail. Name the right
+            # one — a mislabeled conflict sends the user fixing the
+            # wrong field.
+            constraint = str(getattr(exc, "orig", exc))
+            if "uq_users_org_lower_email" in constraint:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="That email is already in use.",
+                )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="That username is already taken.",
