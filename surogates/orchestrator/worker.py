@@ -1380,6 +1380,22 @@ async def run_worker(settings: Settings) -> None:
                 for e in tool_registry.get_all()
                 if e.toolset == "browser"
             )
+        # user_reports exposes other end-users' data, so only operator
+        # (Studio ops-chat) sessions may even see its schema.  This is
+        # the cheap config-only approximation of owner scope — the
+        # handler re-proves it with the DB-backed predicate before
+        # returning anything (defense in depth, same rationale as the
+        # kb tools' handler-side checks).
+        from surogates.tools.owner_scope import owner_scope_config_ok
+
+        if not owner_scope_config_ok(
+            getattr(tenant, "service_account_id", None), session.config,
+        ):
+            effective_tools.difference_update(
+                e.name
+                for e in tool_registry.get_all()
+                if e.toolset == "user_reports"
+            )
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and

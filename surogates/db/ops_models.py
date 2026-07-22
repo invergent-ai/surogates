@@ -27,6 +27,20 @@ class OpsBase(DeclarativeBase):
     pass
 
 
+class OpsAgent(OpsBase):
+    """Mirror of surogate-ops ``agents`` table.
+
+    Stripped to what the user_reports tool needs: identity plus the
+    cached cross-user overview report the ops Users page maintains.
+    """
+    __tablename__ = "agents"
+
+    id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    cohort_report: Mapped[Optional[dict]] = mapped_column(
+        sa.JSON, nullable=True,
+    )
+
+
 class OpsKnowledgeBase(OpsBase):
     """Mirror of surogate-ops ``knowledge_bases`` table.
 
