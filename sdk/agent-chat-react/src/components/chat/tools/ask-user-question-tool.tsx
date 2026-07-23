@@ -85,22 +85,20 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
     [questions, selections],
   );
   const answeredCount = answers.filter((a) => a !== null).length;
-  const allAnswered = answers.every((a) => a !== null);
+  const allAnswered = answeredCount === questions.length;
 
-  // Next unanswered question after ``from`` (wrapping), judged against
-  // the given selections snapshot so a just-made pick counts.
+  // Next unanswered question after ``from``, wrapping. The scan never
+  // evaluates ``from`` itself, so the just-changed question can't
+  // affect the result — the memoized answers are always current enough.
   const nextUnanswered = useCallback(
-    (from: number, sels: Selection[]): number | null => {
-      for (let step = 1; step <= questions.length; step++) {
+    (from: number): number | null => {
+      for (let step = 1; step < questions.length; step++) {
         const i = (from + step) % questions.length;
-        if (i === from) break;
-        if (buildAnswer(questions[i]!, sels[i] ?? emptySelection()) === null) {
-          return i;
-        }
+        if (answers[i] === null) return i;
       }
       return null;
     },
-    [questions],
+    [questions.length, answers],
   );
 
   // Picking a concrete choice answers the question outright, so move
@@ -110,25 +108,21 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
   // the user away mid-correction would read as stolen focus.
   const selectChoice = useCallback(
     (choiceIndex: number) => {
-      const wasAnswered =
-        buildAnswer(
-          questions[active]!,
-          selections[active] ?? emptySelection(),
-        ) !== null;
+      const wasAnswered = answers[active] !== null;
       const copy = selections.slice();
       copy[active] = { index: choiceIndex, other: "" };
       setSelections(copy);
       if (wasAnswered) return;
-      const next = nextUnanswered(active, copy);
+      const next = nextUnanswered(active);
       if (next !== null) setActive(next);
     },
-    [active, questions, selections, nextUnanswered],
+    [active, answers, selections, nextUnanswered],
   );
 
   const advance = useCallback(() => {
-    const next = nextUnanswered(active, selections);
+    const next = nextUnanswered(active);
     if (next !== null) setActive(next);
-  }, [active, selections, nextUnanswered]);
+  }, [active, nextUnanswered]);
 
   const handleSubmit = useCallback(async () => {
     if (!sessionId || locked || submitting) return;
@@ -298,8 +292,8 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
             disabled={!allAnswered || submitting}
             onClick={() => void handleSubmit()}
             className={cn(
-              "shrink-0 rounded-md bg-amber-400 px-4 py-1.5 text-sm font-medium text-black transition-colors",
-              "hover:bg-amber-300",
+              "shrink-0 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors",
+              "hover:bg-primary/80",
               "disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >

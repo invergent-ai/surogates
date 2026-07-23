@@ -10,7 +10,6 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
-  CheckIcon,
   ChevronRightIcon,
   ClockIcon,
   CloudIcon,
@@ -392,36 +391,32 @@ function ChatComposerInner({
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  // null = never loaded. Failures keep the last known list — blanking
+  // it would erase the trigger's active-profile name over a transient
+  // error.
   const [browserProfiles, setBrowserProfiles] = useState<
-    AgentChatBrowserProfile[]
-  >([]);
-  // Load eagerly (the trigger shows the active profile's name, so the
-  // list is needed before the menu ever opens) and refresh on each
-  // open so a freshly-created profile appears without a reload. The
-  // loaded ref skips the close transition, and failures keep the last
-  // known list — blanking it would erase the trigger's active-profile
-  // name over a transient error.
-  const browserProfilesLoadedRef = useRef(false);
+    AgentChatBrowserProfile[] | null
+  >(null);
+  const loadBrowserProfiles = useCallback(() => {
+    if (!adapter.listBrowserProfiles) return;
+    void adapter.listBrowserProfiles().then(setBrowserProfiles).catch(() => {});
+  }, [adapter]);
+  // The trigger names the active profile, so resolve the list as soon
+  // as a profile id is present; the menu also refreshes on each open
+  // (see onOpenChange) so a freshly-created profile appears without a
+  // reload.
   useEffect(() => {
-    if (!browserProfilesEnabled || !adapter.listBrowserProfiles) return;
-    if (!profileMenuOpen && browserProfilesLoadedRef.current) return;
-    let cancelled = false;
-    void adapter
-      .listBrowserProfiles()
-      .then((p) => {
-        if (!cancelled) {
-          browserProfilesLoadedRef.current = true;
-          setBrowserProfiles(p);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [browserProfilesEnabled, profileMenuOpen, adapter]);
-  const activeBrowserProfile = browserProfileId
-    ? browserProfiles.find((p) => p.id === browserProfileId) ?? null
-    : null;
+    if (!browserProfilesEnabled || !browserProfileId) return;
+    if (browserProfiles !== null) return;
+    loadBrowserProfiles();
+  }, [browserProfilesEnabled, browserProfileId, browserProfiles, loadBrowserProfiles]);
+  const activeBrowserProfile =
+    (browserProfiles ?? []).find((p) => p.id === browserProfileId) ?? null;
+  const profileTriggerLabel = activeBrowserProfile && (
+    <span className="max-w-24 truncate text-xs">
+      {activeBrowserProfile.name}
+    </span>
+  );
   const { textInput, attachments } = usePromptInputController();
   const status = isRunning ? "streaming" : disabled ? "error" : "ready";
 
@@ -874,16 +869,15 @@ function ChatComposerInner({
                     }`}
                   >
                     <IdCardIcon className="size-4" />
-                    {activeBrowserProfile && (
-                      <span className="max-w-24 truncate text-xs">
-                        {activeBrowserProfile.name}
-                      </span>
-                    )}
+                    {profileTriggerLabel}
                   </PromptInputButton>
                 ) : (
                   <Popover
                     open={profileMenuOpen}
-                    onOpenChange={setProfileMenuOpen}
+                    onOpenChange={(open) => {
+                      setProfileMenuOpen(open);
+                      if (open) loadBrowserProfiles();
+                    }}
                   >
                     <PopoverTrigger asChild>
                       <PromptInputButton
@@ -901,11 +895,7 @@ function ChatComposerInner({
                         }
                       >
                         <IdCardIcon className="size-4" />
-                        {activeBrowserProfile && (
-                          <span className="max-w-24 truncate text-xs">
-                            {activeBrowserProfile.name}
-                          </span>
-                        )}
+                        {profileTriggerLabel}
                       </PromptInputButton>
                     </PopoverTrigger>
                     <PopoverContent
@@ -915,45 +905,24 @@ function ChatComposerInner({
                     >
                       <Command>
                         <CommandList>
-                          <CommandItem
-                            onSelect={() => {
-                              setProfileMenuOpen(false);
-                              onSelectBrowserProfile(null);
-                            }}
-                            data-checked={!browserProfileId || undefined}
-                            className="gap-3 rounded-md px-3 py-2"
-                          >
-                            No profile
-                            {!browserProfileId && (
-                              <>
-                                <CheckIcon
-                                  aria-hidden
-                                  className="ml-auto size-4 text-foreground"
-                                />
-                                <span className="sr-only">(selected)</span>
-                              </>
-                            )}
-                          </CommandItem>
-                          {browserProfiles.map((p) => (
+                          {/* data-checked lights CommandItem's built-in
+                              trailing check on the selected entry. */}
+                          {[
+                            { id: null as string | null, name: "No profile" },
+                            ...(browserProfiles ?? []),
+                          ].map((p) => (
                             <CommandItem
-                              key={p.id}
+                              key={p.id ?? "none"}
                               onSelect={() => {
                                 setProfileMenuOpen(false);
                                 onSelectBrowserProfile(p.id);
                               }}
-                              data-checked={browserProfileId === p.id || undefined}
+                              data-checked={
+                                (browserProfileId ?? null) === p.id || undefined
+                              }
                               className="gap-3 rounded-md px-3 py-2"
                             >
                               {p.name}
-                              {browserProfileId === p.id && (
-                                <>
-                                  <CheckIcon
-                                    aria-hidden
-                                    className="ml-auto size-4 text-foreground"
-                                  />
-                                  <span className="sr-only">(selected)</span>
-                                </>
-                              )}
                             </CommandItem>
                           ))}
                         </CommandList>
