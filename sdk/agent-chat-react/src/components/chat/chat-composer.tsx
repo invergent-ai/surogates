@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
+  CheckIcon,
   ChevronRightIcon,
   ClockIcon,
   CloudIcon,
@@ -394,8 +395,11 @@ function ChatComposerInner({
   const [browserProfiles, setBrowserProfiles] = useState<
     AgentChatBrowserProfile[]
   >([]);
+  // Load eagerly (the trigger shows the active profile's name, so the
+  // list is needed before the menu ever opens) and refresh on open so a
+  // freshly-created profile appears without a reload.
   useEffect(() => {
-    if (!profileMenuOpen || !adapter.listBrowserProfiles) return;
+    if (!browserProfilesEnabled || !adapter.listBrowserProfiles) return;
     let cancelled = false;
     void adapter
       .listBrowserProfiles()
@@ -408,7 +412,10 @@ function ChatComposerInner({
     return () => {
       cancelled = true;
     };
-  }, [profileMenuOpen, adapter]);
+  }, [browserProfilesEnabled, profileMenuOpen, adapter]);
+  const activeBrowserProfile = browserProfileId
+    ? browserProfiles.find((p) => p.id === browserProfileId) ?? null
+    : null;
   const { textInput, attachments } = usePromptInputController();
   const status = isRunning ? "streaming" : disabled ? "error" : "ready";
 
@@ -851,12 +858,21 @@ function ChatComposerInner({
                     aria-label="Select browser profile"
                     aria-disabled
                     aria-pressed={!!browserProfileId}
-                    tooltip="A browser profile must be chosen before starting the session"
+                    tooltip={
+                      activeBrowserProfile
+                        ? `Browser profile: ${activeBrowserProfile.name} (locked for this session)`
+                        : "A browser profile must be chosen before starting the session"
+                    }
                     className={`cursor-not-allowed opacity-50 ${
                       browserProfileId ? "bg-accent text-foreground" : ""
                     }`}
                   >
                     <IdCardIcon className="size-4" />
+                    {activeBrowserProfile && (
+                      <span className="max-w-24 truncate text-xs">
+                        {activeBrowserProfile.name}
+                      </span>
+                    )}
                   </PromptInputButton>
                 ) : (
                   <Popover
@@ -867,6 +883,11 @@ function ChatComposerInner({
                       <PromptInputButton
                         aria-label="Select browser profile"
                         aria-pressed={!!browserProfileId}
+                        tooltip={
+                          activeBrowserProfile
+                            ? `Browser profile: ${activeBrowserProfile.name}`
+                            : "Select browser profile"
+                        }
                         className={
                           browserProfileId
                             ? "bg-accent text-foreground"
@@ -874,6 +895,11 @@ function ChatComposerInner({
                         }
                       >
                         <IdCardIcon className="size-4" />
+                        {activeBrowserProfile && (
+                          <span className="max-w-24 truncate text-xs">
+                            {activeBrowserProfile.name}
+                          </span>
+                        )}
                       </PromptInputButton>
                     </PopoverTrigger>
                     <PopoverContent
@@ -888,9 +914,13 @@ function ChatComposerInner({
                               setProfileMenuOpen(false);
                               onSelectBrowserProfile(null);
                             }}
+                            aria-checked={!browserProfileId}
                             className="gap-3 rounded-md px-3 py-2"
                           >
                             No profile
+                            {!browserProfileId && (
+                              <CheckIcon className="ml-auto size-4 text-foreground" />
+                            )}
                           </CommandItem>
                           {browserProfiles.map((p) => (
                             <CommandItem
@@ -899,13 +929,12 @@ function ChatComposerInner({
                                 setProfileMenuOpen(false);
                                 onSelectBrowserProfile(p.id);
                               }}
+                              aria-checked={browserProfileId === p.id}
                               className="gap-3 rounded-md px-3 py-2"
                             >
                               {p.name}
                               {browserProfileId === p.id && (
-                                <span className="ml-auto text-xs text-muted-foreground">
-                                  Active
-                                </span>
+                                <CheckIcon className="ml-auto size-4 text-foreground" />
                               )}
                             </CommandItem>
                           ))}
