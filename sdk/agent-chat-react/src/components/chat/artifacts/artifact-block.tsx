@@ -83,6 +83,12 @@ function cachePayload(
   version: number,
   payload: ArtifactPayload,
 ): void {
+  // Never regress the cache: a superseded fetch (version bumped while
+  // it was in flight) can resolve after the newer fetch already
+  // populated the entry — writing it would revive the stale payload
+  // and re-protect it from LRU eviction.
+  const existing = artifactPayloadCache.get(key);
+  if (existing && existing.version >= version) return;
   artifactPayloadCache.delete(key);
   artifactPayloadCache.set(key, { version, payload });
   if (artifactPayloadCache.size > ARTIFACT_PAYLOAD_CACHE_LIMIT) {
