@@ -3,11 +3,14 @@
 //
 // TurnSummaryCard — Simple-mode per-turn recap card rendered below
 // the final assistant text. Lists artifacts the harness's turn
-// summarizer judged notable; each artifact dispatches to the right
-// existing viewer (file viewer, ArtifactBlock, external link, terminal
-// detail dialog).
+// summarizer judged notable. Structured artifacts already render live
+// via their ``artifact.created`` marker in the thread, so the card
+// links back to that block (scroll-into-view) instead of mounting a
+// second ArtifactBlock — a duplicate mount replayed html/svg
+// animations from zero and doubled the payload fetch.
 
-import { ArtifactBlock } from "./artifacts/artifact-block";
+import { FileTextIcon } from "lucide-react";
+import { KIND_LABEL } from "./artifacts/artifact-block";
 import { WorkspaceFileCard } from "./workspace-file-card";
 import type {
   AgentChatTurnArtifactRef,
@@ -35,6 +38,43 @@ interface ResolvedArtifact {
   name: string;
   kind: ArtifactKind;
   version: number;
+}
+
+function scrollToArtifactBlock(artifactId: string): void {
+  if (typeof document === "undefined") return;
+  const selector =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? `[data-artifact-anchor="${CSS.escape(artifactId)}"]`
+      : `[data-artifact-anchor="${artifactId}"]`;
+  document
+    .querySelector(selector)
+    ?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+/**
+ * Compact reference to an artifact that is already live elsewhere in
+ * the thread; clicking scrolls the existing block into view.
+ */
+function ArtifactRefCard({
+  artifact,
+}: {
+  artifact: ResolvedArtifact & { label: string };
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => scrollToArtifactBlock(artifact.artifactId)}
+      className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded border border-border bg-background px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60"
+    >
+      <FileTextIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+        {artifact.name || artifact.label}
+      </span>
+      <span className="shrink-0 text-xs text-muted-foreground">
+        {KIND_LABEL[artifact.kind]}
+      </span>
+    </button>
+  );
 }
 
 function resolveArtifactRef(
@@ -96,15 +136,11 @@ export function TurnSummaryCard({
               const resolved = sessionId
                 ? resolveArtifactRef(artifact.ref, messages)
                 : null;
-              if (resolved && sessionId) {
+              if (resolved) {
                 return (
-                  <ArtifactBlock
+                  <ArtifactRefCard
                     key={key}
-                    sessionId={sessionId}
-                    artifactId={resolved.artifactId}
-                    name={resolved.name || artifact.label}
-                    kind={resolved.kind}
-                    version={resolved.version}
+                    artifact={{ ...resolved, label: artifact.label }}
                   />
                 );
               }
@@ -119,8 +155,6 @@ export function TurnSummaryCard({
                 </span>
                 <ArtifactRow
                   artifact={artifact}
-                  sessionId={sessionId}
-                  messages={messages}
                   onFileSelect={onFileSelect}
                   onCommandSelect={onCommandSelect}
                 />
@@ -135,16 +169,12 @@ export function TurnSummaryCard({
 
 interface ArtifactRowProps {
   artifact: AgentChatTurnArtifactRef;
-  sessionId: string | null;
-  messages: ChatMessage[];
   onFileSelect?: (path: string) => void;
   onCommandSelect?: (toolCallId: string) => void;
 }
 
 function ArtifactRow({
   artifact,
-  sessionId,
-  messages,
   onFileSelect,
   onCommandSelect,
 }: ArtifactRowProps) {
@@ -199,27 +229,13 @@ function ArtifactRow({
     );
   }
 
-  // kind === "artifact"
-  const resolved = sessionId ? resolveArtifactRef(artifact.ref, messages) : null;
-  if (!resolved) {
-    // No matching artifact.created event yet (truncated history, or
-    // the summarizer cited a stale reference). Fall back to plain
-    // text so the card stays informative.
-    return (
-      <span className="truncate text-muted-foreground">
-        {artifact.label}
-      </span>
-    );
-  }
+  // kind === "artifact" — only reached when the full-width branch
+  // above could not resolve the ref (truncated history, or the
+  // summarizer cited a stale reference): fall back to plain text so
+  // the card stays informative.
   return (
-    <div className="flex-1 min-w-0">
-      <ArtifactBlock
-        sessionId={sessionId!}
-        artifactId={resolved.artifactId}
-        name={resolved.name || artifact.label}
-        kind={resolved.kind}
-        version={resolved.version}
-      />
-    </div>
+    <span className="truncate text-muted-foreground">
+      {artifact.label}
+    </span>
   );
 }

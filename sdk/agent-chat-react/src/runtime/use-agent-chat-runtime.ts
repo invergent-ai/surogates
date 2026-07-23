@@ -335,6 +335,31 @@ export function useAgentChatRuntime({
 
     if (live) reviveStreamIfNeeded(targetSessionId);
 
+    // Adopt the authoritative status when it contradicts the local
+    // running flag. Event drainage is the normal repair path, but when
+    // the terminal event was lost (stream died mid-turn and the
+    // backlog page it lived on failed to fetch) the client would show
+    // "Working on it…" forever. The synthetic ``session.done`` carries
+    // id 0, so it bypasses the monotonic dedup like the other control
+    // events, and ``ensureStreamForNewTurn`` resets ``sessionDone`` on
+    // the next send — a completed session stays resumable.
+    if (
+      statusKnown &&
+      !live &&
+      !appliedNew &&
+      stateRef.current.isRunning
+    ) {
+      setState((prev) =>
+        prev.isRunning
+          ? applyRuntimeEvent(prev, {
+              type: "session.done",
+              eventId: 0,
+              data: {},
+            })
+          : prev,
+      );
+    }
+
     if (appliedNew) return RECONCILE_FAST;
     if (live || !statusKnown) return RECONCILE_ACTIVE;
     return isMission || stateRef.current.isRunning

@@ -53,7 +53,7 @@ interface ArtifactBlockProps {
   version: number;
 }
 
-const KIND_LABEL: Record<ArtifactKind, string> = {
+export const KIND_LABEL: Record<ArtifactKind, string> = {
   markdown: "Markdown document",
   table: "Table",
   chart: "Chart",
@@ -66,6 +66,31 @@ const KIND_LABEL: Record<ArtifactKind, string> = {
 // How long the copy icon shows the green check before reverting.
 const COPY_FEEDBACK_MS = 1500;
 
+// Payload cache shared by every ArtifactBlock mount. Chat re-grouping
+// (an iteration/turn summary landing) remounts blocks mid-stream;
+// without this each remount reset the payload to null, flashing the
+// "Loading artifact…" skeleton and restarting html/svg animations —
+// the artifact visibly disappeared and reappeared. Version bumps
+// revalidate in the background while the stale payload keeps showing.
+const ARTIFACT_PAYLOAD_CACHE_LIMIT = 64;
+const artifactPayloadCache = new Map<
+  string,
+  { version: number; payload: ArtifactPayload }
+>();
+
+function cachePayload(
+  key: string,
+  version: number,
+  payload: ArtifactPayload,
+): void {
+  artifactPayloadCache.delete(key);
+  artifactPayloadCache.set(key, { version, payload });
+  if (artifactPayloadCache.size > ARTIFACT_PAYLOAD_CACHE_LIMIT) {
+    const oldest = artifactPayloadCache.keys().next().value;
+    if (oldest !== undefined) artifactPayloadCache.delete(oldest);
+  }
+}
+
 export function ArtifactBlock({
   sessionId,
   artifactId,
@@ -74,17 +99,29 @@ export function ArtifactBlock({
   version,
 }: ArtifactBlockProps) {
   const { adapter } = useAgentChatAdapterContext();
-  const [payload, setPayload] = useState<ArtifactPayload | null>(null);
+  const cacheKey = `${sessionId}:${artifactId}`;
+  const [payload, setPayload] = useState<ArtifactPayload | null>(
+    () => artifactPayloadCache.get(cacheKey)?.payload ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
+    const cached = artifactPayloadCache.get(cacheKey);
+    if (cached) {
+      // Show the cached payload immediately — even a stale version
+      // beats a skeleton flash — and skip the fetch entirely when it
+      // is already current.
+      setPayload(cached.payload);
+      setError(null);
+      if (cached.version >= version) return;
+    }
     let cancelled = false;
-    setPayload(null);
     setError(null);
     adapter.getArtifact({ sessionId, artifactId })
       .then((p) => {
+        cachePayload(cacheKey, version, p);
         if (!cancelled) setPayload(p);
       })
       .catch((e: unknown) => {
@@ -95,7 +132,7 @@ export function ArtifactBlock({
     return () => {
       cancelled = true;
     };
-  }, [adapter, sessionId, artifactId, version]);
+  }, [adapter, sessionId, artifactId, version, cacheKey]);
 
   const handleCopy = async () => {
     if (!payload) return;
@@ -138,8 +175,11 @@ export function ArtifactBlock({
         borderRadius={10}
         className="w-full"
       >
-        <Artifact className="my-2 w-full overflow-visible border-border">
-            <ArtifactHeader>
+        <Artifact
+          className="my-2 w-full overflow-visible border-border"
+          data-artifact-anchor={artifactId}
+        >
+          <ArtifactHeader>
             <div className="flex min-w-0 flex-col">
               <ArtifactTitle className="truncate">{name}</ArtifactTitle>
               <ArtifactDescription>{description}</ArtifactDescription>
