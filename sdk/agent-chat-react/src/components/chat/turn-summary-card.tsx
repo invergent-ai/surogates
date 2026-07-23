@@ -21,7 +21,7 @@ import type { ArtifactKind } from "../../types";
 
 export interface TurnSummaryCardProps {
   summary: AgentChatTurnSummary;
-  /** Required to mount ``ArtifactBlock`` for ``kind: "artifact"`` refs. */
+  /** Required to resolve file and artifact refs. */
   sessionId: string | null;
   /** Used to resolve ``kind: "artifact"`` refs back to their
    *  ``artifact.created`` system-message metadata. */
@@ -41,13 +41,8 @@ interface ResolvedArtifact {
 }
 
 function scrollToArtifactBlock(artifactId: string): void {
-  if (typeof document === "undefined") return;
-  const selector =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? `[data-artifact-anchor="${CSS.escape(artifactId)}"]`
-      : `[data-artifact-anchor="${artifactId}"]`;
   document
-    .querySelector(selector)
+    .querySelector(`[data-artifact-anchor="${CSS.escape(artifactId)}"]`)
     ?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
@@ -56,22 +51,26 @@ function scrollToArtifactBlock(artifactId: string): void {
  * the thread; clicking scrolls the existing block into view.
  */
 function ArtifactRefCard({
-  artifact,
+  artifactId,
+  name,
+  kind,
 }: {
-  artifact: ResolvedArtifact & { label: string };
+  artifactId: string;
+  name: string;
+  kind: ArtifactKind;
 }) {
   return (
     <button
       type="button"
-      onClick={() => scrollToArtifactBlock(artifact.artifactId)}
+      onClick={() => scrollToArtifactBlock(artifactId)}
       className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded border border-border bg-background px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60"
     >
       <FileTextIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
       <span className="min-w-0 flex-1 truncate font-medium text-foreground">
-        {artifact.name || artifact.label}
+        {name}
       </span>
       <span className="shrink-0 text-xs text-muted-foreground">
-        {KIND_LABEL[artifact.kind]}
+        {KIND_LABEL[kind]}
       </span>
     </button>
   );
@@ -104,10 +103,9 @@ export function TurnSummaryCard({
   const hasArtifacts = summary.artifacts.length > 0;
   if (!hasArtifacts) return null;
 
-  // Split artifacts so file/artifact refs render as full-width rich
-  // cards (Claude-style download card + ArtifactBlock) while
-  // url/command refs stay in the bullet list. Mixed turns get both
-  // sections in source order.
+  // Split artifacts so file/artifact refs render as full-width cards
+  // (download card / ArtifactRefCard) while url/command refs stay in
+  // the bullet list. Mixed turns get both sections in source order.
   return (
     <div className="mt-3 rounded border border-border bg-muted/50 px-3 py-2 text-sm">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide">
@@ -140,7 +138,9 @@ export function TurnSummaryCard({
                 return (
                   <ArtifactRefCard
                     key={key}
-                    artifact={{ ...resolved, label: artifact.label }}
+                    artifactId={resolved.artifactId}
+                    name={resolved.name || artifact.label}
+                    kind={resolved.kind}
                   />
                 );
               }

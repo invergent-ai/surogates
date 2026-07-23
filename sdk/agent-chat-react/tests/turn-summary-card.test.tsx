@@ -214,7 +214,7 @@ describe("TurnSummaryCard", () => {
     expect(dom.querySelector("button")).toBeNull();
   });
 
-  it("resolves artifact refs against artifact.created system messages and renders ArtifactBlock", () => {
+  it("resolves artifact refs and renders a reference card to the live block", () => {
     const messages: ChatMessage[] = [
       {
         id: "m1",
@@ -243,11 +243,11 @@ describe("TurnSummaryCard", () => {
         messages={messages}
       />,
     );
-    // ArtifactBlock renders a header with the artifact name + version.
+    // The reference card carries the artifact name plus its kind label
+    // (the plain-text fallback renders just the label, no button).
     expect(dom.textContent).toContain("Report");
-    // The plain-text fallback path would render JUST the label; verify
-    // we got the rich block (it includes additional chrome).
-    expect(dom.querySelector("button, a, [role='button']")).not.toBeNull();
+    expect(dom.textContent).toContain("Markdown document");
+    expect(dom.querySelector("button")).not.toBeNull();
   });
 
   it("falls back to plain text when the artifact ref cannot be resolved", () => {
