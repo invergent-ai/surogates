@@ -396,19 +396,25 @@ function ChatComposerInner({
     AgentChatBrowserProfile[]
   >([]);
   // Load eagerly (the trigger shows the active profile's name, so the
-  // list is needed before the menu ever opens) and refresh on open so a
-  // freshly-created profile appears without a reload.
+  // list is needed before the menu ever opens) and refresh on each
+  // open so a freshly-created profile appears without a reload. The
+  // loaded ref skips the close transition, and failures keep the last
+  // known list — blanking it would erase the trigger's active-profile
+  // name over a transient error.
+  const browserProfilesLoadedRef = useRef(false);
   useEffect(() => {
     if (!browserProfilesEnabled || !adapter.listBrowserProfiles) return;
+    if (!profileMenuOpen && browserProfilesLoadedRef.current) return;
     let cancelled = false;
     void adapter
       .listBrowserProfiles()
       .then((p) => {
-        if (!cancelled) setBrowserProfiles(p);
+        if (!cancelled) {
+          browserProfilesLoadedRef.current = true;
+          setBrowserProfiles(p);
+        }
       })
-      .catch(() => {
-        if (!cancelled) setBrowserProfiles([]);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -914,12 +920,18 @@ function ChatComposerInner({
                               setProfileMenuOpen(false);
                               onSelectBrowserProfile(null);
                             }}
-                            aria-checked={!browserProfileId}
+                            data-checked={!browserProfileId || undefined}
                             className="gap-3 rounded-md px-3 py-2"
                           >
                             No profile
                             {!browserProfileId && (
-                              <CheckIcon className="ml-auto size-4 text-foreground" />
+                              <>
+                                <CheckIcon
+                                  aria-hidden
+                                  className="ml-auto size-4 text-foreground"
+                                />
+                                <span className="sr-only">(selected)</span>
+                              </>
                             )}
                           </CommandItem>
                           {browserProfiles.map((p) => (
@@ -929,12 +941,18 @@ function ChatComposerInner({
                                 setProfileMenuOpen(false);
                                 onSelectBrowserProfile(p.id);
                               }}
-                              aria-checked={browserProfileId === p.id}
+                              data-checked={browserProfileId === p.id || undefined}
                               className="gap-3 rounded-md px-3 py-2"
                             >
                               {p.name}
                               {browserProfileId === p.id && (
-                                <CheckIcon className="ml-auto size-4 text-foreground" />
+                                <>
+                                  <CheckIcon
+                                    aria-hidden
+                                    className="ml-auto size-4 text-foreground"
+                                  />
+                                  <span className="sr-only">(selected)</span>
+                                </>
                               )}
                             </CommandItem>
                           ))}

@@ -150,6 +150,29 @@ describe("ask_user_question widget UX", () => {
     });
   });
 
+  it("stays put when revising an already-answered question", () => {
+    const dom = mount(<AskUserQuestionToolBlock tc={askToolCall()} />, adapterStub());
+
+    clickByText(dom, "Repo-style guide");
+    expect(dom.textContent).toContain("What tone should it use?");
+
+    // Go back and change the first answer — the widget must not yank
+    // focus away mid-correction.
+    clickByText(dom, "Question 1");
+    clickByText(dom, "Root-level file");
+    expect(dom.textContent).toContain("Where should I save the file?");
+  });
+
+  it("lets Next question browse ahead without answering, Submit still gated", () => {
+    const adapter = adapterStub();
+    const dom = mount(<AskUserQuestionToolBlock tc={askToolCall()} />, adapter);
+
+    clickByText(dom, "Next question");
+    expect(dom.textContent).toContain("What tone should it use?");
+    expect(dom.textContent).toContain("0 of 2 answered");
+    expect(adapter.submitAskUserQuestionResponse).not.toHaveBeenCalled();
+  });
+
   it("does not auto-advance for 'Other' until Enter commits the typed answer", () => {
     const dom = mount(<AskUserQuestionToolBlock tc={askToolCall()} />, adapterStub());
 

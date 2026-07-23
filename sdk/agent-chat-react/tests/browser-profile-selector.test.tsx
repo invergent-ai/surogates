@@ -135,7 +135,7 @@ describe("browser profile selector", () => {
     await act(async () => {
       (trigger as HTMLElement).click();
     });
-    const checked = [...document.querySelectorAll('[aria-checked="true"]')];
+    const checked = [...document.querySelectorAll("[data-checked]")];
     expect(checked).toHaveLength(1);
     expect(checked[0]?.textContent).toContain("Work");
     expect(checked[0]?.querySelector("svg")).not.toBeNull();
@@ -147,7 +147,7 @@ describe("browser profile selector", () => {
     await act(async () => {
       (trigger as HTMLElement).click();
     });
-    const checked = [...document.querySelectorAll('[aria-checked="true"]')];
+    const checked = [...document.querySelectorAll("[data-checked]")];
     expect(checked).toHaveLength(1);
     expect(checked[0]?.textContent).toContain("No profile");
   });

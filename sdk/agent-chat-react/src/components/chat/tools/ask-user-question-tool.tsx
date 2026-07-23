@@ -105,16 +105,24 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
 
   // Picking a concrete choice answers the question outright, so move
   // straight to the next open one — the green tab dot plus the new
-  // prompt make the advance legible. "Other" stays put until typed.
+  // prompt make the advance legible. "Other" stays put until typed,
+  // and revising an already-answered question stays put too: yanking
+  // the user away mid-correction would read as stolen focus.
   const selectChoice = useCallback(
     (choiceIndex: number) => {
+      const wasAnswered =
+        buildAnswer(
+          questions[active]!,
+          selections[active] ?? emptySelection(),
+        ) !== null;
       const copy = selections.slice();
       copy[active] = { index: choiceIndex, other: "" };
       setSelections(copy);
+      if (wasAnswered) return;
       const next = nextUnanswered(active, copy);
       if (next !== null) setActive(next);
     },
-    [active, selections, nextUnanswered],
+    [active, questions, selections, nextUnanswered],
   );
 
   const advance = useCallback(() => {
@@ -384,7 +392,14 @@ function OtherRow({
           onFocus={onSelect}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && value.trim()) {
+            // isComposing: the Enter that finalizes an IME composition
+            // must not double as an answer commit.
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing &&
+              value.trim()
+            ) {
               e.preventDefault();
               onCommit();
             }
