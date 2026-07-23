@@ -6,6 +6,7 @@
 // /v1/commerce endpoints (which front surogate-ops with the runtime
 // token) — the browser never talks to ops directly.
 
+import { BrandBeam } from "@invergent/agent-chat-react";
 import { useCallback, useEffect, useState } from "react";
 import { authFetch } from "@/api/auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -188,8 +189,10 @@ export function PlanTokensTab() {
 
       {/* ── Offers ── */}
       {[
-        { label: "Plans", items: subscriptions, verb: "Subscribe" },
-        { label: "Token packs", items: packs, verb: "Buy" },
+        // highlightFirst: the lead plan is the recommended one and gets
+        // the brand beam; selection is a data flag, not display copy.
+        { label: "Plans", items: subscriptions, verb: "Subscribe", highlightFirst: true },
+        { label: "Token packs", items: packs, verb: "Buy", highlightFirst: false },
       ]
         .filter((s) => s.items.length > 0)
         .map((section) => (
@@ -197,35 +200,42 @@ export function PlanTokensTab() {
             <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
               {section.label}
             </p>
-            {section.items.map((offer) => (
-              <div
+            {section.items.map((offer, offerIndex) => (
+              <BrandBeam
                 key={offer.id}
-                data-testid={`plan-offer-${offer.id}`}
-                className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3"
+                size="md"
+                strength={0.55}
+                borderRadius={8}
+                active={section.highlightFirst && offerIndex === 0}
               >
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="text-sm font-medium">{offer.name}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatTokens(offer.token_amount)} tokens
-                    {offer.kind === "subscription"
-                      ? " every period"
-                      : " · one-time"}
-                  </span>
-                </div>
-                <span className="shrink-0 text-sm font-semibold tabular-nums">
-                  {formatPrice(offer.amount_cents, offer.currency)}
-                  {offer.kind === "subscription" && offer.billing_interval
-                    ? `/${offer.billing_interval}`
-                    : ""}
-                </span>
-                <Button
-                  size="sm"
-                  disabled={!overview.purchasable || busyOfferId !== null}
-                  onClick={() => void buy(offer.id)}
+                <div
+                  data-testid={`plan-offer-${offer.id}`}
+                  className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3"
                 >
-                  {busyOfferId === offer.id ? "Redirecting…" : section.verb}
-                </Button>
-              </div>
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="text-sm font-medium">{offer.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatTokens(offer.token_amount)} tokens
+                      {offer.kind === "subscription"
+                        ? " every period"
+                        : " · one-time"}
+                    </span>
+                  </div>
+                  <span className="shrink-0 text-sm font-semibold tabular-nums">
+                    {formatPrice(offer.amount_cents, offer.currency)}
+                    {offer.kind === "subscription" && offer.billing_interval
+                      ? `/${offer.billing_interval}`
+                      : ""}
+                  </span>
+                  <Button
+                    size="sm"
+                    disabled={!overview.purchasable || busyOfferId !== null}
+                    onClick={() => void buy(offer.id)}
+                  >
+                    {busyOfferId === offer.id ? "Redirecting…" : section.verb}
+                  </Button>
+                </div>
+              </BrandBeam>
             ))}
           </div>
         ))}

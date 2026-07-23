@@ -66,6 +66,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { nanoid } from "nanoid";
+import { BrandBeam } from "../ui/brand-beam";
 import type {
   ChangeEvent,
   ChangeEventHandler,
@@ -526,6 +527,11 @@ export type PromptInputProps = Omit<
     message: PromptInputMessage,
     event: FormEvent<HTMLFormElement>
   ) => void | Promise<void>;
+  /**
+   * Runs the branded border beam around the input frame — the
+   * composer's "agent is live" signal while a response streams.
+   */
+  beamActive?: boolean;
 };
 
 export const PromptInput = ({
@@ -538,6 +544,7 @@ export const PromptInput = ({
   maxFileSize,
   onError,
   onSubmit,
+  beamActive = false,
   children,
   ...props
 }: PromptInputProps) => {
@@ -938,9 +945,11 @@ export const PromptInput = ({
         ref={formRef}
         {...props}
       >
-        <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
-          {children}
-        </InputGroup>
+        <BrandBeam size="line" active={beamActive} strength={0.7} borderRadius={24}>
+          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+            {children}
+          </InputGroup>
+        </BrandBeam>
       </form>
     </>
   );

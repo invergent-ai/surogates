@@ -25,7 +25,10 @@ afterEach(() => {
 
 async function renderComposer(
   onSelectBrowserProfile: (id: string | null) => void,
-  { locked = false }: { locked?: boolean } = {},
+  {
+    locked = false,
+    profileId = null,
+  }: { locked?: boolean; profileId?: string | null } = {},
 ) {
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -63,6 +66,7 @@ async function renderComposer(
             isRunning={false}
             browserProfilesEnabled
             browserProfileLocked={locked}
+            browserProfileId={profileId}
             onSelectBrowserProfile={onSelectBrowserProfile}
           />
         </AgentChatAdapterProvider>
@@ -118,5 +122,39 @@ describe("browser profile selector", () => {
     });
     expect(onSelect).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain("Personal");
+  });
+
+  it("marks the selected profile with a check and names it on the trigger", async () => {
+    const dom = await renderComposer(vi.fn(), { profileId: "p2" });
+
+    // The trigger itself shows which profile is active — no need to
+    // open the menu to find out.
+    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
+    expect(trigger.textContent).toContain("Work");
+
+    await act(async () => {
+      (trigger as HTMLElement).click();
+    });
+    const checked = [...document.querySelectorAll("[data-checked]")];
+    expect(checked).toHaveLength(1);
+    expect(checked[0]?.textContent).toContain("Work");
+    expect(checked[0]?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("marks 'No profile' as selected when no profile is chosen", async () => {
+    const dom = await renderComposer(vi.fn());
+    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
+    await act(async () => {
+      (trigger as HTMLElement).click();
+    });
+    const checked = [...document.querySelectorAll("[data-checked]")];
+    expect(checked).toHaveLength(1);
+    expect(checked[0]?.textContent).toContain("No profile");
+  });
+
+  it("names the bound profile on the locked trigger", async () => {
+    const dom = await renderComposer(vi.fn(), { locked: true, profileId: "p1" });
+    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
+    expect(trigger.textContent).toContain("Personal");
   });
 });

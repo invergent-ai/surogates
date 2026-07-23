@@ -391,24 +391,32 @@ function ChatComposerInner({
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  // null = never loaded. Failures keep the last known list — blanking
+  // it would erase the trigger's active-profile name over a transient
+  // error.
   const [browserProfiles, setBrowserProfiles] = useState<
-    AgentChatBrowserProfile[]
-  >([]);
+    AgentChatBrowserProfile[] | null
+  >(null);
+  const loadBrowserProfiles = useCallback(() => {
+    if (!adapter.listBrowserProfiles) return;
+    void adapter.listBrowserProfiles().then(setBrowserProfiles).catch(() => {});
+  }, [adapter]);
+  // The trigger names the active profile, so resolve the list as soon
+  // as a profile id is present; the menu also refreshes on each open
+  // (see onOpenChange) so a freshly-created profile appears without a
+  // reload.
   useEffect(() => {
-    if (!profileMenuOpen || !adapter.listBrowserProfiles) return;
-    let cancelled = false;
-    void adapter
-      .listBrowserProfiles()
-      .then((p) => {
-        if (!cancelled) setBrowserProfiles(p);
-      })
-      .catch(() => {
-        if (!cancelled) setBrowserProfiles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [profileMenuOpen, adapter]);
+    if (!browserProfilesEnabled || !browserProfileId) return;
+    if (browserProfiles !== null) return;
+    loadBrowserProfiles();
+  }, [browserProfilesEnabled, browserProfileId, browserProfiles, loadBrowserProfiles]);
+  const activeBrowserProfile =
+    (browserProfiles ?? []).find((p) => p.id === browserProfileId) ?? null;
+  const profileTriggerLabel = activeBrowserProfile && (
+    <span className="max-w-24 truncate text-xs">
+      {activeBrowserProfile.name}
+    </span>
+  );
   const { textInput, attachments } = usePromptInputController();
   const status = isRunning ? "streaming" : disabled ? "error" : "ready";
 
@@ -761,6 +769,7 @@ function ChatComposerInner({
           maxFiles={MAX_IMAGES_PER_MESSAGE + MAX_ATTACHMENTS_PER_MESSAGE}
           maxFileSize={MAX_ATTACHMENT_BYTES}
           onError={handlePromptInputError}
+          beamActive={status === "streaming"}
         >
           <PromptInputBody>
             <PromptInputTextarea
@@ -850,22 +859,35 @@ function ChatComposerInner({
                     aria-label="Select browser profile"
                     aria-disabled
                     aria-pressed={!!browserProfileId}
-                    tooltip="A browser profile must be chosen before starting the session"
+                    tooltip={
+                      activeBrowserProfile
+                        ? `Browser profile: ${activeBrowserProfile.name} (locked for this session)`
+                        : "A browser profile must be chosen before starting the session"
+                    }
                     className={`cursor-not-allowed opacity-50 ${
                       browserProfileId ? "bg-accent text-foreground" : ""
                     }`}
                   >
                     <IdCardIcon className="size-4" />
+                    {profileTriggerLabel}
                   </PromptInputButton>
                 ) : (
                   <Popover
                     open={profileMenuOpen}
-                    onOpenChange={setProfileMenuOpen}
+                    onOpenChange={(open) => {
+                      setProfileMenuOpen(open);
+                      if (open) loadBrowserProfiles();
+                    }}
                   >
                     <PopoverTrigger asChild>
                       <PromptInputButton
                         aria-label="Select browser profile"
                         aria-pressed={!!browserProfileId}
+                        tooltip={
+                          activeBrowserProfile
+                            ? `Browser profile: ${activeBrowserProfile.name}`
+                            : "Select browser profile"
+                        }
                         className={
                           browserProfileId
                             ? "bg-accent text-foreground"
@@ -873,6 +895,7 @@ function ChatComposerInner({
                         }
                       >
                         <IdCardIcon className="size-4" />
+                        {profileTriggerLabel}
                       </PromptInputButton>
                     </PopoverTrigger>
                     <PopoverContent
@@ -882,30 +905,24 @@ function ChatComposerInner({
                     >
                       <Command>
                         <CommandList>
-                          <CommandItem
-                            onSelect={() => {
-                              setProfileMenuOpen(false);
-                              onSelectBrowserProfile(null);
-                            }}
-                            className="gap-3 rounded-md px-3 py-2"
-                          >
-                            No profile
-                          </CommandItem>
-                          {browserProfiles.map((p) => (
+                          {/* data-checked lights CommandItem's built-in
+                              trailing check on the selected entry. */}
+                          {[
+                            { id: null as string | null, name: "No profile" },
+                            ...(browserProfiles ?? []),
+                          ].map((p) => (
                             <CommandItem
-                              key={p.id}
+                              key={p.id ?? "none"}
                               onSelect={() => {
                                 setProfileMenuOpen(false);
                                 onSelectBrowserProfile(p.id);
                               }}
+                              data-checked={
+                                (browserProfileId ?? null) === p.id || undefined
+                              }
                               className="gap-3 rounded-md px-3 py-2"
                             >
                               {p.name}
-                              {browserProfileId === p.id && (
-                                <span className="ml-auto text-xs text-muted-foreground">
-                                  Active
-                                </span>
-                              )}
                             </CommandItem>
                           ))}
                         </CommandList>

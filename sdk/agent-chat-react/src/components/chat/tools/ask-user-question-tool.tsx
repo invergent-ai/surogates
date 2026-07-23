@@ -3,8 +3,11 @@
 //
 // ask_user_question tool widget -- tabs for each question, radio choices with
 // labels + descriptions, an optional "Other" free-form row, and a single
-// Submit that batches every answer back to the worker.  Esc pauses the
-// session (= user chose to stop the chat instead of answering).
+// Submit that batches every answer back to the worker.  Picking a choice
+// auto-advances to the next unanswered question ("Other" waits for typed
+// input; Enter advances it) so multi-question flows read select → next →
+// submit.  Esc pauses the session (= user chose to stop the chat instead
+// of answering).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { XIcon } from "lucide-react";
@@ -81,7 +84,45 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
     () => questions.map((q, i) => buildAnswer(q, selections[i] ?? emptySelection())),
     [questions, selections],
   );
-  const allAnswered = answers.every((a) => a !== null);
+  const answeredCount = answers.filter((a) => a !== null).length;
+  const allAnswered = answeredCount === questions.length;
+
+  // Next unanswered question after ``from``, wrapping. The scan never
+  // evaluates ``from`` itself, so the just-changed question can't
+  // affect the result — the memoized answers are always current enough.
+  const nextUnanswered = useCallback(
+    (from: number): number | null => {
+      for (let step = 1; step < questions.length; step++) {
+        const i = (from + step) % questions.length;
+        if (answers[i] === null) return i;
+      }
+      return null;
+    },
+    [questions.length, answers],
+  );
+
+  // Picking a concrete choice answers the question outright, so move
+  // straight to the next open one — the green tab dot plus the new
+  // prompt make the advance legible. "Other" stays put until typed,
+  // and revising an already-answered question stays put too: yanking
+  // the user away mid-correction would read as stolen focus.
+  const selectChoice = useCallback(
+    (choiceIndex: number) => {
+      const wasAnswered = answers[active] !== null;
+      const copy = selections.slice();
+      copy[active] = { index: choiceIndex, other: "" };
+      setSelections(copy);
+      if (wasAnswered) return;
+      const next = nextUnanswered(active);
+      if (next !== null) setActive(next);
+    },
+    [active, answers, selections, nextUnanswered],
+  );
+
+  const advance = useCallback(() => {
+    const next = nextUnanswered(active);
+    if (next !== null) setActive(next);
+  }, [active, nextUnanswered]);
 
   const handleSubmit = useCallback(async () => {
     if (!sessionId || locked || submitting) return;
@@ -177,7 +218,7 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
                 )}
               >
                 <span>Question {i + 1}</span>
-                {answered && !isActive && (
+                {answered && (
                   <span className="ml-1 text-[10px] text-emerald-500">●</span>
                 )}
                 {isActive && (
@@ -210,7 +251,7 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
             key={i}
             choice={choice}
             selected={currentSel.index === i}
-            onSelect={() => updateSelection({ index: i })}
+            onSelect={() => selectChoice(i)}
           />
         ))}
 
@@ -224,35 +265,52 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
             onChange={(v) =>
               updateSelection({ index: OTHER_INDEX_OFFSET, other: v })
             }
+            onCommit={() => {
+              if (allAnswered) void handleSubmit();
+              else advance();
+            }}
           />
         )}
       </div>
 
-      {/* Submit */}
-      <div className="border-t border-border px-3 py-2">
-        <button
-          type="button"
-          disabled={!allAnswered || submitting}
-          onClick={() => void handleSubmit()}
-          className={cn(
-            "w-full rounded border border-border px-2 py-1.5 text-left text-sm ",
-            "text-muted-foreground hover:bg-muted/40",
-            "disabled:cursor-not-allowed disabled:opacity-60",
+      {/* Footer: progress + the one primary action */}
+      <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2">
+        <div className="min-w-0 text-xs text-muted-foreground">
+          {questions.length > 1 && (
+            <span className="mr-2 tabular-nums">
+              {answeredCount} of {questions.length} answered
+            </span>
           )}
-        >
-          <span className="mr-2 text-muted-foreground/70">
-            {answers.filter((a) => a !== null).length}
-          </span>
-          {submitting
-            ? "Submitting…"
-            : allAnswered
-              ? "Submit answers"
-              : `Answer ${questions.length - answers.filter((a) => a !== null).length} more to submit`}
-        </button>
-        <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground/70">
-          <span>Esc to cancel</span>
-          {error && <span className="text-destructive">{error}</span>}
+          <span className="text-muted-foreground/70">Esc to cancel</span>
+          {error && (
+            <span className="ml-2 text-destructive">{error}</span>
+          )}
         </div>
+        {allAnswered || questions.length === 1 ? (
+          <button
+            type="button"
+            disabled={!allAnswered || submitting}
+            onClick={() => void handleSubmit()}
+            className={cn(
+              "shrink-0 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors",
+              "hover:bg-primary/80",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+            )}
+          >
+            {submitting ? "Submitting…" : "Submit"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={advance}
+            className={cn(
+              "shrink-0 rounded-md border border-border bg-muted/40 px-4 py-1.5 text-sm font-medium text-foreground transition-colors",
+              "hover:bg-muted",
+            )}
+          >
+            Next question →
+          </button>
+        )}
       </div>
     </div>
   );
@@ -296,11 +354,14 @@ function OtherRow({
   value,
   onSelect,
   onChange,
+  onCommit,
 }: {
   selected: boolean;
   value: string;
   onSelect: () => void;
   onChange: (v: string) => void;
+  /** Enter in the input: submit when everything is answered, else advance. */
+  onCommit: () => void;
 }) {
   return (
     <div
@@ -324,6 +385,19 @@ function OtherRow({
           value={value}
           onFocus={onSelect}
           onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            // isComposing: the Enter that finalizes an IME composition
+            // must not double as an answer commit.
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing &&
+              value.trim()
+            ) {
+              e.preventDefault();
+              onCommit();
+            }
+          }}
           className="mt-0.5 h-7 px-0 text-xs"
         />
       </div>
