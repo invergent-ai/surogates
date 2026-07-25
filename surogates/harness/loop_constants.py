@@ -28,6 +28,16 @@ _LEASE_RENEWAL_INTERVAL_SECONDS: float = 20.0
 # own 30 s timeout to give it room to finish cleanly.
 _BACKGROUND_DRAIN_TIMEOUT_SECONDS: float = 35.0
 
+# How long the loop blocks before its FIRST iteration waiting for the hidden
+# advisor (classifier + pro-tier consult).  The advisor exists to shape the
+# executor's plan, and the plan is formed in iteration 1 — guidance that
+# arrives later steers a strategy that is already in motion.  For easy turns
+# the classifier returns "not hard" in a couple of seconds and the wait ends
+# there; for hard turns we trade up to this much first-token latency for
+# guided execution.  On timeout the consult keeps running detached and its
+# guidance is injected at the next safe iteration boundary instead.
+_ADVISOR_PREFLIGHT_TIMEOUT_SECONDS: float = 20.0
+
 # Retry / resilience constants
 _MAX_LENGTH_CONTINUATIONS: int = 3
 _MAX_CONSECUTIVE_INVALID_TOOL_CALLS: int = 3

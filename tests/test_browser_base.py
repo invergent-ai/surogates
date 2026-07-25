@@ -80,24 +80,21 @@ def test_llm_settings_advisor_defaults(monkeypatch) -> None:
     from surogates.config import LLMSettings
 
     s = LLMSettings()
-    assert s.advisor_enabled is False
-    assert s.advisor_model == ""
-    assert s.advisor_base_url == ""
-    assert s.advisor_api_key == ""
+    # Upstream selection lives in the per-agent llm_advisor slot, not
+    # settings — only the per-turn budgets are configurable here.
+    for dead in ("advisor_enabled", "advisor_model",
+                 "advisor_base_url", "advisor_api_key"):
+        assert not hasattr(s, dead), dead
     assert s.advisor_max_calls_per_turn == 2
     assert s.advisor_max_tokens == 700
 
 
 def test_llm_settings_advisor_env_override(monkeypatch) -> None:
-    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_ENABLED", "true")
-    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_MODEL", "advisor-model")
     monkeypatch.setenv("SUROGATES_LLM_ADVISOR_MAX_CALLS_PER_TURN", "3")
 
     from surogates.config import LLMSettings
 
     s = LLMSettings()
-    assert s.advisor_enabled is True
-    assert s.advisor_model == "advisor-model"
     assert s.advisor_max_calls_per_turn == 3
 
 
