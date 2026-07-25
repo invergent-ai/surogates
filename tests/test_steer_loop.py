@@ -42,6 +42,8 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._advisor_model = ""
     harness._advisor_max_calls_per_turn = 0
     harness._advisor_max_tokens = 0
+    harness._pending_advisor_messages = []
+    harness._slash_commands = SimpleNamespace(commands=set())
     harness._checkpoints_enabled = False
     harness._saga_enabled = False
     harness._saga_settings = None
