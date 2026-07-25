@@ -108,6 +108,7 @@ from surogates.harness.loop_attachments import (
     _render_inlined_attachments,  # noqa: F401
 )
 from surogates.harness.loop_constants import (
+    _ADVISOR_PREFLIGHT_TIMEOUT_SECONDS,
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
@@ -487,6 +488,9 @@ class AgentHarness(
         self._advisor_client: AsyncOpenAI | None = advisor_client
         self._advisor_model: str = advisor_model or ""
         self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
+        # Guidance produced by the background advisor task, flushed into
+        # ``messages`` only at iteration boundaries (see AdvisorMixin).
+        self._pending_advisor_messages: list[dict] = []
         self._advisor_max_tokens = max(1, int(advisor_max_tokens))
 
         # Per-session media-generation wiring (image client + video
@@ -1451,17 +1455,19 @@ class AgentHarness(
         # moment a new user turn shifted the insertion point.
 
         # --- Hidden advisor guidance for hard tasks (one-shot before loop) ---
-        # Spawned as a background task so iteration 0 isn't blocked
-        # waiting for the classifier + advisor LLM call. The task
-        # mutates the shared ``messages`` list when it finishes
-        # (``_consult_advisor_for_category`` appends an advisor
-        # scaffold). The main loop rebuilds ``api_messages`` from
-        # ``messages`` at the start of every iteration, so as soon
-        # as the advisor completes the next iteration picks up its
-        # guidance. If the task is still pending when wake()
-        # returns, ``_drain_background_tasks`` bounds the wait at
-        # ``_BACKGROUND_DRAIN_TIMEOUT_SECONDS``; advisor events
-        # persist via the event log regardless.
+        # The advisor exists to shape the executor's PLAN, and the plan
+        # is formed in iteration 1 — so the loop blocks here for a
+        # bounded window to let the classifier (fast, summary model)
+        # and, when the task is hard, the pro-tier consult finish
+        # before the first LLM request. Easy turns clear the wait in
+        # classifier latency (~1-2 s, verdict "not hard"). On timeout
+        # the consult keeps running detached; its guidance is buffered
+        # and flushed at the next iteration boundary, and if the turn
+        # ends first the durable ADVISOR_RESULT event re-enters context
+        # on the next wake via replay. The task never mutates
+        # ``messages`` directly — a mid-tool-execution append could
+        # split an assistant tool_calls message from its results.
+        self._pending_advisor_messages = []
         advisor_task = asyncio.create_task(
             self._maybe_consult_required_advisor(
                 session,
@@ -1474,6 +1480,13 @@ class AgentHarness(
         )
         self._background_tasks.add(advisor_task)
         advisor_task.add_done_callback(self._background_tasks.discard)
+        if self._advisor_available():
+            # asyncio.wait (not wait_for): a timeout must leave the
+            # consult running, not cancel it.
+            await asyncio.wait(
+                {advisor_task}, timeout=_ADVISOR_PREFLIGHT_TIMEOUT_SECONDS,
+            )
+            self._flush_pending_advisor_messages(messages)
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
@@ -1503,6 +1516,14 @@ class AgentHarness(
             if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga)
                 return
+
+            # --- Late advisor guidance ---
+            # The preflight wait may have timed out with the consult
+            # still running; flush anything it buffered since the last
+            # boundary. This is the ONLY place (besides the preflight)
+            # where guidance enters ``messages``, which is what keeps it
+            # from splitting a tool_calls/tool-result pair.
+            self._flush_pending_advisor_messages(messages)
 
             # --- Mid-turn steering ---
             # Fold in any real user messages that arrived since the last
@@ -1660,6 +1681,7 @@ class AgentHarness(
                 api_msg.pop("reasoning", None)
                 api_msg.pop("finish_reason", None)
                 api_msg.pop("_thinking_prefill", None)
+                api_msg.pop("_advisor", None)
                 # Keep reasoning_details -- OpenRouter uses this for multi-turn
                 # reasoning context with signature fields.
                 api_messages.append(api_msg)
@@ -3583,11 +3605,6 @@ class AgentHarness(
         return make_skipped_tool_result(tc)
 
     # ------------------------------------------------------------------
-    # Hidden advisor routing
-    # ------------------------------------------------------------------
-
-
-    # ------------------------------------------------------------------
     # Message reconstruction from event log
     # ------------------------------------------------------------------
 
@@ -3648,6 +3665,7 @@ class AgentHarness(
                 api_msg.pop("reasoning", None)
                 api_msg.pop("finish_reason", None)
                 api_msg.pop("_thinking_prefill", None)
+                api_msg.pop("_advisor", None)
                 api_messages.append(api_msg)
             await _prepare_messages_for_model_vision_support(
                 api_messages,

@@ -313,10 +313,10 @@ class LLMSettings(BaseSettings):
     vision_base_url: str = ""  # optional auxiliary endpoint for vision model
     vision_api_key: str = ""  # optional auxiliary API key for vision model
 
-    advisor_enabled: bool = False  # hidden strategic advisor for hard agent turns
-    advisor_model: str = ""  # stronger model used for advisor guidance
-    advisor_base_url: str = ""  # optional auxiliary endpoint for advisor model
-    advisor_api_key: str = ""  # optional auxiliary API key for advisor model
+    # The advisor's client and model come from the per-agent
+    # ``llm_advisor`` runtime-config slot (ops emits it for base-tier
+    # agents and it resolves to the platform Pro tier); only the two
+    # per-turn budgets below are read from these settings.
     advisor_max_calls_per_turn: int = 2  # hard cap for hidden advisor calls
     advisor_max_tokens: int = 700  # requested advisor output budget
 

@@ -58,6 +58,12 @@ class HardTaskClassification:
     required: bool
     category: str | None = None
     reason: str = ""
+    # Which classifier produced this verdict. The advisor consults only
+    # on "llm" verdicts: the regex fallback is an English-keyword net
+    # that both over-fires ("run me through the options" → terminal)
+    # and under-fires (zero recall on non-English text), so it is not a
+    # good enough signal to spend a pro-tier consult on.
+    source: str = "regex"
 
 
 _DEBUGGING_RE = re.compile(
@@ -289,6 +295,27 @@ def _serialize_message_content(content: Any) -> str:
 _CACHE_KEY_ASSISTANT_PREFIX_CHARS = 200
 
 
+ADVISOR_GUIDANCE_PREFIX = "[Advisor guidance:"
+
+
+def is_advisor_guidance_message(message: dict[str, Any]) -> bool:
+    """True for the harness-injected advisor guidance pseudo-messages.
+
+    They ride the ``user`` role for provider compatibility, but they are
+    harness output, not the human: the classifier and the advisor's own
+    latest-user extraction must skip them, or a later wake asks the
+    advisor to advise on its own guidance.
+    """
+    if message.get("_advisor"):
+        return True
+    if message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return isinstance(content, str) and content.startswith(
+        ADVISOR_GUIDANCE_PREFIX,
+    )
+
+
 def _build_classifier_payload(
     messages: list[dict[str, Any]],
 ) -> tuple[str, str, str]:
@@ -313,6 +340,8 @@ def _build_classifier_payload(
     for message in reversed(messages):
         role = str(message.get("role") or "")
         if role not in ("user", "assistant"):
+            continue
+        if is_advisor_guidance_message(message):
             continue
         text = _serialize_message_content(message.get("content")).strip()
         if not text:
@@ -449,6 +478,7 @@ async def classify_hard_task_async(
         required=required,
         category=category,
         reason="llm",
+        source="llm",
     )
     _classifier_cache.put(cache_key, result)
     return result

@@ -214,12 +214,19 @@ class ContextReplayMixin:
         iteration_open = False
         awaiting_tool_ids: set[str] = set()
         deferred_users: list[dict] = []
+        deferred_advisors: list[dict] = []
 
         def _flush_deferred() -> None:
-            nonlocal deferred_users
+            nonlocal deferred_users, deferred_advisors
             if deferred_users:
                 messages.append(coalesce_user_messages(deferred_users))
                 deferred_users = []
+            if deferred_advisors:
+                # Kept separate from user coalescing: live turns inject
+                # guidance as its own message at an iteration boundary,
+                # and replay must produce the same shape.
+                messages.extend(deferred_advisors)
+                deferred_advisors = []
 
         for event in events:
             etype = event.type
@@ -261,13 +268,22 @@ class ContextReplayMixin:
                         _flush_deferred()
 
             elif etype == EventType.ADVISOR_RESULT.value and event.data.get("content"):
-                messages.append({
+                rendered_advisor = {
                     "role": "user",
                     "content": self._format_advisor_context(
                         category=event.data.get("category", "advisor"),
                         content=str(event.data.get("content") or ""),
                     ),
-                })
+                }
+                # The consult runs concurrently with the executor, so
+                # its event can land while an LLM iteration is open
+                # (between the tool_calls response and its results).
+                # Defer to the iteration's close — exactly like mid-turn
+                # user messages — so replay never splits a tool pair.
+                if iteration_open:
+                    deferred_advisors.append(rendered_advisor)
+                else:
+                    messages.append(rendered_advisor)
 
             elif (
                 etype == EventType.BOARD_UPDATE.value
