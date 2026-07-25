@@ -239,12 +239,24 @@ class AdvisorMixin:
         task: str,
     ) -> list[dict[str, str]]:
         transcript = self._build_advisor_context(messages)
+        # "Carry the work" wording, A/B-tested against a "do not solve
+        # outright" instruction: method-only advice failed to rescue the
+        # executor on arithmetic/bookkeeping-heavy tasks, while guidance
+        # carrying concrete intermediates and a proposed answer flipped
+        # them to passes without degrading tasks the executor already
+        # solved on its own.
         prompt = (
             "You are a strategic advisor for an agent harness. The executor "
             "model is cheaper and will continue the task after reading your "
             "guidance. Give concise, high-leverage advice under "
-            f"{self._advisor_max_tokens} tokens. Do not solve by writing the "
-            "entire final answer unless that is the only useful guidance.\n\n"
+            f"{self._advisor_max_tokens} tokens.\n"
+            "Work the problem as far as you can yourself: state the key "
+            "intermediate results, the pitfalls, and — when you are "
+            "confident — your own answer, plus how the executor should "
+            "verify it. Method-only advice does not rescue a weaker model "
+            "from error-prone arithmetic or bookkeeping; concrete numbers, "
+            "enumerations, and near-code do. If the task needs tools you "
+            "don't have, say exactly what to run and what output to expect.\n\n"
             f"Hard-task category: {category}\n\n"
             f"Current task or tool intent:\n{task}\n\n"
             f"Recent transcript:\n{transcript}"
