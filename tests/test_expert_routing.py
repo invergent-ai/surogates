@@ -243,3 +243,116 @@ class TestHarnessAdvisorPreflight:
         from surogates.harness.loop import AgentHarness
 
         assert not hasattr(AgentHarness, "_maybe_consult_for_tool_calls")
+
+
+class TestClassifierClientInjection:
+    """The classifier must use the caller's per-session client when given.
+
+    Its ``settings.llm``-derived fallback depends on ``llm.base_url``
+    serving chat completions. In the shared-runtime deployment that URL
+    is the proxy root, which serves only ``/proxy/services/...`` — so the
+    fallback 404s and the classifier silently degrades to regex. Passing
+    the session's summary client (a real, billed per-agent route) is what
+    keeps the LLM path working.
+    """
+
+    @pytest.mark.asyncio
+    async def test_injected_aux_is_used_and_settings_fallback_not_built(
+        self, monkeypatch,
+    ):
+        from surogates.harness import expert_routing
+        from surogates.harness.auxiliary_client import AuxiliaryLLM
+
+        expert_routing._classifier_cache._store.clear()
+
+        def _boom(*_a, **_kw):  # pragma: no cover - must not be reached
+            raise AssertionError(
+                "settings fallback was built despite an injected client",
+            )
+
+        monkeypatch.setattr(expert_routing, "build_base_auxiliary_llm", _boom)
+
+        captured: dict = {}
+
+        async def fake_generate(**kwargs):
+            captured.update(kwargs)
+            return expert_routing.HardTaskJudgment(
+                required=True, category="coding",
+            )
+
+        monkeypatch.setattr(
+            expert_routing, "generate_structured", fake_generate,
+        )
+
+        aux = AuxiliaryLLM(client=MagicMock(), model="cheap-summary-model")
+        result = await expert_routing.classify_hard_task_async(
+            [{"role": "user", "content": "refactor the auth module for aux test"}],
+            aux=aux,
+        )
+
+        assert result.required is True
+        assert captured["model"] == "cheap-summary-model"
+        assert captured["llm_client"] is aux.client
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_settings_client_when_none_injected(
+        self, monkeypatch,
+    ):
+        from surogates.harness import expert_routing
+        from surogates.harness.auxiliary_client import AuxiliaryLLM
+
+        expert_routing._classifier_cache._store.clear()
+        built = MagicMock()
+        monkeypatch.setattr(
+            expert_routing, "build_base_auxiliary_llm",
+            lambda *_a, **_kw: AuxiliaryLLM(client=built, model="base-model"),
+        )
+        monkeypatch.setattr(expert_routing, "load_settings", lambda: object())
+
+        captured: dict = {}
+
+        async def fake_generate(**kwargs):
+            captured.update(kwargs)
+            return expert_routing.HardTaskJudgment(required=False, category=None)
+
+        monkeypatch.setattr(
+            expert_routing, "generate_structured", fake_generate,
+        )
+
+        await expert_routing.classify_hard_task_async(
+            [{"role": "user", "content": "hello there fallback test"}],
+        )
+        assert captured["llm_client"] is built
+
+    @pytest.mark.asyncio
+    async def test_request_failure_is_logged_at_warning_not_debug(
+        self, monkeypatch, caplog,
+    ):
+        """A 404 from a misconfigured endpoint must not vanish."""
+        import logging
+
+        from surogates.harness import expert_routing
+        from surogates.harness.auxiliary_client import AuxiliaryLLM
+
+        expert_routing._classifier_cache._store.clear()
+
+        async def boom(**_kwargs):
+            raise RuntimeError("404 page not found")
+
+        monkeypatch.setattr(
+            expert_routing, "generate_structured", boom,
+        )
+
+        aux = AuxiliaryLLM(client=MagicMock(), model="m")
+        with caplog.at_level(logging.WARNING, logger="surogates.harness.expert_routing"):
+            result = await expert_routing.classify_hard_task_async(
+                [{"role": "user", "content": "do something hard warn test"}],
+                aux=aux,
+            )
+        # Still degrades gracefully...
+        assert result is not None
+        # ...but no longer silently.
+        assert any(
+            "falling back to the regex classifier" in r.message
+            for r in caplog.records
+        )

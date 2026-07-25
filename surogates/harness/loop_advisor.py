@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
+from surogates.harness.auxiliary_client import AuxiliaryLLM
 from surogates.harness.expert_routing import classify_hard_task_async
 from surogates.harness.loop_vision import _collapse_text_parts, _extract_response_text
 from surogates.session.events import EventType
@@ -30,9 +31,21 @@ class AdvisorMixin:
             return False
 
         user_content = str(last_user.get("content") or "")
+        # Prefer the session's summary client: it is resolved from the
+        # agent's runtime config, so it points at a billed per-agent
+        # proxy route and runs on the cheap summary model. The
+        # settings-level fallback inside the classifier depends on
+        # ``llm.base_url`` serving chat completions, which it does not
+        # when that URL is the proxy root.
+        classifier_aux: AuxiliaryLLM | None = None
+        if self._summary_client is not None and self._summary_model:
+            classifier_aux = AuxiliaryLLM(
+                client=self._summary_client, model=self._summary_model,
+            )
         classification = await classify_hard_task_async(
             messages,
             tenant=self._tenant,
+            aux=classifier_aux,
         )
         if not classification.required or classification.category is None:
             return False
