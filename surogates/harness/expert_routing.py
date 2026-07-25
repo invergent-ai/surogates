@@ -27,7 +27,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from surogates.config import load_settings
-from surogates.harness.auxiliary_client import build_base_auxiliary_llm
+from surogates.harness.auxiliary_client import (
+    AuxiliaryLLM,
+    build_base_auxiliary_llm,
+)
 from surogates.harness.structured_output import generate_structured
 
 logger = logging.getLogger(__name__)
@@ -359,6 +362,7 @@ async def classify_hard_task_async(
     messages: list[dict[str, Any]],
     *,
     tenant: Any | None = None,
+    aux: AuxiliaryLLM | None = None,
 ) -> HardTaskClassification:
     """Classify the latest user message using recent conversation context.
 
@@ -368,12 +372,13 @@ async def classify_hard_task_async(
     regex :func:`classify_hard_task` on the latest user text when the
     base LLM is unconfigured, the call fails, or Outlines is missing.
 
-    The auxiliary client targets ``settings.llm.model`` (the same model
-    that handles the main iteration loop) via
-    :func:`build_base_auxiliary_llm`. Reusing the base endpoint keeps
-    the classifier on the upstream that's already warm for the session,
-    instead of paying a separate cold-prefix penalty against the
-    summary endpoint.
+    Callers that already hold a per-session client should pass it as
+    ``aux``; that client is resolved from the agent's runtime config and
+    therefore points at a billed, per-agent proxy route. The
+    :func:`build_base_auxiliary_llm` fallback builds a client from
+    ``settings.llm``, whose ``base_url`` is deployment config and is not
+    guaranteed to serve chat completions — when it does not, the call
+    fails and this degrades to the regex path.
     """
     if not messages:
         return HardTaskClassification(False)
@@ -386,15 +391,17 @@ async def classify_hard_task_async(
     if cached is not None:
         return cached
 
-    try:
-        aux = build_base_auxiliary_llm(load_settings(), tenant)
-    except Exception:
-        logger.debug(
-            "Base LLM client unavailable for hard-task classifier; "
-            "falling back to regex.",
-            exc_info=True,
-        )
-        aux = None
+    if aux is None:
+        try:
+            aux = build_base_auxiliary_llm(load_settings(), tenant)
+        except Exception:
+            logger.warning(
+                "Base LLM client unavailable for hard-task classifier; "
+                "falling back to the regex classifier, which reads only "
+                "the latest message and is weak on non-English input.",
+                exc_info=True,
+            )
+            aux = None
 
     if aux is None:
         result = classify_hard_task(latest_user)
@@ -419,8 +426,11 @@ async def classify_hard_task_async(
             temperature=0,
         )
     except Exception:
-        logger.debug(
-            "LLM hard-task classifier raised; falling back to regex.",
+        logger.warning(
+            "LLM hard-task classifier raised; falling back to the regex "
+            "classifier, which reads only the latest message and is weak "
+            "on non-English input. Check that the classifier endpoint "
+            "actually serves chat completions.",
             exc_info=True,
         )
 
