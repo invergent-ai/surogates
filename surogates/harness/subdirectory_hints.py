@@ -58,7 +58,27 @@ class SubdirectoryHintTracker:
     def check_tool_call(
         self, tool_name: str, tool_args: dict[str, Any]
     ) -> str | None:
-        """Check tool args for new directories, return formatted hints or ``None``."""
+        """Check tool args for new directories, return formatted hints or ``None``.
+
+        Never raises. Hints are advisory and are appended *after* the tool
+        has already run, so an exception here does not just lose a hint --
+        it discards a successful tool result, and for ``terminal`` (which
+        is in ``SIBLING_ABORT_TOOLS``) it cancels every concurrently
+        running sibling tool too. No hint is worth that.
+        """
+        try:
+            return self._check_tool_call(tool_name, tool_args)
+        except Exception:
+            logger.warning(
+                "Subdirectory hints failed for tool %s; continuing without hints",
+                tool_name,
+                exc_info=True,
+            )
+            return None
+
+    def _check_tool_call(
+        self, tool_name: str, tool_args: dict[str, Any]
+    ) -> str | None:
         dirs = self._extract_directories(tool_name, tool_args)
         if not dirs:
             return None
@@ -117,7 +137,13 @@ class SubdirectoryHintTracker:
                 if parent == p:
                     break
                 p = parent
-        except (OSError, ValueError):
+        except Exception:
+            # Deliberately broad. This is a best-effort path walk over
+            # attacker-adjacent strings (arbitrary shell tokens), and every
+            # caller treats a missing candidate as "no hint". Narrow
+            # catching missed RuntimeError from ``Path.expanduser()``, which
+            # raises when HOME is unset -- so any terminal command
+            # containing a ``~`` token failed the whole tool call.
             pass
 
     def _extract_paths_from_command(
