@@ -486,7 +486,6 @@ class TestSharedWorkspace:
         cfg = call["config"]
         assert cfg["storage_bucket"] == parent.config["storage_bucket"]
         assert cfg["workspace_path"] == parent.config["workspace_path"]
-        assert cfg["supports_vision"] is True
         # Parent is itself a root → root id is parent's own id.
         assert cfg["sandbox_root_session_id"] == str(parent.id)
         # Child identity inherits from parent, NOT from the caller tenant.

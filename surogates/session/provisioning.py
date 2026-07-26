@@ -4,7 +4,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
-from surogates.harness.model_metadata import get_model_info
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
@@ -18,7 +17,6 @@ _WORKSPACE_SHARING_FIELDS = (
     "storage_bucket",
     "storage_key_prefix",
     "workspace_path",
-    "supports_vision",
 )
 
 # Boundary fields a child session inherits verbatim from its parent so it
@@ -51,24 +49,24 @@ async def stamp_workspace_config(
     storage: Any,
     settings: Any,
     session_id: UUID,
-    model: str,
 ) -> dict:
     """Stamp the persistent-workspace fields into *config* and ensure the bucket exists.
 
-    Sets ``storage_bucket``, ``storage_key_prefix``, ``workspace_path`` and
-    ``supports_vision`` so the worker mounts a persistent S3 ``/workspace`` for
-    the session. Shared by API/web provisioning (:func:`create_agent_session`)
-    and channel-session provisioning so both yield an identical workspace.
+    Sets ``storage_bucket``, ``storage_key_prefix`` and ``workspace_path``
+    so the worker mounts a persistent S3 ``/workspace`` for the session.
+    Shared by API/web provisioning (:func:`create_agent_session`) and
+    channel-session provisioning so both yield an identical workspace.
+
+    Vision support is deliberately not stamped here: it depends on the
+    model, which is not known until the worker resolves the session's
+    LLM bundle. The harness re-derives it from the live model at the
+    point of use.
     """
     bucket = agent_session_bucket(settings.storage.bucket)
     await storage.create_bucket(bucket)
     config["storage_bucket"] = bucket
     config["storage_key_prefix"] = getattr(settings.storage, "key_prefix", "") or ""
     config["workspace_path"] = storage.resolve_workspace_path(bucket, session_id)
-    model_info = get_model_info(model)
-    config["supports_vision"] = (
-        model_info.supports_vision if model_info is not None else False
-    )
     return config
 
 
@@ -81,7 +79,6 @@ async def create_agent_session(
     user_id: UUID | None,
     agent_id: str,
     channel: str,
-    model: str,
     config: dict | None = None,
     service_account_id: UUID | None = None,
     parent_id: UUID | None = None,
@@ -98,18 +95,20 @@ async def create_agent_session(
     merged_config.setdefault("channel", channel)
     pin_workspace_boundary(merged_config, channel=channel)
     await stamp_workspace_config(
-        merged_config, storage=storage, settings=settings, session_id=sid, model=model,
+        merged_config, storage=storage, settings=settings, session_id=sid,
     )
     if service_account_id is not None:
         merged_config["service_account_id"] = str(service_account_id)
 
+    # ``model`` stays NULL until the worker resolves the LLM bundle and
+    # records what it actually ran on.
     return await store.create_session(
         session_id=sid,
         user_id=user_id,
         org_id=org_id,
         agent_id=agent_id,
         channel=channel,
-        model=model,
+        model=None,
         config=merged_config,
         parent_id=parent_id,
         service_account_id=service_account_id,
@@ -140,7 +139,9 @@ async def create_child_session(
     Identity is inherited from *parent*: ``agent_id``, ``org_id``,
     ``user_id``, and ``service_account_id`` (unless explicitly
     overridden via *service_account_id*).  ``model`` falls back to
-    ``parent.model`` when not supplied.
+    ``parent.model`` when not supplied — which is itself whatever the
+    worker recorded for the parent, or ``None`` if the parent has not
+    woken yet; the child's own wake stamps the authoritative value.
 
     *task_id* links the child to a ``tasks`` row when the spawn is a
     subagent task attempt.  Plain ``spawn_worker`` children pass

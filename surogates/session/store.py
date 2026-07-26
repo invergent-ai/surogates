@@ -433,6 +433,26 @@ class SessionStore:
             )
             return {row.id: str(row.agent_id) for row in result.all()}
 
+    async def record_session_model(self, session_id: UUID, model: str) -> None:
+        """Record the model a session actually ran on.
+
+        The session row is created before any worker resolves the
+        agent's LLM bundle, so ``model`` starts out NULL. The worker
+        stamps it here at wake with ``llm_bundle.main.model`` — the same
+        value it calls — so the record can never drift from what ran.
+        No-ops when unchanged to keep the common path (every wake after
+        the first) off the write path.
+        """
+        if not model:
+            return
+        async with self._sf() as db:
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.model.is_distinct_from(model))
+                .values(model=model)
+            )
+            await db.commit()
+
     async def update_session_status(self, session_id: UUID, status: str) -> None:
         """Set a session's status and touch ``updated_at``."""
         async with self._sf() as db:

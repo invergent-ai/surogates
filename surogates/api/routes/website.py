@@ -731,7 +731,7 @@ async def bootstrap_website_session(
         org_id=org_uuid,
         agent_id=agent_id,
         channel=WEBSITE_CHANNEL,
-        model=settings.llm.model,
+        model=None,
         config=config,
     )
     try:

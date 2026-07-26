@@ -187,6 +187,17 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
+    # The Pro tier is a distinct sentinel, so it needs its own entry —
+    # without one the compressor falls back to a default window for
+    # every Pro session and mis-sizes the context.
+    "surogate-pro": ModelInfo(
+        id="surogate-pro",
+        context_window=262_144,
+        max_output_tokens=32_768,
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
+        supports_vision=True,
+    ),
 }
 
 # Build alias lookup: allow matching by short prefix or common alias.

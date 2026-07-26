@@ -205,7 +205,6 @@ async def create_setup_session(
         user_id=user_id,
         agent_id=body.agent_id or "browser-setup",
         channel="browser_setup",
-        model=settings.llm.model,
         config={
             "browser": {
                 "profile_id": str(profile_id),

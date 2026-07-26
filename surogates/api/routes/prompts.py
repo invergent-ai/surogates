@@ -185,16 +185,6 @@ async def _submit_one(
                 deduplicated=True,
             )
 
-    # Validate config up front so a misconfigured deployment doesn't
-    # leak partial provisioning artefacts (Garage bucket created, then
-    # 503 returned, leaving an orphan bucket behind on every retry).
-    if not settings.llm.model:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LLM model is not configured (settings.llm.model is empty).",
-        )
-    model = settings.llm.model
-
     config: dict = {
         "service_account_id": str(service_account_id),
     }
@@ -228,7 +218,6 @@ async def _submit_one(
             org_id=tenant.org_id,
             agent_id=agent_id,
             channel=API_CHANNEL,
-            model=model,
             config=config,
             service_account_id=service_account_id,
             idempotency_key=body.idempotency_key,

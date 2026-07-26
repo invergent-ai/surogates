@@ -408,24 +408,15 @@ async def _create_session(
     helper is independent of process-wide ``settings.agent_id``.
     """
     store = _get_session_store(request)
-
-    # Model is always set from server config — not user-selectable.
-    # ``LLMSettings.model`` carries its own default; if the deployment
-    # actively cleared it, that's a misconfiguration we surface up
-    # front rather than silently substituting a model that may not
-    # exist on the configured provider.
     settings = request.app.state.settings
-    if not settings.llm.model:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LLM model is not configured (settings.llm.model is empty).",
-        )
-    model = settings.llm.model
 
     config = body.config.copy()
     if body.system:
         config["system"] = body.system
 
+    # No model here: the agent's model is chosen by the management
+    # plane and only resolves when the worker builds the session's LLM
+    # bundle. The worker records it on the row at wake.
     session = await create_agent_session(
         store=store,
         storage=request.app.state.storage,
@@ -434,7 +425,6 @@ async def _create_session(
         org_id=tenant.org_id,
         agent_id=agent_id,
         channel=channel,
-        model=model,
         config=config,
         service_account_id=service_account_id,
     )

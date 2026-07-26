@@ -317,7 +317,6 @@ async def get_or_create_channel_session(
     channel: str,
     config: dict,
     session_factory: async_sessionmaker[AsyncSession],
-    model: str = "",
     storage: object = None,
     settings: object = None,
 ) -> UUID:
@@ -342,8 +341,6 @@ async def get_or_create_channel_session(
         Channel-specific session config (e.g. Slack channel_id, thread_ts).
     session_factory:
         SQLAlchemy async session factory for direct DB queries.
-    model:
-        LLM model override for this channel (empty = use global default).
 
     Returns
     -------
@@ -457,7 +454,6 @@ async def get_or_create_channel_session(
                 storage=storage,
                 settings=settings,
                 session_id=session_id,
-                model=model,
             )
         except Exception:
             logger.warning(
@@ -473,7 +469,7 @@ async def get_or_create_channel_session(
         org_id=org_id,
         agent_id=agent_id,
         channel=channel,
-        model=model,
+        model=None,
         config=merged_config,
     )
 

@@ -21,7 +21,6 @@ def _workspace_config() -> dict:
         "storage_bucket": "tenant-bucket",
         "storage_key_prefix": "",
         "workspace_path": "/workspace/tenant-bucket/parent",
-        "supports_vision": False,
     }
 
 
@@ -79,7 +78,6 @@ async def test_create_agent_session_populates_storage_and_model_metadata():
         user_id=user_id,
         agent_id="agent-a",
         channel="web",
-        model="gpt-5.5",
         config={"system": "be useful"},
         session_id=session_id,
     )
@@ -92,13 +90,15 @@ async def test_create_agent_session_populates_storage_and_model_metadata():
     assert call["user_id"] == user_id
     assert call["agent_id"] == "agent-a"
     assert call["channel"] == "web"
-    assert call["model"] == "gpt-5.5"
+    assert call["model"] is None
     assert call["config"]["system"] == "be useful"
     assert call["config"]["storage_bucket"] == "tenant-bucket"
     # storage_key_prefix is stamped (empty when settings.storage doesn't set it).
     assert call["config"]["storage_key_prefix"] == ""
     assert call["config"]["workspace_path"] == f"/workspace/tenant-bucket/{session_id}"
-    assert call["config"]["supports_vision"] is True
+    # Vision support is not stamped: it depends on the model, which is
+    # unknown until the worker resolves the bundle.
+    assert "supports_vision" not in call["config"]
 
 
 @pytest.mark.asyncio
@@ -108,7 +108,6 @@ async def test_create_child_session_inherits_workspace_from_root_parent():
             "storage_bucket": "tenant-bucket",
             "storage_key_prefix": "",
             "workspace_path": "/workspace/tenant-bucket/abc",
-            "supports_vision": True,
             "system": "parent-system",  # non-sharing field — not inherited
         },
     )
@@ -133,7 +132,6 @@ async def test_create_child_session_inherits_workspace_from_root_parent():
     cfg = call["config"]
     assert cfg["storage_bucket"] == "tenant-bucket"
     assert cfg["workspace_path"] == "/workspace/tenant-bucket/abc"
-    assert cfg["supports_vision"] is True
     assert cfg["sandbox_root_session_id"] == str(parent.id)
     assert cfg["max_iterations"] == 5
     assert cfg["streaming"] is False
@@ -149,7 +147,6 @@ async def test_create_child_session_grandchild_preserves_root():
             "storage_bucket": "b",
             "storage_key_prefix": "",
             "workspace_path": "/workspace/b/root",
-            "supports_vision": False,
             "sandbox_root_session_id": str(grandparent_id),
         },
         parent_id=grandparent_id,
@@ -196,7 +193,6 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
             "storage_bucket": "parent-bucket",
             "storage_key_prefix": "p-1/a-1",
             "workspace_path": "/workspace/parent",
-            "supports_vision": True,
         },
     )
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
@@ -209,7 +205,6 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
             "storage_bucket": "attacker-bucket",
             "storage_key_prefix": "p-evil/a-evil",
             "workspace_path": "/elsewhere",
-            "supports_vision": False,
         },
     )
 
@@ -217,7 +212,6 @@ async def test_create_child_session_caller_cannot_override_workspace_fields():
     assert cfg["storage_bucket"] == "parent-bucket"
     assert cfg["storage_key_prefix"] == "p-1/a-1"
     assert cfg["workspace_path"] == "/workspace/parent"
-    assert cfg["supports_vision"] is True
 
 
 @pytest.mark.asyncio
@@ -230,7 +224,6 @@ async def test_create_child_session_inherits_service_account_from_parent():
             "storage_bucket": "b",
             "storage_key_prefix": "",
             "workspace_path": "/w",
-            "supports_vision": False,
             "service_account_id": str(sa_id),
         },
     )
@@ -313,7 +306,6 @@ async def test_create_child_session_does_not_touch_storage():
             "storage_bucket": "b",
             "storage_key_prefix": "",
             "workspace_path": "/w",
-            "supports_vision": False,
         },
     )
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
@@ -356,8 +348,14 @@ async def test_create_child_session_propagates_idempotency_and_session_id():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_stamp_workspace_config_supports_vision_true_for_vision_model():
-    """A vision model has config['supports_vision'] = True after stamp."""
+async def test_stamp_workspace_config_does_not_stamp_vision_support():
+    """Vision support is model-dependent, so provisioning must not guess.
+
+    The session row exists before any worker resolves the agent's LLM
+    bundle, so the model is unknown here. Stamping a guess would freeze
+    a wrong value into the session config for its whole life; the
+    harness re-derives vision support from the live model instead.
+    """
     from surogates.session.provisioning import stamp_workspace_config
 
     class _FakeStorage:
@@ -369,40 +367,18 @@ async def test_stamp_workspace_config_supports_vision_true_for_vision_model():
             bucket = "test-bucket"
             key_prefix = ""
 
-    config = {}
+    config: dict = {}
+    session_id = uuid4()
     await stamp_workspace_config(
         config,
         storage=_FakeStorage(),
         settings=_FakeSettings(),
-        session_id=uuid4(),
-        model="gpt-5.5",
+        session_id=session_id,
     )
-    assert config["supports_vision"] is True
 
-
-@pytest.mark.asyncio
-async def test_stamp_workspace_config_supports_vision_false_for_text_model():
-    """A text-only model has config['supports_vision'] = False after stamp."""
-    from surogates.session.provisioning import stamp_workspace_config
-
-    class _FakeStorage:
-        async def create_bucket(self, bucket): pass
-        def resolve_workspace_path(self, bucket, session_id): return f"/ws/{session_id}"
-
-    class _FakeSettings:
-        class storage:
-            bucket = "test-bucket"
-            key_prefix = ""
-
-    config = {}
-    await stamp_workspace_config(
-        config,
-        storage=_FakeStorage(),
-        settings=_FakeSettings(),
-        session_id=uuid4(),
-        model="deepseek/deepseek-v4-pro",
-    )
-    assert config["supports_vision"] is False
+    assert "supports_vision" not in config
+    assert config["storage_bucket"] == "test-bucket"
+    assert config["workspace_path"] == f"/ws/{session_id}"
 
 
 @pytest.mark.asyncio
@@ -426,7 +402,6 @@ async def test_create_agent_session_pins_managed_channel_workspace_boundary():
         user_id=user_id,
         agent_id="agent-a",
         channel="slack",
-        model="gpt-4o",
         config={"memory_boundary": "slack:c:G1"},
         session_id=session_id,
     )
@@ -454,7 +429,6 @@ async def test_create_agent_session_does_not_pin_non_channel_memory_boundary():
         user_id=uuid4(),
         agent_id="agent-a",
         channel="web",
-        model="gpt-4o",
         config={"memory_boundary": "slack:c:G1"},
         session_id=session_id,
     )
@@ -471,7 +445,6 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
             "storage_bucket": "tenant-bucket",
             "storage_key_prefix": "project/agent",
             "workspace_path": "/workspace",
-            "supports_vision": True,
             "memory_boundary": "slack:c:G1",
             "workspace_boundary": "slack:c:G1",
         },

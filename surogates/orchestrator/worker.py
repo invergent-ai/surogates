@@ -265,11 +265,21 @@ def _filter_effective_tools(
     return result
 
 
+_warned_missing_model_metadata: set[str] = set()
+
+
 def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
-    """Warn when the configured base model has no static metadata entry."""
+    """Warn when a session's resolved model has no static metadata entry.
+
+    Called per wake (the model is only known once the bundle resolves),
+    so warn once per distinct model rather than on every session.
+    """
     normalized = str(model_id or "").strip()
     if not normalized or get_model_info(normalized) is not None:
         return
+    if normalized in _warned_missing_model_metadata:
+        return
+    _warned_missing_model_metadata.add(normalized)
     logger.warning(
         "Base LLM model %r is not present in surogates.harness.model_metadata "
         "MODEL_CATALOG or aliases; add model metadata so context sizing and capability checks remain accurate.",
@@ -917,8 +927,8 @@ async def run_worker(settings: Settings) -> None:
     # SessionLLMClients bundle built by ``build_session_llm_clients``
     # from the per-agent runtime config + the credential vault.  No
     # process-wide AsyncOpenAI instance here — every session owns
-    # its own connection pool.
-    _warn_if_base_model_missing_from_metadata(settings.llm.model)
+    # its own connection pool.  Model metadata is checked per wake,
+    # once the bundle names the model.
 
     # Worker-side shared-runtime plumbing.  Wires the
     # RuntimeConfigCache + FileBundleCache + MemoryCache that
@@ -1119,6 +1129,12 @@ async def run_worker(settings: Settings) -> None:
             )
         model_id = llm_bundle.main.model
         llm_client = llm_bundle.main.client
+        # The session row is created before any bundle exists, so the
+        # model it ran on is only knowable here. Recording it from the
+        # bundle keeps one source of truth: the management plane picks
+        # the model, the worker reports what it picked.
+        _warn_if_base_model_missing_from_metadata(model_id)
+        await session_store.record_session_model(session.id, model_id)
         budget = IterationBudget(max_total=90)
         summary_slot = llm_bundle.summary
         vision_slot = llm_bundle.vision

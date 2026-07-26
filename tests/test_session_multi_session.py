@@ -97,7 +97,6 @@ def _tenant(org_id: UUID, user_id: UUID | None) -> TenantContext:
 
 def _request(store: _Store, storage: _Storage):
     settings = Settings()
-    settings.llm.model = "gpt-test"
     settings.storage.bucket = "ops-agent-bucket"
     return SimpleNamespace(
         url=SimpleNamespace(path="/v1/sessions"),
