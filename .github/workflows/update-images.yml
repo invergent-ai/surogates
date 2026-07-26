@@ -12,12 +12,33 @@ jobs:
     name: Update agent images on cluster nodes
     # Run after a successful Release, or on manual dispatch.
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     env:
       REMOTE_SCRIPT: /root/update-agent-images.sh
       NODE_HOSTS: ${{ secrets.NODE_HOSTS }}
       MASTER_HOST: ${{ secrets.MASTER_HOST }}
     steps:
+      # These hosts must accept SSH on 22022 from GitHub's egress ranges
+      # (see https://api.github.com/meta -> .actions). Check first so a
+      # firewall/allow-list gap fails in seconds with a clear message
+      # instead of hanging the deploy on TCP timeouts.
+      - name: Verify cluster SSH reachability
+        run: |
+          read -ra HOSTS <<< "${NODE_HOSTS}"
+          unreachable=()
+          for host in "${HOSTS[@]}" "${MASTER_HOST}"; do
+            if timeout 10 bash -c "exec 3<>/dev/tcp/${host}/22022" 2>/dev/null; then
+              echo "==> ${host}:22022 reachable"
+            else
+              echo "==> ${host}:22022 UNREACHABLE" >&2
+              unreachable+=("${host}")
+            fi
+          done
+          if [ "${#unreachable[@]}" -ne 0 ]; then
+            echo "::error::No SSH route from this GitHub-hosted runner to: ${unreachable[*]}. Allow-list GitHub's Actions egress ranges on port 22022, or run this workflow on the self-hosted runner."
+            exit 1
+          fi
+
       - name: Write SSH identity file
         run: |
           install -m 700 -d "${RUNNER_TEMP}/.ssh"
@@ -40,6 +61,7 @@ jobs:
                 -p 22022 \
                 -i "${IDENTITY_FILE}" \
                 -o BatchMode=yes \
+                -o ConnectTimeout=15 \
                 -o StrictHostKeyChecking=accept-new \
                 "root@${host}" \
                 "bash ${REMOTE_SCRIPT}"
@@ -62,6 +84,7 @@ jobs:
 
           ssh -p 22022 -i "${IDENTITY_FILE}" \
             -o BatchMode=yes \
+            -o ConnectTimeout=15 \
             -o StrictHostKeyChecking=accept-new \
             "root@${MASTER_HOST}" "bash /root/restart-agent-pods.sh"
 
