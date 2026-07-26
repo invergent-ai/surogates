@@ -94,6 +94,37 @@ def try_rotate_credential(
     return new_client, True
 
 
+def try_activate_pro_fallback(
+    advisor_client: Any | None,
+    advisor_model: str,
+    current_model: str | None,
+    already_used: bool,
+) -> tuple[Any | None, str | None, bool]:
+    """Escalate to the pro tier after repeated empty provider responses.
+
+    Some prompts make the provider return a completion with no content at
+    all -- ``finish_reason="stop"``, zero characters, usage still accounted.
+    Retrying the same model with a nudge does not help: the behaviour is
+    deterministic for that prompt+model pair, so the nudge retries burn and
+    the session fails. Switching tiers is the one remaining lever.
+
+    The pro tier is a different endpoint, not merely a different model name,
+    so the client must move with the model or the request misroutes.
+
+    Returns ``(new_client, new_model, already_used)``; ``new_client`` is
+    ``None`` when no escalation is available or appropriate.
+    """
+    if already_used:
+        return None, None, True
+    if advisor_client is None or not advisor_model:
+        return None, None, False
+    # Escalating onto the model we are already running would waste a retry
+    # on the behaviour that just failed.
+    if current_model and current_model == advisor_model:
+        return None, None, False
+    return advisor_client, advisor_model, True
+
+
 def try_activate_fallback(
     fallback_chain: list[dict],
     fallback_index: int,

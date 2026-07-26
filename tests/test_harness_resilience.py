@@ -1547,3 +1547,70 @@ class TestHarnessInitNewFields:
     def test_current_model_default_none(self) -> None:
         harness = _make_harness()
         assert harness._current_model is None
+
+
+# ---------------------------------------------------------------------------
+# Pro-tier escalation on empty provider responses
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyResponseProEscalation:
+    """Some prompts make the provider return a completion with no content.
+
+    Observed reproducibly on GAIA questions: finish_reason="stop", zero
+    content, usage accounted. Nudging and retrying on the same model does
+    not help -- it is deterministic for that prompt+model pair. Escalating
+    to the pro tier is the one lever left before failing the session.
+    """
+
+    def test_escalates_to_the_advisor_client_and_model(self) -> None:
+        from surogates.harness.resilience import try_activate_pro_fallback
+
+        advisor = SimpleNamespace(name="advisor-client")
+        client, model, used = try_activate_pro_fallback(
+            advisor_client=advisor,
+            advisor_model="surogate-pro",
+            current_model="surogate",
+            already_used=False,
+        )
+        assert client is advisor
+        assert model == "surogate-pro"
+        assert used is True
+
+    def test_does_not_escalate_twice(self) -> None:
+        from surogates.harness.resilience import try_activate_pro_fallback
+
+        client, model, used = try_activate_pro_fallback(
+            advisor_client=SimpleNamespace(),
+            advisor_model="surogate-pro",
+            current_model="surogate-pro",
+            already_used=True,
+        )
+        assert client is None
+        assert used is True
+
+    def test_no_escalation_when_advisor_is_unconfigured(self) -> None:
+        from surogates.harness.resilience import try_activate_pro_fallback
+
+        client, model, used = try_activate_pro_fallback(
+            advisor_client=None,
+            advisor_model="",
+            current_model="surogate",
+            already_used=False,
+        )
+        assert client is None
+        assert used is False
+
+    def test_no_escalation_when_already_running_on_pro(self) -> None:
+        """Escalating to the model we are already on would just burn a retry."""
+        from surogates.harness.resilience import try_activate_pro_fallback
+
+        advisor = SimpleNamespace()
+        client, model, used = try_activate_pro_fallback(
+            advisor_client=advisor,
+            advisor_model="surogate-pro",
+            current_model="surogate-pro",
+            already_used=False,
+        )
+        assert client is None
+        assert used is False
