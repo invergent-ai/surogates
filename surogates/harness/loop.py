@@ -55,6 +55,7 @@ from surogates.harness.resilience import (
     find_invalid_tool_calls,
     inject_budget_warning,
     try_activate_fallback,
+    try_activate_pro_fallback,
     try_rotate_credential,
 )
 from surogates.harness.sanitize import (
@@ -589,6 +590,9 @@ class AgentHarness(
 
         # Current model (may change on fallback activation).
         self._current_model: str | None = None
+        # Pro-tier escalation is once-per-session: if the bigger model
+        # also returns empty, retrying it again buys nothing.
+        self._pro_fallback_used: bool = False
         self._default_model: str = default_model
 
         # Fire-and-forget background tasks (title generation, etc.).
@@ -2119,6 +2123,28 @@ class AgentHarness(
                             })
                             continue
 
+                        # Nudge retries are spent, and they do not help: an
+                        # empty completion is deterministic for a given
+                        # prompt+model pair. Escalate to the pro tier once
+                        # before giving up -- a different model on a
+                        # different endpoint is the only remaining lever.
+                        if self._try_activate_pro_fallback():
+                            empty_response_retries = 0
+                            logger.warning(
+                                "Session %s: empty LLM response persisted; "
+                                "escalating to pro tier (%s)",
+                                session.id, self._current_model,
+                            )
+                            await self._store.emit_event(
+                                session.id,
+                                EventType.SESSION_MODEL_ESCALATED,
+                                {
+                                    "reason": "empty_llm_response",
+                                    "model": self._current_model,
+                                },
+                            )
+                            continue
+
                         logger.error(
                             "Session %s: LLM returned empty response %d "
                             "times; emitting session.fail",
@@ -2879,6 +2905,21 @@ class AgentHarness(
         self._fallback_index = new_index
         self._primary_config = primary_config
         self._fallback_activated = activated
+        return True
+
+    def _try_activate_pro_fallback(self) -> bool:
+        """Escalate the session's model to the pro tier. True if activated."""
+        new_client, new_model, used = try_activate_pro_fallback(
+            self._advisor_client,
+            self._advisor_model,
+            self._current_model or self._default_model,
+            self._pro_fallback_used,
+        )
+        self._pro_fallback_used = used
+        if new_client is None:
+            return False
+        self._llm = new_client
+        self._current_model = new_model
         return True
 
     def _provider_rate_limit_guard(self) -> ProviderRateLimitGuard | None:

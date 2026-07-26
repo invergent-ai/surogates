@@ -72,6 +72,12 @@ class EventType(str, Enum):
     SESSION_COMPLETE = "session.complete"
     SESSION_FAIL = "session.fail"
     SESSION_RESET = "session.reset"
+    # The session's model was swapped mid-turn to recover from a provider
+    # behaviour the current model could not get past (today: repeated empty
+    # completions). Carries the reason and the model escalated to, so a
+    # tier change is visible in the timeline and in cost attribution rather
+    # than silently changing what the session billed as.
+    SESSION_MODEL_ESCALATED = "session.model_escalated"
     # Auto-title lands on ``sessions.title`` outside the chat-turn event flow.
     # Emitting this lets SSE subscribers patch the title in place instead of
     # waiting for an unrelated refresh.
