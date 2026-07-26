@@ -27,27 +27,20 @@ class _Storage:
 
 @pytest.mark.asyncio
 async def test_create_agent_session_stamps_storage_key_prefix():
-    # get_model_info is consulted for vision support; stub it so tests
-    # don't depend on the model registry.
-    with mock.patch(
-        "surogates.session.provisioning.get_model_info",
-        return_value=SimpleNamespace(supports_vision=False),
-    ):
-        session = await create_agent_session(
-            store=_Store(),
-            storage=_Storage(),
-            settings=SimpleNamespace(
-                storage=SimpleNamespace(
-                    bucket="surogate-workspaces",
-                    key_prefix="p-1/a-1",
-                ),
+    session = await create_agent_session(
+        store=_Store(),
+        storage=_Storage(),
+        settings=SimpleNamespace(
+            storage=SimpleNamespace(
+                bucket="surogate-workspaces",
+                key_prefix="p-1/a-1",
             ),
-            org_id=uuid4(),
-            user_id=uuid4(),
-            agent_id="a-1",
-            channel="api",
-            model="gpt-4o",
-        )
+        ),
+        org_id=uuid4(),
+        user_id=uuid4(),
+        agent_id="a-1",
+        channel="api",
+    )
     assert session.config["storage_bucket"] == "surogate-workspaces"
     assert session.config["storage_key_prefix"] == "p-1/a-1"
 
@@ -55,22 +48,17 @@ async def test_create_agent_session_stamps_storage_key_prefix():
 @pytest.mark.asyncio
 async def test_create_agent_session_defaults_prefix_when_missing():
     """settings.storage with no key_prefix attribute → empty string."""
-    with mock.patch(
-        "surogates.session.provisioning.get_model_info",
-        return_value=SimpleNamespace(supports_vision=False),
-    ):
-        session = await create_agent_session(
-            store=_Store(),
-            storage=_Storage(),
-            settings=SimpleNamespace(
-                storage=SimpleNamespace(bucket="surogate-workspaces"),
-            ),
-            org_id=uuid4(),
-            user_id=uuid4(),
-            agent_id="a-1",
-            channel="api",
-            model="gpt-4o",
-        )
+    session = await create_agent_session(
+        store=_Store(),
+        storage=_Storage(),
+        settings=SimpleNamespace(
+            storage=SimpleNamespace(bucket="surogate-workspaces"),
+        ),
+        org_id=uuid4(),
+        user_id=uuid4(),
+        agent_id="a-1",
+        channel="api",
+    )
     assert session.config["storage_key_prefix"] == ""
 
 

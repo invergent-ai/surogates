@@ -51,7 +51,7 @@ async def materialize_ambient_tick(
             org_id=schedule.org_id,
             agent_id=schedule.agent_id,
             channel="ambient",
-            model=settings.llm.model,
+            model=None,
             config={
                 "slack_channel_id": schedule.channel_id,
                 "slack_team_id": sched_config.get("slack_team_id", ""),

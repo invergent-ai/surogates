@@ -88,7 +88,6 @@ async def materialize_scheduled_run(
                 store=session_store,
                 parent=parent,
                 channel="scheduled",
-                model=settings.llm.model,
                 config=scheduled_config,
                 idempotency_key=idempotency_key,
             )
@@ -102,7 +101,6 @@ async def materialize_scheduled_run(
                 service_account_id=schedule.service_account_id,
                 agent_id=schedule.agent_id,
                 channel="scheduled",
-                model=settings.llm.model,
                 config=scheduled_config,
                 parent_id=None,
                 idempotency_key=idempotency_key,

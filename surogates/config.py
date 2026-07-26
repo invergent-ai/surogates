@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -277,7 +277,32 @@ class LLMSettings(BaseSettings):
 
     model_config = {"env_prefix": "SUROGATES_LLM_"}
 
-    model: str = "gpt-4o"
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_deployment_level_model(cls, data: Any) -> Any:
+        """Fail with a fixable message when a config still sets ``model``.
+
+        ``extra="forbid"`` would already reject it, but with a generic
+        error that reads like a bug rather than a config to edit. This is
+        deliberately fatal rather than ignored: a stale model here used to
+        be recorded on every session row while the agent ran on something
+        else entirely, and silently dropping it would keep that
+        divergence invisible.
+        """
+        if isinstance(data, dict) and "model" in data:
+            raise ValueError(
+                "llm.model (SUROGATES_LLM_MODEL) is no longer supported — "
+                "remove it. Model selection now comes from the per-agent "
+                "runtime config the management plane writes (llm_main), "
+                "and the worker records the resolved model on the session.",
+            )
+        return data
+
+    # No ``model`` here on purpose: the management plane owns model
+    # selection. It reaches the runtime as the per-agent runtime
+    # config's ``llm_main`` slot, which the worker resolves into the
+    # session's LLM bundle and records on the session row. A second
+    # deployment-level model setting could only ever disagree with it.
     base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
     api_key: str = ""  # provider API key
 

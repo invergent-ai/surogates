@@ -69,6 +69,10 @@ def build_base_auxiliary_llm(
     the classifier benefits from the same upstream prefix cache and
     provider warmth as the iteration loop, instead of paying an extra
     round trip against a separately-tiered summary endpoint.
+
+    Only a tenant-level model override can drive this client: the
+    deployment does not carry a model of its own, and the session's
+    own model lives on the bundle the caller already holds.
     """
     llm = settings.llm
     org_llm = _mapping_get(getattr(tenant, "org_config", None), "llm")
@@ -77,7 +81,6 @@ def build_base_auxiliary_llm(
     model = (
         _mapping_get(user_llm, "model")
         or _mapping_get(org_llm, "model")
-        or llm.model
     )
     if not model:
         return None

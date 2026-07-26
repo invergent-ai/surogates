@@ -215,7 +215,6 @@ def _request(
     # ``Settings`` is no longer per-tenant — ``agent_id`` is resolved per
     # request via the runtime context, not from process-wide settings.
     settings = Settings()
-    settings.llm.model = "gpt-test"
     settings.storage.bucket = "ops-agent-bucket"
     return SimpleNamespace(
         url=SimpleNamespace(path=path),
