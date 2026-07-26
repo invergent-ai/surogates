@@ -169,3 +169,67 @@ class TestHintInjectionScan:
         # Should emit a BLOCKED marker, not the malicious content.
         assert hints is not None
         assert "[BLOCKED:" in hints
+
+
+# ---------------------------------------------------------------------------
+# Hints are advisory and must never fail the tool call they annotate
+# ---------------------------------------------------------------------------
+
+
+class TestHintsNeverFailTheToolCall:
+    """Hints are appended AFTER the tool has already run successfully.
+
+    A crash here discards that successful result and, because ``terminal``
+    is in ``SIBLING_ABORT_TOOLS``, cancels every concurrently running
+    sibling tool as well. No hint bug is worth that, so the tracker must
+    swallow anything the path walk can raise.
+    """
+
+    def test_tilde_path_without_home_does_not_raise(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """``Path.expanduser()`` raises RuntimeError when HOME is unset.
+
+        Only OSError/ValueError were caught, so a terminal command
+        mentioning ``~`` turned a successful command into a tool failure.
+        """
+        monkeypatch.delenv("HOME", raising=False)
+        monkeypatch.delenv("USERPROFILE", raising=False)
+        monkeypatch.setattr(
+            "pathlib.Path.expanduser",
+            lambda self: (_ for _ in ()).throw(
+                RuntimeError("Could not determine home directory.")
+            ),
+        )
+        tracker = SubdirectoryHintTracker(initial_cwd=str(tmp_path))
+        assert tracker.check_tool_call("terminal", {"command": "ls ~/data"}) is None
+
+    def test_unexpected_error_in_path_walk_is_contained(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Any exception from the walk is contained, not just known ones."""
+        # Build the tracker BEFORE patching: __init__ calls resolve() too,
+        # and patching first would raise there instead of in the path walk
+        # we mean to exercise.
+        tracker = SubdirectoryHintTracker(initial_cwd=str(tmp_path))
+        # resolve() runs unconditionally before the visited check; patching
+        # is_dir() instead would be short-circuited by the initial cwd
+        # already being visited, so the test would pass without ever
+        # reaching the raising call.
+        monkeypatch.setattr(
+            "pathlib.Path.resolve",
+            lambda self, strict=False: (_ for _ in ()).throw(
+                RuntimeError("boom")
+            ),
+        )
+        assert tracker.check_tool_call("terminal", {"command": "cat ./a.txt"}) is None
+
+    def test_hints_still_work_for_normal_paths(self, tmp_path: Path):
+        """The guard must not silence the feature itself."""
+        subdir = tmp_path / "svc"
+        subdir.mkdir()
+        (subdir / "AGENTS.md").write_text("Service rules")
+        tracker = SubdirectoryHintTracker(initial_cwd=str(tmp_path))
+        hints = tracker.check_tool_call("file_read", {"path": str(subdir / "x.py")})
+        assert hints is not None
+        assert "Service rules" in hints
