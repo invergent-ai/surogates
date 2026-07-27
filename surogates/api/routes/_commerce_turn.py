@@ -108,6 +108,62 @@ async def authorize_commerce_turn(
         )
 
 
+class AllowanceReserveError(RuntimeError):
+    """The allowance plane could not be reached — callers fail closed."""
+
+
+async def reserve_allowance(
+    *,
+    platform_client,
+    runtime_payload: dict,
+    session_store,
+    session_id,
+    agent_id: str,
+    content: str,
+    end_user_id: str,
+) -> None:
+    """Channel-agnostic per-user allowance reservation (no HTTP request).
+
+    A no-op unless ops projects a positive ``end_user_token_allowance``.
+    Reserves the turn's estimate against the end-user's cap and pins the
+    receipt on ``session.config`` for the worker to settle. Raises
+    :class:`~surogates.runtime.platform_client.AllowanceExhaustedError`
+    on 402 (cap spent / subscription required / operator plan spent) and
+    :class:`AllowanceReserveError` when the allowance plane is unreachable
+    (callers fail closed). Shared by the web message route and the
+    slack/telegram inbound pipeline.
+    """
+    if runtime_payload.get("end_user_token_allowance") is None:
+        return
+    if platform_client is None:
+        raise AllowanceReserveError("platform_client not wired")
+    try:
+        receipt = await platform_client.allowance_authorize(
+            str(agent_id),
+            end_user_id=end_user_id,
+            estimated_tokens=estimate_turn_tokens(content),
+        )
+    except AllowanceExhaustedError:
+        raise
+    except Exception as exc:
+        raise AllowanceReserveError(str(exc)) from exc
+    if receipt.get("allowance_id"):
+        if session_store is None:
+            raise AllowanceReserveError("session_store not wired")
+        # Appended, not overwritten: a second message can land while a
+        # turn is still running, and each hold must survive until the
+        # worker settles the whole list atomically.
+        await session_store.append_session_config_list(
+            session_id,
+            "allowance_reservations",
+            {
+                "allowance_id": receipt["allowance_id"],
+                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
+                "reservation_id": receipt.get("reservation_id") or "",
+            },
+        )
+
+
 async def authorize_allowance_turn(
     request: Request,
     session,
@@ -115,44 +171,31 @@ async def authorize_allowance_turn(
     *,
     end_user_id: str,
 ) -> None:
-    """Gate one end-user turn behind their per-user token allowance.
+    """HTTP gate for one end-user turn behind their per-user allowance.
 
-    Unlike :func:`authorize_commerce_turn` this applies to **every**
-    signed-in end-user regardless of identity provider or channel, and is
-    independent of the agent's commerce mode: it enforces the operator's
-    per-user slice of their own subscription.  It is a no-op unless ops
-    projects a positive ``end_user_token_allowance`` (kill-switch on and
-    the operator set a cap), so free/uncapped agents are unaffected.
-
-    On success the reservation receipt is pinned on ``session.config`` for
-    the worker to settle after the turn.  An exhausted allowance raises
-    402 ``allowance_exhausted``.
+    Thin wrapper over :func:`reserve_allowance` that pulls dependencies
+    from ``request.app.state`` and maps the domain outcomes to HTTP: an
+    exhausted allowance (or subscription-required / operator plan spent)
+    to 402 with the machine sentinel, an unreachable allowance plane to
+    503 (fail closed — a capped agent must not serve unmetered turns).
     """
     payload = await runtime_commerce_payload(request, str(session.agent_id))
-    allowance = payload.get("end_user_token_allowance")
-    if allowance is None:
-        return
-    client = getattr(request.app.state, "platform_client", None)
-    if client is None:
-        logger.error("platform_client is not wired on app.state")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Access checks are temporarily unavailable; try again.",
-        )
     try:
-        receipt = await client.allowance_authorize(
-            str(session.agent_id),
+        await reserve_allowance(
+            platform_client=getattr(request.app.state, "platform_client", None),
+            runtime_payload=payload,
+            session_store=getattr(request.app.state, "session_store", None),
+            session_id=session.id,
+            agent_id=session.agent_id,
+            content=content,
             end_user_id=end_user_id,
-            estimated_tokens=estimate_turn_tokens(content),
         )
     except AllowanceExhaustedError as exc:
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail={"code": exc.detail or "allowance_exhausted"},
         ) from exc
-    except Exception as exc:
-        # Fail closed: a capped agent must not serve unmetered turns
-        # because the allowance plane blinked.
+    except AllowanceReserveError as exc:
         logger.error(
             "Allowance authorization failed for session %s: %s",
             session.id,
@@ -162,20 +205,6 @@ async def authorize_allowance_turn(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Access checks are temporarily unavailable; try again.",
         ) from exc
-    if receipt.get("allowance_id"):
-        store = get_session_store(request)
-        # Appended, not overwritten: a second message can land while a
-        # turn is still running, and each hold must survive until the
-        # worker settles the whole list atomically.
-        await store.append_session_config_list(
-            session.id,
-            "allowance_reservations",
-            {
-                "allowance_id": receipt["allowance_id"],
-                "reserved_tokens": int(receipt.get("reserved_tokens") or 0),
-                "reservation_id": receipt.get("reservation_id") or "",
-            },
-        )
 
 
 def get_session_store(request: Request) -> "SessionStore":

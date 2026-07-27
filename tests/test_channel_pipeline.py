@@ -1355,3 +1355,102 @@ async def test_channel_session_blank_identifier_memory_boundary_fails_closed():
 
     created = deps._sessions_created[-1]
     assert created["config"]["memory_boundary"] == f"slack:iso:{created['session_key']}"
+
+
+# ---------------------------------------------------------------------------
+# Slice C: per-user allowance gate on the slack/telegram inbound pipeline
+# ---------------------------------------------------------------------------
+
+
+class _FakeAllowanceClient:
+    def __init__(self, *, receipt=None, error=None):
+        self.receipt = receipt
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def allowance_authorize(self, agent_id, *, end_user_id, estimated_tokens):
+        self.calls.append(
+            {
+                "agent_id": agent_id,
+                "end_user_id": end_user_id,
+                "estimated_tokens": estimated_tokens,
+            },
+        )
+        if self.error is not None:
+            raise self.error
+        return self.receipt
+
+
+def _capped_config():
+    async def _rc(agent_id):
+        return {"end_user_token_allowance": 1000}
+
+    return _rc
+
+
+def _uncapped_config():
+    async def _rc(agent_id):
+        return {}
+
+    return _rc
+
+
+@pytest.mark.asyncio
+async def test_allowance_gate_blocks_exhausted_channel_user():
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    msg = _make_msg(is_dm=True, ts="allow.1")
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(
+        error=AllowanceExhaustedError("allowance_exhausted"),
+    )
+    deps.runtime_config = _capped_config()
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.DROPPED
+    # Blocked BEFORE emit/enqueue: no turn runs.
+    assert deps._enqueued == []
+    assert not any(e[1] == EventType.USER_MESSAGE for e in deps.session_store.events)
+
+
+@pytest.mark.asyncio
+async def test_allowance_gate_passes_and_pins_reservation():
+    msg = _make_msg(is_dm=True, ts="allow.2")
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(
+        receipt={"allowance_id": "al-1", "reserved_tokens": 7, "reservation_id": "r-1"},
+    )
+    deps.runtime_config = _capped_config()
+    pins: list[tuple] = []
+
+    async def _append(session_id, key, value):
+        pins.append((session_id, key, value))
+
+    deps.session_store.append_session_config_list = _append
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.PROCESSED
+    assert deps._enqueued
+    assert pins and pins[0][1] == "allowance_reservations"
+    assert len(deps.platform_client.calls) == 1
+    assert deps.platform_client.calls[0]["end_user_id"] == str(USER_ID)
+
+
+@pytest.mark.asyncio
+async def test_allowance_gate_noop_for_uncapped_agent():
+    msg = _make_msg(is_dm=True, ts="allow.3")
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(receipt={})
+    deps.runtime_config = _uncapped_config()
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.PROCESSED
+    assert deps._enqueued
+    # Uncapped agent → no ops round trip.
+    assert deps.platform_client.calls == []
