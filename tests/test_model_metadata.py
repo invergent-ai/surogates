@@ -261,7 +261,7 @@ class TestEstimateCallCost:
         from surogates.harness.model_metadata import estimate_call_cost
 
         cost, priced = estimate_call_cost(
-            model_id="surogate", usage_model="claude-sonnet-5",
+            model_id="surogate", usage_model="some-unlisted-model-v9",
             input_tokens=1_000_000, output_tokens=10_000,
         )
         assert cost == 0.0
@@ -276,3 +276,62 @@ class TestEstimateCallCost:
         )
         assert cost == 0.0
         assert priced == "gpt-5.5"
+
+
+class TestClaudeCatalogRates:
+    """Rates derived from yunwu's public /api/pricing for the default group.
+
+    price per 1M = model_ratio * group_ratio * $2 (one-api convention);
+    output = input * completion_ratio. Cross-checked against the recorded
+    rate card: opus at ratio 2.5 gives $5/$25/$0.5/$6.25 per M for
+    in/out/cache-read/cache-write, matching on all four.
+    """
+
+    def test_sonnet_5_rates(self):
+        from surogates.harness.model_metadata import get_model_info
+
+        i = get_model_info("claude-sonnet-5")
+        assert i is not None
+        assert i.input_cost_per_1k == 0.002    # ratio 1 -> $2/M (introductory)
+        assert i.output_cost_per_1k == 0.010   # x5      -> $10/M
+
+    def test_opus_5_rates(self):
+        from surogates.harness.model_metadata import get_model_info
+
+        i = get_model_info("claude-opus-5")
+        assert i is not None
+        assert i.input_cost_per_1k == 0.005    # ratio 2.5 -> $5/M
+        assert i.output_cost_per_1k == 0.025   # x5        -> $25/M
+
+    def test_context_windows_are_1m_not_the_sentinel_default(self):
+        """Both ship a 1M window with 128k output.
+
+        Copying the sentinel's 262k would make the compressor compress at
+        a quarter of the real capacity.
+        """
+        from surogates.harness.model_metadata import get_model_info
+
+        for name in ("claude-sonnet-5", "claude-opus-5"):
+            i = get_model_info(name)
+            assert i.context_window == 1_000_000, name
+            assert i.max_output_tokens == 128_000, name
+
+    def test_sentinel_session_now_prices_via_the_served_model(self):
+        # The whole point: a session running as "surogate" served by
+        # claude-sonnet-5 must accrue cost instead of silently zero.
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced = estimate_call_cost(
+            "surogate", "claude-sonnet-5", 1_000_000, 10_000,
+        )
+        assert priced == "claude-sonnet-5"
+        assert cost == pytest.approx(2.10)  # 1M*0.002 + 10k*0.010
+
+    def test_cache_reads_are_discounted(self):
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, _ = estimate_call_cost(
+            "surogate", "claude-sonnet-5", 1_000_000, 0,
+            cache_read_tokens=1_000_000,
+        )
+        assert cost == pytest.approx(0.20)  # all cached: $2/M * 0.1

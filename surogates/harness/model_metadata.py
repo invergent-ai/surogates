@@ -178,6 +178,37 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
+    # --- Anthropic (via the yunwu gateway) ---
+    # Rates from yunwu's public /api/pricing for the `default` group:
+    # price per 1M = model_ratio * group_ratio * $2, output = input *
+    # completion_ratio. sonnet-5 is ratio 1, opus-5 ratio 2.5, both with
+    # completion_ratio 5 and cache_ratio 0.1 (which matches
+    # _CACHE_READ_DISCOUNT). These are gateway rates, NOT Anthropic list
+    # prices -- re-derive from /api/pricing if the gateway or group changes.
+    # The tier sentinels below deliberately carry no rate; cost is priced
+    # against whichever of these actually served the call.
+    # Both are 1M context / 128k max output -- 1M is the default, with no
+    # smaller variant and no beta header required.
+    #
+    # NOTE: sonnet-5's $2/$10 is INTRODUCTORY pricing that ends 2026-08-31,
+    # after which list is $3/$15 per MTok. Re-derive from /api/pricing then.
+    # opus-5 at $5/$25 matches Anthropic list, so the gateway is at parity.
+    "claude-sonnet-5": ModelInfo(
+        id="claude-sonnet-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.010,
+        supports_vision=True,
+    ),
+    "claude-opus-5": ModelInfo(
+        id="claude-opus-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.005,
+        output_cost_per_1k=0.025,
+        supports_vision=True,
+    ),
     # --- Surogate -----------------------
     "surogate": ModelInfo(
         id="surogate",
