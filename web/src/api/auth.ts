@@ -146,6 +146,25 @@ export async function unlinkChannel(identityId: string): Promise<void> {
   }
 }
 
+/** Change the password of a local (database) account. Firebase-backed
+ * users manage credentials through their provider and get a 409 here. */
+export async function changePassword(fields: {
+  current_password: string;
+  new_password: string;
+}): Promise<void> {
+  const response = await authFetch("/api/v1/auth/me/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(
+      errorDetailMessage(data?.detail) ?? "Failed to change password.",
+    );
+  }
+}
+
 // ── BYO Firebase self-registration ──────────────────────────────────────
 
 export type FirebaseProvider = "google" | "github" | "password";
@@ -174,6 +193,14 @@ export interface AuthConfigResponse {
   // channel (no "New chat"). Absent on a fetch error or an older backend
   // — consumers treat "absent" as "unknown" and fail open (multi on).
   multi_session?: boolean;
+  // "Live browser support" capability. False hides the Browser Profiles
+  // settings tab and the composer's browser-profile picker. Absent on a
+  // fetch error or an older backend — treated as "unknown" (fail open).
+  browser_enabled?: boolean;
+  // Active messaging channels an end-user can link their identity to
+  // (subset of slack/teams/telegram). Empty/absent hides "Connected
+  // Channels" — there is nothing to pair against.
+  linkable_channels?: string[];
   // Username handle rule served by the backend (single source of
   // truth). Absent on older backends — callers fall back locally.
   username_pattern?: string;

@@ -99,6 +99,15 @@ class AuthConfigResponse(BaseModel):
     # "Multi session" capability.  When False each user keeps one session
     # per channel; the SPA hides "New chat" and pins the conversation.
     multi_session: bool = True
+    # "Live browser support" capability.  When False the SPA hides the
+    # Browser Profiles settings tab and the composer's browser-profile
+    # picker (the agent's browser_* tools are already removed server-side).
+    # Defaults True so an older backend keeps browser affordances visible.
+    browser_enabled: bool = True
+    # Active messaging channels an end-user can link their identity to
+    # (subset of slack/teams/telegram).  Empty means the agent has no
+    # such channel, so the SPA hides "Connected Channels" entirely.
+    linkable_channels: list[str] = Field(default_factory=list)
     # Username handle rule (source of truth: USERNAME_RE below). The
     # sign-up form pre-validates with this so the client can never
     # drift from the server.
@@ -158,6 +167,8 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            browser_enabled=agent_runtime.browser_enabled,
+            linkable_channels=list(agent_runtime.linkable_channels),
             commerce_mode=commerce_mode,
             commerce_buy_url=commerce_buy_url,
         )
@@ -170,6 +181,8 @@ async def auth_config(
             firebase=None,
             slash_commands=slash_commands,
             multi_session=agent_runtime.multi_session,
+            browser_enabled=agent_runtime.browser_enabled,
+            linkable_channels=list(agent_runtime.linkable_channels),
             commerce_mode=commerce_mode,
             commerce_buy_url=commerce_buy_url,
         )
@@ -178,6 +191,8 @@ async def auth_config(
         self_registration_enabled=True,
         slash_commands=slash_commands,
         multi_session=agent_runtime.multi_session,
+        browser_enabled=agent_runtime.browser_enabled,
+        linkable_channels=list(agent_runtime.linkable_channels),
         commerce_mode=commerce_mode,
         commerce_buy_url=commerce_buy_url,
         firebase=FirebaseWebConfig(
@@ -721,6 +736,74 @@ async def update_me(
         auth_provider=user.auth_provider,
         created_at=user.created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Password
+# ---------------------------------------------------------------------------
+
+
+class ChangePasswordRequest(BaseModel):
+    """Payload for changing a local (database) account's password."""
+
+    current_password: str
+    new_password: str
+
+
+@router.post("/auth/me/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Change the password of a local (``database``) account.
+
+    Only accounts with a stored bcrypt hash can change their password
+    here.  Firebase-backed users manage credentials through their
+    identity provider — the web app offers them a reset-email flow
+    instead — so this route refuses them with 409.
+    """
+    import bcrypt
+
+    if len(body.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="New password must be at least 8 characters.",
+        )
+
+    session_factory = request.app.state.session_factory
+    async with session_factory() as session:
+        result = await session.execute(
+            select(User).where(
+                User.id == tenant.user_id,
+                User.org_id == tenant.org_id,
+            )
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
+            )
+        if user.auth_provider != "database" or not user.password_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Password changes are managed by your sign-in provider."
+                ),
+            )
+        if not bcrypt.checkpw(
+            body.current_password.encode("utf-8"),
+            user.password_hash.encode("utf-8"),
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Current password is incorrect.",
+            )
+        user.password_hash = DatabaseAuthProvider.hash_password(
+            body.new_password,
+        )
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------

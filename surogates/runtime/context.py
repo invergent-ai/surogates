@@ -176,6 +176,13 @@ class AgentRuntimeContext:
     # sessions.
     multi_session: bool = True
 
+    # Active messaging channels an end-user can link their identity to
+    # (subset of slack/teams/telegram).  Empty by default so a payload
+    # predating this field hides the web app's "Connected Channels"
+    # surface (nothing to pair against until the management plane
+    # reports a channel).
+    linkable_channels: tuple[str, ...] = ()
+
     # File-bundle reference.  Both optional so agents that haven't
     # been onboarded to Hub-backed bundles yet still work.
     # ``bundle_hub_ref`` is the Hub repository in ``<owner>/<repo>``

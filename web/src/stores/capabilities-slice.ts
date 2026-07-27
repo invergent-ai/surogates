@@ -19,6 +19,13 @@ export type CapabilitiesSlice = {
   // "Multi session" capability. ``null`` = unknown (fail open — multi on);
   // ``false`` pins each user to one session per channel.
   multiSession: boolean | null;
+  // "Live browser support" capability. ``null`` = unknown (fail open —
+  // browser affordances shown); ``false`` hides them.
+  browserEnabled: boolean | null;
+  // Messaging channels an end-user can link their identity to. ``null`` =
+  // unknown (not loaded); an array (possibly empty) is authoritative — an
+  // empty array hides "Connected Channels".
+  linkableChannels: string[] | null;
 
   fetchCapabilities: () => Promise<void>;
 };
@@ -32,6 +39,8 @@ export const createCapabilitiesSlice: StateCreator<
   slashCommands: null,
   agentId: null,
   multiSession: null,
+  browserEnabled: null,
+  linkableChannels: null,
 
   fetchCapabilities: async () => {
     // ``fetchAuthConfig`` already degrades to a safe fallback on error
@@ -41,6 +50,8 @@ export const createCapabilitiesSlice: StateCreator<
       slashCommands: config.slash_commands ?? null,
       agentId: config.agent_id ?? null,
       multiSession: config.multi_session ?? null,
+      browserEnabled: config.browser_enabled ?? null,
+      linkableChannels: config.linkable_channels ?? null,
     });
   },
 });
@@ -53,4 +64,14 @@ export function slashCommandEnabled(
   id: string,
 ): boolean {
   return slashCommands === null || slashCommands.includes(id);
+}
+
+// True when the browser-profile affordances (settings tab + composer
+// picker) should be surfaced.  Only an explicit ``false`` hides them;
+// unknown (``null``) fails open so a fetch hiccup or older backend keeps
+// them visible.
+export function browserCapabilityEnabled(
+  browserEnabled: boolean | null,
+): boolean {
+  return browserEnabled !== false;
 }

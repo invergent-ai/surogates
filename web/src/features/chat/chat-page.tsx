@@ -12,7 +12,10 @@ import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
-import { slashCommandEnabled } from "@/stores/capabilities-slice";
+import {
+  browserCapabilityEnabled,
+  slashCommandEnabled,
+} from "@/stores/capabilities-slice";
 import * as sessionsApi from "@/api/sessions";
 import {
   getTransparencyConfig,
@@ -38,6 +41,7 @@ export function ChatPage() {
   const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
   const slashCommands = useAppStore((s) => s.slashCommands);
   const multiSession = useAppStore((s) => s.multiSession);
+  const browserEnabled = useAppStore((s) => s.browserEnabled);
   const sessions = useAppStore((s) => s.sessions);
 
   // Load initial data on mount
@@ -243,11 +247,11 @@ export function ChatPage() {
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
-              // The web app has no per-agent browser-capability flag, so the
-              // picker is always offered; selecting a profile for a non-browser
-              // agent is a harmless no-op. Shown before the session starts and
-              // locked once it is active (the SDK handles the lock).
-              browserProfilesEnabled
+              // Offer the browser-profile picker only when the agent has live
+              // browser support (``browser_enabled`` from /auth/config).
+              // Unknown (capabilities not yet loaded) fails open. Shown before
+              // the session starts and locked once active (SDK handles lock).
+              browserProfilesEnabled={browserCapabilityEnabled(browserEnabled)}
               // Hide built-in slash commands the agent has disabled. Unknown
               // (capabilities not yet loaded) fails open via the helper.
               compressEnabled={slashCommandEnabled(slashCommands, "compress")}

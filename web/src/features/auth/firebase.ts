@@ -15,6 +15,7 @@ import {
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
+  onAuthStateChanged,
   sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
@@ -175,4 +176,31 @@ export async function sendFirebasePasswordReset(
   email: string,
 ): Promise<void> {
   await sendPasswordResetEmail(getRuntimeFirebaseAuth(config), email.trim());
+}
+
+/** Resolve the persisted Firebase auth user, waiting for the SDK to
+ * restore it from storage on a cold load. Resolves ``null`` when no
+ * user is available (e.g. the Firebase session lapsed while the app's
+ * own JWT is still valid). */
+function currentFirebaseUser(config: FirebaseRuntimeConfig): Promise<User | null> {
+  const auth = getRuntimeFirebaseAuth(config);
+  if (auth.currentUser) return Promise.resolve(auth.currentUser);
+  return new Promise<User | null>((resolve) => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      unsub();
+      resolve(user);
+    });
+  });
+}
+
+/** Whether the signed-in Firebase user has an email/password credential,
+ * i.e. a "password" entry in ``providerData``. Only such users have a
+ * password to reset — Google/GitHub-only accounts do not. Resolves
+ * false when no Firebase user can be resolved (callers then hide the
+ * password UI; the sign-in page's own reset flow remains the fallback). */
+export async function firebaseUserHasPasswordProvider(
+  config: FirebaseRuntimeConfig,
+): Promise<boolean> {
+  const user = await currentFirebaseUser(config);
+  return !!user?.providerData.some((p) => p.providerId === "password");
 }
