@@ -178,6 +178,37 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
+    # --- Anthropic (via the yunwu gateway) ---
+    # Rates from yunwu's public /api/pricing for the `default` group:
+    # price per 1M = model_ratio * group_ratio * $2, output = input *
+    # completion_ratio. sonnet-5 is ratio 1, opus-5 ratio 2.5, both with
+    # completion_ratio 5 and cache_ratio 0.1 (which matches
+    # _CACHE_READ_DISCOUNT). These are gateway rates, NOT Anthropic list
+    # prices -- re-derive from /api/pricing if the gateway or group changes.
+    # The tier sentinels below deliberately carry no rate; cost is priced
+    # against whichever of these actually served the call.
+    # Both are 1M context / 128k max output -- 1M is the default, with no
+    # smaller variant and no beta header required.
+    #
+    # NOTE: sonnet-5's $2/$10 is INTRODUCTORY pricing that ends 2026-08-31,
+    # after which list is $3/$15 per MTok. Re-derive from /api/pricing then.
+    # opus-5 at $5/$25 matches Anthropic list, so the gateway is at parity.
+    "claude-sonnet-5": ModelInfo(
+        id="claude-sonnet-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.010,
+        supports_vision=True,
+    ),
+    "claude-opus-5": ModelInfo(
+        id="claude-opus-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.005,
+        output_cost_per_1k=0.025,
+        supports_vision=True,
+    ),
     # --- Surogate -----------------------
     "surogate": ModelInfo(
         id="surogate",
@@ -388,6 +419,51 @@ def estimate_cost(
     cache_cost = (cached / 1000.0) * info.input_cost_per_1k * _CACHE_READ_DISCOUNT
     output_cost = (output_tokens / 1000.0) * info.output_cost_per_1k
     return input_cost + cache_cost + output_cost
+
+
+def _has_rate(model_id: str) -> bool:
+    info = get_model_info(model_id)
+    return info is not None and (
+        info.input_cost_per_1k > 0 or info.output_cost_per_1k > 0
+    )
+
+
+def estimate_call_cost(
+    model_id: str,
+    usage_model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+) -> tuple[float, str | None]:
+    """Price a call against the model that actually served it.
+
+    Sessions run under a tier sentinel (``surogate`` / ``surogate-pro``),
+    but the request is served by a concrete upstream model, reported back
+    in the usage payload. The sentinels are in the catalog deliberately --
+    the compressor needs their context window -- yet carry ``0.0`` prices,
+    so pricing the sentinel yields no cost while token counters keep
+    climbing. That is how a 1.48M-token session recorded
+    ``estimated_cost_usd = 0``.
+
+    Returns ``(cost, priced_model)``. ``priced_model`` is ``None`` when no
+    source had a rate, which callers should surface: silently returning
+    ``0.0`` is what hid the gap. Deliberately does NOT invent a rate -- a
+    confidently wrong cost is worse than an obviously missing one.
+    """
+    for candidate in (usage_model, model_id):
+        if candidate and _has_rate(candidate):
+            return (
+                estimate_cost(
+                    candidate, input_tokens, output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                ),
+                candidate,
+            )
+
+    # A call that consumed nothing is not a pricing gap.
+    if not input_tokens and not output_tokens:
+        return 0.0, (usage_model or model_id or None)
+    return 0.0, None
 
 
 # ---------------------------------------------------------------------------
