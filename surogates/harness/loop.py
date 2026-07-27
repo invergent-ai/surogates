@@ -1925,14 +1925,29 @@ class AgentHarness(
             }
 
             # Compute cost estimate (cache reads billed at the discounted rate).
-            from surogates.harness.model_metadata import estimate_cost
+            from surogates.harness.model_metadata import estimate_call_cost
 
-            cost = estimate_cost(
-                model_id, input_tokens, output_tokens,
+            cost, priced_model = estimate_call_cost(
+                model_id,
+                usage_data.get("model"),
+                input_tokens,
+                output_tokens,
                 cache_read_tokens=cache_read_tokens,
             )
             if cost > 0:
                 response_data["cost_usd"] = cost
+            elif priced_model is None:
+                # No catalog rate for the model that served this call, so
+                # the session's estimated_cost_usd cannot move while its
+                # token counters do. Record the gap on the event instead of
+                # dropping it silently -- that silence is what let a
+                # 1.48M-token session read as costing nothing.
+                response_data["cost_unpriced_model"] = (
+                    usage_data.get("model") or model_id
+                )
+                self._warn_unpriced_model_once(
+                    usage_data.get("model") or model_id
+                )
 
             # Record in session cost tracker.
             if cost_tracker is not None:
@@ -2907,6 +2922,25 @@ class AgentHarness(
         self._fallback_activated = activated
         return True
 
+    def _warn_unpriced_model_once(self, model: str) -> None:
+        """Log a missing catalog rate once per model per session.
+
+        Per call would flood a long session; never would leave the operator
+        with silently-zero cost, which is the bug this guards.
+        """
+        seen = getattr(self, "_unpriced_models_warned", None)
+        if seen is None:
+            seen = set()
+            self._unpriced_models_warned = seen
+        if model in seen:
+            return
+        seen.add(model)
+        logger.warning(
+            "No catalog rate for model %r; sessions on it accrue tokens "
+            "with estimated_cost_usd staying at 0. Add it to MODEL_CATALOG.",
+            model,
+        )
+
     def _try_activate_pro_fallback(self) -> bool:
         """Escalate the session's model to the pro tier. True if activated."""
         new_client, new_model, used = try_activate_pro_fallback(
@@ -3760,10 +3794,13 @@ class AgentHarness(
             output_tokens = usage_data.get("output_tokens", 0)
             cache_read_tokens = usage_data.get("cache_read_tokens", 0)
 
-            from surogates.harness.model_metadata import estimate_cost
+            from surogates.harness.model_metadata import estimate_call_cost
 
-            cost = estimate_cost(
-                model_id, input_tokens, output_tokens,
+            cost, _priced_model = estimate_call_cost(
+                model_id,
+                usage_data.get("model"),
+                input_tokens,
+                output_tokens,
                 cache_read_tokens=cache_read_tokens,
             )
 

@@ -218,3 +218,61 @@ class TestOpus48Cost:
             cache_read_tokens=1000,
         )
         assert cost == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pricing the model that actually served the request
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateCallCost:
+    """Sessions run under a tier sentinel ("surogate"), but the request is
+    served by a concrete upstream model reported back in usage.
+
+    The sentinel is in the catalog on purpose -- the compressor needs its
+    context window -- but carries 0.0 prices, so pricing the sentinel
+    silently yields no cost while token counters keep climbing. Observed in
+    PROD: 1.48M input tokens recorded against estimated_cost_usd = 0.
+    """
+
+    def test_prices_the_resolved_model_over_the_sentinel(self):
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced = estimate_call_cost(
+            model_id="surogate", usage_model="gpt-5.5",
+            input_tokens=1_000_000, output_tokens=10_000,
+        )
+        assert priced == "gpt-5.5"
+        assert cost > 0
+
+    def test_falls_back_to_the_sentinel_when_usage_model_is_absent(self):
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced = estimate_call_cost(
+            model_id="gpt-5.5", usage_model=None,
+            input_tokens=1_000, output_tokens=100,
+        )
+        assert priced == "gpt-5.5"
+        assert cost > 0
+
+    def test_reports_unpriced_when_no_source_has_a_rate(self):
+        # The gap must be visible. Returning 0.0 with no signal is why a
+        # 1.48M-token session showed zero cost and nobody noticed.
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced = estimate_call_cost(
+            model_id="surogate", usage_model="claude-sonnet-5",
+            input_tokens=1_000_000, output_tokens=10_000,
+        )
+        assert cost == 0.0
+        assert priced is None
+
+    def test_zero_token_call_is_not_reported_as_unpriced(self):
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced = estimate_call_cost(
+            model_id="gpt-5.5", usage_model="gpt-5.5",
+            input_tokens=0, output_tokens=0,
+        )
+        assert cost == 0.0
+        assert priced == "gpt-5.5"
