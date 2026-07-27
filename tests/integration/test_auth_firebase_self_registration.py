@@ -212,6 +212,76 @@ async def test_firebase_exchange_creates_user_when_enabled(
     assert user.external_id == "uid-123"
 
 
+async def test_firebase_exchange_records_password_sign_in_provider(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    """A password-provider token stamps ``sign_in_provider='password'`` so
+    the web app can offer password reset to this user."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+
+    async def fake_verify(token: str, project_id: str) -> dict:
+        return {
+            "sub": "uid-pw",
+            "email": "pw-user@example.com",
+            "email_verified": True,
+            "firebase": {"sign_in_provider": "password"},
+        }
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+
+    response = await auth_client.post(
+        "/v1/auth/firebase/exchange",
+        json={"id_token": "firebase-token"},
+    )
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id, User.email == "pw-user@example.com",
+            )
+        )
+    assert user is not None
+    assert user.sign_in_provider == "password"
+
+
+async def test_firebase_exchange_records_federated_sign_in_provider(
+    auth_client, auth_app, session_factory, monkeypatch,
+):
+    """A Google-provider token stamps ``sign_in_provider='google.com'`` so
+    the web app hides password reset (no password to reset)."""
+    org_id = await create_org(session_factory)
+    _set_org(auth_app, org_id)
+    _set_firebase(auth_app, enabled=True)
+
+    async def fake_verify(token: str, project_id: str) -> dict:
+        return {
+            "sub": "uid-goog",
+            "email": "goog-user@example.com",
+            "email_verified": True,
+            "firebase": {"sign_in_provider": "google.com"},
+        }
+
+    monkeypatch.setattr(auth_routes, "verify_firebase_id_token", fake_verify)
+
+    response = await auth_client.post(
+        "/v1/auth/firebase/exchange",
+        json={"id_token": "firebase-token"},
+    )
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as session:
+        user = await session.scalar(
+            select(User).where(
+                User.org_id == org_id, User.email == "goog-user@example.com",
+            )
+        )
+    assert user is not None
+    assert user.sign_in_provider == "google.com"
+
+
 async def test_firebase_exchange_404_when_project_has_no_firebase(
     auth_client, auth_app, session_factory, monkeypatch,
 ):

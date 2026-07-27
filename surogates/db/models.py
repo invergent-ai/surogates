@@ -130,6 +130,11 @@ class User(Base):
     )
     external_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     password_hash: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # How the user most recently signed in. For Firebase users this is the
+    # token's ``firebase.sign_in_provider`` (e.g. "password", "google.com",
+    # "github.com"); local logins record "password". Drives whether the web
+    # app offers password reset — only "password" users have one to reset.
+    sign_in_provider: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Self-registration profile: a lowercase handle (unique per org via
     # the partial index in observability.sql) and an optional phone.
     username: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

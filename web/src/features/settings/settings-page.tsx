@@ -254,6 +254,7 @@ export function SettingsPage() {
               {user && (
                 <PasswordSection
                   authProvider={user.auth_provider}
+                  signInProvider={user.sign_in_provider}
                   email={user.email}
                 />
               )}

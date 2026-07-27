@@ -215,6 +215,21 @@ def _email_from_firebase_claims(claims: dict) -> tuple[str | None, bool]:
     return email.strip().lower(), claims.get("email_verified") is True
 
 
+def _sign_in_provider_from_claims(claims: dict) -> str | None:
+    """The Firebase sign-in method from token claims.
+
+    Firebase nests it as ``firebase.sign_in_provider`` (e.g. "password",
+    "google.com", "github.com").  Returns ``None`` when absent so callers
+    leave the stored value untouched rather than clobbering it.
+    """
+    firebase = claims.get("firebase")
+    if isinstance(firebase, dict):
+        method = firebase.get("sign_in_provider")
+        if isinstance(method, str) and method:
+            return method
+    return None
+
+
 def _display_name_from_firebase_claims(
     claims: dict, email: str | None,
 ) -> str:
@@ -304,6 +319,7 @@ async def firebase_exchange(
         )
     email, email_verified = _email_from_firebase_claims(claims)
     provider = firebase_auth_provider_name(fb_project_id)
+    sign_in_method = _sign_in_provider_from_claims(claims)
 
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
@@ -412,6 +428,13 @@ async def firebase_exchange(
                 session.add(user)
                 await session.commit()
             await session.refresh(user)
+
+        # Record how they signed in (only when the token carried it, so a
+        # malformed claim never clobbers a known value). Persisted even on
+        # the no-agent path below via its own commit.
+        if sign_in_method is not None and user.sign_in_provider != sign_in_method:
+            user.sign_in_provider = sign_in_method
+            await session.commit()
 
         # Successful auth through THIS agent's web channel is
         # assignment intent — enroll the user on the serving agent.
@@ -608,6 +631,7 @@ async def me(
         username=user.username,
         phone=user.phone,
         auth_provider=user.auth_provider,
+        sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
     )
 
@@ -734,6 +758,7 @@ async def update_me(
         username=user.username,
         phone=user.phone,
         auth_provider=user.auth_provider,
+        sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
     )
 

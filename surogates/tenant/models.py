@@ -76,6 +76,9 @@ class UserResponse(BaseModel):
     username: str | None = None
     phone: str | None = None
     auth_provider: str
+    # Most recent sign-in method (e.g. "password", "google.com"). Lets the
+    # web app show password reset only to email/password accounts.
+    sign_in_provider: str | None = None
     created_at: datetime
 
 

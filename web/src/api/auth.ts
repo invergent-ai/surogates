@@ -93,6 +93,7 @@ export async function fetchCurrentUser(): Promise<{
   email: string;
   display_name: string | null;
   auth_provider: string;
+  sign_in_provider: string | null;
   created_at: string;
 }> {
   const response = await authFetch("/api/v1/auth/me");
@@ -109,6 +110,7 @@ export async function updateCurrentUser(fields: {
   email: string;
   display_name: string | null;
   auth_provider: string;
+  sign_in_provider: string | null;
   created_at: string;
 }> {
   const response = await authFetch("/api/v1/auth/me", {

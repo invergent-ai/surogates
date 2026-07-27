@@ -5,19 +5,12 @@
 // reset-email flow (their provider owns the credential); local database
 // accounts get an in-app change-password form.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { toast } from "sonner";
 
-import {
-  changePassword,
-  fetchAuthConfig,
-  type FirebaseRuntimeConfig,
-} from "@/api/auth";
-import {
-  firebaseUserHasPasswordProvider,
-  sendFirebasePasswordReset,
-} from "@/features/auth";
+import { changePassword, fetchAuthConfig } from "@/api/auth";
+import { sendFirebasePasswordReset } from "@/features/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -25,12 +18,18 @@ const MIN_PASSWORD_LENGTH = 8;
 
 export function PasswordSection({
   authProvider,
+  signInProvider,
   email,
 }: {
   authProvider: string;
+  signInProvider: string | null;
   email: string;
 }) {
+  // Only email/password accounts have a password to manage. Firebase
+  // users who signed in with Google/GitHub (sign_in_provider !==
+  // "password") have no password, so no reset is offered.
   if (authProvider.startsWith("firebase:")) {
+    if (signInProvider !== "password") return null;
     return <FirebaseResetPassword email={email} />;
   }
   if (authProvider === "database") {
@@ -53,37 +52,14 @@ function SectionShell({ children }: { children: React.ReactNode }) {
 
 function FirebaseResetPassword({ email }: { email: string }) {
   const [sending, setSending] = useState(false);
-  // ``undefined`` = still resolving; ``null`` = no password credential
-  // (Google/GitHub-only — hide entirely); otherwise the config to reset
-  // against.
-  const [config, setConfig] = useState<
-    FirebaseRuntimeConfig | null | undefined
-  >(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const authConfig = await fetchAuthConfig();
-      if (cancelled) return;
-      if (!authConfig.firebase) {
-        setConfig(null);
-        return;
-      }
-      const hasPassword = await firebaseUserHasPasswordProvider(
-        authConfig.firebase,
-      );
-      if (!cancelled) setConfig(hasPassword ? authConfig.firebase : null);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const handleReset = useCallback(async () => {
-    if (!config) return;
     setSending(true);
     try {
-      await sendFirebasePasswordReset(config, email);
+      const config = await fetchAuthConfig();
+      if (config.firebase) {
+        await sendFirebasePasswordReset(config.firebase, email);
+      }
     } catch {
       // Fall through to the neutral notice — never leak whether the
       // address is registered.
@@ -91,12 +67,7 @@ function FirebaseResetPassword({ email }: { email: string }) {
       setSending(false);
       toast.success("Password-reset link sent to your email.");
     }
-  }, [config, email]);
-
-  // Only email/password accounts have a password to reset. While the
-  // provider check is in flight, or for Google/GitHub-only accounts,
-  // render nothing.
-  if (!config) return null;
+  }, [email]);
 
   return (
     <SectionShell>
