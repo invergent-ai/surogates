@@ -115,6 +115,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         browser_enabled=bool(payload.get("browser_enabled", True)),
         multi_session=multi_session_from_payload(payload),
         linkable_channels=tuple(payload.get("linkable_channels") or ()),
+        end_user_token_allowance=payload.get("end_user_token_allowance"),
         # bundle reference.  Empty strings → None
         # (a misconfigured payload that ships "" must not turn into
         # a Hub fetch against an empty ref).

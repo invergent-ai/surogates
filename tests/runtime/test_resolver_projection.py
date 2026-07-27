@@ -239,3 +239,19 @@ def test_linkable_channels_null_normalises_to_empty():
     payload["linkable_channels"] = None
     ctx = build_agent_runtime_context(payload)
     assert ctx.linkable_channels == ()
+
+
+def test_end_user_token_allowance_defaults_to_none():
+    from surogates.runtime import build_agent_runtime_context
+
+    ctx = build_agent_runtime_context(_minimum_payload())
+    assert ctx.end_user_token_allowance is None
+
+
+def test_end_user_token_allowance_projects_when_present():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["end_user_token_allowance"] = 1000
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.end_user_token_allowance == 1000

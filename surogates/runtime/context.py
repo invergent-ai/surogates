@@ -183,6 +183,14 @@ class AgentRuntimeContext:
     # reports a channel).
     linkable_channels: tuple[str, ...] = ()
 
+    # Per-end-user token cap (a slice of the operator's subscription),
+    # projected from ops.  ``None`` = do not enforce — either the platform
+    # kill-switch is off or the operator set no cap — and the runtime skips
+    # per-user authorize/settle entirely.  A positive value tells the
+    # runtime to reserve/settle each end-user turn against the ops
+    # allowance ledger (ops holds the authoritative balance).
+    end_user_token_allowance: int | None = None
+
     # File-bundle reference.  Both optional so agents that haven't
     # been onboarded to Hub-backed bundles yet still work.
     # ``bundle_hub_ref`` is the Hub repository in ``<owner>/<repo>``

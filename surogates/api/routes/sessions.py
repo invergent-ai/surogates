@@ -39,6 +39,7 @@ from surogates.api.session_guards import (
 from surogates.coding_agents.command import is_code_command
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.api.routes._commerce_turn import (
+    authorize_allowance_turn,
     authorize_commerce_turn,
     firebase_buyer_identity,
     runtime_commerce_payload,
@@ -816,6 +817,17 @@ async def send_message(
                     body.content,
                     buyer=buyer,
                 )
+
+    # Per-user allowance (a slice of the operator's subscription) applies
+    # to EVERY signed-in end-user — any identity provider, regardless of
+    # commerce mode — closing the Firebase-only and free-mode gaps of the
+    # commerce gate above. A no-op unless ops projects a positive cap
+    # (kill-switch on + operator opt-in), so free/uncapped agents are
+    # unaffected. The worker settles ``allowance_reservations`` after.
+    if session.channel == "web" and tenant.user_id is not None:
+        await authorize_allowance_turn(
+            request, session, body.content, end_user_id=str(tenant.user_id),
+        )
 
     event_data: dict = {"content": body.content}
     if body.images:

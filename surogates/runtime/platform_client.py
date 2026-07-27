@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 
 __all__ = [
+    "AllowanceExhaustedError",
     "CommercePaymentRequiredError",
     "PlatformAuthError",
     "PlatformClient",
@@ -45,6 +46,19 @@ class CommercePaymentRequiredError(RuntimeError):
 
     ``detail`` carries the machine sentinel (``subscription_required``
     / ``insufficient_tokens``) the widget maps to its paywall copy.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class AllowanceExhaustedError(RuntimeError):
+    """Ops refused a per-end-user allowance authorization with 402.
+
+    The end-user has spent their per-cycle slice of the operator's
+    subscription; ``detail`` is the machine sentinel
+    (``allowance_exhausted``).
     """
 
     def __init__(self, detail: str) -> None:
@@ -479,6 +493,79 @@ class PlatformClient:
             body["reservation_id"] = reservation_id
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/commerce/debit",
+            json=body,
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def allowance_authorize(
+        self,
+        agent_id: str,
+        *,
+        end_user_id: str,
+        estimated_tokens: int,
+    ) -> dict:
+        """Reserve tokens for one end-user turn against their per-user cap.
+
+        Returns ``{allowance_id, reserved_tokens, reservation_id}`` (all
+        zero/empty when uncapped or the kill-switch is off).  Raises:
+
+        * :class:`AllowanceExhaustedError` on 402 — the user has spent
+          their slice of the operator's subscription this cycle.
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/allowance/authorize",
+            json={
+                "end_user_id": end_user_id,
+                "estimated_tokens": estimated_tokens,
+            },
+        )
+        if resp.status_code == 402:
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail") or "")
+            except ValueError:
+                pass
+            raise AllowanceExhaustedError(detail or "allowance_exhausted")
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def allowance_debit(
+        self,
+        agent_id: str,
+        *,
+        allowance_id: str,
+        reserved_tokens: int,
+        actual_tokens: int,
+        reservation_id: str | None = None,
+    ) -> dict:
+        """Settle an allowance reservation with the turn's actual usage.
+
+        Returns ``{"debited_tokens": int}``. Idempotent on the ops side.
+        Callers treat failures as best-effort — an unsettled hold is
+        cleared by the next per-user cycle refill.
+        """
+        body: dict = {
+            "allowance_id": allowance_id,
+            "reserved_tokens": reserved_tokens,
+            "actual_tokens": actual_tokens,
+        }
+        if reservation_id:
+            body["reservation_id"] = reservation_id
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/allowance/debit",
             json=body,
         )
         if resp.status_code == 401:
