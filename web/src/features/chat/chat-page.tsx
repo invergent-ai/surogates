@@ -12,10 +12,7 @@ import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
-import {
-  browserCapabilityEnabled,
-  slashCommandEnabled,
-} from "@/stores/capabilities-slice";
+import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import * as sessionsApi from "@/api/sessions";
 import {
   getTransparencyConfig,
@@ -248,10 +245,10 @@ export function ChatPage() {
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
               // Offer the browser-profile picker only when the agent has live
-              // browser support (``browser_enabled`` from /auth/config).
-              // Unknown (capabilities not yet loaded) fails open. Shown before
-              // the session starts and locked once active (SDK handles lock).
-              browserProfilesEnabled={browserCapabilityEnabled(browserEnabled)}
+              // browser support (``browser_enabled`` from /auth/config). Only
+              // an explicit false hides it; unknown (not yet loaded) fails
+              // open. Shown before the session starts and locked once active.
+              browserProfilesEnabled={browserEnabled !== false}
               // Hide built-in slash commands the agent has disabled. Unknown
               // (capabilities not yet loaded) fails open via the helper.
               compressEnabled={slashCommandEnabled(slashCommands, "compress")}

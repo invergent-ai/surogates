@@ -16,10 +16,7 @@ import { BrowserProfilesTab } from "./browser-profiles-tab";
 import { PlanTokensTab } from "./plan-tokens-tab";
 import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
-import {
-  browserCapabilityEnabled,
-  slashCommandEnabled,
-} from "@/stores/capabilities-slice";
+import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import {
   updateCurrentUser,
   fetchMyChannels,
@@ -72,7 +69,8 @@ export function SettingsPage() {
   // Only surface a capability tab the agent actually offers.  Unknown
   // (capabilities not yet loaded) fails open via the helpers.
   const codingAgentsEnabled = slashCommandEnabled(slashCommands, "code");
-  const browserProfilesEnabled = browserCapabilityEnabled(browserEnabled);
+  // Only an explicit false hides browser profiles; unknown fails open.
+  const browserProfilesEnabled = browserEnabled !== false;
   // Connected Channels only makes sense when the agent has a messaging
   // channel to pair against. An empty (loaded) list hides it; ``null``
   // (not yet loaded / older backend) also hides it, since we cannot

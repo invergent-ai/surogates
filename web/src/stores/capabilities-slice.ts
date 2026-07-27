@@ -65,13 +65,3 @@ export function slashCommandEnabled(
 ): boolean {
   return slashCommands === null || slashCommands.includes(id);
 }
-
-// True when the browser-profile affordances (settings tab + composer
-// picker) should be surfaced.  Only an explicit ``false`` hides them;
-// unknown (``null``) fails open so a fetch hiccup or older backend keeps
-// them visible.
-export function browserCapabilityEnabled(
-  browserEnabled: boolean | null,
-): boolean {
-  return browserEnabled !== false;
-}

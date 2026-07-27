@@ -15,22 +15,20 @@ function CodingAgentsRoute() {
   const navigate = useNavigate();
   const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
   const slashCommands = useAppStore((s) => s.slashCommands);
-  const enabled = slashCommandEnabled(slashCommands, "code");
+  // Redirect only once capabilities have resolved (null = unknown, stay
+  // put and fail open) and coding agents are disabled for this agent.
+  const shouldRedirect =
+    slashCommands !== null && !slashCommandEnabled(slashCommands, "code");
 
   useEffect(() => {
     void fetchCapabilities();
   }, [fetchCapabilities]);
 
-  // Deep links must not reach the panel when the agent has coding agents
-  // disabled. Redirect once capabilities have resolved (null = unknown,
-  // stay put and fail open).
   useEffect(() => {
-    if (slashCommands !== null && !enabled) {
-      void navigate({ to: "/chat", replace: true });
-    }
-  }, [slashCommands, enabled, navigate]);
+    if (shouldRedirect) void navigate({ to: "/chat", replace: true });
+  }, [shouldRedirect, navigate]);
 
-  if (slashCommands !== null && !enabled) return null;
+  if (shouldRedirect) return null;
 
   return (
     <CodingAgentsPanel

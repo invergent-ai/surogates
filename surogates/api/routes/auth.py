@@ -156,45 +156,31 @@ async def auth_config(
     commerce = await runtime_commerce_payload(
         request, str(agent_runtime.agent_id),
     )
-    commerce_mode = str(commerce.get("commerce_mode") or "free")
-    commerce_buy_url = commerce.get("commerce_buy_url")
+    # Capability + monetization fields shared by every branch below; only
+    # self_registration_enabled and firebase differ per resolution outcome.
+    base = dict(
+        agent_id=agent_runtime.agent_id,
+        slash_commands=slash_commands,
+        multi_session=agent_runtime.multi_session,
+        browser_enabled=agent_runtime.browser_enabled,
+        linkable_channels=list(agent_runtime.linkable_channels),
+        commerce_mode=str(commerce.get("commerce_mode") or "free"),
+        commerce_buy_url=commerce.get("commerce_buy_url"),
+    )
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
         return AuthConfigResponse(
-            agent_id=agent_runtime.agent_id,
-            self_registration_enabled=False,
-            firebase=None,
-            slash_commands=slash_commands,
-            multi_session=agent_runtime.multi_session,
-            browser_enabled=agent_runtime.browser_enabled,
-            linkable_channels=list(agent_runtime.linkable_channels),
-            commerce_mode=commerce_mode,
-            commerce_buy_url=commerce_buy_url,
+            self_registration_enabled=False, firebase=None, **base,
         )
     try:
         fb = await cache.get(project_id)
     except LookupError:
         return AuthConfigResponse(
-            agent_id=agent_runtime.agent_id,
-            self_registration_enabled=False,
-            firebase=None,
-            slash_commands=slash_commands,
-            multi_session=agent_runtime.multi_session,
-            browser_enabled=agent_runtime.browser_enabled,
-            linkable_channels=list(agent_runtime.linkable_channels),
-            commerce_mode=commerce_mode,
-            commerce_buy_url=commerce_buy_url,
+            self_registration_enabled=False, firebase=None, **base,
         )
     return AuthConfigResponse(
-        agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
-        slash_commands=slash_commands,
-        multi_session=agent_runtime.multi_session,
-        browser_enabled=agent_runtime.browser_enabled,
-        linkable_channels=list(agent_runtime.linkable_channels),
-        commerce_mode=commerce_mode,
-        commerce_buy_url=commerce_buy_url,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,
@@ -204,6 +190,7 @@ async def auth_config(
             measurement_id=fb.measurement_id or None,
             enabled_providers=list(fb.enabled_providers),
         ),
+        **base,
     )
 
 
@@ -416,6 +403,7 @@ async def firebase_exchange(
                 external_id=subject,
                 username=requested_username,
                 phone=(body.phone or "").strip() or None,
+                sign_in_provider=sign_in_method,
             )
             session.add(user)
             try:
@@ -788,8 +776,6 @@ async def change_password(
     identity provider — the web app offers them a reset-email flow
     instead — so this route refuses them with 409.
     """
-    import bcrypt
-
     if len(body.new_password) < 8:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -817,9 +803,8 @@ async def change_password(
                     "Password changes are managed by your sign-in provider."
                 ),
             )
-        if not bcrypt.checkpw(
-            body.current_password.encode("utf-8"),
-            user.password_hash.encode("utf-8"),
+        if not DatabaseAuthProvider.verify_password(
+            body.current_password, user.password_hash,
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

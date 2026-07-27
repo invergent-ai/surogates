@@ -60,7 +60,7 @@ class DatabaseAuthProvider:
                 error="Account does not have a password configured.",
             )
 
-        if not _bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8")):
+        if not self.verify_password(password, user.password_hash):
             return AuthResult(authenticated=False, error="Invalid credentials.")
 
         return AuthResult(
@@ -80,3 +80,8 @@ class DatabaseAuthProvider:
         return _bcrypt.hashpw(
             plain.encode("utf-8"), _bcrypt.gensalt(rounds=12)
         ).decode("utf-8")
+
+    @staticmethod
+    def verify_password(plain: str, hashed: str) -> bool:
+        """Return whether ``plain`` matches the stored bcrypt ``hashed``."""
+        return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
