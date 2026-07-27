@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Self-registration page for linking messaging platform accounts
-// (Slack, Teams, Telegram) to a Surogates user account.
+// (Slack, Telegram) to a Surogates user account.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearch } from "@tanstack/react-router";
@@ -285,7 +285,7 @@ export function LinkChannelPage() {
           <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
             {status === "success"
               ? "You are all set."
-              : "Message this assistant on Slack, Teams, or Telegram and it replies with an 8-character code. Enter it below to link that chat to your account."}
+              : "Message this assistant on Slack or Telegram and it replies with an 8-character code. Enter it below to link that chat to your account."}
           </p>
         </div>
 

@@ -264,8 +264,8 @@ export function SettingsPage() {
             {channelsEnabled && (
             <TabsContent value="channels">
               <p className="mb-6 text-sm text-muted-foreground leading-relaxed">
-                Connect the Slack, Teams, or Telegram account you also use to
-                message this assistant, so it knows that chat is you.
+                Connect the Slack or Telegram account you also use to message
+                this assistant, so it knows that chat is you.
               </p>
               {channelsLoading ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground">
@@ -279,8 +279,8 @@ export function SettingsPage() {
                     No connected channels yet.
                   </p>
                   <p className="text-sm text-faint">
-                    Use a pairing code from Slack, Teams, or Telegram to link
-                    your account.
+                    Use a pairing code from Slack or Telegram to link your
+                    account.
                   </p>
                   <Button
                     variant="outline"
