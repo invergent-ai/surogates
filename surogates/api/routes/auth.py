@@ -99,6 +99,15 @@ class AuthConfigResponse(BaseModel):
     # "Multi session" capability.  When False each user keeps one session
     # per channel; the SPA hides "New chat" and pins the conversation.
     multi_session: bool = True
+    # "Live browser support" capability.  When False the SPA hides the
+    # Browser Profiles settings tab and the composer's browser-profile
+    # picker (the agent's browser_* tools are already removed server-side).
+    # Defaults True so an older backend keeps browser affordances visible.
+    browser_enabled: bool = True
+    # Active messaging channels an end-user can link their identity to
+    # (subset of slack/teams/telegram).  Empty means the agent has no
+    # such channel, so the SPA hides "Connected Channels" entirely.
+    linkable_channels: list[str] = Field(default_factory=list)
     # Username handle rule (source of truth: USERNAME_RE below). The
     # sign-up form pre-validates with this so the client can never
     # drift from the server.
@@ -147,39 +156,31 @@ async def auth_config(
     commerce = await runtime_commerce_payload(
         request, str(agent_runtime.agent_id),
     )
-    commerce_mode = str(commerce.get("commerce_mode") or "free")
-    commerce_buy_url = commerce.get("commerce_buy_url")
+    # Capability + monetization fields shared by every branch below; only
+    # self_registration_enabled and firebase differ per resolution outcome.
+    base = dict(
+        agent_id=agent_runtime.agent_id,
+        slash_commands=slash_commands,
+        multi_session=agent_runtime.multi_session,
+        browser_enabled=agent_runtime.browser_enabled,
+        linkable_channels=list(agent_runtime.linkable_channels),
+        commerce_mode=str(commerce.get("commerce_mode") or "free"),
+        commerce_buy_url=commerce.get("commerce_buy_url"),
+    )
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)
     if cache is None or not project_id:
         return AuthConfigResponse(
-            agent_id=agent_runtime.agent_id,
-            self_registration_enabled=False,
-            firebase=None,
-            slash_commands=slash_commands,
-            multi_session=agent_runtime.multi_session,
-            commerce_mode=commerce_mode,
-            commerce_buy_url=commerce_buy_url,
+            self_registration_enabled=False, firebase=None, **base,
         )
     try:
         fb = await cache.get(project_id)
     except LookupError:
         return AuthConfigResponse(
-            agent_id=agent_runtime.agent_id,
-            self_registration_enabled=False,
-            firebase=None,
-            slash_commands=slash_commands,
-            multi_session=agent_runtime.multi_session,
-            commerce_mode=commerce_mode,
-            commerce_buy_url=commerce_buy_url,
+            self_registration_enabled=False, firebase=None, **base,
         )
     return AuthConfigResponse(
-        agent_id=agent_runtime.agent_id,
         self_registration_enabled=True,
-        slash_commands=slash_commands,
-        multi_session=agent_runtime.multi_session,
-        commerce_mode=commerce_mode,
-        commerce_buy_url=commerce_buy_url,
         firebase=FirebaseWebConfig(
             api_key=fb.api_key,
             auth_domain=fb.auth_domain,
@@ -189,6 +190,7 @@ async def auth_config(
             measurement_id=fb.measurement_id or None,
             enabled_providers=list(fb.enabled_providers),
         ),
+        **base,
     )
 
 
@@ -198,6 +200,21 @@ def _email_from_firebase_claims(claims: dict) -> tuple[str | None, bool]:
     if not isinstance(email, str) or not email.strip():
         return None, False
     return email.strip().lower(), claims.get("email_verified") is True
+
+
+def _sign_in_provider_from_claims(claims: dict) -> str | None:
+    """The Firebase sign-in method from token claims.
+
+    Firebase nests it as ``firebase.sign_in_provider`` (e.g. "password",
+    "google.com", "github.com").  Returns ``None`` when absent so callers
+    leave the stored value untouched rather than clobbering it.
+    """
+    firebase = claims.get("firebase")
+    if isinstance(firebase, dict):
+        method = firebase.get("sign_in_provider")
+        if isinstance(method, str) and method:
+            return method
+    return None
 
 
 def _display_name_from_firebase_claims(
@@ -289,6 +306,7 @@ async def firebase_exchange(
         )
     email, email_verified = _email_from_firebase_claims(claims)
     provider = firebase_auth_provider_name(fb_project_id)
+    sign_in_method = _sign_in_provider_from_claims(claims)
 
     session_factory = request.app.state.session_factory
     async with session_factory() as session:
@@ -385,6 +403,7 @@ async def firebase_exchange(
                 external_id=subject,
                 username=requested_username,
                 phone=(body.phone or "").strip() or None,
+                sign_in_provider=sign_in_method,
             )
             session.add(user)
             try:
@@ -397,6 +416,13 @@ async def firebase_exchange(
                 session.add(user)
                 await session.commit()
             await session.refresh(user)
+
+        # Record how they signed in (only when the token carried it, so a
+        # malformed claim never clobbers a known value). Persisted even on
+        # the no-agent path below via its own commit.
+        if sign_in_method is not None and user.sign_in_provider != sign_in_method:
+            user.sign_in_provider = sign_in_method
+            await session.commit()
 
         # Successful auth through THIS agent's web channel is
         # assignment intent — enroll the user on the serving agent.
@@ -593,6 +619,7 @@ async def me(
         username=user.username,
         phone=user.phone,
         auth_provider=user.auth_provider,
+        sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
     )
 
@@ -719,8 +746,74 @@ async def update_me(
         username=user.username,
         phone=user.phone,
         auth_provider=user.auth_provider,
+        sign_in_provider=user.sign_in_provider,
         created_at=user.created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Password
+# ---------------------------------------------------------------------------
+
+
+class ChangePasswordRequest(BaseModel):
+    """Payload for changing a local (database) account's password."""
+
+    current_password: str
+    new_password: str
+
+
+@router.post("/auth/me/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> None:
+    """Change the password of a local (``database``) account.
+
+    Only accounts with a stored bcrypt hash can change their password
+    here.  Firebase-backed users manage credentials through their
+    identity provider — the web app offers them a reset-email flow
+    instead — so this route refuses them with 409.
+    """
+    if len(body.new_password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="New password must be at least 8 characters.",
+        )
+
+    session_factory = request.app.state.session_factory
+    async with session_factory() as session:
+        result = await session.execute(
+            select(User).where(
+                User.id == tenant.user_id,
+                User.org_id == tenant.org_id,
+            )
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found.",
+            )
+        if user.auth_provider != "database" or not user.password_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Password changes are managed by your sign-in provider."
+                ),
+            )
+        if not DatabaseAuthProvider.verify_password(
+            body.current_password, user.password_hash,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Current password is incorrect.",
+            )
+        user.password_hash = DatabaseAuthProvider.hash_password(
+            body.new_password,
+        )
+        await session.commit()
 
 
 # ---------------------------------------------------------------------------

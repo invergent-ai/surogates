@@ -14,7 +14,9 @@ import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
 import { PlanTokensTab } from "./plan-tokens-tab";
+import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
+import { slashCommandEnabled } from "@/stores/capabilities-slice";
 import {
   updateCurrentUser,
   fetchMyChannels,
@@ -59,12 +61,28 @@ export function SettingsPage() {
   const user = useAppStore((s) => s.user);
   const fetchUser = useAppStore((s) => s.fetchUser);
   const fetchSessions = useAppStore((s) => s.fetchSessions);
+  const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
+  const slashCommands = useAppStore((s) => s.slashCommands);
+  const browserEnabled = useAppStore((s) => s.browserEnabled);
+  const linkableChannels = useAppStore((s) => s.linkableChannels);
 
-  // Load sidebar data.
+  // Only surface a capability tab the agent actually offers.  Unknown
+  // (capabilities not yet loaded) fails open via the helpers.
+  const codingAgentsEnabled = slashCommandEnabled(slashCommands, "code");
+  // Only an explicit false hides browser profiles; unknown fails open.
+  const browserProfilesEnabled = browserEnabled !== false;
+  // Connected Channels only makes sense when the agent has a messaging
+  // channel to pair against. An empty (loaded) list hides it; ``null``
+  // (not yet loaded / older backend) also hides it, since we cannot
+  // claim a channel exists.
+  const channelsEnabled = (linkableChannels?.length ?? 0) > 0;
+
+  // Load sidebar + capability data.
   useEffect(() => {
     void fetchSessions();
     void fetchUser();
-  }, [fetchSessions, fetchUser]);
+    void fetchCapabilities();
+  }, [fetchSessions, fetchUser, fetchCapabilities]);
 
   // ── Profile tab state ──────────────────────────────────────────────
 
@@ -79,15 +97,15 @@ export function SettingsPage() {
     }
   }, [user]);
 
-  const dirty =
-    user != null &&
-    (displayName !== (user.display_name ?? "") || email !== user.email);
+  // Email is read-only (login identity), so only the display name is
+  // editable here.
+  const dirty = user != null && displayName !== (user.display_name ?? "");
 
   const handleSave = useCallback(async () => {
     if (!dirty) return;
     setSaving(true);
     try {
-      await updateCurrentUser({ display_name: displayName, email });
+      await updateCurrentUser({ display_name: displayName });
       await fetchUser();
       toast.success("Profile updated.");
     } catch (err) {
@@ -95,7 +113,7 @@ export function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [dirty, displayName, email, fetchUser]);
+  }, [dirty, displayName, fetchUser]);
 
   // ── Channels tab state ─────────────────────────────────────────────
 
@@ -145,19 +163,25 @@ export function SettingsPage() {
           <Tabs defaultValue="profile">
             <TabsList variant="line" className="mb-6 overflow-x-auto">
               <TabsTrigger value="profile">Profile</TabsTrigger>
-              <TabsTrigger
-                value="channels"
-                onClick={() => {
-                  if (channels.length === 0) void loadChannels();
-                }}
-              >
-                Connected Channels
-              </TabsTrigger>
+              {channelsEnabled && (
+                <TabsTrigger
+                  value="channels"
+                  onClick={() => {
+                    if (channels.length === 0) void loadChannels();
+                  }}
+                >
+                  Connected Channels
+                </TabsTrigger>
+              )}
               <TabsTrigger value="plan">Plan &amp; Tokens</TabsTrigger>
-              <TabsTrigger value="coding-agents">Coding Agents</TabsTrigger>
-              <TabsTrigger value="browser-profiles">
-                Browser Profiles
-              </TabsTrigger>
+              {codingAgentsEnabled && (
+                <TabsTrigger value="coding-agents">Coding Agents</TabsTrigger>
+              )}
+              {browserProfilesEnabled && (
+                <TabsTrigger value="browser-profiles">
+                  Browser Profiles
+                </TabsTrigger>
+              )}
             </TabsList>
 
             {/* ── Plan & tokens ── */}
@@ -190,25 +214,21 @@ export function SettingsPage() {
                       id="email"
                       type="email"
                       value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="you@example.com"
+                      readOnly
+                      disabled
+                      className="cursor-not-allowed opacity-70"
                     />
+                    <p className="text-sm text-muted-foreground">
+                      Your sign-in email cannot be changed here.
+                    </p>
                   </Field>
 
                   {user && (
-                    <div className="pt-2 space-y-1 text-sm text-muted-foreground">
-                      <div>
-                        <span className="text-subtle font-medium">
-                          Auth provider:
-                        </span>{" "}
-                        {user.auth_provider}
-                      </div>
-                      <div>
-                        <span className="text-subtle font-medium">
-                          Member since:
-                        </span>{" "}
-                        {new Date(user.created_at).toLocaleDateString()}
-                      </div>
+                    <div className="pt-2 text-sm text-muted-foreground">
+                      <span className="text-subtle font-medium">
+                        Member since:
+                      </span>{" "}
+                      {new Date(user.created_at).toLocaleDateString()}
                     </div>
                   )}
                 </FieldGroup>
@@ -228,10 +248,23 @@ export function SettingsPage() {
                   </Button>
                 </div>
               </form>
+
+              {user && (
+                <PasswordSection
+                  authProvider={user.auth_provider}
+                  signInProvider={user.sign_in_provider}
+                  email={user.email}
+                />
+              )}
             </TabsContent>
 
             {/* ── Connected Channels ── */}
+            {channelsEnabled && (
             <TabsContent value="channels">
+              <p className="mb-6 text-sm text-muted-foreground leading-relaxed">
+                Connect the Slack or Telegram account you also use to message
+                this assistant, so it knows that chat is you.
+              </p>
               {channelsLoading ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground">
                   <Loader2Icon className="w-4 h-4 animate-spin mr-2" />
@@ -244,8 +277,8 @@ export function SettingsPage() {
                     No connected channels yet.
                   </p>
                   <p className="text-sm text-faint">
-                    Use a pairing code from Slack, Teams, or Telegram to link
-                    your account.
+                    Use a pairing code from Slack or Telegram to link your
+                    account.
                   </p>
                   <Button
                     variant="outline"
@@ -314,15 +347,20 @@ export function SettingsPage() {
                 onCancel={() => setUnlinkTarget(null)}
               />
             </TabsContent>
+            )}
 
             {/* ── Coding Agents ── */}
-            <TabsContent value="coding-agents">
-              <CodingAgentsPanel adapter={surogatesWebChatAdapter} />
-            </TabsContent>
+            {codingAgentsEnabled && (
+              <TabsContent value="coding-agents">
+                <CodingAgentsPanel adapter={surogatesWebChatAdapter} />
+              </TabsContent>
+            )}
 
-            <TabsContent value="browser-profiles">
-              <BrowserProfilesTab />
-            </TabsContent>
+            {browserProfilesEnabled && (
+              <TabsContent value="browser-profiles">
+                <BrowserProfilesTab />
+              </TabsContent>
+            )}
           </Tabs>
         </div>
       </div>

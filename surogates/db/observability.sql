@@ -867,6 +867,9 @@ END $$;
 -- lowercase handle, phone is optional free-form.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text;
+-- Most recent sign-in method (Firebase ``sign_in_provider`` / "password"
+-- for local logins). Drives the web app's password-reset affordance.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sign_in_provider text;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_org_username
     ON users (org_id, lower(username))
     WHERE username IS NOT NULL;

@@ -38,6 +38,7 @@ export function ChatPage() {
   const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
   const slashCommands = useAppStore((s) => s.slashCommands);
   const multiSession = useAppStore((s) => s.multiSession);
+  const browserEnabled = useAppStore((s) => s.browserEnabled);
   const sessions = useAppStore((s) => s.sessions);
 
   // Load initial data on mount
@@ -243,11 +244,11 @@ export function ChatPage() {
               onOpenIntegrations={() => void navigate({ to: "/integrations" })}
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
-              // The web app has no per-agent browser-capability flag, so the
-              // picker is always offered; selecting a profile for a non-browser
-              // agent is a harmless no-op. Shown before the session starts and
-              // locked once it is active (the SDK handles the lock).
-              browserProfilesEnabled
+              // Offer the browser-profile picker only when the agent has live
+              // browser support (``browser_enabled`` from /auth/config). Only
+              // an explicit false hides it; unknown (not yet loaded) fails
+              // open. Shown before the session starts and locked once active.
+              browserProfilesEnabled={browserEnabled !== false}
               // Hide built-in slash commands the agent has disabled. Unknown
               // (capabilities not yet loaded) fails open via the helper.
               compressEnabled={slashCommandEnabled(slashCommands, "compress")}

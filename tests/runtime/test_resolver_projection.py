@@ -213,3 +213,29 @@ def test_multi_session_projects_false():
     payload["multi_session"] = False
     ctx = build_agent_runtime_context(payload)
     assert ctx.multi_session is False
+
+
+def test_linkable_channels_default_to_empty_tuple():
+    from surogates.runtime import build_agent_runtime_context
+
+    ctx = build_agent_runtime_context(_minimum_payload())
+    assert ctx.linkable_channels == ()
+
+
+def test_linkable_channels_project_as_tuple():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["linkable_channels"] = ["slack", "telegram"]
+    ctx = build_agent_runtime_context(payload)
+    assert isinstance(ctx.linkable_channels, tuple)
+    assert ctx.linkable_channels == ("slack", "telegram")
+
+
+def test_linkable_channels_null_normalises_to_empty():
+    from surogates.runtime import build_agent_runtime_context
+
+    payload = _minimum_payload()
+    payload["linkable_channels"] = None
+    ctx = build_agent_runtime_context(payload)
+    assert ctx.linkable_channels == ()

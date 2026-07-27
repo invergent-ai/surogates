@@ -63,6 +63,20 @@ export function SessionSidebar() {
     void navigate({ to: "/chat" });
   }
 
+  // Single-session return-to-chat: land on the pinned conversation if one is
+  // already selected, otherwise fall through to `/chat`, where the chat page
+  // adopts the newest usable session.
+  function handleOpenChat() {
+    if (activeSessionId) {
+      void navigate({
+        to: "/chat/$sessionId",
+        params: { sessionId: activeSessionId },
+      });
+    } else {
+      void navigate({ to: "/chat" });
+    }
+  }
+
   function handleSelectSession(sessionId: string) {
     setActiveSession(sessionId);
     void navigate({ to: "/chat/$sessionId", params: { sessionId } });
@@ -119,7 +133,22 @@ export function SessionSidebar() {
           "p-1.5 lg:p-3 group-data-[mode=sheet]:p-3",
         )}
       >
-        {!singleSession && (
+        {singleSession ? (
+          // One dedicated conversation per user: no "New chat", but the
+          // sidebar must still offer a way back into it from other pages.
+          <Button
+            variant="outline"
+            onClick={handleOpenChat}
+            className={cn(
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "justify-center px-0 lg:justify-start lg:px-3",
+              "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
+            )}
+          >
+            <MessageSquareIcon className="w-4 h-4" />
+            <span className={showExpandedInline}>Chat</span>
+          </Button>
+        ) : (
           <Button
             variant="outline"
             onClick={handleNewSession}

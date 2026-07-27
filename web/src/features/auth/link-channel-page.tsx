@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 // Self-registration page for linking messaging platform accounts
-// (Slack, Teams, Telegram) to a Surogates user account.
+// (Slack, Telegram) to a Surogates user account.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearch } from "@tanstack/react-router";
@@ -30,13 +30,6 @@ const PLATFORM_LABELS: Record<string, string> = {
   teams: "Microsoft Teams",
   telegram: "Telegram",
 };
-
-const TAGS = [
-  { label: "Managed Agents", icon: "⬡" },
-  { label: "MCP Integration", icon: "⚡" },
-  { label: "Tool Governance", icon: "◈" },
-  { label: "Multi-Tenant", icon: "◇" },
-] as const;
 
 export function LinkChannelPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -276,10 +269,10 @@ export function LinkChannelPage() {
           />
           <div>
             <div className="font-extrabold text-2xl text-foreground tracking-tight">
-              Surogates
+              Surogate
             </div>
             <div className="text-xs text-muted-foreground tracking-[0.14em] uppercase">
-              Managed Agents
+              Account linking
             </div>
           </div>
         </div>
@@ -287,10 +280,12 @@ export function LinkChannelPage() {
         {/* heading */}
         <div className="mb-8">
           <h3 className="text-2xl font-bold text-foreground tracking-tight">
-            Link your account
+            Link your chat account
           </h3>
-          <p className="text-sm text-muted-foreground">
-            connect your messaging platform
+          <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+            {status === "success"
+              ? "You are all set."
+              : "Message this assistant on Slack or Telegram and it replies with an 8-character code. Enter it below to link that chat to your account."}
           </p>
         </div>
 
@@ -301,7 +296,8 @@ export function LinkChannelPage() {
               {platformLabel} account linked successfully!
             </p>
             <p className="text-sm text-muted-foreground">
-              You can now send messages to the bot and it will recognize you.
+              You can now message the assistant on {platformLabel} and it will
+              recognize you as the same person.
             </p>
           </div>
         ) : (
@@ -389,24 +385,6 @@ export function LinkChannelPage() {
             )}
           </form>
         )}
-      </div>
-
-      {/* tags strip below card */}
-      <div
-        className={cn("relative z-10 mt-8 opacity-0", "animate-fade-in")}
-        style={{ animationDelay: "0.5s" }}
-      >
-        <div className="flex flex-wrap justify-center gap-2">
-          {TAGS.map((tag) => (
-            <div
-              key={tag.label}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-card/50 border border-line/50 backdrop-blur-sm"
-            >
-              <span className="text-sm text-primary">{tag.icon}</span>
-              <span className="text-sm text-faint">{tag.label}</span>
-            </div>
-          ))}
-        </div>
       </div>
 
       {/* footer */}
