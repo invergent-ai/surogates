@@ -71,6 +71,8 @@ def test_unsold_capabilities_are_never_restricted():
     config = {"entitlements": {"capabilities": []}}
     assert capability_allowed(config, "clear")
     assert capability_allowed(config, "some-skill")
+    # Compress ships with every purchase; only the sellable set restricts.
+    assert capability_allowed(config, "compress")
     assert not capability_allowed(config, "loop")
 
 
@@ -225,8 +227,10 @@ def test_no_exclusions_leave_the_filter_untouched():
 def test_slash_gate_honours_the_package():
     h = _harness()
     restricted = _session(
-        {"entitlements": {"capabilities": ["compress"]}},
+        {"entitlements": {"capabilities": ["goal"]}},
     )
+    assert h._slash_command_enabled("goal", restricted)
+    # Compress is always included, even under a restricted package.
     assert h._slash_command_enabled("compress", restricted)
     assert not h._slash_command_enabled("mission", restricted)
     assert not h._slash_command_enabled("deep-research", restricted)

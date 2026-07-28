@@ -23,9 +23,10 @@ ENTITLEMENTS_CONFIG_KEY = "entitlements"
 #: Capability ids sellable in a package (mirrors ops
 #: ``core.commerce.features.CAPABILITY_VOCAB``). Slash-command ids are
 #: hyphenated on the wire (``deep-research``); package capabilities use
-#: underscores — :func:`capability_allowed` normalizes.
+#: underscores — :func:`capability_allowed` normalizes. Compress and
+#: multi-session are always included and never restricted here.
 _SLASH_CAPABILITIES = frozenset({
-    "compress", "code", "deep_research", "auto_research",
+    "code", "deep_research", "auto_research",
     "loop", "mission", "goal",
 })
 
