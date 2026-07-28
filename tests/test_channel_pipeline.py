@@ -1416,6 +1416,39 @@ async def test_allowance_gate_blocks_exhausted_channel_user():
 
 
 @pytest.mark.asyncio
+async def test_allowance_block_nudge_names_reason_and_includes_buy_link():
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    msg = _make_msg(is_dm=True, ts="allow.buy")
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(
+        error=AllowanceExhaustedError("subscription_required"),
+    )
+
+    async def _rc(agent_id):
+        return {
+            "end_user_token_allowance": 1000,
+            "commerce_buy_url": "https://buy.example/agent",
+        }
+
+    deps.runtime_config = _rc
+    nudges: list[str] = []
+
+    async def _nudge(session_id, m, text):
+        nudges.append(text)
+
+    deps.input_nudge = _nudge
+
+    result = await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert result == InboundOutcome.DROPPED
+    assert len(nudges) == 1
+    assert "https://buy.example/agent" in nudges[0]
+    assert "subscription" in nudges[0].lower()
+
+
+@pytest.mark.asyncio
 async def test_allowance_gate_passes_and_pins_reservation():
     msg = _make_msg(is_dm=True, ts="allow.2")
     deps = _make_deps()

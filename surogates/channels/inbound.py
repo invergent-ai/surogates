@@ -167,6 +167,22 @@ class InboundOutcome(str, Enum):
     session message was emitted or enqueued."""
 
 
+def _allowance_block_notice(code: str | None, buy_url: str | None) -> str:
+    """User-facing notice when the allowance gate drops a channel turn.
+
+    Names the reason (subscription vs. usage limit) and appends the buy
+    link when the agent projects one, so slack/telegram senders get a
+    real path to keep going rather than a dead "try again later".
+    """
+    if code == "subscription_required":
+        lead = "A subscription is required to keep chatting with this assistant."
+    else:
+        lead = "You've reached your usage limit for this assistant."
+    if buy_url:
+        return f"{lead} Get more access here: {buy_url}"
+    return f"{lead} Please try again later."
+
+
 @lru_cache(maxsize=256)
 def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     """Compile a routing config's ``mention_patterns`` CSV into one regex.
@@ -767,8 +783,10 @@ class ChannelInboundPipeline:
                         await deps.input_nudge(
                             session_id,
                             msg,
-                            "You've reached your usage limit for this "
-                            "assistant. Please try again later.",
+                            _allowance_block_notice(
+                                exc.detail,
+                                runtime_payload.get("commerce_buy_url"),
+                            ),
                         )
                     except Exception:
                         logger.warning(

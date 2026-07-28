@@ -135,8 +135,36 @@ async def test_uncapped_receipt_pins_no_hold():
 
 
 @pytest.mark.asyncio
-async def test_exhausted_allowance_raises_402():
+async def test_exhausted_allowance_raises_402_with_buy_url():
+    """The 402 carries the agent's buy-page URL so the client can render a
+    real buy prompt (matching the commerce gate's structured detail)."""
     client = _FakePlatformClient(error=AllowanceExhaustedError("allowance_exhausted"))
+    store = _FakeStore()
+    request = _request(
+        runtime_payload={
+            "end_user_token_allowance": 50,
+            "commerce_buy_url": "https://buy.example/agent",
+        },
+        platform_client=client,
+        store=store,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await authorize_allowance_turn(
+            request, _session(), "content", end_user_id="u1",
+        )
+    assert exc.value.status_code == 402
+    assert exc.value.detail == {
+        "code": "allowance_exhausted",
+        "buy_url": "https://buy.example/agent",
+    }
+    assert store.updates == []
+
+
+@pytest.mark.asyncio
+async def test_subscription_required_402_carries_code_and_null_buy_url():
+    """No buy URL projected → the key is still present (value None) so the
+    client's paywall branch is uniform."""
+    client = _FakePlatformClient(error=AllowanceExhaustedError("subscription_required"))
     store = _FakeStore()
     request = _request(
         runtime_payload={"end_user_token_allowance": 50},
@@ -148,8 +176,7 @@ async def test_exhausted_allowance_raises_402():
             request, _session(), "content", end_user_id="u1",
         )
     assert exc.value.status_code == 402
-    assert exc.value.detail == {"code": "allowance_exhausted"}
-    assert store.updates == []
+    assert exc.value.detail == {"code": "subscription_required", "buy_url": None}
 
 
 @pytest.mark.asyncio

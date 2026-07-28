@@ -191,9 +191,14 @@ async def authorize_allowance_turn(
             end_user_id=end_user_id,
         )
     except AllowanceExhaustedError as exc:
+        # Carry the buy-page URL (as the commerce gate does) so the client
+        # renders a real buy prompt rather than a generic error.
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
-            detail={"code": exc.detail or "allowance_exhausted"},
+            detail={
+                "code": exc.detail or "allowance_exhausted",
+                "buy_url": payload.get("commerce_buy_url"),
+            },
         ) from exc
     except AllowanceReserveError as exc:
         logger.error(
