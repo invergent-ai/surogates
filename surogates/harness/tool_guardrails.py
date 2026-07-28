@@ -29,9 +29,10 @@ MUTATING_TOOL_NAMES = frozenset({
     "skill_manage",
     "browser_click",
     "browser_type",
-    "browser_press",
+    "browser_press_key",
     "browser_scroll",
     "browser_navigate",
+    "browser_evaluate",
     "send_message",
     "delegate_task",
 })

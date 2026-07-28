@@ -7,7 +7,15 @@ applies_when: any browser_* tool loaded
 
 Use `browser_get_state` before interacting with a page whenever you need a
 target ref, and refresh refs after navigation, scrolling, modal dismissal, or
-any large page change.
+any large page change. It returns a markdown outline: `- role @eN "name"` lines
+are the things you can click and type into.
+
+Reach for `browser_evaluate` instead of repeated scroll-and-restate loops when
+you need data rather than an action — every row of a table, all options of a
+select, a hidden field's value. One evaluate that returns an array beats ten
+snapshots. `browser_get_state` shows at most 500 elements and says so when it
+truncates; scope it with `selector`, or read past the cap with
+`browser_evaluate`.
 
 ## Cookie and consent banners
 

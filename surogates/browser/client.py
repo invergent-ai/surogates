@@ -111,17 +111,83 @@ function depthOf(el) {
   return d;
 }
 
+function isBlockLevel(el) {
+  // Reads the precomputed __style map -- getComputedStyle here would run once
+  // per scanned descendant and force layout each time.
+  const s = __style.get(el);
+  const d = s ? s.display : 'block';
+  return d !== 'inline' && d !== 'inline-block' && d !== 'contents' && d !== 'none';
+}
+
+const __INTERACTIVE = new Set(['button','link','textbox','combobox','checkbox',
+  'radio','menuitem','tab','switch','searchbox','slider','spinbutton']);
+
+function isTextBlock(el) {
+  // A text block is an element whose subtree holds no interactive element and
+  // no block-level element -- i.e. pure inline markup, so its innerText reads
+  // as one coherent run.
+  for (const child of Array.from(el.querySelectorAll('*'))) {
+    if (__INTERACTIVE.has(roleOf(child))) return false;
+    if (isBlockLevel(child)) return false;
+  }
+  return true;
+}
+
+function ownTextOf(el) {
+  // Text nodes that are direct children of el, i.e. the runs that belong to no
+  // descendant element.  Used for elements that are NOT text blocks: their
+  // descendants' text is emitted separately, but these loose runs would
+  // otherwise be lost, since querySelectorAll('*') returns elements only.
+  let out = '';
+  for (const node of Array.from(el.childNodes)) {
+    if (node.nodeType === 3) out += node.nodeValue;
+  }
+  return out;
+}
+
+function headingLevelOf(el) {
+  const tag = el.tagName.toLowerCase();
+  if (/^h[1-6]$/.test(tag)) return Number(tag.slice(1));
+  const aria = Number(el.getAttribute('aria-level'));
+  return Number.isFinite(aria) && aria > 0 ? aria : 2;
+}
+
+function clean(s) {
+  return String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 2000);
+}
+
 const out = [];
 const root = selector === null ? document : document.querySelector(selector);
 if (!root) throw new Error('selector matched no element');
-for (const el of Array.from(root.querySelectorAll('*'))) {
-  const style = window.getComputedStyle(el);
+const covered = new Set();
+const __els = Array.from(root.querySelectorAll('*'));
+const __style = new Map();
+for (const el of __els) __style.set(el, window.getComputedStyle(el));
+for (const el of __els) {
+  const style = __style.get(el);
   if (style.visibility === 'hidden' || style.display === 'none') continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
   el.setAttribute('data-sg-i', String(out.length));
-  out.push({
-    role: roleOf(el),
+  const role = roleOf(el);
+  let textBlock = '';
+  if (__INTERACTIVE.has(role)) {
+    // Text inside a control belongs to the control: nameOf already carries it
+    // into the "- role @eN name" line.  Cover the subtree so a block-level
+    // child (<a><div>Label</div></a>, ubiquitous in nav menus and card links)
+    // cannot emit the same label a second time as a stray text line.
+    for (const d of Array.from(el.querySelectorAll('*'))) covered.add(d);
+  } else if (covered.has(el)) {
+    // An ancestor text block already emitted this element's text.
+    textBlock = '';
+  } else if (isTextBlock(el)) {
+    textBlock = clean(el.innerText || el.textContent);
+    for (const d of Array.from(el.querySelectorAll('*'))) covered.add(d);
+  } else {
+    textBlock = clean(ownTextOf(el));
+  }
+  const entry = {
+    role: role,
     name: nameOf(el),
     x: Math.round(bbox.x),
     y: Math.round(bbox.y),
@@ -130,7 +196,10 @@ for (const el of Array.from(root.querySelectorAll('*'))) {
     depth: depthOf(el),
     children_count: el.children ? el.children.length : 0,
     idx: out.length,
-  });
+    text_block: textBlock,
+  };
+  if (role === 'heading') entry.heading_level = headingLevelOf(el);
+  out.push(entry);
 }
 return {
   viewport: {width: window.innerWidth, height: window.innerHeight},
@@ -196,6 +265,30 @@ return {
         self._invalidate_snapshot_cache()
         return result
 
+    async def evaluate(self, code: str) -> Any:
+        """Run agent-supplied JavaScript in page context and return its value.
+
+        *code* is a function **body**, not an expression: it must ``return`` a
+        JSON-serializable value.  Raw interpolation is correct here -- the
+        payload is code, and it sits in a function body with no surrounding
+        literal to escape from.  The callback is ``async`` so the body may
+        ``await``.
+
+        The snapshot cache is cleared afterwards: JavaScript can move or replace
+        elements, and a stale ``@eN`` that resolves to the wrong node is worse
+        than one that fails to resolve.
+        """
+
+        wrapped = (
+            "const __result = await page.evaluate(async () => {\n"
+            f"{code}\n"
+            "});\n"
+            "return __result;"
+        )
+        result = await self._playwright_execute(wrapped)
+        self._invalidate_snapshot_cache()
+        return result
+
     async def storage_state(self) -> dict[str, Any]:
         """Export the live context's cookies + per-origin localStorage."""
 
@@ -246,7 +339,6 @@ return {
         self,
         *,
         interactive_only: bool = False,
-        compact: bool = False,
         max_depth: int | None = None,
         selector: str | None = None,
     ) -> dict[str, Any]:
@@ -261,7 +353,6 @@ return {
             if self._state_entry_visible(
                 entry,
                 interactive_only=interactive_only,
-                compact=compact,
                 max_depth=max_depth,
             )
         ]
@@ -667,6 +758,10 @@ return true;
             depth = node.get("depth")
             if depth is not None:
                 entry["depth"] = int(depth)
+            entry["text_block"] = str(node.get("text_block") or "")
+            heading_level = node.get("heading_level")
+            if heading_level is not None:
+                entry["heading_level"] = int(heading_level)
             tree.append(entry)
             cache_entry: dict[str, Any] = {
                 "x": center_x,
@@ -687,13 +782,10 @@ return true;
         entry: dict[str, Any],
         *,
         interactive_only: bool,
-        compact: bool,
         max_depth: int | None,
     ) -> bool:
         role = str(entry.get("role", ""))
         if interactive_only and role not in self._INTERACTIVE_ROLES:
-            return False
-        if compact and not entry.get("name") and role not in self._INTERACTIVE_ROLES:
             return False
         if entry.get("intent") == "accept_consent":
             return True

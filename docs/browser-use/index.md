@@ -73,7 +73,8 @@ Every call still passes through governance before execution.
 | Tool | Purpose |
 |---|---|
 | `browser_navigate` | Navigate to a URL and return the final URL and page title. |
-| `browser_get_state` | Return the rendered page's accessibility tree with stable `@eN` refs. |
+| `browser_get_state` | Return the rendered page as a markdown outline with stable `@eN` refs. |
+| `browser_evaluate` | Run JavaScript in the page and return a JSON-serializable value. |
 | `browser_click` | Click an `@eN` ref or viewport coordinates. |
 | `browser_type` | Type text at the current focus or into an `@eN` ref. |
 | `browser_press_key` | Press keys or chords such as `Enter`, `Tab`, or `Control+L`. |
@@ -86,6 +87,19 @@ Every call still passes through governance before execution.
 `browser_get_state` is the default perception channel. It caches element refs
 such as `@e3`, which `browser_click` and `browser_type` can use later. After
 navigation or large page changes, call `browser_get_state` again to refresh refs.
+
+By default it renders markdown: headings carry the page structure,
+`- role @eN "name"` lines mark the interactive elements, and page text appears
+once at the element that owns it rather than being repeated by every ancestor.
+Pass `format="json"` for the raw node tree when viewport coordinates are needed.
+Output is capped at 500 elements, with an explicit truncation line when it bites;
+scope large pages with `selector`.
+
+`browser_evaluate` is the reading channel. It runs a JavaScript function body in
+page context and returns whatever that body returns, so extracting every row of
+a table or every option of a `<select>` is one call rather than a scroll-and-
+restate loop. The DOM may be mutated by the script, so cached refs are dropped
+after every evaluate — call `browser_get_state` again before using a ref.
 
 `browser_screenshot` saves each PNG in the session workspace under
 `browser-screenshots/` and returns both a tool-usable absolute `path`, such as

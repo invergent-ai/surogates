@@ -20,6 +20,7 @@ from surogates.browser.base import (
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
+from surogates.browser.serialize import render_markdown
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -294,10 +295,43 @@ async def _browser_navigate_handler(
 GET_STATE_SCHEMA = {
     "type": "object",
     "properties": {
-        "interactive_only": {"type": "boolean", "default": False},
-        "compact": {"type": "boolean", "default": False},
-        "max_depth": {"type": "integer", "minimum": 0},
-        "selector": {"type": "string"},
+        "format": {
+            "type": "string",
+            "enum": ["markdown", "json"],
+            "default": "markdown",
+            "description": (
+                "Output shape. 'markdown' (default) is a concise page outline: "
+                "headings for structure, '- role @eN \"name\"' lines for "
+                "clickable elements, plain lines for text. 'json' returns the "
+                "raw node tree with viewport coordinates — only needed when you "
+                "must click by coordinate rather than by ref."
+            ),
+        },
+        "interactive_only": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Return only clickable and typeable elements, dropping all page "
+                "text. Use when you know what you are looking for and only need "
+                "its ref."
+            ),
+        },
+        "max_depth": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Drop elements nested deeper than this in the DOM. Rarely "
+                "useful — prefer 'selector' to scope by region."
+            ),
+        },
+        "selector": {
+            "type": "string",
+            "description": (
+                "CSS selector limiting the snapshot to one subtree, e.g. "
+                "'#search-results'. The best way to keep a large page under the "
+                "node cap."
+            ),
+        },
     },
     "additionalProperties": False,
 }
@@ -332,13 +366,88 @@ async def _browser_get_state_handler(
         try:
             state = await client.get_state(
                 interactive_only=arguments.get("interactive_only", False),
-                compact=arguments.get("compact", False),
                 max_depth=arguments.get("max_depth"),
                 selector=arguments.get("selector"),
             )
         except RuntimeError as exc:
             return json.dumps({"error": "get_state_failed", "detail": str(exc)})
-    return json.dumps(state)
+    if arguments.get("format", "markdown") == "json":
+        return json.dumps(state)
+    return render_markdown(state)
+
+
+# Cap on a single evaluate result.  Matches ``_MAX_TOOL_RESULT_CHARS`` in
+# ``surogates/tools/builtin/expert_loop.py``: a ``document.body.innerHTML``
+# return would otherwise swallow the context window.
+_MAX_EVALUATE_RESULT_CHARS: int = 20_000
+
+EVALUATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "code": {
+            "type": "string",
+            "description": (
+                "JavaScript function body run inside the page. 'document' and "
+                "'window' are available; Playwright's 'page' is not. You must "
+                "'return' a JSON-serializable value — DOM nodes are not "
+                "serializable, so return their properties instead. 'await' is "
+                "allowed. Example: return [...document.querySelectorAll('tr')]"
+                ".map(r => r.innerText);"
+            ),
+        },
+    },
+    "required": ["code"],
+    "additionalProperties": False,
+}
+
+
+async def _browser_evaluate_handler(
+    arguments: dict[str, Any],
+    *,
+    tenant: Any = None,
+    session_id: UUID | str | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
+    _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
+    session_config: dict[str, Any] | None = None,
+    **_: Any,
+) -> str:
+    code = arguments.get("code")
+    if not code or not str(code).strip():
+        return json.dumps({
+            "error": "missing_code",
+            "detail": "browser_evaluate requires a non-empty 'code' argument.",
+        })
+
+    preflight = await _resolve_session_browser(
+        tenant=tenant,
+        session_id=session_id,
+        browser_pool=browser_pool,
+        browser_control=browser_control,
+        workspace_path=workspace_path,
+        session_config=session_config,
+    )
+    if isinstance(preflight, str):
+        return preflight
+
+    _browser_id, endpoint, snapshot_cache = preflight
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
+    async with client:
+        try:
+            result = await client.evaluate(str(code))
+        except RuntimeError as exc:
+            return json.dumps({"error": "evaluate_failed", "detail": str(exc)})
+
+    serialized = json.dumps(result)
+    if len(serialized) > _MAX_EVALUATE_RESULT_CHARS:
+        kept = serialized[:_MAX_EVALUATE_RESULT_CHARS]
+        return json.dumps({
+            "truncated": True,
+            "original_length": len(serialized),
+            "result": kept,
+        })
+    return serialized
 
 
 CLOSE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -892,12 +1001,28 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_get_state",
             description=(
-                "Return the current page tree with @eN refs for browser_click "
-                "and browser_type."
+                "Return the current page as a markdown outline with @eN refs "
+                "for browser_click and browser_type. Pass format='json' for the "
+                "raw node tree with coordinates."
             ),
             parameters=GET_STATE_SCHEMA,
         ),
         handler=_browser_get_state_handler,
+        toolset="browser",
+    )
+    registry.register(
+        name="browser_evaluate",
+        schema=ToolSchema(
+            name="browser_evaluate",
+            description=(
+                "Run JavaScript in the page and return its value. Use this to "
+                "read structured page state — full tables, hidden input values, "
+                "every option of a select — in one call instead of many "
+                "get_state and scroll round trips."
+            ),
+            parameters=EVALUATE_SCHEMA,
+        ),
+        handler=_browser_evaluate_handler,
         toolset="browser",
     )
     registry.register(

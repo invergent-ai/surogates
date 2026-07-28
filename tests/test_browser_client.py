@@ -964,3 +964,128 @@ class TestScreenshot:
             {"ref": "@e1", "label": 1, "role": "button", "name": "Go"},
             {"ref": "@e2", "label": 2, "role": "link", "name": "Help"},
         ]
+
+
+class TestTextBlockDerivation:
+    """The snapshot script derives text at the text-block level.
+
+    A text block is the deepest node whose subtree holds no interactive and no
+    block-level element.  These tests assert the Python side carries the fields
+    through; the in-page derivation itself is exercised in the e2e suite.
+    """
+
+    async def test_tree_carries_text_block_and_heading_level(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        nodes = [
+            {"role": "heading", "name": "Results", "x": 0, "y": 0,
+             "width": 100, "height": 20, "depth": 3, "children_count": 0,
+             "idx": 0, "backend_node_id": 11,
+             "text_block": "Results", "heading_level": 2},
+            {"role": "generic", "name": "Results £128", "x": 0, "y": 0,
+             "width": 100, "height": 20, "depth": 3, "children_count": 2,
+             "idx": 1, "backend_node_id": 12, "text_block": ""},
+        ]
+        tree, cache = client._build_tree_and_cache(nodes)
+
+        assert tree[0]["text_block"] == "Results"
+        assert tree[0]["heading_level"] == 2
+        assert tree[1]["text_block"] == ""
+        assert "heading_level" not in tree[1]
+        # Refs and centres are unchanged by the new fields.
+        assert tree[0]["ref"] == "@e1"
+        assert cache["@e1"]["backend_node_id"] == 11
+
+    async def test_missing_fields_are_omitted_not_defaulted(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        nodes = [
+            {"role": "link", "name": "Home", "x": 0, "y": 0,
+             "width": 10, "height": 10, "depth": 2, "children_count": 0,
+             "idx": 0, "backend_node_id": 5},
+        ]
+        tree, _ = client._build_tree_and_cache(nodes)
+
+        assert "heading_level" not in tree[0]
+        assert tree[0].get("text_block", "") == ""
+
+
+class TestSnapshotScriptShape:
+    """Guards on the injected JS -- it is a string, so nothing else type-checks it."""
+
+    def test_script_derives_text_block_and_heading_level(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        script = KernelBrowserClient._SNAPSHOT_SCRIPT
+        assert "text_block" in script
+        assert "heading_level" in script
+        # The text-block test must consider both interactive and block-level
+        # descendants; a check for only one of them is the bug this guards.
+        assert "isTextBlock" in script
+
+    def test_script_guards_against_both_duplication_and_text_loss(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        script = KernelBrowserClient._SNAPSHOT_SCRIPT
+        # Without the covered set, nested pure-inline elements each emit the
+        # same text ("£128", then "£", then "128").
+        assert "covered.add" in script
+        # Without the own-text branch, bare text runs beside an interactive
+        # child are lost -- querySelectorAll('*') returns elements only.
+        assert "ownTextOf" in script
+
+    def test_script_covers_interactive_subtrees(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        script = KernelBrowserClient._SNAPSHOT_SCRIPT
+        # Text inside a control belongs to the control.  Without covering the
+        # interactive subtree, a block-level child (<a><div>Label</div></a> --
+        # Wikipedia's whole TOC, and any `<a class="block">`) emits the label a
+        # second time as a stray text line right under the control line.
+        assert "if (__INTERACTIVE.has(role)) {" in script
+
+    def test_script_computes_style_once_per_element(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        # Style is resolved exactly once per element, into the __style map
+        # that both the visibility check and isBlockLevel read.  A second
+        # getComputedStyle call site would re-resolve style for every
+        # descendant scanned inside isTextBlock and multiply snapshot cost.
+        assert KernelBrowserClient._SNAPSHOT_SCRIPT.count(
+            "window.getComputedStyle"
+        ) == 1
+
+
+class TestEvaluate:
+    async def test_wraps_code_in_a_page_evaluate_callback(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        sent: list[str] = []
+
+        async def fake_execute(code: str, **kwargs: Any) -> Any:
+            sent.append(code)
+            return {"ok": True}
+
+        client._playwright_execute = fake_execute  # type: ignore[assignment]
+        result = await client.evaluate("return document.title;")
+
+        assert result == {"ok": True}
+        assert "await page.evaluate(async () => {" in sent[0]
+        assert "return document.title;" in sent[0]
+
+    async def test_invalidates_the_snapshot_cache(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        client._snapshot_cache["@e1"] = {"x": 1, "y": 2}
+
+        async def fake_execute(code: str, **kwargs: Any) -> Any:
+            return None
+
+        client._playwright_execute = fake_execute  # type: ignore[assignment]
+        await client.evaluate("document.body.innerHTML = '';")
+
+        assert client._snapshot_cache == {}

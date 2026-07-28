@@ -67,11 +67,17 @@ class FakeClient:
         return {"url": url, "title": "Test Page"}
 
     async def get_state(self, **kwargs: Any) -> dict[str, Any]:
+        self.get_state_kwargs = kwargs
         return {
             "url": "http://example.com/",
             "title": "Test",
-            "viewport": {"width": 1, "height": 1},
-            "tree": [],
+            "viewport": {"width": 1280, "height": 800},
+            "tree": [
+                {"ref": "@e1", "role": "heading", "name": "Results",
+                 "x": 0, "y": 0, "text_block": "Results", "heading_level": 2},
+                {"ref": "@e2", "role": "button", "name": "Search",
+                 "x": 10, "y": 20, "text_block": ""},
+            ],
         }
 
     async def close(self) -> None:
@@ -312,7 +318,7 @@ class TestGetStateHandler:
         from surogates.tools.builtin.browser import _browser_get_state_handler
 
         result = await _browser_get_state_handler(
-            {"interactive_only": True},
+            {"interactive_only": True, "format": "json"},
             tenant=tenant,
             session_id=uuid4(),
             browser_pool=FakePool(),
@@ -681,6 +687,7 @@ class TestScreenshotHandler:
 BROWSER_TOOL_NAMES = [
     "browser_navigate",
     "browser_get_state",
+    "browser_evaluate",
     "browser_screenshot",
     "browser_click",
     "browser_type",
@@ -769,6 +776,7 @@ class TestRouterDispatch:
 BROWSER_SUSPEND_HANDLERS = [
     ("_browser_navigate_handler", {"url": "https://example.com"}),
     ("_browser_get_state_handler", {}),
+    ("_browser_evaluate_handler", {"code": "return 1;"}),
     ("_browser_screenshot_handler", {}),
     ("_browser_click_handler", {"x": 10, "y": 10}),
     ("_browser_type_handler", {"text": "hello"}),
@@ -853,3 +861,176 @@ def test_browser_screenshot_key_uses_boundary_workspace_prefix():
         )
         == "project/agent/boundaries/slack:c:G1/workspace/browser-screenshots/shot.png"
     )
+
+
+class TestGetStateFormat:
+    async def test_defaults_to_markdown(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+        assert result.startswith("# Test")
+        assert "## Results" in result
+        assert '- button @e2 "Search"' in result
+
+    async def test_json_format_returns_the_tree(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {"format": "json"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+        body = json.loads(result)
+        assert body["tree"][0]["text_block"] == "Results"
+        assert body["tree"][0]["heading_level"] == 2
+        assert body["tree"][1]["x"] == 10
+
+    async def test_errors_stay_json_in_markdown_mode(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FailingStateClient(),
+        )
+        assert json.loads(result)["error"] == "get_state_failed"
+
+
+class TestGetStateSchema:
+    def test_compact_is_gone(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        assert "compact" not in GET_STATE_SCHEMA["properties"]
+
+    def test_every_parameter_is_documented(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        for name, prop in GET_STATE_SCHEMA["properties"].items():
+            assert prop.get("description"), f"{name} has no description"
+
+    def test_format_enumerates_both_modes(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        assert GET_STATE_SCHEMA["properties"]["format"]["enum"] == ["markdown", "json"]
+
+
+class FakeEvaluateClient(FakeClient):
+    def __init__(self, result: Any = None) -> None:
+        super().__init__()
+        self.evaluated: list[str] = []
+        self._result = result if result is not None else {"rows": 3}
+
+    async def evaluate(self, code: str) -> Any:
+        self.evaluated.append(code)
+        return self._result
+
+
+class FailingEvaluateClient(FakeClient):
+    async def evaluate(self, code: str) -> Any:
+        raise RuntimeError("SyntaxError: Unexpected token '}'")
+
+
+class TestEvaluateHandler:
+    async def test_returns_the_json_result(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {"code": "return document.title;"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient({"title": "T"}),
+        )
+        assert json.loads(result) == {"title": "T"}
+
+    async def test_returns_structured_error_on_js_failure(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {"code": "return }"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FailingEvaluateClient(),
+        )
+        body = json.loads(result)
+        assert body["error"] == "evaluate_failed"
+        assert "SyntaxError" in body["detail"]
+
+    async def test_truncates_oversized_results(self, tenant) -> None:
+        from surogates.tools.builtin.browser import (
+            _MAX_EVALUATE_RESULT_CHARS,
+            _browser_evaluate_handler,
+        )
+
+        huge = "x" * (_MAX_EVALUATE_RESULT_CHARS + 5000)
+        result = await _browser_evaluate_handler(
+            {"code": "return document.body.innerHTML;"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient(huge),
+        )
+        body = json.loads(result)
+        assert body["truncated"] is True
+        assert body["original_length"] > _MAX_EVALUATE_RESULT_CHARS
+        assert len(body["result"]) == _MAX_EVALUATE_RESULT_CHARS
+
+    async def test_rejects_missing_code(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient(),
+        )
+        assert json.loads(result)["error"] == "missing_code"
+
+
+class TestEvaluateAuditTrail:
+    """browser_evaluate's security posture is 'unrestricted but audited'.
+
+    That only holds if the complete JS source reaches the TOOL_CALL event.
+    These pin the two transformations it passes through on the way there.
+    """
+
+    def test_path_sanitisation_leaves_javascript_intact(self) -> None:
+        from surogates.harness.tool_exec import _sanitize_paths
+
+        code = (
+            "const rows = [...document.querySelectorAll('tr')];\n"
+            "return rows.map(r => ({t: r.innerText, n: r.children.length}));"
+        )
+        sanitized = _sanitize_paths({"code": code}, "/workspace")
+        assert sanitized["code"] == code
+
+    def test_arguments_are_not_truncated_on_the_tool_call_event(self) -> None:
+        import inspect
+
+        from surogates.harness import tool_exec
+
+        src = inspect.getsource(tool_exec)
+        # The TOOL_CALL payload carries the whole argument dict.  ``_truncate_args``
+        # feeds ``arguments_excerpt`` on a *different* event -- if it ever moves
+        # onto ``tool_call_data``, the audit trail silently loses long JS bodies.
+        assert '"arguments": sanitized_args,' in src
+        assert '"arguments": _truncate_args' not in src
