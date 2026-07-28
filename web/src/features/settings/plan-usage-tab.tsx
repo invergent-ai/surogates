@@ -28,6 +28,9 @@ interface CommerceOffer {
   amount_cents: number;
   billing_interval: string | null;
   token_amount: number;
+  /** Buyer-facing labels for a custom package; [] or absent = full
+   * access (subscriptions) / pure extra usage (packs). */
+  included?: string[];
 }
 
 interface CommerceOverview {
@@ -39,6 +42,7 @@ interface CommerceOverview {
     current_period_end: string | null;
     period_token_remaining: number;
     topup_token_remaining: number;
+    included?: string[];
   } | null;
   purchasable: boolean;
 }
@@ -180,6 +184,19 @@ export function PlanUsageTab() {
                   {approxMessagesLabel(ent.topup_token_remaining)}
                 </span>
               </div>
+              {(ent.included?.length ?? 0) > 0 ? (
+                <div
+                  className="flex items-start justify-between gap-4"
+                  data-testid="plan-tab-included"
+                >
+                  <span className="shrink-0 text-muted-foreground">
+                    Your plan includes
+                  </span>
+                  <span className="text-right font-medium">
+                    {ent.included?.join(" · ")}
+                  </span>
+                </div>
+              ) : null}
             </>
           )}
         </CardContent>
@@ -218,6 +235,11 @@ export function PlanUsageTab() {
                         ? " every period"
                         : " of extra usage · one-time"}
                     </span>
+                    {(offer.included?.length ?? 0) > 0 ? (
+                      <span className="text-xs text-muted-foreground/80">
+                        Includes: {offer.included?.join(" · ")}
+                      </span>
+                    ) : null}
                   </div>
                   <span className="shrink-0 text-sm font-semibold tabular-nums">
                     {formatPrice(offer.amount_cents, offer.currency)}
