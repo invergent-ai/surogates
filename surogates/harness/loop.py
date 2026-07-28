@@ -3561,12 +3561,17 @@ class AgentHarness(
         # wake. Beats an explicit ``allowed_tools`` for the same reason
         # the ``/code`` rule does: a paywalled tool must never be
         # schema-visible, whatever the session config asks for.
-        if self._entitlement_excluded_tools:
+        # ``getattr``: several test harnesses build partial AgentHarness
+        # objects that skip ``__init__``; absent means no restriction.
+        entitlement_excluded = getattr(
+            self, "_entitlement_excluded_tools", None,
+        )
+        if entitlement_excluded:
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
-            tool_filter.difference_update(self._entitlement_excluded_tools)
+            tool_filter.difference_update(entitlement_excluded)
 
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.
