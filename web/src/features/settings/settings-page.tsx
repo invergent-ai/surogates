@@ -13,7 +13,7 @@ import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
-import { PlanTokensTab } from "./plan-tokens-tab";
+import { PlanUsageTab } from "./plan-usage-tab";
 import { PasswordSection } from "./password-section";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
@@ -173,7 +173,7 @@ export function SettingsPage() {
                   Connected Channels
                 </TabsTrigger>
               )}
-              <TabsTrigger value="plan">Plan &amp; Tokens</TabsTrigger>
+              <TabsTrigger value="plan">Plan &amp; Usage</TabsTrigger>
               {codingAgentsEnabled && (
                 <TabsTrigger value="coding-agents">Coding Agents</TabsTrigger>
               )}
@@ -184,9 +184,9 @@ export function SettingsPage() {
               )}
             </TabsList>
 
-            {/* ── Plan & tokens ── */}
+            {/* ── Plan & usage ── */}
             <TabsContent value="plan">
-              <PlanTokensTab />
+              <PlanUsageTab />
             </TabsContent>
 
             {/* ── Profile ── */}
