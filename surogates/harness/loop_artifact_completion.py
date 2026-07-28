@@ -30,6 +30,20 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+def _should_take_reservations(session: Any, config_key: str) -> bool:
+    """Whether the worker must pop ``config_key`` from the live session
+    config at settle time.
+
+    Channel gate, not a config gate: the wake-time session object is
+    stale, and a hold appended after wake start must still be taken — only
+    website sessions ever carry these, so every other channel skips the
+    extra round trip unless the wake object already shows a hold. Shared by
+    the commerce and per-user allowance settlements."""
+    if getattr(session, "channel", None) == "website":
+        return True
+    return bool((session.config or {}).get(config_key))
+
+
 class ArtifactCompletionMixin:
     async def _promote_fenced_artifacts(
         self,
@@ -550,13 +564,7 @@ class ArtifactCompletionMixin:
         as the floor: content may already have been delivered, and a
         hold must never turn into a free turn.
         """
-        # Channel gate, not a config gate: the wake-time session object
-        # is stale, and a hold appended after wake start must still be
-        # taken — only website sessions ever carry these, so every
-        # other channel skips the extra round trip.
-        if getattr(session, "channel", None) != "website" and not (
-            (session.config or {}).get("commerce_reservations")
-        ):
+        if not _should_take_reservations(session, "commerce_reservations"):
             return
         client = getattr(self, "_platform_client", None)
         if client is None:
@@ -635,9 +643,7 @@ class ArtifactCompletionMixin:
         leak (there is no allowance reaper), the same escape the commerce
         settle makes for website sessions.
         """
-        if getattr(session, "channel", None) != "website" and not (
-            (session.config or {}).get("allowance_reservations")
-        ):
+        if not _should_take_reservations(session, "allowance_reservations"):
             return
         client = getattr(self, "_platform_client", None)
         if client is None:
