@@ -176,6 +176,8 @@ def _allowance_block_notice(code: str | None, buy_url: str | None) -> str:
     """
     if code == "subscription_required":
         lead = "A subscription is required to keep chatting with this assistant."
+    elif code == "channel_not_included":
+        lead = "Your current plan doesn't include this channel."
     else:
         lead = "You've reached your usage limit for this assistant."
     if buy_url:
@@ -771,6 +773,7 @@ class ChannelInboundPipeline:
                     agent_id=routing.agent_id,
                     content=msg.text or "",
                     end_user_id=str(identity.user_id),
+                    channel=routing.platform,
                 )
             except AllowanceExhaustedError as exc:
                 logger.info(

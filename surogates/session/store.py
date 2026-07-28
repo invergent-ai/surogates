@@ -722,6 +722,43 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
+    async def reconcile_session_config_key(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Make ``config[key]`` equal ``value``, minimally.
+
+        ``value is None`` removes the key. The write is skipped when the
+        stored value already matches, so per-turn reconcilers (e.g. the
+        commerce entitlements pin) stay write-free in steady state while
+        still holding the row lock for the comparison.
+        """
+        if not key:
+            raise ValueError("config key must be non-empty")
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow)
+                .where(SessionRow.id == session_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SessionNotFoundError(f"session {session_id} not found")
+            config = dict(row.config or {})
+            if value is None:
+                if key not in config:
+                    return
+                config.pop(key)
+            else:
+                if config.get(key) == value:
+                    return
+                config[key] = value
+            row.config = config
+            row.updated_at = func.now()
+            await db.commit()
+
     async def clear_session_config_key(self, session_id: UUID, key: str) -> None:
         """Remove one top-level key from ``sessions.config``."""
         if not key:

@@ -509,23 +509,35 @@ class PlatformClient:
         *,
         end_user_id: str,
         estimated_tokens: int,
+        channel: str | None = None,
     ) -> dict:
         """Reserve tokens for one end-user turn against their per-user cap.
 
-        Returns ``{allowance_id, reserved_tokens, reservation_id}`` (all
-        zero/empty when uncapped or the kill-switch is off).  Raises:
+        ``channel`` names the surface carrying the turn (``slack`` /
+        ``telegram`` / ``website`` / ``web``); ops gates sellable
+        channels against the user's purchased package and answers 402
+        ``channel_not_included`` when the package excludes this one.
+
+        Returns ``{allowance_id, reserved_tokens, reservation_id,
+        features}`` (zero/empty when uncapped or the kill-switch is
+        off; ``features`` is the user's effective package, ``None`` =
+        no restriction).  Raises:
 
         * :class:`AllowanceExhaustedError` on 402 — the user has spent
-          their slice of the operator's subscription this cycle.
+          their slice of the operator's subscription this cycle, or the
+          package excludes this channel (``channel_not_included``).
         * :class:`PlatformAuthError` on 401 — operations problem.
         * ``httpx.HTTPStatusError`` on any other non-2xx.
         """
+        payload: dict = {
+            "end_user_id": end_user_id,
+            "estimated_tokens": estimated_tokens,
+        }
+        if channel is not None:
+            payload["channel"] = channel
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/allowance/authorize",
-            json={
-                "end_user_id": end_user_id,
-                "estimated_tokens": estimated_tokens,
-            },
+            json=payload,
         )
         if resp.status_code == 402:
             detail = ""

@@ -860,6 +860,7 @@ async def send_website_message(
             body.content,
             end_user_id=str(embed_end_user_id),
             always=True,
+            channel="website",
         )
 
     if session.status in ("failed", "paused", "completed"):

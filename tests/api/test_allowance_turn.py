@@ -231,3 +231,130 @@ async def test_metering_plane_error_fails_closed_503():
             request, _session(), "content", end_user_id="u1",
         )
     assert exc.value.status_code == 503
+
+
+# ── Package plumbing: channel forwarding + entitlements pinning ───────
+
+
+class _ReconcilingStore(_FakeStore):
+    def __init__(self):
+        super().__init__()
+        self.reconciled: list[tuple] = []
+
+    async def reconcile_session_config_key(self, session_id, key, value):
+        self.reconciled.append((session_id, key, value))
+
+
+@pytest.mark.asyncio
+async def test_channel_is_forwarded_to_ops():
+    client = _FakePlatformClient(
+        receipt={"allowance_id": "", "reserved_tokens": 0},
+    )
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={"end_user_token_allowance": 1000},
+        platform_client=client,
+        store=store,
+    )
+    await authorize_allowance_turn(
+        request, _session(), "hi", end_user_id="u1", channel="web",
+    )
+    assert client.calls[0]["channel"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_features_receipt_pins_entitlements_on_the_session():
+    client = _FakePlatformClient(
+        receipt={
+            "allowance_id": "al-1",
+            "reserved_tokens": 5,
+            "reservation_id": "r-1",
+            "features": {"capabilities": ["code"], "channels": ["website"]},
+        },
+    )
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={"end_user_token_allowance": 1000},
+        platform_client=client,
+        store=store,
+    )
+    session = _session()
+    await authorize_allowance_turn(
+        request, session, "hello", end_user_id="u1", channel="website",
+    )
+    assert store.reconciled == [
+        (
+            session.id,
+            "entitlements",
+            {"capabilities": ["code"], "channels": ["website"]},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unrestricted_receipt_clears_a_stale_pin():
+    """A user whose package went away (cancelled sub, cleared offer)
+    must not keep yesterday's restrictions pinned on the session."""
+    client = _FakePlatformClient(
+        receipt={"allowance_id": "", "reserved_tokens": 0, "features": None},
+    )
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={"end_user_token_allowance": 1000},
+        platform_client=client,
+        store=store,
+    )
+    session = _session()
+    session.config = {"entitlements": {"capabilities": []}}
+    await authorize_allowance_turn(
+        request, session, "hi", end_user_id="u1",
+    )
+    assert store.reconciled == [(session.id, "entitlements", None)]
+
+
+@pytest.mark.asyncio
+async def test_steady_state_pin_is_write_free():
+    """Same package as already pinned → no store round trip at all."""
+    features = {"capabilities": ["code"]}
+    client = _FakePlatformClient(
+        receipt={
+            "allowance_id": "", "reserved_tokens": 0, "features": features,
+        },
+    )
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={"end_user_token_allowance": 1000},
+        platform_client=client,
+        store=store,
+    )
+    session = _session()
+    session.config = {"entitlements": {"capabilities": ["code"]}}
+    await authorize_allowance_turn(
+        request, session, "hi", end_user_id="u1",
+    )
+    assert store.reconciled == []
+
+
+@pytest.mark.asyncio
+async def test_channel_not_included_402_carries_code_and_buy_url():
+    client = _FakePlatformClient(
+        error=AllowanceExhaustedError("channel_not_included"),
+    )
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={
+            "end_user_token_allowance": 50,
+            "commerce_buy_url": "https://buy.example/agent",
+        },
+        platform_client=client,
+        store=store,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await authorize_allowance_turn(
+            request, _session(), "content", end_user_id="u1", channel="slack",
+        )
+    assert exc.value.status_code == 402
+    assert exc.value.detail == {
+        "code": "channel_not_included",
+        "buy_url": "https://buy.example/agent",
+    }
