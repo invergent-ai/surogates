@@ -845,7 +845,9 @@ async def send_website_message(
             ),
         )
 
-    await authorize_commerce_turn(request, session, body.content)
+    await authorize_commerce_turn(
+        request, session, body.content, channel="website",
+    )
 
     # Per-buyer embed: when the widget key was minted by a buyer, this
     # anonymous visitor's turn draws from that buyer's purchased

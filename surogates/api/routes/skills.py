@@ -404,16 +404,41 @@ async def _session_entitled_skills(
     tenant: TenantContext,
     session_id: "UUID | None",
 ) -> frozenset[str] | None:
-    """The session's purchased-package skill allowlist, or ``None``.
+    """The caller's purchased-package skill allowlist, or ``None``.
 
-    ``None`` (no session, unauthorized, no pin, unrestricted dimension)
-    means no restriction, mirroring the runtime reader.
+    ``session_id`` is a client-supplied query parameter, so its absence
+    (or a bogus id) must not read as "no restriction" — a
+    package-restricted user could simply omit it to list and read
+    paywalled skills. When the given session doesn't resolve, fall back
+    to the caller's most recently active session, where the authorize
+    gates pin the package every turn. Only a caller with no sessions at
+    all (nothing ever pinned) reads as unrestricted.
     """
-    if session_id is None:
-        return None
-    try:
-        session = await _authorize_session_for_staging(request, tenant, session_id)
-    except HTTPException:
+    session = None
+    if session_id is not None:
+        try:
+            session = await _authorize_session_for_staging(
+                request, tenant, session_id,
+            )
+        except HTTPException:
+            session = None
+    if session is None and tenant.user_id is not None:
+        from sqlalchemy import select
+
+        from surogates.db.models import Session as SessionRow
+
+        session_factory = request.app.state.session_factory
+        async with session_factory() as db:
+            session = await db.scalar(
+                select(SessionRow)
+                .where(
+                    SessionRow.org_id == tenant.org_id,
+                    SessionRow.user_id == tenant.user_id,
+                )
+                .order_by(SessionRow.updated_at.desc())
+                .limit(1),
+            )
+    if session is None:
         return None
     from surogates.runtime.entitlements import entitled_skills
 

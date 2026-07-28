@@ -357,3 +357,94 @@ def test_tier_override_endpoint_selection():
     assert pick(basic_pin, pro, base, None) is base
     assert pick(basic_pin, base, None, pro) is None  # already basic
     assert pick({}, base, None, pro) is None
+
+
+# ── production-shaped MCP/Composio names + filter ordering ────────────
+
+
+def test_router_prefixed_composio_tools_filtered_by_toolkit():
+    """Real Composio tools are mcp__tool_router__TOOLKIT_ACTION; the
+    sellable unit is the toolkit inside the tool component."""
+    registry = _registry_with(
+        ("mcp__tool_router__GMAIL_SEND_EMAIL", "mcp"),
+        ("mcp__tool_router__SLACK_SEND_MESSAGE", "mcp"),
+        ("mcp__composio_tool_router__GMAIL_LIST", "mcp"),
+        ("mcp__crm__lookup", "mcp"),
+    )
+    excluded = _entitlement_tool_exclusions(
+        session_config={"entitlements": {"mcp_server_ids": ["id-x"]}},
+        tool_registry=registry,
+        composio_tool_names=frozenset({
+            "mcp__tool_router__GMAIL_SEND_EMAIL",
+            "mcp__tool_router__SLACK_SEND_MESSAGE",
+            "mcp__composio_tool_router__GMAIL_LIST",
+        }),
+        mcp_scope=({"crm"}, {"gmail"}),
+    )
+    # Gmail toolkit entitled (both router prefixes), slack not; the
+    # plain crm server is entitled.
+    assert excluded == {"mcp__tool_router__SLACK_SEND_MESSAGE"}
+
+
+@pytest.mark.asyncio
+async def test_scope_resolution_sanitizes_server_names(monkeypatch):
+    """A server named github-mcp must match its mcp__github_mcp__* tools."""
+    from surogates.orchestrator.worker import _resolve_mcp_entitlement_scope
+
+    class _Result:
+        def all(self):
+            return [
+                ("github-mcp", "http", None),
+                ("billing", "composio", {"toolkit": "Stripe"}),
+            ]
+
+    class _Session:
+        async def execute(self, *_a, **_k):
+            return _Result()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    import surogates.db.ops_engine as ops_engine
+
+    monkeypatch.setattr(
+        ops_engine, "get_ops_session_factory", lambda: (lambda: _Session()),
+    )
+    scope = await _resolve_mcp_entitlement_scope(
+        frozenset({"id-1", "id-2"}), "postgresql://x",
+    )
+    assert scope == ({"github_mcp"}, {"stripe"})
+
+
+def test_entitlement_exclusions_survive_the_mcp_schema_filter():
+    """Regression: _apply_mcp_schema_filter re-adds this agent's full
+    discovered MCP set when the registry holds a foreign agent's tools;
+    the entitlement subtraction must run after it."""
+    registry = ToolRegistry()
+    h = _harness(entitlement_excluded=frozenset({"mcp__crm__lookup"}))
+    # Simulate the shared registry: this agent discovered crm+billing,
+    # another agent's tool is also present.
+    async def _noop(arguments, **kwargs):
+        return ""
+
+    for name in (
+        "mcp__crm__lookup", "mcp__billing__charge", "mcp__foreign__x",
+    ):
+        h._tools.register(
+            name,
+            {"name": name, "description": "", "parameters": {}},
+            _noop,
+            toolset="mcp",
+        )
+    h._mcp_tool_names = frozenset({"mcp__crm__lookup", "mcp__billing__charge"})
+
+    tool_filter = h._tool_filter_for_session(_session())
+    assert tool_filter is not None
+    assert "mcp__foreign__x" not in tool_filter
+    assert "mcp__billing__charge" in tool_filter
+    # The paywalled tool stays out even though the schema filter
+    # re-materialized this agent's discovered set.
+    assert "mcp__crm__lookup" not in tool_filter

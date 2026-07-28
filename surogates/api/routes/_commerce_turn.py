@@ -38,6 +38,7 @@ async def authorize_commerce_turn(
     content: str,
     *,
     buyer: dict | None = None,
+    channel: str | None = None,
 ) -> None:
     """Gate one visitor message behind the agent's monetization mode.
 
@@ -75,6 +76,7 @@ async def authorize_commerce_turn(
             estimated_tokens=estimate_turn_tokens(content),
             email=buyer.get("email"),
             name=buyer.get("name"),
+            channel=channel,
         )
     except CommercePaymentRequiredError as exc:
         raise HTTPException(

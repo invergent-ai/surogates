@@ -141,13 +141,16 @@ async def test_paid_with_buyer_reserves_and_pins_receipt():
             },
         },
     )
-    await website.authorize_commerce_turn(request, session, "x" * 100)
+    await website.authorize_commerce_turn(
+        request, session, "x" * 100, channel="website",
+    )
 
     assert client.calls == [
         {
             "agent_id": "a-1",
             "firebase_uid": "fb-1",
             "estimated_tokens": (100 + 16) // 4,
+            "channel": "website",
             "email": "b@example.com",
             "name": "B",
         },

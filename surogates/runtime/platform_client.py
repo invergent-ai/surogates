@@ -369,6 +369,7 @@ class PlatformClient:
         estimated_tokens: int,
         email: str | None = None,
         name: str | None = None,
+        channel: str | None = None,
     ) -> dict:
         """Reserve tokens for one end-user turn on a monetized agent.
 
@@ -389,6 +390,8 @@ class PlatformClient:
             body["email"] = email
         if name is not None:
             body["name"] = name
+        if channel is not None:
+            body["channel"] = channel
         resp = await self._client.post(
             f"/api/agents/agents/{agent_id}/commerce/authorize",
             json=body,

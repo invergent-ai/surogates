@@ -816,6 +816,7 @@ async def send_message(
                     session,
                     body.content,
                     buyer=buyer,
+                    channel="web",
                 )
 
     # Per-user allowance (a slice of the operator's subscription) applies

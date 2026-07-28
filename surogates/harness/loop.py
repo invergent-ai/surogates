@@ -3435,6 +3435,32 @@ class AgentHarness(
         updated.add("ask_user_question")
         return updated
 
+    def _apply_entitlement_exclusions(
+        self, tool_filter: set[str] | None,
+    ) -> set[str] | None:
+        """Subtract the purchased-package exclusions, LAST.
+
+        Runs after ``_apply_mcp_schema_filter`` on purpose: that filter
+        can re-add this agent's full discovered MCP set (its contract
+        for sessions without an explicit allowlist), which would
+        resurrect paywalled ``mcp__*`` tools if the exclusion ran
+        earlier. Beats an explicit ``allowed_tools`` for the same
+        reason the ``/code`` rule does: a paywalled tool must never be
+        schema-visible, whatever the session config asks for.
+        ``getattr``: several test harnesses build partial AgentHarness
+        objects that skip ``__init__``; absent means no restriction.
+        """
+        excluded = getattr(self, "_entitlement_excluded_tools", None)
+        if not excluded:
+            return tool_filter
+        base = (
+            set(self._tools.tool_names)
+            if tool_filter is None
+            else set(tool_filter)
+        )
+        base.difference_update(excluded)
+        return base
+
     def _apply_mcp_schema_filter(
         self, tool_filter: set[str] | None, *, explicit_allowed: bool,
     ) -> set[str] | None:
@@ -3556,23 +3582,6 @@ class AgentHarness(
                 tool_filter = set(tool_filter)
             tool_filter.discard("run_coding_agent")
 
-        # Purchased-package exclusions (browser toolset, non-included MCP
-        # servers / Composio toolkits) computed by the worker for this
-        # wake. Beats an explicit ``allowed_tools`` for the same reason
-        # the ``/code`` rule does: a paywalled tool must never be
-        # schema-visible, whatever the session config asks for.
-        # ``getattr``: several test harnesses build partial AgentHarness
-        # objects that skip ``__init__``; absent means no restriction.
-        entitlement_excluded = getattr(
-            self, "_entitlement_excluded_tools", None,
-        )
-        if entitlement_excluded:
-            if tool_filter is None:
-                tool_filter = set(self._tools.tool_names)
-            else:
-                tool_filter = set(tool_filter)
-            tool_filter.difference_update(entitlement_excluded)
-
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.
         # Otherwise the LLM can spawn nested cron jobs from inside a wake —
@@ -3601,6 +3610,7 @@ class AgentHarness(
             tool_filter = self._apply_mcp_schema_filter(
                 tool_filter, explicit_allowed=explicit_allowed,
             )
+            tool_filter = self._apply_entitlement_exclusions(tool_filter)
             tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
             return self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
@@ -3613,6 +3623,7 @@ class AgentHarness(
         tool_filter = self._apply_mcp_schema_filter(
             tool_filter, explicit_allowed=explicit_allowed,
         )
+        tool_filter = self._apply_entitlement_exclusions(tool_filter)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
         return self._ensure_always_available_tools(
             tool_filter, explicit_allowed=explicit_allowed,

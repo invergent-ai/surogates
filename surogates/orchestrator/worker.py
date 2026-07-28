@@ -411,6 +411,8 @@ async def _resolve_mcp_entitlement_scope(
                     ).where(OpsMcpServer.id.in_(list(entitled_ids)))
                 )
             ).all()
+        from surogates.tools.mcp.client import sanitize_mcp_name_component
+
         server_names: set[str] = set()
         toolkits: set[str] = set()
         for name, transport, oauth in rows:
@@ -419,7 +421,11 @@ async def _resolve_mcp_entitlement_scope(
                 if toolkit:
                     toolkits.add(toolkit.lower())
             else:
-                server_names.add(str(name))
+                # Tool names embed the SANITIZED server name
+                # (``mcp__{sanitized}__tool``); compare like with like
+                # or a server named "github-mcp" never matches its own
+                # ``mcp__github_mcp__*`` tools.
+                server_names.add(sanitize_mcp_name_component(str(name)))
         return server_names, toolkits
     except Exception:
         logger.warning(
@@ -444,6 +450,8 @@ def _entitlement_tool_exclusions(
     ``mcp_scope`` (``None`` scope with a restricted dimension = drop
     them all, see :func:`_resolve_mcp_entitlement_scope`).
     """
+    from surogates.orchestrator.mcp_client import is_composio_router_name
+
     excluded: set[str] = set()
     if not _entitlement_capability_allowed(session_config, "browser"):
         excluded.update(
@@ -457,18 +465,28 @@ def _entitlement_tool_exclusions(
     if mcp_allow is not None:
         allowed_servers = mcp_scope[0] if mcp_scope is not None else set()
         allowed_toolkits = mcp_scope[1] if mcp_scope is not None else set()
-        for name in tool_registry.tool_names:
+        for name in set(tool_registry.tool_names) | set(composio_tool_names):
             if not name.startswith("mcp__"):
+                # Defensive: Composio names are router-prefixed in
+                # production; a bare TOOLKIT_ACTION name still gets the
+                # toolkit treatment rather than slipping through.
+                if name in composio_tool_names:
+                    toolkit = name.split("_", 1)[0].lower()
+                    if toolkit not in allowed_toolkits:
+                        excluded.add(name)
+                continue
+            if is_composio_router_name(name):
+                # ``mcp__tool_router__TOOLKIT_ACTION``: the sellable
+                # unit is the toolkit, embedded in the tool component.
+                parts = name.split("__")
+                tool_part = parts[2] if len(parts) >= 3 else ""
+                toolkit = tool_part.split("_", 1)[0].lower()
+                if toolkit not in allowed_toolkits:
+                    excluded.add(name)
                 continue
             parts = name.split("__")
             server = parts[1] if len(parts) >= 3 else ""
             if server not in allowed_servers:
-                excluded.add(name)
-        for name in composio_tool_names:
-            if name.startswith("mcp__"):
-                continue  # handled by the server-name pass above
-            toolkit = name.split("_", 1)[0].lower()
-            if toolkit not in allowed_toolkits:
                 excluded.add(name)
     return excluded
 

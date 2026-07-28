@@ -174,6 +174,13 @@ def _allowance_block_notice(code: str | None, buy_url: str | None) -> str:
     link when the agent projects one, so slack/telegram senders get a
     real path to keep going rather than a dead "try again later".
     """
+    if code == "operator_subscription_exhausted":
+        # The agent OWNER ran out of platform credit; buying more access
+        # cannot help the sender, so no buy link is offered.
+        return (
+            "This assistant is temporarily unavailable. Its owner has "
+            "run out of credit."
+        )
     if code == "subscription_required":
         lead = "A subscription is required to keep chatting with this assistant."
     elif code == "channel_not_included":
