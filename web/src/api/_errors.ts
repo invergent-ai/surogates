@@ -61,7 +61,7 @@ const PAYWALL_LEADS: Record<string, string> = {
   subscription_required:
     "A subscription is required to keep chatting with this assistant.",
   operator_subscription_exhausted:
-    "This assistant is temporarily unavailable — its owner has run out of credit.",
+    "This assistant is temporarily unavailable. Its owner has run out of credit.",
   sign_in_required: "Please sign in to keep chatting with this assistant.",
 };
 

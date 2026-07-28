@@ -629,11 +629,15 @@ class ArtifactCompletionMixin:
         right per-user charge.
 
         Gated on the wake-time config carrying holds, so uncapped agents
-        (the default) skip the round trip. A hold appended mid-turn that
-        the stale wake object misses is bounded — there is no reaper, but
-        the next per-user cycle refill clears any leaked hold.
+        (the default) skip the round trip. Website sessions always pop the
+        live config regardless of the stale wake object: an embed hold
+        pinned by ``send_website_message`` after wake start would otherwise
+        leak (there is no allowance reaper), the same escape the commerce
+        settle makes for website sessions.
         """
-        if not (session.config or {}).get("allowance_reservations"):
+        if getattr(session, "channel", None) != "website" and not (
+            (session.config or {}).get("allowance_reservations")
+        ):
             return
         client = getattr(self, "_platform_client", None)
         if client is None:

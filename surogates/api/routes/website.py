@@ -683,6 +683,16 @@ async def bootstrap_website_session(
                     await store.update_session_config_key(
                         existing.id, "commerce_buyer", buyer,
                     )
+            # Absorb the per-buyer embed identity onto a reused session too,
+            # or a canonical session created before the key carried an
+            # embed_end_user_id would skip the allowance gate on every turn.
+            embed_eu = routing_config.get("embed_end_user_id")
+            if embed_eu and (existing.config or {}).get(
+                "embed_end_user_id",
+            ) != str(embed_eu):
+                await store.update_session_config_key(
+                    existing.id, "embed_end_user_id", str(embed_eu),
+                )
             response.status_code = status.HTTP_200_OK
             return _issue_bootstrap_response(
                 response,

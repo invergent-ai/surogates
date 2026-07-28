@@ -48,6 +48,12 @@ class _FakePlatformClient:
         self.debits.append({"agent_id": agent_id, **kwargs})
         return {"debited_tokens": kwargs["actual_tokens"]}
 
+    async def allowance_debit(self, agent_id, **kwargs):
+        if self.error is not None:
+            raise self.error
+        self.debits.append({"agent_id": agent_id, **kwargs})
+        return {"debited_tokens": kwargs["actual_tokens"]}
+
 
 def _session(*, channel="website", config=None):
     return SimpleNamespace(
@@ -172,3 +178,47 @@ async def test_missing_platform_client_leaves_holds_to_the_reaper():
     )
 
     assert store.pops == []
+
+
+# ── Per-user allowance settlement (website embed holds) ───────────────
+
+_AR1 = {"allowance_id": "al-1", "reserved_tokens": 500, "reservation_id": "res-1"}
+
+
+@pytest.mark.asyncio
+async def test_allowance_website_session_pops_even_when_wake_config_is_stale():
+    """A per-buyer embed hold pinned by send_website_message after wake
+    start would leak without the website escape (there is no allowance
+    reaper) — website sessions always take the live list."""
+    client = _FakePlatformClient()
+    store = _FakeStore(reservations=[_AR1])
+    harness = _Harness(platform_client=client, store=store)
+
+    await harness._settle_allowance_reservation(
+        _session(config={}), _tracker(10, 5),
+    )
+
+    assert store.pops == [(store.pops[0][0], "allowance_reservations")]
+    assert client.debits == [
+        {
+            "agent_id": "a-1",
+            "allowance_id": "al-1",
+            "reserved_tokens": 500,
+            "actual_tokens": 15,
+            "reservation_id": "res-1",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_allowance_non_website_without_pin_skips_the_round_trip():
+    client = _FakePlatformClient()
+    store = _FakeStore(reservations=[_AR1])
+    harness = _Harness(platform_client=client, store=store)
+
+    await harness._settle_allowance_reservation(
+        _session(channel="web", config={}), _tracker(10, 5),
+    )
+
+    assert store.pops == []
+    assert client.debits == []
