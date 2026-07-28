@@ -196,6 +196,17 @@ async def reserve_allowance(
     website widget embed.
     """
     if not always and runtime_payload.get("end_user_token_allowance") is None:
+        # Uncapped agent: no per-turn authorize, so no receipt carries
+        # the package. The agent's default package (ops projects it for
+        # exactly this) is still the sender's package — pin it here or
+        # a free unlimited agent with a restricted default would serve
+        # every capability unrestricted.
+        await pin_entitlements(
+            session_store,
+            session_id,
+            session_config,
+            runtime_payload.get("default_user_features"),
+        )
         return
     if platform_client is None:
         raise AllowanceReserveError("platform_client not wired")

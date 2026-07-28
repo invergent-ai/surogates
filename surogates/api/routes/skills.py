@@ -414,6 +414,10 @@ async def _session_entitled_skills(
     to the caller's most recently active session, where the authorize
     gates pin the package every turn. Only a caller with no sessions at
     all (nothing ever pinned) reads as unrestricted.
+
+    The fallback is scoped to the active agent when one is resolvable:
+    a user chats with several agents in one org, and another agent's
+    pinned package must not gate (or open) this agent's skills.
     """
     session = resolved_session
     if session is None and session_id is not None:
@@ -428,16 +432,19 @@ async def _session_entitled_skills(
 
         from surogates.db.models import Session as SessionRow
 
+        from surogates.api.routes._shared import resolve_agent_id
+
+        stmt = select(SessionRow).where(
+            SessionRow.org_id == tenant.org_id,
+            SessionRow.user_id == tenant.user_id,
+        )
+        agent_id = await resolve_agent_id(request)
+        if agent_id:
+            stmt = stmt.where(SessionRow.agent_id == agent_id)
         session_factory = request.app.state.session_factory
         async with session_factory() as db:
             rows = await db.execute(
-                select(SessionRow)
-                .where(
-                    SessionRow.org_id == tenant.org_id,
-                    SessionRow.user_id == tenant.user_id,
-                )
-                .order_by(SessionRow.updated_at.desc())
-                .limit(1),
+                stmt.order_by(SessionRow.updated_at.desc()).limit(1),
             )
             recent = rows.scalars().all()
             session = recent[0] if recent else None

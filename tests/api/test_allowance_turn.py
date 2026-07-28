@@ -358,3 +358,29 @@ async def test_channel_not_included_402_carries_code_and_buy_url():
         "code": "channel_not_included",
         "buy_url": "https://buy.example/agent",
     }
+
+
+@pytest.mark.asyncio
+async def test_uncapped_agent_pins_the_projected_default_package():
+    """An uncapped agent never phones home per turn, so the agent's
+    default package (projected as ``default_user_features``) must be
+    pinned locally — otherwise a free unlimited agent with a restricted
+    default serves every capability unrestricted."""
+    client = _FakePlatformClient(receipt={"allowance_id": "x"})
+    store = _ReconcilingStore()
+    request = _request(
+        runtime_payload={
+            "commerce_mode": "free",
+            "default_user_features": {"capabilities": ["loop"]},
+        },
+        platform_client=client,
+        store=store,
+    )
+    session = _session()
+    await authorize_allowance_turn(
+        request, session, "hello", end_user_id="u1",
+    )
+    assert client.calls == []
+    assert store.reconciled == [
+        (session.id, "entitlements", {"capabilities": ["loop"]}),
+    ]
