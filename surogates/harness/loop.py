@@ -392,6 +392,7 @@ class AgentHarness(
         agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
+        entitlement_excluded_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -407,6 +408,14 @@ class AgentHarness(
         # session resolved before this was wired keeps every command.
         self._slash_commands: SlashCommandConfig = (
             slash_commands if slash_commands is not None else SlashCommandConfig()
+        )
+        # Tool names the end-user's purchased package excludes for this
+        # wake (computed by the worker from ``session.config["entitlements"]``
+        # plus the ops MCP-server scope; empty = no restriction). Applied
+        # in ``_tool_filter_for_session`` where it beats an explicit
+        # ``allowed_tools``, mirroring the ``/code`` capability rule.
+        self._entitlement_excluded_tools: frozenset[str] = frozenset(
+            entitlement_excluded_tools or (),
         )
         # Per-agent git repos the coding tool / ``/code`` may check out.
         # ``wake`` re-fetches the session from the store, so these are overlaid
@@ -800,9 +809,22 @@ class AgentHarness(
     # Slash-command capability gate
     # ------------------------------------------------------------------
 
-    def _slash_command_enabled(self, name: str) -> bool:
-        """True when slash command *name* is enabled for this agent."""
-        return name in self._slash_commands.commands
+    def _slash_command_enabled(
+        self, name: str, session: Session | None = None,
+    ) -> bool:
+        """True when slash command *name* is enabled for this agent.
+
+        With a ``session``, the end-user's purchased package is checked
+        too: a capability the agent offers but the user's plan does not
+        include is gated exactly like an agent-level switch-off.
+        """
+        if name not in self._slash_commands.commands:
+            return False
+        if session is not None:
+            from surogates.runtime.entitlements import capability_allowed
+
+            return capability_allowed(session.config, name)
+        return True
 
     def _overlay_repos(self, session: Session) -> Session:
         """Overlay the agent's configured repos + ssh targets onto a wake-local session.
@@ -826,11 +848,14 @@ class AgentHarness(
                 config["agent_service_account_id"] = self._agent_service_account_id
         return session.model_copy(update={"config": config})
 
-    def _slash_command_block_reason(self, content: str | None) -> str | None:
+    def _slash_command_block_reason(
+        self, content: str | None, session: Session | None = None,
+    ) -> str | None:
         """User-facing message when the slash command in *content* is gated
-        off for this agent, else None (allowed, or not a gateable command)."""
+        off for this agent (or excluded from the sender's plan), else None
+        (allowed, or not a gateable command)."""
         name = _slash_command_name(content)
-        if name is None or self._slash_command_enabled(name):
+        if name is None or self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
 
@@ -1111,7 +1136,9 @@ class AgentHarness(
             # Capability gate: refuse slash commands disabled for this
             # agent (master switch off, or this command individually off)
             # before the dispatch chain below would handle them.
-            slash_block = self._slash_command_block_reason(last_user_content)
+            slash_block = self._slash_command_block_reason(
+                last_user_content, session,
+            )
             if slash_block is not None:
                 await self._emit_loop_response(
                     session, lease, slash_block, user_content=last_user_content
@@ -3522,12 +3549,24 @@ class AgentHarness(
         # that command is disabled the tool must also disappear from the
         # model-visible set (slash gating alone only blocks the human command).
         # This beats an explicit ``allowed_tools`` that lists it.
-        if not self._slash_command_enabled("code"):
+        if not self._slash_command_enabled("code", session):
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
             tool_filter.discard("run_coding_agent")
+
+        # Purchased-package exclusions (browser toolset, non-included MCP
+        # servers / Composio toolkits) computed by the worker for this
+        # wake. Beats an explicit ``allowed_tools`` for the same reason
+        # the ``/code`` rule does: a paywalled tool must never be
+        # schema-visible, whatever the session config asks for.
+        if self._entitlement_excluded_tools:
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            else:
+                tool_filter = set(tool_filter)
+            tool_filter.difference_update(self._entitlement_excluded_tools)
 
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.

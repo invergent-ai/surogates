@@ -14,6 +14,7 @@ import logging
 
 from fastapi import HTTPException, Request, status
 
+from surogates.runtime.entitlements import ENTITLEMENTS_CONFIG_KEY
 from surogates.runtime.platform_client import (
     AllowanceExhaustedError,
     CommercePaymentRequiredError,
@@ -118,12 +119,9 @@ class AllowanceReserveError(RuntimeError):
     """The allowance plane could not be reached — callers fail closed."""
 
 
-#: Session-config key holding the end-user's effective feature package
-#: for the current turn (``{capabilities, channels, kb_ids,
-#: mcp_server_ids}``; absent key = unrestricted dimension). Pinned by
-#: the authorize gates from the ops receipt; read by the worker/harness
-#: per-session filters. Absent = no restriction (agent defaults).
-ENTITLEMENTS_CONFIG_KEY = "entitlements"
+# The pinned package lives under ``ENTITLEMENTS_CONFIG_KEY`` (imported
+# from ``surogates.runtime.entitlements``, the canonical key + reader
+# module shared with the worker/harness filters).
 
 
 async def pin_entitlements(

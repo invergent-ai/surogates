@@ -22,6 +22,10 @@ from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt import PromptBuilder
+from surogates.runtime.entitlements import (
+    capability_allowed as _entitlement_capability_allowed,
+    dimension_allowlist,
+)
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -371,6 +375,102 @@ def _build_fleet_backend(
             f"unknown browser.fleet_fallback_backend: {settings.fleet_fallback_backend}"
         )
     return CompositeFallbackBackend(primary=primary, fallback=fallback)
+
+
+async def _resolve_mcp_entitlement_scope(
+    entitled_ids: frozenset[str],
+    ops_db_url: str,
+) -> tuple[set[str], set[str]] | None:
+    """Resolve entitled MCP-server ids to enforceable name scopes.
+
+    Returns ``(server_names, composio_toolkits)``: plain servers are
+    enforced by the ``mcp__{name}__`` tool-name prefix, Composio
+    placeholder rows by their toolkit's ``TOOLKIT_*`` tool-name prefix.
+    ``None`` means resolution failed — callers must fail CLOSED for the
+    restricted dimension (drop every MCP/Composio tool) rather than
+    serve paid tools unmetered on an infra blip.
+    """
+    if not ops_db_url:
+        return None
+    try:
+        import sqlalchemy as sa
+
+        from surogates.db.ops_engine import get_ops_session_factory
+        from surogates.db.ops_models import OpsMcpServer
+
+        factory = get_ops_session_factory()
+        if factory is None:
+            return None
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    sa.select(
+                        OpsMcpServer.name,
+                        OpsMcpServer.transport,
+                        OpsMcpServer.oauth,
+                    ).where(OpsMcpServer.id.in_(list(entitled_ids)))
+                )
+            ).all()
+        server_names: set[str] = set()
+        toolkits: set[str] = set()
+        for name, transport, oauth in rows:
+            if str(transport).lower().endswith("composio"):
+                toolkit = str((oauth or {}).get("toolkit") or "").strip()
+                if toolkit:
+                    toolkits.add(toolkit.lower())
+            else:
+                server_names.add(str(name))
+        return server_names, toolkits
+    except Exception:
+        logger.warning(
+            "MCP entitlement scope resolution failed; failing closed",
+            exc_info=True,
+        )
+        return None
+
+
+def _entitlement_tool_exclusions(
+    *,
+    session_config: dict | None,
+    tool_registry: Any,
+    composio_tool_names: frozenset[str],
+    mcp_scope: tuple[set[str], set[str]] | None,
+) -> set[str]:
+    """Concrete tool names the pinned package excludes for this wake.
+
+    Capability exclusions (browser toolset, the coding tool) come
+    straight from the package; MCP/Composio exclusions compare each
+    tool's server name / toolkit prefix against the resolved
+    ``mcp_scope`` (``None`` scope with a restricted dimension = drop
+    them all, see :func:`_resolve_mcp_entitlement_scope`).
+    """
+    excluded: set[str] = set()
+    if not _entitlement_capability_allowed(session_config, "browser"):
+        excluded.update(
+            e.name
+            for e in tool_registry.get_all()
+            if e.toolset == "browser"
+        )
+    if not _entitlement_capability_allowed(session_config, "code"):
+        excluded.add("run_coding_agent")
+    mcp_allow = dimension_allowlist(session_config, "mcp_server_ids")
+    if mcp_allow is not None:
+        allowed_servers = mcp_scope[0] if mcp_scope is not None else set()
+        allowed_toolkits = mcp_scope[1] if mcp_scope is not None else set()
+        for name in tool_registry.tool_names:
+            if not name.startswith("mcp__"):
+                continue
+            parts = name.split("__")
+            server = parts[1] if len(parts) >= 3 else ""
+            if server not in allowed_servers:
+                excluded.add(name)
+        for name in composio_tool_names:
+            if name.startswith("mcp__"):
+                continue  # handled by the server-name pass above
+            toolkit = name.split("_", 1)[0].lower()
+            if toolkit not in allowed_toolkits:
+                excluded.add(name)
+    return excluded
 
 
 async def _load_attached_kbs(
@@ -1367,6 +1467,17 @@ async def run_worker(settings: Settings) -> None:
             agent_id=session.agent_id,
             ops_db_url=settings.ops_db.url,
         )
+        # Purchased-package KB filter: the sender's plan may include only
+        # a subset of the agent's KBs. Applied before the empty-list tool
+        # gate below so a plan with zero included KBs also drops the KB
+        # tools; kb_read_page re-checks per call (kb_tools) so a
+        # remembered kb_id from another user's turn still refuses.
+        entitled_kb_ids = dimension_allowlist(session.config, "kb_ids")
+        if entitled_kb_ids is not None:
+            attached_kbs = [
+                kb for kb in attached_kbs
+                if str(kb.get("id")) in entitled_kb_ids
+            ]
         # Filter the tool set to drop kb_list_pages / kb_read_page
         # when this agent has nothing to navigate. Keeps the LLM from
         # ever seeing tool schemas it cannot meaningfully use, and
@@ -1426,6 +1537,28 @@ async def run_worker(settings: Settings) -> None:
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
         )
 
+        # Purchased-package tool exclusions: browser toolset, the coding
+        # tool, and non-included MCP servers / Composio toolkits. Dropped
+        # from the prompt surface here AND handed to the harness, whose
+        # per-iteration tool filter is what actually bounds the
+        # model-visible schemas and dispatch.
+        mcp_entitlement_allowlist = dimension_allowlist(
+            session.config, "mcp_server_ids",
+        )
+        mcp_entitlement_scope = None
+        if mcp_entitlement_allowlist is not None:
+            mcp_entitlement_scope = await _resolve_mcp_entitlement_scope(
+                mcp_entitlement_allowlist, settings.ops_db.url,
+            )
+        entitlement_excluded_tools = _entitlement_tool_exclusions(
+            session_config=session.config,
+            tool_registry=tool_registry,
+            composio_tool_names=composio_mcp_tools,
+            mcp_scope=mcp_entitlement_scope,
+        )
+        if entitlement_excluded_tools:
+            effective_tools.difference_update(entitlement_excluded_tools)
+
         # Pre-load SOUL.md / AGENT.md from the bundle resolved
         # above.  The PromptBuilder stays sync; the loaders return
         # ``None`` silently when the bundle is missing or doesn't
@@ -1452,7 +1585,15 @@ async def run_worker(settings: Settings) -> None:
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
             slash_commands=ctx.slash_commands,
-            brainstorming_gate=ctx.brainstorming_gate,
+            # The gate is agent-level AND package-level: a plan without
+            # the brainstorming capability turns the guidance off for
+            # this sender even when the agent has it on.
+            brainstorming_gate=(
+                ctx.brainstorming_gate
+                and _entitlement_capability_allowed(
+                    session.config, "brainstorming",
+                )
+            ),
         )
 
         # User / SA / channel-session principals each map to a JWT
@@ -1566,6 +1707,7 @@ async def run_worker(settings: Settings) -> None:
             # this agent's own MCP tools.
             mcp_tool_names=frozenset(discovered_mcp_tools),
             composio_tool_names=composio_mcp_tools,
+            entitlement_excluded_tools=frozenset(entitlement_excluded_tools),
             # Per-agent slash-command gating resolved from the runtime
             # config; the dispatch gate refuses disabled commands.
             slash_commands=ctx.slash_commands,

@@ -36,6 +36,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from surogates.db.ops_engine import ensure_ops_session_factory
+from surogates.runtime.entitlements import kb_allowed
 from surogates.db.ops_models import (
     OpsKBWikiPage,
     OpsKnowledgeBase,
@@ -146,6 +147,11 @@ async def _kb_list_pages_handler(
         return "Error: kb_id is required."
 
     agent_id = _agent_id_from_kwargs(kwargs)
+    if not kb_allowed(kwargs.get("session_config"), kb_id):
+        return (
+            f"Error: knowledge base {kb_id!r} is not included in the "
+            f"current user's plan."
+        )
 
     factory = ensure_ops_session_factory()
     if factory is None:
@@ -204,6 +210,11 @@ async def _kb_read_page_handler(
         return "Error: both kb_id and path are required."
 
     agent_id = _agent_id_from_kwargs(kwargs)
+    if not kb_allowed(kwargs.get("session_config"), kb_id):
+        return (
+            f"Error: knowledge base {kb_id!r} is not included in the "
+            f"current user's plan."
+        )
 
     factory = ensure_ops_session_factory()
     if factory is None:
