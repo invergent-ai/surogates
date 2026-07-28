@@ -115,9 +115,10 @@ ref that resolves to a moved or replaced element is worse than a missing one —
 
 **Result cap.** The serialized result is truncated at **20 000 characters** with
 an explicit marker naming the original size, so a `document.body.innerHTML`
-return cannot blow the context. The value matches `expert_loop.py`'s
-`_MAX_TOOL_RESULT_CHARS`, which caps tool results for the same reason; the
-constant lives beside the other browser constants.
+return cannot blow the context. The value matches
+`surogates/tools/builtin/expert_loop.py`'s `_MAX_TOOL_RESULT_CHARS`, which caps
+tool results for the same reason; the constant lives beside the other browser
+constants.
 
 **Errors.** `_playwright_execute` raises `RuntimeError` when the kernel envelope
 reports failure. The handler catches it and returns
@@ -149,7 +150,7 @@ convenient, not broader.
 ### New module
 
 `surogates/browser/serialize.py` — a pure function from snapshot nodes to
-markdown. No I/O, independently testable, and it keeps `client.py` (996 lines)
+markdown. No I/O, independently testable, and it keeps `client.py` (796 lines)
 from absorbing more. `get_state` calls it; nothing else changes in the request
 path.
 
@@ -185,7 +186,7 @@ Rules:
 - Header: title, url, viewport.
 - Heading roles become markdown headings, level clamped to 2–6.
 - Interactive nodes (`_INTERACTIVE_ROLES`) render as `- {role} @{ref} "{name}"`.
-- Other nodes contribute a plain text line when they own text.
+- Other nodes contribute a plain text line when they are a text block (below).
 - Document order throughout — the same order that assigns `@eN` refs, so refs
   read in ascending order.
 - No indentation. Structure comes from headings; indenting by raw DOM depth is
@@ -197,21 +198,45 @@ banners stay at the top, matching the guidance in
 
 ### Text deduplication
 
-Fixed at the source rather than guessed at in the serializer. The injected
-snapshot script gains an `own_text` field per node: the concatenation of the
-element's **direct child text nodes** only, trimmed and length-capped.
-`nameOf` is left untouched.
+Fixed at the source rather than guessed at in the serializer. A serializer-side
+rule cannot work reliably: `querySelectorAll('*')` returns document order, so
+the ancestor carrying the whole page's text is always seen *before* the
+descendants that own it, leaving nothing to deduplicate against.
 
-The serializer then uses `name` for interactive nodes (where `aria-label`,
-`placeholder`, and `value` are what identify the control) and `own_text` for
-everything else, emitting a text line only when `own_text` is non-empty. A
-container div that merely wraps its children owns no text and contributes
-nothing. Duplication is eliminated by construction rather than by a
-heuristic — a serializer-side rule cannot work reliably, because
-`querySelectorAll('*')` returns document order, so the ancestor carrying the
-whole page's text is always seen before the descendants that own it.
+The injected snapshot script gains one field per node, `text_block`, derived
+from a **text-block** test:
 
-`own_text` is additive to the JSON format: a new field, no removals.
+> A node is a text block when its subtree contains no interactive element and
+> no block-level element — that is, its content is pure inline markup.
+
+- Text blocks carry their full `innerText`, correctly ordered.
+- Non-text-block nodes carry an empty `text_block`; their content belongs to
+  their text-block descendants.
+- `nameOf` is left untouched, and interactive nodes keep using `name` — for a
+  control, `aria-label` / `placeholder` / `value` are what identify it.
+
+The serializer emits a text line only when `text_block` is non-empty, so a
+container div that merely wraps its children contributes nothing. Text is
+emitted exactly once, at the deepest node owning a coherent run.
+
+Choosing the text block as the unit — rather than an element's direct child text
+nodes — is what keeps sentences intact. Direct-child-text-nodes would make
+`<div class="price"><span>£</span><span>128</span></div>` serialize as `£` and
+`128` on separate lines, and mixed inline markup is the common case on content
+pages, not an edge case. Fragmenting it would trade a token problem for a
+comprehension problem.
+
+`<p>Read our <a href="…">privacy policy</a> for details</p>` still splits, but
+along the right seam: the `<a>` is interactive, so the paragraph is not a text
+block, and the two inline runs around the link each become their own text block.
+The link renders as a separately addressable control, which is what the agent
+needs.
+
+The test is cheap. The snapshot script already calls
+`window.getComputedStyle(el)` per element for its visibility check, so the
+`display` lookup rides on a call we are already paying for.
+
+`text_block` is additive to the JSON format: a new field, no removals.
 
 ### Node cap
 
@@ -232,7 +257,7 @@ should extract them in a single call, not re-request a larger tree.
 - `selector` — keep unchanged, gains a description. It scopes the snapshot to a
   subtree and is the primary way to stay under the node cap on a large page.
 - `compact` — **delete**. It dropped unnamed non-interactive nodes, which
-  `own_text` now does by construction in markdown and more precisely. Keeping
+  `text_block` now does by construction in markdown and more precisely. Keeping
   it would leave two overlapping ways to express one intent.
 
 The schema currently has no `description` on any property. All surviving
@@ -249,9 +274,18 @@ operates on string content and does not inspect the format.
 ## Testing
 
 **`serialize.py` unit tests** (pure, no fixtures): heading nesting and clamping;
-interactive line rendering; `own_text` emission and the container-owns-nothing
-case; consent-intent ordering; node cap and truncation line; empty page; nodes
-with missing or malformed fields.
+interactive line rendering; `text_block` emission and the
+container-owns-nothing case; consent-intent ordering; node cap and truncation
+line; empty page; nodes with missing or malformed fields.
+
+**Text-block derivation tests** against the two cases that motivated the rule:
+`<div class="price"><span>£</span><span>128</span></div>` yields the single line
+`£128`, not two fragments; and `<p>Read our <a>privacy policy</a> for
+details</p>` yields the surrounding inline runs as text plus the link as its own
+control line. These assert the in-page derivation, so they need a DOM — either
+the integration suite (`tests/integration/test_browser_e2e.py`) or a fake whose
+nodes carry pre-derived `text_block` values, depending on how much of the
+injected script we are willing to exercise in unit tests.
 
 **`browser_evaluate` handler tests**, following the existing
 `TestGetStateHandler` pattern in `tests/test_browser_tools.py` with
@@ -262,7 +296,7 @@ after a call; `paused_by_user` when the control store reports user control.
 **Routing regression:** `browser_evaluate` resolves to `ToolLocation.HARNESS`.
 
 **`get_state` format tests:** markdown by default; `format="json"` byte-identical
-to today's tree; `own_text` present in JSON output.
+to today's tree; `text_block` present in JSON output.
 
 **Fixture updates:** `tests/test_context_prune.py` and
 `tests/test_context_prune_integration.py` build fixtures shaped like the real
@@ -286,3 +320,11 @@ than assuming it.
 escape hatch, but an agent that ignores the notice will reason over a partial
 page. This is strictly better than today, where large pages are fully serialized
 at ruinous cost, but it is a new failure mode to watch for.
+
+**The text-block test rests on computed `display`.** Sites that restyle block
+elements as inline, or build layout entirely from `display: contents`, can push
+a text block boundary higher or lower than the visual structure suggests —
+merging two visually separate runs onto one line, or splitting one. Text is
+still emitted exactly once either way, so this degrades readability rather than
+correctness. Worth checking against a few real pages during implementation
+rather than reasoning about in the abstract.
