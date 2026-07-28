@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { authFetch } from "./auth";
-import { errorDetailMessage } from "./_errors";
+import { errorDetailMessage, paywallErrorMessage } from "./_errors";
 import type {
   Session,
   SessionChildrenResponse,
@@ -98,7 +98,18 @@ export async function sendMessage(
       body: JSON.stringify(payload),
     },
   );
-  if (!response.ok) throw new Error("Failed to send message");
+  if (!response.ok) {
+    if (response.status === 402) {
+      const body = (await response.json().catch(() => null)) as {
+        detail?: unknown;
+      } | null;
+      const paywall = paywallErrorMessage(body?.detail);
+      if (paywall) {
+        throw new Error(paywall);
+      }
+    }
+    throw new Error("Failed to send message");
+  }
   return (await response.json()) as { event_id: number; status: string };
 }
 
