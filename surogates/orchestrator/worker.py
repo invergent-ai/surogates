@@ -632,6 +632,29 @@ async def _load_prompt_catalogs(
     return available_agents, available_skills
 
 
+async def _load_prompt_catalogs_entitled(
+    *,
+    session_config: dict | None,
+    **kwargs: Any,
+) -> tuple[list[Any], list[Any]]:
+    """Prompt catalogs, narrowed to the sender's purchased package.
+
+    A restricted ``skills`` dimension hides non-included skills from
+    the system prompt; the skill tool and the API listing apply the
+    same allowlist per call, so a remembered name still refuses.
+    """
+    from surogates.runtime.entitlements import entitled_skills
+
+    agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
+    allowed = entitled_skills(session_config)
+    if allowed is not None:
+        skills_catalog = [
+            s for s in skills_catalog
+            if getattr(s, "builtin", False) or s.name in allowed
+        ]
+    return agents_catalog, skills_catalog
+
+
 def build_agent_principal_resolver(*, session_factory: Any):
     """The cached agent_id -> service-account-principal resolver.
 
@@ -1206,11 +1229,28 @@ async def run_worker(settings: Settings) -> None:
         )
         from surogates.tools.builtin.media_gen import MediaGenConfig
 
+        # Per-buyer model tier: when the sender's package pins a tier
+        # that differs from the agent's own, the main slot is built on
+        # the opposite-tier endpoint ops projected for exactly this.
+        # No projected endpoint (BYO agents, old configs) = no-op; the
+        # proxy meters by endpoint role so billing follows the swap.
+        from surogates.runtime.entitlements import entitled_model_tier
+
+        tier_override = None
+        pinned_tier = entitled_model_tier(session.config)
+        if pinned_tier is not None and ctx.llm_main is not None:
+            agent_is_pro = ctx.llm_main.model == "surogate-pro"
+            if pinned_tier == "pro" and not agent_is_pro:
+                tier_override = ctx.llm_tier_pro
+            elif pinned_tier == "basic" and agent_is_pro:
+                tier_override = ctx.llm_tier_basic
+
         llm_bundle = await build_session_llm_clients(
             ctx, vault=credential_vault,
             user_id=credential.user_id,
             service_account_id=credential.service_account_id,
             settings=settings,
+            main_endpoint_override=tier_override,
         )
 
         if not llm_bundle.main.model:
@@ -1453,7 +1493,8 @@ async def run_worker(settings: Settings) -> None:
         # Coordinator sessions also render sub-agents as an "Available
         # Sub-Agents" block and use their presence to gate delegation
         # tool schemas.
-        available_agents, available_skills = await _load_prompt_catalogs(
+        available_agents, available_skills = await _load_prompt_catalogs_entitled(
+            session_config=session.config,
             tenant=tenant,
             session_factory=session_factory,
             bundle=bundle,

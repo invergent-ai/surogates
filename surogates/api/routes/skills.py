@@ -399,6 +399,27 @@ async def _load_session_skill_overrides(
     return (session.config or {}).get("skill_overrides") or {}
 
 
+async def _session_entitled_skills(
+    request: Request,
+    tenant: TenantContext,
+    session_id: "UUID | None",
+) -> frozenset[str] | None:
+    """The session's purchased-package skill allowlist, or ``None``.
+
+    ``None`` (no session, unauthorized, no pin, unrestricted dimension)
+    means no restriction, mirroring the runtime reader.
+    """
+    if session_id is None:
+        return None
+    try:
+        session = await _authorize_session_for_staging(request, tenant, session_id)
+    except HTTPException:
+        return None
+    from surogates.runtime.entitlements import entitled_skills
+
+    return entitled_skills(session.config)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -427,6 +448,7 @@ async def list_skills(
     bundle = await _resolve_agent_bundle(request)
     system_bundle = await _resolve_system_bundle(request)
     overrides = await _load_session_skill_overrides(request, tenant, session_id)
+    entitled = await _session_entitled_skills(request, tenant, session_id)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant,
@@ -435,6 +457,11 @@ async def list_skills(
             system_bundle=system_bundle,
             overrides=overrides,
         )
+    if entitled is not None:
+        all_skills = [
+            s for s in all_skills
+            if getattr(s, "builtin", False) or s.name in entitled
+        ]
 
     summaries: list[SkillSummary] = []
     for skill in all_skills:
@@ -490,6 +517,15 @@ async def view_skill(
 
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    entitled = await _session_entitled_skills(request, tenant, session_id)
+    if (
+        entitled is not None
+        and not getattr(skill_def, "builtin", False)
+        and skill_def.name not in entitled
+    ):
+        # Same shape as unknown so a probing client learns nothing
+        # beyond "not available to you".
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
     detail = SkillDetail(
@@ -598,6 +634,13 @@ async def read_skill_file(
         )
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    entitled = await _session_entitled_skills(request, tenant, session_id)
+    if (
+        entitled is not None
+        and not getattr(skill_def, "builtin", False)
+        and skill_def.name not in entitled
+    ):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:

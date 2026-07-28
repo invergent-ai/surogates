@@ -190,7 +190,15 @@ def _active_skill_override(kwargs: dict[str, Any], name: str) -> dict | None:
 
 
 async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
-    """Load skills from all layers, using DB when a session factory is available."""
+    """Load skills from all layers, using DB when a session factory is available.
+
+    The sender's purchased package narrows the result: a restricted
+    ``skills`` dimension on ``session_config["entitlements"]`` hides
+    non-included skills from the tool and slash surfaces (built-in
+    platform skills always pass — they are runtime plumbing, not
+    sellable content).
+    """
+    from surogates.runtime.entitlements import entitled_skills
     from surogates.tools.loader import ResourceLoader
 
     loader = ResourceLoader.from_settings(_settings_from_kwargs(kwargs))
@@ -198,10 +206,18 @@ async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
     session_factory = kwargs.get("session_factory")
     if session_factory is not None:
         async with session_factory() as db_session:
-            return await loader.load_skills(
+            skills = await loader.load_skills(
                 tenant, db_session=db_session, overrides=overrides,
             )
-    return await loader.load_skills(tenant, overrides=overrides)
+    else:
+        skills = await loader.load_skills(tenant, overrides=overrides)
+    allowed = entitled_skills(kwargs.get("session_config"))
+    if allowed is not None:
+        skills = [
+            s for s in skills
+            if getattr(s, "builtin", False) or s.name in allowed
+        ]
+    return skills
 
 
 # ---------------------------------------------------------------------------

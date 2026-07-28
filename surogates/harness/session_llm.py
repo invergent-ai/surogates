@@ -146,6 +146,7 @@ async def build_session_llm_clients(
     user_id: Any = None,
     service_account_id: Any = None,
     settings: Any = None,
+    main_endpoint_override: "LLMEndpoint | None" = None,
 ) -> SessionLLMClients:
     """Build the per-session LLM bundle.
 
@@ -227,7 +228,12 @@ async def build_session_llm_clients(
         return slot
 
     try:
-        main = await _resolve(ctx.llm_main)
+        # Per-buyer model tier: the worker passes the opposite-tier
+        # endpoint when the sender's package pins a tier that differs
+        # from the agent's own. Client and model swap TOGETHER — the
+        # tier lives in the endpoint URL, so a bare model-string swap
+        # would misroute (see resilience.py's pro-fallback rationale).
+        main = await _resolve(main_endpoint_override or ctx.llm_main)
         summary = await _opt(ctx.llm_summary)
         vision = await _opt(ctx.llm_vision)
         advisor = await _opt(ctx.llm_advisor)

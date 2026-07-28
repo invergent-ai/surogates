@@ -69,6 +69,21 @@ def capability_allowed(
     return normalized in allowed
 
 
+def entitled_model_tier(session_config: dict | None) -> str | None:
+    """The model tier the package pins ("basic"/"pro"), or ``None``
+    for the agent's own tier."""
+    entitlements = pinned_entitlements(session_config)
+    if entitlements is None:
+        return None
+    tier = entitlements.get("model_tier")
+    return tier if tier in ("basic", "pro") else None
+
+
+def entitled_skills(session_config: dict | None) -> frozenset[str] | None:
+    """Allowlist of skill names, or ``None`` when unrestricted."""
+    return dimension_allowlist(session_config, "skills")
+
+
 def kb_allowed(session_config: dict | None, kb_id: str) -> bool:
     """Whether the package includes knowledge base ``kb_id``."""
     allowed = dimension_allowlist(session_config, "kb_ids")
@@ -79,6 +94,8 @@ __all__ = [
     "ENTITLEMENTS_CONFIG_KEY",
     "capability_allowed",
     "dimension_allowlist",
+    "entitled_model_tier",
+    "entitled_skills",
     "kb_allowed",
     "pinned_entitlements",
 ]

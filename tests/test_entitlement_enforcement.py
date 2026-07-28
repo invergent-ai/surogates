@@ -273,3 +273,87 @@ async def test_kb_list_refuses_a_kb_outside_the_plan():
         session_config={"entitlements": {"kb_ids": []}},
     )
     assert "not included in the current user's plan" in result
+
+
+# ── skills + model tier (v2) ──────────────────────────────────────────
+
+
+def test_entitled_model_tier_reads_the_scalar():
+    from surogates.runtime.entitlements import entitled_model_tier
+
+    assert entitled_model_tier(None) is None
+    assert entitled_model_tier({"entitlements": {}}) is None
+    assert entitled_model_tier(
+        {"entitlements": {"model_tier": "pro"}},
+    ) == "pro"
+    assert entitled_model_tier(
+        {"entitlements": {"model_tier": "ultra"}},
+    ) is None
+
+
+def test_entitled_skills_allowlist():
+    from surogates.runtime.entitlements import entitled_skills
+
+    assert entitled_skills(None) is None
+    assert entitled_skills(
+        {"entitlements": {"skills": ["contracts"]}},
+    ) == frozenset({"contracts"})
+    assert entitled_skills({"entitlements": {"capabilities": []}}) is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_catalog_skills_filtered_by_package(monkeypatch):
+    from surogates.orchestrator import worker as worker_mod
+
+    class _Skill:
+        def __init__(self, name, builtin=False):
+            self.name = name
+            self.builtin = builtin
+
+    async def _fake_catalogs(**kwargs):
+        return (["agent"], [
+            _Skill("contracts"), _Skill("litigation"),
+            _Skill("platform-core", builtin=True),
+        ])
+
+    monkeypatch.setattr(worker_mod, "_load_prompt_catalogs", _fake_catalogs)
+    agents, skills = await worker_mod._load_prompt_catalogs_entitled(
+        session_config={"entitlements": {"skills": ["contracts"]}},
+    )
+    assert agents == ["agent"]
+    assert [s.name for s in skills] == ["contracts", "platform-core"]
+
+    # Unrestricted stays untouched.
+    _, all_skills = await worker_mod._load_prompt_catalogs_entitled(
+        session_config={},
+    )
+    assert len(all_skills) == 3
+
+
+def test_tier_override_endpoint_selection():
+    """The worker swaps the main slot only when the pinned tier differs
+    from the agent's own and ops projected the opposite endpoint."""
+    from surogates.runtime.context import LLMEndpoint
+    from surogates.runtime.entitlements import entitled_model_tier
+
+    base = LLMEndpoint(model="surogate", base_url="http://p/base", api_key_ref="r")
+    pro = LLMEndpoint(model="surogate-pro", base_url="http://p/pro", api_key_ref="r")
+
+    def pick(session_config, llm_main, tier_basic, tier_pro):
+        override = None
+        pinned = entitled_model_tier(session_config)
+        if pinned is not None and llm_main is not None:
+            agent_is_pro = llm_main.model == "surogate-pro"
+            if pinned == "pro" and not agent_is_pro:
+                override = tier_pro
+            elif pinned == "basic" and agent_is_pro:
+                override = tier_basic
+        return override
+
+    pro_pin = {"entitlements": {"model_tier": "pro"}}
+    basic_pin = {"entitlements": {"model_tier": "basic"}}
+    assert pick(pro_pin, base, None, pro) is pro
+    assert pick(pro_pin, pro, base, None) is None  # already pro
+    assert pick(basic_pin, pro, base, None) is base
+    assert pick(basic_pin, base, None, pro) is None  # already basic
+    assert pick({}, base, None, pro) is None
