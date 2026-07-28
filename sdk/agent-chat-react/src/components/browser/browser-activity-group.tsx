@@ -40,6 +40,7 @@ function summarize(call: ToolCallInfo): string {
 const ACTION_SUMMARIES: Record<string, (args: Record<string, unknown>) => string> = {
   browser_navigate: (args) => `navigate to ${stringValue(args.url) || "?"}`,
   browser_get_state: () => "get state",
+  browser_evaluate: () => "run script",
   browser_close: () => "close",
   browser_click: (args) => {
     const ref = stringValue(args.ref);

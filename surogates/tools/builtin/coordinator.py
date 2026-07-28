@@ -97,6 +97,7 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "browser_click",
     "browser_close",
     "browser_drag",
+    "browser_evaluate",
     "browser_get_state",
     "browser_navigate",
     "browser_press_key",

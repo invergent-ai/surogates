@@ -4,8 +4,8 @@ These exercise the *composed* behaviour: the real ``ContextCompressor`` running
 ``prune_stale_browser_states`` over a realistically-shaped browser session, and
 the downstream effect on ``should_compress`` (the token-size gate that decides
 compaction frequency).  Browser state payloads mirror the real
-``browser_get_state`` JSON shape (url/title/viewport/tree of ref+role+name
-nodes) but contain no real page data.
+``browser_get_state`` markdown shape (header plus one line per element) but
+contain no real page data.
 """
 
 from __future__ import annotations
@@ -21,28 +21,26 @@ from surogates.harness.context import (
 def _realistic_state(step: int, n_nodes: int = 130) -> str:
     """A browser_get_state result shaped like the real tool output.
 
-    ~130 nodes lands around ~2-2.5K tokens, matching the measured production
-    average for filtered (interactive_only/compact) snapshots.
+    ~130 elements lands around ~1K tokens, matching the measured production
+    average for a markdown snapshot.
     """
-    roles = ["button", "link", "textbox", "generic", "heading", "listitem", "image"]
-    tree = [
-        {
-            "ref": f"@e{i}",
-            "role": roles[i % len(roles)],
-            "name": f"element {i} on view {step} — some visible label text here",
-            "x": (i * 7) % 1280,
-            "y": (i * 13) % 2000,
-        }
-        for i in range(n_nodes)
+    roles = ["button", "link", "textbox", "checkbox", "searchbox", "tab"]
+    lines = [
+        f"# View {step}",
+        f"https://example.test/page/{step}",
+        "viewport 1280x800",
+        "",
     ]
-    return json.dumps(
-        {
-            "url": f"https://example.test/page/{step}",
-            "title": f"View {step}",
-            "viewport": {"width": 1280, "height": 800},
-            "tree": tree,
-        }
-    )
+    for i in range(n_nodes):
+        if i % 7 == 0:
+            lines.append(f"## section {i} on view {step}")
+        elif i % 3 == 0:
+            lines.append(f"element {i} on view {step} — some visible label text here")
+        else:
+            lines.append(
+                f'- {roles[i % len(roles)]} @e{i} "element {i} on view {step}"'
+            )
+    return "\n".join(lines)
 
 
 def _browser_session(n_states: int) -> list[dict]:
@@ -59,7 +57,7 @@ def _browser_session(n_states: int) -> list[dict]:
                         "type": "function",
                         "function": {
                             "name": "browser_get_state",
-                            "arguments": '{"interactive_only": true, "compact": true}',
+                            "arguments": '{"interactive_only": true}',
                         },
                     }
                 ],
@@ -73,11 +71,13 @@ def _browser_session(n_states: int) -> list[dict]:
 
 def _small_ctx_compressor(**kw) -> ContextCompressor:
     # Shrink the declared context window so the compaction threshold is small
-    # enough to reach in a test (threshold = 50% of context_window).
+    # enough to reach in a test (threshold = 50% of context_window).  Sized
+    # against the markdown snapshot: 12 states estimate ~16K tokens unpruned
+    # and ~3K pruned, so a 12K threshold sits clear of both.
     return ContextCompressor(
         "claude-opus-4-7",
         quiet_mode=True,
-        model_overrides={"claude-opus-4-7": {"context_window": 40_000}},
+        model_overrides={"claude-opus-4-7": {"context_window": 24_000}},
         **kw,
     )
 
@@ -98,7 +98,7 @@ def test_prune_keeps_current_state_and_clears_the_rest_on_real_shape():
     assert len(cleared) == 10           # 12 states, keep last 2
     assert len(kept) == 2
     # The two kept states are the most recent ones (the current page view).
-    assert json.loads(kept[-1]["content"])["url"] == "https://example.test/page/12"
+    assert "https://example.test/page/12" in kept[-1]["content"]
     # Substantial payload reduction.
     assert _chars(after) < 0.35 * _chars(before)
 
