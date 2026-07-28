@@ -209,11 +209,24 @@ from a **text-block** test:
 > A node is a text block when its subtree contains no interactive element and
 > no block-level element — that is, its content is pure inline markup.
 
-- Text blocks carry their full `innerText`, correctly ordered.
-- Non-text-block nodes carry an empty `text_block`; their content belongs to
-  their text-block descendants.
+- Text blocks carry their full `innerText`, correctly ordered. When one fires,
+  its whole subtree is marked covered so nested pure-inline elements stay
+  silent — the shallowest text block wins. Without this,
+  `<div><span>£</span><span>128</span></div>` emits three times: the div is a
+  text block and so is each span.
+- Non-text-block nodes carry only their **direct child text runs** — the text
+  that belongs to no descendant element. Without this branch,
+  `<p>Read our <a>privacy policy</a> for details</p>` loses `Read our` and
+  `for details`: the `<p>` is not a text block because it holds an interactive
+  descendant, and bare text nodes are never returned by
+  `querySelectorAll('*')`.
 - `nameOf` is left untouched, and interactive nodes keep using `name` — for a
   control, `aria-label` / `placeholder` / `value` are what identify it.
+
+The two branches are complementary and jointly exhaustive: every text node is
+emitted exactly once, either inside the `innerText` of its shallowest
+text-block ancestor, or as a direct-child run of its nearest non-text-block
+ancestor.
 
 The serializer emits a text line only when `text_block` is non-empty, so a
 container div that merely wraps its children contributes nothing. Text is
@@ -228,9 +241,8 @@ comprehension problem.
 
 `<p>Read our <a href="…">privacy policy</a> for details</p>` still splits, but
 along the right seam: the `<a>` is interactive, so the paragraph is not a text
-block, and the two inline runs around the link each become their own text block.
-The link renders as a separately addressable control, which is what the agent
-needs.
+block and contributes its own text runs, while the link renders as a separately
+addressable control — which is what the agent needs.
 
 The test is cheap. The snapshot script already calls
 `window.getComputedStyle(el)` per element for its visibility check, so the
