@@ -1004,3 +1004,33 @@ class TestEvaluateHandler:
             _client_factory=lambda endpoint: FakeEvaluateClient(),
         )
         assert json.loads(result)["error"] == "missing_code"
+
+
+class TestEvaluateAuditTrail:
+    """browser_evaluate's security posture is 'unrestricted but audited'.
+
+    That only holds if the complete JS source reaches the TOOL_CALL event.
+    These pin the two transformations it passes through on the way there.
+    """
+
+    def test_path_sanitisation_leaves_javascript_intact(self) -> None:
+        from surogates.harness.tool_exec import _sanitize_paths
+
+        code = (
+            "const rows = [...document.querySelectorAll('tr')];\n"
+            "return rows.map(r => ({t: r.innerText, n: r.children.length}));"
+        )
+        sanitized = _sanitize_paths({"code": code}, "/workspace")
+        assert sanitized["code"] == code
+
+    def test_arguments_are_not_truncated_on_the_tool_call_event(self) -> None:
+        import inspect
+
+        from surogates.harness import tool_exec
+
+        src = inspect.getsource(tool_exec)
+        # The TOOL_CALL payload carries the whole argument dict.  ``_truncate_args``
+        # feeds ``arguments_excerpt`` on a *different* event -- if it ever moves
+        # onto ``tool_call_data``, the audit trail silently loses long JS bodies.
+        assert '"arguments": sanitized_args,' in src
+        assert '"arguments": _truncate_args' not in src
