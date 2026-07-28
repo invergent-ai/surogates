@@ -28,6 +28,7 @@ interface CommerceOffer {
   amount_cents: number;
   billing_interval: string | null;
   token_amount: number;
+  description?: string | null;
   /** Buyer-facing labels for a custom package; [] or absent = full
    * access (subscriptions) / pure extra usage (packs). */
   included?: string[];
@@ -207,7 +208,7 @@ export function PlanUsageTab() {
         // highlightFirst: the lead plan is the recommended one and gets
         // the brand beam; selection is a data flag, not display copy.
         { label: "Plans", items: subscriptions, verb: "Subscribe", highlightFirst: true },
-        { label: "Extra usage", items: packs, verb: "Buy", highlightFirst: false },
+        { label: "One-time packs", items: packs, verb: "Buy", highlightFirst: false },
       ]
         .filter((s) => s.items.length > 0)
         .map((section) => (
@@ -230,11 +231,21 @@ export function PlanUsageTab() {
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="text-sm font-medium">{offer.name}</span>
                     <span className="text-xs text-muted-foreground">
-                      {approxMessagesLabel(offer.token_amount)}
-                      {offer.kind === "subscription"
-                        ? " every period"
-                        : " of extra usage · one-time"}
+                      {offer.token_amount > 0
+                        ? `${approxMessagesLabel(offer.token_amount)}${
+                            offer.kind === "subscription"
+                              ? " every period"
+                              : " of extra usage · one-time"
+                          }`
+                        : offer.kind === "subscription"
+                          ? "Access included"
+                          : "Feature add-on · one-time"}
                     </span>
+                    {offer.description ? (
+                      <span className="text-xs text-muted-foreground/80">
+                        {offer.description}
+                      </span>
+                    ) : null}
                     {(offer.included?.length ?? 0) > 0 ? (
                       <span className="text-xs text-muted-foreground/80">
                         Includes: {offer.included?.join(" · ")}
