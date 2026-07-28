@@ -236,7 +236,15 @@ The test is cheap. The snapshot script already calls
 `window.getComputedStyle(el)` per element for its visibility check, so the
 `display` lookup rides on a call we are already paying for.
 
-`text_block` is additive to the JSON format: a new field, no removals.
+### Heading levels
+
+`roleOf` currently collapses `h1`–`h6` to a single `heading` role, discarding the
+level, so headings cannot nest. The snapshot script gains a second field,
+`heading_level` (1–6, from the tag name, falling back to `aria-level`), set only
+on heading nodes.
+
+Both `text_block` and `heading_level` are additive to the JSON format: two new
+fields, no removals.
 
 ### Node cap
 
@@ -295,8 +303,9 @@ after a call; `paused_by_user` when the control store reports user control.
 
 **Routing regression:** `browser_evaluate` resolves to `ToolLocation.HARNESS`.
 
-**`get_state` format tests:** markdown by default; `format="json"` byte-identical
-to today's tree; `text_block` present in JSON output.
+**`get_state` format tests:** markdown by default; `format="json"` returns
+today's structure with the two new fields added and every existing key and the
+node ordering unchanged.
 
 **Fixture updates:** `tests/test_context_prune.py` and
 `tests/test_context_prune_integration.py` build fixtures shaped like the real
