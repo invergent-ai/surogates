@@ -1036,6 +1036,16 @@ class TestSnapshotScriptShape:
         # child are lost -- querySelectorAll('*') returns elements only.
         assert "ownTextOf" in script
 
+    def test_script_covers_interactive_subtrees(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        script = KernelBrowserClient._SNAPSHOT_SCRIPT
+        # Text inside a control belongs to the control.  Without covering the
+        # interactive subtree, a block-level child (<a><div>Label</div></a> --
+        # Wikipedia's whole TOC, and any `<a class="block">`) emits the label a
+        # second time as a stray text line right under the control line.
+        assert "if (__INTERACTIVE.has(role)) {" in script
+
     def test_script_computes_style_once_per_element(self) -> None:
         from surogates.browser.client import KernelBrowserClient
 

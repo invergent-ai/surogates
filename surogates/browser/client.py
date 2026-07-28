@@ -171,7 +171,13 @@ for (const el of __els) {
   el.setAttribute('data-sg-i', String(out.length));
   const role = roleOf(el);
   let textBlock = '';
-  if (covered.has(el)) {
+  if (__INTERACTIVE.has(role)) {
+    // Text inside a control belongs to the control: nameOf already carries it
+    // into the "- role @eN name" line.  Cover the subtree so a block-level
+    // child (<a><div>Label</div></a>, ubiquitous in nav menus and card links)
+    // cannot emit the same label a second time as a stray text line.
+    for (const d of Array.from(el.querySelectorAll('*'))) covered.add(d);
+  } else if (covered.has(el)) {
     // An ancestor text block already emitted this element's text.
     textBlock = '';
   } else if (isTextBlock(el)) {
