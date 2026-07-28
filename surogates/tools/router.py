@@ -76,6 +76,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # Agent browser (separate resource from workspace sandbox)
     "browser_navigate": ToolLocation.HARNESS,
     "browser_get_state": ToolLocation.HARNESS,
+    "browser_evaluate": ToolLocation.HARNESS,
     "browser_screenshot": ToolLocation.HARNESS,
     "browser_click": ToolLocation.HARNESS,
     "browser_type": ToolLocation.HARNESS,

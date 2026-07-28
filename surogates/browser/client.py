@@ -259,6 +259,30 @@ return {
         self._invalidate_snapshot_cache()
         return result
 
+    async def evaluate(self, code: str) -> Any:
+        """Run agent-supplied JavaScript in page context and return its value.
+
+        *code* is a function **body**, not an expression: it must ``return`` a
+        JSON-serializable value.  Raw interpolation is correct here -- the
+        payload is code, and it sits in a function body with no surrounding
+        literal to escape from.  The callback is ``async`` so the body may
+        ``await``.
+
+        The snapshot cache is cleared afterwards: JavaScript can move or replace
+        elements, and a stale ``@eN`` that resolves to the wrong node is worse
+        than one that fails to resolve.
+        """
+
+        wrapped = (
+            "const __result = await page.evaluate(async () => {\n"
+            f"{code}\n"
+            "});\n"
+            "return __result;"
+        )
+        result = await self._playwright_execute(wrapped)
+        self._invalidate_snapshot_cache()
+        return result
+
     async def storage_state(self) -> dict[str, Any]:
         """Export the live context's cookies + per-origin localStorage."""
 

@@ -687,6 +687,7 @@ class TestScreenshotHandler:
 BROWSER_TOOL_NAMES = [
     "browser_navigate",
     "browser_get_state",
+    "browser_evaluate",
     "browser_screenshot",
     "browser_click",
     "browser_type",
@@ -775,6 +776,7 @@ class TestRouterDispatch:
 BROWSER_SUSPEND_HANDLERS = [
     ("_browser_navigate_handler", {"url": "https://example.com"}),
     ("_browser_get_state_handler", {}),
+    ("_browser_evaluate_handler", {"code": "return 1;"}),
     ("_browser_screenshot_handler", {}),
     ("_browser_click_handler", {"x": 10, "y": 10}),
     ("_browser_type_handler", {"text": "hello"}),
@@ -923,3 +925,82 @@ class TestGetStateSchema:
         from surogates.tools.builtin.browser import GET_STATE_SCHEMA
 
         assert GET_STATE_SCHEMA["properties"]["format"]["enum"] == ["markdown", "json"]
+
+
+class FakeEvaluateClient(FakeClient):
+    def __init__(self, result: Any = None) -> None:
+        super().__init__()
+        self.evaluated: list[str] = []
+        self._result = result if result is not None else {"rows": 3}
+
+    async def evaluate(self, code: str) -> Any:
+        self.evaluated.append(code)
+        return self._result
+
+
+class FailingEvaluateClient(FakeClient):
+    async def evaluate(self, code: str) -> Any:
+        raise RuntimeError("SyntaxError: Unexpected token '}'")
+
+
+class TestEvaluateHandler:
+    async def test_returns_the_json_result(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {"code": "return document.title;"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient({"title": "T"}),
+        )
+        assert json.loads(result) == {"title": "T"}
+
+    async def test_returns_structured_error_on_js_failure(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {"code": "return }"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FailingEvaluateClient(),
+        )
+        body = json.loads(result)
+        assert body["error"] == "evaluate_failed"
+        assert "SyntaxError" in body["detail"]
+
+    async def test_truncates_oversized_results(self, tenant) -> None:
+        from surogates.tools.builtin.browser import (
+            _MAX_EVALUATE_RESULT_CHARS,
+            _browser_evaluate_handler,
+        )
+
+        huge = "x" * (_MAX_EVALUATE_RESULT_CHARS + 5000)
+        result = await _browser_evaluate_handler(
+            {"code": "return document.body.innerHTML;"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient(huge),
+        )
+        body = json.loads(result)
+        assert body["truncated"] is True
+        assert body["original_length"] > _MAX_EVALUATE_RESULT_CHARS
+        assert len(body["result"]) == _MAX_EVALUATE_RESULT_CHARS
+
+    async def test_rejects_missing_code(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_evaluate_handler
+
+        result = await _browser_evaluate_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeEvaluateClient(),
+        )
+        assert json.loads(result)["error"] == "missing_code"

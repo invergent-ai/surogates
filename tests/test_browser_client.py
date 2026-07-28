@@ -1046,3 +1046,36 @@ class TestSnapshotScriptShape:
         assert KernelBrowserClient._SNAPSHOT_SCRIPT.count(
             "window.getComputedStyle"
         ) == 1
+
+
+class TestEvaluate:
+    async def test_wraps_code_in_a_page_evaluate_callback(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        sent: list[str] = []
+
+        async def fake_execute(code: str, **kwargs: Any) -> Any:
+            sent.append(code)
+            return {"ok": True}
+
+        client._playwright_execute = fake_execute  # type: ignore[assignment]
+        result = await client.evaluate("return document.title;")
+
+        assert result == {"ok": True}
+        assert "await page.evaluate(async () => {" in sent[0]
+        assert "return document.title;" in sent[0]
+
+    async def test_invalidates_the_snapshot_cache(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        client = KernelBrowserClient("http://browser:30000")
+        client._snapshot_cache["@e1"] = {"x": 1, "y": 2}
+
+        async def fake_execute(code: str, **kwargs: Any) -> Any:
+            return None
+
+        client._playwright_execute = fake_execute  # type: ignore[assignment]
+        await client.evaluate("document.body.innerHTML = '';")
+
+        assert client._snapshot_cache == {}
