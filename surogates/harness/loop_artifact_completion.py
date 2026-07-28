@@ -773,8 +773,13 @@ class ArtifactCompletionMixin:
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
 
-        await self._settle_commerce_reservation(session, cost_tracker)
-        await self._settle_allowance_reservation(session, cost_tracker)
+        # Two independent best-effort settlements (neither raises); run
+        # them concurrently to halve the session-complete round trip when
+        # both a commerce and an allowance hold are present.
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, cost_tracker),
+            self._settle_allowance_reservation(session, cost_tracker),
+        )
 
         session_complete_event_id = await self._store.emit_event(
             session.id,
