@@ -67,6 +67,7 @@ from surogates.channels.website_session import (
 )
 from surogates.config import Settings, enqueue_session
 from surogates.api.routes._commerce_turn import (
+    authorize_allowance_turn,
     authorize_commerce_turn,
     estimate_turn_tokens,
     get_session_store,
@@ -682,6 +683,16 @@ async def bootstrap_website_session(
                     await store.update_session_config_key(
                         existing.id, "commerce_buyer", buyer,
                     )
+            # Absorb the per-buyer embed identity onto a reused session too,
+            # or a canonical session created before the key carried an
+            # embed_end_user_id would skip the allowance gate on every turn.
+            embed_eu = routing_config.get("embed_end_user_id")
+            if embed_eu and (existing.config or {}).get(
+                "embed_end_user_id",
+            ) != str(embed_eu):
+                await store.update_session_config_key(
+                    existing.id, "embed_end_user_id", str(embed_eu),
+                )
             response.status_code = status.HTTP_200_OK
             return _issue_bootstrap_response(
                 response,
@@ -714,6 +725,15 @@ async def bootstrap_website_session(
     cap = agent_cap or settings.website.session_message_cap
     if cap:
         config["session_message_cap"] = cap
+
+    # Per-buyer embed: a widget key a buyer minted carries the buyer's
+    # end_user_id in the routing config. Pin it so every anonymous
+    # visitor turn on the buyer's site draws from that buyer's purchased
+    # allowance (the resell-on-your-site flow). Absent on an operator's
+    # own agent key, which stays anonymous.
+    embed_end_user_id = routing_config.get("embed_end_user_id")
+    if embed_end_user_id:
+        config["embed_end_user_id"] = str(embed_end_user_id)
 
     # Server-verified buyer identity, pinned at bootstrap so every
     # later message inherits it from the session row rather than
@@ -826,6 +846,21 @@ async def send_website_message(
         )
 
     await authorize_commerce_turn(request, session, body.content)
+
+    # Per-buyer embed: when the widget key was minted by a buyer, this
+    # anonymous visitor's turn draws from that buyer's purchased
+    # allowance (``always`` because the buyer holds the allowance even
+    # when the agent has no default cap). An exhausted allowance 402s
+    # with the buy link the widget renders as a paywall.
+    embed_end_user_id = (session.config or {}).get("embed_end_user_id")
+    if embed_end_user_id:
+        await authorize_allowance_turn(
+            request,
+            session,
+            body.content,
+            end_user_id=str(embed_end_user_id),
+            always=True,
+        )
 
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")

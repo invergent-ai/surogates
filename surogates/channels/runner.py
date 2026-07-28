@@ -94,6 +94,8 @@ def _make_deps_factory(
     link_url_base: str = "",
     storage: Any = None,
     settings: Any = None,
+    platform_client: Any = None,
+    runtime_config: Any = None,
 ) -> Any:
     """Return a deps_factory for :class:`ChannelWebhookDispatcher`.
 
@@ -332,6 +334,8 @@ def _make_deps_factory(
             attachments=_attachments,
             pending_input=_pending_input,
             input_nudge=_input_nudge,
+            platform_client=platform_client,
+            runtime_config=runtime_config,
         )
 
     # Expose both resolvers' caches so the channels process can wire them into
@@ -400,6 +404,16 @@ def build_channels_app(
         registry = _global_registry
 
     pipeline = ChannelInboundPipeline()
+    # Per-user allowance enforcement (slack/telegram): resolve the agent's
+    # projected ``end_user_token_allowance`` through a short-TTL cache over
+    # the platform client, so uncapped agents skip the ops round trip.
+    from surogates.runtime import RuntimeConfigCache
+
+    _runtime_config_cache = (
+        RuntimeConfigCache(platform_client.get_runtime_config)
+        if platform_client is not None
+        else None
+    )
     deps_factory = _make_deps_factory(
         session_store=session_store,
         redis=redis,
@@ -408,6 +422,10 @@ def build_channels_app(
         link_url_base=getattr(getattr(settings, "channels", None), "studio_url", ""),
         storage=storage,
         settings=settings,
+        platform_client=platform_client,
+        runtime_config=(
+            _runtime_config_cache.get if _runtime_config_cache is not None else None
+        ),
     )
 
     dispatcher = ChannelWebhookDispatcher(

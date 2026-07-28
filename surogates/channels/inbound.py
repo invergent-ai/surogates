@@ -167,6 +167,22 @@ class InboundOutcome(str, Enum):
     session message was emitted or enqueued."""
 
 
+def _allowance_block_notice(code: str | None, buy_url: str | None) -> str:
+    """User-facing notice when the allowance gate drops a channel turn.
+
+    Names the reason (subscription vs. usage limit) and appends the buy
+    link when the agent projects one, so slack/telegram senders get a
+    real path to keep going rather than a dead "try again later".
+    """
+    if code == "subscription_required":
+        lead = "A subscription is required to keep chatting with this assistant."
+    else:
+        lead = "You've reached your usage limit for this assistant."
+    if buy_url:
+        return f"{lead} Get more access here: {buy_url}"
+    return f"{lead} Please try again later."
+
+
 @lru_cache(maxsize=256)
 def _mention_pattern_regex(csv: str) -> re.Pattern | None:
     """Compile a routing config's ``mention_patterns`` CSV into one regex.
@@ -228,6 +244,10 @@ _PendingInput = Callable[[Any], Awaitable[dict | None]]
 
 #: Async callable: (session_id, msg, text) -> None. Posts a nudge to the channel/thread.
 _InputNudge = Callable[[Any, "InboundMessage", str], Awaitable[None]]
+
+#: Async callable: (agent_id) -> runtime-config payload dict (for the
+#: projected ``end_user_token_allowance``).
+_RuntimeConfig = Callable[[str], Awaitable[dict]]
 
 
 @dataclass
@@ -293,6 +313,13 @@ class PipelineDeps:
     attachments: _Attachments | None = None
     pending_input: _PendingInput | None = None
     input_nudge: _InputNudge | None = None
+    # Per-user token allowance enforcement (a slice of the operator's
+    # subscription). ``platform_client`` reserves against ops;
+    # ``runtime_config`` resolves the agent's projected allowance. Both
+    # ``None`` disables the gate (older wiring / tests), so slack/telegram
+    # behave exactly as before until this is wired.
+    platform_client: Any = None
+    runtime_config: _RuntimeConfig | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +732,76 @@ class ChannelInboundPipeline:
         ]
         if _file_refs:
             event_data["source"]["files"] = _file_refs
+
+        # ------------------------------------------------------------------
+        # Gate 7.5: per-user token allowance (a slice of the operator's
+        # subscription). Reserve this turn against the sender's cap before
+        # emitting/enqueueing; an exhausted allowance (or subscription-
+        # required / operator plan spent) drops the message with a notice.
+        # No-op unless ops projects a positive cap for this agent, so
+        # free/uncapped agents are unaffected; an unreachable allowance
+        # plane fails closed (a capped agent must not serve unmetered).
+        # ------------------------------------------------------------------
+        if (
+            identity.user_id is not None
+            and deps.platform_client is not None
+            and deps.runtime_config is not None
+        ):
+            from surogates.api.routes._commerce_turn import (
+                AllowanceReserveError,
+                reserve_allowance,
+            )
+            from surogates.runtime.platform_client import (
+                AllowanceExhaustedError,
+            )
+
+            try:
+                runtime_payload = await deps.runtime_config(routing.agent_id) or {}
+            except Exception:
+                # Can't resolve the agent's config → fail OPEN (do not gate).
+                # Only a fetched, capped payload should ever block a turn;
+                # a cache blip must not drop every channel message.
+                runtime_payload = {}
+            try:
+                await reserve_allowance(
+                    platform_client=deps.platform_client,
+                    runtime_payload=runtime_payload,
+                    session_store=deps.session_store,
+                    session_id=session_id,
+                    agent_id=routing.agent_id,
+                    content=msg.text or "",
+                    end_user_id=str(identity.user_id),
+                )
+            except AllowanceExhaustedError as exc:
+                logger.info(
+                    "[channels] allowance gate blocked session %s (%s)",
+                    session_id,
+                    exc.detail,
+                )
+                if deps.input_nudge is not None:
+                    try:
+                        await deps.input_nudge(
+                            session_id,
+                            msg,
+                            _allowance_block_notice(
+                                exc.detail,
+                                runtime_payload.get("commerce_buy_url"),
+                            ),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[channels] allowance-limit notice failed",
+                            exc_info=True,
+                        )
+                return InboundOutcome.DROPPED
+            except AllowanceReserveError:
+                logger.warning(
+                    "[channels] allowance plane unreachable — failing closed "
+                    "for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                return InboundOutcome.DROPPED
 
         await deps.session_store.emit_event(
             session_id,

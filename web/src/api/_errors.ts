@@ -52,3 +52,39 @@ export async function parseError(
   } | null;
   throw new Error(errorDetailMessage(payload?.detail) ?? fallback);
 }
+
+// Lead copy per 402 paywall code emitted by the commerce/allowance gates
+// (``{code, buy_url}``). ``operator_subscription_exhausted`` is the agent
+// owner's problem, not the visitor's, so it offers no buy action.
+const PAYWALL_LEADS: Record<string, string> = {
+  allowance_exhausted: "You've reached your usage limit for this assistant.",
+  subscription_required:
+    "A subscription is required to keep chatting with this assistant.",
+  operator_subscription_exhausted:
+    "This assistant is temporarily unavailable. Its owner has run out of credit.",
+  sign_in_required: "Please sign in to keep chatting with this assistant.",
+};
+
+/**
+ * Turn a 402 paywall detail (``{code, buy_url}``) into a user-facing
+ * message, appending the agent's buy link when there is a buyer action to
+ * take. Returns ``undefined`` when the detail is not a recognised paywall
+ * payload so callers fall back to their generic handling.
+ */
+export function paywallErrorMessage(detail: unknown): string | undefined {
+  if (!detail || typeof detail !== "object") {
+    return undefined;
+  }
+  const record = detail as Record<string, unknown>;
+  const code = nonEmptyString(record.code);
+  if (!code) {
+    return undefined;
+  }
+  const lead =
+    PAYWALL_LEADS[code] ?? "You need to buy access to keep chatting.";
+  const buyUrl = nonEmptyString(record.buy_url);
+  if (buyUrl && code !== "operator_subscription_exhausted") {
+    return `${lead} Get more access here: ${buyUrl}`;
+  }
+  return lead;
+}

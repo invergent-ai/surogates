@@ -30,6 +30,20 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
+def _should_take_reservations(session: Any, config_key: str) -> bool:
+    """Whether the worker must pop ``config_key`` from the live session
+    config at settle time.
+
+    Channel gate, not a config gate: the wake-time session object is
+    stale, and a hold appended after wake start must still be taken — only
+    website sessions ever carry these, so every other channel skips the
+    extra round trip unless the wake object already shows a hold. Shared by
+    the commerce and per-user allowance settlements."""
+    if getattr(session, "channel", None) == "website":
+        return True
+    return bool((session.config or {}).get(config_key))
+
+
 class ArtifactCompletionMixin:
     async def _promote_fenced_artifacts(
         self,
@@ -550,13 +564,7 @@ class ArtifactCompletionMixin:
         as the floor: content may already have been delivered, and a
         hold must never turn into a free turn.
         """
-        # Channel gate, not a config gate: the wake-time session object
-        # is stale, and a hold appended after wake start must still be
-        # taken — only website sessions ever carry these, so every
-        # other channel skips the extra round trip.
-        if getattr(session, "channel", None) != "website" and not (
-            (session.config or {}).get("commerce_reservations")
-        ):
+        if not _should_take_reservations(session, "commerce_reservations"):
             return
         client = getattr(self, "_platform_client", None)
         if client is None:
@@ -608,6 +616,81 @@ class ArtifactCompletionMixin:
                     "Commerce settlement failed for session %s "
                     "(reservation %s); the ops reservation reaper will "
                     "release the hold",
+                    session.id,
+                    reservation.get("reservation_id"),
+                    exc_info=True,
+                )
+
+    async def _settle_allowance_reservation(
+        self,
+        session: Session,
+        cost_tracker: SessionCostTracker | None,
+    ) -> None:
+        """Settle the per-user allowance holds pinned at message accept.
+
+        Mirrors :meth:`_settle_commerce_reservation` but for the operator-
+        granted per-user cap: pops the whole ``allowance_reservations``
+        list and debits the wake's total LLM usage against the oldest hold
+        (the rest release with zero usage — their messages folded into
+        this wake, which already charges their tokens). All holds on a web
+        session belong to the same end-user, so the wake total is the
+        right per-user charge.
+
+        Gated on the wake-time config carrying holds, so uncapped agents
+        (the default) skip the round trip. Website sessions always pop the
+        live config regardless of the stale wake object: an embed hold
+        pinned by ``send_website_message`` after wake start would otherwise
+        leak (there is no allowance reaper), the same escape the commerce
+        settle makes for website sessions.
+        """
+        if not _should_take_reservations(session, "allowance_reservations"):
+            return
+        client = getattr(self, "_platform_client", None)
+        if client is None:
+            logger.warning(
+                "Session %s carries allowance reservations but the worker "
+                "has no platform client; the next cycle refill clears them",
+                session.id,
+            )
+            return
+        try:
+            taken = await self._store.pop_session_config_key(
+                session.id, "allowance_reservations",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to take allowance reservations for session %s; "
+                "the next cycle refill will clear them",
+                session.id,
+                exc_info=True,
+            )
+            return
+        reservations = [r for r in (taken or []) if isinstance(r, dict)]
+        if not reservations:
+            return
+        actual_total = (
+            cost_tracker.total_input_tokens + cost_tracker.total_output_tokens
+            if cost_tracker is not None
+            else None
+        )
+        for index, reservation in enumerate(reservations):
+            reserved = int(reservation.get("reserved_tokens") or 0)
+            if actual_total is None:
+                actual = reserved
+            else:
+                actual = actual_total if index == 0 else 0
+            try:
+                await client.allowance_debit(
+                    session.agent_id,
+                    allowance_id=str(reservation.get("allowance_id") or ""),
+                    reserved_tokens=reserved,
+                    actual_tokens=actual,
+                    reservation_id=reservation.get("reservation_id") or None,
+                )
+            except Exception:
+                logger.warning(
+                    "Allowance settlement failed for session %s "
+                    "(reservation %s); the next cycle refill clears the hold",
                     session.id,
                     reservation.get("reservation_id"),
                     exc_info=True,
@@ -696,7 +779,13 @@ class ArtifactCompletionMixin:
         if cost_tracker is not None:
             complete_data["cost_summary"] = cost_tracker.summary()
 
-        await self._settle_commerce_reservation(session, cost_tracker)
+        # Two independent best-effort settlements (neither raises); run
+        # them concurrently to halve the session-complete round trip when
+        # both a commerce and an allowance hold are present.
+        await asyncio.gather(
+            self._settle_commerce_reservation(session, cost_tracker),
+            self._settle_allowance_reservation(session, cost_tracker),
+        )
 
         session_complete_event_id = await self._store.emit_event(
             session.id,
