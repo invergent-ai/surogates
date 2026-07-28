@@ -194,12 +194,14 @@ class TestMotivatingCases:
     def test_sentence_around_a_link_keeps_both_parts(self) -> None:
         # <p>Read our <a href="…">privacy policy</a> for details</p>
         # The p is not a text block (interactive descendant), so it emits its
-        # own text runs; the link renders as its own control line.
+        # own text runs.  The a IS a text block (pure-inline subtree), so it
+        # carries its text in text_block — but the serializer ignores
+        # text_block for interactive roles and renders the control line.
         tree = [
             {"ref": "@e1", "role": "paragraph", "name": "Read our privacy policy for details",
              "x": 0, "y": 0, "text_block": "Read our for details"},
             {"ref": "@e2", "role": "link", "name": "privacy policy",
-             "x": 0, "y": 0, "text_block": ""},
+             "x": 0, "y": 0, "text_block": "privacy policy"},
         ]
         out = render_markdown(_state(tree))
         assert "Read our for details" in out
@@ -312,8 +314,10 @@ def render_markdown(state: dict[str, Any]) -> str:
 
     tree = state.get("tree") or []
     emitted = 0
+    capped = False
     for entry in tree:
         if emitted >= MAX_MARKDOWN_NODES:
+            capped = True
             break
         line = _render_entry(entry)
         if line is None:
@@ -323,7 +327,7 @@ def render_markdown(state: dict[str, Any]) -> str:
 
     if not emitted:
         lines.append("(no visible elements)")
-    elif len(tree) > emitted:
+    elif capped:
         lines.append("")
         lines.append(
             f"[truncated: {emitted} of {len(tree)} nodes shown — narrow with "
@@ -361,6 +365,13 @@ def _heading_level(entry: dict[str, Any]) -> int:
 Note the consent-ordering tests pass without sorting here: `get_state` already
 runs `_prioritize_state_entries` before the serializer sees the tree, and the
 test builds its tree pre-sorted. Do **not** add a second sort.
+
+The truncation line hangs off the `capped` flag, not `len(tree) > emitted` —
+silent nodes (covered spans, empty containers) make `emitted` fall short of
+`len(tree)` on virtually every real page, and a length comparison would append
+a bogus truncation notice when nothing was cut.
+`test_price_split_across_spans_reads_as_one_line` pins this: 3 nodes, 1 line,
+no notice.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -470,13 +481,15 @@ class TestSnapshotScriptShape:
         # child are lost -- querySelectorAll('*') returns elements only.
         assert "ownTextOf" in script
 
-    def test_script_reuses_the_existing_computed_style_call(self) -> None:
+    def test_script_computes_style_once_per_element(self) -> None:
         from surogates.browser.client import KernelBrowserClient
 
-        # One getComputedStyle per element in the main walk -- the visibility
-        # check.  A second per-element call would double snapshot cost.
+        # Style is resolved exactly once per element, into the __style map
+        # that both the visibility check and isBlockLevel read.  A second
+        # getComputedStyle call site would re-resolve style for every
+        # descendant scanned inside isTextBlock and multiply snapshot cost.
         assert KernelBrowserClient._SNAPSHOT_SCRIPT.count(
-            "window.getComputedStyle(el)"
+            "window.getComputedStyle"
         ) == 1
 ```
 
@@ -492,7 +505,10 @@ helpers immediately after the existing `depthOf` function:
 
 ```javascript
 function isBlockLevel(el) {
-  const d = window.getComputedStyle(el).display;
+  // Reads the precomputed __style map -- getComputedStyle here would run once
+  // per scanned descendant and is exactly what the call-count test forbids.
+  const s = __style.get(el);
+  const d = s ? s.display : 'block';
   return d !== 'inline' && d !== 'inline-block' && d !== 'contents' && d !== 'none';
 }
 
@@ -534,11 +550,32 @@ function clean(s) {
 }
 ```
 
-Declare the covered-set immediately before the main walk, beside `const out = []`:
+Immediately before the main walk, beside `const out = []`, declare the covered
+set and resolve every element's style **once** into a map:
 
 ```javascript
 const covered = new Set();
+const __els = Array.from(root.querySelectorAll('*'));
+const __style = new Map();
+for (const el of __els) __style.set(el, window.getComputedStyle(el));
 ```
+
+Change the walk to consume both — replace its header and style lookup
+
+```javascript
+for (const el of Array.from(root.querySelectorAll('*'))) {
+  const style = window.getComputedStyle(el);
+```
+
+with
+
+```javascript
+for (const el of __els) {
+  const style = __style.get(el);
+```
+
+so the map fill is the script's only `getComputedStyle` call site — one style
+resolution per element no matter how many subtrees `isTextBlock` scans.
 
 Then in the main walk, replace the `out.push({...})` call with:
 
@@ -765,7 +802,7 @@ GET_STATE_SCHEMA = {
             "enum": ["markdown", "json"],
             "default": "markdown",
             "description": (
-                "Output shape. 'markdown' (default) is a compact page outline: "
+                "Output shape. 'markdown' (default) is a concise page outline: "
                 "headings for structure, '- role @eN \"name\"' lines for "
                 "clickable elements, plain lines for text. 'json' returns the "
                 "raw node tree with viewport coordinates — only needed when you "
@@ -1147,6 +1184,11 @@ JavaScript can mutate the DOM, so the tool belongs with the mutating set — the
 no-progress guardrail would otherwise treat repeated evaluates as read-only
 spinning.
 
+While in that set, fix the stale `"browser_press"` entry to
+`"browser_press_key"` — no tool named `browser_press` exists (the registered
+name is `browser_press_key`, see `TOOL_LOCATIONS`), so the entry never matches
+and key presses are currently misclassified as non-mutating.
+
 - [ ] **Step 6: Run the full browser suite**
 
 Run: `cd /work/surogates && python -m pytest tests/test_browser_tools.py tests/test_browser_client.py tests/test_browser_serialize.py -v`
@@ -1235,6 +1277,11 @@ def _browser_state_result(n: int) -> str:
 
 Update the module docstrings that describe the old shape at
 `tests/test_context_prune.py:4` and `tests/test_context_prune_integration.py:7`.
+
+`tests/test_context_prune_integration.py` also fakes the tool-call arguments as
+`'{"interactive_only": true, "compact": true}'` (line 62, with a matching
+comment at line 25) — drop `compact` from both, since the parameter no longer
+exists.
 
 - [ ] **Step 4: Register the new tool in the ops frontend**
 
