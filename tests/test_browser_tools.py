@@ -67,11 +67,17 @@ class FakeClient:
         return {"url": url, "title": "Test Page"}
 
     async def get_state(self, **kwargs: Any) -> dict[str, Any]:
+        self.get_state_kwargs = kwargs
         return {
             "url": "http://example.com/",
             "title": "Test",
-            "viewport": {"width": 1, "height": 1},
-            "tree": [],
+            "viewport": {"width": 1280, "height": 800},
+            "tree": [
+                {"ref": "@e1", "role": "heading", "name": "Results",
+                 "x": 0, "y": 0, "text_block": "Results", "heading_level": 2},
+                {"ref": "@e2", "role": "button", "name": "Search",
+                 "x": 10, "y": 20, "text_block": ""},
+            ],
         }
 
     async def close(self) -> None:
@@ -312,7 +318,7 @@ class TestGetStateHandler:
         from surogates.tools.builtin.browser import _browser_get_state_handler
 
         result = await _browser_get_state_handler(
-            {"interactive_only": True},
+            {"interactive_only": True, "format": "json"},
             tenant=tenant,
             session_id=uuid4(),
             browser_pool=FakePool(),
@@ -853,3 +859,67 @@ def test_browser_screenshot_key_uses_boundary_workspace_prefix():
         )
         == "project/agent/boundaries/slack:c:G1/workspace/browser-screenshots/shot.png"
     )
+
+
+class TestGetStateFormat:
+    async def test_defaults_to_markdown(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+        assert result.startswith("# Test")
+        assert "## Results" in result
+        assert '- button @e2 "Search"' in result
+
+    async def test_json_format_returns_the_tree(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {"format": "json"},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        )
+        body = json.loads(result)
+        assert body["tree"][0]["text_block"] == "Results"
+        assert body["tree"][0]["heading_level"] == 2
+        assert body["tree"][1]["x"] == 10
+
+    async def test_errors_stay_json_in_markdown_mode(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_get_state_handler
+
+        result = await _browser_get_state_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FailingStateClient(),
+        )
+        assert json.loads(result)["error"] == "get_state_failed"
+
+
+class TestGetStateSchema:
+    def test_compact_is_gone(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        assert "compact" not in GET_STATE_SCHEMA["properties"]
+
+    def test_every_parameter_is_documented(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        for name, prop in GET_STATE_SCHEMA["properties"].items():
+            assert prop.get("description"), f"{name} has no description"
+
+    def test_format_enumerates_both_modes(self) -> None:
+        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
+
+        assert GET_STATE_SCHEMA["properties"]["format"]["enum"] == ["markdown", "json"]

@@ -309,7 +309,6 @@ return {
         self,
         *,
         interactive_only: bool = False,
-        compact: bool = False,
         max_depth: int | None = None,
         selector: str | None = None,
     ) -> dict[str, Any]:
@@ -324,7 +323,6 @@ return {
             if self._state_entry_visible(
                 entry,
                 interactive_only=interactive_only,
-                compact=compact,
                 max_depth=max_depth,
             )
         ]
@@ -754,13 +752,10 @@ return true;
         entry: dict[str, Any],
         *,
         interactive_only: bool,
-        compact: bool,
         max_depth: int | None,
     ) -> bool:
         role = str(entry.get("role", ""))
         if interactive_only and role not in self._INTERACTIVE_ROLES:
-            return False
-        if compact and not entry.get("name") and role not in self._INTERACTIVE_ROLES:
             return False
         if entry.get("intent") == "accept_consent":
             return True

@@ -20,6 +20,7 @@ from surogates.browser.base import (
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import BrowserControlStore
 from surogates.browser.pool import BrowserPool
+from surogates.browser.serialize import render_markdown
 
 from surogates.storage.tenant import (
     boundary_workspace_key,
@@ -294,10 +295,43 @@ async def _browser_navigate_handler(
 GET_STATE_SCHEMA = {
     "type": "object",
     "properties": {
-        "interactive_only": {"type": "boolean", "default": False},
-        "compact": {"type": "boolean", "default": False},
-        "max_depth": {"type": "integer", "minimum": 0},
-        "selector": {"type": "string"},
+        "format": {
+            "type": "string",
+            "enum": ["markdown", "json"],
+            "default": "markdown",
+            "description": (
+                "Output shape. 'markdown' (default) is a concise page outline: "
+                "headings for structure, '- role @eN \"name\"' lines for "
+                "clickable elements, plain lines for text. 'json' returns the "
+                "raw node tree with viewport coordinates — only needed when you "
+                "must click by coordinate rather than by ref."
+            ),
+        },
+        "interactive_only": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Return only clickable and typeable elements, dropping all page "
+                "text. Use when you know what you are looking for and only need "
+                "its ref."
+            ),
+        },
+        "max_depth": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Drop elements nested deeper than this in the DOM. Rarely "
+                "useful — prefer 'selector' to scope by region."
+            ),
+        },
+        "selector": {
+            "type": "string",
+            "description": (
+                "CSS selector limiting the snapshot to one subtree, e.g. "
+                "'#search-results'. The best way to keep a large page under the "
+                "node cap."
+            ),
+        },
     },
     "additionalProperties": False,
 }
@@ -332,13 +366,14 @@ async def _browser_get_state_handler(
         try:
             state = await client.get_state(
                 interactive_only=arguments.get("interactive_only", False),
-                compact=arguments.get("compact", False),
                 max_depth=arguments.get("max_depth"),
                 selector=arguments.get("selector"),
             )
         except RuntimeError as exc:
             return json.dumps({"error": "get_state_failed", "detail": str(exc)})
-    return json.dumps(state)
+    if arguments.get("format", "markdown") == "json":
+        return json.dumps(state)
+    return render_markdown(state)
 
 
 CLOSE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -892,8 +927,9 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_get_state",
             description=(
-                "Return the current page tree with @eN refs for browser_click "
-                "and browser_type."
+                "Return the current page as a markdown outline with @eN refs "
+                "for browser_click and browser_type. Pass format='json' for the "
+                "raw node tree with coordinates."
             ),
             parameters=GET_STATE_SCHEMA,
         ),
