@@ -115,6 +115,44 @@ async def test_capped_user_reserves_and_pins_receipt():
 
 
 @pytest.mark.asyncio
+async def test_always_reserves_even_without_a_projected_cap():
+    """The per-buyer website embed forces authorization against the
+    buyer's purchased allowance even when the agent projects no default
+    cap (``end_user_token_allowance`` absent)."""
+    client = _FakePlatformClient(
+        receipt={
+            "allowance_id": "al-e",
+            "reserved_tokens": 5,
+            "reservation_id": "r-e",
+        },
+    )
+    store = _FakeStore()
+    request = _request(
+        runtime_payload={},  # no end_user_token_allowance projected
+        platform_client=client,
+        store=store,
+    )
+    await authorize_allowance_turn(
+        request, _session(), "hello there", end_user_id="buyer-1", always=True,
+    )
+    assert len(client.calls) == 1
+    assert client.calls[0]["end_user_id"] == "buyer-1"
+    assert store.updates and store.updates[0][1] == "allowance_reservations"
+
+
+@pytest.mark.asyncio
+async def test_without_always_no_projection_stays_a_noop():
+    """The default (non-embed) path is still a no-op with no projection."""
+    client = _FakePlatformClient(receipt={"allowance_id": "x"})
+    store = _FakeStore()
+    request = _request(runtime_payload={}, platform_client=client, store=store)
+    await authorize_allowance_turn(
+        request, _session(), "hi", end_user_id="u1",
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_uncapped_receipt_pins_no_hold():
     """Ops may report an uncapped user (empty allowance_id) even with the
     flag on — nothing to settle, so no hold is pinned."""
