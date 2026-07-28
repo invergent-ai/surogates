@@ -379,7 +379,6 @@ def _build_fleet_backend(
 
 async def _resolve_mcp_entitlement_scope(
     entitled_ids: frozenset[str],
-    ops_db_url: str,
 ) -> tuple[set[str], set[str]] | None:
     """Resolve entitled MCP-server ids to enforceable name scopes.
 
@@ -390,8 +389,6 @@ async def _resolve_mcp_entitlement_scope(
     restricted dimension (drop every MCP/Composio tool) rather than
     serve paid tools unmetered on an infra blip.
     """
-    if not ops_db_url:
-        return None
     try:
         import sqlalchemy as sa
 
@@ -439,7 +436,6 @@ def _entitlement_tool_exclusions(
     *,
     session_config: dict | None,
     tool_registry: Any,
-    composio_tool_names: frozenset[str],
     mcp_scope: tuple[set[str], set[str]] | None,
 ) -> set[str]:
     """Concrete tool names the pinned package excludes for this wake.
@@ -465,15 +461,8 @@ def _entitlement_tool_exclusions(
     if mcp_allow is not None:
         allowed_servers = mcp_scope[0] if mcp_scope is not None else set()
         allowed_toolkits = mcp_scope[1] if mcp_scope is not None else set()
-        for name in set(tool_registry.tool_names) | set(composio_tool_names):
+        for name in tool_registry.tool_names:
             if not name.startswith("mcp__"):
-                # Defensive: Composio names are router-prefixed in
-                # production; a bare TOOLKIT_ACTION name still gets the
-                # toolkit treatment rather than slipping through.
-                if name in composio_tool_names:
-                    toolkit = name.split("_", 1)[0].lower()
-                    if toolkit not in allowed_toolkits:
-                        excluded.add(name)
                 continue
             if is_composio_router_name(name):
                 # ``mcp__tool_router__TOOLKIT_ACTION``: the sellable
@@ -661,15 +650,15 @@ async def _load_prompt_catalogs_entitled(
     the system prompt; the skill tool and the API listing apply the
     same allowlist per call, so a remembered name still refuses.
     """
-    from surogates.runtime.entitlements import entitled_skills
+    from surogates.runtime.entitlements import (
+        entitled_skills,
+        filter_entitled_skills,
+    )
 
     agents_catalog, skills_catalog = await _load_prompt_catalogs(**kwargs)
-    allowed = entitled_skills(session_config)
-    if allowed is not None:
-        skills_catalog = [
-            s for s in skills_catalog
-            if getattr(s, "builtin", False) or s.name in allowed
-        ]
+    skills_catalog = filter_entitled_skills(
+        skills_catalog, entitled_skills(session_config),
+    )
     return agents_catalog, skills_catalog
 
 
@@ -1250,18 +1239,18 @@ async def run_worker(settings: Settings) -> None:
         # Per-buyer model tier: when the sender's package pins a tier
         # that differs from the agent's own, the main slot is built on
         # the opposite-tier endpoint ops projected for exactly this.
-        # No projected endpoint (BYO agents, old configs) = no-op; the
-        # proxy meters by endpoint role so billing follows the swap.
+        # Ops projects ``llm_tier_pro`` only for basic-tier agents and
+        # ``llm_tier_basic`` only for pro-tier agents, so a pin that
+        # matches the agent's own tier (or a BYO agent / old config)
+        # finds no endpoint and is a no-op; the proxy meters by
+        # endpoint role so billing follows the swap.
         from surogates.runtime.entitlements import entitled_model_tier
 
-        tier_override = None
         pinned_tier = entitled_model_tier(session.config)
-        if pinned_tier is not None and ctx.llm_main is not None:
-            agent_is_pro = ctx.llm_main.model == "surogate-pro"
-            if pinned_tier == "pro" and not agent_is_pro:
-                tier_override = ctx.llm_tier_pro
-            elif pinned_tier == "basic" and agent_is_pro:
-                tier_override = ctx.llm_tier_basic
+        tier_override = {
+            "pro": ctx.llm_tier_pro,
+            "basic": ctx.llm_tier_basic,
+        }.get(pinned_tier)
 
         llm_bundle = await build_session_llm_clients(
             ctx, vault=credential_vault,
@@ -1607,12 +1596,11 @@ async def run_worker(settings: Settings) -> None:
         mcp_entitlement_scope = None
         if mcp_entitlement_allowlist is not None:
             mcp_entitlement_scope = await _resolve_mcp_entitlement_scope(
-                mcp_entitlement_allowlist, settings.ops_db.url,
+                mcp_entitlement_allowlist,
             )
         entitlement_excluded_tools = _entitlement_tool_exclusions(
             session_config=session.config,
             tool_registry=tool_registry,
-            composio_tool_names=composio_mcp_tools,
             mcp_scope=mcp_entitlement_scope,
         )
         if entitlement_excluded_tools:
@@ -1764,7 +1752,9 @@ async def run_worker(settings: Settings) -> None:
             # Per-agent MCP tool set discovered above; the harness uses
             # it to filter the shared registry's prompt schemas down to
             # this agent's own MCP tools.
-            mcp_tool_names=frozenset(discovered_mcp_tools),
+            mcp_tool_names=(
+                frozenset(discovered_mcp_tools) - entitlement_excluded_tools
+            ),
             composio_tool_names=composio_mcp_tools,
             entitlement_excluded_tools=frozenset(entitlement_excluded_tools),
             # Per-agent slash-command gating resolved from the runtime

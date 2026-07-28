@@ -48,6 +48,16 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 logger = logging.getLogger(__name__)
 
 
+def _kb_plan_denied(kb_id: str, kwargs: dict) -> str | None:
+    """The refusal message when the sender's package excludes *kb_id*."""
+    if kb_allowed(kwargs.get("session_config"), kb_id):
+        return None
+    return (
+        f"Error: knowledge base {kb_id!r} is not included in the "
+        f"current user's plan."
+    )
+
+
 # Wiki content sits in Hub under wiki/<path>. The DB stores the
 # logical path (``sources/d1.md``) so the same path is reusable as a
 # stable identifier; the prefix is a Hub-side storage layout choice.
@@ -147,11 +157,9 @@ async def _kb_list_pages_handler(
         return "Error: kb_id is required."
 
     agent_id = _agent_id_from_kwargs(kwargs)
-    if not kb_allowed(kwargs.get("session_config"), kb_id):
-        return (
-            f"Error: knowledge base {kb_id!r} is not included in the "
-            f"current user's plan."
-        )
+    denied = _kb_plan_denied(kb_id, kwargs)
+    if denied is not None:
+        return denied
 
     factory = ensure_ops_session_factory()
     if factory is None:
@@ -210,11 +218,9 @@ async def _kb_read_page_handler(
         return "Error: both kb_id and path are required."
 
     agent_id = _agent_id_from_kwargs(kwargs)
-    if not kb_allowed(kwargs.get("session_config"), kb_id):
-        return (
-            f"Error: knowledge base {kb_id!r} is not included in the "
-            f"current user's plan."
-        )
+    denied = _kb_plan_denied(kb_id, kwargs)
+    if denied is not None:
+        return denied
 
     factory = ensure_ops_session_factory()
     if factory is None:

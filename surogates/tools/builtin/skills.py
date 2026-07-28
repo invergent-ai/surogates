@@ -198,7 +198,10 @@ async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
     platform skills always pass — they are runtime plumbing, not
     sellable content).
     """
-    from surogates.runtime.entitlements import entitled_skills
+    from surogates.runtime.entitlements import (
+        entitled_skills,
+        filter_entitled_skills,
+    )
     from surogates.tools.loader import ResourceLoader
 
     loader = ResourceLoader.from_settings(_settings_from_kwargs(kwargs))
@@ -211,13 +214,9 @@ async def _load_all_skills(tenant: Any, **kwargs: Any) -> list:
             )
     else:
         skills = await loader.load_skills(tenant, overrides=overrides)
-    allowed = entitled_skills(kwargs.get("session_config"))
-    if allowed is not None:
-        skills = [
-            s for s in skills
-            if getattr(s, "builtin", False) or s.name in allowed
-        ]
-    return skills
+    return filter_entitled_skills(
+        skills, entitled_skills(kwargs.get("session_config")),
+    )
 
 
 # ---------------------------------------------------------------------------

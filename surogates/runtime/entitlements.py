@@ -30,6 +30,9 @@ _SLASH_CAPABILITIES = frozenset({
     "loop", "mission", "goal",
 })
 
+#: Everything a package can restrict (mirrors ops CAPABILITY_VOCAB).
+_SELLABLE_CAPABILITIES = _SLASH_CAPABILITIES | {"browser", "brainstorming"}
+
 
 def pinned_entitlements(session_config: dict | None) -> dict | None:
     """The pinned package dict, or ``None`` when unrestricted."""
@@ -64,7 +67,7 @@ def capability_allowed(
     allowed = dimension_allowlist(session_config, "capabilities")
     if allowed is None:
         return True
-    if normalized not in _SLASH_CAPABILITIES | {"browser", "brainstorming"}:
+    if normalized not in _SELLABLE_CAPABILITIES:
         return True
     return normalized in allowed
 
@@ -84,6 +87,24 @@ def entitled_skills(session_config: dict | None) -> frozenset[str] | None:
     return dimension_allowlist(session_config, "skills")
 
 
+def skill_entitled(skill, allowed: frozenset[str] | None) -> bool:
+    """Whether one skill survives a package allowlist.
+
+    Built-in platform skills are runtime plumbing, not sellable
+    content, and always pass; ``allowed=None`` means unrestricted.
+    """
+    if allowed is None:
+        return True
+    return bool(getattr(skill, "builtin", False)) or skill.name in allowed
+
+
+def filter_entitled_skills(skills, allowed: frozenset[str] | None) -> list:
+    """The subset of ``skills`` a package allowlist includes."""
+    if allowed is None:
+        return list(skills)
+    return [s for s in skills if skill_entitled(s, allowed)]
+
+
 def kb_allowed(session_config: dict | None, kb_id: str) -> bool:
     """Whether the package includes knowledge base ``kb_id``."""
     allowed = dimension_allowlist(session_config, "kb_ids")
@@ -96,6 +117,8 @@ __all__ = [
     "dimension_allowlist",
     "entitled_model_tier",
     "entitled_skills",
+    "filter_entitled_skills",
+    "skill_entitled",
     "kb_allowed",
     "pinned_entitlements",
 ]

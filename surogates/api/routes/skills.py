@@ -403,6 +403,7 @@ async def _session_entitled_skills(
     request: Request,
     tenant: TenantContext,
     session_id: "UUID | None",
+    resolved_session: "Any | None" = None,
 ) -> frozenset[str] | None:
     """The caller's purchased-package skill allowlist, or ``None``.
 
@@ -414,8 +415,8 @@ async def _session_entitled_skills(
     gates pin the package every turn. Only a caller with no sessions at
     all (nothing ever pinned) reads as unrestricted.
     """
-    session = None
-    if session_id is not None:
+    session = resolved_session
+    if session is None and session_id is not None:
         try:
             session = await _authorize_session_for_staging(
                 request, tenant, session_id,
@@ -429,7 +430,7 @@ async def _session_entitled_skills(
 
         session_factory = request.app.state.session_factory
         async with session_factory() as db:
-            session = await db.scalar(
+            rows = await db.execute(
                 select(SessionRow)
                 .where(
                     SessionRow.org_id == tenant.org_id,
@@ -438,11 +439,19 @@ async def _session_entitled_skills(
                 .order_by(SessionRow.updated_at.desc())
                 .limit(1),
             )
+            recent = rows.scalars().all()
+            session = recent[0] if recent else None
     if session is None:
         return None
     from surogates.runtime.entitlements import entitled_skills
 
     return entitled_skills(session.config)
+
+
+def _skill_entitled(skill_def, entitled: frozenset[str] | None) -> bool:
+    from surogates.runtime.entitlements import skill_entitled
+
+    return skill_entitled(skill_def, entitled)
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +491,7 @@ async def list_skills(
             system_bundle=system_bundle,
             overrides=overrides,
         )
-    if entitled is not None:
-        all_skills = [
-            s for s in all_skills
-            if getattr(s, "builtin", False) or s.name in entitled
-        ]
+    all_skills = [s for s in all_skills if _skill_entitled(s, entitled)]
 
     summaries: list[SkillSummary] = []
     for skill in all_skills:
@@ -544,11 +549,7 @@ async def view_skill(
     if skill_def is None:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
     entitled = await _session_entitled_skills(request, tenant, session_id)
-    if (
-        entitled is not None
-        and not getattr(skill_def, "builtin", False)
-        and skill_def.name not in entitled
-    ):
+    if not _skill_entitled(skill_def, entitled):
         # Same shape as unknown so a probing client learns nothing
         # beyond "not available to you".
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
@@ -660,12 +661,10 @@ async def read_skill_file(
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
-    entitled = await _session_entitled_skills(request, tenant, session_id)
-    if (
-        entitled is not None
-        and not getattr(skill_def, "builtin", False)
-        and skill_def.name not in entitled
-    ):
+    entitled = await _session_entitled_skills(
+        request, tenant, session_id, resolved_session=session_for_staging,
+    )
+    if not _skill_entitled(skill_def, entitled):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:

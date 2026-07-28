@@ -98,6 +98,7 @@ _REGISTRY_ENTRIES = (
     ("read_file", "file"),
     ("mcp__crm__lookup", "mcp"),
     ("mcp__billing__charge", "mcp"),
+    ("mcp__tool_router__SLACK_SEND_MESSAGE", "mcp"),
 )
 
 
@@ -105,7 +106,6 @@ def test_no_pin_excludes_nothing():
     excluded = _entitlement_tool_exclusions(
         session_config={},
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
-        composio_tool_names=frozenset({"SLACK_SEND_MESSAGE"}),
         mcp_scope=None,
     )
     assert excluded == set()
@@ -115,7 +115,6 @@ def test_capability_exclusions_drop_browser_and_coding():
     excluded = _entitlement_tool_exclusions(
         session_config={"entitlements": {"capabilities": ["mission"]}},
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
-        composio_tool_names=frozenset(),
         mcp_scope=None,
     )
     assert excluded == {"browser_navigate", "browser_click", "run_coding_agent"}
@@ -125,13 +124,12 @@ def test_mcp_servers_filtered_by_resolved_scope():
     excluded = _entitlement_tool_exclusions(
         session_config={"entitlements": {"mcp_server_ids": ["id-crm"]}},
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
-        composio_tool_names=frozenset(
-            {"SLACK_SEND_MESSAGE", "GMAIL_SEND_EMAIL"},
-        ),
         mcp_scope=({"crm"}, {"gmail"}),
     )
     # billing server not entitled; slack toolkit not entitled.
-    assert excluded == {"mcp__billing__charge", "SLACK_SEND_MESSAGE"}
+    assert excluded == {
+        "mcp__billing__charge", "mcp__tool_router__SLACK_SEND_MESSAGE",
+    }
 
 
 def test_mcp_restriction_fails_closed_without_a_scope():
@@ -141,11 +139,12 @@ def test_mcp_restriction_fails_closed_without_a_scope():
     excluded = _entitlement_tool_exclusions(
         session_config={"entitlements": {"mcp_server_ids": ["id-crm"]}},
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
-        composio_tool_names=frozenset({"SLACK_SEND_MESSAGE"}),
         mcp_scope=None,
     )
     assert excluded == {
-        "mcp__crm__lookup", "mcp__billing__charge", "SLACK_SEND_MESSAGE",
+        "mcp__crm__lookup",
+        "mcp__billing__charge",
+        "mcp__tool_router__SLACK_SEND_MESSAGE",
     }
 
 
@@ -153,11 +152,12 @@ def test_empty_mcp_allowlist_drops_all():
     excluded = _entitlement_tool_exclusions(
         session_config={"entitlements": {"mcp_server_ids": []}},
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
-        composio_tool_names=frozenset({"SLACK_SEND_MESSAGE"}),
         mcp_scope=(set(), set()),
     )
     assert excluded == {
-        "mcp__crm__lookup", "mcp__billing__charge", "SLACK_SEND_MESSAGE",
+        "mcp__crm__lookup",
+        "mcp__billing__charge",
+        "mcp__tool_router__SLACK_SEND_MESSAGE",
     }
 
 
@@ -374,11 +374,6 @@ def test_router_prefixed_composio_tools_filtered_by_toolkit():
     excluded = _entitlement_tool_exclusions(
         session_config={"entitlements": {"mcp_server_ids": ["id-x"]}},
         tool_registry=registry,
-        composio_tool_names=frozenset({
-            "mcp__tool_router__GMAIL_SEND_EMAIL",
-            "mcp__tool_router__SLACK_SEND_MESSAGE",
-            "mcp__composio_tool_router__GMAIL_LIST",
-        }),
         mcp_scope=({"crm"}, {"gmail"}),
     )
     # Gmail toolkit entitled (both router prefixes), slack not; the
@@ -414,7 +409,7 @@ async def test_scope_resolution_sanitizes_server_names(monkeypatch):
         ops_engine, "get_ops_session_factory", lambda: (lambda: _Session()),
     )
     scope = await _resolve_mcp_entitlement_scope(
-        frozenset({"id-1", "id-2"}), "postgresql://x",
+        frozenset({"id-1", "id-2"}),
     )
     assert scope == ({"github_mcp"}, {"stripe"})
 
@@ -423,7 +418,6 @@ def test_entitlement_exclusions_survive_the_mcp_schema_filter():
     """Regression: _apply_mcp_schema_filter re-adds this agent's full
     discovered MCP set when the registry holds a foreign agent's tools;
     the entitlement subtraction must run after it."""
-    registry = ToolRegistry()
     h = _harness(entitlement_excluded=frozenset({"mcp__crm__lookup"}))
     # Simulate the shared registry: this agent discovered crm+billing,
     # another agent's tool is also present.
