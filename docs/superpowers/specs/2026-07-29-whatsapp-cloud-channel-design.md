@@ -680,11 +680,30 @@ descriptor = ChannelDescriptor(
         "phone_number_id": "phone_number_id",
         "api_version": "api_version",
     },
-    config_keys=("require_mention", "allow_bots", "identity_policy",
-                 "waba_id", "api_version"),
+    # No ``require_mention`` / ``allow_bots``: both are structurally
+    # unreachable here (§7.1), so declaring them would put switches in
+    # Studio that can never fire.
+    config_keys=("identity_policy", "waba_id", "api_version"),
     webhook_registration="manual",
 )
 ```
+
+### 7.1 Two gating keys are deliberately absent
+
+`require_mention` and `allow_bots` are **not** in `config_keys`, and the
+provisioner does not write them. Both are unreachable on this platform, so
+shipping them would surface controls in Studio that cannot change anything:
+
+- `parse` always sets `is_dm=True` — WhatsApp Cloud API is 1:1 — and
+  `_evaluate_mention_gate` (`inbound.py:964-966`) returns `True` immediately
+  for a DM, before it ever reads `require_mention`. `free_response_channels`
+  and `mention_patterns` are unreachable for the same reason.
+- `parse` always sets `is_bot=False`, because Cloud API never marks a sender
+  as a bot, so the `allow_bots` gate at `inbound.py:470` never runs.
+
+`identity_policy` (shadow vs linked pairing) and `api_version` are live;
+`waba_id` is operator-supplied data rather than a behavioural switch, and is
+retained for the Meta-dashboard workflow and any future template work.
 
 `webhook_registration="manual"`: Meta has no `setWebhook` equivalent for the
 callback URL — it is set in the App Dashboard. `ChannelWebhookReconciler`
@@ -709,7 +728,7 @@ scopes: `whatsapp_business_messaging`, `whatsapp_business_management`,
 
 Agent env vars: `SUROGATES_WHATSAPP_ENABLED` (the `enabled_env` gate checked at
 `channel_provisioning.py:359`), plus `_PHONE_NUMBER_ID`, `_ACCESS_TOKEN`,
-`_APP_SECRET`, `_WABA_ID`, `_API_VERSION`, `_REQUIRE_MENTION`, `_ALLOW_BOTS`,
+`_APP_SECRET`, `_WABA_ID`, `_API_VERSION`,
 `_IDENTITY_POLICY`, and two the provisioner re-emits via `extra_env` rather
 than the forms: `_DISPLAY_PHONE` (the Studio `derivedKey`) and `_VERIFY_TOKEN`
 (so the manage view can render the value the operator pastes into Meta).

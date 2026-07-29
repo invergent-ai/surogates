@@ -465,9 +465,13 @@ class WhatsAppPlatform:
             "phone_number_id": "phone_number_id",
             "api_version": "api_version",
         },
+        # No ``require_mention`` or ``allow_bots``: both are unreachable on
+        # this platform, so shipping them would be a switch that cannot fire.
+        # ``parse`` always sets ``is_dm=True`` (Cloud API is 1:1), and
+        # ``_evaluate_mention_gate`` returns True immediately for a DM; it
+        # also always sets ``is_bot=False``, because Cloud API never marks a
+        # sender as a bot, so the ``allow_bots`` gate never runs either.
         config_keys=(
-            "require_mention",
-            "allow_bots",
             "identity_policy",
             "waba_id",
             "api_version",

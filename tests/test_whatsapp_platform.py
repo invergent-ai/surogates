@@ -406,9 +406,17 @@ class TestWhatsAppPlatform:
     def test_descriptor_config_keys_match_provisioner(self):
         # These names are the contract with the ops provisioner's config blob.
         assert set(WhatsAppPlatform().descriptor.config_keys) == {
-            "require_mention", "allow_bots", "identity_policy",
-            "waba_id", "api_version",
+            "identity_policy", "waba_id", "api_version",
         }
+
+    def test_no_unreachable_gating_keys(self):
+        # require_mention and allow_bots can never fire here: parse always
+        # sets is_dm=True (so the mention gate short-circuits) and
+        # is_bot=False (so the bot gate never runs).  Declaring them would
+        # surface switches in Studio that do nothing.
+        keys = set(WhatsAppPlatform().descriptor.config_keys)
+        assert "require_mention" not in keys
+        assert "allow_bots" not in keys
 
 
 class TestWhatsAppRegistration:
