@@ -722,11 +722,35 @@ class SessionStore:
             row.updated_at = func.now()
             await db.commit()
 
-    async def clear_session_config_key(self, session_id: UUID, key: str) -> None:
-        """Remove one top-level key from ``sessions.config``."""
+    async def reconcile_session_config_key(
+        self,
+        session_id: UUID,
+        key: str,
+        value: Any,
+    ) -> None:
+        """Make ``config[key]`` equal ``value``, minimally.
+
+        ``value is None`` removes the key. Matching values are detected
+        with a plain read first, so per-turn reconcilers (e.g. the
+        commerce entitlements pin) stay lock-free as well as write-free
+        in steady state; only a mismatch escalates to the row lock, and
+        the comparison is repeated under it.
+        """
         if not key:
             raise ValueError("config key must be non-empty")
+
+        def _matches(config: dict) -> bool:
+            if value is None:
+                return key not in config
+            return config.get(key) == value
+
         async with self._sf() as db:
+            stored = await db.execute(
+                select(SessionRow.config).where(SessionRow.id == session_id)
+            )
+            stored_config = stored.scalar_one_or_none()
+            if stored_config is not None and _matches(stored_config):
+                return
             result = await db.execute(
                 select(SessionRow)
                 .where(SessionRow.id == session_id)
@@ -736,10 +760,19 @@ class SessionStore:
             if row is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
             config = dict(row.config or {})
-            config.pop(key, None)
+            if _matches(config):
+                return
+            if value is None:
+                config.pop(key)
+            else:
+                config[key] = value
             row.config = config
             row.updated_at = func.now()
             await db.commit()
+
+    async def clear_session_config_key(self, session_id: UUID, key: str) -> None:
+        """Remove one top-level key from ``sessions.config``."""
+        await self.reconcile_session_config_key(session_id, key, None)
 
     async def append_session_config_list(
         self,

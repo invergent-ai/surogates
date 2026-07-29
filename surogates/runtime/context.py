@@ -138,6 +138,11 @@ class AgentRuntimeContext:
     llm_advisor: LLMEndpoint | None = None
     llm_image: LLMEndpoint | None = None
     llm_video: LLMEndpoint | None = None
+    # The opposite platform tier, for per-buyer model packages: pro
+    # agents project ``llm_tier_basic``, base agents ``llm_tier_pro``.
+    # Absent for BYO-model agents.
+    llm_tier_basic: LLMEndpoint | None = None
+    llm_tier_pro: LLMEndpoint | None = None
 
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)

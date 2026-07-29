@@ -1368,12 +1368,15 @@ class _FakeAllowanceClient:
         self.error = error
         self.calls: list[dict] = []
 
-    async def allowance_authorize(self, agent_id, *, end_user_id, estimated_tokens):
+    async def allowance_authorize(
+        self, agent_id, *, end_user_id, estimated_tokens, channel=None,
+    ):
         self.calls.append(
             {
                 "agent_id": agent_id,
                 "end_user_id": end_user_id,
                 "estimated_tokens": estimated_tokens,
+                "channel": channel,
             },
         )
         if self.error is not None:
@@ -1487,3 +1490,48 @@ async def test_allowance_gate_noop_for_uncapped_agent():
     assert deps._enqueued
     # Uncapped agent → no ops round trip.
     assert deps.platform_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_allowance_gate_forwards_the_channel_and_blocks_excluded():
+    """The gate names the platform as the turn's channel so ops can gate
+    it against the sender's package; a channel_not_included 402 drops the
+    message with the plan notice + buy link."""
+    msg = _make_msg(is_dm=True, ts="allow.ch1")
+    deps = _make_deps()
+    deps.platform_client = _FakeAllowanceClient(
+        receipt={"allowance_id": "", "reserved_tokens": 0},
+    )
+    deps.runtime_config = _capped_config()
+    await ChannelInboundPipeline().handle(
+        msg, routing=_make_routing(), config=_make_config(), deps=deps,
+    )
+    assert deps.platform_client.calls[0]["channel"] == _make_routing().platform
+
+    from surogates.runtime.platform_client import AllowanceExhaustedError
+
+    msg2 = _make_msg(is_dm=True, ts="allow.ch2")
+    deps2 = _make_deps()
+    deps2.platform_client = _FakeAllowanceClient(
+        error=AllowanceExhaustedError("channel_not_included"),
+    )
+
+    async def _rc_with_buy_url(agent_id):
+        return {
+            "end_user_token_allowance": 1000,
+            "commerce_buy_url": "https://buy.example/agent",
+        }
+
+    deps2.runtime_config = _rc_with_buy_url
+    nudges: list[str] = []
+
+    async def _nudge(session_id, msg_in, text):
+        nudges.append(text)
+
+    deps2.input_nudge = _nudge
+    result = await ChannelInboundPipeline().handle(
+        msg2, routing=_make_routing(), config=_make_config(), deps=deps2,
+    )
+    assert result == InboundOutcome.DROPPED
+    assert nudges and "doesn't include this channel" in nudges[0]
+    assert "https://buy.example/agent" in nudges[0]

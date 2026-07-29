@@ -65,6 +65,26 @@ def require_not_channel_principal(tenant: TenantContext) -> None:
         )
 
 
+async def resolve_agent_id(request: Request) -> str | None:
+    """The request's active agent id, or ``None``.
+
+    ``?agent_id=`` query parameter first (ops proxy and Studio), then
+    the ``Host`` subdomain slug (per-tenant chat web apps). Best-effort:
+    never raises.
+    """
+    agent_id = request.query_params.get("agent_id")
+    if not agent_id:
+        host = request.headers.get("host", "")
+        slug = host.split(".", 1)[0] if "." in host else None
+        if slug and slug.lower() not in {"www", "api", "localhost"}:
+            from surogates.runtime.resolver import _resolve_slug_to_agent_id
+            try:
+                agent_id = await _resolve_slug_to_agent_id(request, slug)
+            except Exception:  # noqa: BLE001 — slug lookup is best-effort
+                agent_id = None
+    return agent_id or None
+
+
 async def resolve_agent_bundle(request: Request):
     """Return the active agent's file bundle, or ``None``.
 
@@ -92,16 +112,7 @@ async def resolve_agent_bundle(request: Request):
     cache = getattr(request.app.state, "file_bundle_cache", None)
     if cache is None:
         return None
-    agent_id = request.query_params.get("agent_id")
-    if not agent_id:
-        host = request.headers.get("host", "")
-        slug = host.split(".", 1)[0] if "." in host else None
-        if slug and slug.lower() not in {"www", "api", "localhost"}:
-            from surogates.runtime.resolver import _resolve_slug_to_agent_id
-            try:
-                agent_id = await _resolve_slug_to_agent_id(request, slug)
-            except Exception:  # noqa: BLE001 — slug lookup is best-effort
-                agent_id = None
+    agent_id = await resolve_agent_id(request)
     if not agent_id:
         return None
     try:

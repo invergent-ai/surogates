@@ -399,6 +399,68 @@ async def _load_session_skill_overrides(
     return (session.config or {}).get("skill_overrides") or {}
 
 
+async def _session_entitled_skills(
+    request: Request,
+    tenant: TenantContext,
+    session_id: "UUID | None",
+    resolved_session: "Any | None" = None,
+) -> frozenset[str] | None:
+    """The caller's purchased-package skill allowlist, or ``None``.
+
+    ``session_id`` is a client-supplied query parameter, so its absence
+    (or a bogus id) must not read as "no restriction" — a
+    package-restricted user could simply omit it to list and read
+    paywalled skills. When the given session doesn't resolve, fall back
+    to the caller's most recently active session, where the authorize
+    gates pin the package every turn. Only a caller with no sessions at
+    all (nothing ever pinned) reads as unrestricted.
+
+    The fallback is scoped to the active agent when one is resolvable:
+    a user chats with several agents in one org, and another agent's
+    pinned package must not gate (or open) this agent's skills.
+    """
+    session = resolved_session
+    if session is None and session_id is not None:
+        try:
+            session = await _authorize_session_for_staging(
+                request, tenant, session_id,
+            )
+        except HTTPException:
+            session = None
+    if session is None and tenant.user_id is not None:
+        from sqlalchemy import select
+
+        from surogates.db.models import Session as SessionRow
+
+        from surogates.api.routes._shared import resolve_agent_id
+
+        stmt = select(SessionRow).where(
+            SessionRow.org_id == tenant.org_id,
+            SessionRow.user_id == tenant.user_id,
+        )
+        agent_id = await resolve_agent_id(request)
+        if agent_id:
+            stmt = stmt.where(SessionRow.agent_id == agent_id)
+        session_factory = request.app.state.session_factory
+        async with session_factory() as db:
+            rows = await db.execute(
+                stmt.order_by(SessionRow.updated_at.desc()).limit(1),
+            )
+            recent = rows.scalars().all()
+            session = recent[0] if recent else None
+    if session is None:
+        return None
+    from surogates.runtime.entitlements import entitled_skills
+
+    return entitled_skills(session.config)
+
+
+def _skill_entitled(skill_def, entitled: frozenset[str] | None) -> bool:
+    from surogates.runtime.entitlements import skill_entitled
+
+    return skill_entitled(skill_def, entitled)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -427,6 +489,7 @@ async def list_skills(
     bundle = await _resolve_agent_bundle(request)
     system_bundle = await _resolve_system_bundle(request)
     overrides = await _load_session_skill_overrides(request, tenant, session_id)
+    entitled = await _session_entitled_skills(request, tenant, session_id)
     async with session_factory() as db_session:
         all_skills = await loader.load_skills(
             tenant,
@@ -435,6 +498,7 @@ async def list_skills(
             system_bundle=system_bundle,
             overrides=overrides,
         )
+    all_skills = [s for s in all_skills if _skill_entitled(s, entitled)]
 
     summaries: list[SkillSummary] = []
     for skill in all_skills:
@@ -490,6 +554,11 @@ async def view_skill(
 
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    entitled = await _session_entitled_skills(request, tenant, session_id)
+    if not _skill_entitled(skill_def, entitled):
+        # Same shape as unknown so a probing client learns nothing
+        # beyond "not available to you".
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
     detail = SkillDetail(
@@ -598,6 +667,11 @@ async def read_skill_file(
         )
     skill_def = next((s for s in all_skills if s.name == name), None)
     if skill_def is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
+    entitled = await _session_entitled_skills(
+        request, tenant, session_id, resolved_session=session_for_staging,
+    )
+    if not _skill_entitled(skill_def, entitled):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found.")
 
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:

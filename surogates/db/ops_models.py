@@ -42,6 +42,22 @@ class OpsAgent(OpsBase):
     )
 
 
+class OpsMcpServer(OpsBase):
+    """Mirror of surogate-ops ``mcp_servers`` table.
+
+    Stripped to what package enforcement needs: identity for the
+    entitlement allowlist (ids), ``name`` (embedded in ``mcp__{name}__``
+    tool names), ``transport`` to spot Composio placeholder rows, and
+    ``oauth`` whose ``toolkit`` keys the Composio tool-name prefix.
+    """
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[str] = mapped_column(sa.String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(sa.String(255))
+    transport: Mapped[str] = mapped_column(sa.String(32))
+    oauth: Mapped[Optional[dict]] = mapped_column(sa.JSON, nullable=True)
+
+
 class OpsKnowledgeBase(OpsBase):
     """Mirror of surogate-ops ``knowledge_bases`` table.
 

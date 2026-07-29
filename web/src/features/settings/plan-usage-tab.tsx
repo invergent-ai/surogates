@@ -1,10 +1,11 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// Settings → Plan & tokens: what this agent sells and what the
-// signed-in user currently holds. Data comes from the harness's
-// /v1/commerce endpoints (which front surogate-ops with the runtime
-// token) — the browser never talks to ops directly.
+// Settings → Plan & usage: what this agent sells and what the
+// signed-in user currently holds. Balances arrive token-denominated
+// from the harness's /v1/commerce endpoints (which front surogate-ops
+// with the runtime token) and are shown as messages; the browser
+// never talks to ops directly.
 
 import { BrandBeam } from "@invergent/agent-chat-react";
 import { useCallback, useEffect, useState } from "react";
@@ -17,6 +18,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { approxMessagesLabel } from "@/lib/usage-units";
 
 interface CommerceOffer {
   id: string;
@@ -26,6 +28,10 @@ interface CommerceOffer {
   amount_cents: number;
   billing_interval: string | null;
   token_amount: number;
+  description?: string | null;
+  /** Buyer-facing labels for a custom package; [] or absent = full
+   * access (subscriptions) / pure extra usage (packs). */
+  included?: string[];
 }
 
 interface CommerceOverview {
@@ -37,6 +43,7 @@ interface CommerceOverview {
     current_period_end: string | null;
     period_token_remaining: number;
     topup_token_remaining: number;
+    included?: string[];
   } | null;
   purchasable: boolean;
 }
@@ -54,11 +61,7 @@ function formatPrice(amountCents: number, currency: string): string {
   }).format(amountCents / 100);
 }
 
-function formatTokens(n: number): string {
-  return n.toLocaleString("en-US");
-}
-
-export function PlanTokensTab() {
+export function PlanUsageTab() {
   const [overview, setOverview] = useState<CommerceOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyOfferId, setBusyOfferId] = useState<string | null>(null);
@@ -122,7 +125,7 @@ export function PlanTokensTab() {
   if (overview.mode === "free") {
     return (
       <p className="text-sm text-muted-foreground" data-testid="plan-tab-free">
-        This agent is free to use — there are no plans or token packs.
+        This agent is free to use. There is nothing to buy.
       </p>
     );
   }
@@ -170,18 +173,31 @@ export function PlanTokensTab() {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">
-                  Plan tokens this period
+                  Included usage left this period
                 </span>
                 <span className="font-medium tabular-nums">
-                  {formatTokens(ent.period_token_remaining)}
+                  {approxMessagesLabel(ent.period_token_remaining)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Top-up tokens</span>
+                <span className="text-muted-foreground">Extra usage</span>
                 <span className="font-medium tabular-nums">
-                  {formatTokens(ent.topup_token_remaining)}
+                  {approxMessagesLabel(ent.topup_token_remaining)}
                 </span>
               </div>
+              {(ent.included?.length ?? 0) > 0 ? (
+                <div
+                  className="flex items-start justify-between gap-4"
+                  data-testid="plan-tab-included"
+                >
+                  <span className="shrink-0 text-muted-foreground">
+                    Your plan includes
+                  </span>
+                  <span className="text-right font-medium">
+                    {ent.included?.join(" · ")}
+                  </span>
+                </div>
+              ) : null}
             </>
           )}
         </CardContent>
@@ -192,7 +208,7 @@ export function PlanTokensTab() {
         // highlightFirst: the lead plan is the recommended one and gets
         // the brand beam; selection is a data flag, not display copy.
         { label: "Plans", items: subscriptions, verb: "Subscribe", highlightFirst: true },
-        { label: "Token packs", items: packs, verb: "Buy", highlightFirst: false },
+        { label: "One-time packs", items: packs, verb: "Buy", highlightFirst: false },
       ]
         .filter((s) => s.items.length > 0)
         .map((section) => (
@@ -215,11 +231,26 @@ export function PlanTokensTab() {
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="text-sm font-medium">{offer.name}</span>
                     <span className="text-xs text-muted-foreground">
-                      {formatTokens(offer.token_amount)} tokens
-                      {offer.kind === "subscription"
-                        ? " every period"
-                        : " · one-time"}
+                      {offer.token_amount > 0
+                        ? `${approxMessagesLabel(offer.token_amount)}${
+                            offer.kind === "subscription"
+                              ? " every period"
+                              : " of extra usage · one-time"
+                          }`
+                        : offer.kind === "subscription"
+                          ? "Access included"
+                          : "Feature add-on · one-time"}
                     </span>
+                    {offer.description ? (
+                      <span className="text-xs text-muted-foreground/80">
+                        {offer.description}
+                      </span>
+                    ) : null}
+                    {(offer.included?.length ?? 0) > 0 ? (
+                      <span className="text-xs text-muted-foreground/80">
+                        Includes: {offer.included?.join(" · ")}
+                      </span>
+                    ) : null}
                   </div>
                   <span className="shrink-0 text-sm font-semibold tabular-nums">
                     {formatPrice(offer.amount_cents, offer.currency)}

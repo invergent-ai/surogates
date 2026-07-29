@@ -392,6 +392,7 @@ class AgentHarness(
         agent_service_account_id: str | None = None,
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
+        entitlement_excluded_tools: frozenset[str] = frozenset(),
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -407,6 +408,14 @@ class AgentHarness(
         # session resolved before this was wired keeps every command.
         self._slash_commands: SlashCommandConfig = (
             slash_commands if slash_commands is not None else SlashCommandConfig()
+        )
+        # Tool names the end-user's purchased package excludes for this
+        # wake (computed by the worker from ``session.config["entitlements"]``
+        # plus the ops MCP-server scope; empty = no restriction). Applied
+        # in ``_tool_filter_for_session`` where it beats an explicit
+        # ``allowed_tools``, mirroring the ``/code`` capability rule.
+        self._entitlement_excluded_tools: frozenset[str] = frozenset(
+            entitlement_excluded_tools or (),
         )
         # Per-agent git repos the coding tool / ``/code`` may check out.
         # ``wake`` re-fetches the session from the store, so these are overlaid
@@ -800,9 +809,22 @@ class AgentHarness(
     # Slash-command capability gate
     # ------------------------------------------------------------------
 
-    def _slash_command_enabled(self, name: str) -> bool:
-        """True when slash command *name* is enabled for this agent."""
-        return name in self._slash_commands.commands
+    def _slash_command_enabled(
+        self, name: str, session: Session | None = None,
+    ) -> bool:
+        """True when slash command *name* is enabled for this agent.
+
+        With a ``session``, the end-user's purchased package is checked
+        too: a capability the agent offers but the user's plan does not
+        include is gated exactly like an agent-level switch-off.
+        """
+        if name not in self._slash_commands.commands:
+            return False
+        if session is not None:
+            from surogates.runtime.entitlements import capability_allowed
+
+            return capability_allowed(session.config, name)
+        return True
 
     def _overlay_repos(self, session: Session) -> Session:
         """Overlay the agent's configured repos + ssh targets onto a wake-local session.
@@ -826,11 +848,14 @@ class AgentHarness(
                 config["agent_service_account_id"] = self._agent_service_account_id
         return session.model_copy(update={"config": config})
 
-    def _slash_command_block_reason(self, content: str | None) -> str | None:
+    def _slash_command_block_reason(
+        self, content: str | None, session: Session | None = None,
+    ) -> str | None:
         """User-facing message when the slash command in *content* is gated
-        off for this agent, else None (allowed, or not a gateable command)."""
+        off for this agent (or excluded from the sender's plan), else None
+        (allowed, or not a gateable command)."""
         name = _slash_command_name(content)
-        if name is None or self._slash_command_enabled(name):
+        if name is None or self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
 
@@ -1111,7 +1136,9 @@ class AgentHarness(
             # Capability gate: refuse slash commands disabled for this
             # agent (master switch off, or this command individually off)
             # before the dispatch chain below would handle them.
-            slash_block = self._slash_command_block_reason(last_user_content)
+            slash_block = self._slash_command_block_reason(
+                last_user_content, session,
+            )
             if slash_block is not None:
                 await self._emit_loop_response(
                     session, lease, slash_block, user_content=last_user_content
@@ -3408,6 +3435,32 @@ class AgentHarness(
         updated.add("ask_user_question")
         return updated
 
+    def _apply_entitlement_exclusions(
+        self, tool_filter: set[str] | None,
+    ) -> set[str] | None:
+        """Subtract the purchased-package exclusions, LAST.
+
+        Runs after ``_apply_mcp_schema_filter`` on purpose: that filter
+        can re-add this agent's full discovered MCP set (its contract
+        for sessions without an explicit allowlist), which would
+        resurrect paywalled ``mcp__*`` tools if the exclusion ran
+        earlier. Beats an explicit ``allowed_tools`` for the same
+        reason the ``/code`` rule does: a paywalled tool must never be
+        schema-visible, whatever the session config asks for.
+        ``getattr``: several test harnesses build partial AgentHarness
+        objects that skip ``__init__``; absent means no restriction.
+        """
+        excluded = getattr(self, "_entitlement_excluded_tools", None)
+        if not excluded:
+            return tool_filter
+        base = (
+            set(self._tools.tool_names)
+            if tool_filter is None
+            else set(tool_filter)
+        )
+        base.difference_update(excluded)
+        return base
+
     def _apply_mcp_schema_filter(
         self, tool_filter: set[str] | None, *, explicit_allowed: bool,
     ) -> set[str] | None:
@@ -3522,7 +3575,7 @@ class AgentHarness(
         # that command is disabled the tool must also disappear from the
         # model-visible set (slash gating alone only blocks the human command).
         # This beats an explicit ``allowed_tools`` that lists it.
-        if not self._slash_command_enabled("code"):
+        if not self._slash_command_enabled("code", session):
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
@@ -3557,6 +3610,7 @@ class AgentHarness(
             tool_filter = self._apply_mcp_schema_filter(
                 tool_filter, explicit_allowed=explicit_allowed,
             )
+            tool_filter = self._apply_entitlement_exclusions(tool_filter)
             tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
             return self._ensure_always_available_tools(
                 tool_filter, explicit_allowed=explicit_allowed,
@@ -3569,6 +3623,7 @@ class AgentHarness(
         tool_filter = self._apply_mcp_schema_filter(
             tool_filter, explicit_allowed=explicit_allowed,
         )
+        tool_filter = self._apply_entitlement_exclusions(tool_filter)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
         return self._ensure_always_available_tools(
             tool_filter, explicit_allowed=explicit_allowed,

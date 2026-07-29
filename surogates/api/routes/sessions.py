@@ -816,6 +816,7 @@ async def send_message(
                     session,
                     body.content,
                     buyer=buyer,
+                    channel="web",
                 )
 
     # Per-user allowance (a slice of the operator's subscription) applies
@@ -826,7 +827,11 @@ async def send_message(
     # unaffected. The worker settles ``allowance_reservations`` after.
     if session.channel == "web" and tenant.user_id is not None:
         await authorize_allowance_turn(
-            request, session, body.content, end_user_id=str(tenant.user_id),
+            request,
+            session,
+            body.content,
+            end_user_id=str(tenant.user_id),
+            channel="web",
         )
 
     event_data: dict = {"content": body.content}

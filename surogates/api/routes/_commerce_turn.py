@@ -14,6 +14,7 @@ import logging
 
 from fastapi import HTTPException, Request, status
 
+from surogates.runtime.entitlements import ENTITLEMENTS_CONFIG_KEY
 from surogates.runtime.platform_client import (
     AllowanceExhaustedError,
     CommercePaymentRequiredError,
@@ -37,6 +38,7 @@ async def authorize_commerce_turn(
     content: str,
     *,
     buyer: dict | None = None,
+    channel: str | None = None,
 ) -> None:
     """Gate one visitor message behind the agent's monetization mode.
 
@@ -74,6 +76,7 @@ async def authorize_commerce_turn(
             estimated_tokens=estimate_turn_tokens(content),
             email=buyer.get("email"),
             name=buyer.get("name"),
+            channel=channel,
         )
     except CommercePaymentRequiredError as exc:
         raise HTTPException(
@@ -92,6 +95,12 @@ async def authorize_commerce_turn(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Access checks are temporarily unavailable; try again.",
         ) from exc
+    await pin_entitlements(
+        getattr(request.app.state, "session_store", None),
+        session.id,
+        session.config,
+        receipt.get("features"),
+    )
     if receipt.get("entitlement_id"):
         store = get_session_store(request)
         # Appended, not overwritten: a second message can land while a
@@ -112,6 +121,44 @@ class AllowanceReserveError(RuntimeError):
     """The allowance plane could not be reached — callers fail closed."""
 
 
+# The pinned package lives under ``ENTITLEMENTS_CONFIG_KEY`` (imported
+# from ``surogates.runtime.entitlements``, the canonical key + reader
+# module shared with the worker/harness filters).
+
+
+async def pin_entitlements(
+    session_store,
+    session_id,
+    current_config: dict | None,
+    features: dict | None,
+) -> None:
+    """Pin the receipt's feature package on the session, minimally.
+
+    ``current_config`` (the caller's already-loaded session config, when
+    it has one) short-circuits the round trip entirely in steady state;
+    the store's reconcile skips the write when nothing changed either
+    way. Best-effort by design — a pin failure must not turn an
+    authorized turn into a 500; the previous turn's package (or none)
+    simply keeps applying.
+    """
+    if session_store is None:
+        return
+    if (
+        current_config is not None
+        and current_config.get(ENTITLEMENTS_CONFIG_KEY) == features
+    ):
+        return
+    try:
+        await session_store.reconcile_session_config_key(
+            session_id, ENTITLEMENTS_CONFIG_KEY, features,
+        )
+    except Exception:
+        logger.warning(
+            "entitlements pin failed for session %s", session_id,
+            exc_info=True,
+        )
+
+
 async def reserve_allowance(
     *,
     platform_client,
@@ -122,6 +169,8 @@ async def reserve_allowance(
     content: str,
     end_user_id: str,
     always: bool = False,
+    channel: str | None = None,
+    session_config: dict | None = None,
 ) -> None:
     """Channel-agnostic per-user allowance reservation (no HTTP request).
 
@@ -131,15 +180,33 @@ async def reserve_allowance(
     per-buyer website embed, where the buyer holds a purchased allowance
     to draw from even when the agent itself has no default cap.
 
+    ``channel`` names the surface carrying the turn; ops gates sellable
+    channels (slack/telegram/website) against the user's purchased
+    package and 402s ``channel_not_included`` when excluded.
+    ``session_config`` is the session's current config, used to pin the
+    receipt's feature package (``entitlements``) without a read.
+
     Reserves the turn's estimate against the end-user's cap and pins the
     receipt on ``session.config`` for the worker to settle. Raises
     :class:`~surogates.runtime.platform_client.AllowanceExhaustedError`
-    on 402 (cap spent / subscription required / operator plan spent) and
-    :class:`AllowanceReserveError` when the allowance plane is unreachable
-    (callers fail closed). Shared by the web message route, the
-    slack/telegram inbound pipeline, and the website widget embed.
+    on 402 (cap spent / subscription required / operator plan spent /
+    channel not in the package) and :class:`AllowanceReserveError` when
+    the allowance plane is unreachable (callers fail closed). Shared by
+    the web message route, the slack/telegram inbound pipeline, and the
+    website widget embed.
     """
     if not always and runtime_payload.get("end_user_token_allowance") is None:
+        # Uncapped agent: no per-turn authorize, so no receipt carries
+        # the package. The agent's default package (ops projects it for
+        # exactly this) is still the sender's package — pin it here or
+        # a free unlimited agent with a restricted default would serve
+        # every capability unrestricted.
+        await pin_entitlements(
+            session_store,
+            session_id,
+            session_config,
+            runtime_payload.get("default_user_features"),
+        )
         return
     if platform_client is None:
         raise AllowanceReserveError("platform_client not wired")
@@ -148,11 +215,15 @@ async def reserve_allowance(
             str(agent_id),
             end_user_id=end_user_id,
             estimated_tokens=estimate_turn_tokens(content),
+            channel=channel,
         )
     except AllowanceExhaustedError:
         raise
     except Exception as exc:
         raise AllowanceReserveError(str(exc)) from exc
+    await pin_entitlements(
+        session_store, session_id, session_config, receipt.get("features"),
+    )
     if receipt.get("allowance_id"):
         if session_store is None:
             raise AllowanceReserveError("session_store not wired")
@@ -177,18 +248,21 @@ async def authorize_allowance_turn(
     *,
     end_user_id: str,
     always: bool = False,
+    channel: str | None = None,
 ) -> None:
     """HTTP gate for one end-user turn behind their per-user allowance.
 
     Thin wrapper over :func:`reserve_allowance` that pulls dependencies
     from ``request.app.state`` and maps the domain outcomes to HTTP: an
-    exhausted allowance (or subscription-required / operator plan spent)
-    to 402 with the machine sentinel, an unreachable allowance plane to
-    503 (fail closed — a capped agent must not serve unmetered turns).
+    exhausted allowance (or subscription-required / operator plan spent /
+    channel excluded from the package) to 402 with the machine sentinel,
+    an unreachable allowance plane to 503 (fail closed — a capped agent
+    must not serve unmetered turns).
 
     ``always`` forces the ops authorize regardless of the agent's default
     cap projection — used by the per-buyer website embed, where the buyer
-    holds a purchased allowance to draw from.
+    holds a purchased allowance to draw from. ``channel`` names the
+    surface for the package's channel gate.
     """
     payload = await runtime_commerce_payload(request, str(session.agent_id))
     try:
@@ -201,6 +275,8 @@ async def authorize_allowance_turn(
             content=content,
             end_user_id=end_user_id,
             always=always,
+            channel=channel,
+            session_config=session.config,
         )
     except AllowanceExhaustedError as exc:
         # Carry the buy-page URL (as the commerce gate does) so the client
