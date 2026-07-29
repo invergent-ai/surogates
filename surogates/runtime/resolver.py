@@ -126,9 +126,12 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         commerce_mode=str(payload.get("commerce_mode") or "free"),
         commerce_buy_url=payload.get("commerce_buy_url") or None,
         media_credits_metered=bool(payload.get("media_credits_metered")),
-        media_image_cents=max(
-            0, int(payload.get("media_image_cents") or 4),
-        ),
+        # ``is None`` (not falsy) so an explicit 0 — metered but free
+        # images — survives; only an absent field takes the default.
+        media_image_cents=max(0, int(
+            4 if payload.get("media_image_cents") is None
+            else payload.get("media_image_cents"),
+        )),
     )
 
 

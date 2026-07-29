@@ -417,23 +417,30 @@ def _build_media_budget_hooks(
     *,
     ctx: Any,
     session: Any,
-    service_account_id: Any,
     platform_client: Any,
 ) -> tuple[Any, Any]:
     """Per-buyer media metering hooks for ``MediaGenConfig``.
 
-    ``(None, None)`` for unmetered agents, operator-plane sessions
-    (service-account principals — ops-chat, api, scheduled runs;
-    mirrors the browser guard's stance), or a missing platform client.
-    Otherwise: authorize holds against the sender's media balance via
-    the ops pre-flight endpoint; settle spends the same hold with the
-    generation's actual cost. Identity resolution matches the browser
-    guard: buy-page buyer first, embed end-user, then the session's
-    tenant user.
+    ``(None, None)`` for unmetered agents, operator-plane sessions, or
+    a missing platform client. The operator check reads the SESSION
+    row's ``service_account_id`` (set only when the session itself is
+    owned by a service account — ops-chat, api, scheduled runs), NOT
+    the credential principal: on managed channels (slack/telegram)
+    ``resolve_credential_principal`` deliberately swaps in the AGENT'S
+    OWN service account for external-tool credential minting, and
+    gating on that would exempt every Slack/Telegram buyer from
+    metering. Mirrors the browser guard, which queries the same
+    column. Otherwise: authorize holds against the sender's media
+    balance via the ops pre-flight endpoint; settle spends the same
+    hold with the generation's actual cost. Identity resolution
+    matches the browser guard: buy-page buyer first, embed end-user,
+    then the session's tenant user.
     """
     if not getattr(ctx, "media_credits_metered", False):
         return None, None
-    if platform_client is None or service_account_id is not None:
+    if platform_client is None:
+        return None, None
+    if getattr(session, "service_account_id", None) is not None:
         return None, None
 
     from surogates.runtime.platform_client import MediaCreditsExhaustedError
@@ -1527,7 +1534,6 @@ async def run_worker(settings: Settings) -> None:
         media_budget_authorize, media_budget_settle = _build_media_budget_hooks(
             ctx=ctx,
             session=session,
-            service_account_id=credential.service_account_id,
             platform_client=platform_client,
         )
         media_gen_config = MediaGenConfig(

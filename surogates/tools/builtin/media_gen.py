@@ -343,10 +343,17 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         if value:
             extra_body[field_name] = value
 
-    image_cents = max(1, int(getattr(cfg, "image_cents", 4) or 4))
-    billing, budget_error = await _authorize_media_budget(cfg, image_cents)
-    if budget_error is not None:
-        return _json_error(budget_error)
+    raw_cents = getattr(cfg, "image_cents", 4)
+    image_cents = max(0, int(4 if raw_cents is None else raw_cents))
+    billing = None
+    if image_cents > 0:
+        # A zero price means metered-but-free images: no hold to take,
+        # nothing to settle — skip the metering hop entirely.
+        billing, budget_error = await _authorize_media_budget(
+            cfg, image_cents,
+        )
+        if budget_error is not None:
+            return _json_error(budget_error)
     media_ref = f"img-{uuid4().hex}"
 
     try:
@@ -522,6 +529,10 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 )
                 actual_cents = 0
             await _settle_media_budget(cfg, billing, actual_cents, media_ref)
+            # The hold is spent: a download failure below must not
+            # settle again (the ledger's external_ref idempotency would
+            # absorb it, but relying on that hides intent).
+            billing = None
             urls = status_data.get("unsigned_urls") or []
             if not urls:
                 return _json_error(

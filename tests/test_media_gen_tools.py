@@ -844,11 +844,12 @@ def _hook_ctx(metered=True, cents=4, buy_url="https://buy.example/a"):
     )
 
 
-def _hook_session(config=None, user_id="u-1"):
+def _hook_session(config=None, user_id="u-1", service_account_id=None):
     return SimpleNamespace(
         id="11111111-1111-1111-1111-111111111111",
         config=config or {},
         user_id=user_id,
+        service_account_id=service_account_id,
     )
 
 
@@ -858,22 +859,37 @@ def test_media_hooks_none_when_unmetered():
     a, s = _build_media_budget_hooks(
         ctx=_hook_ctx(metered=False),
         session=_hook_session(),
-        service_account_id=None,
         platform_client=object(),
     )
     assert a is None and s is None
 
 
 def test_media_hooks_none_for_service_account_sessions():
+    """Exemption keys on the SESSION row's service_account_id — the
+    credential principal is the agent's own SA on managed channels
+    and must not exempt Slack/Telegram buyers."""
     from surogates.orchestrator.worker import _build_media_budget_hooks
 
     a, s = _build_media_budget_hooks(
         ctx=_hook_ctx(),
-        session=_hook_session(),
-        service_account_id="sa-1",
+        session=_hook_session(user_id=None, service_account_id="sa-1"),
         platform_client=object(),
     )
     assert a is None and s is None
+
+
+def test_media_hooks_built_for_managed_channel_end_users():
+    """A slack/telegram end-user session (human user_id, no session
+    SA) gets metering hooks even though the CREDENTIAL principal for
+    such sessions is the agent's own service account."""
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+
+    a, s = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(user_id="u-slack-1"),
+        platform_client=object(),
+    )
+    assert a is not None and s is not None
 
 
 @pytest.mark.asyncio
@@ -884,7 +900,6 @@ async def test_media_hooks_anonymous_sender_raises_buy_prompt():
     authorize, _ = _build_media_budget_hooks(
         ctx=_hook_ctx(),
         session=_hook_session(user_id=None),
-        service_account_id=None,
         platform_client=object(),
     )
     with pytest.raises(MediaBudgetExhaustedError) as exc_info:
@@ -920,7 +935,6 @@ async def test_media_hooks_authorize_and_settle_call_platform():
         session=_hook_session(
             config={"commerce_buyer": {"firebase_uid": "fb-1"}},
         ),
-        service_account_id=None,
         platform_client=client,
     )
     receipt = await authorize(4)
@@ -951,7 +965,6 @@ async def test_media_hooks_exhausted_maps_to_buy_prompt_error():
     authorize, _ = _build_media_budget_hooks(
         ctx=_hook_ctx(),
         session=_hook_session(),
-        service_account_id=None,
         platform_client=_BrokeClient(),
     )
     with pytest.raises(MediaBudgetExhaustedError) as exc_info:
