@@ -1,0 +1,473 @@
+"""WhatsApp Business Cloud API webhook channel platform strategy.
+
+Exposes three stateless module-level functions used by the dispatcher and
+the registered :class:`WhatsAppPlatform` object that implements
+:class:`~surogates.channels.registry.ChannelPlatform`.
+
+Module-level functions
+----------------------
+identifier_of(request, body) -> str
+    Reads the tenant's ``phone_number_id`` from the URL path parameter.
+    The path is authoritative: the dispatcher resolves the tenant and its
+    credentials before the body is parsed, and the body's copy of the id is
+    only cross-checked afterwards in :func:`parse`.
+
+verify(request, raw_body, *, creds) -> bool | VerificationResult
+    Branches on the HTTP method.  ``GET`` is Meta's callback-URL handshake
+    (``hub.mode``/``hub.verify_token``/``hub.challenge``) and returns a
+    :class:`VerificationResult` echoing the challenge as plain text.
+    ``POST`` validates the ``X-Hub-Signature-256`` HMAC-SHA256 over the raw
+    body.
+
+parse(body, *, creds, identifier) -> InboundMessage | None
+    Converts a WhatsApp Business Account webhook envelope into an
+    :class:`~surogates.channels.inbound.InboundMessage`.  Returns ``None``
+    for everything that is not a user message — delivery statuses,
+    reactions, system events — per the protocol's loop-safety contract.
+
+WhatsApp Cloud API is DM-only for our purposes: every conversation is 1:1,
+so ``thread_key`` is always ``None`` and ``visibility`` is ``"dm"``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+from typing import Any
+
+from surogates.channels.inbound import InboundFileRef, InboundMessage
+from surogates.channels.platforms.whatsapp_api import (
+    DEFAULT_API_VERSION,
+    ext_for_mime,
+)
+from surogates.channels.registry import ChannelDescriptor, VerificationResult
+
+__all__ = [
+    "WhatsAppPlatform",
+    "identifier_of",
+    "verify",
+    "parse",
+]
+
+logger = logging.getLogger(__name__)
+
+#: Meta's documented maximum webhook body size.  Checked before any crypto.
+_MAX_BODY_BYTES = 3 * 1024 * 1024
+
+#: Inbound message types that carry a user message.  Everything else —
+#: reaction, system, unsupported, order, location, contacts — returns None
+#: rather than starting an agent turn with an empty prompt.
+_MEDIA_TYPES = ("image", "video", "audio", "document", "sticker")
+_MESSAGE_TYPES = ("text",) + _MEDIA_TYPES
+
+
+# ---------------------------------------------------------------------------
+# identifier_of
+# ---------------------------------------------------------------------------
+
+
+def identifier_of(request: Any, body: Any) -> str:
+    """Return the tenant's ``phone_number_id`` from the URL path parameter.
+
+    Parameters
+    ----------
+    request:
+        Starlette-like request exposing ``path_params["phone_number_id"]``.
+    body:
+        Parsed request body — intentionally ignored.  The dispatcher calls
+        this before the body is read.
+    """
+    return request.path_params["phone_number_id"]
+
+
+# ---------------------------------------------------------------------------
+# verify
+# ---------------------------------------------------------------------------
+
+
+def _verify_handshake(request: Any, *, creds: dict) -> VerificationResult:
+    """Handle Meta's GET callback-URL verification handshake.
+
+    Every rejection renders 401: the dispatcher discards
+    ``VerificationResult.status_code`` when ``accepted`` is False.  The
+    distinguishing signal is therefore the log level, not the response —
+    an unconfigured token logs at ERROR because it is a misconfiguration,
+    a mismatch at WARNING because it may be an attack.
+    """
+    expected = (creds or {}).get("verify_token") or ""
+    if not expected:
+        logger.error(
+            "[whatsapp] verify_token is not configured for this tenant — "
+            "refusing the handshake",
+        )
+        return VerificationResult(accepted=False)
+
+    query = request.query_params
+    mode = query.get("hub.mode", "")
+    token = query.get("hub.verify_token", "")
+    challenge = query.get("hub.challenge", "")
+
+    if mode != "subscribe":
+        logger.info("[whatsapp] handshake rejected: hub.mode=%r", mode)
+        return VerificationResult(accepted=False)
+
+    # Compare bytes: compare_digest on str raises TypeError on non-ASCII,
+    # and the token is attacker-controlled.
+    if not hmac.compare_digest(
+        token.encode("utf-8", "surrogatepass"), expected.encode("utf-8"),
+    ):
+        logger.warning("[whatsapp] handshake rejected: verify_token mismatch")
+        return VerificationResult(accepted=False)
+
+    if not challenge:
+        logger.info("[whatsapp] handshake rejected: missing hub.challenge")
+        return VerificationResult(accepted=False)
+
+    return VerificationResult(accepted=True, response_body=challenge, status_code=200)
+
+
+def _verify_signature(app_secret: str, raw_body: bytes, header: str) -> bool:
+    """Constant-time X-Hub-Signature-256 check over the raw body bytes."""
+    if not app_secret or not header:
+        return False
+    if not header.startswith("sha256="):
+        return False
+    expected_hex = header[len("sha256="):].strip()
+    if not expected_hex:
+        return False
+    computed = hmac.new(
+        app_secret.encode("utf-8"), raw_body, hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(computed.lower(), expected_hex.lower())
+
+
+def verify(
+    request: Any,
+    raw_body: bytes,
+    *,
+    creds: dict,
+) -> bool | VerificationResult:
+    """Validate a WhatsApp webhook request.
+
+    Parameters
+    ----------
+    request:
+        Starlette-like request exposing ``method``, ``headers`` and
+        ``query_params``.
+    raw_body:
+        Raw request body bytes.  The HMAC must be computed over these, never
+        over a re-serialisation.
+    creds:
+        Credential dict; ``app_secret`` for POST, ``verify_token`` for GET.
+    """
+    if getattr(request, "method", "POST").upper() == "GET":
+        return _verify_handshake(request, creds=creds)
+
+    if len(raw_body) > _MAX_BODY_BYTES:
+        logger.warning(
+            "[whatsapp] rejecting %d-byte body (cap %d)",
+            len(raw_body), _MAX_BODY_BYTES,
+        )
+        return False
+
+    app_secret = (creds or {}).get("app_secret") or ""
+    if not app_secret:
+        logger.error(
+            "[whatsapp] app_secret is not configured for this tenant — "
+            "refusing the webhook",
+        )
+        return False
+
+    header = request.headers.get("X-Hub-Signature-256", "")
+    return _verify_signature(app_secret, raw_body, header)
+
+
+# ---------------------------------------------------------------------------
+# parse
+# ---------------------------------------------------------------------------
+
+
+def _log_statuses(value: dict, *, identifier: str) -> None:
+    """Log delivery statuses and inbound errors.
+
+    These carry asynchronous send failures the ``POST /messages`` 200 did
+    not report, so they must be visible.  They are *not* emitted as channel
+    observations: that queue is the follow-mode memory firehose and needs a
+    redis handle and an ``agent_id`` that ``parse`` does not receive.
+
+    Wrapped by the caller in try/except — a logging failure must never turn
+    a status webhook into a 400 and a Meta retry loop.
+    """
+    for status in value.get("statuses") or []:
+        if not isinstance(status, dict):
+            continue
+        state = status.get("status")
+        if state == "failed":
+            logger.warning(
+                "[whatsapp] delivery failed pnid=%s wamid=%s errors=%s",
+                identifier, status.get("id"), status.get("errors"),
+            )
+        else:
+            logger.debug(
+                "[whatsapp] delivery %s pnid=%s wamid=%s",
+                state, identifier, status.get("id"),
+            )
+    for error in value.get("errors") or []:
+        logger.warning("[whatsapp] inbound error pnid=%s error=%s", identifier, error)
+
+
+def _file_ref(raw_message: dict, msg_type: str) -> InboundFileRef | None:
+    """Build an :class:`InboundFileRef` from a media message.
+
+    ``url`` carries the Cloud API media id, not an HTTP URL: the framework
+    passes it straight back to ``download_file``, which does the two Graph
+    hops.  This mirrors how Telegram carries its ``file_id``.
+    """
+    block = raw_message.get(msg_type)
+    if not isinstance(block, dict):
+        return None
+    media_id = block.get("id")
+    if not media_id:
+        return None
+    mime_type = block.get("mime_type") or "application/octet-stream"
+    filename = block.get("filename") or f"{media_id}{ext_for_mime(mime_type)}"
+    return InboundFileRef(
+        url=media_id,
+        filename=filename,
+        mime_type=mime_type,
+        size=None,
+        file_id=media_id,
+    )
+
+
+def parse(
+    body: Any,
+    *,
+    creds: dict | None = None,
+    identifier: str | None = None,
+) -> InboundMessage | None:
+    """Map a verified WhatsApp webhook envelope to an :class:`InboundMessage`.
+
+    Returns ``None`` for every payload that is not a user message.  A
+    ``phone_number_id`` in the body that does not match the path
+    ``identifier`` is dropped: one Meta App can subscribe several numbers,
+    and routing another number's message to this tenant would be a
+    tenant-isolation failure.
+    """
+    if not isinstance(body, dict):
+        return None
+    if body.get("object") != "whatsapp_business_account":
+        return None
+
+    for entry in body.get("entry") or []:
+        if not isinstance(entry, dict):
+            continue
+        for change in entry.get("changes") or []:
+            if not isinstance(change, dict):
+                continue
+            if change.get("field") != "messages":
+                continue
+            value = change.get("value") or {}
+            if not isinstance(value, dict):
+                continue
+
+            metadata = value.get("metadata") or {}
+            body_pnid = metadata.get("phone_number_id")
+            if identifier is not None and body_pnid != identifier:
+                logger.warning(
+                    "[whatsapp] dropping payload: body phone_number_id=%s "
+                    "does not match route identifier=%s",
+                    body_pnid, identifier,
+                )
+                return None
+
+            try:
+                _log_statuses(value, identifier=identifier or "")
+            except Exception:  # noqa: BLE001
+                pass
+
+            names = {
+                c.get("wa_id"): (c.get("profile") or {}).get("name", "")
+                for c in value.get("contacts") or []
+                if isinstance(c, dict)
+            }
+
+            raw_messages = [
+                m for m in value.get("messages") or [] if isinstance(m, dict)
+            ]
+            for index, raw_message in enumerate(raw_messages):
+                message = _build_message(raw_message, names=names, identifier=body_pnid)
+                if message is not None:
+                    dropped = len(raw_messages) - index - 1
+                    if dropped:
+                        # The dispatcher runs one pipeline pass per webhook.
+                        # Meta rarely batches user messages (bursts, retry
+                        # backlogs) — but the loss must be visible when it
+                        # does.  Fan-out is a recorded v2 item.
+                        logger.warning(
+                            "[whatsapp] dropping %d additional batched "
+                            "message(s) for pnid=%s (one message per webhook)",
+                            dropped, body_pnid,
+                        )
+                    return message
+    return None
+
+
+def _build_message(
+    raw_message: dict, *, names: dict, identifier: str | None,
+) -> InboundMessage | None:
+    """Build one :class:`InboundMessage`, or ``None`` if it is not a message."""
+    msg_type = str(raw_message.get("type") or "text").lower()
+    if msg_type not in _MESSAGE_TYPES:
+        logger.debug("[whatsapp] ignoring message type %r", msg_type)
+        return None
+
+    wa_id = raw_message.get("from")
+    if not wa_id:
+        # DM-only: without a resolvable 1:1 sender we cannot route a reply.
+        # Log the raw type so we capture the real shape if a group payload
+        # ever arrives.
+        logger.warning(
+            "[whatsapp] refusing message with no resolvable sender (type=%s, keys=%s)",
+            msg_type, sorted(raw_message.keys()),
+        )
+        return None
+
+    wamid = raw_message.get("id") or ""
+
+    if msg_type == "text":
+        text = ((raw_message.get("text") or {}).get("body")) or ""
+        files: list[InboundFileRef] = []
+    else:
+        block = raw_message.get(msg_type) or {}
+        text = block.get("caption") or ""
+        ref = _file_ref(raw_message, msg_type)
+        files = [ref] if ref is not None else []
+
+    source: dict[str, Any] = {
+        "phone_number_id": identifier,
+        "wamid": wamid,
+    }
+    if msg_type == "audio":
+        source["voice"] = bool((raw_message.get("audio") or {}).get("voice"))
+
+    return InboundMessage(
+        kind=msg_type,
+        identifier=str(wa_id),
+        thread_key=None,
+        platform_user_id=str(wa_id),
+        user_name=names.get(wa_id, "") or "",
+        text=text,
+        media_urls=[],
+        media_types=[],
+        is_dm=True,
+        is_mention=False,
+        ts=wamid,
+        source=source,
+        is_bot=False,
+        visibility="dm",
+        files=files,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Platform object
+# ---------------------------------------------------------------------------
+
+
+class WhatsAppPlatform:
+    """Webhook-based WhatsApp Cloud API channel platform strategy.
+
+    Implements :class:`~surogates.channels.registry.ChannelPlatform`.
+
+    Each tenant brings their own Meta App and WhatsApp Business Account.
+    The tenant is identified by its ``phone_number_id``, which is the
+    ``{phone_number_id}`` path parameter in the webhook URL.  Credentials
+    (``access_token``, ``app_secret``, ``verify_token``) are resolved by the
+    dispatcher and passed to every method that needs them.
+    """
+
+    kind = "whatsapp"
+    topology = "webhook"
+
+    #: Meta verifies the callback URL with an unsigned GET on the same path.
+    #: The dispatcher mounts a GET route only for platforms declaring this.
+    handshake_get = True
+
+    descriptor = ChannelDescriptor(
+        vault_refs=lambda identifier: {
+            "access_token": "access_token",
+            "app_secret": "app_secret",
+            "verify_token": "verify_token",
+        },
+        config_keys=(
+            "require_mention",
+            "allow_bots",
+            "identity_policy",
+            "waba_id",
+            "api_version",
+        ),
+        # Meta has no setWebhook equivalent: the callback URL is configured
+        # by hand in the App Dashboard.
+        webhook_registration="manual",
+    )
+
+    # ------------------------------------------------------------------
+    # Route path
+    # ------------------------------------------------------------------
+
+    def route_path(self, identifier: str | None = None) -> str:
+        """Return the FastAPI path for this platform.
+
+        Parameters
+        ----------
+        identifier:
+            The tenant's ``phone_number_id``.  When ``None`` (template form
+            used by ``build_app``), returns the parametrised path template.
+        """
+        if identifier is None:
+            return "/whatsapp/{phone_number_id}"
+        return f"/whatsapp/{identifier}"
+
+    # ------------------------------------------------------------------
+    # identifier_of / verify / parse — delegates to module functions
+    # ------------------------------------------------------------------
+
+    def identifier_of(self, request: Any, body: Any) -> str:
+        return identifier_of(request, body)
+
+    def verify(
+        self, request: Any, raw_body: bytes, *, creds: dict,
+    ) -> bool | VerificationResult:
+        return verify(request, raw_body, creds=creds)
+
+    def parse(
+        self,
+        body: Any,
+        *,
+        creds: dict | None = None,
+        identifier: str | None = None,
+    ) -> InboundMessage | None:
+        return parse(body, creds=creds, identifier=identifier)
+
+
+# ---------------------------------------------------------------------------
+# Self-registration
+# ---------------------------------------------------------------------------
+
+
+def _register() -> None:
+    """Register the singleton WhatsAppPlatform in the module-level registry.
+
+    Called once at import time.  Guarded against double-registration so that
+    test suites that reimport the module (e.g. via importlib.reload) do not
+    raise a ValueError from the registry.
+    """
+    from surogates.channels.registry import registry
+
+    if registry.get("whatsapp") is None:
+        registry.register(WhatsAppPlatform())
+
+
+_register()
