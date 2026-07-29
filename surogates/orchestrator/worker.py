@@ -291,6 +291,109 @@ def _warn_if_base_model_missing_from_metadata(model_id: str) -> None:
     )
 
 
+def _build_browser_budget_guard(
+    session_factory: Any,
+    platform_client: Any,
+    runtime_config_cache: Any,
+) -> Any:
+    """Per-buyer browser-minutes gate for ``BrowserPool.ensure``.
+
+    Runs once per fresh pod provision. Resolves the session row itself
+    (agent, channel, sender identities — provisioning is a
+    once-per-session event, so the read is negligible), short-circuits
+    for unmetered agents via the cached runtime config, and otherwise
+    holds a chunk of the sender's minutes through the ops pre-flight
+    authorize. The returned billing block rides the pod's labels so
+    the ops monitor extends and settles the same hold. Fails CLOSED
+    for metered agents when the metering plane is unreachable — a paid
+    browser must not run free because ops blinked.
+    """
+    import sqlalchemy as sa
+
+    from surogates.browser.base import (
+        BrowserBudgetExhaustedError,
+        BrowserUnavailableError,
+    )
+    from surogates.db.models import Session as SessionRow
+    from surogates.runtime.platform_client import (
+        BrowserMinutesExhaustedError,
+    )
+
+    async def guard(
+        *, session_id: str, org_id: str, user_id: str,
+    ) -> dict[str, str] | None:
+        try:
+            session_uuid = UUID(str(session_id))
+        except ValueError:
+            return None
+        async with session_factory() as db:
+            row = (
+                await db.execute(
+                    sa.select(
+                        SessionRow.agent_id,
+                        SessionRow.channel,
+                        SessionRow.user_id,
+                        SessionRow.config,
+                    ).where(SessionRow.id == session_uuid),
+                )
+            ).one_or_none()
+        if row is None:
+            return None
+        agent_id, channel, session_user_id, config = row
+        if channel == "browser_setup":
+            # Operator-driven profile capture — operator plane only.
+            return None
+        if runtime_config_cache is None or platform_client is None:
+            return None
+        try:
+            payload = await runtime_config_cache.get(str(agent_id)) or {}
+        except LookupError:
+            return None
+        if not payload.get("browser_minutes_metered"):
+            return None
+        config = config or {}
+        buy_url = payload.get("commerce_buy_url")
+        firebase_uid = (config.get("commerce_buyer") or {}).get(
+            "firebase_uid",
+        )
+        end_user_id = (
+            config.get("embed_end_user_id")
+            or user_id
+            or (str(session_user_id) if session_user_id else None)
+        )
+        if not firebase_uid and not end_user_id:
+            # Metered agent, anonymous sender: nothing could hold a
+            # balance — same buy prompt as an empty one.
+            raise BrowserBudgetExhaustedError(
+                "browser_minutes_exhausted", buy_url=buy_url,
+            )
+        try:
+            receipt = await platform_client.browser_authorize(
+                str(agent_id),
+                session_id=str(session_id),
+                firebase_uid=firebase_uid,
+                end_user_id=str(end_user_id) if end_user_id else None,
+            )
+        except BrowserMinutesExhaustedError as exc:
+            raise BrowserBudgetExhaustedError(
+                exc.detail, buy_url=buy_url,
+            ) from exc
+        except Exception as exc:
+            raise BrowserUnavailableError(
+                f"browser minutes authorization unavailable: {exc}",
+            ) from exc
+        if not receipt.get("metered"):
+            return None
+        return {
+            "owner_kind": str(receipt.get("owner_kind") or ""),
+            "owner_id": str(receipt.get("owner_id") or ""),
+            "reservation_id": str(receipt.get("reservation_id") or ""),
+            "balance_id": str(receipt.get("balance_id") or ""),
+        }
+
+    return guard
+
+
 def _build_browser_backend(
     settings: "BrowserSettings",
     *,
@@ -1084,6 +1187,12 @@ async def run_worker(settings: Settings) -> None:
     _start_worker_invalidator(worker_state)
     runtime_config_cache = worker_state["runtime_config_cache"]
     platform_client = worker_state["platform_client"]
+    # Wired post-construction: the guard closes over the runtime
+    # plumbing installed just above, while the pool is built earlier
+    # with the rest of the compute plumbing.
+    browser_pool.budget_guard = _build_browser_budget_guard(
+        session_factory, platform_client, runtime_config_cache,
+    )
 
     # Credential vault — required for per-session ``vault://<name>``
     # resolution.  Pod cannot serve sessions without it.

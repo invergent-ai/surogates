@@ -367,6 +367,23 @@ class K8sBrowserBackend:
             "surogates.ai/org-id": org_id,
             "surogates.ai/user-id": user_id,
         }
+        if spec.billing:
+            # Per-buyer minutes attribution, read by the ops
+            # BrowserMonitor to extend and settle the sender's hold.
+            labels.update({
+                "surogates.ai/minutes-owner-kind": (
+                    spec.billing.get("owner_kind") or ""
+                ),
+                "surogates.ai/minutes-owner-id": (
+                    spec.billing.get("owner_id") or ""
+                ),
+                "surogates.ai/minutes-reservation-id": (
+                    spec.billing.get("reservation_id") or ""
+                ),
+                "surogates.ai/minutes-balance-id": (
+                    spec.billing.get("balance_id") or ""
+                ),
+            })
         env_vars = [
             client.V1EnvVar(name=key, value=value)
             for key, value in sorted(spec.env.items())
