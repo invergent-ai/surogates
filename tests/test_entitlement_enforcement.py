@@ -117,7 +117,23 @@ def test_capability_exclusions_drop_browser_and_coding():
         tool_registry=_registry_with(*_REGISTRY_ENTRIES),
         mcp_scope=None,
     )
-    assert excluded == {"browser_navigate", "browser_click", "run_coding_agent"}
+    assert excluded == {
+        "browser_navigate", "browser_click", "run_coding_agent",
+        "generate_image", "generate_video",
+    }
+
+
+def test_capability_exclusions_keep_entitled_media_tools():
+    excluded = _entitlement_tool_exclusions(
+        session_config={
+            "entitlements": {"capabilities": ["mission", "image", "video"]},
+        },
+        tool_registry=_registry_with(*_REGISTRY_ENTRIES),
+        mcp_scope=None,
+    )
+    assert excluded == {
+        "browser_navigate", "browser_click", "run_coding_agent",
+    }
 
 
 def test_mcp_servers_filtered_by_resolved_scope():
