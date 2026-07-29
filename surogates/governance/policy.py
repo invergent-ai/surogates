@@ -96,9 +96,19 @@ class GovernanceGate:
         enabled: bool = True,
         egress_policy: EgressPolicy | None = None,
         transparency: TransparencyInterceptor | None = None,
+        allow_list_scope: frozenset[str] | None = None,
     ) -> None:
         self._enabled: bool = enabled
         self._open_policy: bool = (allowed_tools is None and denied_tools is None)
+
+        # Namespace the allow-list governs.  A Studio-authored policy
+        # names built-in tools only, so a tool outside the scope (e.g.
+        # ``mcp__*``, which is governed by MCP-server attachment +
+        # entitlements) must not be rejected by the role gate merely for
+        # not appearing in the list.  Deny-list, egress, sandbox and
+        # argument checks still apply to out-of-scope tools.  ``None``
+        # means the allow-list governs every tool (historic behaviour).
+        self._allow_list_scope: frozenset[str] | None = allow_list_scope
 
         # Initialise AGT engine.
         self._engine = AGTPolicyEngine()
@@ -284,8 +294,14 @@ class GovernanceGate:
                 allowed=False, reason=egress_violation, tool_name=tool_name
             )
 
-        # Open policy: skip role check, only run argument checks.
-        if self._open_policy:
+        # Open policy: skip role check, only run argument checks.  Tools
+        # outside the allow-list's governed namespace (e.g. MCP tools
+        # under a built-in-tool allow-list) take the same path.
+        out_of_scope = (
+            self._allow_list_scope is not None
+            and tool_name not in self._allow_list_scope
+        )
+        if self._open_policy or out_of_scope:
             violation = self._check_arguments(tool_name, arguments or {})
             if violation:
                 return PolicyDecision(
@@ -541,7 +557,14 @@ class GovernanceGate:
         profile_rules = profile_egress.get("rules") or []
         profile_default = profile_egress.get("default_action")
 
-        if self._egress_policy is not None or profile_rules:
+        # ``default_action: deny`` with no rules is a real posture
+        # ("block all outbound") — it must materialise a policy, not
+        # fall through to unchecked egress.
+        if (
+            self._egress_policy is not None
+            or profile_rules
+            or profile_default == "deny"
+        ):
             base_default = (
                 getattr(self._egress_policy, "default_action", None)
                 if self._egress_policy is not None else None
@@ -579,6 +602,7 @@ class GovernanceGate:
             enabled=self._enabled,
             egress_policy=new_egress,
             transparency=self._transparency,
+            allow_list_scope=self._allow_list_scope,
         )
         composed.freeze()
         return composed

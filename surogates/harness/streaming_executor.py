@@ -144,6 +144,7 @@ class StreamingToolExecutor:
         media_gen: Any | None = None,
         saga: SagaOrchestrator | None = None,
         log_policy_allowed: bool = False,
+        governance_gate: Any | None = None,
         tool_guardrails: Any | None = None,
         bundle: Any | None = None,
         turn_gate: Any | None = None,
@@ -157,6 +158,7 @@ class StreamingToolExecutor:
         self._redis = redis
         self._budget = budget
         self._log_policy_allowed = log_policy_allowed
+        self._governance_gate = governance_gate
         self._memory_manager = memory_manager
         self._hint_tracker = hint_tracker
         self._sandbox_pool = sandbox_pool
@@ -401,6 +403,7 @@ class StreamingToolExecutor:
                 media_gen=self._media_gen,
                 saga=self._saga,
                 log_policy_allowed=self._log_policy_allowed,
+                governance_gate=self._governance_gate,
                 bundle=self._bundle,
                 turn_gate=self._turn_gate,
             )

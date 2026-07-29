@@ -26,6 +26,7 @@ from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
 )
+from surogates.runtime.governance import build_governance_gate
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -1964,6 +1965,10 @@ async def run_worker(settings: Settings) -> None:
             saga_enabled=settings.saga.enabled,
             saga_settings=settings.saga if settings.saga.enabled else None,
             log_policy_allowed=settings.governance.log_allowed,
+            # Per-wake enforcement gate from the agent's runtime-config
+            # governance projection (allow/deny lists + egress composed
+            # onto the platform floor, frozen).
+            governance_gate=build_governance_gate(ctx.governance),
             summary_client=(
                 summary_slot.client if summary_slot is not None else None
             ),

@@ -260,6 +260,7 @@ def _truncate_args(arguments: Any, limit: int = 500) -> str:
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
+    from surogates.governance.policy import GovernanceGate
     from surogates.governance.saga.orchestrator import SagaOrchestrator
     from surogates.browser.control import BrowserControlStore
     from surogates.browser.pool import BrowserPool
@@ -713,6 +714,7 @@ async def execute_tool_calls(
     media_gen: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
@@ -769,6 +771,7 @@ async def execute_tool_calls(
             media_gen=media_gen,
             tool_guardrails=tool_guardrails,
             log_policy_allowed=log_policy_allowed,
+            governance_gate=governance_gate,
             bundle=bundle,
             turn_gate=turn_gate,
         )
@@ -800,6 +803,7 @@ async def execute_tool_calls(
         media_gen=media_gen,
         saga=saga,
         log_policy_allowed=log_policy_allowed,
+        governance_gate=governance_gate,
         tool_guardrails=tool_guardrails,
         bundle=bundle,
         turn_gate=turn_gate,
@@ -835,6 +839,7 @@ async def execute_tool_calls_sequential(
     media_gen: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
@@ -892,6 +897,7 @@ async def execute_tool_calls_sequential(
             media_gen=media_gen,
             saga=saga,
             log_policy_allowed=log_policy_allowed,
+            governance_gate=governance_gate,
             bundle=bundle,
             turn_gate=turn_gate,
         )
@@ -944,6 +950,7 @@ async def execute_tool_calls_concurrent(
     media_gen: Any | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     log_policy_allowed: bool = False,
+    governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
 ) -> list[dict]:
@@ -1007,6 +1014,7 @@ async def execute_tool_calls_concurrent(
                 media_gen=media_gen,
                 _parent_trace=parent_trace,
                 log_policy_allowed=log_policy_allowed,
+                governance_gate=governance_gate,
                 bundle=bundle,
                 turn_gate=turn_gate,
             )
@@ -1111,6 +1119,7 @@ async def execute_single_tool(
     _parent_trace: Any | None = None,
     saga: SagaOrchestrator | None = None,
     log_policy_allowed: bool = False,
+    governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
 ) -> dict:
@@ -1198,80 +1207,85 @@ async def execute_single_tool(
             "content": result_content,
         }
 
-    # Workspace sandbox check — enforced at the governance layer before
-    # the tool is dispatched.  Uses AGT ExecutionSandbox for path
-    # containment (symlink resolution, is_relative_to).  Emits a
-    # ``policy.denied`` event on failure; emits ``policy.allowed`` on
-    # success only when ``governance.log_allowed`` is enabled.
+    # Governance check — enforced before the tool is dispatched, for
+    # every tool call.  The per-wake *governance_gate* composes the
+    # platform floor (workspace path containment via AGT
+    # ExecutionSandbox, path-argument hygiene, argument checks) with the
+    # agent's configured policy (allow/deny lists + egress) projected
+    # from the runtime config.  When no gate was threaded (direct
+    # callers, tests) a bare floor gate preserves the historic
+    # sandbox-only behaviour.  Emits a ``policy.denied`` event on
+    # failure; emits ``policy.allowed`` on success only when
+    # ``governance.log_allowed`` is enabled.
     from surogates.governance.events import policy_denied_event
-    from surogates.governance.policy import GovernanceGate, _PATH_ARGUMENT_MAP
-    path_keys = _PATH_ARGUMENT_MAP.get(tool_name)
-    if workspace_path and path_keys:
-        _sandbox_gate = GovernanceGate()
-        decision = _sandbox_gate.check(
-            tool_name, tool_args, workspace_path=workspace_path,
+    from surogates.governance.policy import GovernanceGate
+    gate = governance_gate if governance_gate is not None else GovernanceGate()
+    decision = gate.check(
+        tool_name, tool_args,
+        workspace_path=workspace_path,
+        session_id=str(session.id),
+    )
+    if not decision.allowed:
+        logger.warning(
+            "Governance blocked %s for session %s: %s",
+            tool_name, session.id, decision.reason,
         )
-        if not decision.allowed:
-            logger.warning(
-                "Workspace sandbox blocked %s for session %s: %s",
-                tool_name, session.id, decision.reason,
-            )
+        await store.emit_event(
+            session.id,
+            EventType.POLICY_DENIED,
+            policy_denied_event(tool_name, decision.reason or ""),
+        )
+        if decision.overridable:
             await store.emit_event(
                 session.id,
-                EventType.POLICY_DENIED,
-                policy_denied_event(tool_name, decision.reason or ""),
-            )
-            if decision.overridable:
-                await store.emit_event(
-                    session.id,
-                    EventType.INBOX_GOVERNANCE_GATE,
-                    {
-                        "tool_name": tool_name,
-                        "tool_call_id": tool_call_id,
-                        "arguments_excerpt": _truncate_args(sanitized_args),
-                        "deny_reason": decision.reason or "",
-                        "policy_id": decision.policy_id,
-                    },
-                )
-
-            result_payload = {"error": f"Blocked: {decision.reason}"}
-            if decision.overridable:
-                result_payload["error"] = "policy_blocked_overridable"
-                result_payload["message"] = decision.reason
-                result_payload["tool_call_id"] = tool_call_id
-            result_content = json.dumps(result_payload)
-
-            result_event_id = await store.emit_event(
-                session.id,
-                EventType.TOOL_RESULT,
+                EventType.INBOX_GOVERNANCE_GATE,
                 {
+                    "tool_name": tool_name,
                     "tool_call_id": tool_call_id,
-                    "name": tool_name,
-                    "content": result_content,
-                    "elapsed_ms": 0,
+                    "arguments_excerpt": _truncate_args(sanitized_args),
+                    "deny_reason": decision.reason or "",
+                    "policy_id": decision.policy_id,
                 },
             )
-            await store.advance_harness_cursor(
-                session.id,
-                through_event_id=result_event_id,
-                lease_token=lease.lease_token,
-            )
-            return {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": result_content,
-            }
 
-        if log_policy_allowed:
-            await store.emit_event(
-                session.id,
-                EventType.POLICY_ALLOWED,
-                {
-                    "tool": tool_name,
-                    "check": "workspace_sandbox",
-                    "timestamp": time.time(),
-                },
-            )
+        result_payload = {"error": f"Blocked: {decision.reason}"}
+        if decision.overridable:
+            result_payload["error"] = "policy_blocked_overridable"
+            result_payload["message"] = decision.reason
+            result_payload["tool_call_id"] = tool_call_id
+        result_content = json.dumps(result_payload)
+
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "elapsed_ms": 0,
+            },
+        )
+        await store.advance_harness_cursor(
+            session.id,
+            through_event_id=result_event_id,
+            lease_token=lease.lease_token,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_content,
+        }
+
+    if log_policy_allowed:
+        await store.emit_event(
+            session.id,
+            EventType.POLICY_ALLOWED,
+            {
+                "tool": tool_name,
+                "check": "governance_gate",
+                "timestamp": time.time(),
+            },
+        )
 
     # --- Session tool allow-list check ---
     # When the session config declares a ``tool_allow_list``, any tool
