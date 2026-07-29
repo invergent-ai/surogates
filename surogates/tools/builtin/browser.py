@@ -10,10 +10,12 @@ from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from surogates.browser.base import (
+    BrowserBudgetExhaustedError,
     BrowserCreditsExhaustedError,
     BrowserEndpoint,
     BrowserSpec,
     BrowserUnavailableError,
+    browser_budget_exhausted_result,
     browser_credits_exhausted_result,
     browser_unavailable_result,
 )
@@ -205,15 +207,23 @@ async def _resolve_session_browser(
                         service_account_id,
                     )
 
+        tenant_user_id = getattr(tenant, "user_id", None) if tenant else None
         result = await browser_pool.ensure(
             session_id=sid,
             org_id=str(getattr(tenant, "org_id", "")) if tenant is not None else "",
-            user_id=str(getattr(tenant, "user_id", "")) if tenant is not None else "",
+            # Empty for anonymous sessions — never the literal "None"
+            # (it used to leak into the pod's user-id label).
+            user_id=str(tenant_user_id) if tenant_user_id is not None else "",
             spec=browser_spec,
         )
+    except BrowserBudgetExhaustedError as exc:
+        # Subclasses of BrowserUnavailableError — caught first so the
+        # user gets a buy prompt, not "infra is broken".
+        return browser_budget_exhausted_result(
+            exc.reason, buy_url=exc.buy_url,
+        )
     except BrowserCreditsExhaustedError as exc:
-        # Subclass of BrowserUnavailableError — must be caught first so
-        # the user gets top-up guidance, not "infra is broken".
+        # Same precedence rationale, for the operator's own wallet.
         return browser_credits_exhausted_result(exc.reason)
     except BrowserUnavailableError as exc:
         return browser_unavailable_result(exc.reason)

@@ -66,6 +66,18 @@ class AllowanceExhaustedError(RuntimeError):
         self.detail = detail
 
 
+class BrowserMinutesExhaustedError(RuntimeError):
+    """Ops refused a browser provision authorization with 402.
+
+    The sender has no browsing minutes left on a metered agent;
+    ``detail`` is the machine sentinel (``browser_minutes_exhausted``).
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class PlatformClient:
     """Async HTTP client for surogate-ops.
 
@@ -549,6 +561,59 @@ class PlatformClient:
             except ValueError:
                 pass
             raise AllowanceExhaustedError(detail or "allowance_exhausted")
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def browser_authorize(
+        self,
+        agent_id: str,
+        *,
+        session_id: str | None = None,
+        firebase_uid: str | None = None,
+        end_user_id: str | None = None,
+        requested_minutes: int | None = None,
+    ) -> dict:
+        """Pre-flight hold before provisioning a browser pod.
+
+        Called once per fresh provision on agents whose runtime config
+        reports ``browser_minutes_metered``. Returns ``{metered,
+        reservation_id, balance_id, reserved_minutes, owner_kind,
+        owner_id}`` — ``metered=False`` means provision exactly as
+        before (no billing block). Raises:
+
+        * :class:`BrowserMinutesExhaustedError` on 402 — the sender has
+          no browsing minutes left (or no identity that could hold a
+          balance).
+        * :class:`PlatformAuthError` on 401 — operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        """
+        payload: dict = {}
+        if session_id:
+            payload["session_id"] = session_id
+        if firebase_uid:
+            payload["firebase_uid"] = firebase_uid
+        if end_user_id:
+            payload["end_user_id"] = end_user_id
+        if requested_minutes:
+            payload["requested_minutes"] = requested_minutes
+        resp = await self._client.post(
+            f"/api/agents/agents/{agent_id}/browser/authorize",
+            json=payload,
+        )
+        if resp.status_code == 402:
+            detail = ""
+            try:
+                detail = str(resp.json().get("detail") or "")
+            except ValueError:
+                pass
+            raise BrowserMinutesExhaustedError(
+                detail or "browser_minutes_exhausted",
+            )
         if resp.status_code == 401:
             raise PlatformAuthError(
                 "surogate-ops rejected runtime token (401); "

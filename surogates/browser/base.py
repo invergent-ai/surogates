@@ -31,6 +31,21 @@ class BrowserCreditsExhaustedError(BrowserUnavailableError):
         super().__init__(reason, classification="credits")
 
 
+class BrowserBudgetExhaustedError(BrowserUnavailableError):
+    """Raised when the SENDER'S purchased browser-minutes budget is spent.
+
+    The operator-wallet sibling of :class:`BrowserCreditsExhaustedError`
+    covers the project's own minutes; this one covers a buyer/end-user
+    balance on a metered agent. Same subclassing rationale: parent-only
+    call sites degrade gracefully, the tool layer catches it first to
+    render a buy prompt.
+    """
+
+    def __init__(self, reason: str, *, buy_url: str | None = None) -> None:
+        super().__init__(reason, classification="budget")
+        self.buy_url = buy_url
+
+
 def browser_unavailable_result(
     reason: str,
     *,
@@ -73,6 +88,33 @@ def browser_credits_exhausted_result(reason: str) -> str:
     })
 
 
+def browser_budget_exhausted_result(
+    reason: str, *, buy_url: str | None = None,
+) -> str:
+    """Return the JSON tool body for a spent per-buyer minutes budget.
+
+    Like :func:`browser_credits_exhausted_result` the remedy is the
+    user's — but here it is the SENDER's purchased balance, so the
+    guidance points at the agent's own buy page rather than the
+    operator's billing settings.
+    """
+
+    payload: dict[str, object] = {
+        "error": "browser_minutes_exhausted",
+        "reason": reason,
+        "guidance": (
+            "You have no browsing minutes left on your plan for this "
+            "agent, so no browser can be started. Do not retry "
+            "browser_* tools. Tell the user their browsing time is used "
+            "up and that they can buy more from the agent's plan page; "
+            "continue with non-browser tools if you can."
+        ),
+    }
+    if buy_url:
+        payload["buy_url"] = buy_url
+    return json.dumps(payload)
+
+
 class BrowserStatus(str, Enum):
     """Observable lifecycle states for a browser instance."""
 
@@ -109,6 +151,14 @@ class BrowserSpec:
     # When set, the pool injects this Playwright storage_state into the fresh
     # context at provision time (before registry publish / navigation).
     storage_state: dict | None = None
+    # Per-buyer minutes attribution from the ops pre-flight authorize
+    # ({owner_kind, owner_id, reservation_id, balance_id}); the k8s
+    # backend stamps it as pod labels and the fleet backend forwards it
+    # in the lease body so the ops BrowserMonitor can extend and settle
+    # the hold. None on unmetered agents. The process backend (dev)
+    # ignores it like the identity ids — an orphaned hold on that path
+    # is reclaimed by the ops reservation reaper.
+    billing: dict[str, str] | None = None
 
 
 class BrowserBackend(Protocol):

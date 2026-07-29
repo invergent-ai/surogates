@@ -25,6 +25,16 @@ EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 # pod is provisioned; raises ``BrowserCreditsExhaustedError`` when the
 # project is out of minutes. ``None`` disables the gate entirely.
 CreditGuard = Callable[[str], Awaitable[None]]
+# Per-buyer minutes gate, called after the operator gate on fresh
+# provisions with keyword args (session_id, org_id, user_id). Returns
+# a billing block to stamp on the pod ({owner_kind, owner_id,
+# reservation_id, balance_id}), or ``None`` when the agent is
+# unmetered or the session runs on the operator plane — profile
+# capture (``browser_setup``) and service-account-principal sessions.
+# The guard resolves the session row itself; provisioning is a
+# once-per-session event, so the extra read is negligible. Raises
+# ``BrowserBudgetExhaustedError`` when the sender's balance is spent.
+BudgetGuard = Callable[..., Awaitable[dict[str, str] | None]]
 
 
 @dataclass(slots=True)
@@ -52,12 +62,17 @@ class BrowserPool:
         registry: BrowserRegistry,
         event_emitter: EventEmitter | None = None,
         credit_guard: CreditGuard | None = None,
+        budget_guard: BudgetGuard | None = None,
         browser_profile_store: Any | None = None,
     ) -> None:
         self._backend = backend
         self._registry = registry
         self._emit = event_emitter
         self._credit_guard = credit_guard
+        # Public so the worker can wire it after construction — the
+        # guard closes over runtime plumbing (platform client, runtime
+        # config cache) that is installed later in worker boot.
+        self.budget_guard = budget_guard
         # Read by the browser tool layer to inject a session's saved login
         # state at provision; public so handlers reach it via the pool they
         # already hold (avoids threading the store through the executor chain).
@@ -131,6 +146,18 @@ class BrowserPool:
             # provisions. Raises BrowserCreditsExhaustedError when empty.
             if self._credit_guard is not None:
                 await self._credit_guard(org_id)
+            # Per-buyer gate, after the operator gate: metered agents
+            # hold a chunk of the sender's minutes and the returned
+            # billing block rides the spec into the pod labels so the
+            # ops monitor extends and settles the hold.
+            if self.budget_guard is not None:
+                billing = await self.budget_guard(
+                    session_id=session_id,
+                    org_id=org_id,
+                    user_id=user_id,
+                )
+                if billing:
+                    spec.billing = billing
 
             browser_id, endpoint = await self._backend.provision(
                 spec,

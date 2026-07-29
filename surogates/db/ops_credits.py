@@ -1,16 +1,19 @@
-"""Read-only browser-minutes gate backed by the surogate-ops DB.
+"""Read-only OPERATOR-plane browser-minutes gate (ops DB).
 
-Browser pods are billed per wall-clock minute by surogate-ops'
-``BrowserMonitor`` after they terminate. Enforcement, though, has to
-happen *before* a pod starts — at the point of use, not at session
-creation — so a project that is out of minutes simply can't open a new
-browser while a plain chat session keeps working.
+Browser pods are billed to the operator's project wallet per
+wall-clock minute by surogate-ops' ``BrowserMonitor``. Enforcement,
+though, has to happen *before* a pod starts — at the point of use,
+not at session creation — so a project that is out of minutes simply
+can't open a new browser while a plain chat session keeps working.
 
-This module is the use-time gate: given a project (``org_id``), it
-reads the ``browser_minutes`` row from the ops ``credit_balances``
-table and raises :class:`BrowserCreditsExhaustedError` when the balance
-is empty. Writes stay entirely on the ops side; this is SELECT-only,
-mirroring the KB tools' access pattern.
+This module is the operator plane's use-time gate: given a project
+(``org_id``), it reads the ``browser_minutes`` row from the ops
+``credit_balances`` table and raises
+:class:`BrowserCreditsExhaustedError` when the balance is empty.
+Writes stay entirely on the ops side; this is SELECT-only, mirroring
+the KB tools' access pattern. The sibling per-BUYER gate (an agent's
+sold browsing time) is the pool's ``budget_guard`` — see
+``surogates.orchestrator.worker._build_browser_budget_guard``.
 """
 
 from __future__ import annotations

@@ -88,6 +88,10 @@ class FleetBackend:
             "env": dict(spec.env),
             "s3_creds": self._resolve_s3_creds(spec),
         }
+        if spec.billing:
+            # Per-buyer minutes attribution — the fleet manager stamps
+            # it as pod labels for the ops BrowserMonitor.
+            body["billing"] = dict(spec.billing)
         r = await self.http.post(
             f"{self.endpoint}/lease",
             json=body,
