@@ -413,6 +413,80 @@ def _build_browser_budget_guard(
     return guard
 
 
+def _build_media_budget_hooks(
+    *,
+    ctx: Any,
+    session: Any,
+    service_account_id: Any,
+    platform_client: Any,
+) -> tuple[Any, Any]:
+    """Per-buyer media metering hooks for ``MediaGenConfig``.
+
+    ``(None, None)`` for unmetered agents, operator-plane sessions
+    (service-account principals — ops-chat, api, scheduled runs;
+    mirrors the browser guard's stance), or a missing platform client.
+    Otherwise: authorize holds against the sender's media balance via
+    the ops pre-flight endpoint; settle spends the same hold with the
+    generation's actual cost. Identity resolution matches the browser
+    guard: buy-page buyer first, embed end-user, then the session's
+    tenant user.
+    """
+    if not getattr(ctx, "media_credits_metered", False):
+        return None, None
+    if platform_client is None or service_account_id is not None:
+        return None, None
+
+    from surogates.runtime.platform_client import MediaCreditsExhaustedError
+    from surogates.tools.builtin.media_gen import MediaBudgetExhaustedError
+
+    config = session.config or {}
+    buy_url = getattr(ctx, "commerce_buy_url", None)
+    firebase_uid = (config.get("commerce_buyer") or {}).get("firebase_uid")
+    end_user_id = (
+        config.get("embed_end_user_id")
+        or (str(session.user_id) if session.user_id else None)
+    )
+    agent_id = str(ctx.agent_id)
+    session_id = str(session.id)
+
+    async def authorize(requested_cents: int | None = None) -> dict | None:
+        if not firebase_uid and not end_user_id:
+            # Metered agent, anonymous sender: nothing could hold a
+            # balance — same buy prompt as an empty one.
+            raise MediaBudgetExhaustedError(
+                "media_credits_exhausted", buy_url=buy_url,
+            )
+        try:
+            receipt = await platform_client.media_authorize(
+                agent_id,
+                session_id=session_id,
+                firebase_uid=firebase_uid,
+                end_user_id=end_user_id,
+                requested_cents=requested_cents,
+            )
+        except MediaCreditsExhaustedError as exc:
+            raise MediaBudgetExhaustedError(
+                exc.detail, buy_url=buy_url,
+            ) from exc
+        if not receipt.get("metered"):
+            return None
+        return receipt
+
+    async def settle(
+        receipt: dict, actual_cents: int, external_ref: str,
+    ) -> None:
+        await platform_client.media_settle(
+            agent_id,
+            balance_id=str(receipt.get("balance_id") or ""),
+            reserved_cents=int(receipt.get("reserved_cents") or 0),
+            actual_cents=actual_cents,
+            external_ref=external_ref,
+            reservation_id=str(receipt.get("reservation_id") or "") or None,
+        )
+
+    return authorize, settle
+
+
 def _build_browser_backend(
     settings: "BrowserSettings",
     *,
@@ -579,6 +653,10 @@ def _entitlement_tool_exclusions(
         )
     if not _entitlement_capability_allowed(session_config, "code"):
         excluded.add("run_coding_agent")
+    if not _entitlement_capability_allowed(session_config, "image"):
+        excluded.add("generate_image")
+    if not _entitlement_capability_allowed(session_config, "video"):
+        excluded.add("generate_video")
     mcp_allow = dimension_allowlist(session_config, "mcp_server_ids")
     if mcp_allow is not None:
         allowed_servers = mcp_scope[0] if mcp_scope is not None else set()
@@ -1446,6 +1524,12 @@ async def run_worker(settings: Settings) -> None:
             service_account_id=credential.service_account_id,
             settings=settings,
         )
+        media_budget_authorize, media_budget_settle = _build_media_budget_hooks(
+            ctx=ctx,
+            session=session,
+            service_account_id=credential.service_account_id,
+            platform_client=platform_client,
+        )
         media_gen_config = MediaGenConfig(
             image_client=image_slot.client if image_slot is not None else None,
             image_model=image_slot.model if image_slot is not None else "",
@@ -1458,6 +1542,9 @@ async def run_worker(settings: Settings) -> None:
             ),
             video_timeout=settings.llm.video_timeout,
             video_poll_interval=settings.llm.video_poll_interval,
+            budget_authorize=media_budget_authorize,
+            budget_settle=media_budget_settle,
+            image_cents=ctx.media_image_cents,
         )
         compressor = ContextCompressor(
             model_id,

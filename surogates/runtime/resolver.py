@@ -125,6 +125,10 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         bundle_version=payload.get("bundle_version") or None,
         commerce_mode=str(payload.get("commerce_mode") or "free"),
         commerce_buy_url=payload.get("commerce_buy_url") or None,
+        media_credits_metered=bool(payload.get("media_credits_metered")),
+        media_image_cents=max(
+            0, int(payload.get("media_image_cents") or 4),
+        ),
     )
 
 
