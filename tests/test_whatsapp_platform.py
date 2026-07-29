@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json as _json
 from types import SimpleNamespace
 
+import httpx
 import pytest
+import respx
 
 from surogates.channels.platforms.whatsapp import (
     WhatsAppPlatform,
@@ -18,6 +21,7 @@ from surogates.channels.platforms.whatsapp import (
     parse,
     verify,
 )
+from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION, graph_url
 from surogates.channels.registry import VerificationResult
 
 PNID = "7794189252778687"
@@ -404,3 +408,195 @@ class TestWhatsAppRegistration:
     def test_registered_in_registry(self):
         from surogates.channels.registry import registry
         assert registry.get("whatsapp") is not None
+
+
+# ---------------------------------------------------------------------------
+# send
+# ---------------------------------------------------------------------------
+
+MESSAGES_URL = graph_url(PNID, "messages")
+
+
+def _item(content: str, **payload_extra):
+    """An outbox row double: only .destination and .payload are read."""
+    payload = {"content": content}
+    payload.update(payload_extra)
+    return SimpleNamespace(
+        destination={
+            "wa_id": WA_ID,
+            "phone_number_id": PNID,
+            "channel_identifier": PNID,
+        },
+        payload=payload,
+    )
+
+
+class TestWhatsAppSend:
+    @pytest.mark.asyncio
+    async def test_sends_text_and_returns_wamid(self):
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.OUT1"}]},
+                )
+            )
+            result = await p.send(_item("hello"), creds=_creds())
+        assert result.success is True
+        assert result.message_id == "wamid.OUT1"
+
+    @pytest.mark.asyncio
+    async def test_payload_shape(self):
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.X"}]},
+                )
+            )
+            await p.send(_item("hi"), creds=_creds())
+        body = _json.loads(route.calls[0].request.content)
+        assert body["messaging_product"] == "whatsapp"
+        assert body["recipient_type"] == "individual"
+        assert body["to"] == WA_ID
+        assert body["type"] == "text"
+        assert body["text"]["body"] == "hi"
+
+    @pytest.mark.asyncio
+    async def test_markdown_is_transcoded(self):
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.X"}]},
+                )
+            )
+            await p.send(_item("**bold**"), creds=_creds())
+        body = _json.loads(route.calls[0].request.content)
+        assert body["text"]["body"] == "*bold*"
+
+    @pytest.mark.asyncio
+    async def test_long_text_is_split(self):
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.X"}]},
+                )
+            )
+            result = await p.send(_item("a " * 4000), creds=_creds())
+            assert len(router.calls) >= 2
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_empty_content_sends_nothing_and_succeeds(self):
+        # success=True/message_id=None is the correct terminal state:
+        # _deliver_item has two branches and never reads SendResult.retryable,
+        # so success=False would requeue an unsendable item for 30 minutes.
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=False) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(200, json={})
+            )
+            result = await p.send(_item("   "), creds=_creds())
+        assert result.success is True
+        assert result.message_id is None
+        assert len(route.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_failure_returns_formatted_error(self):
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    400, json={"error": {"message": "Re-engagement message",
+                                         "code": 131047}},
+                )
+            )
+            result = await p.send(_item("hi"), creds=_creds())
+        assert result.success is False
+        assert result.error == (
+            "graph error 131047 (HTTP 400): Re-engagement message"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_send_reports_delivered_prefix(self):
+        # A mid-sequence failure must report success with the last delivered
+        # id, so a retry does not duplicate already-delivered chunks.
+        p = WhatsAppPlatform()
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MESSAGES_URL).mock(
+                side_effect=[
+                    httpx.Response(200, json={"messages": [{"id": "wamid.C1"}]}),
+                    httpx.Response(500, json={"error": {"message": "boom"}}),
+                ]
+            )
+            result = await p.send(_item("a " * 4000), creds=_creds())
+        assert result.success is True
+        assert result.message_id == "wamid.C1"
+
+    @pytest.mark.asyncio
+    async def test_uses_api_version_from_creds(self):
+        # api_version rides in creds (stored by the provisioner alongside
+        # phone_number_id): the outbound path receives only (item, creds),
+        # and session config never carries routing config.
+        p = WhatsAppPlatform()
+        url = graph_url(PNID, "messages", api_version="v25.0")
+        with respx.mock(assert_all_called=True) as router:
+            router.post(url).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.X"}]},
+                )
+            )
+            result = await p.send(_item("hi"), creds=_creds(api_version="v25.0"))
+        assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# ask_user_question — text-mode prompt
+# ---------------------------------------------------------------------------
+
+
+class TestWhatsAppInputPrompt:
+    @pytest.mark.asyncio
+    async def test_renders_numbered_choices(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "",
+            input_prompt=True,
+            tool_call_id="tc1",
+            context="Need a decision.",
+            questions=[{
+                "question": "Which environment?",
+                "options": [{"label": "staging"}, {"label": "production"}],
+            }],
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.Q1"}]},
+                )
+            )
+            result = await p.send(item, creds=_creds())
+        sent = _json.loads(route.calls[0].request.content)["text"]["body"]
+        assert "Which environment?" in sent
+        assert "1. staging" in sent
+        assert "2. production" in sent
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_prompt_without_options_still_sends_question(self):
+        p = WhatsAppPlatform()
+        item = _item(
+            "", input_prompt=True, tool_call_id="tc2", context="",
+            questions=[{"question": "What is the deploy tag?", "options": []}],
+        )
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.Q2"}]},
+                )
+            )
+            await p.send(item, creds=_creds())
+        sent = _json.loads(route.calls[0].request.content)["text"]["body"]
+        assert "What is the deploy tag?" in sent

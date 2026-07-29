@@ -36,12 +36,18 @@ import hmac
 import logging
 from typing import Any
 
+import httpx
+
+from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
     ext_for_mime,
+    send_message,
 )
+from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
+from surogates.channels.text_split import split_text
 
 __all__ = [
     "WhatsAppPlatform",
@@ -54,6 +60,12 @@ logger = logging.getLogger(__name__)
 
 #: Meta's documented maximum webhook body size.  Checked before any crypto.
 _MAX_BODY_BYTES = 3 * 1024 * 1024
+
+#: WhatsApp's ``text.body`` cap.  Unlike Telegram (which feeds ``split_text``
+#: 3500 to leave headroom for HTML-render inflation), WhatsApp markup does
+#: not inflate and the transcoder runs *before* splitting, so the full cap
+#: is correct here.
+_MAX_MESSAGE_CHARS = 4096
 
 #: Inbound message types that carry a user message.  Everything else —
 #: reaction, system, unsupported, order, location, contacts — returns None
@@ -371,6 +383,33 @@ def _build_message(
     )
 
 
+def _render_input_prompt(payload: dict) -> str:
+    """Render an ``ask_user_question`` prompt as numbered plain text.
+
+    WhatsApp has no native buttons in this integration, so the choices are
+    a numbered list in the message body and a plain typed reply resolves the
+    pending record through the shared ``resolve_text_answer`` path.
+    """
+    lines: list[str] = []
+    context = (payload.get("context") or "").strip()
+    if context:
+        lines.append(context)
+
+    for question in payload.get("questions") or []:
+        if not isinstance(question, dict):
+            continue
+        prompt = (question.get("question") or "").strip()
+        if prompt:
+            lines.append(f"*{prompt}*")
+        for index, option in enumerate(question.get("options") or [], start=1):
+            label = option.get("label") if isinstance(option, dict) else str(option)
+            if label:
+                lines.append(f"{index}. {label}")
+
+    lines.append("_Reply with your answer._")
+    return "\n".join(line for line in lines if line)
+
+
 # ---------------------------------------------------------------------------
 # Platform object
 # ---------------------------------------------------------------------------
@@ -413,6 +452,14 @@ class WhatsAppPlatform:
         webhook_registration="manual",
     )
 
+    def __init__(self) -> None:
+        # Shared HTTP client reused for every Graph call.  The access token
+        # is a per-tenant credential passed per request, not held on the
+        # client, so one client per platform instance suffices.
+        # WhatsAppPlatform instances are process-lifetime singletons; no
+        # explicit close is needed.
+        self._http = httpx.AsyncClient(timeout=30.0)
+
     # ------------------------------------------------------------------
     # Route path
     # ------------------------------------------------------------------
@@ -450,6 +497,69 @@ class WhatsAppPlatform:
         identifier: str | None = None,
     ) -> InboundMessage | None:
         return parse(body, creds=creds, identifier=identifier)
+
+    # ------------------------------------------------------------------
+    # send
+    # ------------------------------------------------------------------
+
+    async def send(self, item: Any, *, creds: dict) -> SendResult:
+        """Deliver one outbox row to WhatsApp.
+
+        Long bodies are transcoded, split at 4096 characters, and posted as
+        separate messages.  A mid-sequence failure reports ``success=True``
+        with the last delivered id so a retry does not duplicate the chunks
+        that already landed.
+        """
+        token: str = (creds or {}).get("access_token") or ""
+        destination = item.destination or {}
+        wa_id: str = destination.get("wa_id") or ""
+        phone_number_id: str = destination.get("phone_number_id") or ""
+        api_version: str = (creds or {}).get("api_version") or DEFAULT_API_VERSION
+
+        if not token or not wa_id or not phone_number_id:
+            return SendResult(
+                success=False, error="missing whatsapp credentials or destination",
+            )
+
+        if item.payload.get("input_prompt"):
+            text = _render_input_prompt(item.payload)
+        else:
+            text = render_whatsapp(item.payload.get("content", "") or "")
+
+        if not text.strip():
+            # Nothing to send.  ``success=True`` with no id is the correct
+            # terminal state: ``_deliver_item`` has exactly two branches and
+            # never reads ``SendResult.retryable``, so ``success=False``
+            # would requeue an unsendable item every 30 s for 30 minutes.
+            return SendResult(success=True, message_id=None)
+
+        last_id: str | None = None
+        for chunk in split_text(text, _MAX_MESSAGE_CHARS) or [text]:
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": wa_id,
+                "type": "text",
+                "text": {"body": chunk, "preview_url": True},
+            }
+            wamid, error = await send_message(
+                self._http,
+                token=token,
+                phone_number_id=phone_number_id,
+                payload=payload,
+                api_version=api_version,
+            )
+            if wamid is None:
+                if last_id is not None:
+                    # Part of the reply landed; report the delivered prefix
+                    # instead of triggering a duplicate redelivery.
+                    return SendResult(success=True, message_id=last_id)
+                return SendResult(success=False, error=error or "send failed")
+            last_id = wamid
+
+        if last_id is None:
+            return SendResult(success=False, error="send failed")
+        return SendResult(success=True, message_id=last_id)
 
 
 # ---------------------------------------------------------------------------
