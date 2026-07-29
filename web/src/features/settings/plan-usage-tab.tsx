@@ -28,6 +28,8 @@ interface CommerceOffer {
   amount_cents: number;
   billing_interval: string | null;
   token_amount: number;
+  /** Metered browser time the offer sells, in minutes (0 = none). */
+  browser_minutes_amount?: number;
   description?: string | null;
   /** Buyer-facing labels for a custom package; [] or absent = full
    * access (subscriptions) / pure extra usage (packs). */
@@ -43,6 +45,11 @@ interface CommerceOverview {
     current_period_end: string | null;
     period_token_remaining: number;
     topup_token_remaining: number;
+    browser_minutes?: {
+      metered: boolean;
+      period_remaining: number;
+      topup_remaining: number;
+    };
     included?: string[];
   } | null;
   purchasable: boolean;
@@ -185,6 +192,21 @@ export function PlanUsageTab() {
                   {approxMessagesLabel(ent.topup_token_remaining)}
                 </span>
               </div>
+              {ent.browser_minutes?.metered ? (
+                <div
+                  className="flex items-center justify-between"
+                  data-testid="plan-tab-browser-minutes"
+                >
+                  <span className="text-muted-foreground">
+                    Browsing time left
+                  </span>
+                  <span className="font-medium tabular-nums">
+                    {ent.browser_minutes.period_remaining +
+                      ent.browser_minutes.topup_remaining}{" "}
+                    min
+                  </span>
+                </div>
+              ) : null}
               {(ent.included?.length ?? 0) > 0 ? (
                 <div
                   className="flex items-start justify-between gap-4"
@@ -231,8 +253,18 @@ export function PlanUsageTab() {
                   <div className="flex min-w-0 flex-1 flex-col">
                     <span className="text-sm font-medium">{offer.name}</span>
                     <span className="text-xs text-muted-foreground">
-                      {offer.token_amount > 0
-                        ? `${approxMessagesLabel(offer.token_amount)}${
+                      {offer.token_amount > 0 ||
+                      (offer.browser_minutes_amount ?? 0) > 0
+                        ? `${[
+                            offer.token_amount > 0
+                              ? approxMessagesLabel(offer.token_amount)
+                              : "",
+                            (offer.browser_minutes_amount ?? 0) > 0
+                              ? `${offer.browser_minutes_amount} min browsing`
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" + ")}${
                             offer.kind === "subscription"
                               ? " every period"
                               : " of extra usage · one-time"
