@@ -50,6 +50,30 @@ _MIME_EXTENSIONS = {
     "image/gif": "gif",
 }
 
+_MEDIA_BUDGET_ERROR = (
+    "media_budget_exhausted: the workspace has no media generation "
+    "credits left, so this request was refused before anything was "
+    "charged. Tell the user they can top up media credits or wait for "
+    "the monthly allowance to reset in Studio -> Settings -> Billing. "
+    "Do not retry until more credits are available."
+)
+
+
+def _is_insufficient_credits(exc: Exception) -> bool:
+    """True when the call was refused for lack of budget (HTTP 402).
+
+    The platform proxy answers 402 ``insufficient_credits`` when the
+    media wallet can't cover the request — surfaced by the OpenAI SDK
+    as an ``APIStatusError`` carrying ``status_code`` and by httpx as
+    an ``HTTPStatusError`` carrying ``response.status_code``. A BYO
+    provider's own 402 matches too; either way the honest tool answer
+    is "no budget", not a stack trace the model can't act on.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 402
+
 
 @dataclass(frozen=True)
 class MediaGenConfig:
@@ -241,6 +265,8 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             extra_body=extra_body,
         )
     except Exception as exc:  # noqa: BLE001 — provider errors become tool errors
+        if _is_insufficient_credits(exc):
+            return _json_error(_MEDIA_BUDGET_ERROR)
         return _json_error(f"Image generation failed: {exc}")
 
     image_url = _first_generated_image_url(response)
@@ -386,6 +412,8 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 )
             data = await _download_video(client, str(urls[0]))
     except httpx.HTTPStatusError as exc:
+        if _is_insufficient_credits(exc):
+            return _json_error(_MEDIA_BUDGET_ERROR)
         detail = _upstream_error_detail(exc)
         return _json_error(
             f"Video generation request failed: {exc}"

@@ -602,6 +602,31 @@ def _entitlement_tool_exclusions(
     return excluded
 
 
+def _media_tool_exclusions(media_gen_config: Any) -> set[str]:
+    """Media tools with no model behind them for this session.
+
+    ``generate_image`` / ``generate_video`` are registered
+    unconditionally but only work when a model is wired (per-agent
+    pick, platform preset, or deployment fallback). Dropping the
+    schema keeps the LLM from burning a turn on a tool that can only
+    answer "not available" — 10 of 48 prod generate_image calls did
+    exactly that. Predicates mirror the handlers' own availability
+    checks in tools/builtin/media_gen.py.
+    """
+    excluded: set[str] = set()
+    if (
+        getattr(media_gen_config, "image_client", None) is None
+        or not getattr(media_gen_config, "image_model", "")
+    ):
+        excluded.add("generate_image")
+    if not (
+        getattr(media_gen_config, "video_model", "")
+        and getattr(media_gen_config, "video_base_url", "")
+    ):
+        excluded.add("generate_video")
+    return excluded
+
+
 async def _load_attached_kbs(
     *,
     agent_id: str,
@@ -1683,6 +1708,9 @@ async def run_worker(settings: Settings) -> None:
                 for e in tool_registry.get_all()
                 if e.toolset == "browser"
             )
+        effective_tools.difference_update(
+            _media_tool_exclusions(media_gen_config),
+        )
         # user_reports exposes other end-users' data, so non-operator
         # sessions must not be primed with guidance about it.  This
         # keeps the PROMPT fragments in sync; the LLM-visible schema is
