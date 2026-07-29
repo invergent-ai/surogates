@@ -223,12 +223,11 @@ export function PlanUsageTab() {
                     Media generation left
                   </span>
                   <span className="font-medium tabular-nums">
-                    $
-                    {(
-                      (ent.media_credits.period_remaining +
-                        ent.media_credits.topup_remaining) /
-                      100
-                    ).toFixed(2)}
+                    {formatPrice(
+                      ent.media_credits.period_remaining +
+                        ent.media_credits.topup_remaining,
+                      "usd",
+                    )}
                   </span>
                 </div>
               ) : null}
@@ -289,7 +288,7 @@ export function PlanUsageTab() {
                               ? `${offer.browser_minutes_amount} min browsing`
                               : "",
                             (offer.media_credits_amount ?? 0) > 0
-                              ? `$${((offer.media_credits_amount ?? 0) / 100).toFixed(2)} media`
+                              ? `${formatPrice(offer.media_credits_amount ?? 0, "usd")} media`
                               : "",
                           ]
                             .filter(Boolean)

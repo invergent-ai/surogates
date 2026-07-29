@@ -711,17 +711,9 @@ class PlatformClient:
         }
         if reservation_id:
             payload["reservation_id"] = reservation_id
-        resp = await self._client.post(
-            f"/api/agents/agents/{agent_id}/media/settle",
-            json=payload,
+        return await self._post_commerce(
+            f"/api/agents/agents/{agent_id}/media/settle", payload,
         )
-        if resp.status_code == 401:
-            raise PlatformAuthError(
-                "surogate-ops rejected runtime token (401); "
-                "is the token revoked or missing the 'runtime' scope?",
-            )
-        resp.raise_for_status()
-        return resp.json()
 
     async def allowance_debit(
         self,

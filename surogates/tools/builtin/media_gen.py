@@ -70,10 +70,9 @@ def _is_insufficient_credits(exc: Exception) -> bool:
     provider's own 402 matches too; either way the honest tool answer
     is "no budget", not a stack trace the model can't act on.
     """
-    status = getattr(exc, "status_code", None)
-    if status is None:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-    return status == 402
+    from surogates.harness.error_classifier import extract_status_code
+
+    return extract_status_code(exc) == 402
 
 
 @dataclass(frozen=True)
@@ -497,7 +496,6 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             deadline = asyncio.get_running_loop().time() + timeout
             while str(status_data.get("status") or "") not in {"completed", "failed"}:
                 if asyncio.get_running_loop().time() >= deadline:
-                    await _settle_media_budget(cfg, billing, 0, media_ref)
                     return _json_error(
                         f"Video generation timed out after {timeout}s; job "
                         f"{job_id} may still complete upstream ({polling_url})"
@@ -508,7 +506,6 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 status_data = poll_response.json()
 
             if status_data.get("status") == "failed":
-                await _settle_media_budget(cfg, billing, 0, media_ref)
                 detail = (
                     status_data.get("error")
                     or status_data.get("failure_reason")
@@ -540,7 +537,6 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 )
             data = await _download_video(client, str(urls[0]))
     except httpx.HTTPStatusError as exc:
-        await _settle_media_budget(cfg, billing, 0, media_ref)
         if _is_insufficient_credits(exc):
             return _json_error(_MEDIA_BUDGET_ERROR)
         detail = _upstream_error_detail(exc)
@@ -549,11 +545,16 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             + (f" — upstream said: {detail}" if detail else "")
         )
     except httpx.HTTPError as exc:
-        await _settle_media_budget(cfg, billing, 0, media_ref)
         return _json_error(f"Video generation request failed: {exc}")
     except ValueError as exc:
-        await _settle_media_budget(cfg, billing, 0, media_ref)
         return _json_error(str(exc))
+    finally:
+        # Single release point for every exit that never reached the
+        # real settle — timeout, failed job, transport errors, and
+        # even exceptions nothing above catches. After a successful
+        # settle ``billing`` is None and this no-ops, so success paths
+        # can't be contradicted.
+        await _settle_media_budget(cfg, billing, 0, media_ref)
 
     saved = await _save_media_bytes(
         data,
