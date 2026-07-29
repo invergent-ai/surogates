@@ -546,6 +546,20 @@ class TestDownloadMedia:
         assert data is None
         assert mime is None
 
+    @pytest.mark.asyncio
+    async def test_path_shaped_media_id_rejected_without_request(self):
+        # The media id lands in a Graph URL path component; a path-shaped id
+        # must be refused before any HTTP (spec §6.5: sanitize the
+        # Meta-supplied media_id before it reaches any path component).
+        async with httpx.AsyncClient() as client:
+            with respx.mock(assert_all_called=False):
+                data, mime = await download_media(
+                    client, token=TOKEN, media_id="../7794/messages",
+                    max_bytes=1024, api_version=DEFAULT_API_VERSION,
+                )
+        assert data is None
+        assert mime is None
+
 
 # ---------------------------------------------------------------------------
 # upload_media
@@ -638,6 +652,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import re
 from typing import Any
 
 import httpx
@@ -824,6 +839,12 @@ async def download_media(
     the URL may simply have expired.  Any failure returns ``(None, None)``
     so a media problem never kills the surrounding event.
     """
+    # The id becomes a URL path component; refuse anything path-shaped
+    # before any HTTP.  Meta media ids are plain opaque tokens.
+    if not re.fullmatch(r"[A-Za-z0-9_:-]+", media_id or ""):
+        logger.warning("[whatsapp] refusing path-shaped media id %r", media_id)
+        return None, None
+
     headers = {"Authorization": f"Bearer {token}"}
     meta_url = f"{GRAPH_API_BASE}/{api_version}/{media_id}"
 
@@ -1265,6 +1286,9 @@ class TestParse:
         assert msg.text == "héllo 👋 مرحبا"
 
     def test_multi_message_batch_returns_first(self):
+        # The framework processes ONE InboundMessage per webhook; when Meta
+        # coalesces several user messages into one notification, v1 delivers
+        # the first and WARN-logs the drop (recorded in spec §5.3/§10).
         body = _text_message()
         value = body["entry"][0]["changes"][0]["value"]
         value["messages"].append({
@@ -1631,11 +1655,23 @@ def parse(
                 if isinstance(c, dict)
             }
 
-            for raw_message in value.get("messages") or []:
-                if not isinstance(raw_message, dict):
-                    continue
+            raw_messages = [
+                m for m in value.get("messages") or [] if isinstance(m, dict)
+            ]
+            for index, raw_message in enumerate(raw_messages):
                 message = _build_message(raw_message, names=names, identifier=body_pnid)
                 if message is not None:
+                    dropped = len(raw_messages) - index - 1
+                    if dropped:
+                        # The dispatcher runs one pipeline pass per webhook.
+                        # Meta rarely batches user messages (bursts, retry
+                        # backlogs) — but the loss must be visible when it
+                        # does.  Fan-out is a recorded v2 item.
+                        logger.warning(
+                            "[whatsapp] dropping %d additional batched "
+                            "message(s) for pnid=%s (one message per webhook)",
+                            dropped, body_pnid,
+                        )
                     return message
     return None
 
@@ -1936,7 +1972,7 @@ async def test_platform_without_handshake_get_has_no_get_route():
         type(platform).handshake_get = True
 ```
 
-You will need `_dispatcher_with(platform)` — a helper that builds a `ChannelWebhookDispatcher` with `_FakeCache` seeded for `handshaker:t1` and a `_FakeVault` returning `"vault-value"`. If the file already has an equivalent helper under another name, reuse it rather than adding a second one. Import `ChannelDescriptor` and `VerificationResult` from `surogates.channels.registry`.
+The file's existing builder is `_make_app(platform=…, cache=…, vault=…, pipeline=…)` (~`tests/test_channel_dispatcher.py:222`), which registers the platform in a fresh registry, enables its kind, and returns `(app, platform, cache, vault, pipeline)` — use it rather than inventing the `_dispatcher_with` + `build_app()` shape the snippets sketch (adapt the snippets: seed `_FakeCache` for `handshaker:t1` and use `_FakeVault`'s value convention for the verify token). Import `ChannelDescriptor` and `VerificationResult` from `surogates.channels.registry`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2162,10 +2198,11 @@ class TestWhatsAppSend:
         assert result.message_id == "wamid.C1"
 
     @pytest.mark.asyncio
-    async def test_uses_api_version_from_destination_config(self):
+    async def test_uses_api_version_from_creds(self):
+        # api_version rides in creds (stored by the provisioner alongside
+        # phone_number_id): the outbound path receives only (item, creds),
+        # and session config never carries routing config.
         p = WhatsAppPlatform()
-        item = _item("hi")
-        item.destination["api_version"] = "v25.0"
         url = graph_url(PNID, "messages", api_version="v25.0")
         with respx.mock(assert_all_called=True) as router:
             router.post(url).mock(
@@ -2173,7 +2210,7 @@ class TestWhatsAppSend:
                     200, json={"messages": [{"id": "wamid.X"}]},
                 )
             )
-            result = await p.send(item, creds=_creds())
+            result = await p.send(_item("hi"), creds=_creds(api_version="v25.0"))
         assert result.success is True
 
 
@@ -2281,7 +2318,7 @@ Add to `WhatsAppPlatform`:
         destination = item.destination or {}
         wa_id: str = destination.get("wa_id") or ""
         phone_number_id: str = destination.get("phone_number_id") or ""
-        api_version: str = destination.get("api_version") or DEFAULT_API_VERSION
+        api_version: str = (creds or {}).get("api_version") or DEFAULT_API_VERSION
 
         if not token or not wa_id or not phone_number_id:
             return SendResult(success=False, error="missing whatsapp credentials or destination")
@@ -2380,7 +2417,7 @@ git commit -m "feat(channels): WhatsApp outbound send with text-mode input promp
   - `async ack_received(msg, *, creds, config) -> None`
   - `async download_file(*, creds, url, max_bytes) -> bytes | None`
   - `async send_private(creds, *, sender_id, chat_id, is_dm, text) -> bool`
-  - `async post_input_nudge(*, creds, channel, thread_ts, text) -> None`
+  - `async post_input_nudge(*, creds, channel, thread_ts, text) -> str | None` — same contract as `slack.py:910` / `telegram.py:743`: returns the posted message id or `None`, never raises
 
 Read §6.2 and §6.5. `post_input_nudge` is **not** interactive-only — it delivers the `/stop` acknowledgement and the allowance-block notice with its buy link. `runner.py:310-312` getattr-guards it, so omitting it fails silently.
 
@@ -2521,10 +2558,10 @@ class TestSendPrivateAndNudge:
         assert "Stopping" in body["text"]["body"]
 ```
 
-`send_private` and `post_input_nudge` need the tenant's `phone_number_id`, which is not in their signature. Resolve it from `creds` — Task 11's provisioner stores it as a credential alongside the secrets so it is available wherever creds are. So:
+`send_private` and `post_input_nudge` need the tenant's `phone_number_id`, which is not in their signature — and every outbound surface (`send`, `send_files`, `download_file`, and these two) needs the per-tenant `api_version` pin, which session config never carries. Both ride in `creds`: Task 11's provisioner stores them alongside the secrets so they are available wherever creds are. So:
 
-1. Add `"phone_number_id": "phone_number_id"` to the descriptor's `vault_refs` in `WhatsAppPlatform`.
-2. Update `TestWhatsAppPlatform.test_descriptor_vault_refs` (written in Task 3) to expect four keys:
+1. Add `"phone_number_id": "phone_number_id"` and `"api_version": "api_version"` to the descriptor's `vault_refs` in `WhatsAppPlatform`. Neither is a secret; creds are simply the only payload the outbound surfaces receive.
+2. Update `TestWhatsAppPlatform.test_descriptor_vault_refs` (written in Task 3) to expect five keys:
 
 ```python
     def test_descriptor_vault_refs(self):
@@ -2534,10 +2571,11 @@ class TestSendPrivateAndNudge:
             "app_secret": "app_secret",
             "verify_token": "verify_token",
             "phone_number_id": "phone_number_id",
+            "api_version": "api_version",
         }
 ```
 
-3. Add `"phone_number_id": PNID` to the `_creds()` helper's base dict.
+3. Add `"phone_number_id": PNID` and `"api_version": ""` to the `_creds()` helper's base dict (the empty `api_version` exercises the `DEFAULT_API_VERSION` fallback; tests that pin a version pass `_creds(api_version="v25.0")`).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2574,7 +2612,7 @@ Add to `WhatsAppPlatform` (import `download_media` from `whatsapp_api`):
         if not token or not wamid or not phone_number_id:
             return
 
-        api_version = (config or {}).get("api_version") or DEFAULT_API_VERSION
+        api_version = (creds or {}).get("api_version") or DEFAULT_API_VERSION
         _, error = await send_message(
             self._http,
             token=token,
@@ -2612,6 +2650,7 @@ Add to `WhatsAppPlatform` (import `download_media` from `whatsapp_api`):
             return None
         data, _mime = await download_media(
             self._http, token=token, media_id=url, max_bytes=max_bytes,
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
         )
         return data
 
@@ -2621,12 +2660,12 @@ Add to `WhatsAppPlatform` (import `download_media` from `whatsapp_api`):
 
     async def _send_plain(
         self, *, creds: dict, wa_id: str, text: str,
-    ) -> bool:
-        """Post one plain text message.  Returns True on success."""
+    ) -> str | None:
+        """Post one plain text message.  Returns the wamid, or ``None``."""
         token: str = (creds or {}).get("access_token") or ""
         phone_number_id: str = (creds or {}).get("phone_number_id") or ""
         if not token or not phone_number_id or not wa_id or not text:
-            return False
+            return None
         wamid, error = await send_message(
             self._http,
             token=token,
@@ -2638,10 +2677,11 @@ Add to `WhatsAppPlatform` (import `download_media` from `whatsapp_api`):
                 "type": "text",
                 "text": {"body": text, "preview_url": True},
             },
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
         )
         if error:
             logger.warning("[whatsapp] plain send failed (%s)", error)
-        return wamid is not None
+        return wamid
 
     async def send_private(
         self,
@@ -2658,18 +2698,19 @@ Add to `WhatsAppPlatform` (import `download_media` from `whatsapp_api`):
         send.  Used by the ``linked`` identity policy to deliver a pairing
         code without leaking it into a shared surface.
         """
-        return await self._send_plain(creds=creds, wa_id=sender_id, text=text)
+        return await self._send_plain(creds=creds, wa_id=sender_id, text=text) is not None
 
     async def post_input_nudge(
         self, *, creds: dict, channel: str, thread_ts: Any, text: str,
-    ) -> None:
+    ) -> str | None:
         """Deliver a status line to the conversation.
 
         Not interactive-only: this carries the ``/stop`` acknowledgement and
         the allowance/subscription block notice with its buy link.  WhatsApp
-        has no threads, so ``thread_ts`` is ignored.  Best-effort.
+        has no threads, so ``thread_ts`` is ignored.  Best-effort; returns
+        the message id or ``None`` — the same contract as Slack/Telegram.
         """
-        await self._send_plain(creds=creds, wa_id=channel, text=text)
+        return await self._send_plain(creds=creds, wa_id=channel, text=text)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2854,7 +2895,7 @@ _CAPTIONABLE = ("image", "video", "document")
         destination = item.destination or {}
         wa_id: str = destination.get("wa_id") or ""
         phone_number_id: str = destination.get("phone_number_id") or ""
-        api_version: str = destination.get("api_version") or DEFAULT_API_VERSION
+        api_version: str = (creds or {}).get("api_version") or DEFAULT_API_VERSION
         if not token or not wa_id or not phone_number_id or not files:
             return []
 
@@ -2993,7 +3034,7 @@ from surogates.channels.registry import registry
 def test_every_registered_platform_has_a_delivery_adapter():
     # An outbox row for a channel outside ADAPTER_CHANNELS is never claimed
     # and sits pending forever (store.py:1148).
-    missing = {p.kind for p in registry.all()} - set(ADAPTER_CHANNELS)
+    missing = {p.kind for p in registry.all_platforms()} - set(ADAPTER_CHANNELS)
     assert not missing, f"registered but not in ADAPTER_CHANNELS: {sorted(missing)}"
 
 
@@ -3014,7 +3055,7 @@ def test_whatsapp_has_a_memory_boundary():
     assert "whatsapp" in MANAGED_CHANNELS
 ```
 
-If `registry.all()` does not exist, use the registry's actual enumeration accessor — check `surogates/channels/registry.py` for the method name and adapt.
+(`all_platforms()` is the registry's enumeration accessor — `registry.py:301`.)
 
 Append to `tests/test_whatsapp_platform.py`:
 
@@ -3120,12 +3161,13 @@ and add the destination branch beside the telegram one (~line 1160):
                 destination = {
                     "wa_id": config.get("whatsapp_channel_id", ""),
                     "phone_number_id": config.get("channel_identifier", ""),
-                    "api_version": config.get("api_version", ""),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
 ```
 
-`inbound.py:632-633` already writes `f"{routing.platform}_channel_id"` generically, so `whatsapp_channel_id` is populated with no further change.
+No `api_version` here: session config is a creation-time snapshot (`{platform}_channel_id`, `{platform}_thread_key`, `channel_identifier`, `memory_boundary`, `multi_party`, `single_session`) and never carries routing config — the Graph-version pin rides in creds (Task 6/Task 11).
+
+`inbound.py:632-633` already writes `f"{routing.platform}_channel_id"` generically, so `whatsapp_channel_id` is populated with no further change; `"channel_identifier"` is likewise already in session config (`inbound.py:634`).
 
 If `_THREAD_DEST_FIELDS.get(channel, (None, None))` unpacking makes `thread_dest`/`thread_key` `None` and the telegram branch assigns `thread_dest: ...` as a dict key, confirm the WhatsApp branch does not — it must not include a `None` key. The branch above is already correct.
 
@@ -3390,9 +3432,14 @@ class TestWhatsAppProvisioner:
         assert result.credentials["access_token"] == "EAAtoken"
         assert result.credentials["app_secret"] == "0123456789abcdef0123456789abcdef"
         assert result.credentials["phone_number_id"] == "779418925277868"
+        assert result.credentials["api_version"] == "v23.0"
         assert result.credentials["verify_token"]
         assert result.config["waba_id"] == "215589313241560"
         assert result.extra_env["SUROGATES_WHATSAPP_DISPLAY_PHONE"] == "+1 555 179 7781"
+        assert (
+            result.extra_env["SUROGATES_WHATSAPP_VERIFY_TOKEN"]
+            == result.credentials["verify_token"]
+        )
 
     async def test_prepare_reuses_existing_verify_token(self):
         # Re-minting would break the webhook Meta has already verified.
@@ -3411,6 +3458,26 @@ class TestWhatsAppProvisioner:
         )
         assert result.credentials["verify_token"] == "already-minted"
         assert client.read_keys == ["whatsapp_verify_token_779418925277868"]
+
+    async def test_prepare_prefers_env_verify_token(self):
+        # The forms re-emit the token from agent env (it arrived there via
+        # extra_env); it must win so the value Studio renders and the vault
+        # stay in lockstep.
+        prov = CHANNEL_PROVISIONERS["whatsapp"]
+        env = {
+            "SUROGATES_WHATSAPP_PHONE_NUMBER_ID": "779418925277868",
+            "SUROGATES_WHATSAPP_ACCESS_TOKEN": "EAAtoken",
+            "SUROGATES_WHATSAPP_APP_SECRET": "0123456789abcdef0123456789abcdef",
+            "SUROGATES_WHATSAPP_VERIFY_TOKEN": "env-token",
+        }
+        result = await prov.prepare(
+            env,
+            surogates_client=_FakeSurogatesClient(credential="vault-token"),
+            project_id="00000000-0000-0000-0000-000000000001",
+            http_client=_FakeHttp(json_body={"display_phone_number": "+1"}),
+        )
+        assert result.credentials["verify_token"] == "env-token"
+        assert result.extra_env["SUROGATES_WHATSAPP_VERIFY_TOKEN"] == "env-token"
 
     async def test_prepare_survives_graph_failure(self):
         # A Graph outage must not block provisioning; the display phone is
@@ -3431,7 +3498,7 @@ class TestWhatsAppProvisioner:
         assert result.extra_env["SUROGATES_WHATSAPP_DISPLAY_PHONE"] == "779418925277868"
 ```
 
-Add the two fakes near the file's other helpers if they do not already exist:
+The file already ships `_FakeHttpResponse` / `_FakeHttpClient` (~`tests/test_channel_provisioning.py:895-907`) — prefer reusing those as the `http_client` double (adapting the constructor calls above if their kwargs differ from this sketch). Add the fakes below only where no equivalent already exists:
 
 ```python
 class _FakeSurogatesClient:
@@ -3515,13 +3582,18 @@ async def _whatsapp_prepare(
 
     1. Reads the phone number id, access token and app secret; returns
        ``None`` if any is absent.
-    2. Fetches or mints the webhook verify token from the surogates vault.
+    2. Resolves the webhook verify token: the env value when present (the
+       forms re-emit it because the provisioner returns it via
+       ``extra_env``), else the stored vault value, else a fresh mint.
        This MUST be idempotent: re-minting would break the callback URL Meta
        has already verified, and the operator would have to re-verify by
        hand with no diagnostic.
     3. Best-effort Graph lookup of the display phone number, returned as
        ``extra_env`` — Studio's connect flow treats an empty derived value
-       as a failed validation and rolls the channel back to disabled.
+       as a failed validation and rolls the channel back to disabled.  The
+       verify token is also returned as ``extra_env`` so it lands in the
+       agent env and Studio's manage view can render it for the operator to
+       paste into Meta's dashboard.
     """
     phone_number_id = (env.get("SUROGATES_WHATSAPP_PHONE_NUMBER_ID") or "").strip()
     access_token = (env.get("SUROGATES_WHATSAPP_ACCESS_TOKEN") or "").strip()
@@ -3545,7 +3617,8 @@ async def _whatsapp_prepare(
         )
         existing_token = None
 
-    verify_token = existing_token or _mint_webhook_secret()
+    env_token = (env.get("SUROGATES_WHATSAPP_VERIFY_TOKEN") or "").strip()
+    verify_token = env_token or existing_token or _mint_webhook_secret()
 
     # Derive the display phone number for the Studio connect flow.  Cosmetic:
     # a Graph outage must not block provisioning.
@@ -3579,12 +3652,20 @@ async def _whatsapp_prepare(
             "access_token": access_token,
             "app_secret": app_secret,
             "verify_token": verify_token,
-            # The platform needs the tenant id wherever creds are available
-            # (send_private / post_input_nudge get no routing object).
+            # Non-secrets stored alongside the secrets: creds are the only
+            # payload every outbound surface receives (send, send_files,
+            # download_file, send_private, post_input_nudge), so the tenant
+            # id and its Graph-version pin ride there.
             "phone_number_id": phone_number_id,
+            "api_version": api_version,
         },
         config=_whatsapp_config(env),
-        extra_env={"SUROGATES_WHATSAPP_DISPLAY_PHONE": display_phone},
+        extra_env={
+            "SUROGATES_WHATSAPP_DISPLAY_PHONE": display_phone,
+            # Surfaced into the agent env so Studio's manage view can render
+            # the token the operator pastes into Meta's dashboard.
+            "SUROGATES_WHATSAPP_VERIFY_TOKEN": verify_token,
+        },
     )
 
 
@@ -3728,7 +3809,7 @@ git commit -m "feat(channels): recognise whatsapp in commerce vocab and routing 
 - Consumes: the `SUROGATES_WHATSAPP_*` env-var names from Task 11.
 - Produces: `CHANNEL_ENV_KEYS` covering WhatsApp, and an admin form that re-emits every one of them.
 
-**The invariant:** a key belongs in `CHANNEL_ENV_KEYS` only if something re-emits it on save — a form from its own state, or the provisioner's `extra_env`. `preserveExternalEnv` carries forward everything *not* in the set. `SUROGATES_WHATSAPP_DISPLAY_PHONE` is re-minted server-side (Task 11), so it belongs in the set without a form field, exactly like `SUROGATES_TELEGRAM_USERNAME`.
+**The invariant:** a key belongs in `CHANNEL_ENV_KEYS` only if something re-emits it on save — a form from its own state, or the provisioner's `extra_env`. `preserveExternalEnv` carries forward everything *not* in the set. `SUROGATES_WHATSAPP_DISPLAY_PHONE` and `SUROGATES_WHATSAPP_VERIFY_TOKEN` are re-emitted server-side via `extra_env` (Task 11), so they belong in the set without form fields, exactly like `SUROGATES_TELEGRAM_USERNAME`.
 
 **Two forms share this one set** (Task 14 covers the other). Both must be updated, or the one you skip deletes the credentials on save.
 
@@ -3746,6 +3827,7 @@ describe("WhatsApp env keys", () => {
     "SUROGATES_WHATSAPP_WABA_ID",
     "SUROGATES_WHATSAPP_API_VERSION",
     "SUROGATES_WHATSAPP_DISPLAY_PHONE",
+    "SUROGATES_WHATSAPP_VERIFY_TOKEN",
     "SUROGATES_WHATSAPP_IDENTITY_POLICY",
     "SUROGATES_WHATSAPP_ALLOW_BOTS",
   ];
@@ -3773,7 +3855,7 @@ Expected: FAIL — every key assertion.
 
 - [ ] **Step 3: Implement**
 
-In `channels-tab.tsx`, add all nine keys to `CHANNEL_ENV_KEYS` (`:25-46`).
+In `channels-tab.tsx`, add all ten keys to `CHANNEL_ENV_KEYS` (`:25-46`).
 
 Add WhatsApp form state beside the Telegram state, and WhatsApp fields to the `env_vars` literal at `:219-239`:
 
@@ -3788,7 +3870,7 @@ Add WhatsApp form state beside the Telegram state, and WhatsApp fields to the `e
       SUROGATES_WHATSAPP_ALLOW_BOTS: whatsappAllowBots,
 ```
 
-Note `SUROGATES_WHATSAPP_DISPLAY_PHONE` is deliberately **absent** from the literal — the provisioner re-mints it, exactly as `SUROGATES_TELEGRAM_USERNAME` is absent today.
+Note `SUROGATES_WHATSAPP_DISPLAY_PHONE` and `SUROGATES_WHATSAPP_VERIFY_TOKEN` are deliberately **absent** from the literal — the provisioner re-emits both via `extra_env`, exactly as `SUROGATES_TELEGRAM_USERNAME` is absent today.
 
 Add the JSX section mirroring the Telegram block, with these fields: Phone Number ID, Access Token (password), App Secret (password), WABA ID, plus the identity-policy and allow-bots toggles the other channels have.
 
@@ -3847,16 +3929,18 @@ Paste-time validation, each with a message that names what was pasted, what the 
 - **App Secret** — exactly 32 hex characters, **rejecting uppercase** with *"Meta app secrets are lowercase hex — check your paste."* Do not lowercase before matching: that would let an uppercase paste pass validation and then fail HMAC at runtime.
 - **WABA ID** — numeric, 10–25 characters.
 
-Call `runConnect` with:
+Call `runConnect` with (its opts type also requires `wasEnabled` and `setStep` — mirror the Telegram invocation):
 
 ```typescript
 {
   enabledKey: "SUROGATES_WHATSAPP_ENABLED",
   derivedKey: "SUROGATES_WHATSAPP_DISPLAY_PHONE",
   platformLabel: "WhatsApp",
+  wasEnabled,
+  setStep,
+  setEnabled: setWhatsappEnabled,
   channelView: "whatsapp",
   reconnectView: "whatsapp-reconnect",
-  setEnabled: setWhatsappEnabled,
 }
 ```
 
@@ -3865,7 +3949,7 @@ Call `runConnect` with:
 Model it on `TelegramManageView` (`:1220`). It must render, with copy buttons:
 
 - The **callback URL**, built from the phone number id: `https://channels.surogate.ai/whatsapp/{phone_number_id}`. Keep this in one place so it cannot drift from the mounted route.
-- The **verify token**, shown once, with a copy button. Rotation must default to **No** — rotating breaks the webhook Meta has already verified.
+- The **verify token**, read from the agent env (`SUROGATES_WHATSAPP_VERIFY_TOKEN`, populated by the provisioner's `extra_env` on the first save), rendered with a copy button. Rotation must default to **No** — rotating breaks the webhook Meta has already verified.
 - A prominent instruction that **the form must be saved before pasting the URL into Meta**. If reversed, the handshake fast-acks 200 with an empty body and Meta rejects the URL with no diagnostic. This is the most likely setup failure.
 - A reminder to subscribe the **`messages`** webhook field — omitting it is the classic "verified but nothing arrives".
 - A note that dev-mode numbers can only message 5 whitelisted recipients, and that this is Meta's *recipient whitelist* (who you can send to) — distinct from the agent's own allow-list (who may talk to it). Operators conflate these constantly.
@@ -3908,17 +3992,21 @@ git commit -m "feat(studio): WhatsApp connect and manage views"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `work-agent-overview-state.test.ts`:
+Create `frontend/src/features/work/__tests__/work-agent-overview-state.test.ts` (it does not exist yet). `VISIBLE_OVERVIEW_CHANNELS` and the label if-chain are file-private, so test through the exported `getVisibleOverviewChannels`:
 
 ```typescript
-describe("WhatsApp in the overview", () => {
-  it("is a visible overview channel", () => {
-    // A channel outside this set is filtered out of the chart entirely.
-    expect(VISIBLE_OVERVIEW_CHANNELS).toContain("whatsapp");
-  });
+import { getVisibleOverviewChannels } from "../work-agent-overview-state";
 
-  it("has a display label", () => {
-    expect(channelLabel("whatsapp")).toBe("WhatsApp");
+describe("WhatsApp in the overview", () => {
+  it("survives the visibility filter and gets its label", () => {
+    // A channel outside VISIBLE_OVERVIEW_CHANNELS is filtered out of the
+    // chart entirely, and the label if-chain must gain a WhatsApp branch.
+    const rows = getVisibleOverviewChannels([
+      { name: "whatsapp", count: 3 },
+      { name: "imessage", count: 1 },
+    ] as Parameters<typeof getVisibleOverviewChannels>[0]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].name).toBe("WhatsApp");
   });
 });
 ```
@@ -3931,7 +4019,7 @@ it("offers whatsapp as a sellable channel", () => {
 });
 ```
 
-Add a buy-page test:
+Create `frontend/src/features/public-agent/__tests__/buy-page-linkable.test.ts`:
 
 ```typescript
 it("renders a third linkable channel by its own name", () => {
@@ -3953,7 +4041,7 @@ Expected: FAIL on each new assertion.
 - `work-agent-overview-page.tsx` — add WhatsApp to `activeChannelNames`.
 - `work-agent-overview-state.ts` — add `"whatsapp"` to `VISIBLE_OVERVIEW_CHANNELS` and a `WhatsApp` branch to the label if-chain.
 - `work-agent-settings-page.tsx:1676` — `(["slack","telegram","website","whatsapp"] as const)`. The `SUROGATES_${c.toUpperCase()}_ENABLED` derivation is already generic.
-- `agent-commerce-panel.tsx:169-173` — add WhatsApp to `SELLABLE_CHANNELS`. **Its id must match the settings-page list above**, or the channel is silently unsellable.
+- `agent-commerce-panel.tsx:169-173` — add WhatsApp to `SELLABLE_CHANNELS` and `export` the constant (it is file-private today; the new test imports it). **Its id must match the settings-page list above**, or the channel is silently unsellable.
 - `use-onboarding-progress.ts:19-24` — add WhatsApp to the channel list.
 - `buy-page.tsx:344-345` — replace the two-way ternary with a lookup that handles any kind. Extract it as `formatLinkableChannel` so the test above can import it:
 
@@ -4006,6 +4094,6 @@ Not tasks — do these when shipping, and read the spec's §14 risk table first.
 
 **Spec coverage.** Every spec section maps to a task: §3.4 Graph version → Global Constraints + T2 · §4 GET handshake → T4 · §5.1–5.2 → T3 · §5.3 parse → T3 · §5.4 group refusal → T3 · §5.5 dedup → T3 (`ts = wamid`) · §6.1 send → T5 · §6.2 ack_received → T6 · §6.3 send_files → T7 · §6.4 MEDIA gate → T7 · §6.5 download_file → T6 · §6.6 transcoder → T1 · §6.7 error classification → T9 · §7 credentials → T11 · §8 no migration → T12 + Deployment notes · §3.3 ask_user_question → T5 (renderer) + T8 (constants) · §11 surogates → T8 · §11 ops backend → T11, T12 · §11 frontend → T13, T14, T15 · §12 Studio flow → T13, T14 · §13 testing → distributed across every task.
 
-**Type consistency.** `render_whatsapp` (T1) is called in T5 and T7. `send_message`/`upload_media`/`download_media`/`graph_url`/`format_graph_error`/`ext_for_mime` (T2) are used with identical signatures in T3, T5, T6, T7. `_media_kind` (T7) and `_kind_for_mime` (T2) are deliberately separate: the former returns a WhatsApp message `type`, the latter a cap-table key. `msg.source["phone_number_id"]`/`["wamid"]` set in T3 are read in T6. The destination keys `wa_id`/`phone_number_id`/`api_version` written in T8 are read in T5 and T7. `SUROGATES_WHATSAPP_DISPLAY_PHONE` produced in T11 is consumed in T13 and T14.
+**Type consistency.** `render_whatsapp` (T1) is called in T5 and T7. `send_message`/`upload_media`/`download_media`/`graph_url`/`format_graph_error`/`ext_for_mime` (T2) are used with identical signatures in T3, T5, T6, T7. `_media_kind` (T7) and `_kind_for_mime` (T2) are deliberately separate: the former returns a WhatsApp message `type`, the latter a cap-table key. `msg.source["phone_number_id"]`/`["wamid"]` set in T3 are read in T6. The destination keys `wa_id`/`phone_number_id`/`channel_identifier` written in T8 are read in T5 and T7; `phone_number_id` and `api_version` also ride in creds from T11's provisioner through T6's `vault_refs`, because the outbound surfaces receive only `(item, creds)`. `SUROGATES_WHATSAPP_DISPLAY_PHONE` and `SUROGATES_WHATSAPP_VERIFY_TOKEN` produced in T11 are consumed in T13 and T14.
 
 **Known follow-ups deliberately deferred**, all recorded in spec §10: no templates or 24-hour-window machinery; no native buttons; no voice transcription; no reply quoting; no `statuses[]` → outbox reconciliation; no Studio credential alarm; no durable cross-replica dedup; no client-side send throttling; no live Graph probes in Studio; no Embedded Signup; no groups.
