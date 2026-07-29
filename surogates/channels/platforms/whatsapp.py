@@ -45,6 +45,7 @@ from surogates.channels.platforms.whatsapp_api import (
     download_media,
     ext_for_mime,
     send_message,
+    upload_media,
 )
 from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
@@ -67,6 +68,12 @@ _MAX_BODY_BYTES = 3 * 1024 * 1024
 #: not inflate and the transcoder runs *before* splitting, so the full cap
 #: is correct here.
 _MAX_MESSAGE_CHARS = 4096
+
+#: WhatsApp's caption cap.  Over-long captions are silently rejected by Meta.
+_MAX_CAPTION_CHARS = 1024
+
+#: Media kinds that accept a caption.
+_CAPTIONABLE = ("image", "video", "document")
 
 #: Inbound message types that carry a user message.  Everything else —
 #: reaction, system, unsupported, order, location, contacts — returns None
@@ -384,6 +391,14 @@ def _build_message(
     )
 
 
+def _media_kind(mime_type: str) -> str:
+    """Map a MIME type to the WhatsApp message ``type`` for that media."""
+    base = (mime_type or "").split("/")[0].strip().lower()
+    if base in ("image", "video", "audio"):
+        return base
+    return "document"
+
+
 def _render_input_prompt(payload: dict) -> str:
     """Render an ``ask_user_question`` prompt as numbered plain text.
 
@@ -568,6 +583,79 @@ class WhatsAppPlatform:
         if last_id is None:
             return SendResult(success=False, error="send failed")
         return SendResult(success=True, message_id=last_id)
+
+    # ------------------------------------------------------------------
+    # send_files — upload workspace files referenced by MEDIA: markers
+    # ------------------------------------------------------------------
+
+    async def send_files(
+        self, item: Any, *, creds: dict, files: list,
+    ) -> list[str]:
+        """Upload *files* and post each as a native WhatsApp attachment.
+
+        Two Graph hops per file: ``POST /media`` yields a media id, then
+        ``POST /messages`` sends it.  Returns the uploaded media ids (empty
+        when nothing uploaded).  Best-effort per file: any error is logged
+        and skipped, never raised — the same contract as ``download_file``.
+        """
+        token: str = (creds or {}).get("access_token") or ""
+        destination = item.destination or {}
+        wa_id: str = destination.get("wa_id") or ""
+        phone_number_id: str = destination.get("phone_number_id") or ""
+        api_version: str = (creds or {}).get("api_version") or DEFAULT_API_VERSION
+        if not token or not wa_id or not phone_number_id or not files:
+            return []
+
+        caption = render_whatsapp(item.payload.get("content", "") or "")[
+            :_MAX_CAPTION_CHARS
+        ]
+
+        uploaded: list[str] = []
+        for index, f in enumerate(files):
+            media_id, error = await upload_media(
+                self._http,
+                token=token,
+                phone_number_id=phone_number_id,
+                filename=f.filename,
+                data=f.data,
+                mime_type=f.mime_type,
+                api_version=api_version,
+            )
+            if media_id is None:
+                logger.warning(
+                    "[whatsapp] media upload failed for %s (%s)", f.filename, error,
+                )
+                continue
+
+            kind = _media_kind(f.mime_type)
+            block: dict[str, Any] = {"id": media_id}
+            # Only the first attachment carries the caption; repeating it on
+            # every file would spam a linear chat.
+            if index == 0 and caption and kind in _CAPTIONABLE:
+                block["caption"] = caption
+            if kind == "document":
+                block["filename"] = f.filename
+
+            _, send_error = await send_message(
+                self._http,
+                token=token,
+                phone_number_id=phone_number_id,
+                payload={
+                    "messaging_product": "whatsapp",
+                    "recipient_type": "individual",
+                    "to": wa_id,
+                    "type": kind,
+                    kind: block,
+                },
+                api_version=api_version,
+            )
+            if send_error:
+                logger.warning(
+                    "[whatsapp] sending media %s failed (%s)", f.filename, send_error,
+                )
+                continue
+            uploaded.append(media_id)
+        return uploaded
 
     # ------------------------------------------------------------------
     # ack_received — read receipt + typing indicator in one call

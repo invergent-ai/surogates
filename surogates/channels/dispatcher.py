@@ -791,13 +791,14 @@ class ChannelDeliveryDispatcher:
             if update_ts is not None:
                 item.destination["update_ts"] = update_ts
 
-        # Slack MEDIA: markers — strip from text and resolve workspace files.
-        # Gated to Slack: never strip a marker on a platform that cannot upload.
+        # MEDIA: markers — strip from text and resolve workspace files.
+        # Gated on the send_files capability: never strip a marker on a
+        # platform that cannot upload it.
         media_files: list = []
         media_reply_only = False
         send_files_fn = getattr(platform, "send_files", None)
         content = item.payload.get("content") or ""
-        if platform.kind == "slack" and "MEDIA:" in content:
+        if send_files_fn is not None and "MEDIA:" in content:
             from surogates.channels.channel_media import (
                 parse_media_markers,
                 resolve_workspace_media,

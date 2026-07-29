@@ -15,6 +15,7 @@ import httpx
 import pytest
 import respx
 
+from surogates.channels.channel_media import OutboundFile
 from surogates.channels.platforms.whatsapp import (
     WhatsAppPlatform,
     identifier_of,
@@ -739,3 +740,96 @@ class TestSendPrivateAndNudge:
         body = _json.loads(route.calls[0].request.content)
         assert body["to"] == WA_ID
         assert "Stopping" in body["text"]["body"]
+
+
+# ---------------------------------------------------------------------------
+# send_files — two-step Graph upload
+# ---------------------------------------------------------------------------
+
+MEDIA_URL = graph_url(PNID, "media")
+
+
+class TestSendFiles:
+    @pytest.mark.asyncio
+    async def test_uploads_then_sends_and_returns_media_ids(self):
+        p = WhatsAppPlatform()
+        files = [OutboundFile(filename="chart.png", mime_type="image/png", data=b"PNG")]
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MEDIA_URL).mock(
+                return_value=httpx.Response(200, json={"id": "media_up1"})
+            )
+            send = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.M1"}]},
+                )
+            )
+            uploaded = await p.send_files(_item(""), creds=_creds(), files=files)
+        assert uploaded == ["media_up1"]
+        body = _json.loads(send.calls[0].request.content)
+        assert body["type"] == "image"
+        assert body["image"]["id"] == "media_up1"
+
+    @pytest.mark.asyncio
+    async def test_document_carries_filename(self):
+        p = WhatsAppPlatform()
+        files = [OutboundFile(filename="notes.pdf", mime_type="application/pdf",
+                              data=b"PDF")]
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MEDIA_URL).mock(
+                return_value=httpx.Response(200, json={"id": "media_doc"})
+            )
+            send = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.D1"}]},
+                )
+            )
+            await p.send_files(_item(""), creds=_creds(), files=files)
+        body = _json.loads(send.calls[0].request.content)
+        assert body["type"] == "document"
+        assert body["document"]["filename"] == "notes.pdf"
+
+    @pytest.mark.asyncio
+    async def test_oversize_file_is_skipped_not_raised(self):
+        p = WhatsAppPlatform()
+        files = [
+            OutboundFile(filename="big.png", mime_type="image/png",
+                         data=b"x" * (6 * 1024 * 1024)),
+            OutboundFile(filename="ok.png", mime_type="image/png", data=b"PNG"),
+        ]
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MEDIA_URL).mock(
+                return_value=httpx.Response(200, json={"id": "media_ok"})
+            )
+            router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.OK"}]},
+                )
+            )
+            uploaded = await p.send_files(_item(""), creds=_creds(), files=files)
+        assert uploaded == ["media_ok"]
+
+    @pytest.mark.asyncio
+    async def test_caption_truncated_to_1024(self):
+        p = WhatsAppPlatform()
+        item = _item("x" * 2000)
+        files = [OutboundFile(filename="a.png", mime_type="image/png", data=b"P")]
+        with respx.mock(assert_all_called=True) as router:
+            router.post(MEDIA_URL).mock(
+                return_value=httpx.Response(200, json={"id": "m1"})
+            )
+            send = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.C"}]},
+                )
+            )
+            await p.send_files(item, creds=_creds(), files=files)
+        body = _json.loads(send.calls[0].request.content)
+        assert len(body["image"]["caption"]) <= 1024
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_token(self):
+        p = WhatsAppPlatform()
+        files = [OutboundFile(filename="a.png", mime_type="image/png", data=b"P")]
+        assert await p.send_files(
+            _item(""), creds={"access_token": ""}, files=files,
+        ) == []
