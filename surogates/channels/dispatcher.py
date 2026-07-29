@@ -162,6 +162,17 @@ class ChannelWebhookDispatcher:
             for path in interactive:
                 app.add_api_route(path, interactive_handler, methods=["POST"])
 
+        # Platforms whose provider verifies the callback URL with an unsigned
+        # GET on the same path (WhatsApp Cloud API's hub.challenge handshake).
+        # Slack's challenge arrives as a signed POST and reuses ``verify``;
+        # WhatsApp's cannot, so it needs its own method on the same route.
+        if getattr(platform, "handshake_get", False):
+            app.add_api_route(
+                platform.route_path(),
+                self._make_handshake_handler(platform),
+                methods=["GET"],
+            )
+
     # ------------------------------------------------------------------
     # Shared secure front-half
     # ------------------------------------------------------------------
@@ -276,6 +287,35 @@ class ChannelWebhookDispatcher:
     # ------------------------------------------------------------------
     # Per-platform handler factory
     # ------------------------------------------------------------------
+
+    def _make_handshake_handler(self, platform: ChannelPlatform):
+        """Return a GET handler for a provider's callback-URL handshake.
+
+        Reuses the shared secure front-half wholesale: path identifier →
+        resolve_tenant → vault creds → verify.  An accepted
+        :class:`VerificationResult` carrying a ``str`` body is already
+        rendered as a :class:`PlainTextResponse` by
+        :meth:`_resolve_and_verify`, which is exactly the un-quoted challenge
+        echo the provider expects.  An unknown identifier fast-acks 200 with
+        an empty body, preserving the no-liveness-oracle property — the
+        provider reads the empty body as a failed challenge.
+        """
+        self_ = self
+
+        async def _handler(request: Request) -> Response:
+            *_, err = await self_._resolve_and_verify(platform, request, b"")
+            if err is not None:
+                return err
+            # Only reachable if ``verify`` returned a bare truthy value
+            # instead of a VerificationResult — a platform implementation bug.
+            logger.warning(
+                "[dispatcher] %s handshake returned no response — "
+                "verify must return a VerificationResult on GET",
+                platform.kind,
+            )
+            return Response(status_code=400)
+
+        return _handler
 
     def _make_handler(self, platform: ChannelPlatform):
         """Return an async FastAPI route handler for JSON Events API requests.
