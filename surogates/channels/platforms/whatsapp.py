@@ -42,6 +42,7 @@ from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
+    download_media,
     ext_for_mime,
     send_message,
 )
@@ -439,6 +440,13 @@ class WhatsAppPlatform:
             "access_token": "access_token",
             "app_secret": "app_secret",
             "verify_token": "verify_token",
+            # Non-secrets, resolved through the same channel because creds
+            # are the only payload every outbound surface receives: send,
+            # send_files, download_file, send_private and post_input_nudge
+            # get no routing object and session config never carries
+            # routing config.
+            "phone_number_id": "phone_number_id",
+            "api_version": "api_version",
         },
         config_keys=(
             "require_mention",
@@ -560,6 +568,134 @@ class WhatsAppPlatform:
         if last_id is None:
             return SendResult(success=False, error="send failed")
         return SendResult(success=True, message_id=last_id)
+
+    # ------------------------------------------------------------------
+    # ack_received — read receipt + typing indicator in one call
+    # ------------------------------------------------------------------
+
+    async def ack_received(self, msg: Any, *, creds: dict, config: dict) -> None:
+        """Mark the inbound message read and show the typing pip.
+
+        One request sets blue double-checkmarks *and* the typing indicator.
+        This is the only progress signal WhatsApp offers: it cannot edit a
+        sent message, so the dispatcher swallows every intermediate
+        narration event and the agent would otherwise be silent for the
+        whole tool-calling phase.
+
+        Called only when the pipeline accepted the message, so filtered
+        senders never receive a receipt.  Best-effort; never raises.
+        """
+        token: str = (creds or {}).get("access_token") or ""
+        source = getattr(msg, "source", None) or {}
+        wamid = source.get("wamid")
+        phone_number_id = source.get("phone_number_id") or (creds or {}).get(
+            "phone_number_id"
+        )
+        if not token or not wamid or not phone_number_id:
+            return
+
+        _, error = await send_message(
+            self._http,
+            token=token,
+            phone_number_id=phone_number_id,
+            payload={
+                "messaging_product": "whatsapp",
+                "status": "read",
+                "message_id": wamid,
+                "typing_indicator": {"type": "text"},
+            },
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+        )
+        if error and "131009" in error:
+            # wamid older than 30 days — common after a long-quiet
+            # conversation, not worth a warning.
+            logger.info("[whatsapp] read receipt skipped: %s", error)
+        elif error:
+            logger.warning("[whatsapp] read receipt failed (%s)", error)
+
+    # ------------------------------------------------------------------
+    # download_file — two-hop inbound media fetch
+    # ------------------------------------------------------------------
+
+    async def download_file(
+        self, *, creds: dict, url: str, max_bytes: int,
+    ) -> bytes | None:
+        """Fetch inbound media.  ``url`` carries the Cloud API media id.
+
+        Mirrors Telegram, which carries its ``file_id`` in the same slot.
+        ``max_bytes`` is a hard cap, not a streaming contract — the caller
+        buffers the whole body.  Best-effort; never raises.
+        """
+        token: str = (creds or {}).get("access_token") or ""
+        if not token or not url:
+            return None
+        data, _mime = await download_media(
+            self._http,
+            token=token,
+            media_id=url,
+            max_bytes=max_bytes,
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+        )
+        return data
+
+    # ------------------------------------------------------------------
+    # send_private / post_input_nudge — plain sends
+    # ------------------------------------------------------------------
+
+    async def _send_plain(
+        self, *, creds: dict, wa_id: str, text: str,
+    ) -> str | None:
+        """Post one plain text message.  Returns the wamid, or ``None``."""
+        token: str = (creds or {}).get("access_token") or ""
+        phone_number_id: str = (creds or {}).get("phone_number_id") or ""
+        if not token or not phone_number_id or not wa_id or not text:
+            return None
+        wamid, error = await send_message(
+            self._http,
+            token=token,
+            phone_number_id=phone_number_id,
+            payload={
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": wa_id,
+                "type": "text",
+                "text": {"body": text, "preview_url": True},
+            },
+            api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+        )
+        if error:
+            logger.warning("[whatsapp] plain send failed (%s)", error)
+        return wamid
+
+    async def send_private(
+        self,
+        creds: dict,
+        *,
+        sender_id: str,
+        chat_id: str,
+        is_dm: bool,
+        text: str,
+    ) -> bool:
+        """Privately deliver *text* to *sender_id*.
+
+        Every WhatsApp conversation is already a DM, so this is a plain
+        send.  Used by the ``linked`` identity policy to deliver a pairing
+        code without leaking it into a shared surface.
+        """
+        wamid = await self._send_plain(creds=creds, wa_id=sender_id, text=text)
+        return wamid is not None
+
+    async def post_input_nudge(
+        self, *, creds: dict, channel: str, thread_ts: Any, text: str,
+    ) -> str | None:
+        """Deliver a status line to the conversation.
+
+        Not interactive-only: this carries the ``/stop`` acknowledgement and
+        the allowance/subscription block notice with its buy link.  WhatsApp
+        has no threads, so ``thread_ts`` is ignored.  Best-effort; returns
+        the message id or ``None`` — the same contract as Slack/Telegram.
+        """
+        return await self._send_plain(creds=creds, wa_id=channel, text=text)
 
 
 # ---------------------------------------------------------------------------
