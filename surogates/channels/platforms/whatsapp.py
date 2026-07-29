@@ -44,6 +44,7 @@ from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
     download_media,
     ext_for_mime,
+    media_kind_for_mime,
     send_message,
     upload_media,
 )
@@ -68,12 +69,6 @@ _MAX_BODY_BYTES = 3 * 1024 * 1024
 #: not inflate and the transcoder runs *before* splitting, so the full cap
 #: is correct here.
 _MAX_MESSAGE_CHARS = 4096
-
-#: WhatsApp's caption cap.  Over-long captions are silently rejected by Meta.
-_MAX_CAPTION_CHARS = 1024
-
-#: Media kinds that accept a caption.
-_CAPTIONABLE = ("image", "video", "document")
 
 #: Inbound message types that carry a user message.  Everything else —
 #: reaction, system, unsupported, order, location, contacts — returns None
@@ -338,12 +333,19 @@ def _build_message(
     raw_message: dict, *, names: dict, identifier: str | None,
 ) -> InboundMessage | None:
     """Build one :class:`InboundMessage`, or ``None`` if it is not a message."""
-    msg_type = str(raw_message.get("type") or "text").lower()
+    # No default: an absent ``type`` is not a text message.  Defaulting would
+    # re-introduce the reference bug where an unknown event starts an agent
+    # turn with an empty prompt.  Meta always sends ``type``.
+    msg_type = str(raw_message.get("type") or "").lower()
     if msg_type not in _MESSAGE_TYPES:
         logger.debug("[whatsapp] ignoring message type %r", msg_type)
         return None
 
-    wa_id = raw_message.get("from")
+    # E.164 digits, no leading "+".  identity.py builds the shadow-user email
+    # with ``platform_user_id.lstrip("@")``, which does NOT strip a "+", so a
+    # "+" here would end up inside the email local part.  Meta sends bare
+    # digits today; normalise anyway so that stays true.
+    wa_id = str(raw_message.get("from") or "").lstrip("+").strip()
     if not wa_id:
         # DM-only: without a resolvable 1:1 sender we cannot route a reply.
         # Log the raw type so we capture the real shape if a group payload
@@ -391,38 +393,38 @@ def _build_message(
     )
 
 
-def _media_kind(mime_type: str) -> str:
-    """Map a MIME type to the WhatsApp message ``type`` for that media."""
-    base = (mime_type or "").split("/")[0].strip().lower()
-    if base in ("image", "video", "audio"):
-        return base
-    return "document"
-
-
 def _render_input_prompt(payload: dict) -> str:
-    """Render an ``ask_user_question`` prompt as numbered plain text.
+    """Render an ``ask_user_question`` prompt as plain text.
 
     WhatsApp has no native buttons in this integration, so the choices are
-    a numbered list in the message body and a plain typed reply resolves the
-    pending record through the shared ``resolve_text_answer`` path.
+    listed in the message body and a plain typed reply resolves the pending
+    record through the shared ``resolve_text_answer`` path.
+
+    The question shape is the one normalised by
+    ``tools.builtin.ask_user_question._validate_questions`` and emitted
+    verbatim into ``INBOX_INPUT_REQUIRED`` — ``prompt`` and ``choices``
+    (each with a ``label``), NOT ``question``/``options``.
+
+    Choices are bulleted rather than numbered, matching Telegram's text
+    fallback: ``resolve_text_answer`` matches choice *labels*, so numbering
+    would invite a "1" that the resolver records as a free-form answer.
     """
-    lines: list[str] = []
+    lines: list[str] = ["❓ I need your input"]
     context = (payload.get("context") or "").strip()
     if context:
         lines.append(context)
 
-    for question in payload.get("questions") or []:
-        if not isinstance(question, dict):
-            continue
-        prompt = (question.get("question") or "").strip()
-        if prompt:
-            lines.append(f"*{prompt}*")
-        for index, option in enumerate(question.get("options") or [], start=1):
-            label = option.get("label") if isinstance(option, dict) else str(option)
+    questions = [q for q in payload.get("questions") or [] if isinstance(q, dict)]
+    for index, question in enumerate(questions):
+        prompt = (question.get("prompt") or f"Question {index + 1}").strip()
+        prefix = f"{index + 1}. " if len(questions) > 1 else ""
+        lines.append(f"{prefix}{prompt}")
+        for choice in question.get("choices") or []:
+            label = choice.get("label") if isinstance(choice, dict) else str(choice)
             if label:
-                lines.append(f"{index}. {label}")
+                lines.append(f"  • {label}")
 
-    lines.append("_Reply with your answer._")
+    lines.append("Reply with your answer.")
     return "\n".join(line for line in lines if line)
 
 
@@ -606,12 +608,13 @@ class WhatsAppPlatform:
         if not token or not wa_id or not phone_number_id or not files:
             return []
 
-        caption = render_whatsapp(item.payload.get("content", "") or "")[
-            :_MAX_CAPTION_CHARS
-        ]
-
+        # No caption.  ``_deliver_item`` posts any surrounding text as its own
+        # message before calling us, so captioning the first attachment with
+        # ``payload["content"]`` would repeat that sentence; on the
+        # marker-only path the content is empty anyway.  Slack's send_files
+        # omits its comment for the same reason.
         uploaded: list[str] = []
-        for index, f in enumerate(files):
+        for f in files:
             media_id, error = await upload_media(
                 self._http,
                 token=token,
@@ -627,12 +630,8 @@ class WhatsAppPlatform:
                 )
                 continue
 
-            kind = _media_kind(f.mime_type)
+            kind = media_kind_for_mime(f.mime_type)
             block: dict[str, Any] = {"id": media_id}
-            # Only the first attachment carries the caption; repeating it on
-            # every file would spam a linear chat.
-            if index == 0 and caption and kind in _CAPTIONABLE:
-                block["caption"] = caption
             if kind == "document":
                 block["filename"] = f.filename
 

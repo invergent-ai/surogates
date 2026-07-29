@@ -2299,3 +2299,72 @@ class TestGraphErrorClassification:
         assert is_permanent_delivery_error(
             "upload failed: file exceeds 100 MB",
         ) is False
+
+
+# ---------------------------------------------------------------------------
+# MEDIA: gate — capability-based, not Slack-only
+# ---------------------------------------------------------------------------
+
+
+class _NoSendFilesPlatform(_FakePlatform):
+    """A platform that cannot upload — the negative side of the gate.
+
+    Telegram is this shape today: no ``send_files``, no ``supports_edit``.
+    """
+
+
+class _NoDeletePlatform(_FakeMediaPlatform):
+    """``send_files`` but no ``supports_edit`` and no ``delete_message``.
+
+    WhatsApp's exact combination, and one no platform had before it. The
+    marker-only branch reaches for ``delete_message`` to clear a thinking
+    placeholder; with none posted there is nothing to clear, and the leg
+    must stay inert rather than raising.
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        # Undo the base class's delete_message so getattr() finds nothing.
+        self.delete_message = None
+
+
+class TestMediaGateIsCapabilityBased:
+    async def test_platform_without_send_files_keeps_the_raw_marker(self):
+        """A marker must never be stripped from a platform that cannot upload
+        it — the user would lose the file reference entirely."""
+        item = _FakeOutboxItem(
+            id=10,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "Here it is. MEDIA:/workspace/report.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _NoSendFilesPlatform()
+        storage = _MediaStorage({"report.pdf": b"%PDF data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == (
+            "Here it is. MEDIA:/workspace/report.pdf"
+        )
+
+    async def test_send_files_without_delete_message_is_inert_not_an_error(self):
+        """The marker-only branch must not require delete_message."""
+        item = _FakeOutboxItem(
+            id=11,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:/workspace/only.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _NoDeletePlatform(uploaded_ids=["FA2"])
+        storage = _MediaStorage({"only.pdf": b"data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        assert platform.send_calls == []
+        assert len(platform.send_files_calls) == 1
+        assert delivery.delivered == [(11, "FA2")]

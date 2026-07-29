@@ -132,6 +132,15 @@ class ChannelPlatform(Protocol):
 
     Optional members
     ----------------
+    handshake_get:
+        ``True`` when the provider verifies the callback URL with an
+        *unsigned GET* on the same path (WhatsApp Cloud API's
+        ``hub.challenge`` handshake).  The dispatcher then mounts a GET route
+        alongside the POST one, routed straight through ``verify``, which
+        must branch on ``request.method`` and return a
+        :class:`VerificationResult` whose ``response_body`` is the challenge.
+        Omit for platforms whose challenge arrives as a signed POST (Slack)
+        or not at all (Telegram).
     interactive_paths:
         Tuple of URL paths that receive interactive payloads (button clicks,
         modal submissions).  Omit or set to ``()`` if not needed.

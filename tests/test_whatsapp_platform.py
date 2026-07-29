@@ -564,19 +564,41 @@ class TestWhatsAppSend:
 # ---------------------------------------------------------------------------
 
 
+def _questions(raw: list[dict]) -> list[dict]:
+    """Normalise questions the way ``ask_user_question`` does.
+
+    Building the fixture through the real validator is deliberate: hand-written
+    payloads let the platform read the wrong keys while the test still passes.
+    ``INBOX_INPUT_REQUIRED`` carries exactly this shape.
+    """
+    from surogates.tools.builtin.ask_user_question import _validate_questions
+
+    return _validate_questions(raw)
+
+
 class TestWhatsAppInputPrompt:
+    def test_fixture_uses_the_canonical_schema(self):
+        # Guards the bug this class exists to prevent: the keys are
+        # ``prompt``/``choices``, never ``question``/``options``.
+        [q] = _questions([
+            {"prompt": "Which environment?",
+             "choices": [{"label": "staging"}, {"label": "production"}]},
+        ])
+        assert q["prompt"] == "Which environment?"
+        assert [c["label"] for c in q["choices"]] == ["staging", "production"]
+
     @pytest.mark.asyncio
-    async def test_renders_numbered_choices(self):
+    async def test_renders_the_question_and_its_choices(self):
         p = WhatsAppPlatform()
         item = _item(
             "",
             input_prompt=True,
             tool_call_id="tc1",
             context="Need a decision.",
-            questions=[{
-                "question": "Which environment?",
-                "options": [{"label": "staging"}, {"label": "production"}],
-            }],
+            questions=_questions([{
+                "prompt": "Which environment?",
+                "choices": [{"label": "staging"}, {"label": "production"}],
+            }]),
         )
         with respx.mock(assert_all_called=True) as router:
             route = router.post(MESSAGES_URL).mock(
@@ -587,16 +609,47 @@ class TestWhatsAppInputPrompt:
             result = await p.send(item, creds=_creds())
         sent = _json.loads(route.calls[0].request.content)["text"]["body"]
         assert "Which environment?" in sent
-        assert "1. staging" in sent
-        assert "2. production" in sent
+        assert "Need a decision." in sent
+        assert "staging" in sent
+        assert "production" in sent
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_prompt_without_options_still_sends_question(self):
+    async def test_choices_are_answerable_by_label(self):
+        # resolve_text_answer matches labels, so the rendered choice text must
+        # be the label verbatim — numbering it would invite an unmappable "1".
+        from surogates.channels.platforms.telegram_interactive import (
+            resolve_text_answer,
+        )
+
+        p = WhatsAppPlatform()
+        questions = _questions([{
+            "prompt": "Which environment?",
+            "choices": [{"label": "staging"}, {"label": "production"}],
+        }])
+        item = _item("", input_prompt=True, tool_call_id="tc1", context="",
+                     questions=questions)
+        with respx.mock(assert_all_called=True) as router:
+            route = router.post(MESSAGES_URL).mock(
+                return_value=httpx.Response(
+                    200, json={"messages": [{"id": "wamid.Q1"}]},
+                )
+            )
+            await p.send(item, creds=_creds())
+        sent = _json.loads(route.calls[0].request.content)["text"]["body"]
+
+        # Every label the user can read back is one the resolver accepts.
+        for label in ("staging", "production"):
+            assert label in sent
+            [answer] = resolve_text_answer(questions, label)
+            assert answer.get("is_other") is not True
+
+    @pytest.mark.asyncio
+    async def test_prompt_without_choices_still_sends_the_question(self):
         p = WhatsAppPlatform()
         item = _item(
             "", input_prompt=True, tool_call_id="tc2", context="",
-            questions=[{"question": "What is the deploy tag?", "options": []}],
+            questions=_questions([{"prompt": "What is the deploy tag?"}]),
         )
         with respx.mock(assert_all_called=True) as router:
             route = router.post(MESSAGES_URL).mock(
@@ -809,9 +862,12 @@ class TestSendFiles:
         assert uploaded == ["media_ok"]
 
     @pytest.mark.asyncio
-    async def test_caption_truncated_to_1024(self):
+    async def test_no_caption_so_surrounding_text_is_not_repeated(self):
+        # _deliver_item posts payload["content"] as its own message before
+        # calling send_files, so captioning the attachment with it would show
+        # the same sentence twice.
         p = WhatsAppPlatform()
-        item = _item("x" * 2000)
+        item = _item("Here is the chart.")
         files = [OutboundFile(filename="a.png", mime_type="image/png", data=b"P")]
         with respx.mock(assert_all_called=True) as router:
             router.post(MEDIA_URL).mock(
@@ -824,7 +880,7 @@ class TestSendFiles:
             )
             await p.send_files(item, creds=_creds(), files=files)
         body = _json.loads(send.calls[0].request.content)
-        assert len(body["image"]["caption"]) <= 1024
+        assert "caption" not in body["image"]
 
     @pytest.mark.asyncio
     async def test_returns_empty_without_token(self):
@@ -858,3 +914,27 @@ class TestWhatsAppPipelineWiring:
         from surogates.session.store import _THREAD_DEST_FIELDS
 
         assert "whatsapp" in _THREAD_DEST_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# wa_id normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestWaIdNormalisation:
+    def test_leading_plus_is_stripped(self):
+        # identity.py's shadow-user email only strips "@", so a "+" would land
+        # inside the email local part.
+        body = _text_message(**{"from": f"+{WA_ID}"})
+        msg = parse(body, creds=_creds(), identifier=PNID)
+        assert msg.platform_user_id == WA_ID
+        assert msg.identifier == WA_ID
+
+    def test_bare_digits_unchanged(self):
+        msg = parse(_text_message(), creds=_creds(), identifier=PNID)
+        assert msg.platform_user_id == WA_ID
+
+    def test_absent_type_is_not_treated_as_text(self):
+        body = _text_message()
+        body["entry"][0]["changes"][0]["value"]["messages"][0].pop("type")
+        assert parse(body, creds=_creds(), identifier=PNID) is None

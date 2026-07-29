@@ -30,8 +30,18 @@ _STRIKE_RE = re.compile(r"~~(.+?)~~", re.DOTALL)
 _HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
 _LINK_RE = re.compile(r"!?\[([^\]]*)\]\(([^)]+)\)")
 # Runs last, once every ``**`` pair has become a ``_BOLD`` token, so any
-# surviving ``*`` is genuine markdown italic.
-_ITALIC_RE = re.compile(r"\*(.+?)\*", re.DOTALL)
+# surviving ``*`` is genuine markdown italic.  Every guard here is
+# load-bearing; an unguarded ``\*(.+?)\*`` mangles ordinary prose:
+#
+#   ``* one\n* two``               -> ``_ one\n_ two``   (bullet list)
+#   ``5 * 3 = 15 and 2 * 4 = 8``   -> ``5 _ 3 = 15 …``   (arithmetic)
+#
+# The word-boundary lookarounds and newline-free body come from
+# ``telegram_format``.  The whitespace guards are additional: they encode
+# markdown's flanking rule (a delimiter may not be followed — or preceded —
+# by whitespace), which is what separates ``*italic*`` from ``2 * 4``.
+# ``telegram_format`` omits them and mis-renders the arithmetic case.
+_ITALIC_RE = re.compile(r"(?<![\w*])\*(?![\s*])([^*\n]*?)(?<![\s*])\*(?![\w*])")
 
 _SENTINEL = "\x00"
 

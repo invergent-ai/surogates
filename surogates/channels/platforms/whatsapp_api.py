@@ -28,6 +28,7 @@ __all__ = [
     "ext_for_mime",
     "format_graph_error",
     "graph_url",
+    "media_kind_for_mime",
     "send_message",
     "upload_media",
 ]
@@ -98,8 +99,12 @@ def ext_for_mime(mime: str) -> str:
     return mimetypes.guess_extension(base) or ".bin"
 
 
-def _kind_for_mime(mime: str) -> str:
-    """Map a MIME type to a WhatsApp media kind for cap lookup."""
+def media_kind_for_mime(mime: str) -> str:
+    """Map a MIME type to its WhatsApp media kind.
+
+    Doubles as the outbound message ``type`` and the ``MEDIA_SIZE_LIMITS``
+    key — they use the same vocabulary.
+    """
     base = (mime or "").split("/")[0].strip().lower()
     if base in ("image", "video", "audio"):
         return base
@@ -151,7 +156,7 @@ async def upload_media(
     The size cap is checked client-side before the round trip, with the cap
     value in the error string so an operator can see what was exceeded.
     """
-    kind = _kind_for_mime(mime_type)
+    kind = media_kind_for_mime(mime_type)
     cap = MEDIA_SIZE_LIMITS.get(kind, MEDIA_SIZE_LIMITS["document"])
     if len(data) > cap:
         return None, (

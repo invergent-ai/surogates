@@ -1179,21 +1179,3 @@ async def test_get_handshake_does_not_reach_the_pipeline():
         "hub.challenge": "abc",
     })
     assert pipeline.calls == []
-
-
-# ---------------------------------------------------------------------------
-# MEDIA: gate — capability-based, not Slack-only
-# ---------------------------------------------------------------------------
-
-
-def test_media_gate_is_capability_based_not_slack_only():
-    """A platform with send_files gets MEDIA: markers resolved; one without
-    does not, so a marker is never stripped from a platform that cannot
-    upload it.  Guards against silent reversion to a kind check."""
-    import inspect
-
-    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
-
-    source = inspect.getsource(ChannelDeliveryDispatcher._deliver_item)
-    assert 'platform.kind == "slack" and "MEDIA:"' not in source
-    assert 'send_files_fn is not None and "MEDIA:"' in source

@@ -95,3 +95,29 @@ class TestCodeProtection:
         for i in range(12):
             assert f"`c{i}`" in out
         assert "\x00" not in out
+
+
+# ---------------------------------------------------------------------------
+# Text that only *looks* like emphasis
+# ---------------------------------------------------------------------------
+
+
+class TestNonEmphasisAsterisks:
+    def test_asterisk_bullet_list_survives(self):
+        # An unguarded `\*(.+?)\*` turns this into "_ one\n_ two".
+        assert render_whatsapp("* one\n* two") == "* one\n* two"
+
+    def test_arithmetic_survives(self):
+        assert render_whatsapp("5 * 3 = 15 and 2 * 4 = 8") == "5 * 3 = 15 and 2 * 4 = 8"
+
+    def test_italic_does_not_span_lines(self):
+        assert render_whatsapp("a * b\nc * d") == "a * b\nc * d"
+
+    def test_word_adjacent_asterisk_is_not_italic(self):
+        assert render_whatsapp("foo*bar*baz") == "foo*bar*baz"
+
+    def test_genuine_italic_still_converts(self):
+        assert render_whatsapp("an *emphatic* word") == "an _emphatic_ word"
+
+    def test_dash_bullet_list_survives(self):
+        assert render_whatsapp("- one\n- two") == "- one\n- two"
