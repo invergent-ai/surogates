@@ -53,14 +53,19 @@ lives on the **unmerged branch `origin/feat/whatsapp-cloud-api`**, commit
 > mid-conversation. Neither is relevant here.
 
 The Cloud API bundle is `gateway/platforms/whatsapp_cloud.py` (1869 lines),
-`whatsapp_common.py` (351), `hermes_cli/setup_whatsapp_cloud.py` (530),
-`tests/gateway/test_whatsapp_cloud.py` (2250) and
+`gateway/platforms/whatsapp_common.py` (351), `hermes_cli/setup_whatsapp_cloud.py`
+(530), `tests/gateway/test_whatsapp_cloud.py` (2250),
+`tests/hermes_cli/test_whatsapp_cloud_setup.py` (406) and
 `website/docs/user-guide/messaging/whatsapp-cloud.md` (418).
 
 It is single-tenant: one adapter instance, one phone number, one token, a
 module-global media cache, and five in-memory dicts with no tenant key. Its
-inbound security half and its formatting logic are excellent and portable; its
-state management is not. §9 records what must not be copied.
+webhook-security half (signature check, handshake ladder, 3 MB pre-HMAC cap)
+and its formatting logic are excellent and portable; its allow-list gating is
+only half-wired (the Cloud adapter's `allow_from` is never populated, so the
+mixin policy falls back to the Baileys-shared `WHATSAPP_DM_POLICY` default
+`"open"`), and its state management is not portable at all. §9 records what
+must not be copied.
 
 ---
 
@@ -92,7 +97,7 @@ no inheritance.
 
 `surogates/channels/base.py:85` `ChannelAdapter` is the older, vestigial
 protocol used only by the dead `channels/teams.py` and `channels/webhook.py`
-stubs. **Do not implement it.** `SendResult` from `base.py:70` *is* live and is
+stubs. **Do not implement it.** `SendResult` from `base.py:71` *is* live and is
 what `send` returns.
 
 Required members:
@@ -116,7 +121,7 @@ Required members:
 | `download_file` | inbound media (§6.5) |
 | `ack_received` | read receipts + typing (§6.2) |
 | `send_private` | trivially `send` — every WhatsApp conversation is a DM. Required for the `linked` identity policy: `runner.py:180-188` withholds the pairing code from platforms that cannot deliver it privately. |
-| `post_input_nudge` | **not interactive-only.** `runner.py:309-318` getattr-guards it, so omitting it fails silently. It is the delivery path for the `/stop` acknowledgement (`inbound.py:655`) and — critically — the allowance/subscription block notice carrying `commerce_buy_url` (`inbound.py:786-796`). Without it, a user who exhausts their allowance is met with total silence and no buy link, while §11 makes commerce metering a security-shaped requirement. Implement as a plain text send to `channel` (the sender's `wa_id`), ignoring `thread_ts`. |
+| `post_input_nudge` | **not interactive-only.** `runner.py:310-312` getattr-guards it, so omitting it fails silently. It is the delivery path for the `/stop` acknowledgement (`inbound.py:668-672`) and — critically — the allowance/subscription block notice carrying `commerce_buy_url` (`inbound.py:791-800`). Without it, a user who exhausts their allowance is met with total silence and no buy link, while §11 makes commerce metering a security-shaped requirement. Implement as a plain text send to `channel` (the sender's `wa_id`), ignoring `thread_ts`. |
 
 Deliberately **not** implemented: `supports_edit` (WhatsApp cannot edit a sent
 message), `interactive_paths`, `handle_interactive`,
@@ -129,17 +134,20 @@ Decision 3 declines *native buttons*. It must not be read as declining
 `ask_user_question`, because leaving WhatsApp out of
 `INTERACTIVE_PROMPT_CHANNELS` does not degrade the tool — it breaks it silently.
 
-`_build_channel_payload` (`store.py:132-141`) only populates an
+`_build_channel_payload` (`store.py:133-144`, gate at `:135`) only populates an
 `INBOX_INPUT_REQUIRED` payload when `channel in INTERACTIVE_PROMPT_CHANNELS`.
-Otherwise the payload stays `{}`, and `store.py:1171-1172` `if not payload:
+Otherwise the payload stays `{}`, and `store.py:1170-1171` `if not payload:
 return` means **no outbox row is written at all**. The user sees nothing, and the
 session parks waiting for an answer that can never arrive.
 
 Symmetrically, `inbound.py:679` gates pending-input interception to
-`("slack", "telegram")`. That gate is not "interactive only": the Telegram branch
-at `inbound.py:898-916` is precisely the **plain-text answer** path — *"Telegram
-has no modal; a plain reply IS the answer"* — resolving via `resolve_text_answer`.
-That is exactly what a button-less platform needs most.
+`("slack", "telegram")`. That gate is not "interactive only": the non-Slack
+fallthrough at `inbound.py:896-917` is precisely the **plain-text answer** path —
+*"Telegram has no modal; a plain reply IS the answer"* (docstring, `:864-865`) —
+resolving via `resolve_text_answer`. The fallthrough is the implicit else after
+the Slack branch at `:890`, not Telegram-gated, so any kind added to the `:679`
+tuple opts into it automatically. That is exactly what a button-less platform
+needs most.
 
 So v1 adds `whatsapp` to both, with a text renderer: the question and its
 choices rendered as a numbered list in the message body, and a plain typed reply
@@ -201,7 +209,8 @@ which would be an implementation bug.
 
 ### 4.2 Consequences accepted deliberately
 
-- **Unknown identifier fast-acks 200 with an empty body** (`dispatcher.py:213`).
+- **Unknown identifier fast-acks 200 with an empty body** (`dispatcher.py:213`;
+  an exception inside `identifier_of` fast-acks the same way at `:199-204`).
   Meta reads an empty body as a failed challenge and shows "verification
   failed", which is the correct outcome, and we keep the no-liveness-oracle
   property that the fast-ack exists to provide.
@@ -363,10 +372,16 @@ file. Hermes has a dead `"voice"` type branch — the Cloud API never sends
 **Carry the tenant id and wamid in `msg.source`**, the free-form adapter metadata
 dict — `source["phone_number_id"]` and `source["wamid"]` — exactly as Telegram
 carries `source["message_id"]` (`telegram.py:290`). `ack_received` is invoked as
-`ack(msg, creds=…, config=…)` (`dispatcher.py:402`) with **no** `routing` and no
+`ack(msg, creds=…, config=…)` (`dispatcher.py:404`) with **no** `routing` and no
 `identifier`, and `msg.identifier` is the conversation id (the sender's `wa_id`),
 not the tenant. Anything `ack_received` needs must ride on `msg`. No change to
 the `InboundMessage` dataclass is required.
+
+**Set `visibility="dm"`** alongside `is_dm=True` — the Telegram private-chat
+precedent (`telegram.py:206`). Only `boundary_token` reads it today, and an
+unbranched platform lands in the isolated fall-through regardless (§11 #12),
+but the dataclass default is `"private"`, which misdescribes a DM surface and
+would miskey a future `wa:d:` boundary branch.
 
 ### 5.4 Group refusal
 
@@ -383,7 +398,10 @@ time one arrives.
 ### 5.5 Dedup — scope note
 
 Setting `ts = wamid` gets the existing in-process `MessageDeduplicator`
-(`dedup.py`, TTL 300 s, max 2000 entries) for free.
+(`dedup.py`, TTL 300 s, max 2000 entries) for free: the shared inbound pipeline
+constructs it (`inbound.py:405`) and keys it on the bare `msg.ts` string
+(`inbound.py:442`) — a single global cache, which is exactly why a
+second-resolution timestamp would collide across senders and a wamid cannot.
 
 Cross-replica duplicates remain possible: the cache is per-process and the
 channels Deployment runs more than one replica. **This is a pre-existing
@@ -404,18 +422,22 @@ correct; keep it that way.
 ### 6.1 `send`
 
 1. Transcode markdown via `whatsapp_format.render_whatsapp`.
-2. Split with the existing `split_text(text, 4096)` — WhatsApp's `text.body` cap
-   is 4096, identical to Telegram's.
+2. Split with the existing `split_text(text, 4096)` (`text_split.py:23`) —
+   WhatsApp's `text.body` cap. Telegram's platform cap is the same 4096, but do
+   not copy its call site: `telegram.py:653` feeds `split_text` 3500
+   (`_MAX_SOURCE_CHUNK`) to leave headroom for HTML-render inflation. WhatsApp
+   markup does not inflate and §6.6 runs the transcoder *before* splitting, so
+   the full 4096 is correct here.
 3. `POST /{phone_number_id}/messages` per chunk.
 4. Return `SendResult` carrying the wamid from `response["messages"][0]["id"]`.
 
 **No reply quoting in v1.** WhatsApp is 1:1, so quoting adds little, and enabling
 it would require three changes outside this design's scope: `reply_to_mode` added
 to §7 `config_keys`; relaxing the `msg.is_dm` early-return in
-`_record_reply_target` (`inbound.py:936-939`), which always bails for a DM-only
+`_record_reply_target` (`inbound.py:938-939`), which always bails for a DM-only
 platform; and extending the Telegram-hardcoded fresh-reply re-read at
-`store.py:1189` to WhatsApp, without which every reply would quote the session's
-*first* message.
+`store.py:1189-1190` to WhatsApp, without which every reply would quote the
+session's *first* message.
 
 Follow the existing partial-send convention (`slack.py:1044`,
 `telegram.py:677`): on a mid-sequence failure report `success=True` with the last
@@ -453,7 +475,7 @@ for platforms without `supports_edit`. Without read receipts the agent is
 completely silent for the entire tool-calling phase.
 
 The receipt must fire **after** the allow/deny gate, so filtered senders never
-receive one. `dispatcher.py:400-401` already calls `ack_received` only when the
+receive one. `dispatcher.py:401-404` already calls `ack_received` only when the
 outcome is `PROCESSED`, so this holds for free.
 
 Log `131009` ("message id older than 30 days", common after a long-quiet
@@ -509,9 +531,11 @@ attachment."* Without the gate change, users receive literal
 
 WhatsApp is the first platform with `send_files` but **without** `supports_edit`,
 a combination no existing platform has. The marker-only reply path
-(`dispatcher.py:795-830`) deletes a placeholder before uploading and calls
-`delete_message`; verify that branch is inert when neither a placeholder nor
-`supports_edit` exists, and add a regression test covering it.
+(`dispatcher.py:788-823`) uploads first (`:792`) and only after a successful
+upload deletes the thinking placeholder via `delete_message` (`:798-806`), gated
+on a recorded placeholder ts (`update_ts`) and a redis handle. WhatsApp posts no
+placeholder (`post_thinking_placeholder` unimplemented), so `update_ts` stays
+`None` and the delete leg must stay inert; add a regression test covering it.
 
 ### 6.5 `download_file` — inbound media
 
@@ -567,11 +591,12 @@ restore. The **trailing** `\x00` is load-bearing — without it a sequential
 `str.replace` restore of index 1 corrupts index 11. `\x00` never appears in LLM
 output.
 
-Known reference bugs to fix rather than inherit: `***bold italic***` leaves a
-stray asterisk; `![alt](url)` becomes `!alt (url)`; a URL containing `)`
-truncates because the capture group is `[^)]+`; lists, blockquotes and tables
-pass through untouched; nothing is escaped, so a literal asterisk is
-unrepresentable.
+Known reference bugs to fix rather than inherit: `***bold italic***` degrades
+to `**bold italic**` (a stray asterisk on *each* side); `![alt](url)` becomes
+`!alt (url)`; lists, blockquotes and tables pass through untouched; nothing is
+escaped, so a literal asterisk is unrepresentable. (The link regex's `[^)]+`
+capture is *not* a bug despite appearances: the uncaptured tail of a
+`)`-containing URL passes through literally and the output is byte-identical.)
 
 Note the ordering trap: formatting runs **before** splitting, so a chunk boundary
 can land inside a converted `*bold*` span and leave an unpaired marker. Only
@@ -580,18 +605,21 @@ emphasis markers or accept the artifact.
 
 ### 6.7 Error classification
 
-Format Graph errors as `graph error {code} (HTTP {status}): {message}`, then add
-the **delimited prefix** — never the bare code — to
-`_PERMANENT_DELIVERY_ERRORS` (`delivery.py:58-75`):
+Format Graph errors as `graph error {code} (HTTP {status}): {message}` —
+hermes' `_format_graph_error`, ported. Keep its fallback too: when Meta returns
+no `error.code`, the string is `HTTP {status}: {message}` with no `graph error`
+prefix, so code-less errors can never match a permanent prefix and stay
+retryable by construction. Then add the **delimited prefix** — never the bare
+code — to `_PERMANENT_DELIVERY_ERRORS` (`delivery.py:58-75`):
 
 ```python
 "graph error 190 (", "graph error 100 (",
 "graph error 131026 (", "graph error 131047 (",
 ```
 
-`is_permanent_delivery_error` (`delivery.py:83-87`) is an **unanchored,
+`is_permanent_delivery_error` (`delivery.py:83-88`) is an **unanchored,
 case-insensitive substring test** shared by every platform through the single
-`_record_delivery_failure` (`dispatcher.py:663`). A bare `"100"` would mark any
+`_record_delivery_failure` (`dispatcher.py:659`). A bare `"100"` would mark any
 Slack or Telegram error string containing those digits — a rate-limit message
 mentioning "1000 requests", a size error mentioning "100 MB" — as permanently
 dead. Every existing entry is a distinctive alphabetic token (`is_archived`,
@@ -608,15 +636,18 @@ regression test asserting a Slack error containing `100` is still retryable.**
 
 Surfacing a dead token as a Studio credential alarm is **v2, not v1**: the only
 terminal action available at the failure site is
-`mark_dead(item.id, error)` (`dispatcher.py:666`), which writes the error string
-to the outbox row and nothing else. No channel-health or credential-alarm surface
-exists in either repo today.
+`mark_dead(item.id, error)` (`dispatcher.py:666`), which flips the row to
+`status="failed"` and WARN-logs the error (`delivery.py:299-312`) —
+`delivery_outbox` has no error column, so the reason survives only in logs. No
+channel-health or credential-alarm surface exists in either repo today.
 
 Meta's default throughput is 80 messages/second per business phone number.
-`channels/rate_gate.py` exists but is referenced only by
-`tests/runtime/test_channel_adapter_rate_limit.py` — neither the dispatcher, the
-pipeline, nor `run_channels` ever constructs a `PerTenantRateLimiter`, so no
-inbound rate limiting is active for any platform today. **Decision: not wired in
+`channels/rate_gate.py` (a `check_inbound_rate_limit` wrapper around the
+runtime-layer `PerTenantRateLimiter` — the class itself lives in
+`surogates/runtime`, not channels) is referenced only by
+`tests/runtime/test_channel_adapter_rate_limit.py`; nothing in the channels
+stack ever calls it, so no inbound rate limiting is active for any platform
+today. **Decision: not wired in
 v1.** Reactive-only traffic cannot approach 80/s, and wiring `rate_gate` is a
 platform-wide change affecting Slack and Telegram equally. The limit is recorded
 so a future high-volume feature does not rediscover it.
@@ -670,9 +701,11 @@ Agent env vars: `SUROGATES_WHATSAPP_ENABLED` (the `enabled_env` gate checked at
 Process enablement: `channels.whatsapp.enabled: true` in the runtime config. In
 PROD this is the **hand-applied** ConfigMap `surogates-runtime-config`
 (`k8s/surogates-runtime/production/30-runtime-configmap.yaml:189-195`), not a
-chart template. The `channels.*.enabled` keys in `values.yaml:186-190` are inert
-— no template consumes them. `templates/channels-deployment.yaml` needs no
-change: one Deployment runs `surogates channels` for all platforms.
+chart template. The per-kind `channels.*.enabled` keys in
+`k8s/surogates-runtime/values.yaml:187-190` are inert — no template consumes
+them; only the top-level `channels.enabled` gates the Deployment
+(`templates/channels-deployment.yaml:14`). That file needs no change: one
+Deployment runs `surogates channels` for all platforms.
 
 ---
 
@@ -682,14 +715,18 @@ Verified across both repos:
 
 - `channel_identities.platform` and `.platform_user_id` — `Text`, with
   `UniqueConstraint("org_id", "platform", "platform_user_id")`
-  (`db/models.py:204-214`). No enum exists anywhere in the surogates schema.
+  (`db/models.py:204-226` — the constraint at `:211-213`, the `Text` columns at
+  `:225-226`). No enum exists anywhere in the surogates schema.
 - `sessions.channel`, `delivery_outbox.channel`, `ambient_schedules.platform`,
   `credentials.name` — all `Text`.
 - ops `channel_routing.channel_kind` — `sa.String(64)`. Migration
   `a3f9c1d84e72` converted it from a PG enum with
   `postgresql_using='channel_kind::text'` and dropped the type. The `ChannelKind`
-  docstring at `operate.py:40-47` states outright that new kinds need no schema
-  migration.
+  docstring at `operate.py:40-46` states outright that new kinds need no schema
+  migration (`ChannelKind` is a plain class of `str` constants, not an enum —
+  members at `:48-50`). One caveat: that migration's *downgrade* recreates the
+  enum with only slack/telegram/website and will fail once a `whatsapp` row
+  exists — the schema is forward-only past that point.
 - `channel_routing.channel_identifier` — `String(255)`; a `phone_number_id` is
   15–17 digits.
 
@@ -704,8 +741,8 @@ at the adapter boundary. `identity.py:164` builds the shadow email with
 `platform_user_id.lstrip("@")`, which does not strip a `+` — a value stored with
 one would embed it in the email local part.
 
-One stale comment to fix while in the area: `identity.py:165` says "there is no
-unique constraint on email". There is — `uq_users_org_lower_email` on
+One stale comment to fix while in the area: `identity.py:162-163` says "there is
+no unique constraint on email". There is — `uq_users_org_lower_email` on
 `(org_id, lower(email))` at `db/models.py:190-195`.
 
 **Known future risk, not addressed in v1:** Meta is rolling out Business-Scoped
@@ -724,16 +761,16 @@ work.
 | aiohttp server started in `connect()` with its own routes | We have a hardened FastAPI dispatcher. Implement `ChannelPlatform`, do not bring a second HTTP server. |
 | `await self._dispatch_payload(payload)` inline before returning 200 | Runs two Graph round-trips and the full agent turn before acking. Meta's ack timeout fires, it retries, and dedup eats the retry — defeating the retry mechanism rather than using it. |
 | Dedup committed before the work succeeds | A raise during event construction → 500 → Meta retries → retry dropped as duplicate → message permanently lost. |
-| In-memory instance state (`_seen_wamids`, `_last_inbound_wamid_by_chat`, three interactive dicts) | No tenant key, no TTL, no cap; lost on restart, wrong across replicas. |
+| In-memory instance state (`_seen_wamids`, `_last_inbound_wamid_by_chat`, and the `_clarify_state` / `_exec_approval_state` / `_slash_confirm_state` interactive dicts) | No tenant key, no TTL, no cap (only `_seen_wamids` has one — 5000-entry FIFO); lost on restart, wrong across replicas. |
 | Module-global media cache under the user's home dir | Multi-tenant data commingling and unbounded disk growth. |
 | `hmac.compare_digest` on `str` for the verify token | `TypeError` on non-ASCII attacker input, converted to an opaque 401 with the real cause lost. |
 | Group detection via a `chat` key | Invented field; do not encode a fabricated payload shape. |
 | Unknown inbound type → `TEXT` with `body=""` | Starts a real agent turn on every reaction, system event and unsupported message. |
 | `statuses[]` reduced to a DEBUG log | Discards delivery confirmation and asynchronous send failures. Log them properly (§5.3). |
 | Ignoring `metadata.phone_number_id` | It is the tenant identity. |
-| Env-var configuration and `~/.hermes/.env` | Our config is `ChannelDescriptor` + routing cache. Three of the reference's documented env vars are read by nothing. |
+| Env-var configuration and `~/.hermes/.env` | Our config is `ChannelDescriptor` + routing cache. Two documented env vars (`WHATSAPP_CLOUD_APP_ID`, `WHATSAPP_CLOUD_WABA_ID`) are read into fields nothing uses, and two more are read but undocumented. |
 | `/health` endpoint exposing `phone_number_id` | Single-tenant observability leaking a tenant identifier. Emit per-tenant metrics instead. |
-| Interactive resolvers invoked before the allow/deny gate | An approval tap from any `wa_id` resolves a dangerous-command approval. Not applicable in v1 (no native buttons), but must not be reintroduced if buttons land later. |
+| Interactive resolvers invoked before the allow/deny gate | An approval tap from any `wa_id` resolves a dangerous-command approval — in hermes the resolver runs ~70 lines before `_should_process_message`. Not applicable in v1 (no native buttons), but a hard invariant if buttons land later: gate first, then resolve. |
 
 ---
 
@@ -779,45 +816,48 @@ are marked ⚠.
 | 1 | `channels/platforms/whatsapp.py` | new | — |
 | 2 | `channels/platforms/whatsapp_api.py` | new | — |
 | 3 | `channels/platforms/whatsapp_format.py` | new | — |
-| 4 | `channels/platforms/__init__.py:13` | add the import | never registered; this is the only discovery mechanism |
-| 5 | `config.py:593-601` | `WhatsAppChannelSettings(ChannelKindSettings)`, env prefix `SUROGATES_CHANNELS_WHATSAPP_` | — |
-| 6 | `config.py:636-638` | `whatsapp` field on `ChannelsSettings` | permanently disabled — the comment at `:634-635` reads "Absent key → disabled"; no route mounted, no delivery loop |
+| 4 | `channels/platforms/__init__.py:12-13` | add the import (modules self-register at import time — cf. `telegram.py:1002-1005`) | never registered; this is the only discovery mechanism |
+| 5 | `config.py:593-601` | `WhatsAppChannelSettings(ChannelKindSettings)`, env prefix `SUROGATES_CHANNELS_WHATSAPP_` (the per-kind `env_prefix` is load-bearing — `:582-587`) | — |
+| 6 | `config.py:637-639` | `whatsapp` field on `ChannelsSettings` | permanently disabled — the comment at `:635-636` reads "Absent key → disabled"; no route mounted, no delivery loop |
 | 7 | ⚠ `channels/constants.py:35` | `ADAPTER_CHANNELS` | `store.py:1148` drops every outbound event; outbox rows sit pending forever |
-| 8 | ⚠ `channels/constants.py:41` | `INTERACTIVE_PROMPT_CHANNELS` **plus** a text-mode prompt renderer in `WhatsAppPlatform.send` | `ask_user_question` writes **no outbox row at all** (`store.py:132-141` + `:1171`); the user sees nothing and the session parks. See §3.3 |
-| 9 | ⚠ `channels/inbound.py:679` | add `whatsapp` to the pending-input platform tuple | a typed answer is treated as a new message and the question never resolves; the Telegram branch at `:898-916` (`resolve_text_answer`) is the path a button-less platform needs |
+| 8 | ⚠ `channels/constants.py:41` | `INTERACTIVE_PROMPT_CHANNELS` **plus** a text-mode prompt renderer in `WhatsAppPlatform.send` | `ask_user_question` writes **no outbox row at all** (`store.py:133-144` + `:1170-1171`); the user sees nothing and the session parks. See §3.3 |
+| 9 | ⚠ `channels/inbound.py:679` | add `whatsapp` to the pending-input platform tuple | a typed answer is treated as a new message and the question never resolves; the non-Slack fallthrough at `:896-917` (`resolve_text_answer`, `:910`) is the path a button-less platform needs, and it engages automatically once the kind is in the tuple |
 | 10 | `channels/constants.py:51` | `END_USER_CHANNELS` | no `agent_users` enrollment; missing from the ops Users page |
-| 11 | `session/store.py:155` + a branch beside `:1160` | `_THREAD_DEST_FIELDS` (consumed at `:1153`) and the per-channel destination builder | outbound destination cannot be built |
-| 12 | ⚠ `channels/memory_boundary.py:15` | `MANAGED_CHANNELS` (checked at `:76`) | **fail-open.** `session_memory_boundary` returns `None`, so memory falls back to the per-user / org-shared layout (`memory_protocol.py:83-87`, `worker.py:849-853`) and the workspace to the per-session layout (`tenant.py:129`) — WhatsApp conversations would share memory with the user's web/Studio sessions. Omitting only the `boundary_token` branch (`:35-58`) is benign: the `:58` fall-through already yields per-conversation isolation. |
+| 11 | `session/store.py:155` + a branch beside `:1160` | `_THREAD_DEST_FIELDS` (consumed at `:1153`) and the per-channel destination builder | `destination` stays `{}` and every outbound item dies in `_deliver_item` with "missing channel_identifier" (`dispatcher.py:677-684`) |
+| 12 | ⚠ `channels/memory_boundary.py:15` | `MANAGED_CHANNELS` (checked at `:76`) | **fail-open.** `session_memory_boundary` returns `None`, so memory falls back to the per-user / org-shared layout (`runtime/memory_protocol.py:83-87`, `orchestrator/worker.py:849-853`) and the workspace to the per-session layout (`storage/tenant.py:123-138`) — WhatsApp conversations would share memory with the user's web/Studio sessions. Omitting only the `boundary_token` branch (`:35-58`) is benign: the `:58` fall-through already yields per-conversation isolation (`fallback_id` is the deterministic per-conversation `session_key`, `inbound.py:620`). |
 | 13 | `channels/dispatcher.py:146-163` | GET route mounting (§4) | webhook URL cannot be verified |
 | 14 | `channels/dispatcher.py:760` | `MEDIA:` gate → capability check (§6.4) | literal `MEDIA:` text sent to users |
 | 15 | `channels/delivery.py:58-75` | error classification, delimited prefixes (§6.7) | hard failures retried for 30 minutes then dropped silently |
 | 16 | `api/routes/channel_files.py:97`, `:103`, `:154`, `:160` | Slack-hardcoded `fetch_channel_file` tool endpoints — widen or leave alone deliberately. The module already imports `effective_channel_platform` at `:30`. | the on-demand channel-file tool is unavailable on WhatsApp (inbound attachments still work via §6.5) |
-| 17 | `docs/channels/whatsapp.md` + `docs/channels/index.md:7-14` | new doc + index row | — |
+| 17 | `docs/channels/whatsapp.md` + `docs/channels/index.md:7-13` | new doc + index row | — |
 
 Files confirmed generic and requiring no change: `channels/resolve.py`,
-`credentials.py`, `token_resolver.py`, `source.py`, `platform_resolve.py`,
-`dedup.py`, `text_split.py`, `delivery.py` at the schema level.
-`inbound.py:630-633` already writes session config keys generically as
-`f"{routing.platform}_channel_id"`.
+`credentials.py`, `token_resolver.py`, `source.py`, `platform_resolve.py` (its
+one special-case, `ambient` → `slack` at `:21-22`, is untouched), `dedup.py`,
+`text_split.py`, `delivery.py` at the schema level. `inbound.py:632-633` already
+writes session config keys generically as `f"{routing.platform}_channel_id"`.
 
 ### surogate-ops backend
 
 | # | Location | Change | Failure if omitted |
 |---|---|---|---|
-| 1 | ⚠ `services/channel_provisioning.py:626+` | `CHANNEL_PROVISIONERS["whatsapp"]`, `enabled_env="SUROGATES_WHATSAPP_ENABLED"`, plus an `extra_env` derived value (see frontend row 2) | **no `channel_routing` row is ever written**; every inbound webhook fast-acks 200. The single most load-bearing ops change. |
+| 1 | ⚠ `server/services/channel_provisioning.py:626` | `CHANNEL_PROVISIONERS["whatsapp"]` registered beside telegram's (dict defined at `:133`, slack registers at `:285`), `enabled_env="SUROGATES_WHATSAPP_ENABLED"` (gate at `:359`), plus an `extra_env` derived value (see frontend row 2) | **no `channel_routing` row is ever written**; every inbound webhook fast-acks 200. The single most load-bearing ops change. |
 | 2 | ⚠ `core/commerce/features.py:66` | `CHANNEL_VOCAB` | **security-shaped**: `features_allow_channel:415-424` returns `True` for any channel outside the vocab, so a buyer on a Slack-only package chats over WhatsApp unmetered |
 | 3 | `core/commerce/features.py:93` | `CHANNEL_LABELS` | package chips show a raw slug |
-| 4 | `core/surogates_client.py:150-157` | `_format_channel_name` | renders "Whatsapp" via the `.title()` fallback |
-| 5 | `server/routes/agent_runtime.py:103` | `_MANAGED_CHANNELS` (consumed at `:894`) | sender principal instead of agent principal for Composio |
+| 4 | `core/surogates_client.py:144-155` | `_format_channel_name` | renders "Whatsapp" via the `.title()` fallback at `:155` (Telegram already ships on that fallback) |
+| 5 | `server/routes/agent_runtime.py:103` | `_MANAGED_CHANNELS` (consumed at `:1076`) | sender principal instead of agent principal for Composio |
 | 6 | `server/routes/agent_runtime.py:256` | `_LINKABLE_CHANNEL_KINDS` (consumed by `_linkable_channels` at `:259`) | no `linkable_channels` projection; pairing not offered |
-| 7 | `routes/commerce_public.py:222` | `channel_kind.in_([...])` — an inline duplicate of #6 | buy page will not advertise WhatsApp linking |
-| 8 | `core/db/models/operate.py:50` | `ChannelKind` enum member | cosmetic only, no migration |
+| 7 | `routes/commerce_public.py:230` | `channel_kind.in_([...])` — an inline duplicate of #6 | buy page will not advertise WhatsApp linking |
+| 8 | `core/db/models/operate.py:48-50` | `ChannelKind` constant — a plain class of `str` constants, not an enum | cosmetic only, no migration |
 | 9 | `tests/test_offer_features.py:65-67` | **currently asserts `{"channels": ["whatsapp"]}` raises "unknown channel"** | the test must be **inverted**, not extended — it uses `whatsapp` as its example of an unknown channel |
 
 Confirmed generic: `routes/channels.py` (`/by-kind`, `/by-identifier`) has zero
 platform vocabulary; `routes/admin_channels.py:73` takes a free-form
-`channel_kind: str`; `sync_channel_routing_from_env` is kind-agnostic;
-`services/agents.py:690` iterates `CHANNEL_PROVISIONERS`.
+`channel_kind: str`; `sync_channel_routing_from_env`
+(`channel_provisioning.py:319`) is kind-agnostic; `services/agents.py:690`
+iterates `CHANNEL_PROVISIONERS`; `routes/mate.py:72` (`MateChannelUpsert.platform`)
+is free-form with a `"slack"` default — acceptable under decision 2, which keeps
+WhatsApp out of ambient routing.
 
 ### surogate-ops frontend
 
@@ -839,15 +879,16 @@ credentials on save.**
 
 | # | Location | Change |
 |---|---|---|
-| 1 | ⚠ `features/agents/channels-tab.tsx:25-46` | `CHANNEL_ENV_KEYS` + WhatsApp fields in the admin form + the `env_vars` literal at `:221-237` |
-| 2 | ⚠ `features/work/work-agent-channels-tab.tsx` | `ChannelView` union `:44-55`; `WhatsAppConnectView` / `WhatsAppManageView` modelled on `TelegramConnectView:1137` / `TelegramManageView:1220`; state + `env_vars` literal `:1456-1474`. **`runConnect` (`:1500-1541`) is generic over key *names* but hard-requires a server-derived env value** — it treats an empty `derivedKey` as failed token validation and rolls the channel back to disabled (`:1522-1536`). WhatsApp must therefore either have its provisioner return an `extra_env` value to use as `derivedKey` (the Graph-confirmed display phone number is the natural choice) or use a connect path that skips the derived-value check. |
-| 3 | `features/work/work-home-page.tsx:40`, `:51-54`, `:61-66` | `ChannelKey` type, env probes, label map |
-| 4 | `features/work/work-agent-overview-page.tsx:75-80` | `activeChannelNames` |
+| 1 | ⚠ `features/agents/channels-tab.tsx:25-46` | `CHANNEL_ENV_KEYS` + WhatsApp fields in the admin form + the `env_vars` literal at `:219-239` (`RETIRED_CHANNEL_ENV_KEYS` sits at `:84-91`) |
+| 2 | ⚠ `features/work/work-agent-channels-tab.tsx` | `ChannelView` union `:44-53`; `WhatsAppConnectView` / `WhatsAppManageView` modelled on `TelegramConnectView:1137` / `TelegramManageView:1220`; state + `env_vars` literal `:1456-1477`; the list-view cards (`:1996-2011`) and the view-routing chain (`:1797`, `:1814`, `:1884`, `:1900`) — without those the new views are unreachable. **`runConnect` (`:1500-1541`) is generic over key *names* but hard-requires a server-derived env value** — it treats an empty `derivedKey` as failed token validation and rolls the channel back to disabled (`:1522-1536`). WhatsApp must therefore either have its provisioner return an `extra_env` value to use as `derivedKey` (the Graph-confirmed display phone number is the natural choice) or use a connect path that skips the derived-value check. |
+| 3 | `features/work/work-home-page.tsx:40`, `:46-54`, `:58-64` | `ChannelKey` type, env probes, label map |
+| 4 | `features/work/work-agent-overview-page.tsx:67-82` | `activeChannelNames` |
 | 5 | `features/work/work-agent-overview-state.ts:11-18`, `:24-46` | `VISIBLE_OVERVIEW_CHANNELS` — a channel outside this set is filtered out of the overview chart entirely — and the label if-chain |
 | 6 | `features/work/work-agent-settings-page.tsx:1676` | `(["slack","telegram","website"] as const)`; the `SUROGATES_${c.toUpperCase()}_ENABLED` derivation is already generic |
-| 7 | `features/agents/agent-commerce-panel.tsx:150-154` | `SELLABLE_CHANNELS` |
+| 7 | `features/agents/agent-commerce-panel.tsx:169-173` | `SELLABLE_CHANNELS` — its ids must match row 6's settings-page list (wired via `work-agent-settings-page.tsx:1900`), or the channel is silently unsellable |
 | 8 | `features/onboarding/use-onboarding-progress.ts:19-24` | channel list |
-| 9 | `features/public-agent/buy-page.tsx:344` | pre-existing bug: `linkable_channels?.map(c => c === "slack" ? "Slack" : "Telegram")` renders any third kind as "Telegram" |
+| 9 | `features/public-agent/buy-page.tsx:344-345` | pre-existing bug: `linkable_channels?.map(c => c === "slack" ? "Slack" : "Telegram")` renders any third kind as "Telegram" |
+| 10 | `features/work/mock-agent-detail-data.ts:10`, `:79`, `:114` | mock channel union / sample rows — already stale (no telegram or website); extend or skip deliberately |
 
 `components/sessions/session-filters.ts` needs no change — the channel dropdown is
 API-facet driven, though `displayLabel:99` will render "Whatsapp".
