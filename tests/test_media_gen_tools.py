@@ -554,3 +554,146 @@ async def test_generate_video_surfaces_upstream_error_body(tmp_path, monkeypatch
     ))
     assert "400 Bad Request" in result["error"]
     assert "not a valid model ID" in result["error"]  # upstream body surfaced
+
+
+# ── budget-exhausted (HTTP 402) handling ────────────────────────────
+
+
+class _Broke402Client:
+    """Raises the shape the OpenAI SDK uses for a 402 from the proxy."""
+
+    class _Error(Exception):
+        status_code = 402
+
+    def __init__(self):
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+
+    async def _create(self, **_kwargs):
+        raise self._Error("Error code: 402 - insufficient_credits")
+
+
+@pytest.mark.asyncio
+async def test_generate_image_402_returns_budget_guidance(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(_Broke402Client()),
+        workspace_path=str(tmp_path),
+    ))
+    assert result["error"].startswith("media_budget_exhausted")
+    assert "top up" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_generate_image_non_402_keeps_generic_error(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    class _Broke500Client(_Broke402Client):
+        class _Error(Exception):
+            status_code = 500
+
+        async def _create(self, **_kwargs):
+            raise self._Error("boom")
+
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(_Broke500Client()),
+        workspace_path=str(tmp_path),
+    ))
+    assert result["error"].startswith("Image generation failed")
+
+
+@pytest.mark.asyncio
+async def test_generate_video_402_returns_budget_guidance(monkeypatch, tmp_path):
+    import httpx
+
+    from surogates.tools.builtin.media_gen import (
+        MediaGenConfig,
+        _generate_video_handler,
+    )
+
+    def _respond(request):
+        return httpx.Response(
+            402,
+            json={"detail": {"error": "insufficient_credits",
+                             "resource": "media_credits"}},
+        )
+
+    transport = httpx.MockTransport(_respond)
+    real_client = httpx.AsyncClient
+
+    def _patched_client(**kwargs):
+        kwargs["transport"] = transport
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _patched_client)
+    cfg = MediaGenConfig(
+        video_model="x-ai/grok-imagine-video",
+        video_base_url="http://proxy.test/v1",
+        video_api_key="k",
+        video_poll_interval=1,
+    )
+    result = json.loads(await _generate_video_handler(
+        {"prompt": "a rocket"},
+        media_gen=cfg,
+        workspace_path=str(tmp_path),
+    ))
+    assert result["error"].startswith("media_budget_exhausted")
+
+
+# ── worker schema gating (_media_tool_exclusions) ───────────────────
+
+
+def _cfg(**kwargs):
+    from surogates.tools.builtin.media_gen import MediaGenConfig
+
+    return MediaGenConfig(**kwargs)
+
+
+def test_media_tool_exclusions_drop_both_when_nothing_configured():
+    from surogates.orchestrator.worker import _media_tool_exclusions
+
+    assert _media_tool_exclusions(_cfg()) == {
+        "generate_image", "generate_video",
+    }
+
+
+def test_media_tool_exclusions_keep_image_when_wired():
+    from surogates.orchestrator.worker import _media_tool_exclusions
+
+    cfg = _cfg(image_client=object(), image_model="google/gemini-2.5-flash-image")
+    assert _media_tool_exclusions(cfg) == {"generate_video"}
+
+
+def test_media_tool_exclusions_keep_video_when_wired():
+    from surogates.orchestrator.worker import _media_tool_exclusions
+
+    cfg = _cfg(video_model="x-ai/grok-imagine-video",
+               video_base_url="http://proxy.test/v1")
+    assert _media_tool_exclusions(cfg) == {"generate_image"}
+
+
+def test_media_tool_exclusions_empty_when_both_wired():
+    from surogates.orchestrator.worker import _media_tool_exclusions
+
+    cfg = _cfg(
+        image_client=object(),
+        image_model="google/gemini-2.5-flash-image",
+        video_model="x-ai/grok-imagine-video",
+        video_base_url="http://proxy.test/v1",
+    )
+    assert _media_tool_exclusions(cfg) == set()
+
+
+def test_media_tool_exclusions_video_needs_both_model_and_url():
+    from surogates.orchestrator.worker import _media_tool_exclusions
+
+    assert "generate_video" in _media_tool_exclusions(
+        _cfg(video_model="x-ai/grok-imagine-video"),
+    )
+    assert "generate_video" in _media_tool_exclusions(
+        _cfg(video_base_url="http://proxy.test/v1"),
+    )
