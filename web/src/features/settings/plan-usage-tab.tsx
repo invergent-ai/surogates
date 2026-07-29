@@ -30,6 +30,8 @@ interface CommerceOffer {
   token_amount: number;
   /** Metered browser time the offer sells, in minutes (0 = none). */
   browser_minutes_amount?: number;
+  /** Metered media the offer sells, in media cents (0 = none). */
+  media_credits_amount?: number;
   description?: string | null;
   /** Buyer-facing labels for a custom package; [] or absent = full
    * access (subscriptions) / pure extra usage (packs). */
@@ -46,6 +48,11 @@ interface CommerceOverview {
     period_token_remaining: number;
     topup_token_remaining: number;
     browser_minutes?: {
+      metered: boolean;
+      period_remaining: number;
+      topup_remaining: number;
+    };
+    media_credits?: {
       metered: boolean;
       period_remaining: number;
       topup_remaining: number;
@@ -207,6 +214,23 @@ export function PlanUsageTab() {
                   </span>
                 </div>
               ) : null}
+              {ent.media_credits?.metered ? (
+                <div
+                  className="flex items-center justify-between"
+                  data-testid="plan-tab-media-credits"
+                >
+                  <span className="text-muted-foreground">
+                    Media generation left
+                  </span>
+                  <span className="font-medium tabular-nums">
+                    {formatPrice(
+                      ent.media_credits.period_remaining +
+                        ent.media_credits.topup_remaining,
+                      "usd",
+                    )}
+                  </span>
+                </div>
+              ) : null}
               {(ent.included?.length ?? 0) > 0 ? (
                 <div
                   className="flex items-start justify-between gap-4"
@@ -254,13 +278,17 @@ export function PlanUsageTab() {
                     <span className="text-sm font-medium">{offer.name}</span>
                     <span className="text-xs text-muted-foreground">
                       {offer.token_amount > 0 ||
-                      (offer.browser_minutes_amount ?? 0) > 0
+                      (offer.browser_minutes_amount ?? 0) > 0 ||
+                      (offer.media_credits_amount ?? 0) > 0
                         ? `${[
                             offer.token_amount > 0
                               ? approxMessagesLabel(offer.token_amount)
                               : "",
                             (offer.browser_minutes_amount ?? 0) > 0
                               ? `${offer.browser_minutes_amount} min browsing`
+                              : "",
+                            (offer.media_credits_amount ?? 0) > 0
+                              ? `${formatPrice(offer.media_credits_amount ?? 0, "usd")} media`
                               : "",
                           ]
                             .filter(Boolean)

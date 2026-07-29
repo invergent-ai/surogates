@@ -31,7 +31,9 @@ _SLASH_CAPABILITIES = frozenset({
 })
 
 #: Everything a package can restrict (mirrors ops CAPABILITY_VOCAB).
-_SELLABLE_CAPABILITIES = _SLASH_CAPABILITIES | {"browser", "brainstorming"}
+_SELLABLE_CAPABILITIES = _SLASH_CAPABILITIES | {
+    "browser", "brainstorming", "image", "video",
+}
 
 
 def pinned_entitlements(session_config: dict | None) -> dict | None:

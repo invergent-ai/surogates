@@ -214,6 +214,15 @@ class AgentRuntimeContext:
     # agents or when ops has no public frontend URL configured.
     commerce_buy_url: str | None = None
 
+    # Per-buyer media metering: when True generate_image/generate_video
+    # authorize a hold against the sender's media-credit balance before
+    # generating and settle the actual cost after.  False (the default,
+    # and the read for payloads predating the field) skips the hop.
+    media_credits_metered: bool = False
+    # Flat per-image price in media cents the runtime holds and settles
+    # for one generate_image call (ops's image_billing_media_cents).
+    media_image_cents: int = 4
+
     @property
     def asset_root(self) -> str:
         """Path to the tenant's on-disk asset directory.

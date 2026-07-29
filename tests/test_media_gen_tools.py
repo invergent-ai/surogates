@@ -697,3 +697,311 @@ def test_media_tool_exclusions_video_needs_both_model_and_url():
     assert "generate_video" in _media_tool_exclusions(
         _cfg(video_base_url="http://proxy.test/v1"),
     )
+
+
+# ── per-buyer budget hooks ──────────────────────────────────────────
+
+
+class _HookRecorder:
+    def __init__(self, receipt=None, authorize_exc=None):
+        self.receipt = receipt
+        self.authorize_exc = authorize_exc
+        self.authorize_calls = []
+        self.settle_calls = []
+
+    async def authorize(self, requested_cents=None):
+        self.authorize_calls.append(requested_cents)
+        if self.authorize_exc is not None:
+            raise self.authorize_exc
+        return self.receipt
+
+    async def settle(self, receipt, actual_cents, external_ref):
+        self.settle_calls.append((receipt, actual_cents, external_ref))
+
+
+def _billed_image_cfg(client, hooks, image_cents=4):
+    from surogates.tools.builtin.media_gen import MediaGenConfig
+
+    return MediaGenConfig(
+        image_client=client,
+        image_model="google/gemini-2.5-flash-image",
+        budget_authorize=hooks.authorize,
+        budget_settle=hooks.settle,
+        image_cents=image_cents,
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_metered_holds_and_settles_flat_price(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    hooks = _HookRecorder(receipt={"balance_id": "b1", "reserved_cents": 4})
+    client = _FakeImageClient(
+        images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}],
+    )
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_billed_image_cfg(client, hooks),
+        workspace_path=str(tmp_path),
+    ))
+    assert "error" not in result
+    assert hooks.authorize_calls == [4]
+    assert len(hooks.settle_calls) == 1
+    receipt, cents, ref = hooks.settle_calls[0]
+    assert receipt == {"balance_id": "b1", "reserved_cents": 4}
+    assert cents == 4
+    assert ref.startswith("img-")
+
+
+@pytest.mark.asyncio
+async def test_image_budget_exhausted_blocks_before_provider(tmp_path):
+    from surogates.tools.builtin.media_gen import (
+        MediaBudgetExhaustedError,
+        _generate_image_handler,
+    )
+
+    hooks = _HookRecorder(
+        authorize_exc=MediaBudgetExhaustedError(
+            "media_credits_exhausted", buy_url="https://buy.example/x",
+        ),
+    )
+    client = _FakeImageClient(images=[])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_billed_image_cfg(client, hooks),
+        workspace_path=str(tmp_path),
+    ))
+    assert result["error"].startswith("media_credits_exhausted")
+    assert "https://buy.example/x" in result["error"]
+    assert client.last_create_kwargs is None  # provider never called
+    assert hooks.settle_calls == []
+
+
+@pytest.mark.asyncio
+async def test_image_metering_plane_down_fails_closed(tmp_path):
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    hooks = _HookRecorder(authorize_exc=RuntimeError("ops unreachable"))
+    client = _FakeImageClient(images=[])
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_billed_image_cfg(client, hooks),
+        workspace_path=str(tmp_path),
+    ))
+    assert result["error"].startswith("media budget check unavailable")
+    assert client.last_create_kwargs is None
+
+
+@pytest.mark.asyncio
+async def test_image_provider_failure_releases_hold(tmp_path):
+    from surogates.tools.builtin.media_gen import (
+        MediaGenConfig,
+        _generate_image_handler,
+    )
+
+    hooks = _HookRecorder(receipt={"balance_id": "b1", "reserved_cents": 4})
+    cfg = MediaGenConfig(
+        image_client=_Broke402Client(),
+        image_model="google/gemini-2.5-flash-image",
+        budget_authorize=hooks.authorize,
+        budget_settle=hooks.settle,
+    )
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=cfg,
+        workspace_path=str(tmp_path),
+    ))
+    assert "error" in result
+    assert len(hooks.settle_calls) == 1
+    assert hooks.settle_calls[0][1] == 0  # released, not spent
+
+
+@pytest.mark.asyncio
+async def test_image_unmetered_without_hooks_stays_free(tmp_path):
+    """No hooks configured (the default) = exactly the old behavior."""
+    from surogates.tools.builtin.media_gen import _generate_image_handler
+
+    client = _FakeImageClient(
+        images=[{"image_url": {"url": f"data:image/png;base64,{_PNG_B64}"}}],
+    )
+    result = json.loads(await _generate_image_handler(
+        {"prompt": "a red square"},
+        media_gen=_image_cfg(client),
+        workspace_path=str(tmp_path),
+    ))
+    assert "error" not in result
+
+
+# ── worker media budget hook factory ────────────────────────────────
+
+
+def _hook_ctx(metered=True, cents=4, buy_url="https://buy.example/a"):
+    return SimpleNamespace(
+        media_credits_metered=metered,
+        media_image_cents=cents,
+        commerce_buy_url=buy_url,
+        agent_id="agent-1",
+    )
+
+
+def _hook_session(config=None, user_id="u-1", service_account_id=None):
+    return SimpleNamespace(
+        id="11111111-1111-1111-1111-111111111111",
+        config=config or {},
+        user_id=user_id,
+        service_account_id=service_account_id,
+    )
+
+
+def test_media_hooks_none_when_unmetered():
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+
+    a, s = _build_media_budget_hooks(
+        ctx=_hook_ctx(metered=False),
+        session=_hook_session(),
+        platform_client=object(),
+    )
+    assert a is None and s is None
+
+
+def test_media_hooks_none_for_service_account_sessions():
+    """Exemption keys on the SESSION row's service_account_id — the
+    credential principal is the agent's own SA on managed channels
+    and must not exempt Slack/Telegram buyers."""
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+
+    a, s = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(user_id=None, service_account_id="sa-1"),
+        platform_client=object(),
+    )
+    assert a is None and s is None
+
+
+def test_media_hooks_built_for_managed_channel_end_users():
+    """A slack/telegram end-user session (human user_id, no session
+    SA) gets metering hooks even though the CREDENTIAL principal for
+    such sessions is the agent's own service account."""
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+
+    a, s = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(user_id="u-slack-1"),
+        platform_client=object(),
+    )
+    assert a is not None and s is not None
+
+
+@pytest.mark.asyncio
+async def test_media_hooks_anonymous_sender_raises_buy_prompt():
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+    from surogates.tools.builtin.media_gen import MediaBudgetExhaustedError
+
+    authorize, _ = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(user_id=None),
+        platform_client=object(),
+    )
+    with pytest.raises(MediaBudgetExhaustedError) as exc_info:
+        await authorize(4)
+    assert exc_info.value.buy_url == "https://buy.example/a"
+
+
+@pytest.mark.asyncio
+async def test_media_hooks_authorize_and_settle_call_platform():
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+
+    class _Client:
+        def __init__(self):
+            self.authorize_kwargs = None
+            self.settle_kwargs = None
+
+        async def media_authorize(self, agent_id, **kwargs):
+            self.authorize_kwargs = {"agent_id": agent_id, **kwargs}
+            return {
+                "metered": True,
+                "reservation_id": "r1",
+                "balance_id": "b1",
+                "reserved_cents": 4,
+            }
+
+        async def media_settle(self, agent_id, **kwargs):
+            self.settle_kwargs = {"agent_id": agent_id, **kwargs}
+            return {"settled": True}
+
+    client = _Client()
+    authorize, settle = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(
+            config={"commerce_buyer": {"firebase_uid": "fb-1"}},
+        ),
+        platform_client=client,
+    )
+    receipt = await authorize(4)
+    assert client.authorize_kwargs["firebase_uid"] == "fb-1"
+    assert client.authorize_kwargs["requested_cents"] == 4
+    assert receipt["balance_id"] == "b1"
+    await settle(receipt, 4, "img-x")
+    assert client.settle_kwargs == {
+        "agent_id": "agent-1",
+        "balance_id": "b1",
+        "reserved_cents": 4,
+        "actual_cents": 4,
+        "external_ref": "img-x",
+        "reservation_id": "r1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_media_hooks_exhausted_maps_to_buy_prompt_error():
+    from surogates.orchestrator.worker import _build_media_budget_hooks
+    from surogates.runtime.platform_client import MediaCreditsExhaustedError
+    from surogates.tools.builtin.media_gen import MediaBudgetExhaustedError
+
+    class _BrokeClient:
+        async def media_authorize(self, agent_id, **kwargs):
+            raise MediaCreditsExhaustedError("media_credits_exhausted")
+
+    authorize, _ = _build_media_budget_hooks(
+        ctx=_hook_ctx(),
+        session=_hook_session(),
+        platform_client=_BrokeClient(),
+    )
+    with pytest.raises(MediaBudgetExhaustedError) as exc_info:
+        await authorize(None)
+    assert exc_info.value.buy_url == "https://buy.example/a"
+
+
+# ── package capability exclusions for media tools ───────────────────
+
+
+def test_entitlement_exclusions_drop_media_tools():
+    from surogates.orchestrator.worker import _entitlement_tool_exclusions
+
+    class _Registry:
+        tool_names = ("generate_image", "generate_video")
+
+        def get_all(self):
+            return []
+
+    session_config = {
+        "entitlements": {"capabilities": ["code", "browser"]},
+    }
+    excluded = _entitlement_tool_exclusions(
+        session_config=session_config,
+        tool_registry=_Registry(),
+        mcp_scope=None,
+    )
+    assert "generate_image" in excluded
+    assert "generate_video" in excluded
+
+    session_config = {
+        "entitlements": {"capabilities": ["image", "video"]},
+    }
+    excluded = _entitlement_tool_exclusions(
+        session_config=session_config,
+        tool_registry=_Registry(),
+        mcp_scope=None,
+    )
+    assert "generate_image" not in excluded
+    assert "generate_video" not in excluded

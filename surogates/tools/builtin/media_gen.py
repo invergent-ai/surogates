@@ -21,6 +21,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -69,10 +70,9 @@ def _is_insufficient_credits(exc: Exception) -> bool:
     provider's own 402 matches too; either way the honest tool answer
     is "no budget", not a stack trace the model can't act on.
     """
-    status = getattr(exc, "status_code", None)
-    if status is None:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-    return status == 402
+    from surogates.harness.error_classifier import extract_status_code
+
+    return extract_status_code(exc) == 402
 
 
 @dataclass(frozen=True)
@@ -82,6 +82,15 @@ class MediaGenConfig:
     ``image_client`` is an ``AsyncOpenAI`` (or duck-typed equivalent)
     already pointed at the image endpoint; video carries raw endpoint
     fields because the ``/videos`` job API is called over httpx.
+
+    ``budget_authorize`` / ``budget_settle`` are the per-buyer media
+    metering hooks the worker wires for metered agents (absent =
+    unmetered, generate exactly as before). Authorize takes the media
+    cents to hold (``None`` = platform chunk, for videos) and returns
+    a receipt dict or ``None``; it raises
+    :class:`MediaBudgetExhaustedError` when the sender has no credits.
+    Settle takes ``(receipt, actual_cents, external_ref)`` and spends
+    the hold — zero releases it without spending.
     """
 
     image_client: Any | None = None
@@ -91,6 +100,81 @@ class MediaGenConfig:
     video_api_key: str = ""
     video_timeout: int = 600
     video_poll_interval: int = 10
+    budget_authorize: Any | None = None
+    budget_settle: Any | None = None
+    # Flat per-image price in media cents (mirrors ops's
+    # image_billing_media_cents through the runtime config).
+    image_cents: int = 4
+
+
+class MediaBudgetExhaustedError(RuntimeError):
+    """The sender's media-credit balance can't cover a generation."""
+
+    def __init__(self, detail: str, *, buy_url: str | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.buy_url = buy_url
+
+
+def _media_buy_prompt(buy_url: str | None) -> str:
+    """Buyer-facing budget-exhausted tool error (mirrors the browser
+    pool's buy prompt): actionable, and explicit that nothing ran."""
+    message = (
+        "media_credits_exhausted: this user has no media generation "
+        "credits left, so the request was refused before anything was "
+        "charged. Tell the user to top up or upgrade to keep "
+        "generating images and videos"
+    )
+    if buy_url:
+        message += f" — they can purchase more at {buy_url}"
+    message += ". Do not retry until they have more credits."
+    return message
+
+
+async def _authorize_media_budget(
+    cfg: Any, requested_cents: int | None,
+) -> tuple[dict | None, str | None]:
+    """Run the worker-wired authorize hook, if any.
+
+    Returns ``(receipt, error)`` — exactly one is set when metered.
+    Fails CLOSED on an unreachable metering plane: a paid generation
+    must not run free because ops blinked.
+    """
+    authorize = getattr(cfg, "budget_authorize", None)
+    if authorize is None:
+        return None, None
+    try:
+        return await authorize(requested_cents), None
+    except MediaBudgetExhaustedError as exc:
+        return None, _media_buy_prompt(exc.buy_url)
+    except Exception as exc:  # noqa: BLE001 — degrade to a tool error
+        return None, (
+            f"media budget check unavailable: {exc} — nothing was "
+            "generated or charged; try again shortly"
+        )
+
+
+async def _settle_media_budget(
+    cfg: Any, billing: dict | None, actual_cents: int, external_ref: str,
+) -> None:
+    """Best-effort spend of the authorize hold; zero releases it.
+
+    Never fails the tool call — the generation already happened (or
+    already failed); an unreachable settle is logged and the ops-side
+    reservation reaper eventually releases the hold.
+    """
+    settle = getattr(cfg, "budget_settle", None)
+    if billing is None or settle is None:
+        return
+    try:
+        await settle(billing, actual_cents, external_ref)
+    except Exception:  # noqa: BLE001 — audit trail only
+        logger.warning(
+            "media budget settle failed (ref=%s, cents=%s)",
+            external_ref,
+            actual_cents,
+            exc_info=True,
+        )
 
 
 GENERATE_IMAGE_SCHEMA = ToolSchema(
@@ -258,6 +342,19 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         if value:
             extra_body[field_name] = value
 
+    raw_cents = getattr(cfg, "image_cents", 4)
+    image_cents = max(0, int(4 if raw_cents is None else raw_cents))
+    billing = None
+    if image_cents > 0:
+        # A zero price means metered-but-free images: no hold to take,
+        # nothing to settle — skip the metering hop entirely.
+        billing, budget_error = await _authorize_media_budget(
+            cfg, image_cents,
+        )
+        if budget_error is not None:
+            return _json_error(budget_error)
+    media_ref = f"img-{uuid4().hex}"
+
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -265,9 +362,15 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             extra_body=extra_body,
         )
     except Exception as exc:  # noqa: BLE001 — provider errors become tool errors
+        # The provider refused: release the buyer hold without spending.
+        await _settle_media_budget(cfg, billing, 0, media_ref)
         if _is_insufficient_credits(exc):
             return _json_error(_MEDIA_BUDGET_ERROR)
         return _json_error(f"Image generation failed: {exc}")
+    # The provider accepted and charged for the generation — the buyer
+    # spend mirrors the owner-plane debit regardless of what we manage
+    # to do with the payload afterwards.
+    await _settle_media_budget(cfg, billing, image_cents, media_ref)
 
     image_url = _first_generated_image_url(response)
     if not image_url.startswith("data:image/"):
@@ -370,6 +473,11 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             }
         ]
 
+    billing, budget_error = await _authorize_media_budget(cfg, None)
+    if budget_error is not None:
+        return _json_error(budget_error)
+    media_ref = f"vid-{uuid4().hex}"
+
     videos_url = f"{base_url.rstrip('/')}/videos"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
@@ -405,6 +513,23 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
                 )
                 return _json_error(f"Video generation failed: {detail}")
 
+            usage_cost = (status_data.get("usage") or {}).get("cost")
+            if usage_cost is not None:
+                actual_cents = max(0, math.ceil(float(usage_cost) * 100))
+            else:
+                # Completed but no reported cost: mirror the ops-side
+                # "debiting 0" stance rather than guessing a price.
+                logger.warning(
+                    "completed video job %s reported no usage.cost — "
+                    "settling buyer 0",
+                    job_id,
+                )
+                actual_cents = 0
+            await _settle_media_budget(cfg, billing, actual_cents, media_ref)
+            # The hold is spent: a download failure below must not
+            # settle again (the ledger's external_ref idempotency would
+            # absorb it, but relying on that hides intent).
+            billing = None
             urls = status_data.get("unsigned_urls") or []
             if not urls:
                 return _json_error(
@@ -423,6 +548,13 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         return _json_error(f"Video generation request failed: {exc}")
     except ValueError as exc:
         return _json_error(str(exc))
+    finally:
+        # Single release point for every exit that never reached the
+        # real settle — timeout, failed job, transport errors, and
+        # even exceptions nothing above catches. After a successful
+        # settle ``billing`` is None and this no-ops, so success paths
+        # can't be contradicted.
+        await _settle_media_budget(cfg, billing, 0, media_ref)
 
     saved = await _save_media_bytes(
         data,
