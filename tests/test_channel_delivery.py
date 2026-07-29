@@ -2245,3 +2245,57 @@ class TestCodeRunEditInPlace:
         await dispatcher.deliver_batch(platform)
         # Neither edits — each run posts its own fresh main message.
         assert platform.edits == [None, None]
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Graph error classification
+# ---------------------------------------------------------------------------
+
+
+class TestGraphErrorClassification:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "graph error 190 (HTTP 401): Session has expired",
+            "graph error 100 (HTTP 400): Unsupported get request",
+            "graph error 131026 (HTTP 400): Message undeliverable",
+            "graph error 131047 (HTTP 400): Re-engagement message",
+        ],
+    )
+    def test_permanent_graph_errors(self, error):
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "graph error 130429 (HTTP 400): Rate limit hit",
+            "graph error 4 (HTTP 400): Application request limit reached",
+            "HTTP 500: internal error",
+            "HTTP 429: too many requests",
+        ],
+    )
+    def test_retryable_graph_errors(self, error):
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(error) is False
+
+    def test_codeless_error_is_retryable(self):
+        # format_graph_error omits the "graph error" prefix when Meta returns
+        # no code, so a code-less error can never match a permanent prefix.
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error("HTTP 400: something odd") is False
+
+    def test_unrelated_error_containing_100_stays_retryable(self):
+        # The matcher is an unanchored substring test shared by every
+        # platform: a bare "100" entry would kill these.
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(
+            "slack rate limited: retry after 1000 seconds",
+        ) is False
+        assert is_permanent_delivery_error(
+            "upload failed: file exceeds 100 MB",
+        ) is False
