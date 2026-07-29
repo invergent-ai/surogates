@@ -833,3 +833,28 @@ class TestSendFiles:
         assert await p.send_files(
             _item(""), creds={"access_token": ""}, files=files,
         ) == []
+
+
+# ---------------------------------------------------------------------------
+# Pending-input tuple + outbox destination
+# ---------------------------------------------------------------------------
+
+
+class TestWhatsAppPipelineWiring:
+    def test_pending_input_tuple_includes_whatsapp(self):
+        # The non-Slack fallthrough in inbound.py is the plain-text answer
+        # path (resolve_text_answer); joining the tuple opts in for free.
+        import inspect
+
+        import surogates.channels.inbound as inbound
+
+        source = inspect.getsource(inbound.ChannelInboundPipeline.handle)
+        assert "whatsapp" in source, (
+            "whatsapp missing from the pending-input platform tuple: a typed "
+            "answer would be treated as a new message and never resolve"
+        )
+
+    def test_thread_dest_fields_has_whatsapp(self):
+        from surogates.session.store import _THREAD_DEST_FIELDS
+
+        assert "whatsapp" in _THREAD_DEST_FIELDS

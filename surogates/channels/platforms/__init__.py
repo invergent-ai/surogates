@@ -11,3 +11,4 @@ from __future__ import annotations
 
 from surogates.channels.platforms import slack as slack  # noqa: F401
 from surogates.channels.platforms import telegram as telegram  # noqa: F401
+from surogates.channels.platforms import whatsapp as whatsapp  # noqa: F401
