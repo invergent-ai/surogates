@@ -5,6 +5,9 @@
 export interface TransparencyConfig {
   enabled: boolean;
   level?: "none" | "basic" | "enhanced" | "full";
+  // Server-composed disclosure text (per-agent). Newer runtimes send
+  // it; when absent the banner falls back to its local copies.
+  text?: string;
 }
 
 let _cached: TransparencyConfig | null = null;

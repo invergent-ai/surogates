@@ -134,3 +134,35 @@ def transparency_config(
     if not enabled:
         return {"enabled": False, "level": "none"}
     return {"enabled": True, "level": level}
+
+
+def has_transparency_config(governance: dict[str, Any] | None) -> bool:
+    """True when the agent carries an explicit transparency block.
+
+    Distinguishes "the operator configured disclosure (possibly off)"
+    from "nothing configured" — the latter falls back to the
+    deployment-wide default, the former always wins.
+    """
+    return isinstance(governance, dict) and isinstance(
+        governance.get("transparency"), dict,
+    )
+
+
+def disclosure_text(level: str) -> str:
+    """The disclosure copy for a level, empty for ``none``/unknown-off.
+
+    Unknown levels degrade to the ``basic`` text (never to silence) for
+    the same reason ``transparency_config`` clamps upward.
+    """
+    from surogates.governance.transparency import (
+        DISCLOSURE_TEXTS,
+        TransparencyLevel,
+    )
+
+    normalized = str(level or "").strip().lower()
+    if normalized == "none":
+        return ""
+    try:
+        return DISCLOSURE_TEXTS[TransparencyLevel(normalized)]
+    except (KeyError, ValueError):
+        return DISCLOSURE_TEXTS[TransparencyLevel.BASIC]

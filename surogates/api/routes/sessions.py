@@ -870,17 +870,30 @@ async def confirm_disclosure(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> None:
-    """Confirm AI disclosure for a session (EU AI Act Art. 50).
+    """Record the end-user's AI-disclosure acknowledgement (Art. 50).
 
-    Must be called before the agent can execute tools when transparency
-    enforcement is enabled.  Typically called by the frontend after
-    showing the AI disclosure notice to the user.
+    Called by the frontend after the user accepts the disclosure
+    banner.  Persists a ``disclosure.confirmed`` event on the session's
+    append-only log so the acknowledgement survives worker restarts and
+    is evidenceable per session — the previous in-process
+    ``app.state.governance_gate`` write was never wired and lost state
+    on every restart.  Idempotent by construction: repeated confirms
+    append repeated events, which is harmless and still truthful.
     """
     await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
-    governance = getattr(request.app.state, "governance_gate", None)
-    if governance is not None:
-        governance.confirm_disclosure(str(session_id))
+    from surogates.runtime.governance import transparency_config
+
+    store = _get_session_store(request)
+    cfg = transparency_config(agent_runtime.governance)
+    await store.emit_event(
+        session_id,
+        EventType.DISCLOSURE_CONFIRMED,
+        {
+            "level": cfg["level"],
+            "source": "web_banner",
+        },
+    )
 
 
 @router.get("/api/sessions/{session_id}", response_model=Session)

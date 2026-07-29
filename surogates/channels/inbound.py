@@ -645,6 +645,13 @@ class ChannelInboundPipeline:
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
 
+        # AI disclosure (EU AI Act Art. 50): on the first contact of a
+        # conversation with a disclosure-enabled agent, the channel user
+        # gets the notice as its own message before any agent output.
+        await self._maybe_send_disclosure(
+            msg, routing=routing, deps=deps, session_id=session_id,
+        )
+
         # ------------------------------------------------------------------
         # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
         # would queue behind the busy worker and never reach it in time (a
@@ -915,6 +922,66 @@ class ChannelInboundPipeline:
             await _nudge("✅ Got it — continuing.")
             return InboundOutcome.DROPPED
         return None
+
+    @staticmethod
+    async def _maybe_send_disclosure(
+        msg: InboundMessage,
+        *,
+        routing: Any,
+        deps: PipelineDeps,
+        session_id: Any,
+    ) -> None:
+        """Deliver the AI disclosure on a conversation's first contact.
+
+        Fires only for agents whose runtime-config governance carries an
+        enabled transparency block.  "First contact" is detected via the
+        session row's ``message_count`` — zero means no USER_MESSAGE has
+        been recorded yet (the pipeline emits it after this hook), which
+        also covers resumed-but-never-messaged sessions; a re-disclosure
+        on such a session is harmless, a missing one is not.
+
+        Delivery rides ``deps.input_nudge`` (the same seam as the /stop
+        acknowledgement), which posts a plain platform message.  On
+        platforms without ``post_input_nudge`` the nudge is a silent
+        no-op — those channels must not be enabled for
+        disclosure-required agents (see docs/governance-and-security).
+        A ``disclosure.presented`` event records the delivery attempt
+        with level + channel for the per-session audit trail.  Failures
+        never drop the inbound message.
+        """
+        if deps.runtime_config is None or deps.input_nudge is None:
+            return
+        try:
+            from surogates.runtime.governance import (
+                disclosure_text,
+                transparency_config,
+            )
+
+            payload = await deps.runtime_config(routing.agent_id) or {}
+            cfg = transparency_config(payload.get("governance"))
+            if not cfg["enabled"]:
+                return
+            text = disclosure_text(cfg["level"])
+            if not text:
+                return
+            session = await deps.session_store.get_session(session_id)
+            if getattr(session, "message_count", 0):
+                return
+            await deps.input_nudge(session_id, msg, text)
+            await deps.session_store.emit_event(
+                session_id,
+                EventType.DISCLOSURE_PRESENTED,
+                {
+                    "level": cfg["level"],
+                    "channel": routing.platform,
+                    "delivery": "channel_message",
+                },
+            )
+        except Exception:
+            logger.warning(
+                "[channels] AI disclosure delivery failed for session %s",
+                session_id, exc_info=True,
+            )
 
     @staticmethod
     async def _record_reply_target(

@@ -94,13 +94,23 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 
 ## Governance (`governance`)
 
+Per-agent governance (tool allow/deny lists, egress rules, AI
+disclosure) is configured in Studio and reaches the runtime through the
+agent's runtime config, not through env vars. The deployment-level
+settings below are the fallback / audit knobs only.
+
 | Key | Env Var | Default | Description |
 |---|---|---|---|
-| `governance.enabled` | `SUROGATES_GOVERNANCE_ENABLED` | `true` | Enable policy enforcement |
-| `governance.transparency.enabled` | -- | `false` | Enable EU AI Act transparency endpoints |
-| `governance.transparency.level` | -- | `full` | Transparency level |
-| `governance.transparency.require_confirmation` | -- | `true` | Require user confirmation for AI-generated content |
-| `governance.transparency.emotion_recognition` | -- | `false` | Flag emotion recognition usage |
+| `governance.log_allowed` | `SUROGATES_GOVERNANCE_LOG_ALLOWED` | `false` | Emit a `policy.allowed` event for every passing governance check (full audit trail; doubles event volume) |
+| `governance.transparency.enabled` | `SUROGATES_GOVERNANCE_TRANSPARENCY_ENABLED` | `false` | Deployment-wide AI-disclosure fallback for agents without a per-agent transparency block |
+| `governance.transparency.level` | `SUROGATES_GOVERNANCE_TRANSPARENCY_LEVEL` | `basic` | Fallback disclosure level: `none`, `basic`, `enhanced`, `full` |
+
+The legacy `SUROGATES_GOVERNANCE_ENABLED`,
+`SUROGATES_GOVERNANCE_TRANSPARENCY_REQUIRE_CONFIRMATION` and
+`SUROGATES_GOVERNANCE_TRANSPARENCY_EMOTION_RECOGNITION` variables are
+retired and ignored: enablement lives on `Agent.policy.enabled`,
+confirmation is recorded per session as a `disclosure.confirmed` event,
+and the platform performs no emotion recognition.
 
 ## Saga (`saga`)
 

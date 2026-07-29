@@ -183,6 +183,12 @@ class EventType(str, Enum):
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
 
+    # AI-disclosure audit trail (EU AI Act Art. 50): the disclosure was
+    # delivered on a channel / acknowledged by the end-user.  Persisted
+    # in the event log so deployers can evidence compliance per session.
+    DISCLOSURE_PRESENTED = "disclosure.presented"
+    DISCLOSURE_CONFIRMED = "disclosure.confirmed"
+
     # General user feedback on an llm.response (not expert.result — that is
     # rated via EXPERT_ENDORSE / EXPERT_OVERRIDE).  Emitted by the feedback
     # endpoint and consumed by training-data selection to filter trajectories

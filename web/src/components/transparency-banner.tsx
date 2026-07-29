@@ -14,6 +14,11 @@ import * as sessionsApi from "@/api/sessions";
 
 type TransparencyLevel = "none" | "basic" | "enhanced" | "full";
 
+// Fallback copies when the server did not send its disclosure text
+// (older runtimes). Deliberately does NOT self-classify the system as
+// "high-risk" — that is an AI Act Art. 6 legal classification these
+// agents do not carry; the levels scale detail, not risk claims. Keep
+// in sync with surogates/governance/transparency.py DISCLOSURE_TEXTS.
 const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }> = {
   none: {
     body: "",
@@ -21,7 +26,7 @@ const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }
   },
   basic: {
     body:
-      "You are about to interact with an AI system. All outputs are " +
+      "You are about to interact with an AI assistant. Replies are " +
       "machine-generated and may contain errors.",
     legal:
       "In accordance with the EU AI Act (Art. 50(1)), you are being " +
@@ -30,34 +35,35 @@ const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }
   },
   enhanced: {
     body:
-      "You are about to interact with a high-risk AI system. All outputs " +
-      "are machine-generated, subject to governance policy enforcement, " +
-      "and logged for regulatory audit purposes. Interpretability " +
-      "documentation is available on request.",
+      "You are about to interact with an AI assistant. Replies are " +
+      "machine-generated, may contain errors, and are logged. The AI " +
+      "follows the operator's usage policy and you can always ask for " +
+      "a human contact.",
     legal:
-      "In accordance with the EU AI Act (Art. 13, Art. 50(1)), you are " +
-      "being informed that this system uses artificial intelligence. " +
-      "This system is classified as high-risk and is subject to " +
-      "transparency and oversight obligations.",
+      "In accordance with the EU AI Act (Art. 50(1)), you are being " +
+      "informed that this system uses artificial intelligence and that " +
+      "your conversation is logged.",
   },
   full: {
     body:
-      "You are about to interact with a high-risk AI system under full " +
-      "transparency obligations. All tool calls are policy-governed, " +
-      "audited, and subject to human oversight. System accuracy " +
-      "declarations and technical documentation are available.",
+      "You are about to interact with an AI assistant operated on the " +
+      "Surogate platform. Replies are machine-generated, may contain " +
+      "errors, and are logged and policy-governed; a human operator " +
+      "reviews escalations and you can request a human contact at any " +
+      "time.",
     legal:
-      "In accordance with the EU AI Act (Art. 13, Art. 14, Art. 50), " +
-      "you are being informed that this system uses artificial " +
-      "intelligence under full transparency, interpretability, and " +
-      "human oversight requirements. Detailed technical documentation " +
-      "and accuracy declarations are available on request.",
+      "This notice is provided under EU AI Act Art. 50(1). Further " +
+      "information about the system and its operator is available on " +
+      "request.",
   },
 };
 
 interface TransparencyBannerProps {
   sessionId?: string;
   level: TransparencyLevel;
+  // Per-agent disclosure text from the transparency endpoint; falls
+  // back to the local level copies when absent (older runtimes).
+  serverText?: string;
   onConfirmed: () => void;
   onDeclined: () => void;
 }
@@ -65,12 +71,16 @@ interface TransparencyBannerProps {
 export function TransparencyBanner({
   sessionId,
   level,
+  serverText,
   onConfirmed,
   onDeclined,
 }: TransparencyBannerProps) {
   const [confirming, setConfirming] = useState(false);
 
-  const texts = DISCLOSURE_TEXT[level] || DISCLOSURE_TEXT.basic;
+  const fallback = DISCLOSURE_TEXT[level] || DISCLOSURE_TEXT.basic;
+  const texts = serverText
+    ? { body: serverText, legal: fallback.legal }
+    : fallback;
 
   const handleAccept = async () => {
     setConfirming(true);
