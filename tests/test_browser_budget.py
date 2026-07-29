@@ -141,9 +141,10 @@ def _row(
     *,
     channel: str = "web",
     user_id: Any = None,
+    service_account_id: Any = None,
     config: dict | None = None,
 ):
-    return ("agent-1", channel, user_id, config or {})
+    return ("agent-1", channel, user_id, service_account_id, config or {})
 
 
 async def test_guard_skips_unmetered_agents():
@@ -449,3 +450,59 @@ async def test_tool_preflight_renders_buy_prompt():
     body = json.loads(out)
     assert body["error"] == "browser_minutes_exhausted"
     assert body["buy_url"] == "https://buy.example/x"
+
+
+async def test_guard_skips_service_account_sessions():
+    """Operator-plane sessions (ops chat, api, scheduled runs) run
+    under a service account and are never metered — mirroring the
+    token plane's end-user-only scope."""
+    platform = _FakePlatform()
+    guard = _build_browser_budget_guard(
+        _session_factory(_row(service_account_id=uuid.UUID(int=3))),
+        platform,
+        _FakeCache({"browser_minutes_metered": True}),
+    )
+    assert await guard(session_id=_SID, org_id="o", user_id="") is None
+    assert platform.calls == []
+
+
+async def test_guard_wraps_cache_failures_as_unavailable():
+    """A control-plane blip during the metered check degrades to the
+    structured browser_unavailable result, never a raw traceback."""
+    import httpx as _httpx
+
+    class _FlakyCache:
+        async def get(self, agent_id):
+            raise _httpx.ConnectError("boom")
+
+    platform = _FakePlatform()
+    guard = _build_browser_budget_guard(
+        _session_factory(_row(config={"embed_end_user_id": "eu-7"})),
+        platform,
+        _FlakyCache(),
+    )
+    with pytest.raises(BrowserUnavailableError):
+        await guard(session_id=_SID, org_id="o", user_id="")
+    assert platform.calls == []
+
+
+def test_k8s_billing_labels_are_sanitized():
+    from surogates.browser.kubernetes import K8sBrowserBackend
+
+    backend = K8sBrowserBackend(namespace="test-ns")
+    pod = backend._build_pod_manifest(
+        browser_id="bid",
+        pod_name="browser-x",
+        session_id="s1",
+        org_id="p1",
+        user_id="u1",
+        spec=BrowserSpec(billing={
+            "owner_kind": "end_user",
+            "owner_id": "visitor@example.com",
+            "reservation_id": "res-1",
+            "balance_id": "bal-1",
+        }),
+    )
+    assert pod.metadata.labels["surogates.ai/minutes-owner-id"] == (
+        "visitor-example.com"
+    )

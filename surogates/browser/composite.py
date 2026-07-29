@@ -7,6 +7,11 @@ composite transparently provisions via the fallback so a fleet outage
 or capacity-exhaustion event degrades to today's per-session
 behaviour rather than failing the lease outright.
 
+Metering caveat: a k8s fallback still carries ``spec.billing`` as pod
+labels, but a process fallback (dev) drops it — the sender's hold then
+has no pod to settle against and is reclaimed by the ops-side
+reservation reaper's podless sweep.
+
 The composite maintains an in-memory ``browser_id → backend`` routing
 table so ``destroy`` and ``status`` calls reach the backend that
 originally provisioned the browser. After a worker restart the table

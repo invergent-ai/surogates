@@ -155,7 +155,9 @@ class BrowserSpec:
     # ({owner_kind, owner_id, reservation_id, balance_id}); the k8s
     # backend stamps it as pod labels and the fleet backend forwards it
     # in the lease body so the ops BrowserMonitor can extend and settle
-    # the hold. None on unmetered agents.
+    # the hold. None on unmetered agents. The process backend (dev)
+    # ignores it like the identity ids — an orphaned hold on that path
+    # is reclaimed by the ops reservation reaper.
     billing: dict[str, str] | None = None
 
 

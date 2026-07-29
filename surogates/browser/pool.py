@@ -29,9 +29,10 @@ CreditGuard = Callable[[str], Awaitable[None]]
 # provisions with keyword args (session_id, org_id, user_id). Returns
 # a billing block to stamp on the pod ({owner_kind, owner_id,
 # reservation_id, balance_id}), or ``None`` when the agent is
-# unmetered or the session is operator-driven (the guard resolves the
-# session row itself — provisioning is a once-per-session event, so
-# the extra read is negligible). Raises
+# unmetered or the session runs on the operator plane — profile
+# capture (``browser_setup``) and service-account-principal sessions.
+# The guard resolves the session row itself; provisioning is a
+# once-per-session event, so the extra read is negligible. Raises
 # ``BrowserBudgetExhaustedError`` when the sender's balance is spent.
 BudgetGuard = Callable[..., Awaitable[dict[str, str] | None]]
 

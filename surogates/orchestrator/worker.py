@@ -325,6 +325,8 @@ def _build_browser_budget_guard(
         try:
             session_uuid = UUID(str(session_id))
         except ValueError:
+            # Session ids are store-issued UUIDs; anything else cannot
+            # map to a billable session row — unmetered, not blocked.
             return None
         async with session_factory() as db:
             row = (
@@ -333,23 +335,40 @@ def _build_browser_budget_guard(
                         SessionRow.agent_id,
                         SessionRow.channel,
                         SessionRow.user_id,
+                        SessionRow.service_account_id,
                         SessionRow.config,
                     ).where(SessionRow.id == session_uuid),
                 )
             ).one_or_none()
         if row is None:
             return None
-        agent_id, channel, session_user_id, config = row
-        if channel == "browser_setup":
-            # Operator-driven profile capture — operator plane only.
+        agent_id, channel, session_user_id, sa_id, config = row
+        if channel == "browser_setup" or sa_id is not None:
+            # Operator plane: profile-capture sessions and every
+            # service-account-principal session (ops-chat, api,
+            # scheduled runs). Mirrors the token plane, which meters
+            # only end-user identities — an operator testing their own
+            # metered agent must not hit a buy prompt.
             return None
         if runtime_config_cache is None or platform_client is None:
             return None
         try:
             payload = await runtime_config_cache.get(str(agent_id)) or {}
         except LookupError:
+            # Ops does not know the agent — nothing to meter.
             return None
+        except Exception as exc:
+            # The metered-check itself needs ops; an unreachable
+            # control plane degrades to the structured browser_
+            # unavailable tool result, never a raw traceback — and
+            # never a free browser on what might be a metered agent.
+            raise BrowserUnavailableError(
+                f"browser minutes check unavailable: {exc}",
+            ) from exc
         if not payload.get("browser_minutes_metered"):
+            # Deliberately open: a payload from an ops build predating
+            # the flag reads as unmetered, which is why the ops side
+            # deploys first in the rollout.
             return None
         config = config or {}
         buy_url = payload.get("commerce_buy_url")

@@ -31,6 +31,19 @@ SERVICE_PORT_LIVE_VIEW = 443
 TARGET_PORT_LIVE_VIEW = 8080
 
 
+_LABEL_VALUE_DISALLOWED = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _label_safe(raw: str) -> str:
+    """Coerce a string to a legal k8s label value (charset + 63 cap).
+
+    Lossy is fine for the billing values this guards — the ids that
+    settlement depends on are our own UUIDs; only the owner id can be
+    externally chosen.
+    """
+    return _LABEL_VALUE_DISALLOWED.sub("-", raw)[:63].strip("-_.")
+
+
 def _image_pull_policy(image: str) -> str:
     if "@" in image:
         return "IfNotPresent"
@@ -370,17 +383,20 @@ class K8sBrowserBackend:
         if spec.billing:
             # Per-buyer minutes attribution, read by the ops
             # BrowserMonitor to extend and settle the sender's hold.
+            # Values are sanitized to the k8s label charset: the owner
+            # id on the end-user plane can be an externally chosen
+            # string, and one bad character 422s the whole pod create.
             labels.update({
-                "surogates.ai/minutes-owner-kind": (
+                "surogates.ai/minutes-owner-kind": _label_safe(
                     spec.billing.get("owner_kind") or ""
                 ),
-                "surogates.ai/minutes-owner-id": (
+                "surogates.ai/minutes-owner-id": _label_safe(
                     spec.billing.get("owner_id") or ""
                 ),
-                "surogates.ai/minutes-reservation-id": (
+                "surogates.ai/minutes-reservation-id": _label_safe(
                     spec.billing.get("reservation_id") or ""
                 ),
-                "surogates.ai/minutes-balance-id": (
+                "surogates.ai/minutes-balance-id": _label_safe(
                     spec.billing.get("balance_id") or ""
                 ),
             })
