@@ -48,6 +48,23 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
     )
     WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
 
+-- Backing index for cross-session narrative search (the ``session_search``
+-- builtin and the control plane's operator-facing search).  Without it the
+-- query evaluates ``to_tsvector`` per row over a table that is ~90%
+-- streamed ``llm.delta`` chunks — a full sequential scan per search.
+--
+-- The expression and the type predicate MUST stay identical to
+-- ``surogates.db.narrative``: Postgres only uses an expression index when
+-- the query's expression parses to the same tree, and only uses a partial
+-- index when the query's predicate implies this WHERE clause.  Drift is
+-- silent — it just stops using the index.  ``tests/db/test_narrative_index.py``
+-- pins this statement against the helpers.
+CREATE INDEX IF NOT EXISTS idx_events_narrative_fts
+    ON events USING gin (
+        to_tsvector('simple', COALESCE(data->>'content', '') || ' ' || COALESCE(data->'message'->>'content', '') || ' ' || COALESCE(data->>'recap', '') || ' ' || COALESCE(data->>'summary', ''))
+    )
+    WHERE type IN ('user.message', 'llm.response', 'tool.result', 'turn.summary', 'iteration.summary');
+
 -- Per-tenant audit attribution.
 -- ``agent_id`` is nullable so emitters with no per-tenant context
 -- (e.g. platform-wide events) can leave it NULL.  The

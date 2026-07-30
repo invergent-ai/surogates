@@ -323,3 +323,267 @@ async def test_system_agent_session_stays_scoped(
     assert result["success"] is True
     assert result["count"] == 1
     assert result["results"][0]["session_id"] == str(own_session.id)
+
+
+# ---------------------------------------------------------------------------
+# What the search can actually reach
+#
+# Each test below pins one defect that made the shipped search silently
+# incomplete: assistant text unreachable, recaps unsearched, a dead result
+# key, role_filter ignored, streamed deltas ranked as matches, and a
+# documented query syntax the implementation discarded.
+# ---------------------------------------------------------------------------
+
+
+async def _search(session_store, org_id, agent_id, principal_id, **args):
+    return json.loads(
+        await _session_search_handler(
+            args,
+            session_store=session_store,
+            tenant=SimpleNamespace(
+                org_id=org_id, user_id=None, service_account_id=principal_id,
+            ),
+            agent_id=agent_id,
+        )
+    )
+
+
+async def _own_session(session_store, session_factory, org_id, agent_id):
+    issued = await issue_service_account_token(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id=agent_id,
+        channel="api",
+    )
+    return issued, session
+
+
+async def test_assistant_replies_are_searchable(session_store, session_factory):
+    """``llm.response`` nests text under ``message``.
+
+    The previous flat ``data->>'content'`` read made every assistant turn
+    invisible, so a query whose words only appear in the agent's own reply
+    returned nothing.
+    """
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-assistant",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "and then?"},
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": "titration reaches equivalence"}},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-assistant", issued.id, query="equivalence",
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["results"][0]["session_id"] == str(session.id)
+
+
+async def test_turn_recaps_are_searchable(session_store, session_factory):
+    """Recaps are the densest narrative stored and were never searched."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-recap",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "ok"},
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.TURN_SUMMARY,
+        {"turn_id": "t1", "recap": "worked through stoichiometry limiting reagents"},
+        )
+
+    result = await _search(
+        session_store, org_id, "agent-recap", issued.id, query="reagents",
+    )
+
+    assert result["count"] == 1
+    assert result["results"][0]["session_id"] == str(session.id)
+
+
+async def test_tool_results_are_searchable_via_content(
+    session_store, session_factory,
+):
+    """Result payloads carry ``content``; the old ``result`` key never existed."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-tool",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "check it"},
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.TOOL_RESULT,
+        {"tool_call_id": "c1", "name": "web_search", "content": "perchlorate solubility table"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-tool", issued.id, query="perchlorate",
+    )
+
+    assert result["count"] == 1
+
+
+async def test_streamed_deltas_never_match(session_store, session_factory):
+    """``llm.delta`` is one row per token chunk — it must stay out of scope."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-delta",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "unrelated prompt"},
+    )
+    await session_store.emit_event(
+        session.id, EventType.LLM_DELTA, {"content": "electronegativity"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-delta", issued.id, query="electronegativity",
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 0
+
+
+async def test_role_filter_restricts_the_searched_events(
+    session_store, session_factory,
+):
+    """``role_filter`` was parsed and then never applied."""
+    org_id = await create_org(session_factory)
+    issued, user_hit = await _own_session(
+        session_store, session_factory, org_id, "agent-roles",
+    )
+    await session_store.emit_event(
+        user_hit.id,
+        EventType.USER_MESSAGE,
+        {"content": "buffer capacity question"},
+    )
+
+    assistant_hit = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id="agent-roles",
+        channel="api",
+    )
+    await session_store.emit_event(
+        assistant_hit.id, EventType.USER_MESSAGE, {"content": "go on"},
+    )
+    await session_store.emit_event(
+        assistant_hit.id,
+        EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": "buffer capacity peaks at the pKa"}},
+    )
+
+    only_user = await _search(
+        session_store, org_id, "agent-roles", issued.id,
+        query="buffer capacity", role_filter="user",
+    )
+    only_assistant = await _search(
+        session_store, org_id, "agent-roles", issued.id,
+        query="buffer capacity", role_filter="assistant",
+    )
+
+    assert {r["session_id"] for r in only_user["results"]} == {str(user_hit.id)}
+    assert {r["session_id"] for r in only_assistant["results"]} == {
+        str(assistant_hit.id)
+    }
+
+
+async def test_unknown_role_filter_is_rejected(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    issued, _ = await _own_session(
+        session_store, session_factory, org_id, "agent-badrole",
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-badrole", issued.id,
+        query="anything", role_filter="user,wizard",
+    )
+
+    assert result["success"] is False
+    assert "wizard" in result["error"]
+
+
+async def test_or_syntax_matches_partial_terms(session_store, session_factory):
+    """The tool documents OR; ``plainto_tsquery`` used to AND everything."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-or",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.USER_MESSAGE,
+        {"content": "we settled on baseten for inference"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-or", issued.id,
+        query="elevenlabs OR baseten OR funding",
+    )
+
+    assert result["count"] == 1
+
+
+async def test_quoted_phrase_requires_the_sequence(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-phrase",
+    )
+    await session_store.emit_event(
+        session.id,
+        EventType.USER_MESSAGE,
+        {"content": "networking inside docker was the blocker"},
+    )
+
+    exact = await _search(
+        session_store, org_id, "agent-phrase", issued.id,
+        query='"docker networking"',
+    )
+    loose = await _search(
+        session_store, org_id, "agent-phrase", issued.id,
+        query="docker networking",
+    )
+
+    assert exact["count"] == 0
+    assert loose["count"] == 1
+
+
+async def test_negation_excludes_a_term(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    issued, python_only = await _own_session(
+        session_store, session_factory, org_id, "agent-neg",
+    )
+    await session_store.emit_event(
+        python_only.id, EventType.USER_MESSAGE, {"content": "ported the python parser"},
+    )
+    both = await session_store.create_session(
+        user_id=None,
+        service_account_id=issued.id,
+        org_id=org_id,
+        agent_id="agent-neg",
+        channel="api",
+    )
+    await session_store.emit_event(
+        both.id, EventType.USER_MESSAGE, {"content": "python and java interop notes"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-neg", issued.id, query="python -java",
+    )
+
+    assert {r["session_id"] for r in result["results"]} == {str(python_only.id)}

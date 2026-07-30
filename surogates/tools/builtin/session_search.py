@@ -27,6 +27,12 @@ from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
+from surogates.db.narrative import (
+    NARRATIVE_ROLE_TYPES,
+    NARRATIVE_SEARCH_TYPES,
+    narrative_tsquery_sql,
+    narrative_tsvector_sql,
+)
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -96,8 +102,18 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
             parts.append(f"[USER]: {content}")
 
         elif event_type == "llm.response":
-            content = data.get("content", "")
+            # Assistant text is nested under ``message`` on every emit path;
+            # the flat read this used to do returned "" for every turn, so
+            # the transcript handed to the summarizer contained user messages
+            # and bare tool names and no agent replies at all.
+            message = data.get("message")
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+            else:
+                content = data.get("content") or ""
             tool_calls = data.get("tool_calls")
+            if not tool_calls and isinstance(message, dict):
+                tool_calls = message.get("tool_calls")
             if tool_calls and isinstance(tool_calls, list):
                 tc_names = []
                 for tc in tool_calls:
@@ -118,21 +134,33 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
 
         elif event_type == "tool.result":
             tool_name = data.get("name", "unknown")
-            content = str(data.get("result", ""))
+            # Result payloads carry ``content``; the ``result`` key this used
+            # to read has never been written, so every tool output rendered
+            # as an empty line.
+            content = str(data.get("content") or "")
             # Truncate long tool outputs
             if len(content) > 500:
                 content = content[:250] + "\n...[truncated]...\n" + content[-250:]
             parts.append(f"[TOOL:{tool_name}]: {content}")
+
+        elif event_type in ("turn.summary", "iteration.summary"):
+            recap = data.get("recap") or data.get("summary") or ""
+            if recap:
+                parts.append(f"[RECAP]: {recap}")
 
         elif event_type == "llm.thinking":
             # Skip thinking events in transcript
             pass
 
         else:
-            # Include other event types generically
-            content = str(data.get("content", data.get("message", "")))
-            if content:
-                parts.append(f"[{event_type.upper()}]: {content}")
+            # Include other event types generically.  ``message`` is a dict on
+            # LLM-shaped payloads, so only render it when it is plain text.
+            raw = data.get("content")
+            if raw is None:
+                candidate = data.get("message")
+                raw = candidate if isinstance(candidate, str) else None
+            if raw:
+                parts.append(f"[{event_type.upper()}]: {raw}")
 
     return "\n\n".join(parts)
 
@@ -450,29 +478,37 @@ async def session_search(
     query = query.strip()
 
     try:
-        # Parse role filter
-        role_list: list[str] | None = None
+        # Narrow the searched event types to the caller's roles, defaulting
+        # to the whole narrative slice.  The type predicate is not optional
+        # decoration: it is what keeps streamed ``llm.delta`` chunks out of
+        # the results AND what lets the partial GIN index apply.
+        type_filter: tuple[str, ...] = NARRATIVE_SEARCH_TYPES
+        unknown_roles: list[str] = []
         if role_filter and role_filter.strip():
-            role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
-
-        # Map role filter to event types
-        type_filter: list[str] | None = None
-        if role_list:
-            type_map = {
-                "user": "user.message",
-                "assistant": "llm.response",
-                "tool": "tool.result",
-            }
-            type_filter = [type_map[r] for r in role_list if r in type_map]
+            selected: list[str] = []
+            for raw_role in role_filter.split(","):
+                role = raw_role.strip().lower()
+                if not role:
+                    continue
+                mapped = NARRATIVE_ROLE_TYPES.get(role)
+                if mapped is None:
+                    unknown_roles.append(role)
+                    continue
+                selected.extend(t for t in mapped if t not in selected)
+            if unknown_roles:
+                return json.dumps({
+                    "success": False,
+                    "error": (
+                        "Unknown role_filter value(s): "
+                        f"{', '.join(sorted(set(unknown_roles)))}. "
+                        f"Valid roles: {', '.join(sorted(NARRATIVE_ROLE_TYPES))}."
+                    ),
+                })
+            if selected:
+                type_filter = tuple(selected)
 
         # Full-text search across events for this org's sessions.
-        # Query all sessions for the authenticated user (same org_id).
-        from surogates.session.events import EventType
-        from sqlalchemy import select, text as sa_text
-        from surogates.db.models import (
-            Event as EventRow,
-            Session as SessionRow,
-        )
+        from sqlalchemy import text as sa_text
 
         raw_results: list[dict[str, Any]] = []
         try:
@@ -497,8 +533,19 @@ async def session_search(
                 hidden_clause = "AND s.channel NOT IN ({})".format(
                     ", ".join(f"'{c}'" for c in _HIDDEN_SESSION_CHANNELS)
                 )
-                # Build full-text search query using PostgreSQL ts_vector
-                # Search event data->>'content' across all sessions for this org
+                # The type predicate is spelled as a literal IN list rather
+                # than a bound array so the planner can prove it implies the
+                # partial index's WHERE clause.  Values come from a closed
+                # constant, never from caller input.
+                type_clause = "AND e.type IN ({})".format(
+                    ", ".join(f"'{t}'" for t in type_filter)
+                )
+                # Full-text search over the narrative slice of the event log.
+                # The tsvector expression and the type predicate are rendered
+                # from surogates.db.narrative so they stay identical to the
+                # backing GIN index — see that module for why drift is silent.
+                tsvector_sql = narrative_tsvector_sql("e.")
+                tsquery_sql = narrative_tsquery_sql("query")
                 fts_query = sa_text(
                     f"""
                     SELECT e.id AS event_id,
@@ -512,19 +559,16 @@ async def session_search(
                            s.title,
                            s.parent_id,
                            s.user_id,
-                           ts_rank(
-                               to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', '')),
-                               plainto_tsquery('english', :query)
-                           ) AS rank
+                           ts_rank({tsvector_sql}, {tsquery_sql}) AS rank
                     FROM events e
                     JOIN sessions s ON s.id = e.session_id
                     WHERE s.org_id = :org_id
                       {principal_clause}
                       {hidden_clause}
+                      {type_clause}
                       AND s.agent_id = :agent_id
                       AND s.status != 'archived'
-                      AND to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', ''))
-                          @@ plainto_tsquery('english', :query)
+                      AND {tsvector_sql} @@ {tsquery_sql}
                     ORDER BY rank DESC
                     LIMIT :limit
                     """
@@ -742,10 +786,15 @@ SESSION_SEARCH_SCHEMA = ToolSchema(
         "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
         "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
         "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "
-        "phrases for exact match (\"docker networking\"), boolean (python NOT java), prefix (deploy*). "
-        "IMPORTANT: Use OR between keywords for best results — FTS5 defaults to AND which misses "
-        "sessions that only mention some terms. If a broad OR query returns nothing, try individual "
-        "keyword searches in parallel. Returns summaries of the top matching sessions.\n\n"
+        "quoted phrases for an exact sequence (\"docker networking\"), and a leading minus to exclude "
+        "a term (python -java). Bare keywords are ANDed, so use OR when a session only needs to "
+        "mention some of your terms.\n\n"
+        "Matching is exact-token and case-insensitive, with no stemming or wildcards: 'deploy' will "
+        "not find 'deployed' and 'deploy*' is not a prefix search. OR the word forms you care about "
+        "(deploy OR deployed OR deployment). This is deliberate — one shared index serves every "
+        "language the platform runs in, so no language's suffix rules are applied to another's.\n\n"
+        "Searches user messages, assistant replies, tool results, and per-turn recaps. "
+        "Returns summaries of the top matching sessions.\n\n"
         "In an ops console session, results span EVERY user of this agent and each result carries "
         "a user_id — attribute those conversations to that user, never to yourself or the person "
         "you are talking to."
@@ -764,8 +813,10 @@ SESSION_SEARCH_SCHEMA = ToolSchema(
             "role_filter": {
                 "type": "string",
                 "description": (
-                    "Optional: only search messages from specific roles (comma-separated). "
-                    "E.g. 'user,assistant' to skip tool outputs."
+                    "Optional: restrict the search to specific roles (comma-separated). "
+                    "One or more of 'user', 'assistant', 'tool', 'summary'. "
+                    "E.g. 'user,assistant' to skip tool outputs, or 'summary' to search "
+                    "only the per-turn recaps. Defaults to all four."
                 ),
             },
             "limit": {
