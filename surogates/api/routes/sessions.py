@@ -882,15 +882,15 @@ async def confirm_disclosure(
     """
     await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
 
-    from surogates.runtime.governance import transparency_config
+    from surogates.runtime.governance import disclosure_config
 
     store = _get_session_store(request)
-    cfg = transparency_config(agent_runtime.governance)
+    cfg = disclosure_config(agent_runtime.governance)
     await store.emit_event(
         session_id,
         EventType.DISCLOSURE_CONFIRMED,
         {
-            "level": cfg["level"],
+            "level": cfg["level"] if cfg else "none",
             "source": "web_banner",
         },
     )

@@ -155,6 +155,30 @@ async def _resolve_slug_to_agent_id(
     return await cache.get(slug)
 
 
+async def resolve_agent_id_soft(request: Request) -> str | None:
+    """Resolve the target agent id from a request, or ``None``.
+
+    The single home of the resolution order (highest precedence first):
+
+    1. ``?agent_id=<id>`` query parameter — explicit, used by Studio
+       and admin tools.
+    2. ``Host`` header subdomain (slug -> agent_id via the cache),
+       skipping the reserved non-agent subdomains.
+
+    Never raises on "not resolvable" — callers choose whether that is
+    a 400 (:func:`agent_runtime_context_dep`) or a graceful fallback
+    (the public transparency endpoint).
+    """
+    agent_id = request.query_params.get("agent_id")
+    if agent_id:
+        return agent_id
+    host = request.headers.get("host", "")
+    slug = host.split(".", 1)[0] if "." in host else None
+    if slug and slug.lower() not in {"www", "api", "localhost"}:
+        return await _resolve_slug_to_agent_id(request, slug)
+    return None
+
+
 async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
     """Resolve the per-request :class:`AgentRuntimeContext`.
 
@@ -172,14 +196,7 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
       "administratively stopped".  This is the lifecycle gate the
       management plane flips on ``stop_agent``.
     """
-    agent_id = request.query_params.get("agent_id")
-
-    if not agent_id:
-        host = request.headers.get("host", "")
-        slug = host.split(".", 1)[0] if "." in host else None
-        if slug and slug.lower() not in {"www", "api", "localhost"}:
-            agent_id = await _resolve_slug_to_agent_id(request, slug)
-
+    agent_id = await resolve_agent_id_soft(request)
     if not agent_id:
         raise HTTPException(400, "no agent_id in request")
 

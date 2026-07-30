@@ -14,48 +14,28 @@ import * as sessionsApi from "@/api/sessions";
 
 type TransparencyLevel = "none" | "basic" | "enhanced" | "full";
 
-// Fallback copies when the server did not send its disclosure text
-// (older runtimes). Deliberately does NOT self-classify the system as
-// "high-risk" — that is an AI Act Art. 6 legal classification these
-// agents do not carry; the levels scale detail, not risk claims. Keep
-// in sync with surogates/governance/transparency.py DISCLOSURE_TEXTS.
-const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }> = {
-  none: {
-    body: "",
-    legal: "",
-  },
-  basic: {
-    body:
-      "You are about to interact with an AI assistant. Replies are " +
-      "machine-generated and may contain errors.",
-    legal:
-      "In accordance with the EU AI Act (Art. 50(1)), you are being " +
-      "informed that this system uses artificial intelligence to process " +
-      "your requests.",
-  },
-  enhanced: {
-    body:
-      "You are about to interact with an AI assistant. Replies are " +
-      "machine-generated, may contain errors, and are logged. The AI " +
-      "follows the operator's usage policy and you can always ask for " +
-      "a human contact.",
-    legal:
-      "In accordance with the EU AI Act (Art. 50(1)), you are being " +
-      "informed that this system uses artificial intelligence and that " +
-      "your conversation is logged.",
-  },
-  full: {
-    body:
-      "You are about to interact with an AI assistant operated on the " +
-      "Surogate platform. Replies are machine-generated, may contain " +
-      "errors, and are logged and policy-governed; a human operator " +
-      "reviews escalations and you can request a human contact at any " +
-      "time.",
-    legal:
-      "This notice is provided under EU AI Act Art. 50(1). Further " +
-      "information about the system and its operator is available on " +
-      "request.",
-  },
+// The disclosure body is server-composed (per-agent) and arrives via
+// the transparency endpoint's `text`; a single generic sentence covers
+// the fallback when it is absent. Only the short legal references are
+// kept per level here — they are UI framing, not the disclosure copy.
+const FALLBACK_BODY =
+  "You are about to interact with an AI assistant. Replies are " +
+  "machine-generated and may contain errors.";
+
+const LEGAL_TEXT: Record<TransparencyLevel, string> = {
+  none: "",
+  basic:
+    "In accordance with the EU AI Act (Art. 50(1)), you are being " +
+    "informed that this system uses artificial intelligence to process " +
+    "your requests.",
+  enhanced:
+    "In accordance with the EU AI Act (Art. 50(1)), you are being " +
+    "informed that this system uses artificial intelligence and that " +
+    "your conversation is logged.",
+  full:
+    "This notice is provided under EU AI Act Art. 50(1). Further " +
+    "information about the system and its operator is available on " +
+    "request.",
 };
 
 interface TransparencyBannerProps {
@@ -77,10 +57,10 @@ export function TransparencyBanner({
 }: TransparencyBannerProps) {
   const [confirming, setConfirming] = useState(false);
 
-  const fallback = DISCLOSURE_TEXT[level] || DISCLOSURE_TEXT.basic;
-  const texts = serverText
-    ? { body: serverText, legal: fallback.legal }
-    : fallback;
+  const texts = {
+    body: serverText || FALLBACK_BODY,
+    legal: LEGAL_TEXT[level] ?? LEGAL_TEXT.basic,
+  };
 
   const handleAccept = async () => {
     setConfirming(true);

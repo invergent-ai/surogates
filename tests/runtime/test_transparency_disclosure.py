@@ -122,6 +122,24 @@ def test_unknown_agent_falls_back_not_errors():
     }
 
 
+def test_master_switch_off_falls_back_to_deployment():
+    client = _make_client(
+        payloads={
+            "agent-1": {
+                "governance": {
+                    "enabled": False,
+                    "transparency": {"enabled": True, "level": "full"},
+                },
+            },
+        },
+        deployment_enabled=True,
+        deployment_level="basic",
+    )
+    body = client.get("/transparency?agent_id=agent-1").json()
+    assert body["enabled"] is True
+    assert body["level"] == "basic"
+
+
 def test_no_agent_uses_deployment_setting():
     client = _make_client(deployment_enabled=True, deployment_level="enhanced")
     body = client.get("/transparency").json()

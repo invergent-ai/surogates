@@ -96,19 +96,9 @@ class GovernanceGate:
         enabled: bool = True,
         egress_policy: EgressPolicy | None = None,
         transparency: TransparencyInterceptor | None = None,
-        allow_list_scope: frozenset[str] | None = None,
     ) -> None:
         self._enabled: bool = enabled
         self._open_policy: bool = (allowed_tools is None and denied_tools is None)
-
-        # Namespace the allow-list governs.  A Studio-authored policy
-        # names built-in tools only, so a tool outside the scope (e.g.
-        # ``mcp__*``, which is governed by MCP-server attachment +
-        # entitlements) must not be rejected by the role gate merely for
-        # not appearing in the list.  Deny-list, egress, sandbox and
-        # argument checks still apply to out-of-scope tools.  ``None``
-        # means the allow-list governs every tool (historic behaviour).
-        self._allow_list_scope: frozenset[str] | None = allow_list_scope
 
         # Initialise AGT engine.
         self._engine = AGTPolicyEngine()
@@ -294,14 +284,16 @@ class GovernanceGate:
                 allowed=False, reason=egress_violation, tool_name=tool_name
             )
 
-        # Open policy: skip role check, only run argument checks.  Tools
-        # outside the allow-list's governed namespace (e.g. MCP tools
-        # under a built-in-tool allow-list) take the same path.
-        out_of_scope = (
-            self._allow_list_scope is not None
-            and tool_name not in self._allow_list_scope
-        )
-        if self._open_policy or out_of_scope:
+        # Open policy: skip role check, only run argument checks.  MCP
+        # tools take the same path — a Studio-authored allow-list names
+        # built-in tools only, and ``mcp__*`` access is governed by its
+        # own plane (per-agent server attachment enforced by the MCP
+        # proxy, plus entitlements), so the role gate must not reject
+        # them for not appearing in the list.  Deny-list, egress,
+        # sandbox and argument checks above still apply to them, and
+        # every non-MCP name stays subject to the allow-list
+        # (fail-closed for built-ins).
+        if self._open_policy or tool_name.startswith("mcp__"):
             violation = self._check_arguments(tool_name, arguments or {})
             if violation:
                 return PolicyDecision(
@@ -602,7 +594,6 @@ class GovernanceGate:
             enabled=self._enabled,
             egress_policy=new_egress,
             transparency=self._transparency,
-            allow_list_scope=self._allow_list_scope,
         )
         composed.freeze()
         return composed

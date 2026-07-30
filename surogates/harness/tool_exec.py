@@ -1218,8 +1218,8 @@ async def execute_single_tool(
     # failure; emits ``policy.allowed`` on success only when
     # ``governance.log_allowed`` is enabled.
     from surogates.governance.events import policy_denied_event
-    from surogates.governance.policy import GovernanceGate
-    gate = governance_gate if governance_gate is not None else GovernanceGate()
+    from surogates.runtime.governance import floor_gate
+    gate = governance_gate if governance_gate is not None else floor_gate()
     decision = gate.check(
         tool_name, tool_args,
         workspace_path=workspace_path,

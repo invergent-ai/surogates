@@ -24,8 +24,9 @@ import pytest
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.governance import (
     build_governance_gate,
+    disclosure_config,
+    floor_gate,
     governance_profile,
-    transparency_config,
 )
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -157,31 +158,52 @@ def test_gate_floor_workspace_containment_survives_profile(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# transparency_config
+# disclosure_config
 # ---------------------------------------------------------------------------
 
 
-def test_transparency_defaults_off():
-    assert transparency_config(None) == {"enabled": False, "level": "none"}
-    assert transparency_config({}) == {"enabled": False, "level": "none"}
+def test_disclosure_none_when_not_explicitly_configured():
+    assert disclosure_config(None) is None
+    assert disclosure_config({}) is None
+    assert disclosure_config({"enabled": True}) is None
 
 
-def test_transparency_disabled_reports_level_none():
-    assert transparency_config(
+def test_disclosure_none_when_policy_master_switch_off():
+    # Studio's master toggle covers the whole governance section — a
+    # switched-off policy falls back to the deployment default instead
+    # of keeping the agent-level disclosure alive behind it.
+    assert disclosure_config({
+        "enabled": False,
+        "transparency": {"enabled": True, "level": "full"},
+    }) is None
+
+
+def test_disclosure_explicit_disabled_beats_fallback():
+    assert disclosure_config(
         {"transparency": {"enabled": False, "level": "full"}},
-    ) == {"enabled": False, "level": "none"}
+    ) == {"enabled": False, "level": "none", "text": ""}
 
 
-def test_transparency_unknown_level_degrades_to_basic_not_none():
-    assert transparency_config(
+def test_disclosure_unknown_level_degrades_to_basic_not_none():
+    cfg = disclosure_config(
         {"transparency": {"enabled": True, "level": "partial"}},
-    ) == {"enabled": True, "level": "basic"}
+    )
+    assert cfg["enabled"] is True
+    assert cfg["level"] == "basic"
+    assert cfg["text"]
 
 
-def test_transparency_valid_level_passes_through():
-    assert transparency_config(
+def test_disclosure_valid_level_passes_through_with_text():
+    cfg = disclosure_config(
         {"transparency": {"enabled": True, "level": "full"}},
-    ) == {"enabled": True, "level": "full"}
+    )
+    assert cfg == {"enabled": True, "level": "full", "text": cfg["text"]}
+    assert "Art. 50" in cfg["text"]
+
+
+def test_gate_without_profile_is_shared_floor():
+    assert build_governance_gate(None) is floor_gate()
+    assert build_governance_gate({"enabled": True}) is floor_gate()
 
 
 # ---------------------------------------------------------------------------

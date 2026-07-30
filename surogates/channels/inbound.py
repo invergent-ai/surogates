@@ -388,6 +388,20 @@ def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Sessions this process has already seen disclosed (or established) —
+# bounded FIFO so a long-lived adapter cannot grow it unboundedly.
+# Purely an optimisation over the session-row message_count check: an
+# eviction or restart costs one extra lookup, never a missed disclosure.
+_DISCLOSED_SESSIONS: dict[str, None] = {}
+_DISCLOSED_SESSIONS_CAP = 4096
+
+
+def _remember_disclosed(key: str) -> None:
+    if len(_DISCLOSED_SESSIONS) >= _DISCLOSED_SESSIONS_CAP:
+        _DISCLOSED_SESSIONS.pop(next(iter(_DISCLOSED_SESSIONS)))
+    _DISCLOSED_SESSIONS[key] = None
+
+
 class ChannelInboundPipeline:
     """Shared inbound message pipeline for all channel adapters.
 
@@ -645,13 +659,6 @@ class ChannelInboundPipeline:
         # Remember in Redis-backed state for thread-gate lookups.
         await deps.state.remember_session(session_key, str(session_id))
 
-        # AI disclosure (EU AI Act Art. 50): on the first contact of a
-        # conversation with a disclosure-enabled agent, the channel user
-        # gets the notice as its own message before any agent output.
-        await self._maybe_send_disclosure(
-            msg, routing=routing, deps=deps, session_id=session_id,
-        )
-
         # ------------------------------------------------------------------
         # /stop — interrupt the running turn OUT-OF-BAND.  A normal message
         # would queue behind the busy worker and never reach it in time (a
@@ -680,6 +687,15 @@ class ChannelInboundPipeline:
                 except Exception:
                     logger.warning("[channels] /stop ack failed", exc_info=True)
             return InboundOutcome.INTERRUPTED
+
+        # AI disclosure (EU AI Act Art. 50): on the first contact of a
+        # conversation with a disclosure-enabled agent, the channel user
+        # gets the notice as its own message before any agent output.
+        # After the /stop gate — a control command interrupts a run, it
+        # does not open a conversation.
+        await self._maybe_send_disclosure(
+            msg, routing=routing, deps=deps, session_id=session_id,
+        )
 
         # While a question is pending, the platforms diverge on what a plain
         # reply means — see _intercept_pending_input.
@@ -934,11 +950,15 @@ class ChannelInboundPipeline:
         """Deliver the AI disclosure on a conversation's first contact.
 
         Fires only for agents whose runtime-config governance carries an
-        enabled transparency block.  "First contact" is detected via the
+        enabled disclosure config.  "First contact" is detected via the
         session row's ``message_count`` — zero means no USER_MESSAGE has
         been recorded yet (the pipeline emits it after this hook), which
         also covers resumed-but-never-messaged sessions; a re-disclosure
-        on such a session is harmless, a missing one is not.
+        on such a session is harmless, a missing one is not.  Sessions
+        already seen disclosed by this process are remembered in a
+        bounded in-memory set so established conversations skip the
+        session-row lookup entirely (an eviction or restart merely costs
+        one extra lookup, never a missing disclosure).
 
         Delivery rides ``deps.input_nudge`` (the same seam as the /stop
         acknowledgement), which posts a plain platform message.  On
@@ -952,22 +972,20 @@ class ChannelInboundPipeline:
         if deps.runtime_config is None or deps.input_nudge is None:
             return
         try:
-            from surogates.runtime.governance import (
-                disclosure_text,
-                transparency_config,
-            )
+            from surogates.runtime.governance import disclosure_config
 
             payload = await deps.runtime_config(routing.agent_id) or {}
-            cfg = transparency_config(payload.get("governance"))
-            if not cfg["enabled"]:
+            cfg = disclosure_config(payload.get("governance"))
+            if cfg is None or not cfg["enabled"] or not cfg["text"]:
                 return
-            text = disclosure_text(cfg["level"])
-            if not text:
+            key = str(session_id)
+            if key in _DISCLOSED_SESSIONS:
                 return
             session = await deps.session_store.get_session(session_id)
             if getattr(session, "message_count", 0):
+                _remember_disclosed(key)
                 return
-            await deps.input_nudge(session_id, msg, text)
+            await deps.input_nudge(session_id, msg, cfg["text"])
             await deps.session_store.emit_event(
                 session_id,
                 EventType.DISCLOSURE_PRESENTED,
@@ -977,6 +995,7 @@ class ChannelInboundPipeline:
                     "delivery": "channel_message",
                 },
             )
+            _remember_disclosed(key)
         except Exception:
             logger.warning(
                 "[channels] AI disclosure delivery failed for session %s",
