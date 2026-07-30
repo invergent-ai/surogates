@@ -48,6 +48,7 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._saga_enabled = False
     harness._saga_settings = None
     harness._log_policy_allowed = False
+    harness._governance_gate = None
     harness._memory_manager = None
     harness._memory_nudge_interval = 0
     harness._turns_since_memory = 0

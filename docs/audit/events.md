@@ -117,7 +117,24 @@ in compliance audits.
 | key | type | notes |
 |---|---|---|
 | `tool` | string | Tool name that passed the check. |
-| `check` | string | Which check ran (e.g. `workspace_sandbox`). |
+| `check` | string | Which check ran (e.g. `governance_gate`). |
+
+`disclosure.presented` — the AI disclosure (EU AI Act Art. 50) was
+delivered on a channel at a conversation's first contact.
+
+| key | type | notes |
+|---|---|---|
+| `level` | string | Disclosure level (`basic`/`enhanced`/`full`). |
+| `channel` | string | Channel platform (e.g. `slack`, `telegram`). |
+| `delivery` | string | Delivery mechanism (`channel_message`). |
+
+`disclosure.confirmed` — the end-user acknowledged the disclosure
+(web banner accept).
+
+| key | type | notes |
+|---|---|---|
+| `level` | string | Disclosure level shown (`none` when unconfigured). |
+| `source` | string | Acknowledgement source (`web_banner`). |
 | `timestamp` | number | Emitter-side Unix epoch seconds. |
 
 ### Sandbox lifecycle

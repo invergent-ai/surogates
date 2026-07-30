@@ -4,30 +4,54 @@ Surogates enforces security at every layer: policy-based tool governance, MCP se
 
 ## Policy Engine
 
-Every tool call passes through a policy check before execution. Policies are evaluated in sub-millisecond time and cannot be bypassed by the agent.
+Every tool call passes through the per-wake `GovernanceGate` before
+execution. The gate composes two layers:
 
-### Allow-List Mode
+- **Platform floor** (always on, not configurable): workspace-sandbox
+  path containment for file/terminal tools, shell-variable path
+  hygiene, and argument-level checks. No agent configuration can relax
+  the floor.
+- **Agent policy** (configured in Studio, projected through the
+  runtime config's `governance` blob): `allowed_tools` /
+  `denied_tools` over the built-in tool catalog, plus network egress
+  rules for the web/browser tools.
 
-By default, only explicitly allowed tools can be called. The allow-list is composed at session start from:
+Composition is narrowing-only: allow-lists intersect, deny-lists
+union, the stricter egress default wins. Denials are returned to the
+LLM as tool results and recorded as `policy.denied` events (visible in
+the session's Policies tab); `governance.log_allowed` additionally
+records every pass.
 
-- the tenant's base governance policy (set via the org config / `GovernanceSettings`), and
-- the optional `allowed_tools` / `denied_tools` declared on the `AgentDef` row.
+The allow-list governs the **built-in** tool catalog. MCP tools
+(`mcp__*`) are governed by their own plane — per-agent MCP server
+attachment enforced by the MCP proxy, plus package entitlements — so a
+built-in allow-list does not reject them.
 
-The composed gate is **frozen** at session start; the agent cannot widen its own allow-list mid-session.
+### AI disclosure (EU AI Act Art. 50)
 
-### Attribute-Based Access Control (ABAC)
+Per-agent disclosure is part of the agent policy
+(`policy.transparency`, levels `none|basic|enhanced|full`):
 
-Fine-grained rules based on attributes allow precise control:
-
-- "Allow `refund_user` only if `user_status == verified` AND `amount < 1000`"
-- "Allow `terminal` only if `command` does not match `rm -rf`"
-- "Allow `web_search` only during business hours"
-
-ABAC rules can reference tool arguments, user attributes (role, group membership), session attributes (channel, model), and time-based conditions.
+- the public `GET /v1/transparency` endpoint serves the per-agent
+  config (query param or Host-subdomain resolution) with a
+  deployment-settings fallback, and the web SPA renders the banner
+  from it;
+- adapter channels (Slack, Telegram, WhatsApp) deliver the disclosure
+  text as the first message of every new conversation, recorded as a
+  `disclosure.presented` event. Delivery rides each platform's
+  `post_input_nudge`; a platform without one (e.g. the Teams stub)
+  silently cannot disclose, so do not enable such a channel for a
+  disclosure-required agent;
+- the web banner's accept action persists a `disclosure.confirmed`
+  event on the session log, giving deployers per-session evidence.
 
 ### Policy Immutability
 
-Policies are **frozen at session start**. The agent cannot modify its own policy during execution. This prevents prompt injection attacks that attempt to weaken governance mid-session.
+The composed gate is **frozen** for the wake. The agent cannot modify
+its own policy during execution, which blocks prompt-injection
+attempts to weaken governance mid-session. Policy edits in Studio
+reach live sessions on their next wake via the runtime-config
+invalidation channel.
 
 ## Trust Boundaries
 
@@ -41,19 +65,37 @@ Surogates enforces a three-component isolation model:
 
 The structural fix for prompt injection: credentials and tenant data are never reachable from the sandbox where the LLM's generated code runs.
 
-## Sandbox Network Isolation
+## Network controls
 
-Kubernetes NetworkPolicy restricts sandbox pod egress:
+There is no single network switch. Three independent planes govern
+outbound traffic, and an operator needs all three to reason about what
+an agent can reach:
 
-| Allowed | Denied |
-|---|---|
-| MCP proxy (for external tool calls with credential injection) | Internet |
-| Garage S3 API (for workspace file I/O) | Database (PostgreSQL) |
-| | Redis |
-| | API server |
-| | Other sandbox pods |
+1. **Agent web/browser egress** (Studio policy): domain/port allow/deny
+   rules enforced by the governance gate on the URL arguments of
+   `web_search`, `web_extract`, `web_crawl` and `browser_navigate`.
+   `default_action: deny` with no allow rules blocks those tools'
+   requests. It governs nothing else — in particular it does **not**
+   stop `terminal` from running `curl`, nor MCP calls, nor coding
+   agents. Restrict those by denying the tool or detaching the MCP
+   server.
+2. **Terminal sandbox allowlist**: the terminal tool writes its own
+   sandbox-runtime settings with a fixed domain allowlist (package
+   registries, GitHub, coding-agent vendor APIs) plus any configured
+   SSH hosts. It is independent of the agent policy; the only policy
+   lever over it is denying `terminal` (or `run_coding_agent`).
+3. **MCP server attachment**: tool discovery and calls are scoped to
+   the servers attached to the agent, enforced by the MCP proxy. An
+   agent with no attached servers can reach no MCP endpoint.
 
-This prevents data exfiltration from the sandbox, even if the LLM is compromised.
+Additionally, sessions with configured SSH targets get a per-session
+Kubernetes NetworkPolicy pinning egress to the resolved target IPs;
+targets without a pinned host key fail closed.
+
+A blanket sandbox-egress NetworkPolicy (deny internet/DB/Redis/API
+from sandbox pods) is a deployment concern: this repository ships an
+ingress policy for the sandbox executor, and the cluster deployment is
+responsible for the egress rules appropriate to its environment.
 
 ## Credential Vault
 

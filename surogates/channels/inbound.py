@@ -674,6 +674,36 @@ class ChannelInboundPipeline:
                     logger.warning("[channels] /stop ack failed", exc_info=True)
             return InboundOutcome.INTERRUPTED
 
+        # The agent's runtime config feeds both the disclosure notice and
+        # the allowance gate below. Resolve it at most once per message —
+        # the two used to fetch it independently — and only when a
+        # consumer is actually wired. A failed fetch resolves to ``{}``,
+        # which both consumers read as "nothing configured": disclosure
+        # stays silent and the allowance gate stays open.
+        runtime_payload: dict | None = None
+        if deps.runtime_config is not None and (
+            deps.input_nudge is not None
+            or (identity.user_id is not None and deps.platform_client is not None)
+        ):
+            try:
+                runtime_payload = await deps.runtime_config(routing.agent_id) or {}
+            except Exception:
+                logger.warning(
+                    "[channels] runtime config unavailable for agent %s",
+                    routing.agent_id, exc_info=True,
+                )
+                runtime_payload = {}
+
+        # AI disclosure (EU AI Act Art. 50): on the first contact of a
+        # conversation with a disclosure-enabled agent, the channel user
+        # gets the notice as its own message before any agent output.
+        # After the /stop gate — a control command interrupts a run, it
+        # does not open a conversation.
+        await self._maybe_send_disclosure(
+            msg, routing=routing, deps=deps, session_id=session_id,
+            runtime_payload=runtime_payload,
+        )
+
         # While a question is pending, the platforms diverge on what a plain
         # reply means — see _intercept_pending_input.
         if deps.pending_input is not None and routing.platform in (
@@ -766,13 +796,10 @@ class ChannelInboundPipeline:
                 AllowanceExhaustedError,
             )
 
-            try:
-                runtime_payload = await deps.runtime_config(routing.agent_id) or {}
-            except Exception:
-                # Can't resolve the agent's config → fail OPEN (do not gate).
-                # Only a fetched, capped payload should ever block a turn;
-                # a cache blip must not drop every channel message.
-                runtime_payload = {}
+            # Resolved once above; an unresolvable config is ``{}``, which
+            # fails OPEN (do not gate) — only a fetched, capped payload
+            # should ever block a turn, and a cache blip must not drop
+            # every channel message.
             try:
                 await reserve_allowance(
                     platform_client=deps.platform_client,
@@ -917,6 +944,60 @@ class ChannelInboundPipeline:
             await _nudge("✅ Got it — continuing.")
             return InboundOutcome.DROPPED
         return None
+
+    @staticmethod
+    async def _maybe_send_disclosure(
+        msg: InboundMessage,
+        *,
+        routing: Any,
+        deps: PipelineDeps,
+        session_id: Any,
+        runtime_payload: dict | None,
+    ) -> None:
+        """Deliver the AI disclosure on a conversation's first contact.
+
+        Fires only for agents whose runtime-config governance carries an
+        enabled disclosure config.  "First contact" is detected via the
+        session row's ``message_count`` — zero means no USER_MESSAGE has
+        been recorded yet (the pipeline emits it after this hook), which
+        also covers resumed-but-never-messaged sessions; a re-disclosure
+        on such a session is harmless, a missing one is not.
+
+        Delivery rides ``deps.input_nudge`` (the same seam as the /stop
+        acknowledgement), which posts a plain platform message.  On
+        platforms without ``post_input_nudge`` the nudge is a silent
+        no-op — those channels must not be enabled for
+        disclosure-required agents (see docs/governance-and-security).
+        A ``disclosure.presented`` event records the delivery attempt
+        with level + channel for the per-session audit trail.  Failures
+        never drop the inbound message.
+        """
+        from surogates.runtime.governance import disclosure_config
+
+        if runtime_payload is None or deps.input_nudge is None:
+            return
+        cfg = disclosure_config(runtime_payload.get("governance"))
+        if cfg is None or not cfg["enabled"] or not cfg["text"]:
+            return
+        try:
+            session = await deps.session_store.get_session(session_id)
+            if getattr(session, "message_count", 0):
+                return
+            await deps.input_nudge(session_id, msg, cfg["text"])
+            await deps.session_store.emit_event(
+                session_id,
+                EventType.DISCLOSURE_PRESENTED,
+                {
+                    "level": cfg["level"],
+                    "channel": routing.platform,
+                    "delivery": "channel_message",
+                },
+            )
+        except Exception:
+            logger.warning(
+                "[channels] AI disclosure delivery failed for session %s",
+                session_id, exc_info=True,
+            )
 
     @staticmethod
     async def _record_reply_target(

@@ -48,23 +48,29 @@ class ToolCallResult:
     audit_entry: dict[str, Any] | None = None
 
 
+# Disclosure texts deliberately do NOT self-classify the system (the
+# earlier drafts claimed "high-risk AI system", which is a legal
+# classification under AI Act Art. 6 that a patient-communication or
+# assistant agent does not carry — asserting it in end-user copy is
+# both wrong and harmful). The levels scale detail, not risk claims.
 DISCLOSURE_TEXTS = {
     TransparencyLevel.BASIC: (
-        "You are interacting with an AI system. Outputs are machine-generated "
-        "and may contain errors. (EU AI Act Art. 50(1))"
+        "You are interacting with an AI assistant. Replies are "
+        "machine-generated and may contain errors. (EU AI Act Art. 50(1))"
     ),
     TransparencyLevel.ENHANCED: (
-        "You are interacting with a high-risk AI system. Outputs are "
-        "machine-generated, subject to governance policy enforcement, and "
-        "logged for regulatory audit. Interpretability documentation is "
-        "available on request. (EU AI Act Art. 13, Art. 50(1))"
+        "You are interacting with an AI assistant. Replies are "
+        "machine-generated, may contain errors, and are logged. The AI "
+        "follows the operator's usage policy and you can always ask for "
+        "a human contact. (EU AI Act Art. 50(1))"
     ),
     TransparencyLevel.FULL: (
-        "You are interacting with a high-risk AI system under full "
-        "transparency obligations. All tool calls are policy-governed, "
-        "audited, and subject to human oversight. System accuracy "
-        "declarations and technical documentation are available. "
-        "(EU AI Act Art. 13, Art. 14, Art. 50)"
+        "You are interacting with an AI assistant operated on the "
+        "Surogate platform. Replies are machine-generated, may contain "
+        "errors, and are logged and policy-governed; a human operator "
+        "reviews escalations and you can request a human contact at any "
+        "time. This notice is provided under EU AI Act Art. 50(1); "
+        "further information is available from the operator."
     ),
 }
 
@@ -72,6 +78,16 @@ EMOTION_RECOGNITION_NOTICE = (
     "This system uses emotion recognition technology. You have the right "
     "to be informed when such processing takes place. (EU AI Act Art. 50(3))"
 )
+
+
+def disclosure_text_for(level: TransparencyLevel) -> str:
+    """The disclosure copy for a level, falling back to BASIC.
+
+    Module-level so the runtime's per-agent path
+    (``surogates.runtime.governance.disclosure_text``) and the
+    interceptor share one lookup instead of two.
+    """
+    return DISCLOSURE_TEXTS.get(level, DISCLOSURE_TEXTS[TransparencyLevel.BASIC])
 
 
 class TransparencyInterceptor:
@@ -174,7 +190,7 @@ class TransparencyInterceptor:
 
     def get_disclosure_text(self, level: TransparencyLevel) -> str:
         """Get standard disclosure text for the given transparency level."""
-        return DISCLOSURE_TEXTS.get(level, DISCLOSURE_TEXTS[TransparencyLevel.BASIC])
+        return disclosure_text_for(level)
 
     def is_disclosure_confirmed(self, session_id: str) -> bool:
         """Check if disclosure has been confirmed for a session."""

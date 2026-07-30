@@ -211,6 +211,7 @@ export function ChatPage() {
             <TransparencyBanner
               sessionId={sessionId ?? undefined}
               level={transparencyConfig?.level ?? "basic"}
+              serverText={transparencyConfig?.text}
               onConfirmed={handleDisclosureConfirmed}
               onDeclined={handleDisclosureDeclined}
             />

@@ -372,6 +372,7 @@ class AgentHarness(
         default_model: str = "gpt-4o",
         session_factory: Any | None = None,
         log_policy_allowed: bool = False,
+        governance_gate: Any | None = None,
         summary_client: AsyncOpenAI | None = None,
         summary_model: str = "",
         vision_client: AsyncOpenAI | None = None,
@@ -545,6 +546,11 @@ class AgentHarness(
         # ``policy.denied`` on block.  Off by default (doubles audit
         # volume); sourced from ``settings.governance.log_allowed``.
         self._log_policy_allowed = log_policy_allowed
+
+        # Per-wake governance gate: the platform floor composed with the
+        # agent's runtime-config policy (allow/deny lists + egress).
+        # ``None`` falls back to a floor-only gate inside tool_exec.
+        self._governance_gate = governance_gate
 
         # System prompt cache (shared across wake() calls for the same worker).
         self._system_prompt_cache: SystemPromptCache = (
@@ -1775,6 +1781,7 @@ class AgentHarness(
                     media_gen=self._media_gen,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
+                    governance_gate=self._governance_gate,
                     tool_guardrails=tool_guardrails,
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
@@ -2520,6 +2527,7 @@ class AgentHarness(
                     media_gen=self._media_gen,
                     saga=saga,
                     log_policy_allowed=self._log_policy_allowed,
+                    governance_gate=self._governance_gate,
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
                 )

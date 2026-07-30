@@ -14,50 +14,36 @@ import * as sessionsApi from "@/api/sessions";
 
 type TransparencyLevel = "none" | "basic" | "enhanced" | "full";
 
-const DISCLOSURE_TEXT: Record<TransparencyLevel, { body: string; legal: string }> = {
-  none: {
-    body: "",
-    legal: "",
-  },
-  basic: {
-    body:
-      "You are about to interact with an AI system. All outputs are " +
-      "machine-generated and may contain errors.",
-    legal:
-      "In accordance with the EU AI Act (Art. 50(1)), you are being " +
-      "informed that this system uses artificial intelligence to process " +
-      "your requests.",
-  },
-  enhanced: {
-    body:
-      "You are about to interact with a high-risk AI system. All outputs " +
-      "are machine-generated, subject to governance policy enforcement, " +
-      "and logged for regulatory audit purposes. Interpretability " +
-      "documentation is available on request.",
-    legal:
-      "In accordance with the EU AI Act (Art. 13, Art. 50(1)), you are " +
-      "being informed that this system uses artificial intelligence. " +
-      "This system is classified as high-risk and is subject to " +
-      "transparency and oversight obligations.",
-  },
-  full: {
-    body:
-      "You are about to interact with a high-risk AI system under full " +
-      "transparency obligations. All tool calls are policy-governed, " +
-      "audited, and subject to human oversight. System accuracy " +
-      "declarations and technical documentation are available.",
-    legal:
-      "In accordance with the EU AI Act (Art. 13, Art. 14, Art. 50), " +
-      "you are being informed that this system uses artificial " +
-      "intelligence under full transparency, interpretability, and " +
-      "human oversight requirements. Detailed technical documentation " +
-      "and accuracy declarations are available on request.",
-  },
+// The disclosure body is server-composed (per-agent) and arrives via
+// the transparency endpoint's `text`; a single generic sentence covers
+// the fallback when it is absent. Only the short legal references are
+// kept per level here — they are UI framing, not the disclosure copy.
+const FALLBACK_BODY =
+  "You are about to interact with an AI assistant. Replies are " +
+  "machine-generated and may contain errors.";
+
+const LEGAL_TEXT: Record<TransparencyLevel, string> = {
+  none: "",
+  basic:
+    "In accordance with the EU AI Act (Art. 50(1)), you are being " +
+    "informed that this system uses artificial intelligence to process " +
+    "your requests.",
+  enhanced:
+    "In accordance with the EU AI Act (Art. 50(1)), you are being " +
+    "informed that this system uses artificial intelligence and that " +
+    "your conversation is logged.",
+  full:
+    "This notice is provided under EU AI Act Art. 50(1). Further " +
+    "information about the system and its operator is available on " +
+    "request.",
 };
 
 interface TransparencyBannerProps {
   sessionId?: string;
   level: TransparencyLevel;
+  // Per-agent disclosure text from the transparency endpoint; falls
+  // back to the local level copies when absent (older runtimes).
+  serverText?: string;
   onConfirmed: () => void;
   onDeclined: () => void;
 }
@@ -65,12 +51,16 @@ interface TransparencyBannerProps {
 export function TransparencyBanner({
   sessionId,
   level,
+  serverText,
   onConfirmed,
   onDeclined,
 }: TransparencyBannerProps) {
   const [confirming, setConfirming] = useState(false);
 
-  const texts = DISCLOSURE_TEXT[level] || DISCLOSURE_TEXT.basic;
+  const texts = {
+    body: serverText || FALLBACK_BODY,
+    legal: LEGAL_TEXT[level] ?? LEGAL_TEXT.basic,
+  };
 
   const handleAccept = async () => {
     setConfirming(true);

@@ -284,8 +284,16 @@ class GovernanceGate:
                 allowed=False, reason=egress_violation, tool_name=tool_name
             )
 
-        # Open policy: skip role check, only run argument checks.
-        if self._open_policy:
+        # Open policy: skip role check, only run argument checks.  MCP
+        # tools take the same path — a Studio-authored allow-list names
+        # built-in tools only, and ``mcp__*`` access is governed by its
+        # own plane (per-agent server attachment enforced by the MCP
+        # proxy, plus entitlements), so the role gate must not reject
+        # them for not appearing in the list.  Deny-list, egress,
+        # sandbox and argument checks above still apply to them, and
+        # every non-MCP name stays subject to the allow-list
+        # (fail-closed for built-ins).
+        if self._open_policy or tool_name.startswith("mcp__"):
             violation = self._check_arguments(tool_name, arguments or {})
             if violation:
                 return PolicyDecision(
@@ -455,17 +463,26 @@ class GovernanceGate:
             # role gate.
             return self._check_arguments_direct(tool_name, arguments)
 
-        # Temporarily add the tool to permissions so check_violation
-        # only evaluates argument-level rules.
-        perms = self._engine.state_permissions.get(_DEFAULT_ROLE, set())
+        # Temporarily admit the tool so check_violation evaluates only
+        # argument-level rules, then take it back out.
+        #
+        # ``setdefault`` reuses the same set object across calls (the old
+        # ``.get(role, set())`` + reassign allocated one per tool call on
+        # a process-wide gate), while the discard keeps the set from
+        # growing without bound: this runs before any registry lookup, so
+        # ``tool_name`` is whatever the model emitted — hallucinated names
+        # and every tenant's ``mcp__*`` tools would otherwise accumulate
+        # for the lifetime of the worker.
+        perms = self._engine.state_permissions.setdefault(
+            _DEFAULT_ROLE, set(),
+        )
         perms.add(tool_name)
-        self._engine.state_permissions[_DEFAULT_ROLE] = perms
         try:
-            return self._engine.check_violation(_DEFAULT_ROLE, tool_name, arguments)
+            return self._engine.check_violation(
+                _DEFAULT_ROLE, tool_name, arguments,
+            )
         finally:
             perms.discard(tool_name)
-            if not perms:
-                self._engine.state_permissions.pop(_DEFAULT_ROLE, None)
 
     @staticmethod
     def _check_arguments_direct(
@@ -541,7 +558,14 @@ class GovernanceGate:
         profile_rules = profile_egress.get("rules") or []
         profile_default = profile_egress.get("default_action")
 
-        if self._egress_policy is not None or profile_rules:
+        # ``default_action: deny`` with no rules is a real posture
+        # ("block all outbound") — it must materialise a policy, not
+        # fall through to unchecked egress.
+        if (
+            self._egress_policy is not None
+            or profile_rules
+            or profile_default == "deny"
+        ):
             base_default = (
                 getattr(self._egress_policy, "default_action", None)
                 if self._egress_policy is not None else None

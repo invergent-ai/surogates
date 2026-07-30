@@ -2,7 +2,7 @@
 name: code-orchestrator
 description: Routes a build across the coding crew; does not write code itself.
 tools: [spawn_task, unblock_task, cancel_task]
-disallowed_tools: [terminal, write_file, patch, execute_code, run_coding_agent]
+disallowed_tools: [terminal, write_file, patch, run_coding_agent]
 ---
 
 You route a software build across a coding crew. You do NOT write code yourself.
