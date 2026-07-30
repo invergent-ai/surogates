@@ -523,6 +523,61 @@ async def create_api_session(
     )
 
 
+async def _resolve_pending_question(
+    store, session_id: UUID, text: str,
+) -> int | None:
+    """Convert ``text`` into the answer of a live pending question.
+
+    Returns the response event id when the message resolved a pending
+    ``ask_user_question``, ``None`` when nothing live is pending (no
+    row, the row is older than the tool's wait window, or another
+    surface claimed it first) — the caller then treats the text as a
+    normal message. Never raises: a resolution failure must not block
+    the message path.
+    """
+    from datetime import timezone
+
+    from surogates.channels.platforms.telegram_interactive import (
+        resolve_text_answer,
+    )
+    from surogates.session.interactive_input import (
+        pending_input_for_session,
+        resolve_input_response,
+    )
+    from surogates.tools.builtin.ask_user_question import (
+        ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+    )
+
+    try:
+        pending = await pending_input_for_session(
+            store, session_id=session_id,
+        )
+        if pending is None:
+            return None
+        created_at = pending.get("created_at")
+        if created_at is not None:
+            now = datetime.now(timezone.utc)
+            if created_at.tzinfo is None:
+                now = now.replace(tzinfo=None)
+            age = (now - created_at).total_seconds()
+            if age > ASK_USER_QUESTION_MAX_WAIT_SECONDS:
+                return None
+        return await resolve_input_response(
+            store,
+            session_id=session_id,
+            tool_call_id=pending.get("tool_call_id", ""),
+            responses=resolve_text_answer(
+                pending.get("questions") or [], text,
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Pending-question resolution failed for session %s; "
+            "delivering as a normal message",
+            session_id,
+            exc_info=True,
+        )
+        return None
 
 
 @router.post(
@@ -586,6 +641,23 @@ async def send_message(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(f"Message blocked: {injection_result.explanation}"),
             )
+
+    # A message typed while the agent is blocked on ask_user_question IS
+    # that question's answer.  The slack/telegram inbound pipeline already
+    # resolves this; without the same treatment here a web user who types
+    # instead of using the question form leaves the wake parked on the
+    # tool until its timeout.  Only pure text converts — images and
+    # attachments are new material for the next turn.  The inbox-row
+    # claim is atomic, so racing the form's respond route yields exactly
+    # one response event, and a row older than the tool's own wait
+    # window is ignored (the tool has already timed out; the expire
+    # sweeper only clears terminal sessions).
+    if body.content.strip() and not body.images and not body.attachments:
+        answered = await _resolve_pending_question(
+            store, session_id, body.content,
+        )
+        if answered is not None:
+            return SendMessageResponse(event_id=answered)
 
     # Resolve any attachments against the session workspace.  Filenames
     # are user-controlled too, so they go through the same prompt-

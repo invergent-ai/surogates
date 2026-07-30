@@ -61,6 +61,7 @@ async def test_pending_input_returns_payload_for_newest_pending_item():
     row = SimpleNamespace(
         action_ref={"tool_call_id": "tc1"},
         payload={"questions": [{"prompt": "q"}], "context": "ctx"},
+        created_at=None,
     )
     store = _Store(_DB(_ExecuteResult(row=row)))
 
@@ -70,6 +71,7 @@ async def test_pending_input_returns_payload_for_newest_pending_item():
         "tool_call_id": "tc1",
         "questions": [{"prompt": "q"}],
         "context": "ctx",
+        "created_at": None,
     }
 
 
@@ -83,7 +85,7 @@ async def test_resolve_emits_when_pending_row_claimed():
         responses=[{"question": "q", "answer": "a", "is_other": False}],
     )
 
-    assert ok is True
+    assert ok == 42
     assert store._db.committed is True
     assert store.emitted == [
         (
@@ -107,5 +109,5 @@ async def test_resolve_skips_emit_when_no_pending_row_claimed():
         responses=[],
     )
 
-    assert ok is False
+    assert ok is None
     assert store.emitted == []

@@ -48,6 +48,11 @@ async def pending_input_for_session(
         "tool_call_id": (row.action_ref or {}).get("tool_call_id", ""),
         "questions": payload.get("questions") or [],
         "context": payload.get("context", ""),
+        # The blocked tool waits at most its own timeout; callers that
+        # convert free-text messages into answers use this to ignore
+        # rows orphaned by a tool timeout on a still-active session
+        # (the expire sweeper only clears terminal sessions).
+        "created_at": row.created_at,
     }
 
 
@@ -57,10 +62,17 @@ async def resolve_input_response(
     session_id,
     tool_call_id: str,
     responses: list[dict],
-) -> bool:
+) -> int | None:
+    """Claim the pending inbox item and emit the response event.
+
+    Returns the emitted event id (truthy) when this call resolved the
+    question, ``None`` when there was nothing pending to resolve — the
+    inbox-row update is the atomic claim, so two surfaces racing on the
+    same answer produce exactly one response event.
+    """
     tc_id = valid_tool_call_id(tool_call_id)
     if tc_id is None:
-        return False
+        return None
 
     async with store._sf() as db:
         result = await db.execute(
@@ -81,11 +93,10 @@ async def resolve_input_response(
         updated = bool(getattr(result, "rowcount", 0))
 
     if not updated:
-        return False
+        return None
 
-    await store.emit_event(
+    return await store.emit_event(
         session_id,
         EventType.ASK_USER_QUESTION_RESPONSE,
         {"tool_call_id": tc_id, "responses": responses},
     )
-    return True
