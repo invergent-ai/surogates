@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import traceback
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
@@ -69,7 +68,7 @@ from surogates.harness.slash_skill import (
 )
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
-from surogates.harness.structured_output import generate_structured
+from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.harness.tool_schemas import filter_schemas_for_tenant
@@ -3376,20 +3375,12 @@ class AgentHarness(
 
     @staticmethod
     def _parse_json_object(content: str) -> dict[str, Any]:
-        text = content.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
-        if not text:
-            raise ValueError("User-action rescue judge returned empty content")
-        if not text.startswith("{"):
-            start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                text = text[start:end + 1]
-        parsed = json.loads(text)
-        if not isinstance(parsed, dict):
-            raise ValueError("User-action rescue judge returned non-object JSON")
+        parsed = parse_json_object(content)
+        if parsed is None:
+            raise ValueError(
+                "User-action rescue judge returned non-object or "
+                "unparsable JSON",
+            )
         return parsed
 
     @staticmethod

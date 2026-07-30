@@ -7,11 +7,12 @@ helpers.
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import uuid4
+
+from surogates.harness.structured_output import parse_json_object
 
 DEFAULT_MAX_ITERATIONS = 20
 MAX_MAX_ITERATIONS = 20
@@ -22,7 +23,6 @@ DEFAULT_OUTCOME_RUBRIC = (
 )
 
 _RUBRIC_RE = re.compile(r"\n\s*(?:rubric|criteria)\s*:\s*\n", re.IGNORECASE)
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 EVALUATOR_SYSTEM_PROMPT = (
     "You are a strict outcome evaluator for an agent harness. Evaluate the "
@@ -246,24 +246,7 @@ def parse_outcome_evaluation(raw: str) -> OutcomeEvaluation:
             parse_failed=True,
         )
 
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        newline = text.find("\n")
-        if newline >= 0:
-            text = text[newline + 1 :]
-
-    data: Any = None
-    try:
-        data = json.loads(text)
-    except Exception:
-        match = _JSON_OBJECT_RE.search(text)
-        if match is not None:
-            try:
-                data = json.loads(match.group(0))
-            except Exception:
-                data = None
-
+    data: Any = parse_json_object(raw)
     if not isinstance(data, dict):
         return OutcomeEvaluation(
             result="needs_revision",

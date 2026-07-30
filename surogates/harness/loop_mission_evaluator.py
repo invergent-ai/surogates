@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel
 
-from surogates.harness.structured_output import generate_structured
+from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -215,29 +213,14 @@ async def _research_report_task_done(session_factory: Any, mission_id: Any) -> b
 def _parse_judge_json(raw: str) -> dict[str, Any]:
     """Tolerant JSON extraction for the mission judge.
 
-    Mirrors :meth:`AgentHarness._parse_json_object`: strips Markdown
-    fences, falls back to the first ``{...}`` block in prose, and
-    raises ``ValueError`` on empty / non-object payloads so the caller
-    can surface the error as a ``MissionJudgeParseError``.
+    Delegates to :func:`parse_json_object` (fences, prose around the
+    object, reasoning-model preambles) and raises ``ValueError`` when
+    no object can be extracted so the caller can surface the error as
+    a ``MissionJudgeParseError``.
     """
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    text = text.strip()
-    if not text:
-        raise ValueError("empty payload")
-    # Some reasoning models prefix the JSON with their thought process.
-    # Find the first balanced ``{ ... }`` block if the payload isn't
-    # already a JSON object.
-    if not text.startswith("{"):
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start:end + 1]
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise ValueError(f"judge returned non-object JSON: {type(parsed).__name__}")
+    parsed = parse_json_object(raw)
+    if parsed is None:
+        raise ValueError("judge returned non-object or unparsable JSON")
     return parsed
 
 
@@ -344,7 +327,7 @@ def _build_mission_judge(
             # sees the documented shape (or a parse error, never a
             # silently-malformed dict).
             return _MissionVerdict.model_validate(parsed).model_dump()
-        except (json.JSONDecodeError, ValueError) as exc:
+        except ValueError as exc:
             raise MissionJudgeParseError(str(exc)) from exc
 
     return judge

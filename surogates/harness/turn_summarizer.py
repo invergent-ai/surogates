@@ -22,10 +22,11 @@ expected to omit the summary event rather than fail the turn.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from surogates.harness.structured_output import parse_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -261,16 +262,16 @@ class TurnSummarizer:
         if not content:
             return None
 
-        try:
-            parsed = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
+        # Fence-tolerant: gateways that ignore ``response_format``
+        # return the object wrapped in ```json fences — a strict parse
+        # here once silenced recaps entirely.
+        parsed = parse_json_object(content)
+        if parsed is None:
             logger.warning(
-                "turn summary returned non-JSON for %s: %r",
+                "turn summary returned no JSON object for %s: %r",
                 turn_id,
                 content[:200],
             )
-            return None
-        if not isinstance(parsed, dict):
             return None
 
         recap = str(parsed.get("recap") or "").strip()

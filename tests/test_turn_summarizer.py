@@ -338,3 +338,75 @@ async def test_summarize_turn_drops_internal_workspace_paths() -> None:
     # recap survives; the internal file does not.
     assert result is not None
     assert result.artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_parses_markdown_fenced_json() -> None:
+    # The exact failure shape that silenced recaps in production:
+    # Claude via an OpenAI-compatible gateway ignores
+    # response_format=json_object and wraps the object in a ```json
+    # fence. The recap must still land.
+    payload = (
+        "```json\n"
+        '{\n  "recap": "Quizzed the user on 5 Greek verbs and updated '
+        'the progress tracker.",\n  "artifacts": []\n}\n'
+        "```"
+    )
+    client = _StubClient(payload)
+    summarizer = _turn_summarizer(client)
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="help me practice greek verbs",
+        iteration_summaries=["Quiz user on verbs"],
+        candidate_artifacts=[],
+    )
+
+    assert isinstance(result, TurnSummary)
+    assert result.recap.startswith("Quizzed the user")
+    assert result.artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_parses_json_with_surrounding_prose() -> None:
+    payload = (
+        "Here is the summary you asked for:\n"
+        "```json\n"
+        '{"recap": "Built the report.", "artifacts": '
+        '[{"kind": "file", "label": "report.pdf", "ref": "report.pdf"}]}\n'
+        "```\n"
+        "Let me know if you need anything else."
+    )
+    client = _StubClient(payload)
+    summarizer = _turn_summarizer(client)
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="make me a report",
+        iteration_summaries=["Write report"],
+        candidate_artifacts=[
+            TurnArtifact(kind="file", label="report.pdf", ref="report.pdf"),
+        ],
+    )
+
+    assert isinstance(result, TurnSummary)
+    assert result.recap == "Built the report."
+    assert [a.ref for a in result.artifacts] == ["report.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_returns_none_on_truncated_fenced_json() -> None:
+    # A max_tokens cutoff mid-object stays unparseable — no recap
+    # beats a silently wrong one.
+    payload = '```json\n{"recap": "The agent loaded the PostHog analytics'
+    client = _StubClient(payload)
+    summarizer = _turn_summarizer(client)
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="stats please",
+        iteration_summaries=["Run queries"],
+        candidate_artifacts=[],
+    )
+
+    assert result is None
