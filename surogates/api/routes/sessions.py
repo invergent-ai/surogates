@@ -540,6 +540,7 @@ async def _resolve_pending_question(
     from surogates.channels.platforms.telegram_interactive import (
         resolve_text_answer,
     )
+    from surogates.session.events import EventType as _EventType
     from surogates.session.interactive_input import (
         pending_input_for_session,
         resolve_input_response,
@@ -547,6 +548,13 @@ async def _resolve_pending_question(
     from surogates.tools.builtin.ask_user_question import (
         ASK_USER_QUESTION_MAX_WAIT_SECONDS,
     )
+
+    # Refuse anything close to the tool's own deadline: the row's DB
+    # timestamp and the worker's monotonic deadline run on different
+    # clocks, and near the boundary the safe error is treating a live
+    # question as expired (the message falls through as a normal one),
+    # never the reverse (the message would be swallowed).
+    freshness_cap = ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60
 
     try:
         pending = await pending_input_for_session(
@@ -559,13 +567,26 @@ async def _resolve_pending_question(
             now = datetime.now(timezone.utc)
             if created_at.tzinfo is None:
                 now = now.replace(tzinfo=None)
-            age = (now - created_at).total_seconds()
-            if age > ASK_USER_QUESTION_MAX_WAIT_SECONDS:
+            if (now - created_at).total_seconds() > freshness_cap:
                 return None
+        tool_call_id = pending.get("tool_call_id", "")
+        # The form's respond route emits its response event BEFORE its
+        # best-effort inbox claim; a row left pending after a form
+        # answer must not eat the user's next message.
+        prior = await store.get_events(
+            session_id,
+            after=0,
+            types=[_EventType.ASK_USER_QUESTION_RESPONSE],
+        )
+        if any(
+            (event.data or {}).get("tool_call_id") == tool_call_id
+            for event in prior
+        ):
+            return None
         return await resolve_input_response(
             store,
             session_id=session_id,
-            tool_call_id=pending.get("tool_call_id", ""),
+            tool_call_id=tool_call_id,
             responses=resolve_text_answer(
                 pending.get("questions") or [], text,
             ),
@@ -619,6 +640,12 @@ async def send_message(
     # UI reports "stopped" while deltas for the new turn stream in,
     # regardless of whether the previous terminal state was pause, fail,
     # or completed.
+    # Captured BEFORE the resume below: a pending question on a session
+    # that went terminal belongs to a tool call that already cancelled
+    # itself (pause/fail/complete exit its wait loop), so a message
+    # that resumes the session must be a NORMAL message — converting it
+    # into an answer would feed a consumer that no longer exists.
+    was_active = session.status == "active"
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
@@ -643,16 +670,27 @@ async def send_message(
             )
 
     # A message typed while the agent is blocked on ask_user_question IS
-    # that question's answer.  The slack/telegram inbound pipeline already
-    # resolves this; without the same treatment here a web user who types
-    # instead of using the question form leaves the wake parked on the
-    # tool until its timeout.  Only pure text converts — images and
-    # attachments are new material for the next turn.  The inbox-row
-    # claim is atomic, so racing the form's respond route yields exactly
-    # one response event, and a row older than the tool's own wait
-    # window is ignored (the tool has already timed out; the expire
-    # sweeper only clears terminal sessions).
-    if body.content.strip() and not body.images and not body.attachments:
+    # that question's answer — the same call the Telegram inbound
+    # pipeline makes for plain replies (Slack instead nudges toward its
+    # modal; the web composer stays enabled under the question widget,
+    # so typing must work here or the wake stays parked on the tool
+    # until its timeout).  Guards, in order: only genuinely-active
+    # sessions (a terminal session's tool already cancelled itself);
+    # only real web users (an API service-account client cannot detect
+    # the reinterpretation); only pure text (images/attachments are new
+    # material for the next turn).  The claim is atomic among
+    # claim-first callers; the form's respond route emits first and
+    # claims best-effort, so the helper also refuses when a response
+    # event already exists for the tool call.  Commerce/allowance gates
+    # are deliberately not re-run: the resumed turn spends the
+    # reservation its original message already authorized.
+    if (
+        was_active
+        and not request.url.path.startswith("/v1/api/")
+        and body.content.strip()
+        and not body.images
+        and not body.attachments
+    ):
         answered = await _resolve_pending_question(
             store, session_id, body.content,
         )

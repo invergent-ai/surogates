@@ -23,6 +23,7 @@ from surogates.runtime.context import (
     LLMEndpoint,
     SlashCommandConfig,
 )
+from surogates.runtime.platform_client import PlatformAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +176,11 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
     * ``503`` when the agent exists but ``enabled == False`` —
       "administratively stopped".  This is the lifecycle gate the
       management plane flips on ``stop_agent``.
+    * ``503`` (distinct details) when the runtime config cannot be
+      fetched: "temporarily unavailable" for a transient control-plane
+      failure that survived one retry (retry-worthy), or
+      "authentication misconfigured" when ops rejects the runtime
+      token (not retry-worthy — operations must rotate/rescope it).
     """
     agent_id = request.query_params.get("agent_id")
 
@@ -195,6 +201,20 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
             404,
             f"agent {agent_id} not configured",
         )
+    except PlatformAuthError:
+        # The runtime token was rejected — an operations problem that
+        # never self-heals, so no retry (the platform client's error
+        # taxonomy says page, don't retry). Still a 503 for clients,
+        # but named so nobody mistakes it for a transient blip.
+        logger.error(
+            "surogate-ops rejected the runtime token while resolving "
+            "agent %s — check the token's scope/rotation",
+            agent_id,
+        )
+        raise HTTPException(
+            503,
+            "runtime authentication misconfigured — contact the operator",
+        )
     except Exception:
         # Transient control-plane failure with no cached copy to serve
         # (cold start racing an ops redeploy / a runtime-config version
@@ -212,6 +232,12 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
             raise HTTPException(
                 404,
                 f"agent {agent_id} not configured",
+            )
+        except PlatformAuthError:
+            raise HTTPException(
+                503,
+                "runtime authentication misconfigured — contact the "
+                "operator",
             )
         except Exception:
             raise HTTPException(

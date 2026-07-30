@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import func, select, update
 
 from surogates.db.models import InboxItem
 from surogates.session.events import EventType
+
+logger = logging.getLogger(__name__)
 
 
 def valid_tool_call_id(tool_call_id: str) -> str | None:
@@ -95,8 +99,42 @@ async def resolve_input_response(
     if not updated:
         return None
 
-    return await store.emit_event(
-        session_id,
-        EventType.ASK_USER_QUESTION_RESPONSE,
-        {"tool_call_id": tc_id, "responses": responses},
-    )
+    try:
+        return await store.emit_event(
+            session_id,
+            EventType.ASK_USER_QUESTION_RESPONSE,
+            {"tool_call_id": tc_id, "responses": responses},
+        )
+    except Exception:
+        # The claim committed but the response event did not: without a
+        # revert the row reads "responded" while the tool keeps waiting
+        # and no later attempt can convert — a wedged question. Putting
+        # the row back lets the caller fall back to a normal message
+        # and the user answer again via any surface.
+        try:
+            async with store._sf() as db:
+                await db.execute(
+                    update(InboxItem)
+                    .where(
+                        InboxItem.session_id == session_id,
+                        InboxItem.kind == "input_required",
+                        InboxItem.action_ref["tool_call_id"].as_string()
+                        == tc_id,
+                        InboxItem.status == "responded",
+                    )
+                    .values(
+                        status="pending",
+                        responded_at=None,
+                        updated_at=func.now(),
+                    ),
+                )
+                await db.commit()
+        except Exception:
+            logger.warning(
+                "Failed to revert claim for tool_call_id=%s after emit "
+                "failure; the question stays claimed until answered via "
+                "the form",
+                tc_id,
+                exc_info=True,
+            )
+        raise

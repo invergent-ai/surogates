@@ -110,3 +110,41 @@ async def test_resolver_404_on_lookup_error_during_retry():
     with pytest.raises(HTTPException) as exc:
         await agent_runtime_context_dep(_Request(cache))
     assert exc.value.status_code == 404
+
+
+from surogates.runtime.platform_client import PlatformAuthError  # noqa: E402
+
+
+async def test_auth_error_is_never_stale_served():
+    cfg = {"agent_id": "a1", "enabled": True}
+    loader = _Loader([cfg, PlatformAuthError("token revoked")])
+    cache = RuntimeConfigCache(loader, ttl_seconds=0.0, stale_grace_seconds=60)
+    assert await cache.get("a1") == cfg
+    with pytest.raises(PlatformAuthError):
+        await cache.get("a1")
+
+
+async def test_resolver_maps_auth_error_to_named_503_without_retry():
+    loader = _Loader([PlatformAuthError("token revoked")])
+    cache = RuntimeConfigCache(loader, ttl_seconds=0.0)
+    with pytest.raises(HTTPException) as exc:
+        await agent_runtime_context_dep(_Request(cache))
+    assert exc.value.status_code == 503
+    assert "authentication misconfigured" in exc.value.detail
+    assert loader.calls == 1  # no retry: the condition never self-heals
+
+
+async def test_failure_backoff_serves_stale_without_reloading():
+    cfg = {"agent_id": "a1", "enabled": True}
+    loader = _Loader([cfg, RuntimeError("down"), RuntimeError("down")])
+    cache = RuntimeConfigCache(
+        loader, ttl_seconds=0.0, stale_grace_seconds=60,
+        failure_backoff_seconds=30.0,
+    )
+    assert await cache.get("a1") == cfg
+    assert await cache.get("a1") == cfg  # refresh fails -> stale served
+    assert loader.calls == 2
+    # Within the backoff window the loader is not re-entered at all.
+    for _ in range(5):
+        assert await cache.get("a1") == cfg
+    assert loader.calls == 2
