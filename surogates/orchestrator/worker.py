@@ -26,7 +26,11 @@ from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
     dimension_allowlist,
 )
-from surogates.runtime.governance import build_governance_gate
+from surogates.runtime.governance import (
+    BOARD_SELF_TOOLS,
+    WORKER_SELF_TOOLS,
+    build_governance_gate,
+)
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -222,9 +226,7 @@ def _filter_effective_tools(
     # ``task_*`` names confused LLMs into calling them at the end of
     # plain chat turns.
     if getattr(session, "task_id", None) is None:
-        result.discard("worker_block")
-        result.discard("worker_complete")
-        result.discard("worker_context")
+        result -= WORKER_SELF_TOOLS
     else:
         # Task workers always get their self-tools, even under a
         # restrictive AgentDef allowlist (e.g. a specialist whose ``tools``
@@ -233,7 +235,7 @@ def _filter_effective_tools(
         # self-tools, not work tools subject to the allowlist — without
         # them a task worker can't hand off a structured result or read
         # its parents' output.
-        result.update({"worker_block", "worker_complete", "worker_context"})
+        result |= WORKER_SELF_TOOLS
 
     # share_note / read_board / expand_note are coordination self-tools,
     # meaningful only inside a coordination group (the spawn paths stamp
@@ -243,11 +245,9 @@ def _filter_effective_tools(
     # sessions, force-added for members even under a restrictive AgentDef
     # allowlist.
     if not (getattr(session, "config", None) or {}).get("context_group_id"):
-        result.discard("share_note")
-        result.discard("read_board")
-        result.discard("expand_note")
+        result -= BOARD_SELF_TOOLS
     else:
-        result.update({"share_note", "read_board", "expand_note"})
+        result |= BOARD_SELF_TOOLS
 
     # idea_tree / dispatch_experiments / merge_experiment are the research
     # coordinator's deterministic spine. They are present only while a

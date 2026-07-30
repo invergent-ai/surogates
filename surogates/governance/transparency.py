@@ -80,6 +80,16 @@ EMOTION_RECOGNITION_NOTICE = (
 )
 
 
+def disclosure_text_for(level: TransparencyLevel) -> str:
+    """The disclosure copy for a level, falling back to BASIC.
+
+    Module-level so the runtime's per-agent path
+    (``surogates.runtime.governance.disclosure_text``) and the
+    interceptor share one lookup instead of two.
+    """
+    return DISCLOSURE_TEXTS.get(level, DISCLOSURE_TEXTS[TransparencyLevel.BASIC])
+
+
 class TransparencyInterceptor:
     """EU AI Act Art. 13/50 transparency enforcement interceptor.
 
@@ -180,7 +190,7 @@ class TransparencyInterceptor:
 
     def get_disclosure_text(self, level: TransparencyLevel) -> str:
         """Get standard disclosure text for the given transparency level."""
-        return DISCLOSURE_TEXTS.get(level, DISCLOSURE_TEXTS[TransparencyLevel.BASIC])
+        return disclosure_text_for(level)
 
     def is_disclosure_confirmed(self, session_id: str) -> bool:
         """Check if disclosure has been confirmed for a session."""

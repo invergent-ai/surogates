@@ -32,38 +32,40 @@ async def transparency_endpoint(request: Request) -> dict:
     not break the chat page — it just falls back.
     """
     cfg = await _agent_disclosure(request)
-    if cfg is not None:
-        if not cfg["enabled"]:
-            return {"enabled": False}
-        return {"enabled": True, "level": cfg["level"], "text": cfg["text"]}
+    if cfg is None:
+        cfg = _deployment_disclosure(request)
+    if cfg is None or not cfg["enabled"]:
+        return {"enabled": False}
+    return {"enabled": True, "level": cfg["level"], "text": cfg["text"]}
 
+
+def _deployment_disclosure(request: Request) -> dict | None:
+    """The deployment-wide fallback disclosure, or ``None`` if unset."""
     settings = getattr(request.app.state, "settings", None)
-    if settings is None:
-        return {"enabled": False}
-    t = getattr(settings.governance, "transparency", None)
-    if t is None or not getattr(t, "enabled", False):
-        return {"enabled": False}
+    transparency = (
+        getattr(settings.governance, "transparency", None)
+        if settings is not None else None
+    )
+    if transparency is None or not getattr(transparency, "enabled", False):
+        return None
     return {
         "enabled": True,
-        "level": t.level,
-        "text": disclosure_text(t.level),
+        "level": transparency.level,
+        "text": disclosure_text(transparency.level),
     }
 
 
 async def _agent_disclosure(request: Request) -> dict | None:
     """Best-effort per-agent disclosure lookup; ``None`` when unresolved."""
-    try:
-        agent_id = await resolve_agent_id_soft(request)
-    except Exception:  # noqa: BLE001 — slug cache blip: deployment fallback
-        return None
-    if not agent_id:
-        return None
     cache = getattr(request.app.state, "runtime_config_cache", None)
     if cache is None:
         return None
     try:
+        agent_id = await resolve_agent_id_soft(request)
+        if not agent_id:
+            return None
         payload = await cache.get(agent_id)
-    except Exception:  # noqa: BLE001 — unknown agent: deployment fallback
+    except Exception:  # noqa: BLE001 — unknown agent or cache blip: fall back
         return None
     governance = payload.get("governance") if isinstance(payload, dict) else None
     return disclosure_config(governance)

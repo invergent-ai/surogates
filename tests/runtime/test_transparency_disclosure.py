@@ -171,15 +171,13 @@ def _disclosure_deps(
     async def _nudge(session_id, msg, text):
         nudges.append(text)
 
-    async def _runtime_config(agent_id: str) -> dict:
-        return {"governance": governance} if governance is not None else {}
-
-    deps = SimpleNamespace(
-        session_store=store,
-        runtime_config=_runtime_config,
-        input_nudge=_nudge,
-    )
+    deps = SimpleNamespace(session_store=store, input_nudge=_nudge)
     deps._nudges = nudges
+    # The pipeline resolves the runtime payload once per message and
+    # hands it to the hook, so the fixture supplies it directly.
+    deps._payload = (
+        {"governance": governance} if governance is not None else {}
+    )
     return deps
 
 
@@ -198,6 +196,7 @@ async def test_first_contact_sends_disclosure_and_emits_event():
     )
     await ChannelInboundPipeline._maybe_send_disclosure(
         _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+        runtime_payload=deps._payload,
     )
     assert deps._nudges == [disclosure_text("basic")]
     event_call = deps.session_store.emit_event.call_args
@@ -214,6 +213,7 @@ async def test_no_disclosure_on_established_conversation():
     )
     await ChannelInboundPipeline._maybe_send_disclosure(
         _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+        runtime_payload=deps._payload,
     )
     assert deps._nudges == []
     deps.session_store.emit_event.assert_not_awaited()
@@ -225,6 +225,7 @@ async def test_no_disclosure_when_transparency_disabled_or_absent():
         deps = _disclosure_deps(governance=governance)
         await ChannelInboundPipeline._maybe_send_disclosure(
             _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+            runtime_payload=deps._payload,
         )
         assert deps._nudges == []
 
@@ -237,13 +238,24 @@ async def test_disclosure_failure_never_raises():
     deps.session_store.get_session = AsyncMock(side_effect=RuntimeError("db"))
     await ChannelInboundPipeline._maybe_send_disclosure(
         _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+        runtime_payload=deps._payload,
     )
     assert deps._nudges == []
 
 
 @pytest.mark.asyncio
 async def test_disclosure_skipped_without_wiring():
-    deps = SimpleNamespace(runtime_config=None, input_nudge=None)
+    """No nudge seam, or no resolvable config, means no attempt."""
+    deps = SimpleNamespace(input_nudge=None)
     await ChannelInboundPipeline._maybe_send_disclosure(
         _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+        runtime_payload={"governance": {"transparency": {"enabled": True}}},
     )
+    deps = _disclosure_deps(
+        governance={"transparency": {"enabled": True, "level": "basic"}},
+    )
+    await ChannelInboundPipeline._maybe_send_disclosure(
+        _msg(), routing=_routing(), deps=deps, session_id=uuid4(),
+        runtime_payload=None,
+    )
+    assert deps._nudges == []

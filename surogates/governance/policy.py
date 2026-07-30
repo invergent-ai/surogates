@@ -463,17 +463,20 @@ class GovernanceGate:
             # role gate.
             return self._check_arguments_direct(tool_name, arguments)
 
-        # Temporarily add the tool to permissions so check_violation
-        # only evaluates argument-level rules.
-        perms = self._engine.state_permissions.get(_DEFAULT_ROLE, set())
-        perms.add(tool_name)
-        self._engine.state_permissions[_DEFAULT_ROLE] = perms
-        try:
-            return self._engine.check_violation(_DEFAULT_ROLE, tool_name, arguments)
-        finally:
-            perms.discard(tool_name)
-            if not perms:
-                self._engine.state_permissions.pop(_DEFAULT_ROLE, None)
+        # Add the tool to permissions so check_violation evaluates only
+        # argument-level rules, and leave it there: in open-policy mode
+        # the role gate is never consulted, so a resident name cannot
+        # permit anything, and the set is bounded by the tool catalog.
+        # (The previous add/discard pair allocated and mutated a shared
+        # engine on every tool call — the floor gate is process-wide.)
+        perms = self._engine.state_permissions.setdefault(
+            _DEFAULT_ROLE, set(),
+        )
+        if tool_name not in perms:
+            perms.add(tool_name)
+        return self._engine.check_violation(
+            _DEFAULT_ROLE, tool_name, arguments,
+        )
 
     @staticmethod
     def _check_arguments_direct(

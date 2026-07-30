@@ -388,20 +388,6 @@ def build_principal_stamp(*, user_id=None, service_account_id=None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Sessions this process has already seen disclosed (or established) —
-# bounded FIFO so a long-lived adapter cannot grow it unboundedly.
-# Purely an optimisation over the session-row message_count check: an
-# eviction or restart costs one extra lookup, never a missed disclosure.
-_DISCLOSED_SESSIONS: dict[str, None] = {}
-_DISCLOSED_SESSIONS_CAP = 4096
-
-
-def _remember_disclosed(key: str) -> None:
-    if len(_DISCLOSED_SESSIONS) >= _DISCLOSED_SESSIONS_CAP:
-        _DISCLOSED_SESSIONS.pop(next(iter(_DISCLOSED_SESSIONS)))
-    _DISCLOSED_SESSIONS[key] = None
-
-
 class ChannelInboundPipeline:
     """Shared inbound message pipeline for all channel adapters.
 
@@ -688,6 +674,26 @@ class ChannelInboundPipeline:
                     logger.warning("[channels] /stop ack failed", exc_info=True)
             return InboundOutcome.INTERRUPTED
 
+        # The agent's runtime config feeds both the disclosure notice and
+        # the allowance gate below. Resolve it at most once per message —
+        # the two used to fetch it independently — and only when a
+        # consumer is actually wired. A failed fetch resolves to ``{}``,
+        # which both consumers read as "nothing configured": disclosure
+        # stays silent and the allowance gate stays open.
+        runtime_payload: dict | None = None
+        if deps.runtime_config is not None and (
+            deps.input_nudge is not None
+            or (identity.user_id is not None and deps.platform_client is not None)
+        ):
+            try:
+                runtime_payload = await deps.runtime_config(routing.agent_id) or {}
+            except Exception:
+                logger.warning(
+                    "[channels] runtime config unavailable for agent %s",
+                    routing.agent_id, exc_info=True,
+                )
+                runtime_payload = {}
+
         # AI disclosure (EU AI Act Art. 50): on the first contact of a
         # conversation with a disclosure-enabled agent, the channel user
         # gets the notice as its own message before any agent output.
@@ -695,6 +701,7 @@ class ChannelInboundPipeline:
         # does not open a conversation.
         await self._maybe_send_disclosure(
             msg, routing=routing, deps=deps, session_id=session_id,
+            runtime_payload=runtime_payload,
         )
 
         # While a question is pending, the platforms diverge on what a plain
@@ -789,13 +796,10 @@ class ChannelInboundPipeline:
                 AllowanceExhaustedError,
             )
 
-            try:
-                runtime_payload = await deps.runtime_config(routing.agent_id) or {}
-            except Exception:
-                # Can't resolve the agent's config → fail OPEN (do not gate).
-                # Only a fetched, capped payload should ever block a turn;
-                # a cache blip must not drop every channel message.
-                runtime_payload = {}
+            # Resolved once above; an unresolvable config is ``{}``, which
+            # fails OPEN (do not gate) — only a fetched, capped payload
+            # should ever block a turn, and a cache blip must not drop
+            # every channel message.
             try:
                 await reserve_allowance(
                     platform_client=deps.platform_client,
@@ -948,6 +952,7 @@ class ChannelInboundPipeline:
         routing: Any,
         deps: PipelineDeps,
         session_id: Any,
+        runtime_payload: dict | None,
     ) -> None:
         """Deliver the AI disclosure on a conversation's first contact.
 
@@ -956,11 +961,7 @@ class ChannelInboundPipeline:
         session row's ``message_count`` — zero means no USER_MESSAGE has
         been recorded yet (the pipeline emits it after this hook), which
         also covers resumed-but-never-messaged sessions; a re-disclosure
-        on such a session is harmless, a missing one is not.  Sessions
-        already seen disclosed by this process are remembered in a
-        bounded in-memory set so established conversations skip the
-        session-row lookup entirely (an eviction or restart merely costs
-        one extra lookup, never a missing disclosure).
+        on such a session is harmless, a missing one is not.
 
         Delivery rides ``deps.input_nudge`` (the same seam as the /stop
         acknowledgement), which posts a plain platform message.  On
@@ -971,21 +972,16 @@ class ChannelInboundPipeline:
         with level + channel for the per-session audit trail.  Failures
         never drop the inbound message.
         """
-        if deps.runtime_config is None or deps.input_nudge is None:
+        from surogates.runtime.governance import disclosure_config
+
+        if runtime_payload is None or deps.input_nudge is None:
+            return
+        cfg = disclosure_config(runtime_payload.get("governance"))
+        if cfg is None or not cfg["enabled"] or not cfg["text"]:
             return
         try:
-            from surogates.runtime.governance import disclosure_config
-
-            payload = await deps.runtime_config(routing.agent_id) or {}
-            cfg = disclosure_config(payload.get("governance"))
-            if cfg is None or not cfg["enabled"] or not cfg["text"]:
-                return
-            key = str(session_id)
-            if key in _DISCLOSED_SESSIONS:
-                return
             session = await deps.session_store.get_session(session_id)
             if getattr(session, "message_count", 0):
-                _remember_disclosed(key)
                 return
             await deps.input_nudge(session_id, msg, cfg["text"])
             await deps.session_store.emit_event(
@@ -997,7 +993,6 @@ class ChannelInboundPipeline:
                     "delivery": "channel_message",
                 },
             )
-            _remember_disclosed(key)
         except Exception:
             logger.warning(
                 "[channels] AI disclosure delivery failed for session %s",

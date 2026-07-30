@@ -9,6 +9,9 @@ drift apart without one of them failing.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from surogates.runtime.governance import (
@@ -21,6 +24,9 @@ from surogates.runtime.governance import (
 # Mirrored from the producer test, together with the contract id both
 # halves assert — editing the literal on one side only now fails here.
 GOVERNANCE_CONTRACT_ID = "governance-blob/v1"
+# First 16 hex chars of sha256 over the sorted-key JSON of CANONICAL_BLOB,
+# recorded identically in the producer test.
+CANONICAL_BLOB_DIGEST = "fe4aea33015b61b5"
 
 
 CANONICAL_BLOB = {
@@ -40,8 +46,19 @@ CANONICAL_BLOB = {
 }
 
 
-def test_contract_id_matches_the_producer():
-    assert GOVERNANCE_CONTRACT_ID == "governance-blob/v1"
+def test_contract_digest_matches_the_producer():
+    """Pin the blob's content, not just its name.
+
+    Both repos record this digest, so editing the mirrored literal on one
+    side only fails there — a bare ``id == id`` assertion could not catch
+    that.
+    """
+    digest = hashlib.sha256(
+        json.dumps(CANONICAL_BLOB, sort_keys=True).encode(),
+    ).hexdigest()
+    assert (GOVERNANCE_CONTRACT_ID, digest[:16]) == (
+        "governance-blob/v1", CANONICAL_BLOB_DIGEST,
+    )
 
 
 def test_canonical_blob_denies_the_denied_tool():

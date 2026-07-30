@@ -24,8 +24,8 @@ from typing import Any
 
 from surogates.governance.policy import GovernanceGate
 from surogates.governance.transparency import (
-    DISCLOSURE_TEXTS,
     TransparencyLevel,
+    disclosure_text_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,28 +40,39 @@ logger = logging.getLogger(__name__)
 # state (``add_allowed``/``add_denied`` have no production callers).
 _FLOOR_GATE = GovernanceGate()
 
-# Execution-context self-tools an agent policy must not be able to take
-# away. These are not work tools: they are how a session reports its own
-# state and how a stuck one gets unstuck, and the harness already
-# force-adds the first two groups into a worker's schema even under a
-# restrictive AgentDef allowlist (see ``worker._filter_effective_tools``).
-# Letting a policy deny them would put the two layers in conflict and,
-# for the task-lifecycle pair, strand work permanently: a child that
-# called ``worker_block`` can only be resumed by the coordinator calling
-# ``unblock_task`` or ``cancel_task``, so denying those leaves the task
-# blocked forever with a single ``policy.denied`` event as the trace.
+# Execution-context self-tools: how a session reports its own state and
+# how a stuck one gets unstuck, as opposed to work tools.
 #
-# The ops catalog omits these names so Studio cannot offer them and the
-# policy validator rejects them with a clear 422; this set is the
-# runtime's own belt-and-braces for hand-written or legacy blobs.
-PROTECTED_TOOLS: frozenset[str] = frozenset({
-    # Task-worker self-reporting (force-added by the harness).
+# These are the single declaration for both layers that care.
+# ``worker._filter_effective_tools`` strips them from sessions that
+# cannot use them and force-adds them for sessions that can, even under
+# a restrictive AgentDef allowlist; the governance gate refuses to let
+# an agent policy deny them. Keeping one set means adding a fourth
+# group cannot leave the two layers disagreeing.
+WORKER_SELF_TOOLS: frozenset[str] = frozenset({
     "worker_block", "worker_complete", "worker_context",
-    # Coordination-board self-tools (force-added for group members).
+})
+BOARD_SELF_TOOLS: frozenset[str] = frozenset({
     "share_note", "read_board", "expand_note",
-    # The coordinator's only levers to resume or abandon a blocked task.
+})
+# The coordinator's only levers to resume or abandon a blocked task: a
+# child that called ``worker_block`` stays blocked forever without them,
+# so a policy that denied them would strand work with a single
+# ``policy.denied`` event as the trace.
+TASK_LIFECYCLE_TOOLS: frozenset[str] = frozenset({
     "unblock_task", "cancel_task",
 })
+
+# Tools no agent policy may take away. The ops catalog omits these names
+# so Studio cannot offer them and the policy validator rejects them with
+# a clear 422; this set is the runtime's own belt-and-braces for
+# hand-written or legacy blobs.
+PROTECTED_TOOLS: frozenset[str] = (
+    WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS
+)
+
+# The harness disclosure-level vocabulary, straight off the enum.
+_LEVEL_VALUES = {level.value for level in TransparencyLevel}
 
 
 def floor_gate() -> GovernanceGate:
@@ -85,44 +96,22 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 
     profile: dict[str, Any] = {}
 
-    allowed = governance.get("allowed_tools")
-    if isinstance(allowed, list):
-        allowed_names = [t for t in allowed if isinstance(t, str) and t]
-        if allowed_names:
-            # An allow-list must still admit the self-tools, or a task
-            # worker cannot report its own state.
-            profile["allowed_tools"] = sorted(
-                set(allowed_names) | PROTECTED_TOOLS,
-            )
-    elif allowed not in (None, []):
-        logger.warning(
-            "governance.allowed_tools has unexpected type %s; ignoring",
-            type(allowed).__name__,
-        )
+    allowed = _tool_names(governance, "allowed_tools")
+    if allowed:
+        # An allow-list must still admit the self-tools, or a task worker
+        # cannot report its own state.
+        profile["allowed_tools"] = sorted(allowed | PROTECTED_TOOLS)
 
-    denied = governance.get("denied_tools")
-    if isinstance(denied, list):
-        denied_names = [
-            t for t in denied
-            if isinstance(t, str) and t and t not in PROTECTED_TOOLS
-        ]
-        dropped = sorted(
-            t for t in denied
-            if isinstance(t, str) and t in PROTECTED_TOOLS
-        )
-        if dropped:
-            logger.warning(
-                "governance.denied_tools names protected self-tools %s; "
-                "ignoring them (denying these strands blocked work)",
-                dropped,
-            )
-        if denied_names:
-            profile["denied_tools"] = denied_names
-    elif denied not in (None, []):
+    denied = _tool_names(governance, "denied_tools")
+    protected = denied & PROTECTED_TOOLS
+    if protected:
         logger.warning(
-            "governance.denied_tools has unexpected type %s; ignoring",
-            type(denied).__name__,
+            "governance.denied_tools names protected self-tools %s; "
+            "ignoring them (denying these strands blocked work)",
+            sorted(protected),
         )
+    if denied - PROTECTED_TOOLS:
+        profile["denied_tools"] = sorted(denied - PROTECTED_TOOLS)
 
     egress = governance.get("egress")
     if isinstance(egress, dict):
@@ -142,6 +131,24 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
             }
 
     return profile or None
+
+
+def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
+    """Non-empty string tool names under *key*, or an empty set.
+
+    A malformed value never widens the policy: an unusable
+    ``allowed_tools`` becomes "no allow-list" and an unusable
+    ``denied_tools`` simply matches nothing.
+    """
+    value = governance.get(key)
+    if isinstance(value, list):
+        return {t for t in value if isinstance(t, str) and t}
+    if value not in (None, []):
+        logger.warning(
+            "governance.%s has unexpected type %s; ignoring",
+            key, type(value).__name__,
+        )
+    return set()
 
 
 def build_governance_gate(
@@ -201,19 +208,18 @@ def disclosure_config(
     }
 
 
-_LEVEL_VALUES = {level.value for level in TransparencyLevel}
-
-
 def disclosure_text(level: str) -> str:
-    """The disclosure copy for a level, empty for ``none``.
+    """The disclosure copy for a level string, empty for ``none``.
 
-    Unknown levels degrade to the ``basic`` text (never to silence) for
+    Adds string normalisation and the ``none`` case on top of
+    :func:`~surogates.governance.transparency.disclosure_text_for`;
+    unknown levels degrade to the ``basic`` text (never to silence) for
     the same reason ``disclosure_config`` clamps upward.
     """
     normalized = str(level or "").strip().lower()
     if normalized == "none":
         return ""
     try:
-        return DISCLOSURE_TEXTS[TransparencyLevel(normalized)]
-    except (KeyError, ValueError):
-        return DISCLOSURE_TEXTS[TransparencyLevel.BASIC]
+        return disclosure_text_for(TransparencyLevel(normalized))
+    except ValueError:
+        return disclosure_text_for(TransparencyLevel.BASIC)

@@ -28,6 +28,7 @@ from surogates.harness.tool_guardrails import (
     toolguard_synthetic_result,
 )
 from surogates.tools.coerce import coerce_tool_args
+from surogates.runtime.governance import floor_gate
 from surogates.storage.tenant import boundary_workspace_prefix
 
 # ---------------------------------------------------------------------------
@@ -1218,12 +1219,12 @@ async def execute_single_tool(
     # failure; emits ``policy.allowed`` on success only when
     # ``governance.log_allowed`` is enabled.
     from surogates.governance.events import policy_denied_event
-    from surogates.runtime.governance import floor_gate
     gate = governance_gate if governance_gate is not None else floor_gate()
+    # ``session_id`` is only read by the transparency interceptor, which
+    # is never instantiated, so it is not passed: disclosure is delivered
+    # by the channel pipeline, not by blocking tool calls.
     decision = gate.check(
-        tool_name, tool_args,
-        workspace_path=workspace_path,
-        session_id=str(session.id),
+        tool_name, tool_args, workspace_path=workspace_path,
     )
     if not decision.allowed:
         logger.warning(
