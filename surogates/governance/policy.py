@@ -463,20 +463,26 @@ class GovernanceGate:
             # role gate.
             return self._check_arguments_direct(tool_name, arguments)
 
-        # Add the tool to permissions so check_violation evaluates only
-        # argument-level rules, and leave it there: in open-policy mode
-        # the role gate is never consulted, so a resident name cannot
-        # permit anything, and the set is bounded by the tool catalog.
-        # (The previous add/discard pair allocated and mutated a shared
-        # engine on every tool call — the floor gate is process-wide.)
+        # Temporarily admit the tool so check_violation evaluates only
+        # argument-level rules, then take it back out.
+        #
+        # ``setdefault`` reuses the same set object across calls (the old
+        # ``.get(role, set())`` + reassign allocated one per tool call on
+        # a process-wide gate), while the discard keeps the set from
+        # growing without bound: this runs before any registry lookup, so
+        # ``tool_name`` is whatever the model emitted — hallucinated names
+        # and every tenant's ``mcp__*`` tools would otherwise accumulate
+        # for the lifetime of the worker.
         perms = self._engine.state_permissions.setdefault(
             _DEFAULT_ROLE, set(),
         )
-        if tool_name not in perms:
-            perms.add(tool_name)
-        return self._engine.check_violation(
-            _DEFAULT_ROLE, tool_name, arguments,
-        )
+        perms.add(tool_name)
+        try:
+            return self._engine.check_violation(
+                _DEFAULT_ROLE, tool_name, arguments,
+            )
+        finally:
+            perms.discard(tool_name)
 
     @staticmethod
     def _check_arguments_direct(
