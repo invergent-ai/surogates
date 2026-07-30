@@ -14,6 +14,8 @@ This module bridges two layers:
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, Request
 
 from surogates.runtime.context import (
@@ -21,6 +23,8 @@ from surogates.runtime.context import (
     LLMEndpoint,
     SlashCommandConfig,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["agent_runtime_context_dep", "build_agent_runtime_context"]
 
@@ -191,6 +195,30 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
             404,
             f"agent {agent_id} not configured",
         )
+    except Exception:
+        # Transient control-plane failure with no cached copy to serve
+        # (cold start racing an ops redeploy / a runtime-config version
+        # bump). One immediate retry covers the sub-second blip; a
+        # second failure is the client's problem to retry — surface a
+        # retryable 503, never an anonymous 500.
+        logger.warning(
+            "runtime-config fetch failed for agent %s — retrying once",
+            agent_id,
+            exc_info=True,
+        )
+        try:
+            payload = await cache.get(agent_id)
+        except LookupError:
+            raise HTTPException(
+                404,
+                f"agent {agent_id} not configured",
+            )
+        except Exception:
+            raise HTTPException(
+                503,
+                "runtime configuration temporarily unavailable — "
+                "retry shortly",
+            )
 
     ctx = build_agent_runtime_context(payload)
     if not ctx.enabled:

@@ -22,8 +22,11 @@ would need a separate negative-TTL story.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["RuntimeConfigCache"]
 
@@ -41,15 +44,28 @@ class RuntimeConfigCache:
         self,
         loader: Callable[[str], Awaitable[dict]],
         ttl_seconds: float = 1.0,
+        stale_grace_seconds: float = 300.0,
     ) -> None:
         self._loader = loader
         self._ttl = ttl_seconds
+        self._stale_grace = stale_grace_seconds
         self._entries: dict[str, tuple[float, dict]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global = asyncio.Lock()
 
     async def get(self, agent_id: str) -> dict:
-        """Return the cached config, fetching through the loader on miss."""
+        """Return the cached config, fetching through the loader on miss.
+
+        Stale-on-failure: a transient loader error (ops redeploying,
+        network blip, a version bump racing this request) serves the
+        expired entry for up to ``stale_grace_seconds`` past its TTL
+        instead of failing the request — the platform client surfaces
+        network errors unchanged for exactly this policy. The stale
+        entry's timestamp is NOT refreshed, so the next call retries
+        the loader immediately. ``LookupError`` (a definitive 404) is
+        never absorbed: the agent is gone, and it also purges any
+        cached entry so a deleted agent cannot be served stale.
+        """
         now = time.monotonic()
         cached = self._entries.get(agent_id)
         if cached is not None and (now - cached[0]) < self._ttl:
@@ -62,7 +78,25 @@ class RuntimeConfigCache:
             cached = self._entries.get(agent_id)
             if cached is not None and (time.monotonic() - cached[0]) < self._ttl:
                 return cached[1]
-            cfg = await self._loader(agent_id)
+            try:
+                cfg = await self._loader(agent_id)
+            except LookupError:
+                self._entries.pop(agent_id, None)
+                raise
+            except Exception:
+                if (
+                    cached is not None
+                    and (time.monotonic() - cached[0])
+                    < self._ttl + self._stale_grace
+                ):
+                    logger.warning(
+                        "runtime-config refresh failed for agent %s — "
+                        "serving the cached copy",
+                        agent_id,
+                        exc_info=True,
+                    )
+                    return cached[1]
+                raise
             self._entries[agent_id] = (time.monotonic(), cfg)
             return cfg
 
