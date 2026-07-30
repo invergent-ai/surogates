@@ -88,15 +88,6 @@ Supports both standard unified diff and V4A patch format. Includes fuzzy matchin
 | `path` | string | Directory to list |
 | `recursive` | boolean | Include subdirectories (default: false) |
 
-### `execute_code` -- Programmatic Code Execution
-
-Executes code programmatically, enabling agents to call tools from within generated code.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `language` | string | Programming language |
-| `code` | string | Code to execute |
-
 ### `web_search` -- Web Search
 
 | Parameter | Type | Description |

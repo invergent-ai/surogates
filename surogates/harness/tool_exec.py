@@ -1210,7 +1210,7 @@ async def execute_single_tool(
     # Governance check — enforced before the tool is dispatched, for
     # every tool call.  The per-wake *governance_gate* composes the
     # platform floor (workspace path containment via AGT
-    # ExecutionSandbox, path-argument hygiene, argument checks) with the
+    # ExecutionSandbox plus path-argument hygiene) with the
     # agent's configured policy (allow/deny lists + egress) projected
     # from the runtime config.  When no gate was threaded (direct
     # callers, tests) a bare floor gate preserves the historic

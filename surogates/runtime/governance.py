@@ -30,13 +30,38 @@ from surogates.governance.transparency import (
 
 logger = logging.getLogger(__name__)
 
-# The platform floor: open policy (workspace-sandbox path containment,
-# path-argument hygiene and AGT argument checks still run).  Shared
+# The platform floor: open policy — workspace-sandbox path containment
+# and path-argument hygiene still run.  (The AGT engine's dangerous-code
+# screening keys off tool names this harness does not use, so treat the
+# floor as path containment only, not command screening.)  Shared
 # across wakes and used as the tool-path fallback so the per-workspace
 # ExecutionSandbox cache is actually effective — the gate documents its
 # sandbox cache as thread-safe, and the floor carries no mutable policy
 # state (``add_allowed``/``add_denied`` have no production callers).
 _FLOOR_GATE = GovernanceGate()
+
+# Execution-context self-tools an agent policy must not be able to take
+# away. These are not work tools: they are how a session reports its own
+# state and how a stuck one gets unstuck, and the harness already
+# force-adds the first two groups into a worker's schema even under a
+# restrictive AgentDef allowlist (see ``worker._filter_effective_tools``).
+# Letting a policy deny them would put the two layers in conflict and,
+# for the task-lifecycle pair, strand work permanently: a child that
+# called ``worker_block`` can only be resumed by the coordinator calling
+# ``unblock_task`` or ``cancel_task``, so denying those leaves the task
+# blocked forever with a single ``policy.denied`` event as the trace.
+#
+# The ops catalog omits these names so Studio cannot offer them and the
+# policy validator rejects them with a clear 422; this set is the
+# runtime's own belt-and-braces for hand-written or legacy blobs.
+PROTECTED_TOOLS: frozenset[str] = frozenset({
+    # Task-worker self-reporting (force-added by the harness).
+    "worker_block", "worker_complete", "worker_context",
+    # Coordination-board self-tools (force-added for group members).
+    "share_note", "read_board", "expand_note",
+    # The coordinator's only levers to resume or abandon a blocked task.
+    "unblock_task", "cancel_task",
+})
 
 
 def floor_gate() -> GovernanceGate:
@@ -64,7 +89,11 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
     if isinstance(allowed, list):
         allowed_names = [t for t in allowed if isinstance(t, str) and t]
         if allowed_names:
-            profile["allowed_tools"] = allowed_names
+            # An allow-list must still admit the self-tools, or a task
+            # worker cannot report its own state.
+            profile["allowed_tools"] = sorted(
+                set(allowed_names) | PROTECTED_TOOLS,
+            )
     elif allowed not in (None, []):
         logger.warning(
             "governance.allowed_tools has unexpected type %s; ignoring",
@@ -73,7 +102,20 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
 
     denied = governance.get("denied_tools")
     if isinstance(denied, list):
-        denied_names = [t for t in denied if isinstance(t, str) and t]
+        denied_names = [
+            t for t in denied
+            if isinstance(t, str) and t and t not in PROTECTED_TOOLS
+        ]
+        dropped = sorted(
+            t for t in denied
+            if isinstance(t, str) and t in PROTECTED_TOOLS
+        )
+        if dropped:
+            logger.warning(
+                "governance.denied_tools names protected self-tools %s; "
+                "ignoring them (denying these strands blocked work)",
+                dropped,
+            )
         if denied_names:
             profile["denied_tools"] = denied_names
     elif denied not in (None, []):

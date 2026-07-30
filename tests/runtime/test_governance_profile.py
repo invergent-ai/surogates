@@ -55,13 +55,18 @@ def test_profile_no_restrictions_is_none():
 
 
 def test_profile_normalises_lists_and_drops_garbage():
+    from surogates.runtime.governance import PROTECTED_TOOLS
+
     profile = governance_profile({
         "enabled": True,
         "allowed_tools": ["read_file", 42, ""],
         "denied_tools": "terminal",          # wrong type: ignored
         "egress": {"default_action": "allow", "rules": []},  # no-op egress
     })
-    assert profile == {"allowed_tools": ["read_file"]}
+    # Non-string / empty entries are dropped; the execution-context
+    # self-tools are added so an allow-list cannot strand a worker.
+    assert set(profile) == {"allowed_tools"}
+    assert set(profile["allowed_tools"]) == {"read_file"} | PROTECTED_TOOLS
 
 
 def test_profile_keeps_deny_default_egress_without_rules():
