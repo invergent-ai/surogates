@@ -128,9 +128,10 @@ as a free-form answer. There are no tappable buttons on this channel.
 
 ## Ops notes
 
-- Enable the platform on the channels deployment via the runtime config
-  (`channels.whatsapp.enabled: true`); routing rows control which numbers
-  are live.
+- The platform needs no runtime-config flag — it is on by default, because
+  routing rows are the only gate that matters: without one the channel does
+  nothing, and an unknown number fast-acks 200. Set
+  `channels.whatsapp.enabled: false` only to switch it off deliberately.
 - Delivery is a durable outbox: transient failures retry every 30s and
   dead-letter after 30 minutes or on permanent errors.
 - Unknown phone number ids are fast-acked with 200 and no side effects, so

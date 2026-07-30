@@ -733,8 +733,19 @@ Agent env vars: `SUROGATES_WHATSAPP_ENABLED` (the `enabled_env` gate checked at
 than the forms: `_DISPLAY_PHONE` (the Studio `derivedKey`) and `_VERIFY_TOKEN`
 (so the manage view can render the value the operator pastes into Meta).
 
-Process enablement: `channels.whatsapp.enabled: true` in the runtime config. In
-PROD this is the **hand-applied** ConfigMap `surogates-runtime-config`
+**Process enablement: none required.** `WhatsAppChannelSettings.enabled`
+defaults to `True`, unlike every other kind. The per-kind flag is a second gate
+on top of `channel_routing`, and for a BYO-per-tenant channel the routing table
+is already the only gate that matters: without a row the channel does nothing,
+and an unknown `phone_number_id` fast-acks 200 with no side effects by design.
+Requiring the flag bought no safety and cost a hand-applied ConfigMap edit per
+environment — a step easy to forget whose only symptom is a webhook Meta reports
+as unverifiable. Being on costs one mounted route and one 2-second outbox poll
+that finds nothing. `SUROGATES_CHANNELS_WHATSAPP_ENABLED=false` (or
+`channels.whatsapp.enabled: false`) still switches it off.
+
+For reference, the runtime config in PROD is the **hand-applied** ConfigMap
+`surogates-runtime-config`
 (`k8s/surogates-runtime/production/30-runtime-configmap.yaml:189-195`), not a
 chart template. The per-kind `channels.*.enabled` keys in
 `k8s/surogates-runtime/values.yaml:187-190` are inert — no template consumes
