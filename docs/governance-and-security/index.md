@@ -36,11 +36,12 @@ Per-agent disclosure is part of the agent policy
   config (query param or Host-subdomain resolution) with a
   deployment-settings fallback, and the web SPA renders the banner
   from it;
-- adapter channels (Slack, Telegram) deliver the disclosure text as
-  the first message of every new conversation, recorded as a
-  `disclosure.presented` event. Platforms without a
-  `post_input_nudge` implementation (e.g. Teams) cannot deliver it —
-  do not enable such channels for disclosure-required agents;
+- adapter channels (Slack, Telegram, WhatsApp) deliver the disclosure
+  text as the first message of every new conversation, recorded as a
+  `disclosure.presented` event. Delivery rides each platform's
+  `post_input_nudge`; a platform without one (e.g. the Teams stub)
+  silently cannot disclose, so do not enable such a channel for a
+  disclosure-required agent;
 - the web banner's accept action persists a `disclosure.confirmed`
   event on the session log, giving deployers per-session evidence.
 
