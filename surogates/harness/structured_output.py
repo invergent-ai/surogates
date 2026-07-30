@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
-def iter_json_objects(content: Any):
+def iter_json_objects(content: Any) -> Iterator[dict[str, Any]]:
     """Yield every decodable JSON object embedded in raw model text.
 
     Providers that ignore ``response_format={"type": "json_object"}``
@@ -24,6 +25,10 @@ def iter_json_objects(content: Any):
     caller wants a mapping.  A truncated outer object can still yield
     complete objects nested inside it; callers that validate against a
     schema should keep scanning past candidates that fail validation.
+
+    ``content`` is deliberately ``Any``: callers pass provider response
+    attributes straight in, and a missing/None channel means "nothing
+    here", not a programming error.
     """
     if not isinstance(content, str):
         return
@@ -51,7 +56,6 @@ def iter_json_objects(content: Any):
             idx = text.find("{", end)
         else:
             idx = text.find("{", idx + 1)
-    return
 
 
 def parse_json_object(content: Any) -> dict[str, Any] | None:
@@ -255,7 +259,7 @@ def _coerce_structured_result(value: Any, output_model: type[T]) -> T:
         return value
     if isinstance(value, dict):
         return output_model.model_validate(value)
-    parsed = parse_json_object(str(value or ""))
+    parsed = parse_json_object(value if isinstance(value, str) else str(value))
     if parsed is None:
         raise ValueError("model output contains no JSON object")
     return output_model.model_validate(parsed)

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from surogates.harness.structured_output import (
     generate_structured,
+    iter_json_objects,
     parse_json_object,
 )
 
@@ -417,3 +418,49 @@ async def test_fallback_reads_json_from_reasoning_content() -> None:
         )
 
     assert decision == RoutingDecision(route="final", confidence=0.9)
+
+
+def test_iter_json_objects_yields_every_embedded_object() -> None:
+    text = 'draft {"a": 1} then final ```json\n{"a": 2}\n```'
+    assert list(iter_json_objects(text)) == [{"a": 1}, {"a": 2}]
+
+
+def test_iter_json_objects_does_not_rescan_nested_objects() -> None:
+    # The outer object is complete, so its members must not be yielded
+    # again as separate candidates.
+    text = 'noise {"outer": {"inner": 1}} tail'
+    assert list(iter_json_objects(text)) == [{"outer": {"inner": 1}}]
+
+
+async def test_fallback_skips_draft_objects_that_fail_the_schema() -> None:
+    """Leaked reasoning can park a draft object ahead of the answer;
+    the schema is what tells them apart."""
+    llm_client = AsyncOpenAI(api_key="test-key")
+    leaked = (
+        'Let me think. Maybe {"route": "unsure"} — no. Final answer:\n'
+        "```json\n"
+        + json.dumps({"route": "final", "confidence": 0.6})
+        + "\n```"
+    )
+    llm_client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=leaked, refusal=None)
+                )
+            ]
+        )
+    )
+
+    with patch(
+        "surogates.harness.structured_output._try_outlines",
+        AsyncMock(return_value=None),
+    ):
+        decision = await generate_structured(
+            llm_client=llm_client,
+            model="gemma-4-31B",
+            messages=[{"role": "user", "content": "Route this."}],
+            output_model=RoutingDecision,
+        )
+
+    assert decision == RoutingDecision(route="final", confidence=0.6)

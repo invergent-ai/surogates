@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any, Literal
 from uuid import UUID
 
@@ -329,7 +327,7 @@ def _build_mission_judge(
             # sees the documented shape (or a parse error, never a
             # silently-malformed dict).
             return _MissionVerdict.model_validate(parsed).model_dump()
-        except (json.JSONDecodeError, ValueError) as exc:
+        except ValueError as exc:
             raise MissionJudgeParseError(str(exc)) from exc
 
     return judge

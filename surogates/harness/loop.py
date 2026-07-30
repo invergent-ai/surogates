@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import traceback
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
