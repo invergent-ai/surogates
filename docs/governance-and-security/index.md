@@ -64,19 +64,32 @@ Surogates enforces a three-component isolation model:
 
 The structural fix for prompt injection: credentials and tenant data are never reachable from the sandbox where the LLM's generated code runs.
 
-## Sandbox Network Isolation
+## Network controls
 
-Two network controls exist today:
+There is no single network switch. Three independent planes govern
+outbound traffic, and an operator needs all three to reason about what
+an agent can reach:
 
-- **Agent egress rules** (Studio policy): domain/port allow/deny rules
-  enforced by the governance gate on the URL arguments of
-  `web_search`, `web_extract`, `web_crawl` and `browser_navigate`. An
-  egress `default_action: deny` with no allow rules blocks all
-  outbound requests from those tools.
-- **SSH-session NetworkPolicies**: sessions with configured SSH
-  targets get a per-session Kubernetes NetworkPolicy pinning egress to
-  the resolved target IPs; targets without a pinned host key fail
-  closed.
+1. **Agent web/browser egress** (Studio policy): domain/port allow/deny
+   rules enforced by the governance gate on the URL arguments of
+   `web_search`, `web_extract`, `web_crawl` and `browser_navigate`.
+   `default_action: deny` with no allow rules blocks those tools'
+   requests. It governs nothing else — in particular it does **not**
+   stop `terminal` from running `curl`, nor MCP calls, nor coding
+   agents. Restrict those by denying the tool or detaching the MCP
+   server.
+2. **Terminal sandbox allowlist**: the terminal tool writes its own
+   sandbox-runtime settings with a fixed domain allowlist (package
+   registries, GitHub, coding-agent vendor APIs) plus any configured
+   SSH hosts. It is independent of the agent policy; the only policy
+   lever over it is denying `terminal` (or `run_coding_agent`).
+3. **MCP server attachment**: tool discovery and calls are scoped to
+   the servers attached to the agent, enforced by the MCP proxy. An
+   agent with no attached servers can reach no MCP endpoint.
+
+Additionally, sessions with configured SSH targets get a per-session
+Kubernetes NetworkPolicy pinning egress to the resolved target IPs;
+targets without a pinned host key fail closed.
 
 A blanket sandbox-egress NetworkPolicy (deny internet/DB/Redis/API
 from sandbox pods) is a deployment concern: this repository ships an
