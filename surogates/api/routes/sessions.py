@@ -523,6 +523,43 @@ async def create_api_session(
     )
 
 
+async def _resolve_pending_question(
+    store, session_id: UUID, text: str,
+) -> int | None:
+    """Convert ``text`` into the answer of a live pending question.
+
+    Thin route-side wrapper over
+    :func:`surogates.session.interactive_input.try_resolve_text_answer`
+    — the shared helper carries the guard set (freshness, already-
+    answered probe, atomic claim). Returns the response event id, or
+    ``None`` when the text should be delivered as a normal message.
+    Never raises: a resolution failure must not block the message path.
+    """
+    from surogates.session.interactive_input import try_resolve_text_answer
+    from surogates.tools.builtin.ask_user_question import (
+        ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+    )
+
+    try:
+        return await try_resolve_text_answer(
+            store,
+            session_id=session_id,
+            text=text,
+            # Refuse anything close to the tool's own deadline: the
+            # row's DB timestamp and the worker's monotonic deadline
+            # run on different clocks, and near the boundary the safe
+            # error is treating a live question as expired (the message
+            # falls through as a normal one), never the reverse.
+            max_age_seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60,
+        )
+    except Exception:
+        logger.warning(
+            "Pending-question resolution failed for session %s; "
+            "delivering as a normal message",
+            session_id,
+            exc_info=True,
+        )
+        return None
 
 
 @router.post(
@@ -564,6 +601,12 @@ async def send_message(
     # UI reports "stopped" while deltas for the new turn stream in,
     # regardless of whether the previous terminal state was pause, fail,
     # or completed.
+    # Captured BEFORE the resume below: a pending question on a session
+    # that went terminal belongs to a tool call that already cancelled
+    # itself (pause/fail/complete exit its wait loop), so a message
+    # that resumes the session must be a NORMAL message — converting it
+    # into an answer would feed a consumer that no longer exists.
+    was_active = session.status == "active"
     if session.status in ("failed", "paused", "completed"):
         await store.update_session_status(session_id, "active")
         await store.emit_event(session_id, EventType.SESSION_RESUME, {})
@@ -586,6 +629,34 @@ async def send_message(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(f"Message blocked: {injection_result.explanation}"),
             )
+
+    # A message typed while the agent is blocked on ask_user_question IS
+    # that question's answer — the same call the Telegram inbound
+    # pipeline makes for plain replies (Slack instead nudges toward its
+    # modal; the web composer stays enabled under the question widget,
+    # so typing must work here or the wake stays parked on the tool
+    # until its timeout).  Guards, in order: only genuinely-active
+    # sessions (a terminal session's tool already cancelled itself);
+    # only real web users (an API service-account client cannot detect
+    # the reinterpretation); only pure text (images/attachments are new
+    # material for the next turn).  The claim is atomic among
+    # claim-first callers; the form's respond route emits first and
+    # claims best-effort, so the helper also refuses when a response
+    # event already exists for the tool call.  Commerce/allowance gates
+    # are deliberately not re-run: the resumed turn spends the
+    # reservation its original message already authorized.
+    if (
+        was_active
+        and not request.url.path.startswith("/v1/api/")
+        and body.content.strip()
+        and not body.images
+        and not body.attachments
+    ):
+        answered = await _resolve_pending_question(
+            store, session_id, body.content,
+        )
+        if answered is not None:
+            return SendMessageResponse(event_id=answered)
 
     # Resolve any attachments against the session workspace.  Filenames
     # are user-controlled too, so they go through the same prompt-

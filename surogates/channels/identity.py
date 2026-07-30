@@ -159,8 +159,13 @@ async def get_or_create_channel_identity(
         return existing
 
     # Synthetic address namespaced by org so the same platform user id in two
-    # orgs (or two ids differing only by a stripped '@') can't collide; there
-    # is no unique constraint on email, but downstream lookups treat it as a key.
+    # orgs (or two ids differing only by a stripped '@') can't collide.
+    # ``uq_users_org_lower_email`` on (org_id, lower(email)) enforces this,
+    # and downstream lookups treat the address as a key.
+    #
+    # Only '@' is stripped, so an adapter must normalise anything else that
+    # cannot sit in an email local part (e.g. a leading '+' on an E.164 id)
+    # before it reaches here.
     local_part = platform_user_id.lstrip("@")
     email = f"{platform}-{local_part}@{org_id}.channels.surogate.local"
 

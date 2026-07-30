@@ -32,13 +32,16 @@ def multi_session_disabled(config: dict) -> bool:
 #: that claims their outbox rows).  Must match the platforms registered in
 #: :mod:`surogates.channels.platforms` — an outbox row for any other
 #: channel value would never be claimed and sit "pending" forever.
-ADAPTER_CHANNELS = frozenset({"slack", "telegram"})
+ADAPTER_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 
 #: Channels whose platform can render an ``ask_user_question`` prompt
-#: (Slack: Answer button + modal; Telegram: inline keyboard).  Channels
-#: outside this set must not receive content-less ``input_prompt`` outbox
-#: rows — their ``send`` would post an empty message.
-INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram"})
+#: (Slack: Answer button + modal; Telegram: inline keyboard; WhatsApp:
+#: numbered plain text).  A channel OUTSIDE this set gets no
+#: ``input_prompt`` outbox row at all — ``_build_channel_payload`` returns
+#: an empty payload and ``store`` drops it — so the user sees nothing and
+#: the session parks waiting for an answer that can never arrive.  Adding a
+#: channel here therefore REQUIRES a prompt renderer in its ``send``.
+INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 
 #: Channels whose sessions represent a real end-user talking to the
 #: agent — the set that drives agent-user enrollment (``agent_users``)
@@ -48,4 +51,6 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram"})
 #: activity.  ``teams`` is pre-registered for the Phase-2 adapter
 #: (``channels/teams.py`` already pins ``channel='teams'``) so shipping
 #: it cannot silently split the roster from its stats.
-END_USER_CHANNELS = frozenset({"web", "website", "slack", "telegram", "teams"})
+END_USER_CHANNELS = frozenset(
+    {"web", "website", "slack", "telegram", "teams", "whatsapp"}
+)

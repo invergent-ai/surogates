@@ -155,6 +155,8 @@ _SINGLE_SESSION_MARKER = SessionRow.config["single_session"].astext == "true"
 _THREAD_DEST_FIELDS = {
     "slack": ("thread_ts", "slack_thread_key"),
     "telegram": ("message_thread_id", "telegram_thread_key"),
+    # WhatsApp is DM-only and has no threads at all.
+    "whatsapp": (None, None),
 }
 
 
@@ -1162,6 +1164,16 @@ class SessionStore:
                     "chat_id": config.get("telegram_channel_id", ""),
                     thread_dest: config.get(thread_key),
                     "reply_to_message_id": config.get("telegram_reply_to_message_id"),
+                    "channel_identifier": config.get("channel_identifier", ""),
+                }
+            elif channel == "whatsapp":
+                # No thread fields: WhatsApp is DM-only.  No api_version
+                # either — session config is a creation-time snapshot and
+                # never carries routing config, so the Graph-version pin
+                # rides in creds alongside the tenant's phone_number_id.
+                destination = {
+                    "wa_id": config.get("whatsapp_channel_id", ""),
+                    "phone_number_id": config.get("channel_identifier", ""),
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
 

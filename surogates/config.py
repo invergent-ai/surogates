@@ -602,6 +602,28 @@ class WebsiteChannelSettings(ChannelKindSettings):
     model_config = {"env_prefix": "SUROGATES_CHANNELS_WEBSITE_"}
 
 
+class WhatsAppChannelSettings(ChannelKindSettings):
+    """WhatsApp is on by default — unlike the other kinds.
+
+    The per-kind flag is a *second* gate on top of ``channel_routing``, and
+    for WhatsApp the routing table is already the only gate that matters:
+    every tenant brings their own Meta app, so the channel does nothing at
+    all until a routing row exists, and an unknown ``phone_number_id``
+    fast-acks 200 with no side effects by design.  Requiring the flag as
+    well bought no safety and cost a hand-applied ConfigMap edit per
+    environment — a step easy to forget, whose only symptom is a webhook
+    Meta reports as unverifiable.
+
+    Being on costs one mounted route and one outbox poll every 2 s that
+    finds nothing.  ``SUROGATES_CHANNELS_WHATSAPP_ENABLED=false`` still
+    turns it off if a deployment ever needs to.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_WHATSAPP_"}
+
+    enabled: bool = True
+
+
 class ChannelsSettings(BaseSettings):
     """Webhook channel service configuration.
 
@@ -637,6 +659,7 @@ class ChannelsSettings(BaseSettings):
     slack: SlackChannelSettings = Field(default_factory=SlackChannelSettings)
     telegram: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
     website: WebsiteChannelSettings = Field(default_factory=WebsiteChannelSettings)
+    whatsapp: WhatsAppChannelSettings = Field(default_factory=WhatsAppChannelSettings)
 
     def get(self, kind: str, default: Any = None) -> Any:
         """Dict-like access so ``enabled_platforms(settings)`` works.

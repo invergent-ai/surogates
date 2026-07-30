@@ -48,7 +48,11 @@ _POLL_INTERVAL_SECONDS = 1.0
 _LEASE_RENEW_INTERVAL_SECONDS = 30.0
 # Hard cap on how long we keep the worker parked on a single ask call.
 # Past this, we emit a timeout response so the LLM can move on.
-_MAX_WAIT_SECONDS = 30 * 60  # 30 minutes
+# Public: channel/web surfaces that convert free-text messages into
+# answers bound their staleness window to this — an inbox row older
+# than the wait cannot belong to a live tool call.
+ASK_USER_QUESTION_MAX_WAIT_SECONDS = 30 * 60  # 30 minutes
+_MAX_WAIT_SECONDS = ASK_USER_QUESTION_MAX_WAIT_SECONDS
 
 
 ASK_USER_QUESTION_DESCRIPTION = (

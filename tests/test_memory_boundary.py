@@ -18,7 +18,13 @@ def _tok(platform, channel_id, visibility, chat_type="", fallback="fb"):
 
 
 def test_managed_channels():
-    assert MANAGED_CHANNELS == frozenset({"slack", "telegram"})
+    assert MANAGED_CHANNELS == frozenset({"slack", "telegram", "whatsapp"})
+
+
+def test_whatsapp_dm_is_isolated_per_conversation():
+    # WhatsApp has no boundary_token branch, so it takes the unknown-platform
+    # fall-through: per-conversation isolation, never a shared partition.
+    assert _tok("whatsapp", "13557825698", "dm") == "whatsapp:iso:fb"
 
 
 def test_slack_public_shares_one_token():

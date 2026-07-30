@@ -2245,3 +2245,126 @@ class TestCodeRunEditInPlace:
         await dispatcher.deliver_batch(platform)
         # Neither edits — each run posts its own fresh main message.
         assert platform.edits == [None, None]
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp Graph error classification
+# ---------------------------------------------------------------------------
+
+
+class TestGraphErrorClassification:
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "graph error 190 (HTTP 401): Session has expired",
+            "graph error 100 (HTTP 400): Unsupported get request",
+            "graph error 131026 (HTTP 400): Message undeliverable",
+            "graph error 131047 (HTTP 400): Re-engagement message",
+        ],
+    )
+    def test_permanent_graph_errors(self, error):
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(error) is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "graph error 130429 (HTTP 400): Rate limit hit",
+            "graph error 4 (HTTP 400): Application request limit reached",
+            "HTTP 500: internal error",
+            "HTTP 429: too many requests",
+        ],
+    )
+    def test_retryable_graph_errors(self, error):
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(error) is False
+
+    def test_codeless_error_is_retryable(self):
+        # format_graph_error omits the "graph error" prefix when Meta returns
+        # no code, so a code-less error can never match a permanent prefix.
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error("HTTP 400: something odd") is False
+
+    def test_unrelated_error_containing_100_stays_retryable(self):
+        # The matcher is an unanchored substring test shared by every
+        # platform: a bare "100" entry would kill these.
+        from surogates.channels.delivery import is_permanent_delivery_error
+
+        assert is_permanent_delivery_error(
+            "slack rate limited: retry after 1000 seconds",
+        ) is False
+        assert is_permanent_delivery_error(
+            "upload failed: file exceeds 100 MB",
+        ) is False
+
+
+# ---------------------------------------------------------------------------
+# MEDIA: gate — capability-based, not Slack-only
+# ---------------------------------------------------------------------------
+
+
+class _NoSendFilesPlatform(_FakePlatform):
+    """A platform that cannot upload — the negative side of the gate.
+
+    Telegram is this shape today: no ``send_files``, no ``supports_edit``.
+    """
+
+
+class _NoDeletePlatform(_FakeMediaPlatform):
+    """``send_files`` but no ``supports_edit`` and no ``delete_message``.
+
+    WhatsApp's exact combination, and one no platform had before it. The
+    marker-only branch reaches for ``delete_message`` to clear a thinking
+    placeholder; with none posted there is nothing to clear, and the leg
+    must stay inert rather than raising.
+    """
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        # Undo the base class's delete_message so getattr() finds nothing.
+        self.delete_message = None
+
+
+class TestMediaGateIsCapabilityBased:
+    async def test_platform_without_send_files_keeps_the_raw_marker(self):
+        """A marker must never be stripped from a platform that cannot upload
+        it — the user would lose the file reference entirely."""
+        item = _FakeOutboxItem(
+            id=10,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "Here it is. MEDIA:/workspace/report.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _NoSendFilesPlatform()
+        storage = _MediaStorage({"report.pdf": b"%PDF data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        sent_item, _ = platform.send_calls[0]
+        assert sent_item.payload["content"] == (
+            "Here it is. MEDIA:/workspace/report.pdf"
+        )
+
+    async def test_send_files_without_delete_message_is_inert_not_an_error(self):
+        """The marker-only branch must not require delete_message."""
+        item = _FakeOutboxItem(
+            id=11,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+            payload={"content": "MEDIA:/workspace/only.pdf"},
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _NoDeletePlatform(uploaded_ids=["FA2"])
+        storage = _MediaStorage({"only.pdf": b"data"})
+        store = _FakeSessionStore(_MediaSession())
+
+        dispatcher = _media_dispatcher(platform, delivery, storage, store)
+        await dispatcher.deliver_batch(platform)
+
+        assert platform.send_calls == []
+        assert len(platform.send_files_calls) == 1
+        assert delivery.delivered == [(11, "FA2")]
