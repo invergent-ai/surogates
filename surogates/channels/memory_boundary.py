@@ -12,7 +12,7 @@ from __future__ import annotations
 __all__ = ["MANAGED_CHANNELS", "boundary_token", "session_memory_boundary"]
 
 # Channel platforms whose sessions are memory-partitioned by conversation.
-MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram"})
+MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp"})
 
 
 def boundary_token(

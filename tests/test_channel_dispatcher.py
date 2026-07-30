@@ -1048,3 +1048,134 @@ class TestSlackInteractiveSurfaces:
 
         assert r.status_code == 200
         assert pipeline.calls == []
+
+
+# ---------------------------------------------------------------------------
+# GET handshake route (platforms declaring handshake_get)
+# ---------------------------------------------------------------------------
+
+HANDSHAKE_IDENTIFIER = "t1"
+HANDSHAKE_URL = f"/handshaker/{HANDSHAKE_IDENTIFIER}"
+
+# The value _FakeVault.resolve_ref returns for every ref.
+VAULT_VALUE = "fake-token-value"
+
+
+class _HandshakePlatform:
+    """Minimal platform that echoes a GET challenge, like WhatsApp.
+
+    Declares ``handshake_get`` so the dispatcher mounts a GET route on the
+    same path as the POST webhook.
+    """
+
+    kind = "handshaker"
+    topology = "webhook"
+    handshake_get = True
+    descriptor = ChannelDescriptor(
+        vault_refs=lambda ident: {"verify_token": f"handshaker/{ident}/verify_token"},
+        config_keys=(),
+        webhook_registration="manual",
+    )
+
+    def route_path(self, identifier=None) -> str:
+        if identifier is None:
+            return "/handshaker/{tenant}"
+        return f"/handshaker/{identifier}"
+
+    def identifier_of(self, request, body) -> str:
+        return request.path_params["tenant"]
+
+    def verify(self, request, body, *, creds) -> bool | VerificationResult:
+        if request.method == "GET":
+            query = request.query_params
+            if query.get("hub.verify_token") != (creds or {}).get("verify_token"):
+                return VerificationResult(accepted=False)
+            challenge = query.get("hub.challenge", "")
+            if not challenge:
+                return VerificationResult(accepted=False)
+            return VerificationResult(accepted=True, response_body=challenge)
+        return True
+
+    def parse(self, body, *, creds=None, identifier=None) -> InboundMessage | None:
+        return None
+
+    async def send(self, item, *, creds) -> SendResult:
+        return SendResult(success=True)
+
+
+def _make_handshake_app() -> FastAPI:
+    cache = _FakeCache({
+        f"handshaker:{HANDSHAKE_IDENTIFIER}": {
+            "org_id": ORG_ID,
+            "agent_id": AGENT_ID,
+            "config": {},
+        },
+    })
+    app, _platform, _cache, _vault, _pipeline = _make_app(
+        platform=_HandshakePlatform(), cache=cache,
+    )
+    return app
+
+
+async def _get(app: FastAPI, path: str, params: dict):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="https://test") as c:
+        return await c.get(path, params=params)
+
+
+async def test_get_handshake_echoes_challenge():
+    app = _make_handshake_app()
+    r = await _get(app, HANDSHAKE_URL, {
+        "hub.mode": "subscribe",
+        "hub.verify_token": VAULT_VALUE,
+        "hub.challenge": "1158201444",
+    })
+    assert r.status_code == 200
+    assert r.text == "1158201444"
+
+
+async def test_get_handshake_rejects_bad_token_with_401():
+    app = _make_handshake_app()
+    r = await _get(app, HANDSHAKE_URL, {
+        "hub.mode": "subscribe",
+        "hub.verify_token": "wrong",
+        "hub.challenge": "x",
+    })
+    assert r.status_code == 401
+
+
+async def test_get_handshake_unknown_tenant_fast_acks_200_empty():
+    """Preserves the no-liveness-oracle property; the provider reads the
+    empty body as a failed challenge, which is the correct outcome."""
+    app = _make_handshake_app()
+    r = await _get(app, "/handshaker/unknown", {
+        "hub.mode": "subscribe",
+        "hub.verify_token": VAULT_VALUE,
+        "hub.challenge": "x",
+    })
+    assert r.status_code == 200
+    assert r.text == ""
+
+
+async def test_platform_without_handshake_get_has_no_get_route():
+    """Slack/Telegram must not gain a GET route."""
+    app, _platform, _cache, _vault, _pipeline = _make_app()
+    r = await _get(app, KNOWN_URL, {})
+    assert r.status_code == 405
+
+
+async def test_get_handshake_does_not_reach_the_pipeline():
+    cache = _FakeCache({
+        f"handshaker:{HANDSHAKE_IDENTIFIER}": {
+            "org_id": ORG_ID, "agent_id": AGENT_ID, "config": {},
+        },
+    })
+    app, _platform, _cache, _vault, pipeline = _make_app(
+        platform=_HandshakePlatform(), cache=cache,
+    )
+    await _get(app, HANDSHAKE_URL, {
+        "hub.mode": "subscribe",
+        "hub.verify_token": VAULT_VALUE,
+        "hub.challenge": "abc",
+    })
+    assert pipeline.calls == []

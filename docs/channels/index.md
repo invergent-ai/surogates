@@ -9,6 +9,7 @@ There is no CLI. All user interaction happens through channels. A channel is an 
 | **[Web](web.md)** | Browser-based chat UI with real-time streaming, session management, and workspace browsing |
 | **[Slack](slack.md)** | Socket Mode integration with DMs, @mentions, threading, file attachments, and multi-workspace support |
 | **[Telegram](telegram.md)** | Bot API integration with DMs, groups, forum topics, media handling, and fallback IP transport for restricted networks |
+| **[WhatsApp](whatsapp.md)** | Official WhatsApp Business Cloud API integration. One-to-one chats only, per-tenant Meta App, media both ways, read receipts and typing. Reactive: the agent never initiates, so Meta's 24-hour window never applies. |
 | **[Website](website.md)** | Public-website widget channel for anonymous visitors. Configured at deploy time via `website.*` settings — publishable-key auth, configured CORS allow-list, CSRF-protected cookie session, optional per-session message cap. |
 | **[API](api.md)** | Fire-and-forget programmatic channel for synthetic data pipelines and batch jobs. Service-account auth, idempotent submission, results read from database tables. |
 

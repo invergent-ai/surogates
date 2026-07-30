@@ -72,6 +72,18 @@ _PERMANENT_DELIVERY_ERRORS: frozenset[str] = frozenset({
     "bot was blocked by the user",
     "user is deactivated",
     "bot was kicked",
+    # WhatsApp Cloud API (Meta Graph) — DELIMITED PREFIXES, never bare codes.
+    # This is an unanchored substring test shared by every platform, so a
+    # bare "100" would mark any Slack or Telegram error mentioning "1000
+    # requests" or "100 MB" permanently dead.  Retryable Graph codes
+    # (130429, 4, HTTP 429/5xx) need no entry — retryable is the default,
+    # and a code-less Graph error is formatted without the "graph error"
+    # prefix so it can never match here.
+    "graph error 190 (",     # token expired (subcode 463) or revoked (467)
+    "graph error 100 (",     # bad object id — usually a phone number pasted
+                             # into the Phone Number ID field
+    "graph error 131026 (",  # recipient not on WhatsApp / undeliverable
+    "graph error 131047 (",  # 24-hour customer service window closed
 })
 
 # Give up on an undelivered item once it is older than this, whatever the

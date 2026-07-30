@@ -602,6 +602,10 @@ class WebsiteChannelSettings(ChannelKindSettings):
     model_config = {"env_prefix": "SUROGATES_CHANNELS_WEBSITE_"}
 
 
+class WhatsAppChannelSettings(ChannelKindSettings):
+    model_config = {"env_prefix": "SUROGATES_CHANNELS_WHATSAPP_"}
+
+
 class ChannelsSettings(BaseSettings):
     """Webhook channel service configuration.
 
@@ -637,6 +641,7 @@ class ChannelsSettings(BaseSettings):
     slack: SlackChannelSettings = Field(default_factory=SlackChannelSettings)
     telegram: TelegramChannelSettings = Field(default_factory=TelegramChannelSettings)
     website: WebsiteChannelSettings = Field(default_factory=WebsiteChannelSettings)
+    whatsapp: WhatsAppChannelSettings = Field(default_factory=WhatsAppChannelSettings)
 
     def get(self, kind: str, default: Any = None) -> Any:
         """Dict-like access so ``enabled_platforms(settings)`` works.

@@ -676,7 +676,9 @@ class ChannelInboundPipeline:
 
         # While a question is pending, the platforms diverge on what a plain
         # reply means — see _intercept_pending_input.
-        if deps.pending_input is not None and routing.platform in ("slack", "telegram"):
+        if deps.pending_input is not None and routing.platform in (
+            "slack", "telegram", "whatsapp",
+        ):
             intercepted = await self._intercept_pending_input(
                 msg, routing=routing, deps=deps, session_id=session_id,
             )
