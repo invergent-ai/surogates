@@ -342,9 +342,10 @@ async def test_summarize_turn_drops_internal_workspace_paths() -> None:
 
 @pytest.mark.asyncio
 async def test_summarize_turn_parses_markdown_fenced_json() -> None:
-    # Exact failure shape observed in prod 2026-07-27..30: Claude via an
-    # OpenAI-compatible gateway ignores response_format=json_object and
-    # wraps the object in a ```json fence. The recap must still land.
+    # The exact failure shape that silenced recaps in production:
+    # Claude via an OpenAI-compatible gateway ignores
+    # response_format=json_object and wraps the object in a ```json
+    # fence. The recap must still land.
     payload = (
         "```json\n"
         '{\n  "recap": "Quizzed the user on 5 Greek verbs and updated '

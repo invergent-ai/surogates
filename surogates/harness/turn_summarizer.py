@@ -263,12 +263,12 @@ class TurnSummarizer:
             return None
 
         # Fence-tolerant: gateways that ignore ``response_format``
-        # (Claude via yunwu killed every recap fleet-wide for two days)
-        # return the object wrapped in ```json fences.
+        # return the object wrapped in ```json fences — a strict parse
+        # here once silenced recaps entirely.
         parsed = parse_json_object(content)
         if parsed is None:
             logger.warning(
-                "turn summary returned non-JSON for %s: %r",
+                "turn summary returned no JSON object for %s: %r",
                 turn_id,
                 content[:200],
             )

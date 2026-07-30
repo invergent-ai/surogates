@@ -13,42 +13,55 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
-def parse_json_object(content: Any) -> dict[str, Any] | None:
-    """Best-effort extraction of one JSON object from raw model text.
+def iter_json_objects(content: Any):
+    """Yield every decodable JSON object embedded in raw model text.
 
     Providers that ignore ``response_format={"type": "json_object"}``
     (Claude via OpenAI-compatible gateways, notably) return the object
     wrapped in markdown fences and sometimes surrounded by prose.
-    Accepts the text as-is, fenced, or embedded in prose; returns the
-    first JSON *object* found, or ``None`` when no complete object can
-    be decoded.  Valid JSON that is not an object (array, string, ...)
-    is rejected -- every caller wants a mapping.
+    Accepts the text as-is, fenced, or embedded in prose.  Valid JSON
+    that is not an object (array, string, ...) is skipped -- every
+    caller wants a mapping.  A truncated outer object can still yield
+    complete objects nested inside it; callers that validate against a
+    schema should keep scanning past candidates that fail validation.
     """
     if not isinstance(content, str):
-        return None
+        return
     text = content.strip()
     if not text:
-        return None
+        return
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict):
-        return parsed
-    if parsed is not None:
-        return None
+        pass
+    else:
+        if isinstance(parsed, dict):
+            yield parsed
+        return
     decoder = json.JSONDecoder()
     idx = text.find("{")
     while idx != -1:
         try:
-            candidate, _ = decoder.raw_decode(text, idx)
+            candidate, end = decoder.raw_decode(text, idx)
         except json.JSONDecodeError:
             idx = text.find("{", idx + 1)
             continue
         if isinstance(candidate, dict):
-            return candidate
-        idx = text.find("{", idx + 1)
-    return None
+            yield candidate
+            idx = text.find("{", end)
+        else:
+            idx = text.find("{", idx + 1)
+    return
+
+
+def parse_json_object(content: Any) -> dict[str, Any] | None:
+    """First JSON object embedded in raw model text, or ``None``.
+
+    See :func:`iter_json_objects` for the extraction rules.  First
+    object wins by design -- without a schema there is no way to rank
+    candidates, and clean fenced output has exactly one.
+    """
+    return next(iter_json_objects(content), None)
 
 
 async def generate_structured(
@@ -198,18 +211,18 @@ async def _try_openai_json_mode(
     # ``message.content`` and the JSON we asked for in
     # ``message.reasoning_content`` -- empty content alone isn't a failure
     # if the JSON is sitting in the reasoning channel.  Both channels are
-    # tried: prose in ``content`` no longer masks an object parked in
-    # ``reasoning_content``.
+    # tried, and within each, every embedded object -- leaked reasoning
+    # can contain draft objects before the real answer, and the schema
+    # is the only reliable way to tell them apart.
     for attr in ("content", "reasoning_content"):
-        parsed = parse_json_object(getattr(message, attr, None))
-        if parsed is None:
-            continue
-        try:
-            return output_model.model_validate(parsed)
-        except Exception as exc:
-            logger.debug(
-                "JSON-mode fallback validation failed on %s: %s", attr, exc,
-            )
+        for parsed in iter_json_objects(getattr(message, attr, None)):
+            try:
+                return output_model.model_validate(parsed)
+            except Exception as exc:
+                logger.debug(
+                    "JSON-mode fallback validation failed on %s: %s",
+                    attr, exc,
+                )
     return None
 
 
