@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select, update
 
-from surogates.db.models import InboxItem
+from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -138,3 +139,75 @@ async def resolve_input_response(
                 exc_info=True,
             )
         raise
+
+
+async def response_event_exists(
+    store,
+    *,
+    session_id,
+    tool_call_id: str,
+) -> bool:
+    """Whether a response event was already recorded for the tool call.
+
+    The form's respond route emits its event BEFORE its best-effort
+    inbox claim, so a row can read ``pending`` although the question is
+    answered — converters must not eat the next message for it. One
+    indexed probe (``idx_events_session_type``) instead of scanning the
+    session's response history.
+    """
+    async with store._sf() as db:
+        row = await db.execute(
+            select(Event.id)
+            .where(
+                Event.session_id == session_id,
+                Event.type == EventType.ASK_USER_QUESTION_RESPONSE.value,
+                Event.data["tool_call_id"].as_string() == tool_call_id,
+            )
+            .limit(1),
+        )
+        return row.scalar_one_or_none() is not None
+
+
+async def try_resolve_text_answer(
+    store,
+    *,
+    session_id,
+    text: str,
+    max_age_seconds: float | None = None,
+) -> int | None:
+    """Resolve free-form *text* as the answer to the live pending question.
+
+    The full guard set for surfaces that convert typed messages into
+    answers: nothing pending → ``None``; the pending row older than
+    ``max_age_seconds`` → ``None`` (the blocked tool has timed out, and
+    converting would feed a consumer that no longer exists); a response
+    event already recorded for the tool call → ``None`` (see
+    :func:`response_event_exists`). On success returns the response
+    event id. Callers treat ``None`` as "deliver the text as a normal
+    message".
+    """
+    pending = await pending_input_for_session(store, session_id=session_id)
+    if pending is None:
+        return None
+    created_at = pending.get("created_at")
+    if created_at is not None and max_age_seconds is not None:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - created_at).total_seconds()
+        if age > max_age_seconds:
+            return None
+    tool_call_id = pending.get("tool_call_id", "")
+    if await response_event_exists(
+        store, session_id=session_id, tool_call_id=tool_call_id,
+    ):
+        return None
+    from surogates.channels.platforms.telegram_interactive import (
+        resolve_text_answer,
+    )
+
+    return await resolve_input_response(
+        store,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        responses=resolve_text_answer(pending.get("questions") or [], text),
+    )

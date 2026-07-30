@@ -194,56 +194,45 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
         raise HTTPException(400, "no agent_id in request")
 
     cache = request.app.state.runtime_config_cache
-    try:
-        payload = await cache.get(agent_id)
-    except LookupError:
-        raise HTTPException(
-            404,
-            f"agent {agent_id} not configured",
-        )
-    except PlatformAuthError:
-        # The runtime token was rejected — an operations problem that
-        # never self-heals, so no retry (the platform client's error
-        # taxonomy says page, don't retry). Still a 503 for clients,
-        # but named so nobody mistakes it for a transient blip.
-        logger.error(
-            "surogate-ops rejected the runtime token while resolving "
-            "agent %s — check the token's scope/rotation",
-            agent_id,
-        )
-        raise HTTPException(
-            503,
-            "runtime authentication misconfigured — contact the operator",
-        )
-    except Exception:
-        # Transient control-plane failure with no cached copy to serve
-        # (cold start racing an ops redeploy / a runtime-config version
-        # bump). One immediate retry covers the sub-second blip; a
-        # second failure is the client's problem to retry — surface a
-        # retryable 503, never an anonymous 500.
-        logger.warning(
-            "runtime-config fetch failed for agent %s — retrying once",
-            agent_id,
-            exc_info=True,
-        )
+    # Two attempts: an immediate retry covers a transient control-plane
+    # blip with no cached copy to serve (cold start racing an ops
+    # redeploy / a runtime-config version bump); a second failure is
+    # the client's problem to retry — a retryable 503, never an
+    # anonymous 500. LookupError (definitive 404) and PlatformAuthError
+    # (a rejected runtime token never self-heals — the platform
+    # client's error taxonomy says page, don't retry) short-circuit.
+    payload = None
+    for attempt in (0, 1):
         try:
             payload = await cache.get(agent_id)
+            break
         except LookupError:
             raise HTTPException(
                 404,
                 f"agent {agent_id} not configured",
             )
         except PlatformAuthError:
+            logger.error(
+                "surogate-ops rejected the runtime token while resolving "
+                "agent %s — check the token's scope/rotation",
+                agent_id,
+            )
             raise HTTPException(
                 503,
                 "runtime authentication misconfigured — contact the "
                 "operator",
             )
         except Exception:
-            raise HTTPException(
-                503,
-                "runtime configuration temporarily unavailable — "
-                "retry shortly",
+            if attempt == 1:
+                raise HTTPException(
+                    503,
+                    "runtime configuration temporarily unavailable — "
+                    "retry shortly",
+                )
+            logger.warning(
+                "runtime-config fetch failed for agent %s — retrying once",
+                agent_id,
+                exc_info=True,
             )
 
     ctx = build_agent_runtime_context(payload)

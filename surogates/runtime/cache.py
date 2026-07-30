@@ -32,10 +32,6 @@ from surogates.runtime.platform_client import PlatformAuthError
 
 logger = logging.getLogger(__name__)
 
-# Sentinel far in the monotonic past so "never failed" never matches
-# the backoff window.
-_FAR_PAST = 1e12
-
 __all__ = ["RuntimeConfigCache"]
 
 
@@ -84,13 +80,14 @@ class RuntimeConfigCache:
         """
         now = time.monotonic()
         cached = self._entries.get(agent_id)
-        if cached is not None and (now - cached[0]) < self._ttl:
+        if cached is not None and self._fresh(cached[0], now):
             return cached[1]
+        last_failure = self._last_failure.get(agent_id)
         if (
             cached is not None
-            and (now - cached[0]) < self._ttl + self._stale_grace
-            and (now - self._last_failure.get(agent_id, -_FAR_PAST))
-            < self._failure_backoff
+            and self._fresh(cached[0], now, grace=self._stale_grace)
+            and last_failure is not None
+            and (now - last_failure) < self._failure_backoff
         ):
             return cached[1]
 
@@ -99,7 +96,7 @@ class RuntimeConfigCache:
             # Double-checked after taking the lock — a peer may have
             # already loaded while we waited.
             cached = self._entries.get(agent_id)
-            if cached is not None and (time.monotonic() - cached[0]) < self._ttl:
+            if cached is not None and self._fresh(cached[0], time.monotonic()):
                 return cached[1]
             try:
                 cfg = await self._loader(agent_id)
@@ -111,10 +108,8 @@ class RuntimeConfigCache:
                 raise
             except Exception:
                 self._last_failure[agent_id] = time.monotonic()
-                if (
-                    cached is not None
-                    and (time.monotonic() - cached[0])
-                    < self._ttl + self._stale_grace
+                if cached is not None and self._fresh(
+                    cached[0], time.monotonic(), grace=self._stale_grace,
                 ):
                     logger.warning(
                         "runtime-config refresh failed for agent %s — "
@@ -127,6 +122,9 @@ class RuntimeConfigCache:
             self._last_failure.pop(agent_id, None)
             self._entries[agent_id] = (time.monotonic(), cfg)
             return cfg
+
+    def _fresh(self, loaded_at: float, now: float, grace: float = 0.0) -> bool:
+        return (now - loaded_at) < self._ttl + grace
 
     def invalidate(self, agent_id: str) -> None:
         """Drop the cache entry for ``agent_id`` if present.

@@ -40,10 +40,9 @@ class _DB:
 
 
 class _Store:
-    def __init__(self, db, prior_responses=()):
+    def __init__(self, db):
         self._db = db
         self.emitted = []
-        self.prior_responses = list(prior_responses)
 
     def _sf(self):
         return self._db
@@ -51,9 +50,6 @@ class _Store:
     async def emit_event(self, session_id, event_type, data):
         self.emitted.append((session_id, event_type, data))
         return 77
-
-    async def get_events(self, session_id, after=0, types=None):
-        return self.prior_responses
 
 
 def _pending_row(*, age_seconds: int = 0):
@@ -73,6 +69,7 @@ async def test_fresh_pending_question_consumes_the_message():
     store = _Store(
         _DB(
             _ExecuteResult(row=_pending_row(age_seconds=60)),
+            _ExecuteResult(row=None),  # no prior response event
             _ExecuteResult(rowcount=1),  # inbox claim
         ),
     )
@@ -113,6 +110,7 @@ async def test_lost_claim_race_returns_none():
     store = _Store(
         _DB(
             _ExecuteResult(row=_pending_row(age_seconds=5)),
+            _ExecuteResult(row=None),  # no prior response event
             _ExecuteResult(rowcount=0),  # someone else claimed it
         ),
     )
@@ -124,10 +122,11 @@ async def test_already_answered_question_is_not_reclaimed():
     """The form's respond route emits before its best-effort claim; a
     row left pending after a form answer must not eat the next typed
     message."""
-    prior = SimpleNamespace(data={"tool_call_id": "tc-live"})
     store = _Store(
-        _DB(_ExecuteResult(row=_pending_row(age_seconds=10))),
-        prior_responses=[prior],
+        _DB(
+            _ExecuteResult(row=_pending_row(age_seconds=10)),
+            _ExecuteResult(row=object()),  # a prior response event exists
+        ),
     )
     assert await _resolve_pending_question(store, "s1", "hello") is None
     assert store.emitted == []

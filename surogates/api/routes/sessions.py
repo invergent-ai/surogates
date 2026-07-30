@@ -528,68 +528,29 @@ async def _resolve_pending_question(
 ) -> int | None:
     """Convert ``text`` into the answer of a live pending question.
 
-    Returns the response event id when the message resolved a pending
-    ``ask_user_question``, ``None`` when nothing live is pending (no
-    row, the row is older than the tool's wait window, or another
-    surface claimed it first) — the caller then treats the text as a
-    normal message. Never raises: a resolution failure must not block
-    the message path.
+    Thin route-side wrapper over
+    :func:`surogates.session.interactive_input.try_resolve_text_answer`
+    — the shared helper carries the guard set (freshness, already-
+    answered probe, atomic claim). Returns the response event id, or
+    ``None`` when the text should be delivered as a normal message.
+    Never raises: a resolution failure must not block the message path.
     """
-    from datetime import timezone
-
-    from surogates.channels.platforms.telegram_interactive import (
-        resolve_text_answer,
-    )
-    from surogates.session.events import EventType as _EventType
-    from surogates.session.interactive_input import (
-        pending_input_for_session,
-        resolve_input_response,
-    )
+    from surogates.session.interactive_input import try_resolve_text_answer
     from surogates.tools.builtin.ask_user_question import (
         ASK_USER_QUESTION_MAX_WAIT_SECONDS,
     )
 
-    # Refuse anything close to the tool's own deadline: the row's DB
-    # timestamp and the worker's monotonic deadline run on different
-    # clocks, and near the boundary the safe error is treating a live
-    # question as expired (the message falls through as a normal one),
-    # never the reverse (the message would be swallowed).
-    freshness_cap = ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60
-
     try:
-        pending = await pending_input_for_session(
-            store, session_id=session_id,
-        )
-        if pending is None:
-            return None
-        created_at = pending.get("created_at")
-        if created_at is not None:
-            now = datetime.now(timezone.utc)
-            if created_at.tzinfo is None:
-                now = now.replace(tzinfo=None)
-            if (now - created_at).total_seconds() > freshness_cap:
-                return None
-        tool_call_id = pending.get("tool_call_id", "")
-        # The form's respond route emits its response event BEFORE its
-        # best-effort inbox claim; a row left pending after a form
-        # answer must not eat the user's next message.
-        prior = await store.get_events(
-            session_id,
-            after=0,
-            types=[_EventType.ASK_USER_QUESTION_RESPONSE],
-        )
-        if any(
-            (event.data or {}).get("tool_call_id") == tool_call_id
-            for event in prior
-        ):
-            return None
-        return await resolve_input_response(
+        return await try_resolve_text_answer(
             store,
             session_id=session_id,
-            tool_call_id=tool_call_id,
-            responses=resolve_text_answer(
-                pending.get("questions") or [], text,
-            ),
+            text=text,
+            # Refuse anything close to the tool's own deadline: the
+            # row's DB timestamp and the worker's monotonic deadline
+            # run on different clocks, and near the boundary the safe
+            # error is treating a live question as expired (the message
+            # falls through as a normal one), never the reverse.
+            max_age_seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60,
         )
     except Exception:
         logger.warning(
