@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -12,6 +11,44 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def parse_json_object(content: Any) -> dict[str, Any] | None:
+    """Best-effort extraction of one JSON object from raw model text.
+
+    Providers that ignore ``response_format={"type": "json_object"}``
+    (Claude via OpenAI-compatible gateways, notably) return the object
+    wrapped in markdown fences and sometimes surrounded by prose.
+    Accepts the text as-is, fenced, or embedded in prose; returns the
+    first JSON *object* found, or ``None`` when no complete object can
+    be decoded.  Valid JSON that is not an object (array, string, ...)
+    is rejected -- every caller wants a mapping.
+    """
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    if parsed is not None:
+        return None
+    decoder = json.JSONDecoder()
+    idx = text.find("{")
+    while idx != -1:
+        try:
+            candidate, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            idx = text.find("{", idx + 1)
+            continue
+        if isinstance(candidate, dict):
+            return candidate
+        idx = text.find("{", idx + 1)
+    return None
 
 
 async def generate_structured(
@@ -160,35 +197,20 @@ async def _try_openai_json_mode(
     # with enable_thinking=True) often put visible text in
     # ``message.content`` and the JSON we asked for in
     # ``message.reasoning_content`` -- empty content alone isn't a failure
-    # if the JSON is sitting in the reasoning channel.
-    text = _extract_json_text(message)
-    if not text:
-        return None
-
-    try:
-        return output_model.model_validate_json(text)
-    except Exception as exc:
-        logger.debug("JSON-mode fallback validation failed: %s", exc)
-        return None
-
-
-def _extract_json_text(message: Any) -> str:
-    """Pull a JSON candidate string from ``message.content`` or
-    ``message.reasoning_content`` (in that order), stripping markdown
-    fences if present.  Returns an empty string when neither field
-    holds anything usable.
-    """
-    if message is None:
-        return ""
+    # if the JSON is sitting in the reasoning channel.  Both channels are
+    # tried: prose in ``content`` no longer masks an object parked in
+    # ``reasoning_content``.
     for attr in ("content", "reasoning_content"):
-        raw = getattr(message, attr, None)
-        if isinstance(raw, str) and raw.strip():
-            text = raw.strip()
-            if text.startswith("```"):
-                text = re.sub(r"^```(?:json)?\s*", "", text)
-                text = re.sub(r"\s*```$", "", text)
-            return text.strip()
-    return ""
+        parsed = parse_json_object(getattr(message, attr, None))
+        if parsed is None:
+            continue
+        try:
+            return output_model.model_validate(parsed)
+        except Exception as exc:
+            logger.debug(
+                "JSON-mode fallback validation failed on %s: %s", attr, exc,
+            )
+    return None
 
 
 def _make_outlines_model(
@@ -220,8 +242,7 @@ def _coerce_structured_result(value: Any, output_model: type[T]) -> T:
         return value
     if isinstance(value, dict):
         return output_model.model_validate(value)
-    text = str(value or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return output_model.model_validate_json(text)
+    parsed = parse_json_object(str(value or ""))
+    if parsed is None:
+        raise ValueError("model output contains no JSON object")
+    return output_model.model_validate(parsed)

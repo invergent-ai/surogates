@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, patch
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from surogates.harness.structured_output import generate_structured
+from surogates.harness.structured_output import (
+    generate_structured,
+    parse_json_object,
+)
 
 
 class RoutingDecision(BaseModel):
@@ -331,3 +334,86 @@ async def test_fallback_skipped_for_empty_messages() -> None:
 
     assert decision is None
     create_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# parse_json_object
+# ---------------------------------------------------------------------------
+
+
+def test_parse_json_object_accepts_raw_object() -> None:
+    assert parse_json_object('{"a": 1}') == {"a": 1}
+
+
+def test_parse_json_object_accepts_fenced_object() -> None:
+    fenced = '```json\n{"recap": "done", "artifacts": []}\n```'
+    assert parse_json_object(fenced) == {"recap": "done", "artifacts": []}
+
+
+def test_parse_json_object_accepts_bare_fence_without_language_tag() -> None:
+    assert parse_json_object('```\n{"a": true}\n```') == {"a": True}
+
+
+def test_parse_json_object_accepts_prose_around_fence() -> None:
+    text = (
+        "Sure! Here is the JSON:\n```json\n"
+        '{"a": {"nested": "with a } brace in a string"}}\n'
+        "```\nHope this helps."
+    )
+    assert parse_json_object(text) == {
+        "a": {"nested": "with a } brace in a string"},
+    }
+
+
+def test_parse_json_object_skips_false_brace_starts() -> None:
+    assert parse_json_object('{oops — real one: {"a": 1}') == {"a": 1}
+
+
+def test_parse_json_object_rejects_non_object_json() -> None:
+    assert parse_json_object("[1, 2, 3]") is None
+    assert parse_json_object('"just a string"') is None
+
+
+def test_parse_json_object_rejects_truncated_object() -> None:
+    assert parse_json_object('```json\n{"recap": "cut off mid') is None
+
+
+def test_parse_json_object_rejects_empty_and_non_string() -> None:
+    assert parse_json_object("") is None
+    assert parse_json_object("   ") is None
+    assert parse_json_object(None) is None
+    assert parse_json_object(42) is None
+
+
+async def test_fallback_reads_json_from_reasoning_content() -> None:
+    """Prose in ``content`` must not mask the object a reasoning-mode
+    model parked in ``reasoning_content``."""
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="I thought about it and answered below.",
+                        reasoning_content=json.dumps(
+                            {"route": "final", "confidence": 0.9}
+                        ),
+                        refusal=None,
+                    )
+                )
+            ]
+        )
+    )
+
+    with patch(
+        "surogates.harness.structured_output._try_outlines",
+        AsyncMock(return_value=None),
+    ):
+        decision = await generate_structured(
+            llm_client=llm_client,
+            model="deepseek-r1",
+            messages=[{"role": "user", "content": "Route this."}],
+            output_model=RoutingDecision,
+        )
+
+    assert decision == RoutingDecision(route="final", confidence=0.9)
