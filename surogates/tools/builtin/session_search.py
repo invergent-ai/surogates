@@ -23,10 +23,18 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from shlex import split as shlex_split
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
+from surogates.db.narrative import (
+    narrative_tsquery_sql,
+    narrative_tsvector_sql,
+    narrative_type_list_sql,
+    narrative_types_for_roles,
+)
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -96,8 +104,18 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
             parts.append(f"[USER]: {content}")
 
         elif event_type == "llm.response":
-            content = data.get("content", "")
+            # Assistant text is nested under ``message`` on every emit path;
+            # the flat read this used to do returned "" for every turn, so
+            # the transcript handed to the summarizer contained user messages
+            # and bare tool names and no agent replies at all.
+            message = data.get("message")
+            if isinstance(message, dict):
+                content = message.get("content") or ""
+            else:
+                content = data.get("content") or ""
             tool_calls = data.get("tool_calls")
+            if not tool_calls and isinstance(message, dict):
+                tool_calls = message.get("tool_calls")
             if tool_calls and isinstance(tool_calls, list):
                 tc_names = []
                 for tc in tool_calls:
@@ -118,21 +136,43 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
 
         elif event_type == "tool.result":
             tool_name = data.get("name", "unknown")
-            content = str(data.get("result", ""))
+            # Result payloads carry ``content``; the ``result`` key this used
+            # to read has never been written, so every tool output rendered
+            # as an empty line.
+            content = str(data.get("content") or "")
             # Truncate long tool outputs
             if len(content) > 500:
                 content = content[:250] + "\n...[truncated]...\n" + content[-250:]
             parts.append(f"[TOOL:{tool_name}]: {content}")
 
-        elif event_type == "llm.thinking":
-            # Skip thinking events in transcript
+        elif event_type in ("turn.summary", "iteration.summary"):
+            recap = data.get("recap") or data.get("summary") or ""
+            if recap:
+                parts.append(f"[RECAP]: {recap}")
+
+        elif event_type in ("llm.thinking", "llm.delta"):
+            # Thinking is not conversation.  Deltas are the same assistant
+            # text as ``llm.response``, but persisted one row per streamed
+            # chunk — they carry a ``content`` key, so without this branch
+            # they fall through to the generic case and re-emit every reply
+            # as hundreds of per-token lines.  On a busy session that is the
+            # majority of the transcript, and since the 100k-char window is
+            # centred on the first match, the real conversation is what gets
+            # truncated away.  ``surogates.db.narrative`` excludes them from
+            # the search index for the same reason.
             pass
 
         else:
-            # Include other event types generically
-            content = str(data.get("content", data.get("message", "")))
-            if content:
-                parts.append(f"[{event_type.upper()}]: {content}")
+            # Include other event types generically.  Both keys are dicts on
+            # LLM-shaped payloads, so render either only when it is plain
+            # text — otherwise the transcript grows a Python repr of the
+            # whole object and the summarizer reads that as conversation.
+            raw = data.get("content")
+            if not isinstance(raw, str):
+                candidate = data.get("message")
+                raw = candidate if isinstance(candidate, str) else None
+            if raw:
+                parts.append(f"[{event_type.upper()}]: {raw}")
 
     return "\n\n".join(parts)
 
@@ -140,6 +180,37 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 # Truncation around matches
 # ---------------------------------------------------------------------------
+
+
+def _centering_terms(query: str) -> list[str]:
+    """The literal words to look for when centring the truncation window.
+
+    The query is ``websearch_to_tsquery`` syntax, so a plain ``.split()``
+    yields tokens that never appear in the transcript — the bare operator
+    ``OR``, the quote characters of a phrase, and the leading ``-`` of an
+    exclusion. Each of those either matches nothing (so the window falls
+    back to the start of the conversation and the summarizer is asked about
+    text it was not given) or, worse, matches incidentally: ``or`` occurs
+    inside "work order" within the first few hundred characters of almost
+    any transcript, which pins the window to the beginning every time.
+
+    So: drop the operator, unwrap phrases into their words, and discard
+    negated terms — a term the caller excluded is the last thing the window
+    should centre on.
+    """
+    try:
+        tokens = shlex_split(query)
+    except ValueError:
+        # Unbalanced quote — the tsquery parser tolerates it, so neither
+        # should this. Fall back to whitespace splitting with the quote
+        # characters stripped.
+        tokens = query.replace('"', " ").split()
+    terms: list[str] = []
+    for token in tokens:
+        if not token or token.upper() == "OR" or token.startswith("-"):
+            continue
+        terms.extend(word for word in token.lower().split() if word)
+    return terms
 
 
 def _truncate_around_matches(
@@ -151,8 +222,7 @@ def _truncate_around_matches(
     if len(full_text) <= max_chars:
         return full_text
 
-    # Find the first occurrence of any query term
-    query_terms = query.lower().split()
+    query_terms = _centering_terms(query)
     text_lower = full_text.lower()
     first_match = len(full_text)
     for term in query_terms:
@@ -317,7 +387,6 @@ async def _list_recent_sessions(
             # Build a preview from the first user message event
             preview = ""
             try:
-                from surogates.session.events import EventType
                 events = await session_store.get_events(
                     sid, types=[EventType.USER_MESSAGE], limit=1,
                 )
@@ -401,7 +470,9 @@ async def session_search(
     from results since the agent already has that context.
 
     Args:
-        query: Search terms (FTS5-style syntax: OR, NOT, phrases, prefix*).
+        query: Search terms in websearch syntax: bare words are ANDed,
+            OR between alternatives, "quoted phrases" for a sequence,
+            and a leading - to exclude. No stemming, no prefix wildcard.
         role_filter: Comma-separated roles to restrict search to.
         limit: Max sessions to summarize (capped at 5).
         session_store: The Surogates SessionStore instance.
@@ -450,29 +521,19 @@ async def session_search(
     query = query.strip()
 
     try:
-        # Parse role filter
-        role_list: list[str] | None = None
-        if role_filter and role_filter.strip():
-            role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
-
-        # Map role filter to event types
-        type_filter: list[str] | None = None
-        if role_list:
-            type_map = {
-                "user": "user.message",
-                "assistant": "llm.response",
-                "tool": "tool.result",
-            }
-            type_filter = [type_map[r] for r in role_list if r in type_map]
+        # Narrow the searched event types to the caller's roles.  The type
+        # predicate is not optional decoration: it is what keeps streamed
+        # ``llm.delta`` chunks out of the results AND what lets the partial
+        # GIN index apply.
+        try:
+            type_filter = narrative_types_for_roles(
+                role_filter.split(",") if role_filter else None
+            )
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
 
         # Full-text search across events for this org's sessions.
-        # Query all sessions for the authenticated user (same org_id).
-        from surogates.session.events import EventType
-        from sqlalchemy import select, text as sa_text
-        from surogates.db.models import (
-            Event as EventRow,
-            Session as SessionRow,
-        )
+        from sqlalchemy import text as sa_text
 
         raw_results: list[dict[str, Any]] = []
         try:
@@ -497,8 +558,14 @@ async def session_search(
                 hidden_clause = "AND s.channel NOT IN ({})".format(
                     ", ".join(f"'{c}'" for c in _HIDDEN_SESSION_CHANNELS)
                 )
-                # Build full-text search query using PostgreSQL ts_vector
-                # Search event data->>'content' across all sessions for this org
+                type_clause = "AND e.type IN ({})".format(
+                    narrative_type_list_sql(type_filter)
+                )
+                # Rendered from surogates.db.narrative so they stay identical
+                # to the backing GIN index — see that module for why drift is
+                # silent.
+                tsvector_sql = narrative_tsvector_sql("e.")
+                tsquery_sql = narrative_tsquery_sql("query")
                 fts_query = sa_text(
                     f"""
                     SELECT e.id AS event_id,
@@ -512,19 +579,16 @@ async def session_search(
                            s.title,
                            s.parent_id,
                            s.user_id,
-                           ts_rank(
-                               to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', '')),
-                               plainto_tsquery('english', :query)
-                           ) AS rank
+                           ts_rank({tsvector_sql}, {tsquery_sql}) AS rank
                     FROM events e
                     JOIN sessions s ON s.id = e.session_id
                     WHERE s.org_id = :org_id
                       {principal_clause}
                       {hidden_clause}
+                      {type_clause}
                       AND s.agent_id = :agent_id
                       AND s.status != 'archived'
-                      AND to_tsvector('english', COALESCE(e.data->>'content', '') || ' ' || COALESCE(e.data->>'result', ''))
-                          @@ plainto_tsquery('english', :query)
+                      AND {tsvector_sql} @@ {tsquery_sql}
                     ORDER BY rank DESC
                     LIMIT :limit
                     """
@@ -621,7 +685,14 @@ async def session_search(
         tasks: list[tuple[UUID, dict[str, Any], str, dict[str, Any]]] = []
         for sid, match_info in seen_sessions.items():
             try:
-                events = await session_store.get_events(sid)
+                # Deltas are ~90% of the log and carry no text the transcript
+                # does not already get from ``llm.response``; excluding them
+                # in SQL keeps a long session from being loaded into memory
+                # almost entirely as token fragments.
+
+                events = await session_store.get_events(
+                    sid, exclude_types=[EventType.LLM_DELTA],
+                )
                 if not events:
                     continue
                 # Convert Event pydantic models to dicts for formatting
@@ -742,10 +813,15 @@ SESSION_SEARCH_SCHEMA = ToolSchema(
         "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
         "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
         "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "
-        "phrases for exact match (\"docker networking\"), boolean (python NOT java), prefix (deploy*). "
-        "IMPORTANT: Use OR between keywords for best results — FTS5 defaults to AND which misses "
-        "sessions that only mention some terms. If a broad OR query returns nothing, try individual "
-        "keyword searches in parallel. Returns summaries of the top matching sessions.\n\n"
+        "quoted phrases for an exact sequence (\"docker networking\"), and a leading minus to exclude "
+        "a term (python -java). Bare keywords are ANDed, so use OR when a session only needs to "
+        "mention some of your terms.\n\n"
+        "Matching is exact-token and case-insensitive, with no stemming or wildcards: 'deploy' will "
+        "not find 'deployed' and 'deploy*' is not a prefix search. OR the word forms you care about "
+        "(deploy OR deployed OR deployment). This is deliberate — one shared index serves every "
+        "language the platform runs in, so no language's suffix rules are applied to another's.\n\n"
+        "Searches user messages, assistant replies, tool results, and per-turn recaps. "
+        "Returns summaries of the top matching sessions.\n\n"
         "In an ops console session, results span EVERY user of this agent and each result carries "
         "a user_id — attribute those conversations to that user, never to yourself or the person "
         "you are talking to."
@@ -764,8 +840,10 @@ SESSION_SEARCH_SCHEMA = ToolSchema(
             "role_filter": {
                 "type": "string",
                 "description": (
-                    "Optional: only search messages from specific roles (comma-separated). "
-                    "E.g. 'user,assistant' to skip tool outputs."
+                    "Optional: restrict the search to specific roles (comma-separated). "
+                    "One or more of 'user', 'assistant', 'tool', 'summary'. "
+                    "E.g. 'user,assistant' to skip tool outputs, or 'summary' to search "
+                    "only the per-turn recaps. Defaults to all four."
                 ),
             },
             "limit": {

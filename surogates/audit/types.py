@@ -66,3 +66,13 @@ class AuditType(str, Enum):
     # payload (which subsystems were cleaned up successfully).
     AGENT_CREATED = "agent.created"
     AGENT_DELETED = "agent.deleted"
+
+    # An operator searched or read end-user conversation content across
+    # sessions (Studio console, platform copilot).  Unlike every other
+    # entry here this records a *read*, because bulk operator access to
+    # end-user conversations is exactly what a controller has to be able
+    # to account for: who searched, over which agent and users, for what,
+    # and how much came back.  Emitters must treat a failed write as a
+    # failed read rather than swallowing it — an unlogged bulk read is
+    # the thing the log exists to make impossible.
+    SESSION_CONTENT_SEARCH = "session.content_search"

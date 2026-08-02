@@ -48,6 +48,36 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
     )
     WHERE type IN ('user.feedback', 'expert.endorse', 'expert.override');
 
+-- Backing index for cross-session narrative search (the ``session_search``
+-- builtin and the control plane's operator-facing search).  Without it the
+-- query evaluates ``to_tsvector`` per row over a table that is ~90%
+-- streamed ``llm.delta`` chunks — a full sequential scan per search.
+--
+-- The expression and the type predicate MUST stay identical to
+-- ``surogates.db.narrative``: Postgres only uses an expression index when
+-- the query's expression parses to the same tree, and only uses a partial
+-- index when the query's predicate implies this WHERE clause.  Drift is
+-- silent — it just stops using the index.  ``tests/db/test_narrative_index.py``
+-- pins this statement against the helpers.
+--
+-- CHANGING THE EXPRESSION REQUIRES A NEW INDEX NAME.  ``IF NOT EXISTS``
+-- matches on name alone, so an edited expression under the same name is a
+-- no-op on every database that already has the index: the tests pass (they
+-- run against a fresh schema) while production keeps the old definition and
+-- quietly stops using it.  Bump the ``_v2`` suffix and drop the previous
+-- index once the new one is built.
+--
+-- ``left(..., 500000)`` is not cosmetic: a tsvector may hold at most
+-- 1,048,575 bytes of lexemes and overflowing it is an ERROR.  ``user.message``
+-- bodies are unbounded, so without the cap one long message makes its own
+-- INSERT fail once this index exists, and makes this CREATE INDEX abort —
+-- rolling back every statement in this file — if such a row already exists.
+CREATE INDEX IF NOT EXISTS idx_events_narrative_fts_v2
+    ON events USING gin (
+        to_tsvector('simple', left(COALESCE(data->>'content', '') || ' ' || COALESCE(data->'message'->>'content', '') || ' ' || COALESCE(data->>'recap', '') || ' ' || COALESCE(data->>'summary', ''), 500000))
+    )
+    WHERE type IN ('user.message', 'llm.response', 'tool.result', 'turn.summary', 'iteration.summary');
+
 -- Per-tenant audit attribution.
 -- ``agent_id`` is nullable so emitters with no per-tenant context
 -- (e.g. platform-wide events) can leave it NULL.  The
