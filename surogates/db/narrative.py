@@ -6,7 +6,7 @@
 Two consumers need to agree, byte for byte, on what "the searchable text
 of an event" means:
 
-* the ``idx_events_narrative_fts`` GIN index declared in
+* the ``idx_events_narrative_fts_v2`` GIN index declared in
   ``observability.sql``, and
 * every query that wants that index used — the ``session_search`` builtin
   here, and the control plane's cross-session search, which imports these
@@ -69,15 +69,35 @@ _NARRATIVE_TEXT_PATHS: tuple[str, ...] = (
     "data->>'summary'",
 )
 
+# Hard ceiling on the text handed to ``to_tsvector``.
+#
+# A tsvector may hold at most 1,048,575 bytes of lexeme data, and exceeding
+# it is an ERROR, not a truncation. ``user.message`` bodies are unbounded —
+# the API takes ``content: str`` with no ``max_length`` — so without this cap
+# a single very long message has two failure modes, both on paths that must
+# not fail: the INSERT of that event is rejected once the index exists
+# (breaking the hot append path for a live session), and ``CREATE INDEX``
+# aborts if such a row already exists, which rolls back the whole
+# ``observability.sql`` transaction and fails the migration.
+#
+# 500k characters is far past any real message and leaves room for the
+# worst realistic lexeme-storage ratio, where every token is distinct.
+# Search quality is unaffected: nothing near that length is a conversation.
+NARRATIVE_TEXT_LIMIT = 500_000
+
 
 def narrative_text_sql(prefix: str = "") -> str:
     """Render the concatenated searchable-text expression.
 
     *prefix* qualifies the column reference: ``""`` for a ``CREATE INDEX``
     on ``events``, ``"e."`` inside a query that aliases the table.
+
+    The result is capped at :data:`NARRATIVE_TEXT_LIMIT` — see there for why
+    an uncapped expression can refuse writes and abort migrations.
     """
     parts = [f"COALESCE({prefix}{path}, '')" for path in _NARRATIVE_TEXT_PATHS]
-    return " || ' ' || ".join(parts)
+    joined = " || ' ' || ".join(parts)
+    return f"left({joined}, {NARRATIVE_TEXT_LIMIT})"
 
 
 def narrative_tsvector_sql(prefix: str = "") -> str:

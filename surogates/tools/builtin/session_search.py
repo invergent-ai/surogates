@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from shlex import split as shlex_split
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
@@ -162,10 +163,12 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
             pass
 
         else:
-            # Include other event types generically.  ``message`` is a dict on
-            # LLM-shaped payloads, so only render it when it is plain text.
+            # Include other event types generically.  Both keys are dicts on
+            # LLM-shaped payloads, so render either only when it is plain
+            # text — otherwise the transcript grows a Python repr of the
+            # whole object and the summarizer reads that as conversation.
             raw = data.get("content")
-            if raw is None:
+            if not isinstance(raw, str):
                 candidate = data.get("message")
                 raw = candidate if isinstance(candidate, str) else None
             if raw:
@@ -179,6 +182,37 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _centering_terms(query: str) -> list[str]:
+    """The literal words to look for when centring the truncation window.
+
+    The query is ``websearch_to_tsquery`` syntax, so a plain ``.split()``
+    yields tokens that never appear in the transcript — the bare operator
+    ``OR``, the quote characters of a phrase, and the leading ``-`` of an
+    exclusion. Each of those either matches nothing (so the window falls
+    back to the start of the conversation and the summarizer is asked about
+    text it was not given) or, worse, matches incidentally: ``or`` occurs
+    inside "work order" within the first few hundred characters of almost
+    any transcript, which pins the window to the beginning every time.
+
+    So: drop the operator, unwrap phrases into their words, and discard
+    negated terms — a term the caller excluded is the last thing the window
+    should centre on.
+    """
+    try:
+        tokens = shlex_split(query)
+    except ValueError:
+        # Unbalanced quote — the tsquery parser tolerates it, so neither
+        # should this. Fall back to whitespace splitting with the quote
+        # characters stripped.
+        tokens = query.replace('"', " ").split()
+    terms: list[str] = []
+    for token in tokens:
+        if not token or token.upper() == "OR" or token.startswith("-"):
+            continue
+        terms.extend(word for word in token.lower().split() if word)
+    return terms
+
+
 def _truncate_around_matches(
     full_text: str, query: str, max_chars: int = MAX_SESSION_CHARS
 ) -> str:
@@ -188,8 +222,7 @@ def _truncate_around_matches(
     if len(full_text) <= max_chars:
         return full_text
 
-    # Find the first occurrence of any query term
-    query_terms = query.lower().split()
+    query_terms = _centering_terms(query)
     text_lower = full_text.lower()
     first_match = len(full_text)
     for term in query_terms:
@@ -354,7 +387,6 @@ async def _list_recent_sessions(
             # Build a preview from the first user message event
             preview = ""
             try:
-                from surogates.session.events import EventType
                 events = await session_store.get_events(
                     sid, types=[EventType.USER_MESSAGE], limit=1,
                 )
@@ -438,7 +470,9 @@ async def session_search(
     from results since the agent already has that context.
 
     Args:
-        query: Search terms (FTS5-style syntax: OR, NOT, phrases, prefix*).
+        query: Search terms in websearch syntax: bare words are ANDed,
+            OR between alternatives, "quoted phrases" for a sequence,
+            and a leading - to exclude. No stemming, no prefix wildcard.
         role_filter: Comma-separated roles to restrict search to.
         limit: Max sessions to summarize (capped at 5).
         session_store: The Surogates SessionStore instance.
@@ -655,7 +689,6 @@ async def session_search(
                 # does not already get from ``llm.response``; excluding them
                 # in SQL keeps a long session from being loaded into memory
                 # almost entirely as token fragments.
-                from surogates.session.events import EventType
 
                 events = await session_store.get_events(
                     sid, exclude_types=[EventType.LLM_DELTA],

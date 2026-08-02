@@ -30,7 +30,7 @@ from surogates.db.narrative import (
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-_INDEX_NAME = "idx_events_narrative_fts"
+_INDEX_NAME = "idx_events_narrative_fts_v2"
 
 
 async def test_index_exists(session_factory) -> None:
@@ -100,6 +100,21 @@ async def test_planner_can_use_the_index_for_the_shared_query(
     assert _INDEX_NAME in plan, (
         "the planner cannot use the narrative index for the query the shared "
         f"helpers render — the expression or the type predicate has drifted:\n{plan}"
+    )
+    # The index name alone is not enough. This index is *partial*, so when
+    # only the tsvector expression drifts the planner still uses it — for the
+    # type predicate — and demotes the text match to a per-row ``Filter``.
+    # That plan reads every narrative row and re-evaluates ``to_tsvector`` on
+    # each, which is the sequential-scan cost this index exists to avoid, and
+    # it contains the index name. Require the text match to be an index
+    # condition, which is only true when the expressions agree.
+    index_cond = "\n".join(
+        line for line in plan_rows if "Index Cond" in line
+    )
+    assert "@@" in index_cond, (
+        "the tsvector expression has drifted from the index: the text match "
+        "was pushed to a per-row Filter instead of an Index Cond, so every "
+        f"narrative row is re-tokenised at query time:\n{plan}"
     )
 
 

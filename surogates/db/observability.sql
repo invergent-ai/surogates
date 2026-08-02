@@ -59,9 +59,22 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_dedupe
 -- index when the query's predicate implies this WHERE clause.  Drift is
 -- silent — it just stops using the index.  ``tests/db/test_narrative_index.py``
 -- pins this statement against the helpers.
-CREATE INDEX IF NOT EXISTS idx_events_narrative_fts
+--
+-- CHANGING THE EXPRESSION REQUIRES A NEW INDEX NAME.  ``IF NOT EXISTS``
+-- matches on name alone, so an edited expression under the same name is a
+-- no-op on every database that already has the index: the tests pass (they
+-- run against a fresh schema) while production keeps the old definition and
+-- quietly stops using it.  Bump the ``_v2`` suffix and drop the previous
+-- index once the new one is built.
+--
+-- ``left(..., 500000)`` is not cosmetic: a tsvector may hold at most
+-- 1,048,575 bytes of lexemes and overflowing it is an ERROR.  ``user.message``
+-- bodies are unbounded, so without the cap one long message makes its own
+-- INSERT fail once this index exists, and makes this CREATE INDEX abort —
+-- rolling back every statement in this file — if such a row already exists.
+CREATE INDEX IF NOT EXISTS idx_events_narrative_fts_v2
     ON events USING gin (
-        to_tsvector('simple', COALESCE(data->>'content', '') || ' ' || COALESCE(data->'message'->>'content', '') || ' ' || COALESCE(data->>'recap', '') || ' ' || COALESCE(data->>'summary', ''))
+        to_tsvector('simple', left(COALESCE(data->>'content', '') || ' ' || COALESCE(data->'message'->>'content', '') || ' ' || COALESCE(data->>'recap', '') || ' ' || COALESCE(data->>'summary', ''), 500000))
     )
     WHERE type IN ('user.message', 'llm.response', 'tool.result', 'turn.summary', 'iteration.summary');
 

@@ -456,6 +456,17 @@ async def test_streamed_deltas_never_match(session_store, session_factory):
     assert result["success"] is True
     assert result["count"] == 0
 
+    # Positive control: the same word in a searchable event type does match,
+    # so the assertion above is about deltas being out of scope and not about
+    # the search being broken.
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "electronegativity"},
+    )
+    control = await _search(
+        session_store, org_id, "agent-delta", issued.id, query="electronegativity",
+    )
+    assert control["count"] == 1
+
 
 async def test_role_filter_restricts_the_searched_events(
     session_store, session_factory,

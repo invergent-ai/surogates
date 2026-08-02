@@ -26,7 +26,7 @@ from surogates.db.narrative import (
 )
 
 _SQL_PATH = Path(__file__).resolve().parents[2] / "surogates" / "db" / "observability.sql"
-_INDEX_NAME = "idx_events_narrative_fts"
+_INDEX_NAME = "idx_events_narrative_fts_v2"
 
 
 def _index_statement() -> str:
@@ -110,3 +110,30 @@ def test_role_types_are_a_subset_of_searchable_types() -> None:
                 f"role {role!r} maps to {event_type!r}, which the index "
                 "does not cover"
             )
+
+
+def test_every_searchable_type_is_a_real_event_type() -> None:
+    """The type lists are plain strings, and nothing else checks them.
+
+    A typo applied consistently to ``narrative.py`` and ``observability.sql``
+    passes the parity test and the EXPLAIN test — the index and the query
+    agree perfectly on a predicate that matches no row that was ever
+    written. Tying the vocabulary to the enum that produces it is the only
+    thing that catches that.
+    """
+    from surogates.db.narrative import NARRATIVE_ROLE_TYPES, NARRATIVE_SEARCH_TYPES
+    from surogates.session.events import EventType
+
+    emitted = {e.value for e in EventType}
+    assert set(NARRATIVE_SEARCH_TYPES) <= emitted
+    for types in NARRATIVE_ROLE_TYPES.values():
+        assert set(types) <= emitted
+
+
+def test_role_types_are_all_searchable() -> None:
+    """A role that selects a type outside the index's WHERE clause would
+    silently fall off the index."""
+    from surogates.db.narrative import NARRATIVE_ROLE_TYPES, NARRATIVE_SEARCH_TYPES
+
+    for role, types in NARRATIVE_ROLE_TYPES.items():
+        assert set(types) <= set(NARRATIVE_SEARCH_TYPES), role
