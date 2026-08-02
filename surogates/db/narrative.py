@@ -20,22 +20,14 @@ scan over a table that is ~90% streamed ``llm.delta`` chunks. Hence one
 module, two rendered strings, and a test that pins the ``.sql`` file
 against :func:`narrative_tsvector_sql`.
 
-Text keys, and why each is here:
-
-``content``
-    ``user.message`` prompts and ``tool.result`` payloads.
-``message.content``
-    ``llm.response`` assistant text. Always nested under ``message`` — a
-    flat ``data->>'content'`` read returns NULL for every assistant turn,
-    which is why the original search could not match the agent's own words.
-``recap``
-    ``turn.summary`` — the per-turn recap. The densest narrative the
-    platform stores, and the corpus the report engine already summarises.
-``summary``
-    ``iteration.summary`` — the one-line-per-iteration fallback that keeps
-    flowing when recap generation degrades.
+One text key is worth calling out: ``llm.response`` assistant text is
+always nested under ``message``, so a flat ``data->>'content'`` read
+returns NULL for every assistant turn — which is why the original search
+could not match the agent's own words.
 """
 from __future__ import annotations
+
+from typing import Iterable, Optional, Sequence
 
 # Event types whose payloads carry human-readable narrative text.
 #
@@ -106,6 +98,50 @@ def narrative_tsquery_sql(param: str = "query") -> str:
     return f"websearch_to_tsquery('{NARRATIVE_FTS_CONFIG}', :{param})"
 
 
-def narrative_type_list_sql() -> str:
-    """Render the type predicate that lets the partial index apply."""
-    return ", ".join(f"'{t}'" for t in NARRATIVE_SEARCH_TYPES)
+def narrative_type_list_sql(
+    types: Sequence[str] = NARRATIVE_SEARCH_TYPES,
+) -> str:
+    """Render the ``IN`` list of event types for a query's type predicate.
+
+    Spelled as literals rather than a bound array because the planner has to
+    *see* the values to prove they imply the partial index's ``WHERE``; a
+    bound ``= ANY(:types)`` leaves it unable to, and the index goes unused.
+    *types* is always a subset of :data:`NARRATIVE_SEARCH_TYPES` chosen
+    server-side, never caller text.
+    """
+    return ", ".join(f"'{t}'" for t in types)
+
+
+def narrative_types_for_roles(roles: Optional[Iterable[str]]) -> tuple[str, ...]:
+    """Map caller role names to the event types they select.
+
+    Shared because both search implementations accept the same ``role``
+    vocabulary, and a role added on one side but not the other is a silent
+    difference in what each will find.
+
+    Raises :class:`ValueError` naming the unknown roles; callers render that
+    however their surface requires. An empty or all-blank selection means
+    "no preference" and yields the full narrative slice, so a query is never
+    accidentally narrowed to nothing.
+    """
+    if not roles:
+        return NARRATIVE_SEARCH_TYPES
+    selected: list[str] = []
+    unknown: list[str] = []
+    for raw_role in roles:
+        role = (raw_role or "").strip().lower()
+        if not role:
+            continue
+        mapped = NARRATIVE_ROLE_TYPES.get(role)
+        if mapped is None:
+            unknown.append(role)
+            continue
+        selected.extend(t for t in mapped if t not in selected)
+    if unknown:
+        raise ValueError(
+            "unknown role(s): "
+            + ", ".join(sorted(set(unknown)))
+            + ". Valid roles: "
+            + ", ".join(sorted(NARRATIVE_ROLE_TYPES))
+        )
+    return tuple(selected) or NARRATIVE_SEARCH_TYPES

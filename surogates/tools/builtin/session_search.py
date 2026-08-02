@@ -28,11 +28,12 @@ from uuid import UUID
 
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
 from surogates.db.narrative import (
-    NARRATIVE_ROLE_TYPES,
-    NARRATIVE_SEARCH_TYPES,
     narrative_tsquery_sql,
     narrative_tsvector_sql,
+    narrative_type_list_sql,
+    narrative_types_for_roles,
 )
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -148,8 +149,16 @@ def _format_conversation(events: List[Dict[str, Any]]) -> str:
             if recap:
                 parts.append(f"[RECAP]: {recap}")
 
-        elif event_type == "llm.thinking":
-            # Skip thinking events in transcript
+        elif event_type in ("llm.thinking", "llm.delta"):
+            # Thinking is not conversation.  Deltas are the same assistant
+            # text as ``llm.response``, but persisted one row per streamed
+            # chunk — they carry a ``content`` key, so without this branch
+            # they fall through to the generic case and re-emit every reply
+            # as hundreds of per-token lines.  On a busy session that is the
+            # majority of the transcript, and since the 100k-char window is
+            # centred on the first match, the real conversation is what gets
+            # truncated away.  ``surogates.db.narrative`` excludes them from
+            # the search index for the same reason.
             pass
 
         else:
@@ -478,34 +487,16 @@ async def session_search(
     query = query.strip()
 
     try:
-        # Narrow the searched event types to the caller's roles, defaulting
-        # to the whole narrative slice.  The type predicate is not optional
-        # decoration: it is what keeps streamed ``llm.delta`` chunks out of
-        # the results AND what lets the partial GIN index apply.
-        type_filter: tuple[str, ...] = NARRATIVE_SEARCH_TYPES
-        unknown_roles: list[str] = []
-        if role_filter and role_filter.strip():
-            selected: list[str] = []
-            for raw_role in role_filter.split(","):
-                role = raw_role.strip().lower()
-                if not role:
-                    continue
-                mapped = NARRATIVE_ROLE_TYPES.get(role)
-                if mapped is None:
-                    unknown_roles.append(role)
-                    continue
-                selected.extend(t for t in mapped if t not in selected)
-            if unknown_roles:
-                return json.dumps({
-                    "success": False,
-                    "error": (
-                        "Unknown role_filter value(s): "
-                        f"{', '.join(sorted(set(unknown_roles)))}. "
-                        f"Valid roles: {', '.join(sorted(NARRATIVE_ROLE_TYPES))}."
-                    ),
-                })
-            if selected:
-                type_filter = tuple(selected)
+        # Narrow the searched event types to the caller's roles.  The type
+        # predicate is not optional decoration: it is what keeps streamed
+        # ``llm.delta`` chunks out of the results AND what lets the partial
+        # GIN index apply.
+        try:
+            type_filter = narrative_types_for_roles(
+                role_filter.split(",") if role_filter else None
+            )
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
 
         # Full-text search across events for this org's sessions.
         from sqlalchemy import text as sa_text
@@ -533,17 +524,12 @@ async def session_search(
                 hidden_clause = "AND s.channel NOT IN ({})".format(
                     ", ".join(f"'{c}'" for c in _HIDDEN_SESSION_CHANNELS)
                 )
-                # The type predicate is spelled as a literal IN list rather
-                # than a bound array so the planner can prove it implies the
-                # partial index's WHERE clause.  Values come from a closed
-                # constant, never from caller input.
                 type_clause = "AND e.type IN ({})".format(
-                    ", ".join(f"'{t}'" for t in type_filter)
+                    narrative_type_list_sql(type_filter)
                 )
-                # Full-text search over the narrative slice of the event log.
-                # The tsvector expression and the type predicate are rendered
-                # from surogates.db.narrative so they stay identical to the
-                # backing GIN index — see that module for why drift is silent.
+                # Rendered from surogates.db.narrative so they stay identical
+                # to the backing GIN index — see that module for why drift is
+                # silent.
                 tsvector_sql = narrative_tsvector_sql("e.")
                 tsquery_sql = narrative_tsquery_sql("query")
                 fts_query = sa_text(
@@ -665,7 +651,15 @@ async def session_search(
         tasks: list[tuple[UUID, dict[str, Any], str, dict[str, Any]]] = []
         for sid, match_info in seen_sessions.items():
             try:
-                events = await session_store.get_events(sid)
+                # Deltas are ~90% of the log and carry no text the transcript
+                # does not already get from ``llm.response``; excluding them
+                # in SQL keeps a long session from being loaded into memory
+                # almost entirely as token fragments.
+                from surogates.session.events import EventType
+
+                events = await session_store.get_events(
+                    sid, exclude_types=[EventType.LLM_DELTA],
+                )
                 if not events:
                     continue
                 # Convert Event pydantic models to dicts for formatting
