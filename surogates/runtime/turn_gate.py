@@ -25,10 +25,24 @@ the simple counter is enough for the canary deploy.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-__all__ = ["TurnConcurrencyGate", "TurnGateBusy"]
+__all__ = ["TurnConcurrencyGate", "TurnGateBusy", "released_for_wait"]
+
+logger = logging.getLogger(__name__)
+
+# Re-acquiring on the way out is best-effort.  If the cap is genuinely
+# saturated when the wait ends we proceed without a slot and let the
+# dispatcher's outer release fall on the floor-at-zero guard.  Slight
+# under-count is acceptable — the cap is a guideline, not a correctness
+# constraint — whereas blocking forever waiting for a slot would expire the
+# session lease and produce an orphan re-enqueue cycle, a far worse failure.
+_REACQUIRE_TIMEOUT_SECONDS: float = 30.0
+_REACQUIRE_BACKOFF_SECONDS: float = 0.5
 
 
 class TurnGateBusy(RuntimeError):
@@ -104,3 +118,78 @@ class TurnConcurrencyGate:
 
     def _key(self, org_id: str, agent_id: str) -> str:
         return f"surogates:turns:{org_id}:{agent_id}"
+
+
+async def _reacquire_with_backoff(
+    turn_gate: Any, org_id: str, agent_id: str,
+) -> bool:
+    """Re-acquire a slot, retrying briefly while the tenant is at cap.
+
+    Returns ``True`` on success, ``False`` once
+    :data:`_REACQUIRE_TIMEOUT_SECONDS` of failed attempts have elapsed.
+    """
+    if turn_gate is None:
+        return False
+    deadline = time.monotonic() + _REACQUIRE_TIMEOUT_SECONDS
+    while True:
+        try:
+            if await turn_gate.try_acquire(org_id, agent_id):
+                return True
+        except Exception:
+            logger.debug(
+                "Transient try_acquire failure during re-acquire "
+                "(org=%s agent=%s)", org_id, agent_id, exc_info=True,
+            )
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_REACQUIRE_BACKOFF_SECONDS)
+
+
+@asynccontextmanager
+async def released_for_wait(
+    turn_gate: Any | None,
+    org_id: str,
+    agent_id: str,
+    *,
+    context: str,
+) -> AsyncIterator[None]:
+    """Hand the tenant's slot back while the caller sleeps; take it again after.
+
+    The gate counts *active work*.  A caller blocked on something external —
+    a delegated child session, a human answering a question — consumes no
+    worker CPU, so holding its slot for the duration is a category error: a
+    handful of waiters saturate the per-tenant cap and every unrelated
+    session is requeued behind sleepers.
+
+    Both halves are best-effort and never raise into the body:
+
+    * If the release fails the body still runs, and no re-acquire is
+      attempted — re-taking a slot that was never given up would hand the
+      tenant a slot it does not own.
+    * If the re-acquire fails the body's result still stands.  Losing the
+      work a caller already completed to satisfy a soft cap is the wrong
+      trade.
+
+    ``context`` names the caller in log lines.
+    """
+    released = False
+    if turn_gate is not None:
+        try:
+            await turn_gate.release(org_id, agent_id)
+            released = True
+        except Exception:
+            logger.warning(
+                "%s: failed to release gate slot (org=%s agent=%s); "
+                "proceeding without", context, org_id, agent_id, exc_info=True,
+            )
+    try:
+        yield
+    finally:
+        if released and not await _reacquire_with_backoff(
+            turn_gate, org_id, agent_id,
+        ):
+            logger.warning(
+                "%s: could not re-acquire gate slot within %.0fs "
+                "(org=%s agent=%s); continuing without",
+                context, _REACQUIRE_TIMEOUT_SECONDS, org_id, agent_id,
+            )

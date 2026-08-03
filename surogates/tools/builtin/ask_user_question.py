@@ -30,6 +30,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.runtime.turn_gate import released_for_wait
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -307,6 +308,30 @@ async def _wait_for_response(
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
+async def _resolve_gate_identity(
+    session_store: Any, session_id: UUID,
+) -> tuple[str | None, str | None]:
+    """Read the (org_id, agent_id) the turn gate is keyed on.
+
+    Returns ``(None, None)`` when the session cannot be read or does not
+    carry both -- there is then no slot we can safely account for, so the
+    caller skips the release entirely rather than guessing at a key.
+    """
+    try:
+        session = await session_store.get_session(session_id)
+    except Exception:
+        logger.warning(
+            "Could not read session %s for gate release; holding the slot",
+            session_id, exc_info=True,
+        )
+        return None, None
+    org_id = getattr(session, "org_id", None)
+    agent_id = getattr(session, "agent_id", None)
+    if org_id is None or agent_id is None:
+        return None, None
+    return str(org_id), str(agent_id)
+
+
 # ---------------------------------------------------------------------------
 # Handler + registration
 # ---------------------------------------------------------------------------
@@ -324,11 +349,14 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
     Optional:
 
     - ``lease_token`` -- current lease token, used to renew during the wait.
+    - ``turn_gate`` -- the per-tenant concurrency gate; its slot is handed
+      back for the duration of the wait.
     """
     session_store = kwargs.get("session_store")
     tool_call_id = kwargs.get("tool_call_id")
     raw_session_id = kwargs.get("session_id")
     lease_token = kwargs.get("lease_token")
+    turn_gate = kwargs.get("turn_gate")
 
     if session_store is None or not tool_call_id or raw_session_id is None:
         return json.dumps(
@@ -355,12 +383,23 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         },
     )
 
-    outcome = await _wait_for_response(
-        session_id=session_id,
-        tool_call_id=str(tool_call_id),
-        session_store=session_store,
-        lease_token=lease_token,
-    )
+    # The wait below is idle -- it polls at 1 Hz and renews the lease, using
+    # no worker CPU -- but can last 30 minutes.  Holding a turn slot for it
+    # would let a handful of pending questions saturate the tenant cap and
+    # requeue every unrelated session behind sleepers.
+    org_id, agent_id = await _resolve_gate_identity(session_store, session_id)
+    async with released_for_wait(
+        turn_gate if org_id else None,
+        org_id or "",
+        agent_id or "",
+        context="ask_user_question",
+    ):
+        outcome = await _wait_for_response(
+            session_id=session_id,
+            tool_call_id=str(tool_call_id),
+            session_store=session_store,
+            lease_token=lease_token,
+        )
 
     if outcome.get("cancelled"):
         return json.dumps(
