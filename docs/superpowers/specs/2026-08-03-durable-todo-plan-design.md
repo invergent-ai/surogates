@@ -59,10 +59,26 @@ of which have a caller outside the module.
 
 ### Tool classification
 
-`todo` moves out of `CONCURRENCY_SAFE_TOOLS` — and therefore out of
-`PARALLEL_TOOLS`, so it stops firing eagerly mid-stream — into a new
-`DURABLE_STATE_TOOLS`, unioned into `BATCH_PARALLEL_TOOLS` so it still fans
-out once the stream commits. It also leaves `SAGA_EXCLUDED_TOOLS`.
+`todo` leaves `CONCURRENCY_SAFE_TOOLS`, and therefore `PARALLEL_TOOLS` and
+`BATCH_PARALLEL_TOOLS`. It runs sequentially.
+
+Two reasons, and the second only surfaced in review:
+
+1. A todo write allocates durable state, so it must not be dispatched
+   eagerly mid-stream — a discarded stream would leave the event behind.
+2. With the in-process cache gone, every call is an unlocked
+   read-modify-write on the event log. Two concurrent todo calls would
+   silently drop one update. The shared in-process store it replaced could
+   not lose one, so batch parallelism would have been a regression.
+
+The first reason alone would have allowed post-commit parallelism (the
+delegation-tool pattern). The second rules it out.
+
+It stays in `SAGA_EXCLUDED_TOOLS`. Saga compensation restores a sandbox
+checkpoint (`governance/saga/compensator.py`), and checkpoints are stashed
+only for file-mutating tools. A todo write mutates the event log, not the
+workspace, so a journaled step would carry no `checkpoint_hash` and its
+rollback could only raise `SagaStateError`.
 
 This is the rule `PARALLEL_TOOLS`' own docstring already states:
 
@@ -72,8 +88,8 @@ This is the rule `PARALLEL_TOOLS`' own docstring already states:
 > after the stream completes.
 
 A todo write now allocates durable state. Delegation tools are the existing
-precedent; `DURABLE_STATE_TOOLS` names the category for tools that qualify
-without being delegations.
+precedent for the mid-stream exclusion; `todo` goes further and stays
+sequential because it has no per-call isolation to fall back on.
 
 ## Out of scope
 

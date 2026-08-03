@@ -200,13 +200,21 @@ async def _todo_handler(
         try:
             snapshot = await session_store.latest_todo_snapshot(session_id)
         except Exception:
-            # Degrade to a blank list rather than failing the turn: a read
-            # blip must not cost the model its tool call.
+            # Fail the call rather than answer from a blank store.  An empty
+            # list is indistinguishable from "you have no plan", so degrading
+            # would invite the model to re-plan over a list that still
+            # exists -- and a merge on top of it would then persist the
+            # truncated result, which is the exact bug this tool now avoids.
             logger.warning(
                 "todo: could not load the plan for session %s",
                 session_id, exc_info=True,
             )
-            snapshot = None
+            return json.dumps({
+                "error": (
+                    "Could not read the current task list. Nothing was "
+                    "changed. Retry the call."
+                ),
+            }, ensure_ascii=False)
         if snapshot:
             store.write(snapshot, merge=False)
 

@@ -154,15 +154,37 @@ async def test_no_store_still_answers():
     assert [t["id"] for t in out["todos"]] == ["1"]
 
 
-@pytest.mark.asyncio
-async def test_a_snapshot_read_failure_does_not_break_the_call():
-    """A DB blip must degrade to a blank list, not raise into the tool loop."""
-    class _Broken(_Store):
-        async def latest_todo_snapshot(self, session_id):
-            raise RuntimeError("db blip")
+class _Broken(_Store):
+    async def latest_todo_snapshot(self, session_id):
+        raise RuntimeError("db blip")
 
+
+@pytest.mark.asyncio
+async def test_a_failed_load_never_persists_a_truncated_list():
+    """The bug this whole change exists to fix, re-entered by the back door.
+
+    If the snapshot cannot be read the store is empty. A `merge=true` write
+    would then merge onto nothing and emit THAT as the new snapshot --
+    destroying the real plan permanently, which is strictly worse than the
+    in-memory version it replaced.
+    """
+    store = _Broken()
+    out = await _call(store, uuid4(), todos=[
+        {"id": "9", "content": "new", "status": "pending"},
+    ], merge=True)
+
+    assert "error" in out, "a write must not proceed on a plan it could not read"
+    assert not [e for e in store.events if e[1] == EventType.TODO_UPDATED.value], (
+        "nothing may be persisted when the prior list is unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_load_does_not_report_an_empty_plan():
+    """Returning [] invites the model to re-plan over a list that still exists."""
     out = await _call(_Broken(), uuid4())
-    assert out["todos"] == []
+    assert "error" in out
+    assert out.get("todos") != []
 
 
 def test_todo_is_not_dispatched_mid_stream():
@@ -175,5 +197,12 @@ def test_todo_is_not_dispatched_mid_stream():
     )
 
     assert "todo" not in PARALLEL_TOOLS
-    assert "todo" in BATCH_PARALLEL_TOOLS  # still parallel once committed
-    assert "todo" not in SAGA_EXCLUDED_TOOLS
+    # Nor after the stream commits: every call is an unlocked
+    # read-modify-write on the event log, so two concurrent todo calls would
+    # silently drop one update. The old shared in-process store could not
+    # lose one; running sequentially is what keeps that true.
+    assert "todo" not in BATCH_PARALLEL_TOOLS
+    # Saga compensation restores a sandbox checkpoint, and todo never gets
+    # one -- journaling it would create a step that can only fail to roll
+    # back.
+    assert "todo" in SAGA_EXCLUDED_TOOLS
