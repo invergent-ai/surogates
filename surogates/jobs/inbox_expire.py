@@ -1,40 +1,75 @@
 """Background job for expiring stale inbox items.
 
-Pending inbox items are actionable only while their owning session can still
-consume a user response. Once the session is terminal, the item stays in the
-history but should no longer appear as actionable.
+Pending inbox items are actionable only while something is still waiting to
+consume the user's response. Past that point the item stays in the history but
+must stop presenting itself as actionable, or the user submits an answer no one
+reads.
+
+A question is normally retired by the tool that asked it, at the moment it
+gives up (see :func:`surogates.session.interactive_input.expire_input_request`).
+This sweeper covers what that cannot: sessions that went terminal, and rows
+orphaned by a worker that died before it could clean up after itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from surogates.db.models import InboxItem, Session
 from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
+from surogates.tools.builtin.ask_user_question import (
+    ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SWEEP_INTERVAL_SECONDS = 300.0
 _TERMINAL_SESSION_STATUSES = frozenset({"completed", "failed", "archived"})
 
+# Added to the tool's own wait before a question is considered dead. The row
+# is stamped by the database while the tool counts down on the worker's
+# monotonic clock, so the two disagree by whatever skew exists between them.
+# Erring long only leaves a dead question listed a minute longer; erring short
+# would expire one a live tool could still consume.
+_ANSWER_WINDOW_GRACE_SECONDS = 60
+
 
 async def expire_inbox_items(session_store) -> int:
-    """Expire pending inbox items whose sessions are terminal."""
+    """Expire pending inbox items that can no longer be acted on."""
     terminal_sessions = select(Session.id).where(
         Session.status.in_(_TERMINAL_SESSION_STATUSES)
+    )
+    answer_window = timedelta(
+        seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS + _ANSWER_WINDOW_GRACE_SECONDS
     )
     async with session_store._sf() as db:
         result = await db.execute(
             update(InboxItem)
             .where(
                 InboxItem.status == "pending",
-                InboxItem.session_id.in_(terminal_sessions),
-                # Acknowledge-only kinds are informational; they persist until
-                # read/acknowledged rather than expiring on a terminal session.
-                InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
+                or_(
+                    and_(
+                        InboxItem.session_id.in_(terminal_sessions),
+                        # Acknowledge-only kinds are informational; they
+                        # persist until read/acknowledged rather than
+                        # expiring on a terminal session.
+                        InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
+                    ),
+                    # The backstop for a question whose tool never got to
+                    # retire its own row — a worker killed mid-wait leaves
+                    # one behind, and on a session that is still running
+                    # nothing else would ever clear it. Compared against
+                    # the database clock, which is the one that stamped
+                    # created_at.
+                    and_(
+                        InboxItem.kind == "input_required",
+                        InboxItem.created_at < func.now() - answer_window,
+                    ),
+                ),
             )
             .values(
                 status="expired",
@@ -46,7 +81,7 @@ async def expire_inbox_items(session_store) -> int:
         await db.commit()
 
     if ids:
-        logger.info("Expired %d inbox item(s) for terminal sessions", len(ids))
+        logger.info("Expired %d inbox item(s)", len(ids))
     return len(ids)
 
 

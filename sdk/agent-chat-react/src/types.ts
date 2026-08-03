@@ -446,6 +446,12 @@ export interface AgentChatInboxItem {
   payload: Record<string, unknown>;
   actionRef: Record<string, unknown> | null;
   createdAt: string;
+  /**
+   * When the item stops being actionable, for the kinds that have a
+   * deadline — today only a question, which is answerable while its tool
+   * call is parked waiting. Null when nothing expires.
+   */
+  expiresAt?: string | null;
   updatedAt: string;
   readAt: string | null;
   respondedAt: string | null;
@@ -459,7 +465,12 @@ export interface AgentChatInboxList {
 }
 
 export interface AgentChatInboxListInput {
-  status?: AgentChatInboxStatus;
+  /**
+   * A history view needs several statuses at once (acknowledged,
+   * responded and expired), and expired items are invisible to any
+   * request that does not name them.
+   */
+  status?: AgentChatInboxStatus | AgentChatInboxStatus[];
   kind?: AgentChatInboxKind;
   sessionId?: string;
   cursor?: string;

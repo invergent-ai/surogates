@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -1463,15 +1464,19 @@ class SessionStore:
         self,
         *,
         user_id: UUID,
-        status: str | None = None,
+        status: str | Sequence[str] | None = None,
         kind: str | None = None,
         session_id: UUID | None = None,
         cursor: tuple[datetime, int] | None = None,
         limit: int = 50,
     ) -> list[InboxItem]:
+        # A history view wants several statuses at once (acknowledged,
+        # responded and expired), so the filter takes a set as readily as
+        # a single value. Without one, expired items stay hidden.
+        statuses = [status] if isinstance(status, str) else list(status or ())
         stmt = select(InboxItem).where(InboxItem.user_id == user_id)
-        if status:
-            stmt = stmt.where(InboxItem.status == status)
+        if statuses:
+            stmt = stmt.where(InboxItem.status.in_(statuses))
         else:
             stmt = stmt.where(InboxItem.status != "expired")
         if kind:

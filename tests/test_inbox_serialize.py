@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 # SPDX-License-Identifier: AGPL-3.0-only
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +24,35 @@ def test_serialize_item_includes_agent_fields():
     out = _serialize_item(_item(sid), {"agent_id": "agent-x", "agent_slug": "agent-x-slug"})
     assert out["agent_id"] == "agent-x"
     assert out["agent_slug"] == "agent-x-slug"
+
+
+def test_serialize_item_dates_a_question_by_the_tools_wait():
+    """The answer window is the server's rule; clients read it rather
+    than each mirroring the constant."""
+    from surogates.tools.builtin.ask_user_question import (
+        ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+    )
+
+    item = _item(uuid.uuid4())
+    item.kind = "input_required"
+
+    expires_at = _serialize_item(item)["expires_at"]
+
+    assert expires_at == (
+        item.created_at + timedelta(seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS)
+    ).isoformat()
+
+
+def test_serialize_item_leaves_kinds_without_a_deadline_open():
+    """Only a question stops being actionable on a clock."""
+    assert _serialize_item(_item(uuid.uuid4()))["expires_at"] is None
+
+
+def test_serialize_item_keeps_a_missing_user_id_null():
+    """Service-account-owned rows carry no user; str() would emit "None"."""
+    item = _item(uuid.uuid4())
+    item.user_id = None
+    assert _serialize_item(item)["user_id"] is None
 
 
 def test_serialize_item_defaults_agent_fields_to_none():

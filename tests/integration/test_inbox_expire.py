@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from sqlalchemy import select, update
 
 from surogates.db.models import InboxItem, Session
-from surogates.jobs.inbox_expire import expire_inbox_items
+from surogates.jobs.inbox_expire import (
+    _ANSWER_WINDOW_GRACE_SECONDS,
+    expire_inbox_items,
+)
 from surogates.session.events import EventType
+from surogates.tools.builtin.ask_user_question import (
+    ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+)
 
 from .conftest import create_org, create_user
 
@@ -60,6 +68,140 @@ async def test_sweeper_expires_pending_items_for_terminal_sessions(
 
     assert expired_count >= 1
     assert item.status == "expired"
+
+
+async def _backdate_inbox_items(session_store, session_id, *, seconds: float):
+    async with session_store._sf() as db:
+        await db.execute(
+            update(InboxItem)
+            .where(InboxItem.session_id == session_id)
+            .values(
+                created_at=datetime.now(timezone.utc) - timedelta(seconds=seconds)
+            )
+        )
+        await db.commit()
+
+
+async def test_tool_retires_its_own_row_when_it_gives_up(
+    session_factory,
+    session_store,
+):
+    """The tool knows the exact moment it stops waiting; leaving that to
+    the periodic sweep would leave the question offering to take an
+    answer for up to another sweep interval."""
+    from surogates.session.interactive_input import expire_input_request
+
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-gave-up",
+            "questions": [{"prompt": "Continue?"}],
+            "context": "",
+        },
+    )
+
+    retired = await expire_input_request(
+        session_store, session_id=session.id, tool_call_id="tc-gave-up",
+    )
+    item = await _get_inbox_item_for_session(session_store, session.id)
+
+    assert retired is True
+    assert item.status == "expired"
+    # The row was already claimed by an answer, so there is nothing to
+    # retire and the caller learns it lost the race.
+    assert (
+        await expire_input_request(
+            session_store, session_id=session.id, tool_call_id="tc-gave-up",
+        )
+        is False
+    )
+
+
+async def test_sweeper_expires_questions_past_the_answer_window(
+    session_factory,
+    session_store,
+):
+    """The blocked tool gives up after its wait window even though the
+    session keeps running, so nothing is left to consume an answer."""
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-timed-out",
+            "questions": [{"prompt": "Continue?"}],
+            "context": "",
+        },
+    )
+    await _backdate_inbox_items(
+        session_store,
+        session.id,
+        seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS
+        + _ANSWER_WINDOW_GRACE_SECONDS
+        + 60,
+    )
+
+    expired_count = await expire_inbox_items(session_store)
+    item = await _get_inbox_item_for_session(session_store, session.id)
+
+    assert expired_count == 1
+    assert item.status == "expired"
+
+
+async def test_sweeper_keeps_questions_inside_the_answer_window(
+    session_factory,
+    session_store,
+):
+    """Skew between the worker's clock and the database's must not expire
+    a question the tool is still parked on."""
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-still-waiting",
+            "questions": [{"prompt": "Continue?"}],
+            "context": "",
+        },
+    )
+    await _backdate_inbox_items(
+        session_store,
+        session.id,
+        seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60,
+    )
+
+    expired_count = await expire_inbox_items(session_store)
+    item = await _get_inbox_item_for_session(session_store, session.id)
+
+    assert expired_count == 0
+    assert item.status == "pending"
+
+
+async def test_answer_window_does_not_expire_other_kinds(
+    session_factory,
+    session_store,
+):
+    """Only a question has a deadline: an action or a gate stays actionable
+    for as long as its session can still wake and consume the response."""
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_ACTION_REQUIRED,
+        {"instructions": "Sign in", "action_type": "browser"},
+    )
+    await _backdate_inbox_items(
+        session_store,
+        session.id,
+        seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS * 10,
+    )
+
+    expired_count = await expire_inbox_items(session_store)
+    item = await _get_inbox_item_for_session(session_store, session.id)
+
+    assert expired_count == 0
+    assert item.status == "pending"
 
 
 async def test_sweeper_does_not_touch_active_sessions(

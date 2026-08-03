@@ -24,6 +24,7 @@ interface InboxItemResponse {
   payload: Record<string, unknown>;
   action_ref: Record<string, unknown> | null;
   created_at: string;
+  expires_at?: string | null;
   updated_at: string;
   read_at: string | null;
   responded_at: string | null;
@@ -50,6 +51,7 @@ function toInboxItem(item: InboxItemResponse): AgentChatInboxItem {
     payload: item.payload,
     actionRef: item.action_ref,
     createdAt: item.created_at,
+    expiresAt: item.expires_at ?? null,
     updatedAt: item.updated_at,
     readAt: item.read_at,
     respondedAt: item.responded_at,
@@ -60,7 +62,9 @@ function toInboxItem(item: InboxItemResponse): AgentChatInboxItem {
 
 function listUrl(input: AgentChatInboxListInput = {}): string {
   const params = new URLSearchParams();
-  if (input.status) params.set("status", input.status);
+  for (const status of [input.status ?? []].flat()) {
+    params.append("status", status);
+  }
   if (input.kind) params.set("kind", input.kind);
   if (input.sessionId) params.set("session_id", input.sessionId);
   if (input.cursor) params.set("cursor", input.cursor);

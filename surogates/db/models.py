@@ -496,6 +496,16 @@ class InboxItem(Base):
         ),
         Index("idx_inbox_org_created", "org_id", "created_at"),
         Index("idx_inbox_session", "session_id"),
+        # The expiry sweeper's working set — pending items by kind and
+        # age. Partial because pending is the small minority of a table
+        # that only grows; see inbox_principal.sql, which retrofits it
+        # onto databases that already exist.
+        Index(
+            "idx_inbox_pending_kind_created",
+            "kind",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
         CheckConstraint(
             "(user_id IS NOT NULL)::int + (service_account_id IS NOT NULL)::int = 1",
             name="ck_inbox_items_one_principal",

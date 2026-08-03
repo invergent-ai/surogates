@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from uuid import UUID
@@ -289,6 +290,58 @@ async def test_delete_inbox_item_expires_and_hides_item(
     assert row.responded_at is not None
 
 
+async def test_list_accepts_several_statuses_at_once(
+    client,
+    session_factory,
+    session_store,
+):
+    """A history view asks for everything the user is done with, which
+    spans three statuses — and expired items are invisible to any request
+    that does not name them."""
+    _, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    still_pending = await _emit_task_complete(session_store, session.id)
+    acknowledged = await _emit_task_complete(session_store, session.id)
+    hidden = await _emit_task_complete(session_store, session.id)
+    await session_store.set_inbox_status(
+        item_id=acknowledged.id, user_id=user_id, new_status="acknowledged",
+    )
+    await session_store.delete_inbox_item(item_id=hidden.id, user_id=user_id)
+
+    response = await client.get(
+        "/v1/inbox?status=acknowledged&status=responded&status=expired",
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    returned = {row["id"] for row in response.json()["items"]}
+    assert returned == {acknowledged.id, hidden.id}
+    assert still_pending.id not in returned
+
+
+async def test_list_rejects_an_unknown_status(
+    client,
+    session_factory,
+    session_store,
+):
+    """Silently returning nothing would read as an empty inbox."""
+    _, _, token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+
+    response = await client.get(
+        "/v1/inbox?status=pending&status=nonsense",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "nonsense" in response.text
+
+
 async def test_delete_other_users_item_returns_404(
     client,
     session_factory,
@@ -459,6 +512,31 @@ async def test_respond_rejects_non_governance_kind(
     assert response.status_code == 409
 
 
+def _finite_event_source(stop_on: str):
+    """Turn the route's endless SSE generator into one that stops.
+
+    The test client drains a response fully before handing it back, and
+    an inbox stream is designed never to end.
+    """
+
+    def factory(generator):
+        async def limited_stream():
+            async for event in generator:
+                if "event" not in event:
+                    continue
+                yield f"event: {event['event']}\n"
+                yield f"data: {event['data']}\n\n"
+                if event["event"] == stop_on:
+                    break
+
+        return StreamingResponse(
+            limited_stream(),
+            media_type="text/event-stream",
+        )
+
+    return factory
+
+
 async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     client,
     app,
@@ -471,24 +549,9 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     )
     headers = {"Authorization": f"Bearer {token}"}
 
-    def finite_event_source(generator):
-        async def limited_stream():
-            async for event in generator:
-                if "event" not in event:
-                    continue
-                yield f"event: {event['event']}\n"
-                yield f"data: {event['data']}\n\n"
-                if event["event"] == "item":
-                    break
-
-        return StreamingResponse(
-            limited_stream(),
-            media_type="text/event-stream",
-        )
-
     monkeypatch.setattr(
         "surogates.api.routes.inbox.EventSourceResponse",
-        finite_event_source,
+        _finite_event_source("item"),
         raising=False,
     )
 
@@ -519,6 +582,50 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "event: snapshot" in response.text
     assert "event: item" in response.text
     assert "task_complete" in response.text
+
+
+async def test_sse_snapshot_counts_only_pending_unread(
+    client,
+    app,
+    session_factory,
+    monkeypatch,
+):
+    """The badge derives from pending items, so the snapshot it seeds must
+    agree — counting unread items the user already dealt with made the
+    number jump the moment the stream connected."""
+    store = app.state.session_store
+    _, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        store,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    still_pending = await _emit_task_complete(store, session.id)
+    already_handled = await _emit_task_complete(store, session.id)
+    await store.set_inbox_status(
+        item_id=already_handled.id,
+        user_id=user_id,
+        new_status="acknowledged",
+    )
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox.EventSourceResponse",
+        _finite_event_source("snapshot"),
+        raising=False,
+    )
+
+    async with asyncio.timeout(5):
+        response = await client.get("/v1/inbox/stream", headers=headers)
+
+    assert response.status_code == 200, response.text
+    snapshot = json.loads(
+        next(
+            line[len("data: "):]
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        )
+    )
+    assert snapshot["unread_ids"] == [still_pending.id]
 
 
 class _FakeRuntimeCache:

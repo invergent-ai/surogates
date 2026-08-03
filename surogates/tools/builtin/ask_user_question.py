@@ -32,6 +32,7 @@ from uuid import UUID
 
 from surogates.runtime.turn_gate import released_for_wait
 from surogates.session.events import EventType
+from surogates.session.interactive_input import expire_input_request
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -402,6 +403,20 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
         )
 
     if outcome.get("cancelled"):
+        # Nothing is waiting on the answer any more, so the inbox item
+        # stops offering to take one. Best-effort: the sweeper catches a
+        # row left behind by a worker that died before getting here.
+        try:
+            await expire_input_request(
+                session_store,
+                session_id=session_id,
+                tool_call_id=str(tool_call_id),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to expire the inbox item for ask_user_question %s",
+                tool_call_id, exc_info=True,
+            )
         return json.dumps(
             {
                 "cancelled": True,

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import datetime
-from typing import Annotated
+from datetime import datetime, timedelta
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import (
@@ -26,8 +26,16 @@ from surogates.session.events import EventType
 from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tools.builtin.ask_user_question import (
+    ASK_USER_QUESTION_MAX_WAIT_SECONDS,
+)
 
 router = APIRouter(prefix="/inbox")
+
+# Repeat the parameter to ask for several at once. Declared as a literal
+# so an unknown value is rejected by the framework, rather than filtering
+# everything out and reading as an empty inbox.
+InboxStatus = Literal["pending", "acknowledged", "responded", "expired"]
 
 
 class InboxResponse(BaseModel):
@@ -102,12 +110,30 @@ async def _agent_fields_for(request: Request, session_id: UUID) -> dict:
     return fields.get(session_id, {})
 
 
+def _expires_at(item) -> str | None:
+    """When a question stops being answerable, or None if it does not.
+
+    Only a question has a deadline: it is answerable while the tool call
+    that asked it is parked waiting, and that wait is capped. Computed
+    here so the one place that knows the cap is the one that owns it —
+    every client used to mirror the constant, and a mirror is only
+    correct until someone changes the original.
+    """
+    if item.kind != "input_required":
+        return None
+    deadline = item.created_at + timedelta(
+        seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS
+    )
+    return deadline.isoformat()
+
+
 def _serialize_item(item, agent_fields: dict | None = None) -> dict:
     fields = agent_fields or {}
     return {
         "id": item.id,
         "org_id": str(item.org_id),
-        "user_id": str(item.user_id),
+        # Null for service-account-owned items; str() would emit "None".
+        "user_id": str(item.user_id) if item.user_id is not None else None,
         "session_id": str(item.session_id),
         "source_event_id": item.source_event_id,
         "kind": item.kind,
@@ -117,6 +143,7 @@ def _serialize_item(item, agent_fields: dict | None = None) -> dict:
         "payload": item.payload,
         "action_ref": item.action_ref,
         "created_at": item.created_at.isoformat(),
+        "expires_at": _expires_at(item),
         "updated_at": item.updated_at.isoformat(),
         "read_at": item.read_at.isoformat() if item.read_at else None,
         "responded_at": item.responded_at.isoformat()
@@ -141,7 +168,7 @@ async def _wake_session_from_request(request: Request, session_id: UUID) -> None
 async def list_inbox(
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
-    status: str | None = Query(default=None),
+    status: list[InboxStatus] | None = Query(default=None),
     kind: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
@@ -151,7 +178,7 @@ async def list_inbox(
     store = request.app.state.session_store
     items = await store.list_inbox(
         user_id=tenant.user_id,
-        status=status,
+        status=status or [],
         kind=kind,
         session_id=UUID(session_id) if session_id else None,
         cursor=_decode_cursor(cursor),
@@ -193,14 +220,16 @@ async def stream_inbox(
         pubsub = redis.pubsub()
         try:
             await pubsub.subscribe(channel)
+            # Pending only, matching what the badge counts from the list
+            # endpoint: an unread item the user already acknowledged or
+            # responded to is history, and counting it here made the
+            # badge jump the moment the stream connected.
             snapshot = await asyncio.shield(
-                store.list_inbox(user_id=tenant.user_id, limit=200)
+                store.list_inbox(
+                    user_id=tenant.user_id, status="pending", limit=200,
+                )
             )
-            unread_ids = [
-                item.id
-                for item in snapshot
-                if item.read_at is None and item.status != "expired"
-            ]
+            unread_ids = [item.id for item in snapshot if item.read_at is None]
             yield {
                 "event": "snapshot",
                 "data": json.dumps({"unread_ids": unread_ids}, default=str),

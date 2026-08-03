@@ -21,3 +21,13 @@ END $$;
 -- status, ordered by created_at), mirroring idx_inbox_user_status_created.
 CREATE INDEX IF NOT EXISTS idx_inbox_sa_status_created
     ON inbox_items (service_account_id, status, created_at);
+
+-- The expiry sweeper's working set. Every other index here is led by a
+-- principal, so its "pending items, by kind and age" pass had to read the
+-- whole table every 300s — on a table that only ever grows, since inbox rows
+-- are kept as history. Partial on status because pending is the small,
+-- shrinking minority of rows, which also keeps the write cost near zero:
+-- an entry is added when an item is created and removed when it is resolved.
+CREATE INDEX IF NOT EXISTS idx_inbox_pending_kind_created
+    ON inbox_items (kind, created_at)
+    WHERE status = 'pending';

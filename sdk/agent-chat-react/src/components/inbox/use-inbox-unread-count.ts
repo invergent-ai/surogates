@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentChatAdapter, AgentChatInboxEventStream } from "../../types";
 
 export interface InboxUnreadCountState {
@@ -10,64 +10,70 @@ export interface InboxUnreadCountState {
   error: string | null;
 }
 
+/**
+ * How many pending inbox items the user has not opened.
+ *
+ * Re-derived from the list on every signal rather than adjusted in
+ * place: the stream carries "something changed", not a delta, so
+ * counting its nudges only ever pushed the badge up — it never came back
+ * down when the user read, answered or dismissed an item.
+ */
 export function useInboxUnreadCount(
   adapter: AgentChatAdapter,
 ): InboxUnreadCountState {
   const [unreadCount, setUnreadCount] = useState(0);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestId = useRef(0);
+
+  const listInbox = adapter.listInbox;
+  const openInboxStream = adapter.openInboxStream;
+
+  const refetch = useCallback(async () => {
+    if (!listInbox) return;
+    const id = ++requestId.current;
+    try {
+      const response = await listInbox({ status: "pending", limit: 200 });
+      if (id !== requestId.current) return;
+      setUnreadCount(response.items.filter((item) => !item.readAt).length);
+      setError(null);
+    } catch (err) {
+      if (id !== requestId.current) return;
+      // Keep the last known count: a transient failure is not "zero".
+      setError(err instanceof Error ? err.message : "Failed to load inbox");
+    } finally {
+      if (id === requestId.current) setHasLoaded(true);
+    }
+  }, [listInbox]);
 
   useEffect(() => {
-    let cancelled = false;
-    let stream: AgentChatInboxEventStream | null = null;
-
-    if (!adapter.listInbox || !adapter.openInboxStream) {
+    if (!listInbox || !openInboxStream) {
       setError("Inbox is not supported by this adapter.");
       setHasLoaded(true);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
 
-    adapter
-      .listInbox({ status: "pending", limit: 200 })
-      .then((response) => {
-        if (cancelled) return;
-        setUnreadCount(response.items.filter((item) => !item.readAt).length);
-        setHasLoaded(true);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load inbox");
-        setHasLoaded(true);
-      });
-
+    void refetch();
+    let stream: AgentChatInboxEventStream | null = null;
     try {
-      stream = adapter.openInboxStream();
-      stream.addEventListener("snapshot", (event) => {
-        if (cancelled) return;
-        const payload = JSON.parse(event.data) as { unread_ids?: unknown };
-        const ids = Array.isArray(payload.unread_ids) ? payload.unread_ids : [];
-        setUnreadCount(ids.length);
-        setHasLoaded(true);
-      });
-      stream.addEventListener("item", () => {
-        if (cancelled) return;
-        setUnreadCount((count) => count + 1);
-        setHasLoaded(true);
-      });
-      stream.onerror = () => {
-        if (!cancelled) setError("Inbox stream disconnected.");
-      };
+      stream = openInboxStream();
+      const onChange = () => void refetch();
+      stream.addEventListener("snapshot", onChange);
+      stream.addEventListener("item", onChange);
+      stream.onerror = () => setError("Inbox stream disconnected.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to open inbox stream");
+      setError(
+        err instanceof Error ? err.message : "Failed to open inbox stream",
+      );
     }
 
     return () => {
-      cancelled = true;
+      // Abandons any refetch still in flight, so a late response cannot
+      // set state after unmount.
+      requestId.current += 1;
       stream?.close();
     };
-  }, [adapter]);
+  }, [listInbox, openInboxStream, refetch]);
 
   return { unreadCount, hasLoaded, error };
 }

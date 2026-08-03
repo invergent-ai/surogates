@@ -29,6 +29,7 @@ import {
   buildInboxResponse,
   parseInboxQuestions,
 } from "./inbox-answers";
+import { useAnswerWindow } from "./inbox-expiry";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
@@ -39,6 +40,7 @@ import type {
   AgentChatInboxItem,
   AgentChatInboxKind,
   AgentChatInboxList,
+  AgentChatInboxStatus,
 } from "../../types";
 
 type OnSessionSelect = (sessionId: string, item?: AgentChatInboxItem) => void;
@@ -120,8 +122,25 @@ function kindIcon(kind: AgentChatInboxKind) {
   return CircleDotIcon;
 }
 
+type InboxView = "active" | "history";
+
+// History is asked for by name: a request that omits the status filter
+// gets everything except expired, which is exactly the half of history
+// worth keeping — a question the agent stopped waiting for, or an item
+// that was dismissed.
+const STATUSES_BY_VIEW: Record<InboxView, AgentChatInboxStatus[]> = {
+  active: ["pending"],
+  history: ["acknowledged", "responded", "expired"],
+};
+
 function sortItems(items: AgentChatInboxItem[]): AgentChatInboxItem[] {
-  return [...items].sort((a, b) => {
+  // Paging can overlap with a stream update; the first copy of a row
+  // wins (callers put the fresher one first) and it is listed once.
+  const byId = new Map<number, AgentChatInboxItem>();
+  for (const item of items) {
+    if (!byId.has(item.id)) byId.set(item.id, item);
+  }
+  return [...byId.values()].sort((a, b) => {
     if (a.createdAt !== b.createdAt) return a.createdAt > b.createdAt ? -1 : 1;
     return b.id - a.id;
   });
@@ -139,6 +158,67 @@ function InboxBody({ body, muted }: { body: string; muted?: boolean }) {
 
 const FIELD_CLASS =
   "h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50";
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
+/**
+ * Runs a detail-pane action, reporting failure where the user is looking.
+ *
+ * Every action here reaches the network, and an unhandled rejection put
+ * the button back the way it was with nothing said — indistinguishable
+ * from a submit that worked.
+ */
+function useAction(): {
+  error: string | null;
+  busy: boolean;
+  run: (fallback: string, action: () => Promise<void>) => Promise<void>;
+} {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = useCallback(
+    async (fallback: string, action: () => Promise<void>) => {
+      setBusy(true);
+      setError(null);
+      try {
+        await action();
+      } catch (err) {
+        setError(errorMessage(err, fallback));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  return { error, busy, run };
+}
+
+function ActionError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <p role="alert" className="text-sm text-destructive">
+      {message}
+    </p>
+  );
+}
+
+function ExpiryNote({ label, expired }: { label: string; expired: boolean }) {
+  return (
+    <p
+      className={cn(
+        "text-xs",
+        expired ? "text-muted-foreground" : "text-foreground",
+      )}
+    >
+      {expired
+        ? "The agent stopped waiting for this answer and moved on, so it can no longer be submitted."
+        : `${label}. Deleting it will not answer the agent; it only clears it from your inbox.`}
+    </p>
+  );
+}
 
 // <option> values are choice INDEXES, never labels: an agent-supplied
 // label could otherwise collide with whatever sentinel marks the
@@ -243,44 +323,42 @@ function InboxDetailActions({
   onSessionSelect?: OnSessionSelect;
   children?: ReactNode;
 }) {
-  const [deleting, setDeleting] = useState(false);
+  const { error, busy: deleting, run } = useAction();
 
   async function deleteItem() {
     if (!adapter.deleteInboxItem) return;
-    setDeleting(true);
-    try {
-      await onDeleted(item.id);
-    } finally {
-      setDeleting(false);
-    }
+    await run("Failed to delete", () => onDeleted(item.id));
   }
 
   return (
-    <div className="flex flex-wrap gap-2">
-      <Button
-        type="button"
-        size="sm"
-        onClick={() => onSessionSelect?.(item.sessionId, item)}
-        aria-label="Open session"
-      >
-        <ExternalLinkIcon className="size-3.5" />
-        Open session
-      </Button>
-      {children}
-      {adapter.deleteInboxItem && (
+    <div className="space-y-2">
+      <ActionError message={error} />
+      <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           size="sm"
-          variant="ghost"
-          onClick={() => void deleteItem()}
-          disabled={deleting}
-          aria-label="Delete inbox item"
-          title="Delete inbox item"
+          onClick={() => onSessionSelect?.(item.sessionId, item)}
+          aria-label="Open session"
         >
-          <Trash2Icon className="size-3.5" />
-          {deleting ? "Deleting" : "Delete"}
+          <ExternalLinkIcon className="size-3.5" />
+          Open session
         </Button>
-      )}
+        {children}
+        {adapter.deleteInboxItem && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => void deleteItem()}
+            disabled={deleting}
+            aria-label="Delete inbox item"
+            title="Delete inbox item"
+          >
+            <Trash2Icon className="size-3.5" />
+            {deleting ? "Deleting" : "Delete"}
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -302,8 +380,10 @@ function InputRequiredDetail({
   // choice object while the user is only editing an answer.
   const questions = useMemo(() => parseInboxQuestions(item), [item]);
   const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
-  const [submitting, setSubmitting] = useState(false);
-  const disabled = item.status !== "pending" || submitting;
+  const { error, busy: submitting, run } = useAction();
+  const { expired, label: expiryLabel } = useAnswerWindow(item.expiresAt);
+  const pending = item.status === "pending" && !expired;
+  const disabled = !pending || submitting;
 
   const editDraft = (prompt: string, patch: Partial<AnswerDraft>) =>
     setDrafts((current) => ({
@@ -311,9 +391,11 @@ function InputRequiredDetail({
       [prompt]: { ...current[prompt], ...patch },
     }));
 
-  const canSubmit = questions.every(
-    (question) => answerText(question, drafts[question.prompt]),
-  );
+  // An empty batch satisfies every(), and the server rejects a
+  // submission with no answers in it.
+  const canSubmit =
+    questions.length > 0 &&
+    questions.every((question) => answerText(question, drafts[question.prompt]));
 
   async function submit() {
     const toolCallId =
@@ -321,8 +403,7 @@ function InputRequiredDetail({
         ? item.payload.tool_call_id
         : "";
     if (!toolCallId || !canSubmit) return;
-    setSubmitting(true);
-    try {
+    await run("Failed to submit your answer", async () => {
       const responses: AgentChatAskUserQuestionAnswer[] = questions.map(
         (question) => buildInboxResponse(question, drafts[question.prompt]),
       );
@@ -332,9 +413,7 @@ function InputRequiredDetail({
         responses,
       });
       onUpdated(await adapter.getInboxItem({ itemId: item.id }));
-    } finally {
-      setSubmitting(false);
-    }
+    });
   }
 
   return (
@@ -363,6 +442,10 @@ function InputRequiredDetail({
           />
         </label>
       ))}
+      {item.status === "pending" && (
+        <ExpiryNote label={expiryLabel} expired={expired} />
+      )}
+      <ActionError message={error} />
       <InboxDetailActions
         item={item}
         adapter={adapter}
@@ -396,8 +479,11 @@ function AckDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
+  const { error, busy, run } = useAction();
   async function acknowledge() {
-    onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
+    await run("Failed to acknowledge", async () => {
+      onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
+    });
   }
   const outcome = typeof item.payload.outcome === "string" ? item.payload.outcome : "";
   const duration =
@@ -418,6 +504,7 @@ function AckDetail({
           Duration: {Math.round(duration / 60)} min ({duration} s)
         </p>
       )}
+      <ActionError message={error} />
       <InboxDetailActions
         item={item}
         adapter={adapter}
@@ -429,10 +516,11 @@ function AckDetail({
             type="button"
             size="sm"
             onClick={() => void acknowledge()}
+            disabled={busy}
             aria-label="Acknowledge inbox item"
           >
             <CheckIcon className="size-3.5" />
-            Acknowledge
+            {busy ? "Saving" : "Acknowledge"}
           </Button>
         )}
       </InboxDetailActions>
@@ -453,10 +541,13 @@ function GovernanceDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
+  const { error, busy, run } = useAction();
   async function decide(decision: "approve" | "reject") {
-    onUpdated(
-      await adapter.respondGovernanceInboxItem({ itemId: item.id, decision }),
-    );
+    await run(`Failed to ${decision}`, async () => {
+      onUpdated(
+        await adapter.respondGovernanceInboxItem({ itemId: item.id, decision }),
+      );
+    });
   }
   const toolName =
     typeof item.payload.tool_name === "string" ? item.payload.tool_name : "tool";
@@ -466,7 +557,7 @@ function GovernanceDetail({
       : "";
   const reason =
     typeof item.payload.deny_reason === "string" ? item.payload.deny_reason : "";
-  const disabled = item.status !== "pending";
+  const disabled = item.status !== "pending" || busy;
   return (
     <div className="space-y-4">
       <div>
@@ -480,6 +571,7 @@ function GovernanceDetail({
           {args}
         </pre>
       )}
+      <ActionError message={error} />
       <InboxDetailActions
         item={item}
         adapter={adapter}
@@ -521,7 +613,7 @@ function ActionRequiredDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
-  const [submitting, setSubmitting] = useState(false);
+  const { error, busy: submitting, run } = useAction();
   const actionType =
     typeof item.payload.action_type === "string"
       ? item.payload.action_type
@@ -532,13 +624,11 @@ function ActionRequiredDetail({
     item.status !== "pending" || submitting || !adapter.respondActionRequiredInboxItem;
 
   async function complete() {
-    if (!adapter.respondActionRequiredInboxItem) return;
-    setSubmitting(true);
-    try {
-      onUpdated(await adapter.respondActionRequiredInboxItem({ itemId: item.id }));
-    } finally {
-      setSubmitting(false);
-    }
+    const respond = adapter.respondActionRequiredInboxItem;
+    if (!respond) return;
+    await run("Failed to mark the action complete", async () => {
+      onUpdated(await respond({ itemId: item.id }));
+    });
   }
 
   return (
@@ -550,6 +640,7 @@ function ActionRequiredDetail({
         </p>
       )}
       {actionType && <Badge variant="secondary">{actionType}</Badge>}
+      <ActionError message={error} />
       <InboxDetailActions
         item={item}
         adapter={adapter}
@@ -584,8 +675,11 @@ function ProgressDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
+  const { error, busy, run } = useAction();
   async function acknowledge() {
-    onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
+    await run("Failed to acknowledge", async () => {
+      onUpdated(await adapter.acknowledgeInboxItem({ itemId: item.id }));
+    });
   }
   const rows: Array<[string, unknown]> = [];
   for (const row of [
@@ -610,6 +704,7 @@ function ProgressDetail({
           ))}
         </dl>
       )}
+      <ActionError message={error} />
       <InboxDetailActions
         item={item}
         adapter={adapter}
@@ -621,10 +716,11 @@ function ProgressDetail({
             type="button"
             size="sm"
             onClick={() => void acknowledge()}
+            disabled={busy}
             aria-label="Acknowledge inbox item"
           >
             <CheckIcon className="size-3.5" />
-            Acknowledge
+            {busy ? "Saving" : "Acknowledge"}
           </Button>
         )}
       </InboxDetailActions>
@@ -724,6 +820,7 @@ export function InboxPanel({
   const [items, setItems] = useState<AgentChatInboxItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [internalSelectedId, setInternalSelectedId] = useState<number | null>(null);
+  const [view, setView] = useState<InboxView>("active");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef(0);
@@ -733,12 +830,32 @@ export function InboxPanel({
     [items, selectedItemId],
   );
 
+  // Read through a ref, never closed over: an action started before a
+  // tab switch resolves after it, and a callback holding the old view
+  // would file the result under the list the user has since left.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+
   const applyItem = useCallback((nextItem: AgentChatInboxItem) => {
-    setItems((current) =>
-      sortItems(
-        current.map((item) => (item.id === nextItem.id ? nextItem : item)),
-      ),
-    );
+    setItems((current) => {
+      // A row already on screen updates in place, whatever its new
+      // status: the user just acted on it and the result — Acknowledged,
+      // Responded — is the confirmation. It leaves the view on the next
+      // load, the way a read mail stays put until you come back to the
+      // folder.
+      //
+      // A row that is not on screen is an insert, which is how the
+      // stream announces something new; mapping over the existing rows
+      // dropped those entirely and froze the list at whatever it held
+      // when the page opened. Only insert what belongs here, so a nudge
+      // about a fresh pending item cannot land in History.
+      if (current.some((item) => item.id === nextItem.id)) {
+        return sortItems([nextItem, ...current]);
+      }
+      return STATUSES_BY_VIEW[viewRef.current].includes(nextItem.status)
+        ? sortItems([nextItem, ...current])
+        : current;
+    });
   }, []);
 
   const selectItem = useCallback(
@@ -758,26 +875,29 @@ export function InboxPanel({
     async (cursor?: string | null) => {
       const id = ++requestId.current;
       setLoading(true);
-      setError(null);
       try {
         const response = await inboxAdapter.listInbox({
+          status: STATUSES_BY_VIEW[view],
           cursor: cursor ?? undefined,
           limit,
         });
         if (id !== requestId.current) return;
-        setItems((current) =>
-          sortItems(cursor ? [...current, ...response.items] : response.items),
-        );
+        // Merged, never replaced. A first page is only ever loaded into
+        // an empty list — mount, a view switch, a retry — so the only
+        // thing merging preserves is an item a nudge inserted while this
+        // request was in flight, which a replace would silently drop.
+        setItems((current) => sortItems([...response.items, ...current]));
         setNextCursor(response.nextCursor);
+        setError(null);
       } catch (err) {
         if (id === requestId.current) {
-          setError(err instanceof Error ? err.message : "Failed to load inbox");
+          setError(errorMessage(err, "Failed to load inbox"));
         }
       } finally {
         if (id === requestId.current) setLoading(false);
       }
     },
-    [inboxAdapter, limit],
+    [inboxAdapter, limit, view],
   );
 
   useEffect(() => {
@@ -787,9 +907,20 @@ export function InboxPanel({
   useEffect(() => {
     const stream = inboxAdapter.openInboxStream();
     stream.addEventListener("item", (event) => {
-      const payload = JSON.parse(event.data) as { item_id?: unknown };
-      if (typeof payload.item_id !== "number") return;
-      void inboxAdapter.getInboxItem({ itemId: payload.item_id }).then(applyItem);
+      // A stream frame is not a trusted shape: a malformed one must not
+      // throw out of the listener and take the subscription with it.
+      let itemId: unknown;
+      try {
+        itemId = (JSON.parse(event.data) as { item_id?: unknown }).item_id;
+      } catch {
+        return;
+      }
+      if (typeof itemId !== "number") return;
+      // Only the Active view moves on its own — a nudge means something
+      // new is pending, which by definition is not history. Read from
+      // the ref so a tab click does not tear down the connection.
+      if (viewRef.current !== "active") return;
+      void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
     });
     return () => stream.close();
   }, [applyItem, inboxAdapter]);
@@ -797,6 +928,21 @@ export function InboxPanel({
   function updateSelectedItem(item: AgentChatInboxItem) {
     applyItem(item);
   }
+
+  const selectView = useCallback(
+    (next: InboxView) => {
+      if (next === view) return;
+      // The two views share no items, so keeping the old ones on screen
+      // while the new page loads would show the wrong list.
+      setView(next);
+      setItems([]);
+      setNextCursor(null);
+      setError(null);
+      if (selectedId === undefined) setInternalSelectedId(null);
+      onSelectedIdChange?.(null);
+    },
+    [onSelectedIdChange, selectedId, view],
+  );
 
   const deleteItem = useCallback(
     async (itemId: number) => {
@@ -820,13 +966,37 @@ export function InboxPanel({
             <h1 className="font-semibold">{title}</h1>
           </div>
         )}
+        <div className="flex gap-1 border-b border-line px-2 py-2">
+          {(["active", "history"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => selectView(value)}
+              className={cn(
+                "px-2 py-1 text-xs capitalize transition-colors",
+                view === value
+                  ? "bg-line font-medium text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {error && (
-            <div className="px-4 py-3 text-sm text-destructive">{error}</div>
+          {error && items.length === 0 && (
+            <div className="space-y-2 px-4 py-3">
+              <p className="text-sm text-destructive">{error}</p>
+              <Button type="button" size="sm" onClick={() => void load(null)}>
+                Try again
+              </Button>
+            </div>
           )}
-          {!error && items.length === 0 && !loading && (
+          {items.length === 0 && !error && !loading && (
             <div className="px-4 py-8 text-sm text-muted-foreground">
-              No inbox items
+              {view === "active"
+                ? "Nothing needs you right now"
+                : "No history yet"}
             </div>
           )}
           {items.map((item) => {
@@ -878,6 +1048,10 @@ export function InboxPanel({
       </aside>
       {selectedItem ? (
         <InboxDetail
+          // Remount per item: two items of the same kind render the same
+          // component, so without this the previous one's failure message
+          // and half-typed answers carry over to the next.
+          key={selectedItem.id}
           item={selectedItem}
           adapter={inboxAdapter}
           onUpdated={updateSelectedItem}
