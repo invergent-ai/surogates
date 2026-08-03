@@ -197,6 +197,28 @@ describe("conversational ask rendering", () => {
     });
   });
 
+  it("gives choices carrying descriptions room to read", () => {
+    // Pills truncate; a choice with a rationale needs a stacked row so
+    // the rationale is visible rather than hidden behind a tooltip.
+    const dom = render(
+      askTurn({
+        questions: [
+          {
+            prompt: "Which approach?",
+            choices: [
+              { label: "Cron", description: "Runs on a fixed schedule" },
+              { label: "Webhook" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(dom.textContent).toContain("Cron");
+    expect(dom.textContent).toContain("Runs on a fixed schedule");
+    expect(dom.textContent).toContain("Webhook");
+  });
+
   it("keeps the question visible once answered, without a status banner", () => {
     const dom = render(
       askTurn({

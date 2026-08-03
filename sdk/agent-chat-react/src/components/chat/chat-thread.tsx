@@ -48,6 +48,7 @@ import {
   AskUserQuestionToolBlock,
   askQuestionsOf,
   conversationalAskAcceptsFreeText,
+  hasChoices,
   isConversationalAsk,
 } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
@@ -291,17 +292,14 @@ function pendingAskCall(messages: ChatMessageType[]): ToolCallInfo | null {
  * would be recorded as the answer to every one of them.
  */
 function askComposerPolicy(
-  messages: ChatMessageType[],
+  pending: ToolCallInfo | null,
 ): { locked: boolean; reason?: string; placeholder?: string } | null {
-  const pending = pendingAskCall(messages);
   if (!pending) return null;
   const questions = askQuestionsOf(pending);
-  // Args may not have finished streaming. Until the shape is known,
-  // lock: a stray message answering an unseen batch is worse than a
-  // composer that unlocks a moment later.
-  if (questions.length === 0) {
-    return { locked: true, reason: "Answer the question above to continue." };
-  }
+  // Zero questions means the args have not finished streaming; it is
+  // indistinguishable from a batch until they do, and locking is the
+  // safe reading either way — a stray message answering an unseen
+  // batch is worse than a composer that unlocks a moment later.
   if (!isConversationalAsk(questions)) {
     return { locked: true, reason: "Answer the questions above to continue." };
   }
@@ -315,7 +313,7 @@ function askComposerPolicy(
   }
   return {
     locked: false,
-    placeholder: (question.choices?.length ?? 0) > 0
+    placeholder: hasChoices(question)
       ? "Pick one above, or type your answer…"
       : "Type your answer…",
   };
@@ -2221,7 +2219,14 @@ export function ChatThread({
   onOpenIntegrations,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
-  const askPolicy = useMemo(() => askComposerPolicy(messages), [messages]);
+  // Split so the JSON parse inside the policy is keyed on the pending
+  // call's args rather than the messages array, which is rebuilt on
+  // every streamed token anywhere in the thread.
+  const pendingAsk = useMemo(() => pendingAskCall(messages), [messages]);
+  const askPolicy = useMemo(
+    () => askComposerPolicy(pendingAsk),
+    [pendingAsk?.id, pendingAsk?.args],
+  );
   const awaitingInput = askPolicy !== null;
   const orbActivity = useMemo(
     () =>

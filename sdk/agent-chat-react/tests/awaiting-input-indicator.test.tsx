@@ -74,85 +74,57 @@ function userMessage(): ChatMessage {
   } as ChatMessage;
 }
 
-function pendingAskTurn(): ChatMessage {
+function pendingAsk(
+  id: string,
+  questions: unknown[],
+  content = "",
+): ChatMessage {
   return {
-    id: "asst-ask",
+    id: `asst-${id}`,
     role: "assistant",
-    content: "Here's the design. Does it work?",
+    content,
     createdAt: new Date(),
     status: "streaming",
     turnId: "t-1",
     iterationIndex: 0,
     toolCalls: [
       {
-        id: "call_ask",
+        id: `call_${id}`,
         toolName: "ask_user_question",
-        args: JSON.stringify({
-          questions: [
-            {
-              prompt: "Does this design work for you?",
-              choices: [{ label: "Yes, build it" }, { label: "Changes needed" }],
-              allow_other: false,
-            },
-          ],
-        }),
+        args: JSON.stringify({ questions }),
         status: "running",
       },
     ],
   } as ChatMessage;
 }
+
+/** A closed menu: choices offered and nothing else accepted. */
+const pendingAskTurn = () =>
+  pendingAsk(
+    "ask",
+    [
+      {
+        prompt: "Does this design work for you?",
+        choices: [{ label: "Yes, build it" }, { label: "Changes needed" }],
+        allow_other: false,
+      },
+    ],
+    "Here's the design. Does it work?",
+  );
 
 /** The shape a conversational agent asks in: one open-ended question. */
-function pendingOpenAskTurn(): ChatMessage {
-  return {
-    id: "asst-ask-open",
-    role: "assistant",
-    content: "",
-    createdAt: new Date(),
-    status: "streaming",
-    turnId: "t-1",
-    iterationIndex: 0,
-    toolCalls: [
-      {
-        id: "call_ask_open",
-        toolName: "ask_user_question",
-        args: JSON.stringify({
-          questions: [{ prompt: "What subjects do you like at school?" }],
-        }),
-        status: "running",
-      },
-    ],
-  } as ChatMessage;
-}
+const pendingOpenAskTurn = () =>
+  pendingAsk("ask_open", [{ prompt: "What subjects do you like at school?" }]);
 
 /** One question, choices offered, typing still allowed. */
-function pendingOpenChoiceAskTurn(): ChatMessage {
-  return {
-    id: "asst-ask-chips",
-    role: "assistant",
-    content: "",
-    createdAt: new Date(),
-    status: "streaming",
-    turnId: "t-1",
-    iterationIndex: 0,
-    toolCalls: [
-      {
-        id: "call_ask_chips",
-        toolName: "ask_user_question",
-        args: JSON.stringify({
-          questions: [
-            {
-              prompt: "How often can you meet?",
-              choices: [{ label: "Three a week" }, { label: "Twice a week" }],
-              allow_other: true,
-            },
-          ],
-        }),
-        status: "running",
-      },
-    ],
-  } as ChatMessage;
-}
+const pendingOpenChoiceAskTurn = () =>
+  pendingAsk("ask_chips", [
+    {
+      prompt: "How often can you meet?",
+      choices: [{ label: "Three a week" }, { label: "Twice a week" }],
+      allow_other: true,
+    },
+  ]);
 
 function runningTerminalTurn(): ChatMessage {
   return {

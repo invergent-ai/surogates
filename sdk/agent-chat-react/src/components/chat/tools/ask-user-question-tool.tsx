@@ -51,6 +51,11 @@ function emptySelection(): Selection {
   return { index: -1, other: "" };
 }
 
+/** Whether the agent offered a menu, as opposed to asking openly. */
+export function hasChoices(question: AskUserQuestionQuestion): boolean {
+  return (question.choices?.length ?? 0) > 0;
+}
+
 function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestionAnswer | null {
   if (sel.index < 0) return null;
   if (sel.index >= OTHER_INDEX_OFFSET) {
@@ -58,7 +63,7 @@ function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestio
     if (!text) return null;
     // "Other" only means something when there was a menu to depart
     // from; mirrors the server-side rule in resolve_text_answer.
-    return { question: q.prompt, answer: text, is_other: (q.choices?.length ?? 0) > 0 };
+    return { question: q.prompt, answer: text, is_other: hasChoices(q) };
   }
   const choice = q.choices?.[sel.index];
   if (!choice) return null;
@@ -93,8 +98,7 @@ export function isConversationalAsk(questions: AskUserQuestionQuestion[]): boole
 export function conversationalAskAcceptsFreeText(
   question: AskUserQuestionQuestion,
 ): boolean {
-  const hasChoices = (question.choices?.length ?? 0) > 0;
-  return !hasChoices || question.allow_other !== false;
+  return !hasChoices(question) || question.allow_other !== false;
 }
 
 /**
@@ -192,12 +196,14 @@ function ConversationalAsk({
 
   const answered = tc.askUserQuestionAnswers !== undefined;
   const pending = !answered && tc.status === "running";
-  // No answer and the call is over: the wait timed out, or the session
-  // was paused/ended while the question was open.
-  const unanswered = !answered && tc.status !== "running";
 
   const choices = question.choices ?? [];
-  const showPrompt = !promptEchoedInContent(assistantContent, question.prompt);
+  // Every historical ask re-renders whenever anything in the thread
+  // streams, and this walks the whole assistant body twice.
+  const showPrompt = useMemo(
+    () => !promptEchoedInContent(assistantContent, question.prompt),
+    [assistantContent, question.prompt],
+  );
 
   // Declining to answer is a supported outcome -- the tool documents
   // that a paused session comes back as ``cancelled: true``. The batch
@@ -269,7 +275,9 @@ function ConversationalAsk({
 
       {error && <p className="text-xs text-destructive">{error}</p>}
 
-      {unanswered && (
+      {/* The call is over with nothing recorded: the wait timed out, or
+          the session ended while the question was open. */}
+      {!answered && !pending && (
         <p className="text-xs italic text-muted-foreground/70">
           No answer recorded.
         </p>

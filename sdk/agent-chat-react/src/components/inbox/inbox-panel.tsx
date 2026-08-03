@@ -22,6 +22,13 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { MessageResponse } from "../ai-elements/message";
+import {
+  type AnswerDraft,
+  type InboxQuestion,
+  answerText,
+  buildInboxResponse,
+  parseInboxQuestions,
+} from "./inbox-answers";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
@@ -139,30 +146,28 @@ const FIELD_CLASS =
 const OTHER_OPTION = "other";
 
 function QuestionInput({
-  prompt,
-  choices,
-  allowOther,
+  question,
+  draft,
   disabled,
-  picked,
-  typed,
-  useOther,
   onPickChoice,
   onChooseOther,
   onType,
 }: {
-  prompt: string;
-  choices?: Array<{ label: string; description?: string }>;
-  allowOther: boolean;
+  question: InboxQuestion;
+  draft: AnswerDraft | undefined;
   disabled: boolean;
-  picked: string;
-  typed: string;
-  useOther: boolean;
   onPickChoice: (label: string) => void;
   onChooseOther: () => void;
   onType: (value: string) => void;
 }) {
+  const { prompt, choices, allowOther } = question;
+  const typed = draft?.typed ?? "";
+  const useOther = !!draft?.useOther;
+
   if (choices && choices.length > 0) {
-    const pickedIndex = choices.findIndex((choice) => choice.label === picked);
+    const pickedIndex = choices.findIndex(
+      (choice) => choice.label === draft?.picked,
+    );
     return (
       <div className="space-y-1.5">
         <select
@@ -289,52 +294,22 @@ function InputRequiredDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
-  const questions = Array.isArray(item.payload.questions)
-    ? (item.payload.questions as Array<{
-        prompt?: unknown;
-        choices?: unknown;
-        allow_other?: unknown;
-      }>)
-        .map((question) => ({
-          prompt: typeof question.prompt === "string" ? question.prompt : "",
-          choices: Array.isArray(question.choices)
-            ? (question.choices as Array<{ label?: unknown; description?: unknown }>)
-                .map((choice) => ({
-                  label: typeof choice.label === "string" ? choice.label : "",
-                  description:
-                    typeof choice.description === "string"
-                      ? choice.description
-                      : undefined,
-                }))
-                .filter((choice) => choice.label)
-            : undefined,
-          // Matches the tool schema, where omitting the flag permits
-          // an answer that is not on the menu.
-          allowOther: question.allow_other !== false,
-        }))
-        .filter((question) => question.prompt)
-    : [];
-  // Picked label and typed text are held apart so switching between
-  // them does not submit the one the user moved away from.
-  const [picked, setPicked] = useState<Record<string, string>>({});
-  const [typed, setTyped] = useState<Record<string, string>>({});
-  const [useOther, setUseOther] = useState<Record<string, boolean>>({});
+  // Re-parsing on every keystroke would rebuild every question and
+  // choice object while the user is only editing an answer.
+  const questions = useMemo(() => parseInboxQuestions(item), [item]);
+  const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
   const [submitting, setSubmitting] = useState(false);
   const disabled = item.status !== "pending" || submitting;
 
-  const hasChoices = (q: (typeof questions)[number]) =>
-    (q.choices?.length ?? 0) > 0;
-  // "Other" only exists for a question that offered a menu; an
-  // open-ended question has nothing to deviate from.
-  const isOther = (q: (typeof questions)[number]) =>
-    hasChoices(q) && !!useOther[q.prompt];
-  const answerOf = (q: (typeof questions)[number]) =>
-    (hasChoices(q) && !useOther[q.prompt]
-      ? (picked[q.prompt] ?? "")
-      : (typed[q.prompt] ?? "")
-    ).trim();
+  const editDraft = (prompt: string, patch: Partial<AnswerDraft>) =>
+    setDrafts((current) => ({
+      ...current,
+      [prompt]: { ...current[prompt], ...patch },
+    }));
 
-  const canSubmit = questions.every((question) => answerOf(question));
+  const canSubmit = questions.every(
+    (question) => answerText(question, drafts[question.prompt]),
+  );
 
   async function submit() {
     const toolCallId =
@@ -344,11 +319,9 @@ function InputRequiredDetail({
     if (!toolCallId || !canSubmit) return;
     setSubmitting(true);
     try {
-      const responses: AgentChatAskUserQuestionAnswer[] = questions.map((question) => ({
-        question: question.prompt,
-        answer: answerOf(question),
-        is_other: isOther(question),
-      }));
+      const responses: AgentChatAskUserQuestionAnswer[] = questions.map(
+        (question) => buildInboxResponse(question, drafts[question.prompt]),
+      );
       await adapter.submitAskUserQuestionResponse({
         sessionId: item.sessionId,
         toolCallId,
@@ -369,38 +342,20 @@ function InputRequiredDetail({
             {question.prompt}
           </span>
           <QuestionInput
-            prompt={question.prompt}
-            choices={question.choices}
-            allowOther={question.allowOther}
+            question={question}
+            draft={drafts[question.prompt]}
             disabled={disabled}
-            picked={picked[question.prompt] ?? ""}
-            typed={typed[question.prompt] ?? ""}
-            useOther={!!useOther[question.prompt]}
-            onPickChoice={(label) => {
-              setUseOther((current) => ({
-                ...current,
-                [question.prompt]: false,
-              }));
-              setPicked((current) => ({
-                ...current,
-                [question.prompt]: label,
-              }));
-              // Drop any abandoned free text, so returning to the menu
-              // cannot submit a draft the user moved away from.
-              setTyped((current) => ({ ...current, [question.prompt]: "" }));
-            }}
-            onChooseOther={() =>
-              setUseOther((current) => ({
-                ...current,
-                [question.prompt]: true,
-              }))
+            onPickChoice={(label) =>
+              // Dropping the typed value keeps an abandoned draft from
+              // resurfacing if the user switches back to Other.
+              editDraft(question.prompt, {
+                picked: label,
+                typed: "",
+                useOther: false,
+              })
             }
-            onType={(value) =>
-              setTyped((current) => ({
-                ...current,
-                [question.prompt]: value,
-              }))
-            }
+            onChooseOther={() => editDraft(question.prompt, { useOther: true })}
+            onType={(value) => editDraft(question.prompt, { typed: value })}
           />
         </label>
       ))}
