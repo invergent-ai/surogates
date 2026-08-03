@@ -13,7 +13,11 @@ from uuid import UUID
 from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from surogates.db.models import Mission as MissionRow
+from surogates.db.models import (
+    Mission as MissionRow,
+    Session as ORMSession,
+    Task,
+)
 from surogates.missions.models import Mission, MissionStatus
 
 
@@ -56,6 +60,7 @@ class MissionStore:
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         max_iterations: int = 20,
+        budget_tokens: int | None = None,
     ) -> UUID:
         """Insert a new mission with status='active'.
 
@@ -93,6 +98,7 @@ class MissionStore:
                 description=description,
                 rubric=rubric,
                 max_iterations=max_iterations,
+            budget_tokens=budget_tokens,
             )
             db.add(row)
             await db.commit()
@@ -228,3 +234,71 @@ class MissionStore:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             return datetime.now(timezone.utc) - last < timedelta(seconds=window_seconds)
+
+    async def tokens_spent(self, mission_id: UUID) -> int:
+        """Total tokens billed to *mission_id*.
+
+        DERIVED, never a counter: a SUM over the mission's own coordinator
+        session plus every session attached to one of its tasks.  A counter
+        incremented alongside the work can drift from what was actually
+        billed; this cannot.
+
+        The join goes ``sessions.task_id -> tasks.mission_id`` rather than
+        reading ``Task.current_session_id``, which only points at the
+        in-flight attempt and would miss every earlier one.
+        """
+        spend = func.coalesce(ORMSession.input_tokens, 0) + func.coalesce(
+            ORMSession.output_tokens, 0
+        )
+        async with self._sf() as db:
+            own = (await db.execute(
+                select(func.coalesce(func.sum(spend), 0))
+                .select_from(ORMSession)
+                .join(MissionRow, MissionRow.session_id == ORMSession.id)
+                .where(MissionRow.id == mission_id)
+            )).scalar_one()
+            workers = (await db.execute(
+                select(func.coalesce(func.sum(spend), 0))
+                .select_from(ORMSession)
+                .join(Task, Task.id == ORMSession.task_id)
+                .where(Task.mission_id == mission_id)
+            )).scalar_one()
+        return int(own or 0) + int(workers or 0)
+
+    async def budget_exhausted(self, mission_id: UUID) -> bool:
+        """True when the mission has a token allowance and has spent it."""
+        async with self._sf() as db:
+            budget = (await db.execute(
+                select(MissionRow.budget_tokens)
+                .where(MissionRow.id == mission_id)
+            )).scalar_one_or_none()
+        if not budget:
+            return False
+        return await self.tokens_spent(mission_id) >= budget
+
+    async def pause_if_budget_exhausted(self, mission_id: UUID) -> bool:
+        """Pause a mission that has spent its allowance. True if this call did it.
+
+        Reuses ``paused`` + ``paused_reason`` rather than adding a status:
+        a new one would have to land in the SDK's ``types.ts`` and its
+        rebuilt dist, which is a known release-breaker, and "paused with a
+        reason" is exactly what this is.
+        """
+        if not await self.budget_exhausted(mission_id):
+            return False
+        async with self._sf() as db:
+            updated = (await db.execute(
+                update(MissionRow)
+                .where(
+                    MissionRow.id == mission_id,
+                    MissionRow.status == "active",
+                )
+                .values(
+                    status="paused",
+                    paused_reason="budget_exhausted",
+                    updated_at=func.now(),
+                )
+                .returning(MissionRow.id)
+            )).scalar_one_or_none()
+            await db.commit()
+        return updated is not None

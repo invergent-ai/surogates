@@ -1502,6 +1502,12 @@ class Mission(Base):
     iteration: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
+    # Token allowance for the whole objective. NULL = unbounded.  Tokens,
+    # not cost: PROD runs tier sentinels priced at 0.0, so a cost ceiling
+    # would never trip (a 1.48M-token session recorded 0 USD).
+    budget_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
     max_iterations: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="20"
     )
