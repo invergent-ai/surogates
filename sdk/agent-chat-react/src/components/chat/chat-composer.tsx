@@ -442,7 +442,14 @@ function ChatComposerInner({
   const [menuMode, setMenuMode] = useState<ComposerMenuMode>("all");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
-  const showSlashMenu = !menuDismissed && (textInput.value.startsWith("/") || buttonMenuOpen);
+  // While the agent is parked on a question, the composer is an answer
+  // field. Slash commands route around sendMessage entirely (/goal goes
+  // to defineOutcome), so the question would stay open and unanswered
+  // until it times out.
+  const showSlashMenu =
+    !menuDismissed &&
+    !awaitingAnswer &&
+    (textInput.value.startsWith("/") || buttonMenuOpen);
 
   // Re-open when user types a new `/` after dismissal.
   useEffect(() => {
@@ -802,7 +809,11 @@ function ChatComposerInner({
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>
-              {!disabled && (
+              {/* Attachments are new material for the next turn -- the
+                  server refuses to read them as the pending answer (see
+                  _resolve_pending_question), so offering them here would
+                  park the question until it times out. */}
+              {!disabled && !awaitingAnswer && (
               <Popover open={addMenuOpen} onOpenChange={setAddMenuOpen}>
                 <PopoverTrigger asChild>
                   <PromptInputButton aria-label="Add">

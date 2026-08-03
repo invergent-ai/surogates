@@ -177,6 +177,54 @@ describe("conversational ask answers become user messages", () => {
     expect(next.messages).toHaveLength(1);
   });
 
+  it("ignores a second response for the same tool call", () => {
+    // Both answer surfaces are live at once for a conversational ask,
+    // and the widget's respond route emits without checking whether the
+    // composer already answered. The worker takes the first event and
+    // ignores the rest; the thread must not show the reply twice.
+    const state = withMessages([askTurn(ONE_QUESTION)]);
+    const first = applyAgentChatEvent(
+      state,
+      response(
+        [{ question: "What subjects do you like?", answer: "computers", is_other: false }],
+        42,
+      ),
+    );
+    const second = applyAgentChatEvent(
+      first,
+      response(
+        [{ question: "What subjects do you like?", answer: "sports", is_other: false }],
+        43,
+      ),
+    );
+
+    expect(second.messages.filter((m) => m.role === "user")).toHaveLength(1);
+    expect(second.messages[1]?.content).toBe("computers");
+  });
+
+  it("leaves a failed send standing instead of adopting it", () => {
+    // markSendError keeps the local- id and appends the failure to the
+    // body. Adopting it would erase the notice and attach the answer to
+    // a message that never reached the server.
+    const failed = {
+      ...optimisticUserMessage("computers\n\n*Failed to send: network*"),
+      status: "error" as const,
+    };
+    const state = withMessages([askTurn(ONE_QUESTION), failed]);
+
+    const next = applyAgentChatEvent(
+      state,
+      response([
+        { question: "What subjects do you like?", answer: "sports", is_other: false },
+      ]),
+    );
+
+    expect(next.messages).toHaveLength(3);
+    expect(next.messages[1]?.status).toBe("error");
+    expect(next.messages[1]?.content).toContain("Failed to send");
+    expect(next.messages[2]?.content).toBe("sports");
+  });
+
   it("does not adopt a user message the server already confirmed", () => {
     // A promoted (evt-) user message belongs to an earlier turn: the
     // answer is a new message, not a rewrite of that one.

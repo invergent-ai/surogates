@@ -1353,12 +1353,21 @@ function applyAskUserQuestionResponse(
   for (let i = next.length - 1; i >= 0; i--) {
     const msg = next[i];
     if (!msg?.toolCalls?.some((tc) => tc.id === targetToolId)) continue;
+    // A second response for the same tool call is possible: the widget's
+    // respond route emits before its best-effort inbox claim, so it does
+    // not refuse a question the composer already answered. The worker
+    // returns on the first event and ignores the rest, so the thread
+    // must too -- otherwise the same reply lands twice.
+    const alreadyAnswered = msg.toolCalls.some(
+      (tc) => tc.id === targetToolId && tc.askUserQuestionAnswers !== undefined,
+    );
     next[i] = {
       ...msg,
       toolCalls: msg.toolCalls.map((tc) =>
         tc.id === targetToolId ? { ...tc, askUserQuestionAnswers: answers } : tc,
       ),
     };
+    if (alreadyAnswered) return next;
     return appendConversationalAnswer(next, eventId, answers);
   }
   return messages;
@@ -1403,6 +1412,11 @@ function appendConversationalAnswer(
     const msg = next[i]!;
     if (msg.role !== "user") continue;
     if (!msg.id.startsWith("local-")) break;
+    // markSendError keeps the local- id on a send that failed and
+    // appends the failure to its body. Adopting it would erase that
+    // notice and pin the answer to a message that never reached the
+    // server, so leave it standing and add the answer separately.
+    if (msg.status === "error") break;
     next[i] = { ...msg, id, content: answer, status: "complete" };
     return next;
   }

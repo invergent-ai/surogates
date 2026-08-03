@@ -137,6 +137,20 @@ describe("conversational ask rendering", () => {
     expect(occurrences).toBe(1);
   });
 
+  it("still shows a short prompt that only coincidentally appears in the body", () => {
+    // "sure?" occurs inside "I'm not sure?" by accident. Suppressing on
+    // that leaves the user with no visible question at all.
+    const dom = render(
+      askTurn({
+        content: "I'm not sure? Let me think about the tradeoffs first.",
+        questions: [{ prompt: "Sure?" }],
+      }),
+    );
+
+    const occurrences = (dom.textContent ?? "").toLowerCase().split("sure?").length - 1;
+    expect(occurrences).toBe(2);
+  });
+
   it("still shows the prompt when the body says something else", () => {
     const dom = render(
       askTurn({

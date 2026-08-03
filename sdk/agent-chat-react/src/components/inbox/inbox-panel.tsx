@@ -130,45 +130,93 @@ function InboxBody({ body, muted }: { body: string; muted?: boolean }) {
   );
 }
 
+const FIELD_CLASS =
+  "h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50";
+
+// <option> values are choice INDEXES, never labels: an agent-supplied
+// label could otherwise collide with whatever sentinel marks the
+// free-form row. "other" is not a number, so it cannot be an index.
+const OTHER_OPTION = "other";
+
 function QuestionInput({
   prompt,
   choices,
+  allowOther,
   disabled,
-  value,
-  onChange,
+  picked,
+  typed,
+  useOther,
+  onPickChoice,
+  onChooseOther,
+  onType,
 }: {
   prompt: string;
   choices?: Array<{ label: string; description?: string }>;
+  allowOther: boolean;
   disabled: boolean;
-  value: string;
-  onChange: (value: string) => void;
+  picked: string;
+  typed: string;
+  useOther: boolean;
+  onPickChoice: (label: string) => void;
+  onChooseOther: () => void;
+  onType: (value: string) => void;
 }) {
   if (choices && choices.length > 0) {
+    const pickedIndex = choices.findIndex((choice) => choice.label === picked);
     return (
-      <select
-        aria-label={prompt}
-        className="h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50"
-        disabled={disabled}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="">Select</option>
-        {choices.map((choice) => (
-          <option key={choice.label} value={choice.label}>
-            {choice.label}
-          </option>
-        ))}
-      </select>
+      <div className="space-y-1.5">
+        <select
+          aria-label={prompt}
+          className={FIELD_CLASS}
+          disabled={disabled}
+          value={
+            useOther
+              ? OTHER_OPTION
+              : pickedIndex >= 0
+                ? String(pickedIndex)
+                : ""
+          }
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === OTHER_OPTION) {
+              onChooseOther();
+              return;
+            }
+            const choice = choices[Number(value)];
+            if (choice) onPickChoice(choice.label);
+          }}
+        >
+          <option value="">Select</option>
+          {choices.map((choice, index) => (
+            <option key={choice.label} value={String(index)}>
+              {choice.label}
+            </option>
+          ))}
+          {/* Without this the menu is the only answer the user can
+              give, even when the agent said any answer is fine. */}
+          {allowOther && <option value={OTHER_OPTION}>Other</option>}
+        </select>
+        {useOther && (
+          <input
+            aria-label={`${prompt} (other)`}
+            className={FIELD_CLASS}
+            placeholder="Type your answer…"
+            disabled={disabled}
+            value={typed}
+            onChange={(event) => onType(event.target.value)}
+          />
+        )}
+      </div>
     );
   }
 
   return (
     <input
       aria-label={prompt}
-      className="h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50"
+      className={FIELD_CLASS}
       disabled={disabled}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
+      value={typed}
+      onChange={(event) => onType(event.target.value)}
     />
   );
 }
@@ -245,6 +293,7 @@ function InputRequiredDetail({
     ? (item.payload.questions as Array<{
         prompt?: unknown;
         choices?: unknown;
+        allow_other?: unknown;
       }>)
         .map((question) => ({
           prompt: typeof question.prompt === "string" ? question.prompt : "",
@@ -259,13 +308,33 @@ function InputRequiredDetail({
                 }))
                 .filter((choice) => choice.label)
             : undefined,
+          // Matches the tool schema, where omitting the flag permits
+          // an answer that is not on the menu.
+          allowOther: question.allow_other !== false,
         }))
         .filter((question) => question.prompt)
     : [];
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  // Picked label and typed text are held apart so switching between
+  // them does not submit the one the user moved away from.
+  const [picked, setPicked] = useState<Record<string, string>>({});
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [useOther, setUseOther] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
   const disabled = item.status !== "pending" || submitting;
-  const canSubmit = questions.every((question) => answers[question.prompt]?.trim());
+
+  const hasChoices = (q: (typeof questions)[number]) =>
+    (q.choices?.length ?? 0) > 0;
+  // "Other" only exists for a question that offered a menu; an
+  // open-ended question has nothing to deviate from.
+  const isOther = (q: (typeof questions)[number]) =>
+    hasChoices(q) && !!useOther[q.prompt];
+  const answerOf = (q: (typeof questions)[number]) =>
+    (hasChoices(q) && !useOther[q.prompt]
+      ? (picked[q.prompt] ?? "")
+      : (typed[q.prompt] ?? "")
+    ).trim();
+
+  const canSubmit = questions.every((question) => answerOf(question));
 
   async function submit() {
     const toolCallId =
@@ -277,8 +346,8 @@ function InputRequiredDetail({
     try {
       const responses: AgentChatAskUserQuestionAnswer[] = questions.map((question) => ({
         question: question.prompt,
-        answer: answers[question.prompt]?.trim() ?? "",
-        is_other: false,
+        answer: answerOf(question),
+        is_other: isOther(question),
       }));
       await adapter.submitAskUserQuestionResponse({
         sessionId: item.sessionId,
@@ -302,10 +371,32 @@ function InputRequiredDetail({
           <QuestionInput
             prompt={question.prompt}
             choices={question.choices}
+            allowOther={question.allowOther}
             disabled={disabled}
-            value={answers[question.prompt] ?? ""}
-            onChange={(value) =>
-              setAnswers((current) => ({
+            picked={picked[question.prompt] ?? ""}
+            typed={typed[question.prompt] ?? ""}
+            useOther={!!useOther[question.prompt]}
+            onPickChoice={(label) => {
+              setUseOther((current) => ({
+                ...current,
+                [question.prompt]: false,
+              }));
+              setPicked((current) => ({
+                ...current,
+                [question.prompt]: label,
+              }));
+              // Drop any abandoned free text, so returning to the menu
+              // cannot submit a draft the user moved away from.
+              setTyped((current) => ({ ...current, [question.prompt]: "" }));
+            }}
+            onChooseOther={() =>
+              setUseOther((current) => ({
+                ...current,
+                [question.prompt]: true,
+              }))
+            }
+            onType={(value) =>
+              setTyped((current) => ({
                 ...current,
                 [question.prompt]: value,
               }))

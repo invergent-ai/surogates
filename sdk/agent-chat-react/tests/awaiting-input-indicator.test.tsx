@@ -267,6 +267,39 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
   });
 
+  it("hides the attachment picker while an answer is awaited", () => {
+    // The server refuses to read an attachment as the pending answer
+    // (only pure text converts), so offering one here would leave the
+    // question open until its 30-minute timeout with nothing happening.
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.querySelector('[aria-label="Add"]')).toBeNull();
+  });
+
+  it("offers the attachment picker when no question is pending", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage()]}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.querySelector('[aria-label="Add"]')).not.toBeNull();
+  });
+
   it("offers quick replies but keeps typing available when other is allowed", () => {
     const dom = mount(
       <ChatThread

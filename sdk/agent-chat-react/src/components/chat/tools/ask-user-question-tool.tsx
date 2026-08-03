@@ -104,12 +104,17 @@ export function conversationalAskAcceptsFreeText(
  * Agents routinely write the question in prose and pass the same
  * sentence as ``prompt``.  Comparison is whitespace- and case-
  * insensitive and ignores inline markdown emphasis, since the body is
- * markdown and the prompt is plain text.  A containment test (rather
- * than equality) is deliberate: the prose usually ends with the
- * question after a lead-in.  Biasing toward suppression is the safe
- * side — the question is still on screen inside the body, whereas the
- * opposite error prints it twice.
+ * markdown and the prompt is plain text.
+ *
+ * The body normally *ends* with the question, after a lead-in, so that
+ * is the primary test.  A mid-body match also counts, but only for a
+ * prompt long enough to be unmistakable: a short one ("Sure?") occurs
+ * inside ordinary prose by coincidence ("I'm not sure? Let me...") and
+ * suppressing on that would leave the user with chips, or nothing at
+ * all, and no visible question to answer.
  */
+const UNMISTAKABLE_PROMPT_LENGTH = 40;
+
 export function promptEchoedInContent(
   content: string | undefined,
   prompt: string,
@@ -119,7 +124,10 @@ export function promptEchoedInContent(
   const body = normalize(content ?? "");
   const question = normalize(prompt);
   if (!body || !question) return false;
-  return body.includes(question);
+  if (body.endsWith(question)) return true;
+  return (
+    question.length >= UNMISTAKABLE_PROMPT_LENGTH && body.includes(question)
+  );
 }
 
 // ── Entry point ──────────────────────────────────────────────────────
@@ -190,6 +198,24 @@ function ConversationalAsk({
 
   const choices = question.choices ?? [];
   const showPrompt = !promptEchoedInContent(assistantContent, question.prompt);
+
+  // Declining to answer is a supported outcome -- the tool documents
+  // that a paused session comes back as ``cancelled: true``. The batch
+  // widget binds it to Esc; the conversational shape has no visible
+  // chrome to hang it on, but must not drop the capability, since the
+  // composer deliberately shows Send rather than Stop here.
+  useEffect(() => {
+    if (!pending || !sessionId) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      void adapter.pauseSession({ sessionId }).catch(() => {
+        // Best-effort; the user may press Esc again.
+      });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [adapter, sessionId, pending]);
 
   const pick = useCallback(
     async (label: string) => {
