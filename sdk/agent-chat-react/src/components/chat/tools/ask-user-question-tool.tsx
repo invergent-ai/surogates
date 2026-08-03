@@ -62,7 +62,8 @@ function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestio
     const text = sel.other.trim();
     if (!text) return null;
     // "Other" only means something when there was a menu to depart
-    // from; mirrors the server-side rule in resolve_text_answer.
+    // from. The server recomputes this from the stored questions, so
+    // what we send is advisory.
     return { question: q.prompt, answer: text, is_other: hasChoices(q) };
   }
   const choice = q.choices?.[sel.index];

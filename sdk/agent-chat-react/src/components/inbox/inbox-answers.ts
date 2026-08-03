@@ -69,7 +69,11 @@ export function parseInboxQuestions(item: AgentChatInboxItem): InboxQuestion[] {
  *
  * Only a question that presented a menu can be answered off it; an
  * open-ended question has nothing to deviate from, so its answer is
- * never "other". Matches the server-side rule in resolve_text_answer.
+ * never "other".
+ *
+ * The server settles this from the questions it stored and overrides
+ * whatever is submitted, so this is what the UI shows and a fallback
+ * for servers predating that; it is not the authority.
  */
 export function isOtherAnswer(
   question: InboxQuestion,
