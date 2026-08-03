@@ -424,5 +424,15 @@ class ContextReplayMixin:
         ssh_section = render_ssh_targets_prompt(self._ssh_targets)
         if ssh_section:
             prompt = f"{prompt}\n\n{ssh_section}"
+        # Session-level instruction from ``POST /v1/sessions {"system": ...}``.
+        # Appended, never substituted: it narrows behaviour for one session,
+        # while the agent's own prompt carries the tool contract the harness
+        # depends on.  Ignored unless it is a non-blank string — ``config`` is
+        # caller-supplied JSON and a wrong type must not break the wake.
+        override = (session.config or {}).get("system")
+        if isinstance(override, str) and override.strip():
+            prompt = (
+                f"{prompt}\n\n## Session instructions\n\n{override.strip()}"
+            )
         self._system_prompt_cache.set(session.id, prompt)
         return prompt
