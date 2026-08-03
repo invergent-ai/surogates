@@ -30,6 +30,10 @@ function session(input: Partial<AgentChatSession> & { id: string }): AgentChatSe
 
 function inboxItem(input: Partial<AgentChatInboxItem> & { id: number }): AgentChatInboxItem {
   const { id, ...rest } = input;
+  // Created just now: a question older than the tool's answer window is
+  // no longer submittable, so a fixed date would render every
+  // input_required fixture as already expired.
+  const createdAt = new Date().toISOString();
   return {
     id,
     orgId: "org-1",
@@ -42,8 +46,8 @@ function inboxItem(input: Partial<AgentChatInboxItem> & { id: number }): AgentCh
     body: "All done.",
     payload: { outcome: "success", duration_seconds: 90 },
     actionRef: null,
-    createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
+    createdAt,
+    updatedAt: createdAt,
     readAt: null,
     respondedAt: null,
     ...rest,
@@ -476,7 +480,7 @@ describe("InboxPanel", () => {
 
     expect(deleted).toEqual([5]);
     expect(container.textContent).not.toContain("Need account");
-    expect(container.textContent).toContain("No inbox items");
+    expect(container.textContent).toContain("Nothing needs you right now");
     expect(container.textContent).toContain("Select an item");
   });
 
@@ -636,7 +640,7 @@ describe("InboxPanel", () => {
 
     expect(deleted).toEqual([4]);
     expect(container.textContent).not.toContain("Old notification");
-    expect(container.textContent).toContain("No inbox items");
+    expect(container.textContent).toContain("Nothing needs you right now");
     expect(container.textContent).toContain("Select an item");
   });
 });

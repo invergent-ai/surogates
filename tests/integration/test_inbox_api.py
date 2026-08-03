@@ -290,6 +290,58 @@ async def test_delete_inbox_item_expires_and_hides_item(
     assert row.responded_at is not None
 
 
+async def test_list_accepts_several_statuses_at_once(
+    client,
+    session_factory,
+    session_store,
+):
+    """A history view asks for everything the user is done with, which
+    spans three statuses — and expired items are invisible to any request
+    that does not name them."""
+    _, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    still_pending = await _emit_task_complete(session_store, session.id)
+    acknowledged = await _emit_task_complete(session_store, session.id)
+    hidden = await _emit_task_complete(session_store, session.id)
+    await session_store.set_inbox_status(
+        item_id=acknowledged.id, user_id=user_id, new_status="acknowledged",
+    )
+    await session_store.delete_inbox_item(item_id=hidden.id, user_id=user_id)
+
+    response = await client.get(
+        "/v1/inbox?status=acknowledged&status=responded&status=expired",
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    returned = {row["id"] for row in response.json()["items"]}
+    assert returned == {acknowledged.id, hidden.id}
+    assert still_pending.id not in returned
+
+
+async def test_list_rejects_an_unknown_status(
+    client,
+    session_factory,
+    session_store,
+):
+    """Silently returning nothing would read as an empty inbox."""
+    _, _, token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+
+    response = await client.get(
+        "/v1/inbox?status=pending&status=nonsense",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "nonsense" in response.json()["detail"]
+
+
 async def test_delete_other_users_item_returns_404(
     client,
     session_factory,

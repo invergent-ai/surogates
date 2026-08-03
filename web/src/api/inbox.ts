@@ -60,7 +60,9 @@ function toInboxItem(item: InboxItemResponse): AgentChatInboxItem {
 
 function listUrl(input: AgentChatInboxListInput = {}): string {
   const params = new URLSearchParams();
-  if (input.status) params.set("status", input.status);
+  for (const status of [input.status ?? []].flat()) {
+    params.append("status", status);
+  }
   if (input.kind) params.set("kind", input.kind);
   if (input.sessionId) params.set("session_id", input.sessionId);
   if (input.cursor) params.set("cursor", input.cursor);

@@ -459,7 +459,12 @@ export interface AgentChatInboxList {
 }
 
 export interface AgentChatInboxListInput {
-  status?: AgentChatInboxStatus;
+  /**
+   * A history view needs several statuses at once (acknowledged,
+   * responded and expired), and expired items are invisible to any
+   * request that does not name them.
+   */
+  status?: AgentChatInboxStatus | AgentChatInboxStatus[];
   kind?: AgentChatInboxKind;
   sessionId?: string;
   cursor?: string;

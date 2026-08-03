@@ -29,6 +29,24 @@ from surogates.tenant.context import TenantContext
 
 router = APIRouter(prefix="/inbox")
 
+_STATUSES = frozenset({"pending", "acknowledged", "responded", "expired"})
+
+
+def _validated_statuses(requested: list[str] | None) -> list[str]:
+    """The requested statuses, rejecting anything that cannot exist.
+
+    An unknown value would otherwise filter everything out and read as an
+    empty inbox rather than as the typo it is.
+    """
+    values = [value for value in (requested or []) if value]
+    unknown = sorted(set(values) - _STATUSES)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown inbox status: {', '.join(unknown)}",
+        )
+    return values
+
 
 class InboxResponse(BaseModel):
     decision: str | None = Field(default=None, pattern="^(approve|reject)$")
@@ -142,17 +160,18 @@ async def _wake_session_from_request(request: Request, session_id: UUID) -> None
 async def list_inbox(
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
-    status: str | None = Query(default=None),
+    status: list[str] | None = Query(default=None),
     kind: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ):
+    statuses = _validated_statuses(status)
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
     items = await store.list_inbox(
         user_id=tenant.user_id,
-        status=status,
+        status=statuses,
         kind=kind,
         session_id=UUID(session_id) if session_id else None,
         cursor=_decode_cursor(cursor),
