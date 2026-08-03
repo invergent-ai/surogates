@@ -86,6 +86,15 @@ _CRASH_LOOP_THRESHOLD: int = 3
 _CRASH_LOOP_KEY_PREFIX = "surogates:crash_loop:"
 _CRASH_LOOP_TTL_SECONDS: int = 6 * 3600
 
+# How many times the orphan sweeper re-enqueues one session before giving up.
+# The crash-loop breaker above only trips inside ``_process``'s ``except``
+# branch, and a SIGKILL (OOM, pod eviction) never reaches an ``except`` — so a
+# session that reproducibly kills its worker leaves no crash record at all and
+# the sweeper would re-enqueue it every cycle, forever.  The streak counting
+# these resets on any sign of life, so a session making real progress between
+# crashes never approaches the ceiling.
+_MAX_RECOVERY_ATTEMPTS: int = 3
+
 
 def _crash_fingerprint(exc: BaseException) -> str:
     """Stable identity for a crash: error category + hashed detail."""
@@ -873,6 +882,32 @@ class Orchestrator:
             if getattr(session, "channel", None) == "browser_setup":
                 continue
             try:
+                # Checked BEFORE the recovery emit: emit_event bumps
+                # ``sessions.updated_at``, which is the staleness signal that
+                # made this session visible to the sweeper in the first place.
+                # Emitting on the tripping pass would reset that clock.
+                #
+                # Fails open — a transient DB blip on this query must not
+                # strand a session, because ordinary crash recovery is the
+                # common case and the ceiling is only a backstop.
+                try:
+                    attempts = int(
+                        await self.session_store
+                        .count_recoveries_since_progress(session.id)
+                    )
+                except Exception:
+                    logger.warning(
+                        "Recovery-streak lookup failed for session %s; "
+                        "recovering anyway",
+                        session.id, exc_info=True,
+                    )
+                    attempts = 0
+                if attempts >= _MAX_RECOVERY_ATTEMPTS:
+                    await self._abandon_unrecoverable_session(
+                        session, attempts=attempts, reason=reason,
+                    )
+                    continue
+
                 await self.session_store.emit_event(
                     session.id,
                     EventType.HARNESS_RECOVERED,
@@ -882,35 +917,7 @@ class Orchestrator:
                     },
                 )
                 await self.session_store.release_stale_lease(session.id)
-                # Compensate the TurnConcurrencyGate.  A session that
-                # reaches the orphan sweeper got there because its
-                # previous owner died WITHOUT running the dispatcher's
-                # finally branch -- which is the only path that
-                # ``release()``s the gate slot.  Left unhandled, every
-                # debugger-stop / OOM / pod-eviction leaks one slot
-                # per in-flight session for this (org, agent); a few
-                # cycles of that drives the counter to its cap and
-                # every subsequent dequeue is rejected, leaving fresh
-                # sessions stuck in an endless re-enqueue loop with
-                # no diagnostic anywhere.
-                #
-                # Floor-at-zero in ``TurnGate.release()`` protects
-                # against double-release if this recovery races a
-                # late-arriving finally on the original owner (the
-                # owner is by definition gone at this point, but the
-                # floor keeps us honest).
-                if self._turn_gate is not None:
-                    try:
-                        await self._turn_gate.release(
-                            str(session.org_id), session.agent_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to release turn gate slot for "
-                            "recovered session %s (org=%s agent=%s)",
-                            session.id, session.org_id, session.agent_id,
-                            exc_info=True,
-                        )
+                await self._release_dead_owner_gate_slot(session)
                 await enqueue_session(
                     self.redis,
                     org_id=str(session.org_id),
@@ -928,6 +935,70 @@ class Orchestrator:
                     session.id,
                 )
         return recovered
+
+    async def _release_dead_owner_gate_slot(self, session: Any) -> None:
+        """Compensate the TurnConcurrencyGate for a session's dead owner.
+
+        A session that reaches the orphan sweeper got there because its
+        previous owner died WITHOUT running the dispatcher's finally branch --
+        which is the only path that ``release()``s the gate slot.  Left
+        unhandled, every debugger-stop / OOM / pod-eviction leaks one slot per
+        in-flight session for this (org, agent); a few cycles of that drives
+        the counter to its cap and every subsequent dequeue is rejected,
+        leaving fresh sessions stuck in an endless re-enqueue loop with no
+        diagnostic anywhere.
+
+        The slot leaked whether or not we go on to retry the session, so both
+        the recovery and the abandon path call this.
+
+        Floor-at-zero in ``TurnGate.release()`` protects against
+        double-release if this races a late-arriving finally on the original
+        owner (the owner is by definition gone at this point, but the floor
+        keeps us honest).
+        """
+        if self._turn_gate is None:
+            return
+        try:
+            await self._turn_gate.release(
+                str(session.org_id), session.agent_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to release turn gate slot for "
+                "recovered session %s (org=%s agent=%s)",
+                session.id, session.org_id, session.agent_id,
+                exc_info=True,
+            )
+
+    async def _abandon_unrecoverable_session(
+        self, session: Any, *, attempts: int, reason: str,
+    ) -> None:
+        """Terminate a session the sweeper has failed to recover.
+
+        Failing the session is what actually breaks the loop: ``session.fail``
+        is one of ``find_orphaned_sessions``'s session-ending event types AND
+        the status filter drops non-``active`` rows, so the session leaves the
+        orphan-eligible set on both counts.  Merely skipping the re-enqueue
+        would leave it to be re-examined every sweep forever.
+        """
+        logger.error(
+            "Session %s hit the recovery ceiling (%d attempts with no "
+            "progress, %s) — abandoning instead of re-enqueueing",
+            session.id, attempts, reason,
+        )
+        await self.session_store.release_stale_lease(session.id)
+        await self._release_dead_owner_gate_slot(session)
+        await self.session_store.emit_event(
+            session.id,
+            EventType.SESSION_FAIL,
+            {
+                "reason": "recovery_loop",
+                "attempts": attempts,
+                "recovered_by": reason,
+                "retryable": False,
+            },
+        )
+        await self.session_store.update_session_status(session.id, "failed")
 
     async def _sweep_orphans_on_boot(self) -> None:
         """One-shot aggressive sweep right after worker start.
