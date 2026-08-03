@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.session.events import EventType
@@ -1230,6 +1231,50 @@ async def execute_single_tool(
     decision = gate.check(
         tool_name, tool_args, workspace_path=workspace_path,
     )
+    if not decision.allowed and decision.overridable:
+        # A human may already have approved this exact call.  The grant
+        # query lives HERE, not in ``gate.check``: the gate is a frozen,
+        # synchronous, per-wake object with no DB handle and no session
+        # context, and keeping it pure is what lets it stay shared.
+        try:
+            granted, grant_reasons = await store.consume_approval_grant(
+                session_id=session.id,
+                tool_name=tool_name,
+                arguments=tool_args or {},
+            )
+        except Exception:
+            # Fail closed: an unreadable grant is not an approval.
+            logger.warning(
+                "Approval-grant lookup failed for %s on session %s",
+                tool_name, session.id, exc_info=True,
+            )
+            granted, grant_reasons = False, ["lookup_failed"]
+        if granted:
+            logger.info(
+                "Approved call allowed for %s on session %s",
+                tool_name, session.id,
+            )
+            await store.emit_event(
+                session.id,
+                EventType.POLICY_ALLOWED,
+                {
+                    "tool_name": tool_name,
+                    "reason": "human approval",
+                    "tool_call_id": tool_call_id,
+                },
+            )
+            decision = replace(decision, allowed=True, reason="human approval")
+        elif grant_reasons and grant_reasons != ["no_grant"]:
+            # Surface the near miss: an expired or spent grant is a very
+            # different message to the operator than "never approved".
+            decision = replace(
+                decision,
+                reason=(
+                    f"{decision.reason} (prior approval "
+                    f"{', '.join(grant_reasons)})"
+                ),
+            )
+
     if not decision.allowed:
         logger.warning(
             "Governance blocked %s for session %s: %s",
