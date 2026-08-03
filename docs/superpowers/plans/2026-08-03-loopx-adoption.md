@@ -6,54 +6,54 @@
 
 ---
 
+
 ## 0. Status
 
-Updated 2026-08-03. The audit that produced this report also surfaced live
-bugs; fixing those closed or partly closed several proposals before any of
-them was worked on deliberately.
+**Complete.** Every proposal in this report is implemented. Updated 2026-08-03.
 
-| | Proposal | Status | Landed as |
+| | Proposal | State | PRs |
 | --- | --- | --- | --- |
-| P8 | Wake receipt + recovery ceiling | **done** | #175, #176 |
-| P1 | Durable plan | **done** | #185 |
-| P2 | Suspend/resume for human gates | partial — Ship 1 only | #177 |
-| P3 | Per-objective spend ledger | partial — dead-config half only | #178 |
-| P7 | Ambient "should I tick?" | partial — failure-backoff only | #179 |
-| P6 | `session doctor` | open | — |
-| P4 | Stagnation detection | open | — |
-| P5 | Approval as an expiring grant | open | — |
-| P9 | Mission evidence ledger | open | — |
+| P8 | Wake receipt + recovery ceiling | merged | #175, #176 |
+| P1 | Durable plan | merged | #185 |
+| P6 | `session doctor` | merged | #187 |
+| P7 | Ambient failure backoff | merged | #179 |
+| P2 | Human gates — Ships 1, 2 | merged / open | #177, #189 |
+| P3 | Per-objective spend | merged / open | #178, #190 |
+| P5 | Approval as an expiring grant | open | surogates#188 + surogate-ops#336 |
+| P4 | Stagnation detection | open | #191 |
+| P9 | Evidence corroboration | open | #192 |
 
 Also merged from the same audit, outside the proposal list: #180 (task
 respawn loop), #181 (`system` field never reaching the LLM), #182 (inert
 arbor meta keys), #183 (`policy_profile` accepted but unenforced).
 
-### Remainders on the partial items
+**Merge order:** surogates#188 before surogate-ops#336 (the ops half needs the
+`approval_grants` table). #190 and #191 both add a column to the same
+`ALTER TABLE missions` statement and will conflict; whichever lands second
+appends its column to the list.
 
-- **P2.** Ship 1 (release the turn gate during the wait) is in. Ship 2
-  (enqueue on answer, real `TOOL_RESULT` on timeout) and Ship 3 (true
-  suspend) are not. Ship 3's sharpest trap is still live:
+### Deliberately not built
+
+Each is flagged in its own PR rather than quietly dropped.
+
+- **P2 Ship 3 — true suspend.** ~10 touchpoints, and the trap that
   `find_orphaned_sessions` re-enqueues exactly the event shape a suspended
-  session leaves.
-- **P3.** The dead-config bug is fixed — the worker now honours the derived
-  `max_iterations`. The mission-level token ledger is not built. Tokens must
-  be the enforcement quantity: PROD runs tier sentinels priced at 0.0.
-- **P7.** The real bug (a failed materialise never advancing `next_run_at`)
-  is fixed. The no-change gate is deliberately **not** built — the design
-  objection stands: a quiet-thread trigger fires *because* nothing changed,
-  so a no-change fingerprint suppresses the canonical case.
-
-### Open decision, carried from #183
-
-`policy_profile` is accepted, persisted, shown in the UI and taught by the
-shipped `build-sub-agent` skill, but no registry resolves a profile name, so
-a sub-agent declared `read_only` runs with the parent's authority. #183 only
-made the gap audible. Implementing it means defining what each profile
-permits — a security decision. `GovernanceGate.with_profile` already exists
-and its docstring calls profiles "per-session overlays"; name resolution is
-the only missing piece.
-
----
+  session leaves, making suspend an infinite re-wake loop.
+- **P7 — the no-change tick gate.** The design objection stands: a
+  quiet-thread trigger fires *because* nothing changed, so a no-change
+  fingerprint suppresses the canonical case. Only the failure-backoff bug was
+  real, and that shipped.
+- **P9 — declared validator commands.** Executing declared argv from the
+  evaluator needs sandbox access, timeouts and an argument-trust model. Arbor's
+  `eval_cmd_test` is the shape to copy when it happens.
+- **P9 — per-criterion structured rubric.** Its stated value was killing
+  re-litigation churn, which #191 addresses by giving the judge its previous
+  verdict and streak. A criteria table would be speculative until churn is
+  shown to persist — and the proposed "latch settled criteria" design is
+  anti-LoopX with no invalidation driver.
+- **`policy_profile` enforcement** (surfaced by #183). Needs a decision on what
+  each profile permits; `GovernanceGate.with_profile` already exists and name
+  resolution is the only missing piece.
 
 ## 0b. Corrections this report needed
 
