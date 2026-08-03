@@ -161,7 +161,10 @@ describe("conversational ask answers become user messages", () => {
     );
 
     expect(next.messages).toHaveLength(1);
-    expect(next.messages[0]?.toolCalls?.[0]?.askUserQuestionAnswers).toHaveLength(2);
+    expect(next.messages[0]?.toolCalls?.[0]?.askUserQuestionAnswers).toEqual([
+      { question: "Which approach?", answer: "Cron", is_other: false },
+      { question: "Which region?", answer: "eu-west", is_other: false },
+    ]);
   });
 
   it("ignores an empty answer rather than adding a blank bubble", () => {
@@ -200,6 +203,14 @@ describe("conversational ask answers become user messages", () => {
 
     expect(second.messages.filter((m) => m.role === "user")).toHaveLength(1);
     expect(second.messages[1]?.content).toBe("computers");
+    // The tool call must agree with the bubble. Recording the losing
+    // submission here would leave the thread saying one thing and the
+    // operator-facing recap another.
+    expect(
+      second.messages[0]?.toolCalls?.[0]?.askUserQuestionAnswers,
+    ).toEqual([
+      { question: "What subjects do you like?", answer: "computers", is_other: false },
+    ]);
   });
 
   it("leaves a failed send standing instead of adopting it", () => {
@@ -223,6 +234,53 @@ describe("conversational ask answers become user messages", () => {
     expect(next.messages[1]?.status).toBe("error");
     expect(next.messages[1]?.content).toContain("Failed to send");
     expect(next.messages[2]?.content).toBe("sports");
+  });
+
+  it("adopts the reply, not a follow-up sent before the event arrived", () => {
+    // The composer re-opens the moment the optimistic message lands, so
+    // a user can send again before the answer round-trips. Taking the
+    // newest local message would overwrite that follow-up with the
+    // answer and strand the real reply.
+    const state = withMessages([
+      askTurn(ONE_QUESTION),
+      optimisticUserMessage("computers"),
+      { ...optimisticUserMessage("actually, also sports"), id: "local-2" },
+    ]);
+
+    const next = applyAgentChatEvent(
+      state,
+      response([
+        { question: "What subjects do you like?", answer: "computers", is_other: false },
+      ]),
+    );
+
+    expect(next.messages).toHaveLength(3);
+    expect(next.messages[1]?.id).toBe("evt-42");
+    expect(next.messages[1]?.content).toBe("computers");
+    expect(next.messages[2]?.content).toBe("actually, also sports");
+  });
+
+  it("steps over a failed send to adopt the retry", () => {
+    const failed = {
+      ...optimisticUserMessage("computers\n\n*Failed to send: network*"),
+      status: "error" as const,
+    };
+    const state = withMessages([
+      askTurn(ONE_QUESTION),
+      failed,
+      { ...optimisticUserMessage("computers"), id: "local-retry" },
+    ]);
+
+    const next = applyAgentChatEvent(
+      state,
+      response([
+        { question: "What subjects do you like?", answer: "computers", is_other: false },
+      ]),
+    );
+
+    expect(next.messages).toHaveLength(3);
+    expect(next.messages[1]?.status).toBe("error");
+    expect(next.messages[2]?.id).toBe("evt-42");
   });
 
   it("does not adopt a user message the server already confirmed", () => {

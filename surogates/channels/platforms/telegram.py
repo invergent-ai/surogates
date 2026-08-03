@@ -928,6 +928,7 @@ class TelegramPlatform:
             session_id=session_id,
             tool_call_id=pending.get("tool_call_id", ""),
             responses=responses,
+            questions=questions,
         )
         if not resolved:
             return "This question was already answered."

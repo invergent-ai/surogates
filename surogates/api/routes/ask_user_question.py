@@ -21,10 +21,7 @@ from surogates.api.session_guards import (
 )
 from surogates.db.models import InboxItem
 from surogates.session.events import EventType
-from surogates.session.interactive_input import (
-    derive_is_other,
-    pending_input_for_session,
-)
+from surogates.session.interactive_input import asked_questions, derive_is_other
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -142,16 +139,15 @@ async def respond_to_ask_user_question(
 
     # Whether an answer went off the menu is a fact about the question,
     # so it is settled here rather than taken from the submitter. The
-    # lookup runs before the claim below, while the row is still
-    # pending; if it has already gone, the submitted flag stands rather
-    # than being replaced by a guess.
-    pending = await pending_input_for_session(
-        store, session_id=session_id, tool_call_id=tc_id,
-    )
+    # questions come from the inbox row, or from the ask in the event
+    # log once that row has been claimed — a late submission still gets
+    # checked rather than recorded on trust.
     payload = {
         "tool_call_id": tc_id,
         "responses": derive_is_other(
-            (pending or {}).get("questions") or [],
+            await asked_questions(
+                store, session_id=session_id, tool_call_id=tc_id,
+            ),
             [r.model_dump() for r in body.responses],
         ),
     }

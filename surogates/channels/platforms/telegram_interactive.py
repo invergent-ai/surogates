@@ -150,17 +150,14 @@ def resolve_text_answer(questions: list[dict], text: str) -> list[dict]:
     the answer, and flagging it "other" made consumers render a
     distinction with no other side.
     """
+    from surogates.session.interactive_input import match_choice_label
+
     stripped = (text or "").strip()
     responses: list[dict] = []
     for index, question in enumerate(questions):
         prompt = question.get("prompt") or f"Question {index + 1}"
         choices = question.get("choices") or []
-        matched = None
-        for choice in choices:
-            label = (choice.get("label") or "").strip()
-            if label and label.lower() == stripped.lower():
-                matched = label
-                break
+        matched = match_choice_label(stripped, choices)
         responses.append(
             {
                 "question": prompt,

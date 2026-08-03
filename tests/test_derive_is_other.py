@@ -6,7 +6,7 @@ surface used to decide it independently and agree only by inspection;
 these pin the one definition that now overrides them.
 """
 
-from surogates.session.interactive_input import derive_is_other
+from surogates.session.interactive_input import derive_is_other, match_choice_label
 
 OPEN = [{"prompt": "What subjects do you like?"}]
 MENU = [
@@ -72,6 +72,27 @@ class TestDeriveIsOther:
         assert rows[0]["is_other"] is False
         assert rows[1]["is_other"] is True
 
+    def test_repeated_prompt_is_answered_against_its_own_menu(self):
+        # Nothing stops a batch repeating a prompt, and matching on text
+        # alone answered the second one against the first one's choices
+        # -- silently flipping a correctly computed flag.
+        questions = [
+            {"prompt": "Continue?", "choices": [{"label": "Yes"}, {"label": "No"}]},
+            {
+                "prompt": "Continue?",
+                "choices": [{"label": "Maybe"}, {"label": "Never"}],
+            },
+        ]
+        rows = derive_is_other(
+            questions,
+            [
+                {"question": "Continue?", "answer": "Never", "is_other": False},
+                {"question": "Continue?", "answer": "Never", "is_other": False},
+            ],
+        )
+        assert rows[0]["is_other"] is True  # off the first menu
+        assert rows[1]["is_other"] is False  # on the second
+
     def test_falls_back_to_position_when_the_prompt_was_rewritten(self):
         [row] = derive_is_other(
             MENU,
@@ -107,3 +128,23 @@ class TestDeriveIsOther:
             ],
         )
         assert row["extra"] == "kept"
+
+
+class TestMatchChoiceLabel:
+    """The one definition of "is this answer on the menu"."""
+
+    CHOICES = [{"label": "eu-west"}, {"label": "us-east"}]
+
+    def test_returns_the_canonical_label_ignoring_case_and_padding(self):
+        assert match_choice_label("  EU-West ", self.CHOICES) == "eu-west"
+
+    def test_returns_none_for_an_answer_that_is_not_listed(self):
+        assert match_choice_label("frankfurt", self.CHOICES) is None
+
+    def test_empty_text_matches_nothing(self):
+        # Guards a blank answer against a choice with a blank label.
+        assert match_choice_label("   ", self.CHOICES) is None
+        assert match_choice_label("", [{"label": ""}]) is None
+
+    def test_no_choices_matches_nothing(self):
+        assert match_choice_label("anything", []) is None

@@ -151,6 +151,7 @@ function QuestionInput({
   disabled,
   onPickChoice,
   onChooseOther,
+  onClear,
   onType,
 }: {
   question: InboxQuestion;
@@ -158,6 +159,7 @@ function QuestionInput({
   disabled: boolean;
   onPickChoice: (label: string) => void;
   onChooseOther: () => void;
+  onClear: () => void;
   onType: (value: string) => void;
 }) {
   const { prompt, choices, allowOther } = question;
@@ -185,6 +187,13 @@ function QuestionInput({
             const value = event.target.value;
             if (value === OTHER_OPTION) {
               onChooseOther();
+              return;
+            }
+            // The placeholder's value is "", and Number("") is 0 -- so
+            // reaching for it to clear the answer would silently select
+            // the first choice instead.
+            if (value === "") {
+              onClear();
               return;
             }
             const choice = choices[Number(value)];
@@ -355,6 +364,13 @@ function InputRequiredDetail({
               })
             }
             onChooseOther={() => editDraft(question.prompt, { useOther: true })}
+            onClear={() =>
+              editDraft(question.prompt, {
+                picked: "",
+                typed: "",
+                useOther: false,
+              })
+            }
             onType={(value) => editDraft(question.prompt, { typed: value })}
           />
         </label>

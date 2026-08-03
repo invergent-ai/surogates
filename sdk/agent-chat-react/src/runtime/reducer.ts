@@ -1357,18 +1357,20 @@ function applyAskUserQuestionResponse(
     // respond route emits before its best-effort inbox claim, so it does
     // not refuse a question the composer already answered. The worker
     // returns on the first event and ignores the rest, so the thread
-    // must too -- otherwise the same reply lands twice.
+    // keeps the first answer whole -- recording the later one would show
+    // the reply twice, or leave the bubble and the tool call disagreeing
+    // about what the user said.
     const alreadyAnswered = msg.toolCalls.some(
       (tc) => tc.id === targetToolId && tc.askUserQuestionAnswers !== undefined,
     );
+    if (alreadyAnswered) return messages;
     next[i] = {
       ...msg,
       toolCalls: msg.toolCalls.map((tc) =>
         tc.id === targetToolId ? { ...tc, askUserQuestionAnswers: answers } : tc,
       ),
     };
-    if (alreadyAnswered) return next;
-    return appendConversationalAnswer(next, eventId, answers);
+    return appendConversationalAnswer(next, i, eventId, answers);
   }
   return messages;
 }
@@ -1386,15 +1388,23 @@ function applyAskUserQuestionResponse(
  * optimistic ``local-`` message (``markSending``) and the server
  * answers with ``ask_user_question.response`` and no ``user.message``,
  * so that local message must be adopted rather than duplicated.  We
- * adopt the trailing un-promoted local message rather than matching its
- * text: a reply that matched a choice label comes back canonicalised
- * (typed "yes", answer "Yes"), and an exact-match test would leave the
- * optimistic copy stranded beside the synthesised one.  Tapping a
- * quick-reply chip sends no message at all, so there is nothing to
- * adopt and the answer is appended fresh.
+ * adopt by position rather than by matching text: a reply that matched
+ * a choice label comes back canonicalised (typed "yes", answer "Yes"),
+ * and an exact-match test would leave the optimistic copy stranded
+ * beside the synthesised one.  Tapping a quick-reply chip sends no
+ * message at all, so there is nothing to adopt and the answer is
+ * appended fresh.
+ *
+ * The scan runs forward from the asking turn and takes the FIRST
+ * un-promoted local message, which is the reply to this question.
+ * Scanning back from the tail would take the newest instead: the
+ * composer re-opens as soon as the optimistic message lands, so a user
+ * who sends a follow-up before the response event arrives would have
+ * that follow-up overwritten with their answer.
  */
 function appendConversationalAnswer(
   messages: AgentChatMessage[],
+  askIndex: number,
   eventId: number,
   answers: { question: string; answer: string; is_other: boolean }[],
 ): AgentChatMessage[] {
@@ -1408,15 +1418,14 @@ function appendConversationalAnswer(
   if (messages.some((m) => m.id === id)) return messages;
 
   const next = [...messages];
-  for (let i = next.length - 1; i >= 0; i--) {
+  for (let i = askIndex + 1; i < next.length; i++) {
     const msg = next[i]!;
-    if (msg.role !== "user") continue;
-    if (!msg.id.startsWith("local-")) break;
+    if (msg.role !== "user" || !msg.id.startsWith("local-")) continue;
     // markSendError keeps the local- id on a send that failed and
     // appends the failure to its body. Adopting it would erase that
     // notice and pin the answer to a message that never reached the
-    // server, so leave it standing and add the answer separately.
-    if (msg.status === "error") break;
+    // server, so step over it and keep looking.
+    if (msg.status === "error") continue;
     next[i] = { ...msg, id, content: answer, status: "complete" };
     return next;
   }

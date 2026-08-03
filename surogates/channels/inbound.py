@@ -932,11 +932,13 @@ class ChannelInboundPipeline:
 
         resolved = False
         try:
+            questions = pending.get("questions") or []
             resolved = await resolve_input_response(
                 deps.session_store,
                 session_id=session_id,
                 tool_call_id=pending.get("tool_call_id", ""),
-                responses=resolve_text_answer(pending.get("questions") or [], msg.text),
+                responses=resolve_text_answer(questions, msg.text),
+                questions=questions,
             )
         except Exception:
             logger.warning("[channels] pending input resolution failed", exc_info=True)
