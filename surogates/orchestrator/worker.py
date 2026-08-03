@@ -80,6 +80,41 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 from surogates.channels.memory_boundary import MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS  # noqa: E402
 
 
+# Platform ceiling on iterations per wake.  Agent-supplied configuration may
+# lower it, never raise it.
+_DEFAULT_MAX_ITERATIONS: int = 90
+
+
+def _resolve_iteration_budget(session: Any) -> IterationBudget:
+    """Build the wake's iteration budget, honouring the per-agent cap.
+
+    ``max_iterations`` is derived and written into the child's config by the
+    spawn paths (``harness/agent_resolver.py``, ``tools/builtin/coordinator.py``,
+    ``tools/builtin/delegate.py``, ``tasks/spawn.py``).  Children are separate
+    enqueued sessions, so the worker that wakes them is the only place that
+    value can take effect.
+
+    The config is agent-supplied, so it may only *lower* the platform ceiling.
+    Anything unusable -- absent, non-integer, zero, negative -- falls back to
+    the default rather than producing a budget that is exhausted on
+    construction, which would send the session straight to a final summary
+    having done no work.  ``bool`` is rejected explicitly: it is an ``int``
+    subclass in Python, and a config that says ``true`` would otherwise
+    silently cap the session at one iteration.
+    """
+    config = getattr(session, "config", None) or {}
+    raw = config.get("max_iterations")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        if raw is not None:
+            logger.warning(
+                "Session %s: ignoring unusable max_iterations %r; "
+                "falling back to %d",
+                getattr(session, "id", "?"), raw, _DEFAULT_MAX_ITERATIONS,
+            )
+        return IterationBudget(max_total=_DEFAULT_MAX_ITERATIONS)
+    return IterationBudget(max_total=min(raw, _DEFAULT_MAX_ITERATIONS))
+
+
 def resolve_credential_principal(
     *,
     session: Any,
@@ -1521,7 +1556,7 @@ async def run_worker(settings: Settings) -> None:
         # the model, the worker reports what it picked.
         _warn_if_base_model_missing_from_metadata(model_id)
         await session_store.record_session_model(session.id, model_id)
-        budget = IterationBudget(max_total=90)
+        budget = _resolve_iteration_budget(session)
         summary_slot = llm_bundle.summary
         vision_slot = llm_bundle.vision
         advisor_slot = llm_bundle.advisor
