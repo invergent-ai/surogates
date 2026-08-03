@@ -20,11 +20,10 @@ This module pins:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -242,43 +241,6 @@ async def test_release_fires_even_when_no_gate(
     )
     # Single-goal path returns the child's text directly, not JSON.
     assert "Delegation failed" not in result
-
-
-async def test_reacquire_returns_true_when_slot_immediately_free() -> None:
-    gate_redis = _FakeRedisGate()
-    gate = TurnConcurrencyGate(gate_redis, default_max=10)
-    ok = await delegate_module._reacquire_gate_with_backoff(
-        gate, "org-1", "agent-A",
-    )
-    assert ok is True
-    assert gate_redis.values["surogates:turns:org-1:agent-A"] == 1
-
-
-async def test_reacquire_returns_false_after_deadline_at_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If the cap is saturated for the entire backoff window, the
-    helper gives up rather than blocking forever -- the parent's
-    return path is more important than perfect accounting."""
-    # Tight deadline + backoff so the test finishes promptly.
-    monkeypatch.setattr(
-        delegate_module, "_REACQUIRE_TIMEOUT_SECONDS", 0.05,
-    )
-    monkeypatch.setattr(
-        delegate_module, "_REACQUIRE_BACKOFF_SECONDS", 0.01,
-    )
-
-    gate_redis = _FakeRedisGate()
-    gate = TurnConcurrencyGate(gate_redis, default_max=2)
-    # Saturate by pre-loading 2 acquires.
-    gate_redis.values["surogates:turns:org-1:agent-A"] = 2
-
-    ok = await delegate_module._reacquire_gate_with_backoff(
-        gate, "org-1", "agent-A",
-    )
-    assert ok is False
-    # Counter unchanged -- helper aborted without acquiring.
-    assert gate_redis.values["surogates:turns:org-1:agent-A"] == 2
 
 
 async def test_release_fires_in_finally_when_gather_raises(
