@@ -117,6 +117,7 @@ from surogates.harness.loop_constants import (
     _MAX_CONSECUTIVE_INVALID_TOOL_CALLS,
     _MAX_EMPTY_RESPONSE_RETRIES,
     _MAX_LENGTH_CONTINUATIONS,
+    _MAX_PARTIAL_TOOL_CALL_RETRIES,
     _PRE_WAKE_HUB_TIMEOUT_SECONDS,
 )
 from surogates.harness.loop_deep_research import (
@@ -1438,6 +1439,7 @@ class AgentHarness(
         thinking_prefill_retries = 0  # retries for thinking-only responses
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
+        partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
         # the planner ends a turn with no tool calls AND has never
         # called ``delegate_task(agent_type="research-writer")`` in any
@@ -2032,19 +2034,51 @@ class AgentHarness(
             )
 
             if tool_calls_raw and usage_data.get("partial_tool_call"):
-                logger.warning(
-                    "Session %s: partial tool-call arguments for %s; "
-                    "returning recovery tool results instead of executing",
+                # This retry refunds the iteration, so the cap is the only
+                # thing bounding it.  Never reset a sibling counter here: a
+                # provider alternating truncated and unparseable arguments
+                # would otherwise keep both streaks below their own caps
+                # forever.
+                if partial_tool_call_retries < _MAX_PARTIAL_TOOL_CALL_RETRIES:
+                    partial_tool_call_retries += 1
+                    logger.warning(
+                        "Session %s: partial tool-call arguments for %s; "
+                        "returning recovery tool results instead of executing "
+                        "(%d/%d)",
+                        session.id,
+                        usage_data.get("partial_tool_names") or [],
+                        partial_tool_call_retries,
+                        _MAX_PARTIAL_TOOL_CALL_RETRIES,
+                    )
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
+                    self._budget.refund()
+                    messages.append(assistant_message)
+                    messages.extend(
+                        build_partial_tool_call_recovery_results(tool_calls_raw)
+                    )
+                    continue
+
+                logger.error(
+                    "Session %s: partial tool-call arguments after %d retries; "
+                    "ending the turn with a summary",
                     session.id,
-                    usage_data.get("partial_tool_names") or [],
+                    _MAX_PARTIAL_TOOL_CALL_RETRIES,
                 )
                 if streaming_executor is not None:
                     streaming_executor.discard()
-                self._budget.refund()
                 messages.append(assistant_message)
-                messages.extend(build_partial_tool_call_recovery_results(tool_calls_raw))
-                invalid_json_retries = 0
-                continue
+                messages.extend(
+                    build_partial_tool_call_recovery_results(tool_calls_raw)
+                )
+                await self._request_final_summary(
+                    session, messages, system_prompt, lease,
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                    iteration_index=turn_iteration_index,
+                )
+                return
+            partial_tool_call_retries = 0  # reset on a turn with complete args
 
             # 4a. Length continuation with prefix accumulation.
             # When finish_reason == "length", the response was truncated. We

@@ -42,6 +42,12 @@ _ADVISOR_PREFLIGHT_TIMEOUT_SECONDS: float = 20.0
 _MAX_LENGTH_CONTINUATIONS: int = 3
 _MAX_CONSECUTIVE_INVALID_TOOL_CALLS: int = 3
 _MAX_EMPTY_RESPONSE_RETRIES: int = 3
+# Retries for a provider that ends a response before the tool-call JSON is
+# complete.  This retry refunds the iteration budget, so without a cap the
+# wake loop's ``remaining > 0`` guard never advances and a provider stuck
+# truncating spins the worker forever — there is no wall-clock deadline in
+# the loop to catch it.
+_MAX_PARTIAL_TOOL_CALL_RETRIES: int = 3
 _LENGTH_CONTINUATION_PROMPT: str = (
     "[System: Your previous response was truncated by the output "
     "length limit. Continue exactly where you left off. Do not "
