@@ -111,15 +111,12 @@ export function conversationalAskAcceptsFreeText(
  * insensitive and ignores inline markdown emphasis, since the body is
  * markdown and the prompt is plain text.
  *
- * The body normally *ends* with the question, after a lead-in, so that
- * is the primary test.  A mid-body match also counts, but only for a
- * prompt long enough to be unmistakable: a short one ("Sure?") occurs
- * inside ordinary prose by coincidence ("I'm not sure? Let me...") and
- * suppressing on that would leave the user with chips, or nothing at
- * all, and no visible question to answer.
+ * The body has to *end* with the question: that is how agents write it,
+ * after a lead-in.  Matching anywhere would suppress on a coincidence —
+ * "Sure?" falls inside "I'm not sure? Let me..." — and the cost of that
+ * is the whole question disappearing, whereas the cost of missing an
+ * echo is only that it reads twice.
  */
-const UNMISTAKABLE_PROMPT_LENGTH = 40;
-
 export function promptEchoedInContent(
   content: string | undefined,
   prompt: string,
@@ -128,11 +125,7 @@ export function promptEchoedInContent(
     s.replace(/[*_`]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
   const body = normalize(content ?? "");
   const question = normalize(prompt);
-  if (!body || !question) return false;
-  if (body.endsWith(question)) return true;
-  return (
-    question.length >= UNMISTAKABLE_PROMPT_LENGTH && body.includes(question)
-  );
+  return !!body && !!question && body.endsWith(question);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────

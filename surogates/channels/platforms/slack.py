@@ -875,7 +875,6 @@ class SlackPlatform:
                     session_id=parsed.session_id,
                     tool_call_id=parsed.tool_call_id,
                     responses=parsed.responses,
-                    questions=pending["questions"],
                 )
                 # On the winning submit, replace the now-dead Answer button with
                 # the submitted answer.  Stale/duplicate submits (resolved False)

@@ -111,17 +111,13 @@ describe("inbox question dropdown", () => {
     ).not.toBeNull();
   });
 
-  it("clears the answer when the placeholder is reselected", async () => {
-    // Number("") is 0, so falling through to the index lookup would
-    // silently re-pick the first choice instead of clearing.
+  it("does not let the placeholder be chosen back", async () => {
+    // Its value is "" and Number("") is 0, so reselecting it would read
+    // as the first choice. Disabled means the browser never offers it.
     const dom = await mount(<InboxPanel adapter={adapterStub(ITEM)} selectedId={1} />);
 
-    const select = setSelect(dom, "1");
-    expect(select.value).toBe("1");
-
-    setSelect(dom, "");
-
-    expect(dom.querySelector<HTMLSelectElement>("select")?.value).toBe("");
+    const placeholder = dom.querySelector<HTMLOptionElement>('option[value=""]');
+    expect(placeholder?.disabled).toBe(true);
   });
 
   it("selects by index, so a label cannot collide with the sentinel", async () => {

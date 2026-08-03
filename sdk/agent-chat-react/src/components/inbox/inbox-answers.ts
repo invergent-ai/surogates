@@ -3,9 +3,11 @@
 //
 // Reading an ask_user_question payload out of an inbox item, and
 // shaping a half-filled answer back into the response the tool expects.
-// Separate from the panel so the rules stay testable on their own, and
-// exported so hosts rendering their own inbox UI answer by the same
-// rules rather than restating them.
+// Separate from the panel so the rules stay testable on their own.
+//
+// Not exported from the package: the only other host with its own inbox
+// UI is Studio, whose pin predates this file. Export it when something
+// can actually import it.
 
 import type {
   AgentChatAskUserQuestionAnswer,

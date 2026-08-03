@@ -70,6 +70,9 @@ async def test_fresh_pending_question_consumes_the_message():
         _DB(
             _ExecuteResult(row=_pending_row(age_seconds=60)),
             _ExecuteResult(row=None),  # no prior response event
+            # Re-read of the asked questions, so is_other is settled
+            # against them rather than taken on trust.
+            _ExecuteResult(row=_pending_row(age_seconds=60)),
             _ExecuteResult(rowcount=1),  # inbox claim
         ),
     )

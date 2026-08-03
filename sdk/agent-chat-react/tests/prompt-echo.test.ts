@@ -28,11 +28,13 @@ describe("promptEchoedInContent", () => {
     ).toBe(true);
   });
 
-  it("suppresses a long prompt quoted mid-body", () => {
+  it("keeps a prompt the body only quotes mid-way", () => {
+    // Rendering it twice is a stutter; suppressing on a coincidence
+    // leaves nothing to answer, so the tie goes to showing it.
     const prompt = "Do the atoms stop completely, or keep slowing down?";
     expect(
       promptEchoedInContent(`${prompt} Take your time.`, prompt),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("keeps a short prompt that only coincidentally appears", () => {

@@ -176,7 +176,6 @@ async def resolve_input_response(
     session_id,
     tool_call_id: str,
     responses: list[dict],
-    questions: list[dict] | None = None,
 ) -> int | None:
     """Claim the pending inbox item and emit the response event.
 
@@ -185,19 +184,17 @@ async def resolve_input_response(
     inbox-row update is the atomic claim, so two surfaces racing on the
     same answer produce exactly one response event.
 
-    ``questions`` is the asked payload, used to settle ``is_other``
-    server-side; callers that already hold it pass it in, and the rest
-    have it looked up here so no channel can skip the check.
+    ``is_other`` is settled here against the asked payload, so no
+    channel can submit a flag that goes unchecked.
     """
     tc_id = valid_tool_call_id(tool_call_id)
     if tc_id is None:
         return None
 
-    if questions is None:
-        questions = await asked_questions(
-            store, session_id=session_id, tool_call_id=tc_id,
-        )
-    responses = derive_is_other(questions, responses)
+    responses = derive_is_other(
+        await asked_questions(store, session_id=session_id, tool_call_id=tc_id),
+        responses,
+    )
 
     async with store._sf() as db:
         result = await db.execute(
@@ -325,11 +322,9 @@ async def try_resolve_text_answer(
         resolve_text_answer,
     )
 
-    questions = pending.get("questions") or []
     return await resolve_input_response(
         store,
         session_id=session_id,
         tool_call_id=tool_call_id,
-        responses=resolve_text_answer(questions, text),
-        questions=questions,
+        responses=resolve_text_answer(pending.get("questions") or [], text),
     )

@@ -41,15 +41,6 @@ export type { IntegrationsPageProps } from "./components/connections/integration
 export { CodingAgentsPanel } from "./components/connections/coding-agents-panel";
 export type { CodingAgentsPanelProps } from "./components/connections/coding-agents-panel";
 export { InboxPanel } from "./components/inbox/inbox-panel";
-// Hosts that render their own inbox UI (Studio does) need the answer
-// rules, not just the payload types, or they restate them by hand.
-export {
-  answerText,
-  buildInboxResponse,
-  hasChoices as inboxQuestionHasChoices,
-  isOtherAnswer,
-  parseInboxQuestions,
-} from "./components/inbox/inbox-answers";
 export { useInboxUnreadCount } from "./components/inbox/use-inbox-unread-count";
 export { MissionDashboard } from "./components/missions/mission-dashboard";
 export { MissionsPanel } from "./components/missions/missions-panel";
@@ -94,10 +85,6 @@ export type { AgentChatProps } from "./agent-chat";
 export type { ChatComposerError } from "./components/chat/chat-composer";
 export type { AgentChatAdapterContextValue } from "./adapter-context";
 export type { InboxPanelProps } from "./components/inbox/inbox-panel";
-export type {
-  AnswerDraft,
-  InboxQuestion,
-} from "./components/inbox/inbox-answers";
 export type { InboxUnreadCountState } from "./components/inbox/use-inbox-unread-count";
 export type { MessageResponseProps } from "./components/ai-elements/message";
 export type { MissionDashboardProps } from "./components/missions/mission-dashboard";

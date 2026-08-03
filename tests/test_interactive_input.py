@@ -141,17 +141,19 @@ async def test_resolve_overrides_a_submitted_is_other_that_the_menu_contradicts(
     assert data["responses"][0]["is_other"] is False
 
 
-async def test_resolve_skips_the_lookup_when_the_caller_supplies_questions():
-    # try_resolve_text_answer already holds the payload; re-reading it
-    # would be a second query on every channel reply.
-    store = _Store(_DB(_ExecuteResult(rowcount=1)))
+async def test_resolve_clears_a_submitted_is_other_on_an_open_question():
+    store = _Store(
+        _DB(
+            _ExecuteResult(row=_pending_row([{"prompt": "q"}])),
+            _ExecuteResult(rowcount=1),
+        ),
+    )
 
     ok = await resolve_input_response(
         store,
         session_id="s1",
         tool_call_id="tc1",
         responses=[{"question": "q", "answer": "a", "is_other": True}],
-        questions=[{"prompt": "q"}],
     )
 
     assert ok == 42
