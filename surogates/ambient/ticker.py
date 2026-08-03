@@ -49,6 +49,18 @@ class AmbientTicker:
                     "ambient ticker failed to materialize channel %s",
                     getattr(row, "channel_id", "?"),
                 )
+                # materialize_ambient_tick advances next_run_at as its last
+                # step, so a failure leaves the row past-due and still
+                # holding a lock nobody owns.  Tell the store, or claim_due
+                # re-fires this row every time the lease lapses, forever.
+                try:
+                    await self._store.mark_failed(row)
+                except Exception:
+                    logger.exception(
+                        "ambient ticker failed to record the failed tick "
+                        "for channel %s; it will retry when the lease lapses",
+                        getattr(row, "channel_id", "?"),
+                    )
 
     async def run(self) -> None:
         while not self._stop.is_set():

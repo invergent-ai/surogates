@@ -20,6 +20,11 @@ from surogates.db.models import AmbientScheduleRow
 
 __all__ = ["AmbientSchedule", "AmbientScheduleStore"]
 
+# Floor on how far a failed tick pushes its next run.  ``ensure`` creates rows
+# with ``cadence_seconds=0`` to mean "due now", so backing off by the cadence
+# alone would leave a failing row instantly due again.
+_MIN_FAILURE_BACKOFF_SECONDS: int = 300
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -160,6 +165,34 @@ class AmbientScheduleStore:
                 .values(
                     ambient_session_id=ambient_session_id,
                     next_run_at=now + timedelta(seconds=schedule.cadence_seconds),
+                    locked_by=None,
+                    locked_until=None,
+                    updated_at=now,
+                )
+            )
+            await db.commit()
+
+    async def mark_failed(self, schedule: AmbientSchedule) -> None:
+        """Advance a failed tick's clock and drop its lock.
+
+        Without this the row keeps ``next_run_at`` in the past while still
+        naming a worker that has already given up, so ``claim_due`` re-claims
+        it the moment the lease lapses -- forever, at lease frequency, with no
+        backoff.  A failed tick is treated as a skipped one: it waits a full
+        cadence like any other.
+
+        The floor matters because ``ensure`` creates rows with
+        ``cadence_seconds=0`` to mean "due now"; advancing by the cadence
+        alone would leave such a row instantly due again.
+        """
+        now = _utcnow()
+        backoff = max(schedule.cadence_seconds, _MIN_FAILURE_BACKOFF_SECONDS)
+        async with self._sf() as db:
+            await db.execute(
+                sa.update(AmbientScheduleRow)
+                .where(AmbientScheduleRow.id == schedule.id)
+                .values(
+                    next_run_at=now + timedelta(seconds=backoff),
                     locked_by=None,
                     locked_until=None,
                     updated_at=now,
