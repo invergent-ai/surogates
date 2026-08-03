@@ -118,6 +118,22 @@ describe("inbox question dropdown", () => {
 
     const placeholder = dom.querySelector<HTMLOptionElement>('option[value=""]');
     expect(placeholder?.disabled).toBe(true);
+    // It still has to be the thing shown before an answer is picked --
+    // a select whose value matches no option renders the first one
+    // instead, which would look like a choice already made.
+    expect(dom.querySelector<HTMLSelectElement>("select")?.value).toBe("");
+  });
+
+  it("lets the user move between a choice and Other", async () => {
+    const dom = await mount(<InboxPanel adapter={adapterStub(ITEM)} selectedId={1} />);
+
+    expect(setSelect(dom, "1").value).toBe("1");
+    setSelect(dom, "other");
+    expect(dom.querySelector<HTMLSelectElement>("select")?.value).toBe("other");
+    setSelect(dom, "0");
+    expect(dom.querySelector<HTMLSelectElement>("select")?.value).toBe("0");
+    // Switching back to the menu drops the Other field with it.
+    expect(dom.querySelector('input[placeholder="Type your answer…"]')).toBeNull();
   });
 
   it("selects by index, so a label cannot collide with the sentinel", async () => {
