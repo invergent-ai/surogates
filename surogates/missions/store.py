@@ -23,6 +23,9 @@ _TERMINAL_STATUSES: tuple[str, ...] = (
 _ACTIVE_OR_PAUSED: tuple[str, ...] = ("active", "paused")
 
 
+STAGNANT_EVALUATION_LIMIT = 3
+
+
 class MissionStoreError(Exception):
     """Base for mission store errors."""
 
@@ -162,6 +165,12 @@ class MissionStore:
                     last_evaluation_feedback=feedback,
                     last_evaluation_at=func.now(),
                     evaluator_parse_failures=0,
+                    # A verdict that is not "satisfied" means the loop did
+                    # not move; anything else starts the count over.
+                    stagnant_evaluations=(
+                        0 if result == "satisfied"
+                        else MissionRow.stagnant_evaluations + 1
+                    ),
                 )
             )
             if res.rowcount == 0:
@@ -228,3 +237,16 @@ class MissionStore:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             return datetime.now(timezone.utc) - last < timedelta(seconds=window_seconds)
+
+    async def is_stagnant(self, mission_id: UUID) -> bool:
+        """True when the evaluator has returned no progress too many times.
+
+        3 is a surogates choice, not a port: it matches the parse-failure
+        pause and the recovery ceiling, so an operator meets one number.
+        """
+        async with self._sf() as db:
+            count = (await db.execute(
+                select(MissionRow.stagnant_evaluations)
+                .where(MissionRow.id == mission_id)
+            )).scalar_one_or_none()
+        return bool(count is not None and count >= STAGNANT_EVALUATION_LIMIT)

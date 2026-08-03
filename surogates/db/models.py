@@ -1517,6 +1517,12 @@ class Mission(Base):
     last_evaluation_at: Mapped[Optional[datetime]] = mapped_column(
         nullable=True
     )
+    # Consecutive evaluations that did not report progress. The judge runs
+    # every round regardless; without this it had no memory of having
+    # already said the same thing.
+    stagnant_evaluations: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     evaluator_parse_failures: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )

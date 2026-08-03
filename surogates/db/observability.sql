@@ -415,7 +415,9 @@ CREATE TABLE IF NOT EXISTS missions (
 ALTER TABLE missions
     ALTER COLUMN user_id DROP NOT NULL,
     ADD COLUMN IF NOT EXISTS service_account_id uuid
-        REFERENCES service_accounts(id);
+        REFERENCES service_accounts(id),
+    -- Consecutive evaluations that reported no progress.
+    ADD COLUMN IF NOT EXISTS stagnant_evaluations integer NOT NULL DEFAULT 0;
 
 -- Replace the old (org, user, agent, status) index with one that covers
 -- both principal shapes.  Old index is dropped explicitly because the
