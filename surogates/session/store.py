@@ -1419,6 +1419,46 @@ class SessionStore:
             row = result.first()
         return row[0] if row is not None else None
 
+    async def count_recoveries_since_progress(self, session_id: UUID) -> int:
+        """Count ``harness.recovered`` events since the session last progressed.
+
+        The orphan sweeper re-enqueues any stale, leaseless active session.
+        ``harness.recovered`` is not a session-ending event, so a session that
+        reproducibly kills its worker before emitting anything stays eligible
+        forever and takes a worker down on every sweep.  This is the streak
+        that bounds those attempts.
+
+        "Progress" is a sign of life the sweep itself cannot fake: a model
+        answered, a tool returned, or the user said something new.  An
+        ``llm.request`` deliberately does not count — it only proves the wake
+        started, which a session that dies during context replay never gets
+        past.  Any of the three resets the streak, so a session doing real
+        work between crashes is never mistaken for a poison one.
+        """
+        progress_types = (
+            EventType.LLM_RESPONSE.value,
+            EventType.TOOL_RESULT.value,
+            EventType.USER_MESSAGE.value,
+        )
+        last_progress_id = (
+            select(func.max(EventRow.id))
+            .where(
+                EventRow.session_id == session_id,
+                EventRow.type.in_(progress_types),
+            )
+            .scalar_subquery()
+        )
+        stmt = select(func.count()).select_from(EventRow).where(
+            EventRow.session_id == session_id,
+            EventRow.type == EventType.HARNESS_RECOVERED.value,
+            or_(
+                last_progress_id.is_(None),
+                EventRow.id > last_progress_id,
+            ),
+        )
+        async with self._sf() as db:
+            return int((await db.execute(stmt)).scalar_one())
+
     async def list_inbox(
         self,
         *,
