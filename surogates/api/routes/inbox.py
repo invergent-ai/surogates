@@ -394,6 +394,18 @@ async def respond_to_inbox_item(
             "tool_call_id": tool_call_id,
             "inbox_item_id": item.id,
         }
+        if decision == "approve":
+            # The decision has to outlive this request or the retry is
+            # blocked identically.  Key the grant on the ORIGINAL arguments:
+            # the inbox payload carries only a truncated excerpt, and a
+            # grant scoped to a truncation would match nothing.
+            await store.grant_tool_call_approval(
+                session_id=item.session_id,
+                org_id=item.org_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                granted_by=tenant.user_id,
+            )
     else:
         if payload.completed is not True:
             raise HTTPException(

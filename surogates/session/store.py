@@ -11,7 +11,8 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -30,6 +31,7 @@ from surogates.db.agent_users import (
     ensure_agent_user,
 )
 from surogates.db.models import (
+    ApprovalGrant,
     Event as EventRow,
     IdeaNode,
     InboxItem,
@@ -1420,6 +1422,172 @@ class SessionStore:
             row = result.first()
         return row[0] if row is not None else None
 
+    # ── Approval grants ───────────────────────────────────────────────
+
+    @staticmethod
+    def _arguments_hash(arguments: Any) -> str:
+        """sha256 over canonical (sorted-key) arguments.
+
+        Same canonicalisation the tool guardrails use, so ``{"a":1,"b":2}``
+        and ``{"b":2,"a":1}`` are the same call.
+        """
+        from surogates.harness.tool_guardrails import canonical_tool_args
+
+        payload = canonical_tool_args(arguments if isinstance(arguments, dict) else {})
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def mint_approval_grant(
+        self,
+        *,
+        session_id: UUID,
+        org_id: UUID,
+        tool_name: str,
+        arguments: Any,
+        granted_by: UUID | None = None,
+        ttl_seconds: int = 3600,
+        max_uses: int = 1,
+    ) -> UUID:
+        """Record a human's approval of one blocked call. Returns the grant id."""
+        grant = ApprovalGrant(
+            org_id=org_id,
+            session_id=session_id,
+            tool_name=tool_name,
+            arguments_hash=self._arguments_hash(arguments),
+            granted_by=granted_by,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+            max_uses=max(1, int(max_uses)),
+            used_count=0,
+        )
+        async with self._sf() as db:
+            db.add(grant)
+            await db.commit()
+            return grant.id
+
+    async def grant_tool_call_approval(
+        self,
+        *,
+        session_id: UUID,
+        org_id: UUID,
+        tool_name: str,
+        tool_call_id: str,
+        granted_by: UUID | None = None,
+        ttl_seconds: int = 3600,
+    ) -> UUID | None:
+        """Approve the blocked call identified by *tool_call_id*.
+
+        Scoped to the ORIGINAL arguments, read back off the ``tool.call``
+        event: ``inbox.governance_gate`` stores only a truncated excerpt for
+        display, so a grant keyed on the payload would match no real call.
+
+        Returns ``None`` when the originating call cannot be found — there is
+        nothing to scope an approval to, and a grant over ``{}`` would be a
+        blank cheque.
+
+        Both respond handlers (this repo's API and surogate-ops) go through
+        here so the two cannot drift.
+        """
+        if not tool_call_id:
+            return None
+        events = await self.get_events(session_id, types=[EventType.TOOL_CALL])
+        arguments: dict | None = None
+        for event in reversed(events):
+            data = event.data or {}
+            if data.get("tool_call_id") == tool_call_id:
+                raw = data.get("arguments")
+                arguments = raw if isinstance(raw, dict) else {}
+                break
+        if arguments is None:
+            logger.warning(
+                "approval: no tool.call %s in session %s; not granting",
+                tool_call_id, session_id,
+            )
+            return None
+        return await self.mint_approval_grant(
+            session_id=session_id,
+            org_id=org_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            granted_by=granted_by,
+            ttl_seconds=ttl_seconds,
+        )
+
+    async def revoke_approval_grant(self, grant_id: UUID) -> None:
+        async with self._sf() as db:
+            await db.execute(
+                update(ApprovalGrant)
+                .where(ApprovalGrant.id == grant_id)
+                .values(revoked_at=datetime.now(timezone.utc))
+            )
+            await db.commit()
+
+    async def consume_approval_grant(
+        self, *, session_id: UUID, tool_name: str, arguments: Any,
+    ) -> tuple[bool, list[str]]:
+        """Spend one use of a live grant for this exact call.
+
+        Returns ``(True, [])`` when a use was claimed, else ``(False, reasons)``
+        where *reasons* explains why — recomputed from the row, never read off
+        a stored flag.
+
+        The spend is a single conditional ``UPDATE ... RETURNING``: two tool
+        calls racing on a single-use grant cannot both win, which a
+        read-then-write would allow.
+        """
+        args_hash = self._arguments_hash(arguments)
+        now = datetime.now(timezone.utc)
+        live = (
+            select(ApprovalGrant.id)
+            .where(
+                ApprovalGrant.session_id == session_id,
+                ApprovalGrant.tool_name == tool_name,
+                ApprovalGrant.arguments_hash == args_hash,
+                ApprovalGrant.revoked_at.is_(None),
+                ApprovalGrant.expires_at > now,
+                ApprovalGrant.used_count < ApprovalGrant.max_uses,
+            )
+            .order_by(ApprovalGrant.created_at.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        async with self._sf() as db:
+            claimed = (await db.execute(
+                update(ApprovalGrant)
+                .where(ApprovalGrant.id == live)
+                .values(used_count=ApprovalGrant.used_count + 1)
+                .returning(ApprovalGrant.id)
+                .execution_options(synchronize_session=False)
+            )).scalar_one_or_none()
+            await db.commit()
+            if claimed is not None:
+                return True, []
+
+            # Nothing claimable — say why, newest first.
+            row = (await db.execute(
+                select(ApprovalGrant)
+                .where(
+                    ApprovalGrant.session_id == session_id,
+                    ApprovalGrant.tool_name == tool_name,
+                    ApprovalGrant.arguments_hash == args_hash,
+                )
+                .order_by(ApprovalGrant.created_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+
+        if row is None:
+            return False, ["no_grant"]
+        reasons: list[str] = []
+        if row.revoked_at is not None:
+            reasons.append("revoked")
+        expires_at = row.expires_at
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= now:
+                reasons.append("expired")
+        if row.used_count >= row.max_uses:
+            reasons.append("exhausted")
+        return False, reasons or ["no_grant"]
+
     async def latest_todo_snapshot(self, session_id: UUID | str) -> list | None:
         """The session's current todo list, or ``None`` if it never wrote one.
 
@@ -1788,6 +1956,16 @@ class SessionStore:
             )
             rows = result.mappings().all()
         return [Event.model_validate(dict(r)) for r in rows]
+
+    async def has_live_lease(self, session_id: UUID) -> bool:
+        """True when a worker currently holds *session_id*."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(LeaseRow.session_id).where(
+                    LeaseRow.session_id == session_id,
+                    LeaseRow.expires_at > func.now(),
+                ).limit(1)
+            )).scalar_one_or_none() is not None
 
     async def release_stale_lease(self, session_id: UUID) -> bool:
         """Delete a session's lease row only if it has already expired.

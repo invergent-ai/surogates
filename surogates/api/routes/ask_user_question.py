@@ -21,7 +21,11 @@ from surogates.api.session_guards import (
 )
 from surogates.db.models import InboxItem
 from surogates.session.events import EventType
-from surogates.session.interactive_input import asked_questions, derive_is_other
+from surogates.session.interactive_input import (
+    asked_questions,
+    derive_is_other,
+    wake_if_unattended,
+)
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -179,4 +183,12 @@ async def respond_to_ask_user_question(
             await db.commit()
     except Exception:
         logger.exception("Failed to mark ask_user_question inbox item responded.")
+
+    # The asking tool is usually still parked and will see the event itself.
+    # If it is not — worker died, or the wait already timed out — the answer
+    # would sit in the log with nobody listening.
+    await wake_if_unattended(
+        store, redis=getattr(request.app.state, "redis", None),
+        session_id=session_id,
+    )
     return AskUserQuestionResponseReply(event_id=event_id)

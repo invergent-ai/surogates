@@ -113,6 +113,10 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
     if denied - PROTECTED_TOOLS:
         profile["denied_tools"] = sorted(denied - PROTECTED_TOOLS)
 
+    approval = _tool_names(governance, "require_approval")
+    if approval:
+        profile["require_approval"] = sorted(approval)
+
     egress = governance.get("egress")
     if isinstance(egress, dict):
         rules = [r for r in (egress.get("rules") or []) if isinstance(r, dict)]
@@ -142,7 +146,12 @@ def _tool_names(governance: dict[str, Any], key: str) -> set[str]:
     """
     value = governance.get(key)
     if isinstance(value, list):
-        return {t for t in value if isinstance(t, str) and t}
+        # Strip: a padded entry that silently matches nothing fails OPEN for
+        # ``denied_tools`` and ``require_approval``, which is the wrong
+        # direction for both.
+        return {
+            t.strip() for t in value if isinstance(t, str) and t.strip()
+        }
     if value not in (None, []):
         logger.warning(
             "governance.%s has unexpected type %s; ignoring",

@@ -416,6 +416,7 @@ ALTER TABLE missions
     ALTER COLUMN user_id DROP NOT NULL,
     ADD COLUMN IF NOT EXISTS service_account_id uuid
         REFERENCES service_accounts(id),
+    ADD COLUMN IF NOT EXISTS budget_tokens integer,
     -- Consecutive evaluations that reported no progress.
     ADD COLUMN IF NOT EXISTS stagnant_evaluations integer NOT NULL DEFAULT 0;
 
