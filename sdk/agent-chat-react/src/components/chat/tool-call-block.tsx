@@ -35,6 +35,7 @@ export function ToolCallBlock({
   tc,
   resolvedArtifactName,
   assistantContent,
+  viewMode,
   onFileSelect,
 }: {
   tc: ToolCallInfo;
@@ -45,6 +46,8 @@ export function ToolCallBlock({
    * already wrote out in prose.
    */
   assistantContent?: string;
+  /** Only ``ask_user_question`` reads this; the timeline is Expert-only. */
+  viewMode?: "simple" | "expert";
   onFileSelect?: (path: string) => void;
 }) {
   if (tc.toolName.startsWith("mcp__")) {
@@ -106,7 +109,11 @@ export function ToolCallBlock({
 
     case "ask_user_question":
       return (
-        <AskUserQuestionToolBlock tc={tc} assistantContent={assistantContent} />
+        <AskUserQuestionToolBlock
+          tc={tc}
+          assistantContent={assistantContent}
+          viewMode={viewMode}
+        />
       );
 
     case "create_artifact":

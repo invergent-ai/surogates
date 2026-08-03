@@ -27,7 +27,6 @@ import { cn } from "../../../lib/utils";
 import { Input } from "../../ui/input";
 import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
-import { useChatViewMode } from "../../../runtime/use-agent-chat-runtime";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 import type {
@@ -128,6 +127,7 @@ export function promptEchoedInContent(
 export function AskUserQuestionToolBlock({
   tc,
   assistantContent,
+  viewMode = "simple",
 }: {
   tc: ToolCallInfo;
   /**
@@ -135,6 +135,14 @@ export function AskUserQuestionToolBlock({
    * suppress a prompt the agent already wrote out in prose.
    */
   assistantContent?: string;
+  /**
+   * Passed down rather than read from the persisted view-mode store:
+   * the two render paths are mode-exclusive (IterationGroup is Simple,
+   * the timeline is Expert), and a host that drives ChatThread with an
+   * explicit ``viewMode`` prop must not see the widget disagree with
+   * the thread around it.
+   */
+  viewMode?: "simple" | "expert";
 }) {
   const questions = useMemo(() => askQuestionsOf(tc), [tc.args]);
 
@@ -156,7 +164,7 @@ export function AskUserQuestionToolBlock({
     );
   }
 
-  return <BatchAsk tc={tc} questions={questions} />;
+  return <BatchAsk tc={tc} questions={questions} viewMode={viewMode} />;
 }
 
 // ── Conversational (single question) ─────────────────────────────────
@@ -285,9 +293,11 @@ function QuickReply({
 function BatchAsk({
   tc,
   questions,
+  viewMode,
 }: {
   tc: ToolCallInfo;
   questions: AskUserQuestionQuestion[];
+  viewMode: "simple" | "expert";
 }) {
   const { adapter, sessionId } = useAgentChatAdapterContext();
 
@@ -412,7 +422,7 @@ function BatchAsk({
   }, [handleCancel, handleSubmit, locked]);
 
   if (locked) {
-    return <BatchAskLocked tc={tc} questions={questions} />;
+    return <BatchAskLocked tc={tc} questions={questions} viewMode={viewMode} />;
   }
 
   const current = questions[active]!;
@@ -650,11 +660,12 @@ function Radio({ selected }: { selected: boolean }) {
 function BatchAskLocked({
   tc,
   questions,
+  viewMode,
 }: {
   tc: ToolCallInfo;
   questions: AskUserQuestionQuestion[];
+  viewMode: "simple" | "expert";
 }) {
-  const viewMode = useChatViewMode();
   const answers = tc.askUserQuestionAnswers;
   // Map answer question text back to the widget's question index so the
   // order matches the tabs (LLM-submitted order, not user navigation).

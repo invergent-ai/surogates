@@ -805,6 +805,9 @@ function TimelineEntryItem({
                 tc={entry.tc}
                 resolvedArtifactName={entry.resolvedArtifactName}
                 assistantContent={entry.assistantContent}
+                // The timeline only renders in Expert mode; Simple goes
+                // through SimpleAssistantGroup / IterationGroup.
+                viewMode="expert"
                 onFileSelect={onFileSelect}
               />
               {failureSummary ? (
@@ -1662,6 +1665,7 @@ export function IterationGroup({
         <AskUserQuestionToolBlock
           tc={askCall}
           assistantContent={message.content}
+          viewMode="simple"
         />
       </div>
     );
