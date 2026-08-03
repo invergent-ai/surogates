@@ -30,6 +30,7 @@ from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
     WORKER_SELF_TOOLS,
     build_governance_gate,
+    warn_if_profile_unenforced,
 )
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
@@ -1557,6 +1558,11 @@ async def run_worker(settings: Settings) -> None:
         _warn_if_base_model_missing_from_metadata(model_id)
         await session_store.record_session_model(session.id, model_id)
         budget = _resolve_iteration_budget(session)
+        # A declared policy_profile is stamped by the spawn paths and shown in
+        # the UI, but no registry resolves a profile NAME to the shape the
+        # gate composes -- so it is inert. Say so rather than let a session
+        # look restricted when it is not.
+        warn_if_profile_unenforced(session.config, agent_id=session.agent_id)
         summary_slot = llm_bundle.summary
         vision_slot = llm_bundle.vision
         advisor_slot = llm_bundle.advisor
