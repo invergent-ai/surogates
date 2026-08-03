@@ -1789,6 +1789,16 @@ class SessionStore:
             rows = result.mappings().all()
         return [Event.model_validate(dict(r)) for r in rows]
 
+    async def has_live_lease(self, session_id: UUID) -> bool:
+        """True when a worker currently holds *session_id*."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(LeaseRow.session_id).where(
+                    LeaseRow.session_id == session_id,
+                    LeaseRow.expires_at > func.now(),
+                ).limit(1)
+            )).scalar_one_or_none() is not None
+
     async def release_stale_lease(self, session_id: UUID) -> bool:
         """Delete a session's lease row only if it has already expired.
 
