@@ -239,7 +239,9 @@ async def _enqueue_ready_tasks(
                 claimed.id,
             )
             failed_this_tick.add(claimed.id)
-            await _rollback_claim(session_factory, claimed.id)
+            await _retry_or_block(
+                session_factory, claimed, reason="tenant resolution failed",
+            )
             continue
 
         try:
@@ -265,24 +267,30 @@ async def _enqueue_ready_tasks(
             await _block_claim(session_factory, claimed.id, reason=str(exc))
             continue
         except ValueError as exc:
-            # Other config-level error (e.g. missing workspace fields on the
-            # parent session), which may be transient. Rolling back gives a
-            # human a chance to fix the config; the within-tick exclusion
-            # prevents hot-looping on this same row for the rest of THIS tick.
+            # Permanent config error, same class as UnknownAgentDefError above:
+            # the raise sites are shape checks on the PARENT session's config
+            # (missing storage_bucket / storage_key_prefix / workspace_path),
+            # which is a property of a row that never changes on its own.
+            # Rolling this back returned the task to 'ready' with its attempt
+            # given back, so the tick re-claimed it every 5s forever — the
+            # ceiling in _finalize_ended_attempts only inspects 'running'
+            # tasks and could never see it.
             logger.warning(
-                "tasks_tick: spawn failed for task %s: %s",
+                "tasks_tick: blocking task %s (spawn cannot succeed): %s",
                 claimed.id, exc,
             )
             failed_this_tick.add(claimed.id)
-            await _rollback_claim(session_factory, claimed.id)
+            await _block_claim(session_factory, claimed.id, reason=str(exc))
             continue
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "tasks_tick: unexpected error spawning task %s; rolling back",
+                "tasks_tick: unexpected error spawning task %s",
                 claimed.id,
             )
             failed_this_tick.add(claimed.id)
-            await _rollback_claim(session_factory, claimed.id)
+            await _retry_or_block(
+                session_factory, claimed, reason=f"spawn failed: {exc}",
+            )
             continue
 
         # Phase C: wire current_session_id onto the task.
@@ -347,11 +355,36 @@ async def _block_claim(
         )
 
 
+async def _retry_or_block(
+    session_factory: async_sessionmaker, claimed: Task, *, reason: str,
+) -> None:
+    """Return a failed claim to ``ready``, or block it once attempts are spent.
+
+    ``claimed.attempt_count`` already includes the attempt just consumed (the
+    claim increments it), so this is the only place a repeatedly-failing spawn
+    can be stopped: ``_finalize_ended_attempts``' ceiling only inspects tasks
+    in ``running`` joined to an ended Session, and a task returned to ``ready``
+    is never seen by it.
+    """
+    if claimed.attempt_count >= claimed.max_attempts:
+        logger.warning(
+            "tasks_tick: blocking task %s after %d/%d failed spawn attempts: %s",
+            claimed.id, claimed.attempt_count, claimed.max_attempts, reason,
+        )
+        await _block_claim(session_factory, claimed.id, reason=reason)
+        return
+    await _rollback_claim(session_factory, claimed.id)
+
+
 async def _rollback_claim(
     session_factory: async_sessionmaker, task_id: UUID,
 ) -> None:
-    """Best-effort: roll a failed claim back to ``ready`` and decrement
-    ``attempt_count`` so a config error doesn't burn a retry budget.
+    """Best-effort: roll a failed claim back to ``ready``.
+
+    The consumed attempt is deliberately **kept**.  Giving it back restored
+    the row to its exact pre-claim state, which made ``max_attempts``
+    unenforceable and let a task whose spawn could never succeed be
+    re-claimed on every tick, forever.
 
     Errors during the rollback itself are logged but not raised — the
     next finalize pass will recover by treating the running attempt as
@@ -362,10 +395,7 @@ async def _rollback_claim(
             await db.execute(
                 update(Task)
                 .where(Task.id == task_id)
-                .values(
-                    status="ready",
-                    attempt_count=Task.attempt_count - 1,
-                )
+                .values(status="ready")
             )
             await db.commit()
     except Exception:
