@@ -34,10 +34,17 @@ import { CodeRunToolBlock } from "./tools/code-run-tool";
 export function ToolCallBlock({
   tc,
   resolvedArtifactName,
+  assistantContent,
   onFileSelect,
 }: {
   tc: ToolCallInfo;
   resolvedArtifactName?: string;
+  /**
+   * Body of the assistant message that made the call.  Only
+   * ``ask_user_question`` uses it, to avoid echoing a prompt the agent
+   * already wrote out in prose.
+   */
+  assistantContent?: string;
   onFileSelect?: (path: string) => void;
 }) {
   if (tc.toolName.startsWith("mcp__")) {
@@ -98,7 +105,9 @@ export function ToolCallBlock({
       return <SkillManageToolBlock tc={tc} />;
 
     case "ask_user_question":
-      return <AskUserQuestionToolBlock tc={tc} />;
+      return (
+        <AskUserQuestionToolBlock tc={tc} assistantContent={assistantContent} />
+      );
 
     case "create_artifact":
       return <ArtifactToolBlock tc={tc} resolvedName={resolvedArtifactName} />;

@@ -102,6 +102,58 @@ function pendingAskTurn(): ChatMessage {
   } as ChatMessage;
 }
 
+/** The shape a conversational agent asks in: one open-ended question. */
+function pendingOpenAskTurn(): ChatMessage {
+  return {
+    id: "asst-ask-open",
+    role: "assistant",
+    content: "",
+    createdAt: new Date(),
+    status: "streaming",
+    turnId: "t-1",
+    iterationIndex: 0,
+    toolCalls: [
+      {
+        id: "call_ask_open",
+        toolName: "ask_user_question",
+        args: JSON.stringify({
+          questions: [{ prompt: "What subjects do you like at school?" }],
+        }),
+        status: "running",
+      },
+    ],
+  } as ChatMessage;
+}
+
+/** One question, choices offered, typing still allowed. */
+function pendingOpenChoiceAskTurn(): ChatMessage {
+  return {
+    id: "asst-ask-chips",
+    role: "assistant",
+    content: "",
+    createdAt: new Date(),
+    status: "streaming",
+    turnId: "t-1",
+    iterationIndex: 0,
+    toolCalls: [
+      {
+        id: "call_ask_chips",
+        toolName: "ask_user_question",
+        args: JSON.stringify({
+          questions: [
+            {
+              prompt: "How often can you meet?",
+              choices: [{ label: "Three a week" }, { label: "Twice a week" }],
+              allow_other: true,
+            },
+          ],
+        }),
+        status: "running",
+      },
+    ],
+  } as ChatMessage;
+}
+
 function runningTerminalTurn(): ChatMessage {
   return {
     id: "asst-tool",
@@ -165,7 +217,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(dom.textContent).toContain("Does this design work for you?");
   });
 
-  it("disables the composer (no Stop button) while parked on a pending ask", () => {
+  it("locks the composer on a closed menu (choices, allow_other false)", () => {
     const dom = mount(
       <ChatThread
         sessionId="s-1"
@@ -184,11 +236,54 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(textarea).not.toBeNull();
     expect(textarea?.disabled).toBe(true);
     expect(textarea?.placeholder).toContain(
-      "Answer the question above to continue.",
+      "Pick one of the options above to continue.",
     );
     // The Stop/abort control is gone (it would otherwise abort the
     // session if the user typed an answer and submitted).
     expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
+  });
+
+  it("keeps the composer open for an open-ended conversational ask", () => {
+    // The server turns a typed message into the answer, so the composer
+    // IS the answer field here. Locking it would show the user a
+    // question they cannot answer the obvious way.
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    expect(textarea?.disabled).toBe(false);
+    expect(textarea?.placeholder).toContain("Type your answer…");
+    // Enter must send, not stop: the turn is running but the agent is
+    // parked on the user, and stopping would cancel the pending ask.
+    expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
+  });
+
+  it("offers quick replies but keeps typing available when other is allowed", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenChoiceAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea?.disabled).toBe(false);
+    expect(textarea?.placeholder).toContain("Pick one above, or type your answer…");
+    const chips = [...dom.querySelectorAll("button")].map((b) => b.textContent);
+    expect(chips).toContain("Three a week");
   });
 
   it("still shows 'Working on it' when the running tool is NOT an ask", () => {

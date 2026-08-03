@@ -1,19 +1,33 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// ask_user_question tool widget -- tabs for each question, radio choices with
-// labels + descriptions, an optional "Other" free-form row, and a single
-// Submit that batches every answer back to the worker.  Picking a choice
-// auto-advances to the next unanswered question ("Other" waits for typed
-// input; Enter advances it) so multi-question flows read select → next →
-// submit.  Esc pauses the session (= user chose to stop the chat instead
-// of answering).
+// ask_user_question renders in one of two shapes, chosen by how many
+// questions the agent asked.
+//
+// A SINGLE question is a conversational turn, not a form: the agent
+// said something and is waiting for a reply.  It renders as the agent's
+// own message with optional quick-reply chips, the composer stays live,
+// and the answer lands in the thread as the user's own message (see
+// ``appendConversationalAnswer`` in the reducer).  Wrapping that in a
+// bordered card with tab headers, per-question numbering and a Submit
+// button turned every conversational beat into a form receipt.
+//
+// TWO OR MORE questions is a genuine batch decision: tabs for each
+// question, radio choices with labels + descriptions, an optional
+// "Other" free-form row, and a single Submit that batches every answer
+// back to the worker.  Picking a choice auto-advances to the next
+// unanswered question ("Other" waits for typed input; Enter advances
+// it) so multi-question flows read select -> next -> submit.  Esc
+// pauses the session (= user chose to stop the chat instead of
+// answering).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { XIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { Input } from "../../ui/input";
+import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
+import { useChatViewMode } from "../../../runtime/use-agent-chat-runtime";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 import type {
@@ -43,17 +57,239 @@ function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestio
   if (sel.index >= OTHER_INDEX_OFFSET) {
     const text = sel.other.trim();
     if (!text) return null;
-    return { question: q.prompt, answer: text, is_other: true };
+    // "Other" only means something when there was a menu to depart
+    // from; mirrors the server-side rule in resolve_text_answer.
+    return { question: q.prompt, answer: text, is_other: (q.choices?.length ?? 0) > 0 };
   }
   const choice = q.choices?.[sel.index];
   if (!choice) return null;
   return { question: q.prompt, answer: choice.label, is_other: false };
 }
 
-export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
+// ── Shape helpers (shared with chat-thread) ──────────────────────────
+
+/** The questions an ask_user_question call is presenting, if parseable. */
+export function askQuestionsOf(tc: ToolCallInfo): AskUserQuestionQuestion[] {
+  return parseArgs<AskUserQuestionArgs>(tc.args)?.questions ?? [];
+}
+
+/**
+ * A one-question ask is conversational: the agent is talking, not
+ * collecting a form.  Everything else keeps the batch widget.
+ */
+export function isConversationalAsk(questions: AskUserQuestionQuestion[]): boolean {
+  return questions.length === 1;
+}
+
+/**
+ * Whether a pending conversational ask accepts a typed reply.
+ *
+ * The server converts a free-text message into the answer for whatever
+ * question is pending, so the composer is the natural way to reply —
+ * except when the agent offered a closed menu (``allow_other: false``
+ * alongside choices), where only the listed options are valid.  A
+ * question with no choices always accepts typing; there would
+ * otherwise be no way to answer it at all.
+ */
+export function conversationalAskAcceptsFreeText(
+  question: AskUserQuestionQuestion,
+): boolean {
+  const hasChoices = (question.choices?.length ?? 0) > 0;
+  return !hasChoices || question.allow_other !== false;
+}
+
+/**
+ * Whether the agent's message body already contains the question, so
+ * rendering the prompt again would echo it.
+ *
+ * Agents routinely write the question in prose and pass the same
+ * sentence as ``prompt``.  Comparison is whitespace- and case-
+ * insensitive and ignores inline markdown emphasis, since the body is
+ * markdown and the prompt is plain text.  A containment test (rather
+ * than equality) is deliberate: the prose usually ends with the
+ * question after a lead-in.  Biasing toward suppression is the safe
+ * side — the question is still on screen inside the body, whereas the
+ * opposite error prints it twice.
+ */
+export function promptEchoedInContent(
+  content: string | undefined,
+  prompt: string,
+): boolean {
+  const normalize = (s: string) =>
+    s.replace(/[*_`]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+  const body = normalize(content ?? "");
+  const question = normalize(prompt);
+  if (!body || !question) return false;
+  return body.includes(question);
+}
+
+// ── Entry point ──────────────────────────────────────────────────────
+
+export function AskUserQuestionToolBlock({
+  tc,
+  assistantContent,
+}: {
+  tc: ToolCallInfo;
+  /**
+   * The body of the assistant message that made this call, used to
+   * suppress a prompt the agent already wrote out in prose.
+   */
+  assistantContent?: string;
+}) {
+  const questions = useMemo(() => askQuestionsOf(tc), [tc.args]);
+
+  if (questions.length === 0) {
+    return (
+      <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        ask_user_question: no questions provided
+      </div>
+    );
+  }
+
+  if (isConversationalAsk(questions)) {
+    return (
+      <ConversationalAsk
+        tc={tc}
+        question={questions[0]!}
+        assistantContent={assistantContent}
+      />
+    );
+  }
+
+  return <BatchAsk tc={tc} questions={questions} />;
+}
+
+// ── Conversational (single question) ─────────────────────────────────
+
+function ConversationalAsk({
+  tc,
+  question,
+  assistantContent,
+}: {
+  tc: ToolCallInfo;
+  question: AskUserQuestionQuestion;
+  assistantContent?: string;
+}) {
   const { adapter, sessionId } = useAgentChatAdapterContext();
-  const args = useMemo(() => parseArgs<AskUserQuestionArgs>(tc.args), [tc.args]);
-  const questions = args?.questions ?? [];
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const answered = tc.askUserQuestionAnswers !== undefined;
+  const pending = !answered && tc.status === "running";
+  // No answer and the call is over: the wait timed out, or the session
+  // was paused/ended while the question was open.
+  const unanswered = !answered && tc.status !== "running";
+
+  const choices = question.choices ?? [];
+  const showPrompt = !promptEchoedInContent(assistantContent, question.prompt);
+
+  const pick = useCallback(
+    async (label: string) => {
+      if (!sessionId || submitting) return;
+      setError(null);
+      setSubmitting(true);
+      try {
+        await adapter.submitAskUserQuestionResponse({
+          sessionId,
+          toolCallId: tc.id,
+          responses: [
+            { question: question.prompt, answer: label, is_other: false },
+          ],
+        });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Submit failed.");
+        setSubmitting(false);
+      }
+    },
+    [adapter, sessionId, tc.id, question.prompt, submitting],
+  );
+
+  // Descriptions need room to read, so they get stacked rows; bare
+  // labels stay compact as inline pills.
+  const stacked = choices.some((c) => !!c.description);
+
+  return (
+    <div className="space-y-2">
+      {showPrompt && <MessageResponse>{question.prompt}</MessageResponse>}
+
+      {pending && choices.length > 0 && (
+        <div
+          className={cn(
+            stacked ? "flex flex-col gap-1.5" : "flex flex-wrap gap-2",
+            "max-w-2xl",
+          )}
+          role="group"
+          aria-label="Suggested answers"
+        >
+          {choices.map((choice, i) => (
+            <QuickReply
+              key={i}
+              choice={choice}
+              stacked={stacked}
+              disabled={submitting}
+              onSelect={() => void pick(choice.label)}
+            />
+          ))}
+        </div>
+      )}
+
+      {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {unanswered && (
+        <p className="text-xs italic text-muted-foreground/70">
+          No answer recorded.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function QuickReply({
+  choice,
+  stacked,
+  disabled,
+  onSelect,
+}: {
+  choice: AskUserQuestionChoice;
+  stacked: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onSelect}
+      className={cn(
+        "border border-border bg-background text-left text-foreground transition-colors",
+        "hover:border-foreground/30 hover:bg-muted",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        stacked
+          ? "rounded-md px-3 py-2"
+          : "rounded-full px-3.5 py-1.5 text-sm",
+      )}
+    >
+      <span className={cn("block", stacked && "text-sm")}>{choice.label}</span>
+      {stacked && choice.description && (
+        <span className="mt-0.5 block text-xs text-muted-foreground">
+          {choice.description}
+        </span>
+      )}
+    </button>
+  );
+}
+
+// ── Batch (two or more questions) ────────────────────────────────────
+
+function BatchAsk({
+  tc,
+  questions,
+}: {
+  tc: ToolCallInfo;
+  questions: AskUserQuestionQuestion[];
+}) {
+  const { adapter, sessionId } = useAgentChatAdapterContext();
 
   const [active, setActive] = useState(0);
   const [selections, setSelections] = useState<Selection[]>(() =>
@@ -175,19 +411,11 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
     return () => window.removeEventListener("keydown", handler);
   }, [handleCancel, handleSubmit, locked]);
 
-  if (questions.length === 0) {
-    return (
-      <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-        ask_user_question: no questions provided
-      </div>
-    );
-  }
-
   if (locked) {
-    return <AskUserQuestionLocked tc={tc} questions={questions} />;
+    return <BatchAskLocked tc={tc} questions={questions} />;
   }
 
-  const current = questions[active];
+  const current = questions[active]!;
   const currentSel = selections[active] ?? emptySelection();
 
   return (
@@ -276,20 +504,18 @@ export function AskUserQuestionToolBlock({ tc }: { tc: ToolCallInfo }) {
       {/* Footer: progress + the one primary action */}
       <div className="flex items-center justify-between gap-3 border-t border-border px-3 py-2">
         <div className="min-w-0 text-xs text-muted-foreground">
-          {questions.length > 1 && (
-            <span className="mr-2 tabular-nums">
-              {answeredCount} of {questions.length} answered
-            </span>
-          )}
+          <span className="mr-2 tabular-nums">
+            {answeredCount} of {questions.length} answered
+          </span>
           <span className="text-muted-foreground/70">Esc to cancel</span>
           {error && (
             <span className="ml-2 text-destructive">{error}</span>
           )}
         </div>
-        {allAnswered || questions.length === 1 ? (
+        {allAnswered ? (
           <button
             type="button"
-            disabled={!allAnswered || submitting}
+            disabled={submitting}
             onClick={() => void handleSubmit()}
             className={cn(
               "shrink-0 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors",
@@ -419,15 +645,16 @@ function Radio({ selected }: { selected: boolean }) {
   );
 }
 
-// ── Locked (after submit / during replay) ────────────────────────────
+// ── Batch: locked (after submit / during replay) ─────────────────────
 
-function AskUserQuestionLocked({
+function BatchAskLocked({
   tc,
   questions,
 }: {
   tc: ToolCallInfo;
   questions: AskUserQuestionQuestion[];
 }) {
+  const viewMode = useChatViewMode();
   const answers = tc.askUserQuestionAnswers;
   // Map answer question text back to the widget's question index so the
   // order matches the tabs (LLM-submitted order, not user navigation).
@@ -457,7 +684,10 @@ function AskUserQuestionLocked({
                 <div className="ml-5 text-foreground">
                   <span className="text-emerald-500">→</span>{" "}
                   {a.answer}
-                  {a.is_other && (
+                  {/* "Off the menu" is operator signal, not end-user
+                      signal: it tells whoever reviews the session that
+                      the offered options did not fit. */}
+                  {a.is_other && viewMode === "expert" && (
                     <span className="ml-1 text-[10px] text-muted-foreground/70">
                       (other)
                     </span>

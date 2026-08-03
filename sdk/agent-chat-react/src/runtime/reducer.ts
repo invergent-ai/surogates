@@ -285,7 +285,11 @@ export function applyAgentChatEvent(
     case "ask_user_question.response":
       return withMessages(
         nextState,
-        applyAskUserQuestionResponse(nextState.messages, event.data),
+        applyAskUserQuestionResponse(
+          nextState.messages,
+          event.eventId,
+          event.data,
+        ),
       );
 
     case "policy.denied":
@@ -1331,11 +1335,20 @@ function applyUserFeedback(
 
 function applyAskUserQuestionResponse(
   messages: AgentChatMessage[],
+  eventId: number,
   data: Record<string, unknown>,
 ): AgentChatMessage[] {
   const targetToolId = stringValue(data.tool_call_id);
   const responses = Array.isArray(data.responses) ? data.responses : undefined;
   if (!targetToolId || !responses) return messages;
+  const answers = responses.map((response) => {
+    const row = objectValue(response) ?? {};
+    return {
+      question: stringValue(row.question),
+      answer: stringValue(row.answer),
+      is_other: Boolean(row.is_other),
+    };
+  });
   const next = [...messages];
   for (let i = next.length - 1; i >= 0; i--) {
     const msg = next[i];
@@ -1343,24 +1356,64 @@ function applyAskUserQuestionResponse(
     next[i] = {
       ...msg,
       toolCalls: msg.toolCalls.map((tc) =>
-        tc.id === targetToolId
-          ? {
-              ...tc,
-              askUserQuestionAnswers: responses.map((response) => {
-                const row = objectValue(response) ?? {};
-                return {
-                  question: stringValue(row.question),
-                  answer: stringValue(row.answer),
-                  is_other: Boolean(row.is_other),
-                };
-              }),
-            }
-          : tc,
+        tc.id === targetToolId ? { ...tc, askUserQuestionAnswers: answers } : tc,
       ),
     };
-    return next;
+    return appendConversationalAnswer(next, eventId, answers);
   }
   return messages;
+}
+
+/**
+ * Give a single-question ask its answer as a real user message.
+ *
+ * A one-question ask is a conversational turn: the agent asked, the
+ * user replied.  The reply belongs in the thread as the user's own
+ * message, exactly where it would sit had they typed it unprompted —
+ * not buried inside the agent's tool card.  Multi-question asks are
+ * genuine batch forms and keep their Q/A recap in the widget instead.
+ *
+ * Both entry paths converge here.  Typing into the composer appends an
+ * optimistic ``local-`` message (``markSending``) and the server
+ * answers with ``ask_user_question.response`` and no ``user.message``,
+ * so that local message must be adopted rather than duplicated.  We
+ * adopt the trailing un-promoted local message rather than matching its
+ * text: a reply that matched a choice label comes back canonicalised
+ * (typed "yes", answer "Yes"), and an exact-match test would leave the
+ * optimistic copy stranded beside the synthesised one.  Tapping a
+ * quick-reply chip sends no message at all, so there is nothing to
+ * adopt and the answer is appended fresh.
+ */
+function appendConversationalAnswer(
+  messages: AgentChatMessage[],
+  eventId: number,
+  answers: { question: string; answer: string; is_other: boolean }[],
+): AgentChatMessage[] {
+  if (answers.length !== 1) return messages;
+  const answer = answers[0]!.answer.trim();
+  if (!answer) return messages;
+
+  const id = `evt-${eventId}`;
+  // A redelivered event (SSE reconnect replays from the last cursor)
+  // must not append the answer twice.
+  if (messages.some((m) => m.id === id)) return messages;
+
+  const next = [...messages];
+  for (let i = next.length - 1; i >= 0; i--) {
+    const msg = next[i]!;
+    if (msg.role !== "user") continue;
+    if (!msg.id.startsWith("local-")) break;
+    next[i] = { ...msg, id, content: answer, status: "complete" };
+    return next;
+  }
+  next.push({
+    id,
+    role: "user",
+    content: answer,
+    createdAt: new Date(),
+    status: "complete",
+  });
+  return next;
 }
 
 function applyPolicyDenied(
