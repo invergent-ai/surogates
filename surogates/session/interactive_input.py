@@ -218,11 +218,18 @@ async def resolve_input_response(
         return None
 
     try:
-        return await store.emit_event(
+        event_id = await store.emit_event(
             session_id,
             EventType.ASK_USER_QUESTION_RESPONSE,
             {"tool_call_id": tc_id, "responses": responses},
         )
+        # Covers every channel caller from one place: the asking tool is
+        # usually still parked and sees this itself, but if it is gone the
+        # answer would sit here unread.
+        await wake_if_unattended(
+            store, redis=getattr(store, "_redis", None), session_id=session_id,
+        )
+        return event_id
     except Exception:
         # The claim committed but the response event did not: without a
         # revert the row reads "responded" while the tool keeps waiting
@@ -362,3 +369,44 @@ async def try_resolve_text_answer(
         tool_call_id=tool_call_id,
         responses=resolve_text_answer(pending.get("questions") or [], text),
     )
+
+
+async def wake_if_unattended(
+    store, *, redis, session_id, _enqueue=None,
+) -> None:
+    """Enqueue *session_id* when no worker is parked on it.
+
+    ``ask_user_question`` normally has a poller holding the session, and it
+    sees the answer within a second.  When that poller is gone — the worker
+    died, or the wait already timed out — the answer would otherwise sit in
+    the event log with nobody listening.
+
+    Conditional on the lease for a reason: enqueueing while a poller holds
+    the session rides the dispatcher's ``_rewake_pending`` path and runs an
+    extra turn on unchanged history once the current one ends.  An unknown
+    answer counts as attended, because a spurious turn is worse than an
+    answer the live poller picks up a moment later.
+
+    Never raises: the answer is already recorded, and failing the caller
+    would report a lost answer that was not lost.
+    """
+    if redis is None:
+        return
+    enqueue = _enqueue
+    if enqueue is None:
+        from surogates.config import enqueue_session as enqueue
+    try:
+        if await store.has_live_lease(session_id):
+            return
+        session = await store.get_session(session_id)
+        await enqueue(
+            redis,
+            org_id=str(session.org_id),
+            agent_id=session.agent_id,
+            session_id=session_id,
+        )
+    except Exception:
+        logger.warning(
+            "Could not wake session %s after an answer", session_id,
+            exc_info=True,
+        )
