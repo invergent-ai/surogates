@@ -753,6 +753,59 @@ class ScheduledSession(Base):
 # ---------------------------------------------------------------------------
 
 
+class ApprovalGrant(Base):
+    """A human's decision to let one blocked tool call through.
+
+    Approving used to emit a chat message and nothing else — nothing the
+    gate could consult, so the same call was blocked again on retry.  A
+    grant is that decision made durable.
+
+    Validity is never stored as a flag.  ``consume_approval_grant``
+    recomputes it on every read from ``revoked_at`` / ``expires_at`` /
+    ``used_count``, so a grant cannot drift into looking live after the
+    fact.
+
+    Scope is the *call*, not the tool: ``arguments_hash`` pins the exact
+    arguments that were shown to the human, so approving one deploy does
+    not approve every future one.
+    """
+
+    __tablename__ = "approval_grants"
+    __table_args__ = (
+        Index(
+            "idx_approval_grants_lookup",
+            "session_id", "tool_name", "arguments_hash",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # sha256 of the canonical (sorted-key) tool arguments.
+    arguments_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    max_uses: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1",
+    )
+    used_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+
 class AmbientScheduleRow(Base):
     """One ambient-review schedule per followed channel.
 

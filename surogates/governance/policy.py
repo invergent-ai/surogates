@@ -96,8 +96,17 @@ class GovernanceGate:
         enabled: bool = True,
         egress_policy: EgressPolicy | None = None,
         transparency: TransparencyInterceptor | None = None,
+        require_approval: set[str] | None = None,
     ) -> None:
         self._enabled: bool = enabled
+        # Tools a human must approve before they run.  Checked beside the
+        # deny-list fast path -- above the open-policy/``mcp__`` early
+        # return -- because open policy is the production default and MCP
+        # tools take that return unconditionally, so a rule placed below it
+        # would never fire for the tools most worth gating.
+        self._require_approval: frozenset[str] = frozenset(
+            require_approval or (),
+        )
         self._open_policy: bool = (allowed_tools is None and denied_tools is None)
 
         # Initialise AGT engine.
@@ -249,6 +258,17 @@ class GovernanceGate:
                 allowed=False,
                 reason=f"denied: tool {tool_name!r} explicitly blocked",
                 tool_name=tool_name,
+            )
+
+        # Approval gate.  Deliberately AFTER the deny list (an explicit
+        # denial is not negotiable and must not become approvable) and
+        # BEFORE the open-policy / ``mcp__`` early return below.
+        if tool_name in self._require_approval:
+            return PolicyDecision(
+                allowed=False,
+                reason=f"tool {tool_name!r} requires human approval",
+                tool_name=tool_name,
+                overridable=True,
             )
 
         # Path-arg hygiene check — reject shell-variable patterns like
@@ -597,12 +617,21 @@ class GovernanceGate:
                     action=rule.get("action", "allow"),
                 )
 
+        # Approval rules union: a profile may add tools that need a human,
+        # never drop one the base required.
+        new_require_approval = set(self._require_approval)
+        new_require_approval.update(
+            str(t).strip() for t in (profile.get("require_approval") or [])
+            if str(t).strip()
+        )
+
         composed = GovernanceGate(
             allowed_tools=new_allowed if new_allowed is not None else None,
             denied_tools=new_denied if new_denied else None,
             enabled=self._enabled,
             egress_policy=new_egress,
             transparency=self._transparency,
+            require_approval=new_require_approval or None,
         )
         composed.freeze()
         return composed
