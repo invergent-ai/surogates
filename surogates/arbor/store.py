@@ -28,8 +28,8 @@ META_KEYS: frozenset[str] = frozenset({
     "test_baseline_score", "test_trunk_score",
     "eval_cmd", "eval_cmd_test", "eval_timeout",
     "eval_retries", "eval_retry_base_delay", "eval_retry_max_delay",
-    "metric_direction", "dataset_info",
-    "protected_paths", "required_outputs",
+    "metric_direction",
+    "protected_paths",
     "max_cycles", "max_tree_depth", "max_parallel",
     "merge_threshold", "hitl_mode",
     # Convergence detector config (ConvergenceConfig.from_meta reads these).
