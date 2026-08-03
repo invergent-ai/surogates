@@ -297,6 +297,14 @@ CONCURRENCY_SAFE_TOOLS: frozenset[str] = frozenset({
     "web_search",
     "web_extract",
     "web_crawl",
+})
+
+# Tools that allocate durable state and therefore must NOT be dispatched
+# eagerly mid-stream -- a discarded stream would leave the state behind.
+# Same rule as DELEGATION_TOOLS below, without the child session: ``todo``
+# appends a plan snapshot to the event log on every write.  Safe to batch
+# concurrently once the stream commits, so it joins BATCH_PARALLEL_TOOLS.
+DURABLE_STATE_TOOLS: frozenset[str] = frozenset({
     "todo",
 })
 
@@ -358,7 +366,9 @@ DELEGATION_TOOLS: frozenset[str] = frozenset({
 # All tools that ``should_parallelize`` may dispatch concurrently after
 # the stream completes.  Superset of :data:`PARALLEL_TOOLS` plus
 # delegation tools.  Used only for batched (post-stream) dispatch.
-BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
+BATCH_PARALLEL_TOOLS: frozenset[str] = (
+    PARALLEL_TOOLS | DELEGATION_TOOLS | DURABLE_STATE_TOOLS
+)
 
 MAX_TOOL_WORKERS: int = 8
 
@@ -373,7 +383,6 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "session_search",
     "skill_view",
     "skills_list",
-    "todo",
     "web_crawl",
     "web_extract",
     "web_search",

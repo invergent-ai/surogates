@@ -1,8 +1,12 @@
-"""Builtin todo tool -- in-memory task management per session.
+"""Builtin todo tool -- event-sourced task management per session.
 
 Registers the ``todo`` tool with the tool registry.  Provides a
-per-session in-memory task list for decomposing complex tasks,
-tracking progress, and maintaining focus across long conversations.
+per-session task list for decomposing complex tasks, tracking progress,
+and maintaining focus across long conversations.
+
+The list is stored as ``todo.updated`` events, so it survives a wake
+boundary: a new worker loads the latest snapshot rather than starting
+blank.  Every response carries the full list, so recovery reads one row.
 
 Design:
 - Single ``todo`` tool: provide ``todos`` param to write, omit to read
@@ -15,8 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
+from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -26,7 +31,7 @@ VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 
 
 class TodoStore:
-    """In-memory todo list. One instance per session.
+    """Todo list. Built per call from the latest snapshot.
 
     Items are ordered -- list position is priority. Each item has:
       - id: unique string identifier (agent-chosen)
@@ -84,43 +89,6 @@ class TodoStore:
         """Return a copy of the current list."""
         return [item.copy() for item in self._items]
 
-    def has_items(self) -> bool:
-        """Check if there are any items in the list."""
-        return bool(self._items)
-
-    def format_for_injection(self) -> Optional[str]:
-        """Render the todo list for post-compression injection.
-
-        Returns a human-readable string to append to the compressed
-        message history, or None if the list is empty.
-        """
-        if not self._items:
-            return None
-
-        # Status markers for compact display
-        markers = {
-            "completed": "[x]",
-            "in_progress": "[>]",
-            "pending": "[ ]",
-            "cancelled": "[~]",
-        }
-
-        # Only inject pending/in_progress items — completed/cancelled ones
-        # cause the model to re-do finished work after compression.
-        active_items = [
-            item for item in self._items
-            if item["status"] in ("pending", "in_progress")
-        ]
-        if not active_items:
-            return None
-
-        lines = ["[Your active task list was preserved across context compression]"]
-        for item in active_items:
-            marker = markers.get(item["status"], "[?]")
-            lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']})")
-
-        return "\n".join(lines)
-
     @staticmethod
     def _validate(item: Dict[str, Any]) -> Dict[str, str]:
         """Validate and normalize a todo item.
@@ -141,21 +109,6 @@ class TodoStore:
             status = "pending"
 
         return {"id": item_id, "content": content, "status": status}
-
-
-# Per-session TodoStore instances, keyed by session_id string.
-_session_stores: dict[str, TodoStore] = {}
-
-
-def _get_store(session_id: Any) -> TodoStore:
-    """Get or create a TodoStore for the given session.
-
-    Thread-safe because each session runs in a single async task.
-    """
-    key = str(session_id) if session_id else "default"
-    if key not in _session_stores:
-        _session_stores[key] = TodoStore()
-    return _session_stores[key]
 
 
 def register(registry: ToolRegistry) -> None:
@@ -229,16 +182,43 @@ async def _todo_handler(
     """Handle todo tool calls.
 
     Reads or writes depending on whether ``todos`` is provided.
-    Uses a per-session TodoStore keyed by ``session_id`` from kwargs.
+
+    The list lives in the event log, not in this process: it is loaded from
+    the newest ``todo.updated`` snapshot on every call and a write appends a
+    new one.  That is what keeps a merge correct across a wake boundary --
+    the previous design kept the store in a module-global that a new worker
+    started blank, so ``merge=true`` merged onto nothing and dropped the plan.
     """
     session_id = kwargs.get("session_id")
-    store = _get_store(session_id)
+    session_store = kwargs.get("session_store")
 
     todos = arguments.get("todos")
     merge = arguments.get("merge", False)
 
+    store = TodoStore()
+    if session_store is not None and session_id:
+        try:
+            snapshot = await session_store.latest_todo_snapshot(session_id)
+        except Exception:
+            # Degrade to a blank list rather than failing the turn: a read
+            # blip must not cost the model its tool call.
+            logger.warning(
+                "todo: could not load the plan for session %s",
+                session_id, exc_info=True,
+            )
+            snapshot = None
+        if snapshot:
+            store.write(snapshot, merge=False)
+
     if todos is not None:
         items = store.write(todos, merge)
+        if session_store is not None and session_id:
+            # Deliberately not swallowed: if the plan cannot be persisted the
+            # model must see the failure, or it proceeds against a list that
+            # will be gone on the next wake.
+            await session_store.emit_event(
+                session_id, EventType.TODO_UPDATED, {"todos": items},
+            )
     else:
         items = store.read()
 

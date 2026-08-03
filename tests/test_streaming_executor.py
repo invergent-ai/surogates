@@ -148,14 +148,19 @@ class TestConcurrencyClassification:
         safe_tools = [
             "read_file", "search_files", "list_files",
             "session_search", "skills_list", "skill_view",
-            "web_search", "web_extract", "web_crawl", "todo",
+            "web_search", "web_extract", "web_crawl",
         ]
         for name in safe_tools:
             assert is_parallelizable(name), f"{name} should be concurrency-safe"
 
     def test_write_tools_are_not_parallelizable(self) -> None:
+        # ``todo`` sits here with ``delegate_task``: both allocate durable
+        # state mid-stream (a plan snapshot event, a child session), so a
+        # discarded stream must not have already committed them. Both are
+        # promoted to parallel once the stream commits -- see
+        # BATCH_PARALLEL_TOOLS.
         non_parallel_tools = [
-            "write_file", "patch",
+            "write_file", "patch", "todo",
             "memory", "skill_manage", "delegate_task", "ask_user_question",
         ]
         for name in non_parallel_tools:
