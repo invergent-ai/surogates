@@ -274,7 +274,7 @@ async def build_evaluator_prompt(
         # In-flight mission tasks ({n_in_flight})
 
         {in_flight_block}
-
+        {history_block}
         # Verdict
 
         Return JSON only.
@@ -285,8 +285,31 @@ async def build_evaluator_prompt(
         completed_block=_render_completed(completed_rows),
         n_in_flight=len(in_flight_rows),
         in_flight_block=_render_in_flight(in_flight_rows),
+        history_block=_render_history(mission),
     )
     return prompt
+
+
+def _render_history(mission: Any) -> str:
+    """What this judge already said, and how many times running.
+
+    Without it every round re-derives the same opinion from scratch: the
+    evaluator fires on each terminal task but keeps no memory, so a mission
+    can be told the same thing indefinitely at full cost.
+    """
+    streak = getattr(mission, "stagnant_evaluations", 0) or 0
+    if not streak or not mission.last_evaluation_result:
+        return ""
+    return dedent(f"""
+        # Your previous evaluation ({streak} in a row without progress)
+
+        Verdict: {mission.last_evaluation_result}
+        Reason: {(mission.last_evaluation_explanation or "")[:600]}
+        Guidance you gave: {(mission.last_evaluation_feedback or "")[:600]}
+
+        If the same blocker is still present after {streak} rounds, say so
+        plainly and return `blocked` rather than repeating the guidance.
+        """)
 
 
 def evaluator_system_prompt() -> str:

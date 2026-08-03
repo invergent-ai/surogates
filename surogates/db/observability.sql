@@ -416,8 +416,9 @@ ALTER TABLE missions
     ALTER COLUMN user_id DROP NOT NULL,
     ADD COLUMN IF NOT EXISTS service_account_id uuid
         REFERENCES service_accounts(id),
-    -- Token allowance for the objective; NULL = unbounded.
-    ADD COLUMN IF NOT EXISTS budget_tokens integer;
+    ADD COLUMN IF NOT EXISTS budget_tokens integer,
+    -- Consecutive evaluations that reported no progress.
+    ADD COLUMN IF NOT EXISTS stagnant_evaluations integer NOT NULL DEFAULT 0;
 
 -- Replace the old (org, user, agent, status) index with one that covers
 -- both principal shapes.  Old index is dropped explicitly because the

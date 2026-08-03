@@ -70,6 +70,7 @@ class Mission(BaseModel):
     last_evaluation_feedback: str | None = None
     last_evaluation_at: datetime | None = None
     evaluator_parse_failures: int = 0
+    stagnant_evaluations: int = 0
     paused_reason: str | None = None
     cancelled_reason: str | None = None
     created_at: datetime
