@@ -17,10 +17,7 @@ import { useEffect, useState } from "react";
 
 const TICK_MS = 30_000;
 
-export function formatExpiresIn(
-  expiresAtIso: string,
-  nowMs: number,
-): string {
+function formatExpiresIn(expiresAtIso: string, nowMs: number): string {
   const remainingMs = Date.parse(expiresAtIso) - nowMs;
   if (remainingMs <= 0) return "Expired";
   if (remainingMs < 60_000) return "Expires in under a minute";

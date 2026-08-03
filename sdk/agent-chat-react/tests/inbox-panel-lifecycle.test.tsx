@@ -9,7 +9,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
+import { NON_INBOX_ADAPTER } from "./inbox-adapter-stub";
 import { InboxPanel } from "../src/components/inbox/inbox-panel";
 import type {
   AgentChatAdapter,
@@ -67,45 +67,7 @@ function createHarness(
   let closes = 0;
 
   const adapter: AgentChatAdapter = {
-    ...NO_BROWSER_ADAPTER,
-    async listSessions() {
-      return { sessions: [], total: 0 };
-    },
-    async createSession() {
-      throw new Error("not used");
-    },
-    async getSession() {
-      throw new Error("not used");
-    },
-    async sendMessage() {
-      return { eventId: 1, status: "accepted" as const };
-    },
-    async pauseSession() {},
-    async retrySession() {
-      throw new Error("not used");
-    },
-    async getArtifact() {
-      throw new Error("not used");
-    },
-    async submitAskUserQuestionResponse() {
-      return { eventId: 1 };
-    },
-    openEventStream() {
-      throw new Error("not used");
-    },
-    async getWorkspaceTree() {
-      return { root: "workspace", entries: [], truncated: false };
-    },
-    async getWorkspaceFile() {
-      throw new Error("not used");
-    },
-    async uploadWorkspaceFile() {
-      return { path: "uploaded.txt", size: 4 };
-    },
-    async deleteWorkspaceFile() {},
-    getWorkspaceDownloadUrl(input) {
-      return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
-    },
+    ...NON_INBOX_ADAPTER,
     async listInbox(input = {}) {
       listInputs.push(input);
       const wanted = [input.status ?? []].flat();

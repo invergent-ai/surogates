@@ -512,6 +512,31 @@ async def test_respond_rejects_non_governance_kind(
     assert response.status_code == 409
 
 
+def _finite_event_source(stop_on: str):
+    """Turn the route's endless SSE generator into one that stops.
+
+    The test client drains a response fully before handing it back, and
+    an inbox stream is designed never to end.
+    """
+
+    def factory(generator):
+        async def limited_stream():
+            async for event in generator:
+                if "event" not in event:
+                    continue
+                yield f"event: {event['event']}\n"
+                yield f"data: {event['data']}\n\n"
+                if event["event"] == stop_on:
+                    break
+
+        return StreamingResponse(
+            limited_stream(),
+            media_type="text/event-stream",
+        )
+
+    return factory
+
+
 async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     client,
     app,
@@ -524,24 +549,9 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     )
     headers = {"Authorization": f"Bearer {token}"}
 
-    def finite_event_source(generator):
-        async def limited_stream():
-            async for event in generator:
-                if "event" not in event:
-                    continue
-                yield f"event: {event['event']}\n"
-                yield f"data: {event['data']}\n\n"
-                if event["event"] == "item":
-                    break
-
-        return StreamingResponse(
-            limited_stream(),
-            media_type="text/event-stream",
-        )
-
     monkeypatch.setattr(
         "surogates.api.routes.inbox.EventSourceResponse",
-        finite_event_source,
+        _finite_event_source("item"),
         raising=False,
     )
 
@@ -598,24 +608,9 @@ async def test_sse_snapshot_counts_only_pending_unread(
         new_status="acknowledged",
     )
 
-    def finite_event_source(generator):
-        async def limited_stream():
-            async for event in generator:
-                if "event" not in event:
-                    continue
-                yield f"event: {event['event']}\n"
-                yield f"data: {event['data']}\n\n"
-                if event["event"] == "snapshot":
-                    break
-
-        return StreamingResponse(
-            limited_stream(),
-            media_type="text/event-stream",
-        )
-
     monkeypatch.setattr(
         "surogates.api.routes.inbox.EventSourceResponse",
-        finite_event_source,
+        _finite_event_source("snapshot"),
         raising=False,
     )
 

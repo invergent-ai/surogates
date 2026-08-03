@@ -1,32 +1,16 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
-import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
+import { NON_INBOX_ADAPTER } from "./inbox-adapter-stub";
 import { InboxPanel } from "../src/components/inbox/inbox-panel";
 import type {
   AgentChatAdapter,
-  AgentChatArtifactPayload,
   AgentChatInboxItem,
   AgentChatInboxList,
-  AgentChatSession,
-  AgentChatSessionList,
-  AgentChatWorkspaceFile,
-  AgentChatWorkspaceTree,
-  AgentChatWorkspaceUpload,
 } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
-
-function session(input: Partial<AgentChatSession> & { id: string }): AgentChatSession {
-  return {
-    status: "completed",
-    title: "Session",
-    createdAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
-    ...input,
-  };
-}
 
 function inboxItem(input: Partial<AgentChatInboxItem> & { id: number }): AgentChatInboxItem {
   const { id, ...rest } = input;
@@ -53,45 +37,7 @@ function inboxItem(input: Partial<AgentChatInboxItem> & { id: number }): AgentCh
 
 function createAdapter(items: AgentChatInboxItem[]): AgentChatAdapter {
   return {
-    ...NO_BROWSER_ADAPTER,
-    async listSessions(): Promise<AgentChatSessionList> {
-      return { sessions: [], total: 0 };
-    },
-    async createSession() {
-      return session({ id: "created" });
-    },
-    async getSession(input) {
-      return session({ id: input.sessionId });
-    },
-    async sendMessage() {
-      return { eventId: 1, status: "accepted" };
-    },
-    async pauseSession() {},
-    async retrySession(input) {
-      return session({ id: input.sessionId });
-    },
-    async getArtifact(): Promise<AgentChatArtifactPayload> {
-      throw new Error("not used by inbox tests");
-    },
-    async submitAskUserQuestionResponse() {
-      return { eventId: 1 };
-    },
-    async getWorkspaceTree(): Promise<AgentChatWorkspaceTree> {
-      return { root: "workspace", entries: [], truncated: false };
-    },
-    async getWorkspaceFile(): Promise<AgentChatWorkspaceFile> {
-      throw new Error("not used by inbox tests");
-    },
-    async uploadWorkspaceFile(): Promise<AgentChatWorkspaceUpload> {
-      return { path: "uploaded.txt", size: 4 };
-    },
-    async deleteWorkspaceFile() {},
-    getWorkspaceDownloadUrl(input) {
-      return `/api/v1/sessions/${input.sessionId}/workspace/download?path=${encodeURIComponent(input.path)}`;
-    },
-    openEventStream() {
-      throw new Error("not used by inbox tests");
-    },
+    ...NON_INBOX_ADAPTER,
     async listInbox(): Promise<AgentChatInboxList> {
       return { items, nextCursor: null };
     },

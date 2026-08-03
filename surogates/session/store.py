@@ -1434,11 +1434,11 @@ class SessionStore:
         # responded and expired), so the filter takes a set as readily as
         # a single value. Without one, expired items stay hidden.
         statuses = [status] if isinstance(status, str) else list(status or ())
+        stmt = select(InboxItem).where(InboxItem.user_id == user_id)
         if statuses:
-            stmt = select(InboxItem).where(InboxItem.status.in_(statuses))
+            stmt = stmt.where(InboxItem.status.in_(statuses))
         else:
-            stmt = select(InboxItem).where(InboxItem.status != "expired")
-        stmt = stmt.where(InboxItem.user_id == user_id)
+            stmt = stmt.where(InboxItem.status != "expired")
         if kind:
             stmt = stmt.where(InboxItem.kind == kind)
         if session_id:
