@@ -204,6 +204,76 @@ describe("InboxPanel lifecycle", () => {
     expect(view.textContent).not.toContain("Brand new");
   });
 
+  it("files an action that lands after a tab switch under the new view", async () => {
+    const items = [
+      inboxItem({ id: 1, title: "Still pending" }),
+      inboxItem({ id: 2, title: "Old news", status: "responded" }),
+    ];
+    let releaseRead: (() => void) | null = null;
+    const harness = createHarness(items, {
+      async markInboxItemRead(input) {
+        await new Promise<void>((resolve) => {
+          releaseRead = resolve;
+        });
+        const item = items.find((candidate) => candidate.id === input.itemId);
+        if (!item) throw new Error("missing item");
+        item.readAt = new Date().toISOString();
+        return item;
+      },
+    });
+    const view = await mount(harness.adapter);
+
+    // Open a pending item, then switch tabs while its read receipt is
+    // still in flight.
+    await click('button[aria-label="Open inbox item Still pending"]');
+    await clickText("history");
+    expect(view.textContent).toContain("Old news");
+
+    await act(async () => {
+      releaseRead?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // A callback holding the view it started in would file this pending
+    // item under History.
+    expect(view.textContent).not.toContain("Still pending");
+  });
+
+  it("keeps an item the stream announced while the first page was loading", async () => {
+    const items = [inboxItem({ id: 1, title: "From the list" })];
+    let releaseList: (() => void) | null = null;
+    let listCalls = 0;
+    const harness = createHarness(items, {
+      async listInbox() {
+        listCalls += 1;
+        if (listCalls === 1) {
+          await new Promise<void>((resolve) => {
+            releaseList = resolve;
+          });
+        }
+        return { items: [items[0]!], nextCursor: null };
+      },
+    });
+    const view = await mount(harness.adapter);
+
+    items.push(inboxItem({ id: 2, title: "Arrived mid-load" }));
+    await act(async () => {
+      harness.emit("item", JSON.stringify({ item_id: 2, kind: "task_complete" }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      releaseList?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The list snapshot predates the nudge, so replacing rather than
+    // merging would drop the item the agent just raised.
+    expect(view.textContent).toContain("Arrived mid-load");
+    expect(view.textContent).toContain("From the list");
+  });
+
   it("ignores a malformed stream frame instead of throwing", async () => {
     const harness = createHarness([inboxItem({ id: 1, title: "First" })]);
     const view = await mount(harness.adapter);

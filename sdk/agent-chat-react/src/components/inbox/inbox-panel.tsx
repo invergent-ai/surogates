@@ -830,30 +830,33 @@ export function InboxPanel({
     [items, selectedItemId],
   );
 
-  const applyItem = useCallback(
-    (nextItem: AgentChatInboxItem) => {
-      setItems((current) => {
-        // A row already on screen updates in place, whatever its new
-        // status: the user just acted on it and the result — Acknowledged,
-        // Responded — is the confirmation. It leaves the view on the next
-        // load, the way a read mail stays put until you come back to the
-        // folder.
-        //
-        // A row that is not on screen is an insert, which is how the
-        // stream announces something new; mapping over the existing rows
-        // dropped those entirely and froze the list at whatever it held
-        // when the page opened. Only insert what belongs here, so a nudge
-        // about a fresh pending item cannot land in History.
-        if (current.some((item) => item.id === nextItem.id)) {
-          return sortItems([nextItem, ...current]);
-        }
-        return STATUSES_BY_VIEW[view].includes(nextItem.status)
-          ? sortItems([nextItem, ...current])
-          : current;
-      });
-    },
-    [view],
-  );
+  // Read through a ref, never closed over: an action started before a
+  // tab switch resolves after it, and a callback holding the old view
+  // would file the result under the list the user has since left.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+
+  const applyItem = useCallback((nextItem: AgentChatInboxItem) => {
+    setItems((current) => {
+      // A row already on screen updates in place, whatever its new
+      // status: the user just acted on it and the result — Acknowledged,
+      // Responded — is the confirmation. It leaves the view on the next
+      // load, the way a read mail stays put until you come back to the
+      // folder.
+      //
+      // A row that is not on screen is an insert, which is how the
+      // stream announces something new; mapping over the existing rows
+      // dropped those entirely and froze the list at whatever it held
+      // when the page opened. Only insert what belongs here, so a nudge
+      // about a fresh pending item cannot land in History.
+      if (current.some((item) => item.id === nextItem.id)) {
+        return sortItems([nextItem, ...current]);
+      }
+      return STATUSES_BY_VIEW[viewRef.current].includes(nextItem.status)
+        ? sortItems([nextItem, ...current])
+        : current;
+    });
+  }, []);
 
   const selectItem = useCallback(
     async (itemId: number) => {
@@ -879,9 +882,11 @@ export function InboxPanel({
           limit,
         });
         if (id !== requestId.current) return;
-        setItems((current) =>
-          sortItems(cursor ? [...current, ...response.items] : response.items),
-        );
+        // Merged, never replaced. A first page is only ever loaded into
+        // an empty list — mount, a view switch, a retry — so the only
+        // thing merging preserves is an item a nudge inserted while this
+        // request was in flight, which a replace would silently drop.
+        setItems((current) => sortItems([...response.items, ...current]));
         setNextCursor(response.nextCursor);
         setError(null);
       } catch (err) {
@@ -899,17 +904,6 @@ export function InboxPanel({
     void load(null);
   }, [load]);
 
-  // Read through a ref so the subscription below does not depend on the
-  // view: tearing down and reopening the connection on a tab click is
-  // work for something that is a pure client-side re-render.
-  const onNudgeRef = useRef<(itemId: number) => void>(() => undefined);
-  onNudgeRef.current = (itemId: number) => {
-    // Only the Active view moves on its own — a nudge means something
-    // new is pending, which by definition is not history.
-    if (view !== "active") return;
-    void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
-  };
-
   useEffect(() => {
     const stream = inboxAdapter.openInboxStream();
     stream.addEventListener("item", (event) => {
@@ -922,10 +916,14 @@ export function InboxPanel({
         return;
       }
       if (typeof itemId !== "number") return;
-      onNudgeRef.current(itemId);
+      // Only the Active view moves on its own — a nudge means something
+      // new is pending, which by definition is not history. Read from
+      // the ref so a tab click does not tear down the connection.
+      if (viewRef.current !== "active") return;
+      void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
     });
     return () => stream.close();
-  }, [inboxAdapter]);
+  }, [applyItem, inboxAdapter]);
 
   function updateSelectedItem(item: AgentChatInboxItem) {
     applyItem(item);
@@ -1050,6 +1048,10 @@ export function InboxPanel({
       </aside>
       {selectedItem ? (
         <InboxDetail
+          // Remount per item: two items of the same kind render the same
+          // component, so without this the previous one's failure message
+          // and half-typed answers carry over to the next.
+          key={selectedItem.id}
           item={selectedItem}
           adapter={inboxAdapter}
           onUpdated={updateSelectedItem}
