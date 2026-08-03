@@ -26,6 +26,13 @@ def test_serialize_item_includes_agent_fields():
     assert out["agent_slug"] == "agent-x-slug"
 
 
+def test_serialize_item_keeps_a_missing_user_id_null():
+    """Service-account-owned rows carry no user; str() would emit "None"."""
+    item = _item(uuid.uuid4())
+    item.user_id = None
+    assert _serialize_item(item)["user_id"] is None
+
+
 def test_serialize_item_defaults_agent_fields_to_none():
     out = _serialize_item(_item(uuid.uuid4()))
     assert out["agent_id"] is None

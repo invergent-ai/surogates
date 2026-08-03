@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from uuid import UUID
@@ -519,6 +520,65 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     assert "event: snapshot" in response.text
     assert "event: item" in response.text
     assert "task_complete" in response.text
+
+
+async def test_sse_snapshot_counts_only_pending_unread(
+    client,
+    app,
+    session_factory,
+    monkeypatch,
+):
+    """The badge derives from pending items, so the snapshot it seeds must
+    agree — counting unread items the user already dealt with made the
+    number jump the moment the stream connected."""
+    store = app.state.session_store
+    _, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        store,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+
+    still_pending = await _emit_task_complete(store, session.id)
+    already_handled = await _emit_task_complete(store, session.id)
+    await store.set_inbox_status(
+        item_id=already_handled.id,
+        user_id=user_id,
+        new_status="acknowledged",
+    )
+
+    def finite_event_source(generator):
+        async def limited_stream():
+            async for event in generator:
+                if "event" not in event:
+                    continue
+                yield f"event: {event['event']}\n"
+                yield f"data: {event['data']}\n\n"
+                if event["event"] == "snapshot":
+                    break
+
+        return StreamingResponse(
+            limited_stream(),
+            media_type="text/event-stream",
+        )
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox.EventSourceResponse",
+        finite_event_source,
+        raising=False,
+    )
+
+    async with asyncio.timeout(5):
+        response = await client.get("/v1/inbox/stream", headers=headers)
+
+    assert response.status_code == 200, response.text
+    snapshot = json.loads(
+        next(
+            line[len("data: "):]
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        )
+    )
+    assert snapshot["unread_ids"] == [still_pending.id]
 
 
 class _FakeRuntimeCache:

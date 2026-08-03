@@ -107,7 +107,8 @@ def _serialize_item(item, agent_fields: dict | None = None) -> dict:
     return {
         "id": item.id,
         "org_id": str(item.org_id),
-        "user_id": str(item.user_id),
+        # Null for service-account-owned items; str() would emit "None".
+        "user_id": str(item.user_id) if item.user_id is not None else None,
         "session_id": str(item.session_id),
         "source_event_id": item.source_event_id,
         "kind": item.kind,
@@ -193,14 +194,16 @@ async def stream_inbox(
         pubsub = redis.pubsub()
         try:
             await pubsub.subscribe(channel)
+            # Pending only, matching what the badge counts from the list
+            # endpoint: an unread item the user already acknowledged or
+            # responded to is history, and counting it here made the
+            # badge jump the moment the stream connected.
             snapshot = await asyncio.shield(
-                store.list_inbox(user_id=tenant.user_id, limit=200)
+                store.list_inbox(
+                    user_id=tenant.user_id, status="pending", limit=200,
+                )
             )
-            unread_ids = [
-                item.id
-                for item in snapshot
-                if item.read_at is None and item.status != "expired"
-            ]
+            unread_ids = [item.id for item in snapshot if item.read_at is None]
             yield {
                 "event": "snapshot",
                 "data": json.dumps({"unread_ids": unread_ids}, default=str),
