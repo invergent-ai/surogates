@@ -7,6 +7,7 @@ image with a different subcommand:
     surogate worker           Start a harness worker (Redis queue consumer)
     surogate mcp-proxy        Start the MCP proxy service
     surogate migrate          Run database migrations
+    surogate doctor <id>      Diagnose why one session is stuck
 """
 
 from __future__ import annotations
@@ -153,6 +154,41 @@ def cmd_migrate(args: argparse.Namespace) -> None:
     run_migrations(settings.db)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Report coherence problems for one session."""
+    from uuid import UUID
+
+    from surogates.config import load_settings
+
+    settings = load_settings()
+    _configure_logging("WARNING")  # findings go to stdout, not the log
+
+    async def _run() -> int:
+        from surogates.db.engine import (
+            async_engine_from_settings,
+            async_session_factory,
+        )
+        from surogates.session.doctor import diagnose_session
+        from surogates.session.store import SessionStore
+
+        engine = async_engine_from_settings(settings.db)
+        try:
+            findings = await diagnose_session(
+                SessionStore(async_session_factory(engine)),
+                UUID(args.session_id),
+            )
+        finally:
+            await engine.dispose()
+        if not findings:
+            print("no findings")
+            return 0
+        for f in findings:
+            print(f"{f.code}: {f.detail}")
+        return 1
+
+    sys.exit(asyncio.run(_run()))
+
+
 # -- parser ------------------------------------------------------------------
 
 
@@ -175,6 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
     # surogate migrate
     sub.add_parser("migrate", help="Run database migrations")
 
+    # surogate doctor <session-id>
+    doctor_parser = sub.add_parser(
+        "doctor", help="Diagnose why one session is stuck",
+    )
+    doctor_parser.add_argument("session_id", help="Session UUID")
+
     # surogate channels [kind]
     channels_parser = sub.add_parser(
         "channels", help="Start the channel webhook service",
@@ -194,6 +236,7 @@ COMMANDS = {
     "worker": cmd_worker,
     "mcp-proxy": cmd_mcp_proxy,
     "migrate": cmd_migrate,
+    "doctor": cmd_doctor,
     "channels": cmd_channels,
 }
 
