@@ -43,9 +43,14 @@ parks the turn waiting for the answer.
 **The item is only actionable while that tool is still waiting.** The wait is
 capped at `ASK_USER_QUESTION_MAX_WAIT_SECONDS` (30 minutes); past it the tool
 returns a timeout to the model and the turn moves on, so an answer submitted
-afterwards is recorded with nothing left to receive it. The sweeper expires
-these items on that schedule even when the session is still running, and both
-inbox UIs stop accepting an answer once the window has closed.
+afterwards is recorded with nothing left to receive it.
+
+The tool retires its own row the moment it gives up — on timeout, and when the
+session is paused or completed under it. Serialized items carry `expires_at`
+so clients never mirror the wait constant: a UI stops accepting an answer at
+that instant, and anything without a deadline serializes `expires_at: null`.
+The sweeper is the backstop for a row whose worker died before it could clean
+up (see Statuses).
 
 An answer can arrive from any of four surfaces — the inbox form, the question
 widget in chat, a plain message typed in the web composer, or a channel reply
@@ -138,13 +143,15 @@ User actions:
 that names no status returns everything except `expired`, so an expired item is
 only ever returned to a request that asks for it by name.
 
-The sweeper (`jobs/inbox_expire.py`, every 300s) expires a `pending` item when
-either is true:
+A question is normally retired by the tool that asked it. The sweeper
+(`jobs/inbox_expire.py`, every 300s) covers what that cannot, expiring a
+`pending` item when either is true:
 
 - its session is terminal (`completed`, `failed`, `archived`) and its kind is
   not acknowledge-only — an informational notification survives its session;
 - it is an `input_required` item older than the `ask_user_question` wait window
-  plus a grace margin, whatever the session is doing.
+  plus a grace margin, whatever the session is doing — the row is orphaned,
+  because a worker that reached its own timeout would already have cleared it.
 
 ## API
 
@@ -198,6 +205,7 @@ Response:
         "completion_endpoint": "/v1/inbox/{item_id}/respond"
       },
       "created_at": "2026-05-11T12:00:00+00:00",
+      "expires_at": null,
       "updated_at": "2026-05-11T12:00:00+00:00",
       "read_at": null,
       "responded_at": null

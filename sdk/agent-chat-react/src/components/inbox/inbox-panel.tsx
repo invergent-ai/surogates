@@ -381,7 +381,7 @@ function InputRequiredDetail({
   const questions = useMemo(() => parseInboxQuestions(item), [item]);
   const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
   const { error, busy: submitting, run } = useAction();
-  const { expired, label: expiryLabel } = useAnswerWindow(item.createdAt);
+  const { expired, label: expiryLabel } = useAnswerWindow(item.expiresAt);
   const pending = item.status === "pending" && !expired;
   const disabled = !pending || submitting;
 
@@ -899,6 +899,17 @@ export function InboxPanel({
     void load(null);
   }, [load]);
 
+  // Read through a ref so the subscription below does not depend on the
+  // view: tearing down and reopening the connection on a tab click is
+  // work for something that is a pure client-side re-render.
+  const onNudgeRef = useRef<(itemId: number) => void>(() => undefined);
+  onNudgeRef.current = (itemId: number) => {
+    // Only the Active view moves on its own — a nudge means something
+    // new is pending, which by definition is not history.
+    if (view !== "active") return;
+    void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
+  };
+
   useEffect(() => {
     const stream = inboxAdapter.openInboxStream();
     stream.addEventListener("item", (event) => {
@@ -911,13 +922,10 @@ export function InboxPanel({
         return;
       }
       if (typeof itemId !== "number") return;
-      // Only the Active view moves on its own — a nudge means something
-      // new is pending, which by definition is not history.
-      if (view !== "active") return;
-      void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
+      onNudgeRef.current(itemId);
     });
     return () => stream.close();
-  }, [applyItem, inboxAdapter, view]);
+  }, [inboxAdapter]);
 
   function updateSelectedItem(item: AgentChatInboxItem) {
     applyItem(item);

@@ -10,7 +10,6 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
-import { ANSWER_WINDOW_MS } from "../src/components/inbox/inbox-expiry";
 import { InboxPanel } from "../src/components/inbox/inbox-panel";
 import type {
   AgentChatAdapter,
@@ -298,7 +297,7 @@ describe("InboxPanel lifecycle", () => {
       title: "Which color?",
       payload: { tool_call_id: "tc-1", questions: [{ prompt: "Which color?" }] },
     });
-    stale.createdAt = new Date(Date.now() - ANSWER_WINDOW_MS - 1000).toISOString();
+    stale.expiresAt = new Date(Date.now() - 1000).toISOString();
     const submitted: unknown[] = [];
     const harness = createHarness([stale], {
       async submitAskUserQuestionResponse(input) {

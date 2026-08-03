@@ -258,6 +258,40 @@ async def resolve_input_response(
         raise
 
 
+async def expire_input_request(
+    store,
+    *,
+    session_id,
+    tool_call_id: str,
+) -> bool:
+    """Retire the pending row for a question nobody is waiting on.
+
+    Called when the blocked tool gives up — a timeout, or a session that
+    was paused or completed under it. Until then the row is the only
+    thing standing between a user and an answer that would be recorded
+    with no consumer, and the tool is the one that knows the exact
+    moment: the sweeper's periodic pass is a backstop for the case where
+    the worker died without reaching this call, not the primary path.
+    """
+    tc_id = valid_tool_call_id(tool_call_id)
+    if tc_id is None:
+        return False
+
+    async with store._sf() as db:
+        result = await db.execute(
+            update(InboxItem)
+            .where(
+                InboxItem.session_id == session_id,
+                InboxItem.kind == "input_required",
+                InboxItem.action_ref["tool_call_id"].as_string() == tc_id,
+                InboxItem.status == "pending",
+            )
+            .values(status="expired", updated_at=func.now()),
+        )
+        await db.commit()
+    return bool(getattr(result, "rowcount", 0))
+
+
 async def response_event_exists(
     store,
     *,

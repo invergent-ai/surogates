@@ -1,10 +1,14 @@
 """Background job for expiring stale inbox items.
 
 Pending inbox items are actionable only while something is still waiting to
-consume the user's response. Two things end that wait: the owning session
-going terminal, and — for a question — the blocked tool call giving up. Past
-either point the item stays in the history but must stop presenting itself as
-actionable, or the user submits an answer no one reads.
+consume the user's response. Past that point the item stays in the history but
+must stop presenting itself as actionable, or the user submits an answer no one
+reads.
+
+A question is normally retired by the tool that asked it, at the moment it
+gives up (see :func:`surogates.session.interactive_input.expire_input_request`).
+This sweeper covers what that cannot: sessions that went terminal, and rows
+orphaned by a worker that died before it could clean up after itself.
 """
 
 from __future__ import annotations
@@ -55,11 +59,12 @@ async def expire_inbox_items(session_store) -> int:
                         # expiring on a terminal session.
                         InboxItem.kind.notin_(ACKNOWLEDGE_ONLY_KINDS),
                     ),
-                    # A question outlives its tool call on a session that
-                    # is still running: the tool returned a timeout to the
-                    # LLM and the turn moved on, but nothing else clears
-                    # the row. Compared against the database clock, which
-                    # is the one that stamped created_at.
+                    # The backstop for a question whose tool never got to
+                    # retire its own row — a worker killed mid-wait leaves
+                    # one behind, and on a session that is still running
+                    # nothing else would ever clear it. Compared against
+                    # the database clock, which is the one that stamped
+                    # created_at.
                     and_(
                         InboxItem.kind == "input_required",
                         InboxItem.created_at < func.now() - answer_window,

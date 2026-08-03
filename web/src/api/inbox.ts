@@ -24,6 +24,7 @@ interface InboxItemResponse {
   payload: Record<string, unknown>;
   action_ref: Record<string, unknown> | null;
   created_at: string;
+  expires_at?: string | null;
   updated_at: string;
   read_at: string | null;
   responded_at: string | null;
@@ -50,6 +51,7 @@ function toInboxItem(item: InboxItemResponse): AgentChatInboxItem {
     payload: item.payload,
     actionRef: item.action_ref,
     createdAt: item.created_at,
+    expiresAt: item.expires_at ?? null,
     updatedAt: item.updated_at,
     readAt: item.read_at,
     respondedAt: item.responded_at,

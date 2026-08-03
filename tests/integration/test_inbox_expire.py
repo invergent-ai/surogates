@@ -82,6 +82,43 @@ async def _backdate_inbox_items(session_store, session_id, *, seconds: float):
         await db.commit()
 
 
+async def test_tool_retires_its_own_row_when_it_gives_up(
+    session_factory,
+    session_store,
+):
+    """The tool knows the exact moment it stops waiting; leaving that to
+    the periodic sweep would leave the question offering to take an
+    answer for up to another sweep interval."""
+    from surogates.session.interactive_input import expire_input_request
+
+    session = await _create_user_session(session_factory, session_store)
+    await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-gave-up",
+            "questions": [{"prompt": "Continue?"}],
+            "context": "",
+        },
+    )
+
+    retired = await expire_input_request(
+        session_store, session_id=session.id, tool_call_id="tc-gave-up",
+    )
+    item = await _get_inbox_item_for_session(session_store, session.id)
+
+    assert retired is True
+    assert item.status == "expired"
+    # The row was already claimed by an answer, so there is nothing to
+    # retire and the caller learns it lost the race.
+    assert (
+        await expire_input_request(
+            session_store, session_id=session.id, tool_call_id="tc-gave-up",
+        )
+        is False
+    )
+
+
 async def test_sweeper_expires_questions_past_the_answer_window(
     session_factory,
     session_store,

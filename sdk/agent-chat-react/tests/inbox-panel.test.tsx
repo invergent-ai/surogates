@@ -30,10 +30,7 @@ function session(input: Partial<AgentChatSession> & { id: string }): AgentChatSe
 
 function inboxItem(input: Partial<AgentChatInboxItem> & { id: number }): AgentChatInboxItem {
   const { id, ...rest } = input;
-  // Created just now: a question older than the tool's answer window is
-  // no longer submittable, so a fixed date would render every
-  // input_required fixture as already expired.
-  const createdAt = new Date().toISOString();
+  const createdAt = "2026-01-01T00:00:00Z";
   return {
     id,
     orgId: "org-1",

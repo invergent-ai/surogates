@@ -446,6 +446,12 @@ export interface AgentChatInboxItem {
   payload: Record<string, unknown>;
   actionRef: Record<string, unknown> | null;
   createdAt: string;
+  /**
+   * When the item stops being actionable, for the kinds that have a
+   * deadline — today only a question, which is answerable while its tool
+   * call is parked waiting. Null when nothing expires.
+   */
+  expiresAt?: string | null;
   updatedAt: string;
   readAt: string | null;
   respondedAt: string | null;

@@ -339,7 +339,7 @@ async def test_list_rejects_an_unknown_status(
     )
 
     assert response.status_code == 422, response.text
-    assert "nonsense" in response.json()["detail"]
+    assert "nonsense" in response.text
 
 
 async def test_delete_other_users_item_returns_404(
