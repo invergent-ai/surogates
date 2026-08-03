@@ -297,7 +297,6 @@ CONCURRENCY_SAFE_TOOLS: frozenset[str] = frozenset({
     "web_search",
     "web_extract",
     "web_crawl",
-    "todo",
 })
 
 # Tools whose errors should abort all sibling concurrent executions.
@@ -373,6 +372,11 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "session_search",
     "skill_view",
     "skills_list",
+    # Saga compensation restores a sandbox checkpoint (see
+    # governance/saga/compensator.py), and checkpoints are stashed only for
+    # file-mutating tools.  ``todo`` mutates the event log, not the
+    # workspace, so a journaled step would carry no checkpoint_hash and its
+    # rollback could only raise.
     "todo",
     "web_crawl",
     "web_extract",

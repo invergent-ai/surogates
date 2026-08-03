@@ -113,6 +113,10 @@ class EventType(str, Enum):
     # triggers the dispatcher's retry path when the session re-wakes.
     HARNESS_RECOVERED = "harness.recovered"
 
+    # Agent plan snapshot (todo tool). Full list on every write, so
+    # recovery reads the latest row rather than folding a delta log.
+    TODO_UPDATED = "todo.updated"
+
     # Sub-agent delegation (delegate_task tool)
     DELEGATION_START = "delegation.start"
     DELEGATION_COMPLETE = "delegation.complete"

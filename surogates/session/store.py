@@ -1420,6 +1420,30 @@ class SessionStore:
             row = result.first()
         return row[0] if row is not None else None
 
+    async def latest_todo_snapshot(self, session_id: UUID | str) -> list | None:
+        """The session's current todo list, or ``None`` if it never wrote one.
+
+        Every todo response carries the full list, so the newest
+        ``todo.updated`` row *is* the current state -- no fold required.
+        ``None`` (never written) is distinct from ``[]`` (emptied): the merge
+        path needs to tell those apart.
+        """
+        stmt = (
+            select(EventRow.data)
+            .where(
+                EventRow.session_id == session_id,
+                EventRow.type == EventType.TODO_UPDATED.value,
+            )
+            .order_by(EventRow.id.desc())
+            .limit(1)
+        )
+        async with self._sf() as db:
+            row = (await db.execute(stmt)).scalar_one_or_none()
+        if not isinstance(row, dict):
+            return None
+        todos = row.get("todos")
+        return todos if isinstance(todos, list) else None
+
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.
 
