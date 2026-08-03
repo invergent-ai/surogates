@@ -297,6 +297,19 @@ class TestInteractive:
         responses = resolve_text_answer(QUESTIONS, "maybe later")
         assert responses[0]["answer"] == "maybe later" and responses[0]["is_other"] is True
 
+    def test_resolve_text_answer_open_question_is_never_other(self):
+        # No choices means no menu to depart from: the reply IS the
+        # answer.  Conversational agents ask exclusively in this shape,
+        # so a stray "other" flag here marks every single reply.
+        open_questions = [{"prompt": "What subjects do you like?"}]
+        responses = resolve_text_answer(open_questions, "computers and sports")
+        assert responses[0]["answer"] == "computers and sports"
+        assert responses[0]["is_other"] is False
+
+    def test_resolve_text_answer_empty_choices_list_is_never_other(self):
+        responses = resolve_text_answer([{"prompt": "Why?", "choices": []}], "because")
+        assert responses[0]["is_other"] is False
+
     @respx.mock
     async def test_send_input_prompt_includes_keyboard(self):
         route = respx.post(f"{API}/bottok/sendMessage").mock(

@@ -22,6 +22,13 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { MessageResponse } from "../ai-elements/message";
+import {
+  type AnswerDraft,
+  type InboxQuestion,
+  answerText,
+  buildInboxResponse,
+  parseInboxQuestions,
+} from "./inbox-answers";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
@@ -130,45 +137,95 @@ function InboxBody({ body, muted }: { body: string; muted?: boolean }) {
   );
 }
 
+const FIELD_CLASS =
+  "h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50";
+
+// <option> values are choice INDEXES, never labels: an agent-supplied
+// label could otherwise collide with whatever sentinel marks the
+// free-form row. "other" is not a number, so it cannot be an index.
+const OTHER_OPTION = "other";
+
 function QuestionInput({
-  prompt,
-  choices,
+  question,
+  draft,
   disabled,
-  value,
-  onChange,
+  onPickChoice,
+  onChooseOther,
+  onType,
 }: {
-  prompt: string;
-  choices?: Array<{ label: string; description?: string }>;
+  question: InboxQuestion;
+  draft: AnswerDraft | undefined;
   disabled: boolean;
-  value: string;
-  onChange: (value: string) => void;
+  onPickChoice: (label: string) => void;
+  onChooseOther: () => void;
+  onType: (value: string) => void;
 }) {
+  const { prompt, choices, allowOther } = question;
+  const typed = draft?.typed ?? "";
+  const useOther = !!draft?.useOther;
+
   if (choices && choices.length > 0) {
+    const pickedIndex = choices.findIndex(
+      (choice) => choice.label === draft?.picked,
+    );
     return (
-      <select
-        aria-label={prompt}
-        className="h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50"
-        disabled={disabled}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="">Select</option>
-        {choices.map((choice) => (
-          <option key={choice.label} value={choice.label}>
-            {choice.label}
+      <div className="space-y-1.5">
+        <select
+          aria-label={prompt}
+          className={FIELD_CLASS}
+          disabled={disabled}
+          value={
+            useOther
+              ? OTHER_OPTION
+              : pickedIndex >= 0
+                ? String(pickedIndex)
+                : ""
+          }
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === OTHER_OPTION) {
+              onChooseOther();
+              return;
+            }
+            const choice = choices[Number(value)];
+            if (choice) onPickChoice(choice.label);
+          }}
+        >
+          {/* Disabled, so it cannot be chosen back: its value is "" and
+              Number("") is 0, which would read as the first choice. */}
+          <option value="" disabled>
+            Select
           </option>
-        ))}
-      </select>
+          {choices.map((choice, index) => (
+            <option key={choice.label} value={String(index)}>
+              {choice.label}
+            </option>
+          ))}
+          {/* Without this the menu is the only answer the user can
+              give, even when the agent said any answer is fine. */}
+          {allowOther && <option value={OTHER_OPTION}>Other</option>}
+        </select>
+        {useOther && (
+          <input
+            aria-label={`${prompt} (other)`}
+            className={FIELD_CLASS}
+            placeholder="Type your answer…"
+            disabled={disabled}
+            value={typed}
+            onChange={(event) => onType(event.target.value)}
+          />
+        )}
+      </div>
     );
   }
 
   return (
     <input
       aria-label={prompt}
-      className="h-9 w-full border border-line bg-background px-2 text-sm text-foreground outline-none focus:border-primary disabled:opacity-50"
+      className={FIELD_CLASS}
       disabled={disabled}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
+      value={typed}
+      onChange={(event) => onType(event.target.value)}
     />
   );
 }
@@ -241,31 +298,22 @@ function InputRequiredDetail({
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
 }) {
-  const questions = Array.isArray(item.payload.questions)
-    ? (item.payload.questions as Array<{
-        prompt?: unknown;
-        choices?: unknown;
-      }>)
-        .map((question) => ({
-          prompt: typeof question.prompt === "string" ? question.prompt : "",
-          choices: Array.isArray(question.choices)
-            ? (question.choices as Array<{ label?: unknown; description?: unknown }>)
-                .map((choice) => ({
-                  label: typeof choice.label === "string" ? choice.label : "",
-                  description:
-                    typeof choice.description === "string"
-                      ? choice.description
-                      : undefined,
-                }))
-                .filter((choice) => choice.label)
-            : undefined,
-        }))
-        .filter((question) => question.prompt)
-    : [];
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  // Re-parsing on every keystroke would rebuild every question and
+  // choice object while the user is only editing an answer.
+  const questions = useMemo(() => parseInboxQuestions(item), [item]);
+  const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
   const [submitting, setSubmitting] = useState(false);
   const disabled = item.status !== "pending" || submitting;
-  const canSubmit = questions.every((question) => answers[question.prompt]?.trim());
+
+  const editDraft = (prompt: string, patch: Partial<AnswerDraft>) =>
+    setDrafts((current) => ({
+      ...current,
+      [prompt]: { ...current[prompt], ...patch },
+    }));
+
+  const canSubmit = questions.every(
+    (question) => answerText(question, drafts[question.prompt]),
+  );
 
   async function submit() {
     const toolCallId =
@@ -275,11 +323,9 @@ function InputRequiredDetail({
     if (!toolCallId || !canSubmit) return;
     setSubmitting(true);
     try {
-      const responses: AgentChatAskUserQuestionAnswer[] = questions.map((question) => ({
-        question: question.prompt,
-        answer: answers[question.prompt]?.trim() ?? "",
-        is_other: false,
-      }));
+      const responses: AgentChatAskUserQuestionAnswer[] = questions.map(
+        (question) => buildInboxResponse(question, drafts[question.prompt]),
+      );
       await adapter.submitAskUserQuestionResponse({
         sessionId: item.sessionId,
         toolCallId,
@@ -300,16 +346,20 @@ function InputRequiredDetail({
             {question.prompt}
           </span>
           <QuestionInput
-            prompt={question.prompt}
-            choices={question.choices}
+            question={question}
+            draft={drafts[question.prompt]}
             disabled={disabled}
-            value={answers[question.prompt] ?? ""}
-            onChange={(value) =>
-              setAnswers((current) => ({
-                ...current,
-                [question.prompt]: value,
-              }))
+            onPickChoice={(label) =>
+              // Dropping the typed value keeps an abandoned draft from
+              // resurfacing if the user switches back to Other.
+              editDraft(question.prompt, {
+                picked: label,
+                typed: "",
+                useOther: false,
+              })
             }
+            onChooseOther={() => editDraft(question.prompt, { useOther: true })}
+            onType={(value) => editDraft(question.prompt, { typed: value })}
           />
         </label>
       ))}

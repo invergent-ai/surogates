@@ -936,7 +936,9 @@ class ChannelInboundPipeline:
                 deps.session_store,
                 session_id=session_id,
                 tool_call_id=pending.get("tool_call_id", ""),
-                responses=resolve_text_answer(pending.get("questions") or [], msg.text),
+                responses=resolve_text_answer(
+                    pending.get("questions") or [], msg.text,
+                ),
             )
         except Exception:
             logger.warning("[channels] pending input resolution failed", exc_info=True)

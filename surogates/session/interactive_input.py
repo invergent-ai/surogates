@@ -61,6 +61,115 @@ async def pending_input_for_session(
     }
 
 
+def match_choice_label(text: str, choices: list[dict]) -> str | None:
+    """The choice *text* selects, matched case- and padding-insensitively.
+
+    The one definition of "is this answer on the menu", shared by the
+    free-text channel resolver and the server-side ``is_other`` check so
+    the two cannot drift.
+    """
+    target = (text or "").strip().lower()
+    if not target:
+        return None
+    for choice in choices:
+        label = (choice.get("label") or "").strip()
+        if label and label.lower() == target:
+            return label
+    return None
+
+
+async def asked_questions(
+    store,
+    *,
+    session_id,
+    tool_call_id: str,
+) -> list[dict]:
+    """The questions stored for a tool call, however far along it is.
+
+    Prefers the pending inbox row, then falls back to the ask itself in
+    the event log.  The row is claimed the moment anyone answers, so a
+    lookup that only consulted it would go blind exactly when two
+    surfaces answer at once — the case the derivation exists for.  The
+    event log is append-only and cannot be claimed.
+    """
+    tc_id = valid_tool_call_id(tool_call_id)
+    if tc_id is None:
+        return []
+
+    pending = await pending_input_for_session(
+        store, session_id=session_id, tool_call_id=tc_id,
+    )
+    if pending is not None:
+        return pending.get("questions") or []
+
+    async with store._sf() as db:
+        row = await db.execute(
+            select(Event.data)
+            .where(
+                Event.session_id == session_id,
+                Event.type == EventType.INBOX_INPUT_REQUIRED.value,
+                Event.data["tool_call_id"].as_string() == tc_id,
+            )
+            .order_by(Event.id.desc())
+            .limit(1),
+        )
+        data = row.scalar_one_or_none() or {}
+    return data.get("questions") or []
+
+
+def derive_is_other(questions: list[dict], responses: list[dict]) -> list[dict]:
+    """Return *responses* with ``is_other`` recomputed from *questions*.
+
+    ``is_other`` means "the user went off the menu", which is a fact
+    about what the agent asked, not something a client is in a position
+    to assert.  Every surface that submits an answer used to decide it
+    independently -- four clients and two channel parsers, agreeing only
+    by inspection -- and one of them getting it wrong silently corrupted
+    the transcript and the training data derived from it.  Deciding it
+    here, from the questions actually stored for the tool call, leaves
+    one definition and makes the submitted flag advisory.
+
+    Position decides first, confirmed by the prompt: every producer
+    emits one response per question in order, and a batch may repeat a
+    prompt, so matching on text alone would answer the second "Continue?"
+    against the first one's menu.  Only when the prompt at that position
+    disagrees do we look it up by text, which covers a client that
+    reordered or rewrote it.  A question we cannot identify at all keeps
+    the flag it arrived with: refusing to guess is better than
+    overwriting a correct value with a made-up one.
+    """
+    by_prompt: dict[str, dict] = {}
+    for question in questions:
+        prompt = question.get("prompt")
+        if isinstance(prompt, str):
+            by_prompt.setdefault(prompt.strip(), question)
+
+    derived: list[dict] = []
+    for index, response in enumerate(responses):
+        row = dict(response)
+        asked = str(row.get("question") or "").strip()
+
+        question = None
+        if index < len(questions):
+            at_index = questions[index]
+            prompt = at_index.get("prompt")
+            if isinstance(prompt, str) and prompt.strip() == asked:
+                question = at_index
+        if question is None:
+            question = by_prompt.get(asked)
+        if question is None and index < len(questions):
+            question = questions[index]
+        if question is None:
+            derived.append(row)
+            continue
+        choices = question.get("choices") or []
+        row["is_other"] = bool(choices) and match_choice_label(
+            str(row.get("answer") or ""), choices,
+        ) is None
+        derived.append(row)
+    return derived
+
+
 async def resolve_input_response(
     store,
     *,
@@ -74,10 +183,18 @@ async def resolve_input_response(
     question, ``None`` when there was nothing pending to resolve — the
     inbox-row update is the atomic claim, so two surfaces racing on the
     same answer produce exactly one response event.
+
+    ``is_other`` is settled here against the asked payload, so no
+    channel can submit a flag that goes unchecked.
     """
     tc_id = valid_tool_call_id(tool_call_id)
     if tc_id is None:
         return None
+
+    responses = derive_is_other(
+        await asked_questions(store, session_id=session_id, tool_call_id=tc_id),
+        responses,
+    )
 
     async with store._sf() as db:
         result = await db.execute(

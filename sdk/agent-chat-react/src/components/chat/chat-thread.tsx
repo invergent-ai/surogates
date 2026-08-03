@@ -44,7 +44,13 @@ import { ToolCallBlock } from "./tool-call-block";
 import { CodeRunToolBlock } from "./tools/code-run-tool";
 import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
-import { AskUserQuestionToolBlock } from "./tools/ask-user-question-tool";
+import {
+  AskUserQuestionToolBlock,
+  askQuestionsOf,
+  conversationalAskAcceptsFreeText,
+  hasChoices,
+  isConversationalAsk,
+} from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
 import { ChatMessage } from "./chat-message";
@@ -182,7 +188,13 @@ interface ChatThreadProps {
 
 type TimelineEntry =
   | { kind: "reasoning"; key: string; reasoning: string; isStreaming: boolean }
-  | { kind: "tool"; key: string; tc: ToolCallInfo; resolvedArtifactName?: string }
+  | {
+      kind: "tool";
+      key: string;
+      tc: ToolCallInfo;
+      resolvedArtifactName?: string;
+      assistantContent?: string;
+    }
   | { kind: "browser_activity"; key: string; calls: ToolCallInfo[] }
   | { kind: "web_search_group"; key: string; calls: ToolCallInfo[] }
   | {
@@ -251,16 +263,60 @@ function hasUserFacingAskContent(msg: ChatMessageType): boolean {
  * assistant turn we reach decides it; a ``user`` message after the ask
  * means the user moved on, so it's no longer awaiting.
  */
-function isAwaitingUserInput(messages: ChatMessageType[]): boolean {
+function pendingAskCall(messages: ChatMessageType[]): ToolCallInfo | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === "user") return false;
+    if (m.role === "user") return null;
     if (m.role !== "assistant") continue; // skip trailing system markers
-    return !!m.toolCalls?.some(
-      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+    return (
+      m.toolCalls?.find(
+        (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
+      ) ?? null
     );
   }
-  return false;
+  return null;
+}
+
+/**
+ * How the composer should behave while a question is pending.
+ *
+ * ``null`` when nothing is pending.  Otherwise the composer stays open
+ * unless the agent offered a closed menu: the server turns a typed
+ * message into the answer for whatever question is open (see
+ * ``try_resolve_text_answer``), so for a conversational ask the
+ * composer IS the answer field — locking it would strand the user with
+ * a question they can see and cannot answer in the obvious way.
+ *
+ * A multi-question batch keeps the composer locked: its answers are
+ * collected per question in the widget, and a single typed message
+ * would be recorded as the answer to every one of them.
+ */
+function askComposerPolicy(
+  pending: ToolCallInfo | null,
+): { locked: boolean; reason?: string; placeholder?: string } | null {
+  if (!pending) return null;
+  const questions = askQuestionsOf(pending);
+  // Zero questions means the args have not finished streaming; it is
+  // indistinguishable from a batch until they do, and locking is the
+  // safe reading either way — a stray message answering an unseen
+  // batch is worse than a composer that unlocks a moment later.
+  if (!isConversationalAsk(questions)) {
+    return { locked: true, reason: "Answer the questions above to continue." };
+  }
+
+  const question = questions[0]!;
+  if (!conversationalAskAcceptsFreeText(question)) {
+    return {
+      locked: true,
+      reason: "Pick one of the options above to continue.",
+    };
+  }
+  return {
+    locked: false,
+    placeholder: hasChoices(question)
+      ? "Pick one above, or type your answer…"
+      : "Type your answer…",
+  };
 }
 
 /**
@@ -387,7 +443,15 @@ function messageToEntries(
         const parsed = parseTerminalResult(tc.result, tc.args);
         if (parsed && (parsed.exit_code !== 0 || parsed.error)) continue;
       }
-      entries.push({ kind: "tool", key: tc.id, tc });
+      entries.push({
+        kind: "tool",
+        key: tc.id,
+        tc,
+        // Only ask_user_question reads this, to suppress a prompt the
+        // agent already spelled out in its message body.
+        assistantContent:
+          tc.toolName === "ask_user_question" ? msg.content : undefined,
+      });
     }
   }
 
@@ -738,6 +802,10 @@ function TimelineEntryItem({
               <ToolCallBlock
                 tc={entry.tc}
                 resolvedArtifactName={entry.resolvedArtifactName}
+                assistantContent={entry.assistantContent}
+                // The timeline only renders in Expert mode; Simple goes
+                // through SimpleAssistantGroup / IterationGroup.
+                viewMode="expert"
                 onFileSelect={onFileSelect}
               />
               {failureSummary ? (
@@ -1581,18 +1649,22 @@ export function IterationGroup({
   const [open, setOpen] = useState(false);
 
   // ask_user_question owns its iteration's rendering in BOTH states: the
-  // interactive widget while awaiting an answer (a shimmer label alone
-  // gives the user nothing to act on and the session stalls), and the
-  // read-only Q/A recap once answered (AskUserQuestionToolBlock renders
-  // its locked view) — instead of collapsing to a generic tool row that
-  // drops the question and the user's choice from the thread.
+  // question (and any quick replies) while awaiting an answer — a
+  // shimmer label alone gives the user nothing to act on and the
+  // session stalls — and the question again once answered, so the
+  // exchange stays in the thread instead of collapsing to a generic
+  // tool row that drops it.
   const askCall = (message.toolCalls ?? []).find(
     (tc) => tc.toolName === "ask_user_question",
   );
   if (askCall) {
     return (
       <div className="px-1 py-0.5">
-        <AskUserQuestionToolBlock tc={askCall} />
+        <AskUserQuestionToolBlock
+          tc={askCall}
+          assistantContent={message.content}
+          viewMode="simple"
+        />
       </div>
     );
   }
@@ -2147,7 +2219,15 @@ export function ChatThread({
   onOpenIntegrations,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
-  const awaitingInput = useMemo(() => isAwaitingUserInput(messages), [messages]);
+  // Split so the JSON parse inside the policy is keyed on the pending
+  // call's args rather than the messages array, which is rebuilt on
+  // every streamed token anywhere in the thread.
+  const pendingAsk = useMemo(() => pendingAskCall(messages), [messages]);
+  const askPolicy = useMemo(
+    () => askComposerPolicy(pendingAsk),
+    [pendingAsk?.id, pendingAsk?.args],
+  );
+  const awaitingInput = askPolicy !== null;
   const orbActivity = useMemo(
     () =>
       deriveOrbActivity(
@@ -2160,13 +2240,14 @@ export function ChatThread({
   // ask_user_question — the agent is waiting on the user, not working.
   const showWorkingOnIt =
     useDelayedRunningIndicator(isRunning) && !awaitingInput;
-  // Disable the composer while parked on a pending ask_user_question:
-  // the user answers via the question widget, not the composer. Left
-  // active it would show Stop (isRunning stays true) and abort the
-  // session if the user typed an answer and pressed Enter.
-  const composerDisabled = disabled || awaitingInput;
-  const composerDisabledReason = awaitingInput
-    ? "Answer the question above to continue."
+  // A conversational ask leaves the composer open — it IS the answer
+  // field, and ``awaitingAnswer`` keeps Enter from stopping the session
+  // (isRunning stays true while the agent is parked). A multi-question
+  // batch is collected in the widget instead, so its composer locks.
+  const composerLocked = askPolicy?.locked ?? false;
+  const composerDisabled = disabled || composerLocked;
+  const composerDisabledReason = composerLocked
+    ? askPolicy?.reason
     : disabledReason;
 
   // Pair ``create_artifact`` tool calls to their matching
@@ -2241,6 +2322,8 @@ export function ChatThread({
         isRunning={isRunning}
         disabled={composerDisabled}
         disabledReason={composerDisabledReason}
+        awaitingAnswer={askPolicy !== null && !askPolicy.locked}
+        placeholder={askPolicy?.placeholder}
         tokenUsage={tokenUsage}
         onComposerError={onComposerError}
         showBrowser={showBrowser}

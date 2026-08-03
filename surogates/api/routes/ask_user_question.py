@@ -21,6 +21,7 @@ from surogates.api.session_guards import (
 )
 from surogates.db.models import InboxItem
 from surogates.session.events import EventType
+from surogates.session.interactive_input import asked_questions, derive_is_other
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -44,6 +45,8 @@ class AskUserQuestionAnswer(BaseModel):
     # When the user chose the "Other" free-form option rather than a
     # predefined choice.  Recorded so the transcript preserves the user's
     # intent and downstream training data can distinguish the two paths.
+    # Advisory: the server recomputes it from the stored questions and
+    # only falls back to this value when they can no longer be found.
     is_other: bool = False
 
     @field_validator("question", "answer")
@@ -134,9 +137,19 @@ async def respond_to_ask_user_question(
             detail="Invalid tool_call_id.",
         )
 
+    # Whether an answer went off the menu is a fact about the question,
+    # so it is settled here rather than taken from the submitter. The
+    # questions come from the inbox row, or from the ask in the event
+    # log once that row has been claimed — a late submission still gets
+    # checked rather than recorded on trust.
     payload = {
         "tool_call_id": tc_id,
-        "responses": [r.model_dump() for r in body.responses],
+        "responses": derive_is_other(
+            await asked_questions(
+                store, session_id=session_id, tool_call_id=tc_id,
+            ),
+            [r.model_dump() for r in body.responses],
+        ),
     }
     event_id = await store.emit_event(
         session_id,

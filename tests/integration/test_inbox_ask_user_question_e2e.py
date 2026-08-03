@@ -80,3 +80,111 @@ async def test_ask_user_question_through_inbox(
     assert ask_user_question_event.data["responses"] == [
         {"question": "Pick a color", "answer": "blue", "is_other": False}
     ]
+
+
+async def _respond_and_read_flag(
+    inbox_client,
+    session_store,
+    user_session,
+    *,
+    tool_call_id: str,
+    questions: list[dict],
+    submitted: dict,
+) -> bool:
+    """Ask, answer through the real route, return the recorded is_other."""
+    await session_store.emit_event(
+        user_session.session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {"tool_call_id": tool_call_id, "questions": questions, "context": ""},
+    )
+
+    response = await inbox_client.post(
+        (
+            f"/v1/sessions/{user_session.session.id}"
+            f"/ask_user_question/{tool_call_id}/respond"
+        ),
+        json={"responses": [submitted]},
+        headers=user_session.auth_headers,
+    )
+    assert response.status_code == 201, response.text
+
+    async with session_store._sf() as db:
+        events = (
+            await db.execute(
+                select(Event)
+                .where(
+                    Event.session_id == user_session.session.id,
+                    Event.type == EventType.ASK_USER_QUESTION_RESPONSE.value,
+                    Event.data["tool_call_id"].as_string() == tool_call_id,
+                )
+                .order_by(Event.id.desc())
+                .limit(1),
+            )
+        ).scalar_one()
+    return events.data["responses"][0]["is_other"]
+
+
+async def test_route_settles_is_other_against_the_stored_questions(
+    inbox_client,
+    session_factory,
+    session_store,
+):
+    """A submitted is_other does not survive contact with the question.
+
+    Every surface used to decide this for itself; the route now decides
+    it from what the agent actually asked, so a client that gets it
+    wrong -- in either direction -- cannot write that into the
+    transcript or the training data drawn from it.
+    """
+    user_session = await create_user_token_session(session_factory, session_store)
+
+    # Open question: nothing to depart from, so never "other" however
+    # insistently it is claimed.
+    assert (
+        await _respond_and_read_flag(
+            inbox_client,
+            session_store,
+            user_session,
+            tool_call_id="tc-open",
+            questions=[{"prompt": "What subjects do you like?"}],
+            submitted={
+                "question": "What subjects do you like?",
+                "answer": "computers",
+                "is_other": True,
+            },
+        )
+        is False
+    )
+
+    menu = [{"prompt": "Which region?", "choices": [{"label": "eu-west"}]}]
+
+    # On the menu, claimed otherwise.
+    assert (
+        await _respond_and_read_flag(
+            inbox_client,
+            session_store,
+            user_session,
+            tool_call_id="tc-on-menu",
+            questions=menu,
+            submitted={
+                "question": "Which region?",
+                "answer": "eu-west",
+                "is_other": True,
+            },
+        )
+        is False
+    )
+
+    # Off the menu, not claimed -- the direction a client omitting the
+    # field entirely would get wrong.
+    assert (
+        await _respond_and_read_flag(
+            inbox_client,
+            session_store,
+            user_session,
+            tool_call_id="tc-off-menu",
+            questions=menu,
+            submitted={"question": "Which region?", "answer": "frankfurt"},
+        )
+        is True
+    )

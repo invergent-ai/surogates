@@ -117,6 +117,14 @@ interface ChatComposerProps {
   isRunning: boolean;
   disabled?: boolean;
   disabledReason?: string;
+  /**
+   * The agent asked a question and is waiting on the reply.  The turn
+   * is still running, but the composer must send rather than stop — the
+   * server converts the typed message into the answer.
+   */
+  awaitingAnswer?: boolean;
+  /** Overrides the idle placeholder (e.g. while answering a question). */
+  placeholder?: string;
   tokenUsage?: TokenUsage;
   /**
    * Optional handler for client-side rejections (size/count caps,
@@ -367,6 +375,8 @@ function ChatComposerInner({
   isRunning,
   disabled = false,
   disabledReason,
+  awaitingAnswer = false,
+  placeholder,
   tokenUsage,
   onComposerError,
   showBrowser = false,
@@ -418,7 +428,11 @@ function ChatComposerInner({
     </span>
   );
   const { textInput, attachments } = usePromptInputController();
-  const status = isRunning ? "streaming" : disabled ? "error" : "ready";
+  // While the agent is parked on a question, the turn is technically
+  // still running but the user is the one being waited on: the composer
+  // must read as "reply", not "stop the agent".
+  const status =
+    isRunning && !awaitingAnswer ? "streaming" : disabled ? "error" : "ready";
 
   // ── Load skills from backend ─────────────────────────────────────
 
@@ -428,7 +442,14 @@ function ChatComposerInner({
   const [menuMode, setMenuMode] = useState<ComposerMenuMode>("all");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [menuDismissed, setMenuDismissed] = useState(false);
-  const showSlashMenu = !menuDismissed && (textInput.value.startsWith("/") || buttonMenuOpen);
+  // While the agent is parked on a question, the composer is an answer
+  // field. Slash commands route around sendMessage entirely (/goal goes
+  // to defineOutcome), so the question would stay open and unanswered
+  // until it times out.
+  const showSlashMenu =
+    !menuDismissed &&
+    !awaitingAnswer &&
+    (textInput.value.startsWith("/") || buttonMenuOpen);
 
   // Re-open when user types a new `/` after dismissal.
   useEffect(() => {
@@ -700,7 +721,11 @@ function ChatComposerInner({
         return;
       }
 
-      if (isRunning) {
+      // Stopping first is how a user interrupts a working agent. When
+      // the agent is waiting on an answer, stopping would pause the
+      // session and the pending ask_user_question would come back
+      // ``cancelled`` — the message must go straight through instead.
+      if (isRunning && !awaitingAnswer) {
         await onStop();
       }
       await onSend(
@@ -709,7 +734,7 @@ function ChatComposerInner({
         pending.length > 0 ? pending : undefined,
       );
     },
-    [onSend, onStop, onComposerError, isRunning, disabled],
+    [onSend, onStop, onComposerError, isRunning, awaitingAnswer, disabled],
   );
 
   const handlePromptInputError = useCallback(
@@ -777,14 +802,18 @@ function ChatComposerInner({
               placeholder={
                 disabled
                   ? disabledReason ?? "Session disabled"
-                  : "Send a message..."
+                  : placeholder ?? "Send a message..."
               }
               disabled={disabled}
             />
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>
-              {!disabled && (
+              {/* Attachments are new material for the next turn -- the
+                  server refuses to read them as the pending answer (see
+                  _resolve_pending_question), so offering them here would
+                  park the question until it times out. */}
+              {!disabled && !awaitingAnswer && (
               <Popover open={addMenuOpen} onOpenChange={setAddMenuOpen}>
                 <PopoverTrigger asChild>
                   <PromptInputButton aria-label="Add">

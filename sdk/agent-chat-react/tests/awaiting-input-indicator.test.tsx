@@ -74,33 +74,57 @@ function userMessage(): ChatMessage {
   } as ChatMessage;
 }
 
-function pendingAskTurn(): ChatMessage {
+function pendingAsk(
+  id: string,
+  questions: unknown[],
+  content = "",
+): ChatMessage {
   return {
-    id: "asst-ask",
+    id: `asst-${id}`,
     role: "assistant",
-    content: "Here's the design. Does it work?",
+    content,
     createdAt: new Date(),
     status: "streaming",
     turnId: "t-1",
     iterationIndex: 0,
     toolCalls: [
       {
-        id: "call_ask",
+        id: `call_${id}`,
         toolName: "ask_user_question",
-        args: JSON.stringify({
-          questions: [
-            {
-              prompt: "Does this design work for you?",
-              choices: [{ label: "Yes, build it" }, { label: "Changes needed" }],
-              allow_other: false,
-            },
-          ],
-        }),
+        args: JSON.stringify({ questions }),
         status: "running",
       },
     ],
   } as ChatMessage;
 }
+
+/** A closed menu: choices offered and nothing else accepted. */
+const pendingAskTurn = () =>
+  pendingAsk(
+    "ask",
+    [
+      {
+        prompt: "Does this design work for you?",
+        choices: [{ label: "Yes, build it" }, { label: "Changes needed" }],
+        allow_other: false,
+      },
+    ],
+    "Here's the design. Does it work?",
+  );
+
+/** The shape a conversational agent asks in: one open-ended question. */
+const pendingOpenAskTurn = () =>
+  pendingAsk("ask_open", [{ prompt: "What subjects do you like at school?" }]);
+
+/** One question, choices offered, typing still allowed. */
+const pendingOpenChoiceAskTurn = () =>
+  pendingAsk("ask_chips", [
+    {
+      prompt: "How often can you meet?",
+      choices: [{ label: "Three a week" }, { label: "Twice a week" }],
+      allow_other: true,
+    },
+  ]);
 
 function runningTerminalTurn(): ChatMessage {
   return {
@@ -165,7 +189,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(dom.textContent).toContain("Does this design work for you?");
   });
 
-  it("disables the composer (no Stop button) while parked on a pending ask", () => {
+  it("locks the composer on a closed menu (choices, allow_other false)", () => {
     const dom = mount(
       <ChatThread
         sessionId="s-1"
@@ -184,11 +208,87 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(textarea).not.toBeNull();
     expect(textarea?.disabled).toBe(true);
     expect(textarea?.placeholder).toContain(
-      "Answer the question above to continue.",
+      "Pick one of the options above to continue.",
     );
     // The Stop/abort control is gone (it would otherwise abort the
     // session if the user typed an answer and submitted).
     expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
+  });
+
+  it("keeps the composer open for an open-ended conversational ask", () => {
+    // The server turns a typed message into the answer, so the composer
+    // IS the answer field here. Locking it would show the user a
+    // question they cannot answer the obvious way.
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea).not.toBeNull();
+    expect(textarea?.disabled).toBe(false);
+    expect(textarea?.placeholder).toContain("Type your answer…");
+    // Enter must send, not stop: the turn is running but the agent is
+    // parked on the user, and stopping would cancel the pending ask.
+    expect(dom.querySelector('[aria-label="Stop"]')).toBeNull();
+  });
+
+  it("hides the attachment picker while an answer is awaited", () => {
+    // The server refuses to read an attachment as the pending answer
+    // (only pure text converts), so offering one here would leave the
+    // question open until its 30-minute timeout with nothing happening.
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.querySelector('[aria-label="Add"]')).toBeNull();
+  });
+
+  it("offers the attachment picker when no question is pending", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage()]}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    expect(dom.querySelector('[aria-label="Add"]')).not.toBeNull();
+  });
+
+  it("offers quick replies but keeps typing available when other is allowed", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[userMessage(), pendingOpenChoiceAskTurn()]}
+        isRunning={true}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
+    const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+    expect(textarea?.disabled).toBe(false);
+    expect(textarea?.placeholder).toContain("Pick one above, or type your answer…");
+    const chips = [...dom.querySelectorAll("button")].map((b) => b.textContent);
+    expect(chips).toContain("Three a week");
   });
 
   it("still shows 'Working on it' when the running tool is NOT an ask", () => {

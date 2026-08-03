@@ -75,8 +75,23 @@ async def test_pending_input_returns_payload_for_newest_pending_item():
     }
 
 
+def _pending_row(questions):
+    return SimpleNamespace(
+        action_ref={"tool_call_id": "tc1"},
+        payload={"questions": questions, "context": ""},
+        created_at=None,
+    )
+
+
 async def test_resolve_emits_when_pending_row_claimed():
-    store = _Store(_DB(_ExecuteResult(rowcount=1)))
+    # Two queries now: the asked questions are read so is_other can be
+    # settled here, then the row is claimed.
+    store = _Store(
+        _DB(
+            _ExecuteResult(row=_pending_row([{"prompt": "q"}])),
+            _ExecuteResult(rowcount=1),
+        ),
+    )
 
     ok = await resolve_input_response(
         store,
@@ -97,6 +112,53 @@ async def test_resolve_emits_when_pending_row_claimed():
             },
         ),
     ]
+
+
+async def test_resolve_overrides_a_submitted_is_other_that_the_menu_contradicts():
+    # A client asserting "off the menu" for an answer that is on it does
+    # not get to write that into the transcript.
+    store = _Store(
+        _DB(
+            _ExecuteResult(
+                row=_pending_row(
+                    [{"prompt": "Which region?", "choices": [{"label": "eu-west"}]}],
+                ),
+            ),
+            _ExecuteResult(rowcount=1),
+        ),
+    )
+
+    await resolve_input_response(
+        store,
+        session_id="s1",
+        tool_call_id="tc1",
+        responses=[
+            {"question": "Which region?", "answer": "eu-west", "is_other": True},
+        ],
+    )
+
+    (_, _, data) = store.emitted[0]
+    assert data["responses"][0]["is_other"] is False
+
+
+async def test_resolve_clears_a_submitted_is_other_on_an_open_question():
+    store = _Store(
+        _DB(
+            _ExecuteResult(row=_pending_row([{"prompt": "q"}])),
+            _ExecuteResult(rowcount=1),
+        ),
+    )
+
+    ok = await resolve_input_response(
+        store,
+        session_id="s1",
+        tool_call_id="tc1",
+        responses=[{"question": "q", "answer": "a", "is_other": True}],
+    )
+
+    assert ok == 42
+    (_, _, data) = store.emitted[0]
+    assert data["responses"][0]["is_other"] is False
 
 
 async def test_resolve_skips_emit_when_no_pending_row_claimed():

@@ -143,22 +143,26 @@ def resolve_text_answer(questions: list[dict], text: str) -> list[dict]:
     that choice; anything else is recorded as an "other" answer.  Multi-
     question prompts get the whole reply attached to each question — the
     agent asked them as one message and receives the answer the same way.
+
+    ``is_other`` means "the user went off the menu", so it is only ever
+    true for a question that offered a menu.  An open-ended question
+    (no ``choices``) has nothing to deviate from: every reply is simply
+    the answer, and flagging it "other" made consumers render a
+    distinction with no other side.
     """
+    from surogates.session.interactive_input import match_choice_label
+
     stripped = (text or "").strip()
     responses: list[dict] = []
     for index, question in enumerate(questions):
         prompt = question.get("prompt") or f"Question {index + 1}"
-        matched = None
-        for choice in question.get("choices") or []:
-            label = (choice.get("label") or "").strip()
-            if label and label.lower() == stripped.lower():
-                matched = label
-                break
+        choices = question.get("choices") or []
+        matched = match_choice_label(stripped, choices)
         responses.append(
             {
                 "question": prompt,
                 "answer": matched or stripped,
-                "is_other": matched is None,
+                "is_other": bool(choices) and matched is None,
             }
         )
     return responses

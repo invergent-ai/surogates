@@ -285,7 +285,11 @@ export function applyAgentChatEvent(
     case "ask_user_question.response":
       return withMessages(
         nextState,
-        applyAskUserQuestionResponse(nextState.messages, event.data),
+        applyAskUserQuestionResponse(
+          nextState.messages,
+          event.eventId,
+          event.data,
+        ),
       );
 
     case "policy.denied":
@@ -1331,36 +1335,108 @@ function applyUserFeedback(
 
 function applyAskUserQuestionResponse(
   messages: AgentChatMessage[],
+  eventId: number,
   data: Record<string, unknown>,
 ): AgentChatMessage[] {
   const targetToolId = stringValue(data.tool_call_id);
   const responses = Array.isArray(data.responses) ? data.responses : undefined;
   if (!targetToolId || !responses) return messages;
+  const answers = responses.map((response) => {
+    const row = objectValue(response) ?? {};
+    return {
+      question: stringValue(row.question),
+      answer: stringValue(row.answer),
+      is_other: Boolean(row.is_other),
+    };
+  });
   const next = [...messages];
   for (let i = next.length - 1; i >= 0; i--) {
     const msg = next[i];
     if (!msg?.toolCalls?.some((tc) => tc.id === targetToolId)) continue;
+    // A second response for the same tool call is possible: the widget's
+    // respond route emits before its best-effort inbox claim, so it does
+    // not refuse a question the composer already answered. The worker
+    // returns on the first event and ignores the rest, so the thread
+    // keeps the first answer whole -- recording the later one would show
+    // the reply twice, or leave the bubble and the tool call disagreeing
+    // about what the user said.
+    const alreadyAnswered = msg.toolCalls.some(
+      (tc) => tc.id === targetToolId && tc.askUserQuestionAnswers !== undefined,
+    );
+    if (alreadyAnswered) return messages;
     next[i] = {
       ...msg,
       toolCalls: msg.toolCalls.map((tc) =>
-        tc.id === targetToolId
-          ? {
-              ...tc,
-              askUserQuestionAnswers: responses.map((response) => {
-                const row = objectValue(response) ?? {};
-                return {
-                  question: stringValue(row.question),
-                  answer: stringValue(row.answer),
-                  is_other: Boolean(row.is_other),
-                };
-              }),
-            }
-          : tc,
+        tc.id === targetToolId ? { ...tc, askUserQuestionAnswers: answers } : tc,
       ),
     };
-    return next;
+    return appendConversationalAnswer(next, i, eventId, answers);
   }
   return messages;
+}
+
+/**
+ * Give a single-question ask its answer as a real user message.
+ *
+ * A one-question ask is a conversational turn: the agent asked, the
+ * user replied.  The reply belongs in the thread as the user's own
+ * message, exactly where it would sit had they typed it unprompted —
+ * not buried inside the agent's tool card.  Multi-question asks are
+ * genuine batch forms and keep their Q/A recap in the widget instead.
+ *
+ * Both entry paths converge here.  Typing into the composer appends an
+ * optimistic ``local-`` message (``markSending``) and the server
+ * answers with ``ask_user_question.response`` and no ``user.message``,
+ * so that local message must be adopted rather than duplicated.  We
+ * adopt by position rather than by matching text: a reply that matched
+ * a choice label comes back canonicalised (typed "yes", answer "Yes"),
+ * and an exact-match test would leave the optimistic copy stranded
+ * beside the synthesised one.  Tapping a quick-reply chip sends no
+ * message at all, so there is nothing to adopt and the answer is
+ * appended fresh.
+ *
+ * The scan runs forward from the asking turn and takes the FIRST
+ * un-promoted local message, which is the reply to this question.
+ * Scanning back from the tail would take the newest instead: the
+ * composer re-opens as soon as the optimistic message lands, so a user
+ * who sends a follow-up before the response event arrives would have
+ * that follow-up overwritten with their answer.
+ */
+function appendConversationalAnswer(
+  messages: AgentChatMessage[],
+  askIndex: number,
+  eventId: number,
+  answers: { question: string; answer: string; is_other: boolean }[],
+): AgentChatMessage[] {
+  if (answers.length !== 1) return messages;
+  const answer = answers[0]!.answer.trim();
+  if (!answer) return messages;
+
+  const id = `evt-${eventId}`;
+  // A redelivered event (SSE reconnect replays from the last cursor)
+  // must not append the answer twice.
+  if (messages.some((m) => m.id === id)) return messages;
+
+  const next = [...messages];
+  for (let i = askIndex + 1; i < next.length; i++) {
+    const msg = next[i]!;
+    if (msg.role !== "user" || !msg.id.startsWith("local-")) continue;
+    // markSendError keeps the local- id on a send that failed and
+    // appends the failure to its body. Adopting it would erase that
+    // notice and pin the answer to a message that never reached the
+    // server, so step over it and keep looking.
+    if (msg.status === "error") continue;
+    next[i] = { ...msg, id, content: answer, status: "complete" };
+    return next;
+  }
+  next.push({
+    id,
+    role: "user",
+    content: answer,
+    createdAt: new Date(),
+    status: "complete",
+  });
+  return next;
 }
 
 function applyPolicyDenied(

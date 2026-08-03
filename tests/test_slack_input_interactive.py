@@ -189,7 +189,7 @@ async def test_view_submission_resolves(monkeypatch):
     assert captured == {
         "session_id": "s1",
         "tool_call_id": "tc1",
-        "responses": [{"question": "Anything?", "answer": "blue", "is_other": True}],
+        "responses": [{"question": "Anything?", "answer": "blue", "is_other": False}],
     }
 
 

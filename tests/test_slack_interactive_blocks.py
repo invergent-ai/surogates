@@ -3,6 +3,7 @@ import json
 from surogates.channels.platforms.slack_interactive import (
     ANSWER_ACTION_ID,
     MODAL_CALLBACK_ID,
+    OTHER_VALUE,
     ModalErrors,
     ModalSubmission,
     build_input_prompt_blocks,
@@ -110,8 +111,33 @@ def test_parse_free_text_answer():
     parsed = parse_modal_submission(view, [Q_FREE])
 
     assert isinstance(parsed, ModalSubmission)
+    # Q_FREE offers no choices, so the typed reply is the answer, not an
+    # "other" — there was nothing to be other than.
     assert parsed.responses == [
-        {"question": "Anything else?", "answer": "use a tunnel", "is_other": True},
+        {"question": "Anything else?", "answer": "use a tunnel", "is_other": False},
+    ]
+
+
+def test_parse_other_answer_on_choice_question_is_flagged_other():
+    view = {
+        "private_metadata": json.dumps({"session_id": "s1", "tool_call_id": "tc1"}),
+        "state": {"values": {
+            "q0_choice": {"q0_choice": {
+                "type": "static_select",
+                "selected_option": {"value": OTHER_VALUE},
+            }},
+            "q0_other": {"q0_other": {
+                "type": "plain_text_input",
+                "value": "teal",
+            }},
+        }},
+    }
+
+    parsed = parse_modal_submission(view, [Q_CHOICE])
+
+    assert isinstance(parsed, ModalSubmission)
+    assert parsed.responses == [
+        {"question": "Which color?", "answer": "teal", "is_other": True},
     ]
 
 

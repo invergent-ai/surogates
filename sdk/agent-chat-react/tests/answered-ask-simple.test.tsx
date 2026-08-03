@@ -1,12 +1,18 @@
 /**
- * A completed ask_user_question keeps its rich Q/A block in Simple mode.
+ * A completed ask_user_question keeps the exchange in Simple mode.
  *
- * While running, IterationGroup renders the interactive
- * AskUserQuestionToolBlock; once answered it used to collapse to a
- * generic "Ask User Question" tool row, dropping the question and the
- * user's chosen answer from the visible thread. The block already has
- * an answered/locked view (AskUserQuestionLocked), so the completed
- * iteration should render it too — preserving the decision record.
+ * While running, IterationGroup renders the question; once answered the
+ * iteration must not collapse to a generic "Ask User Question" tool row
+ * that drops the question from the visible thread.
+ *
+ * A ONE-question ask is conversational: the question stays as the
+ * agent's own message and the answer arrives as a user bubble the
+ * reducer synthesises, so the thread reads as a dialogue. It carries
+ * none of the form chrome — no "Clarification answered" banner, no
+ * "Q1." numbering, no bordered card.
+ *
+ * A MULTI-question ask is a batch decision and keeps the Q/A recap
+ * block, which is the only place its answers are recorded.
  */
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -91,8 +97,42 @@ function answeredAskTurn(): ChatMessage {
   } as ChatMessage;
 }
 
+function answeredBatchAskTurn(): ChatMessage {
+  return {
+    id: "asst-ask-batch",
+    role: "assistant",
+    content: "Here's the design.",
+    createdAt: new Date(),
+    status: "complete",
+    turnId: "t-1",
+    iterationIndex: 0,
+    toolCalls: [
+      {
+        id: "call_ask_batch",
+        toolName: "ask_user_question",
+        args: JSON.stringify({
+          questions: [
+            { prompt: "Which approach do you prefer?" },
+            { prompt: "Which region?" },
+          ],
+        }),
+        status: "complete",
+        result: "{}",
+        askUserQuestionAnswers: [
+          {
+            question: "Which approach do you prefer?",
+            answer: "Surogate Cron",
+            is_other: false,
+          },
+          { question: "Which region?", answer: "eu-west", is_other: false },
+        ],
+      },
+    ],
+  } as ChatMessage;
+}
+
 describe("answered ask_user_question in Simple mode", () => {
-  it("shows the question and the chosen answer (locked block), not a bare tool row", () => {
+  it("keeps a single question in the thread with no form chrome", () => {
     const dom = mount(
       <ChatThread
         sessionId="s-1"
@@ -104,8 +144,27 @@ describe("answered ask_user_question in Simple mode", () => {
         viewMode="simple"
       />,
     );
+    expect(dom.textContent).toContain("Which approach do you prefer?");
+    // The exchange reads as conversation, not as a filled-in form.
+    expect(dom.textContent).not.toContain("Clarification answered");
+    expect(dom.textContent).not.toContain("Q1.");
+  });
+
+  it("shows the Q/A recap for a multi-question batch", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[answeredBatchAskTurn()]}
+        isRunning={false}
+        terminal={true}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />,
+    );
     expect(dom.textContent).toContain("Clarification answered");
     expect(dom.textContent).toContain("Which approach do you prefer?");
     expect(dom.textContent).toContain("Surogate Cron");
+    expect(dom.textContent).toContain("eu-west");
   });
 });
