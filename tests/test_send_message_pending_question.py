@@ -80,9 +80,11 @@ async def test_fresh_pending_question_consumes_the_message():
     assert data["tool_call_id"] == "tc-live"
     assert data["responses"] == [
         {
+            # Open-ended question: there was no menu to depart from, so
+            # the reply is simply the answer.
             "question": "What subjects do you like?",
             "answer": "biology mostly",
-            "is_other": True,
+            "is_other": False,
         },
     ]
 

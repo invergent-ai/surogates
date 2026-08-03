@@ -210,7 +210,11 @@ def parse_modal_submission(view: dict, questions: list[dict]) -> ModalSubmission
             errors[f"q{index}_other"] = "Enter an answer for Other." if choices else "Enter an answer."
             continue
 
-        responses.append({"question": prompt, "answer": other_value, "is_other": True})
+        # Typed answer.  Only "other" when there was a menu to depart
+        # from — an open-ended question has no options to deviate from.
+        responses.append(
+            {"question": prompt, "answer": other_value, "is_other": bool(choices)},
+        )
 
     if errors:
         return ModalErrors(errors)
