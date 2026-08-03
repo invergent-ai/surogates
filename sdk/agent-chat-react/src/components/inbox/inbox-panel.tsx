@@ -830,12 +830,30 @@ export function InboxPanel({
     [items, selectedItemId],
   );
 
-  const applyItem = useCallback((nextItem: AgentChatInboxItem) => {
-    // An insert, not just a replacement: the stream announces items the
-    // list has never seen, and dropping those left the inbox frozen at
-    // whatever was there when the page loaded.
-    setItems((current) => sortItems([nextItem, ...current]));
-  }, []);
+  const applyItem = useCallback(
+    (nextItem: AgentChatInboxItem) => {
+      setItems((current) => {
+        // A row already on screen updates in place, whatever its new
+        // status: the user just acted on it and the result — Acknowledged,
+        // Responded — is the confirmation. It leaves the view on the next
+        // load, the way a read mail stays put until you come back to the
+        // folder.
+        //
+        // A row that is not on screen is an insert, which is how the
+        // stream announces something new; mapping over the existing rows
+        // dropped those entirely and froze the list at whatever it held
+        // when the page opened. Only insert what belongs here, so a nudge
+        // about a fresh pending item cannot land in History.
+        if (current.some((item) => item.id === nextItem.id)) {
+          return sortItems([nextItem, ...current]);
+        }
+        return STATUSES_BY_VIEW[view].includes(nextItem.status)
+          ? sortItems([nextItem, ...current])
+          : current;
+      });
+    },
+    [view],
+  );
 
   const selectItem = useCallback(
     async (itemId: number) => {

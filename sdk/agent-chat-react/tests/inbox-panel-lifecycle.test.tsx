@@ -57,10 +57,14 @@ function createHarness(
   overrides: Partial<AgentChatAdapter> = {},
 ): Harness {
   const listInputs: AgentChatInboxListInput[] = [];
-  const listeners = new Map<
-    string,
-    Array<(event: AgentChatInboxStreamEvent) => void>
-  >();
+  // Listeners belong to one stream instance, and a closed stream
+  // delivers nothing — otherwise a reopened subscription would look like
+  // it still carries the handlers of the one it replaced.
+  interface Subscription {
+    listeners: Map<string, Array<(event: AgentChatInboxStreamEvent) => void>>;
+    closed: boolean;
+  }
+  let live: Subscription | null = null;
   let closes = 0;
 
   const adapter: AgentChatAdapter = {
@@ -135,11 +139,17 @@ function createHarness(
       return item;
     },
     openInboxStream() {
+      const subscription: Subscription = { listeners: new Map(), closed: false };
+      live = subscription;
       return {
         addEventListener(type, listener) {
-          listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+          subscription.listeners.set(type, [
+            ...(subscription.listeners.get(type) ?? []),
+            listener,
+          ]);
         },
         close() {
+          subscription.closed = true;
           closes += 1;
         },
         onerror: null,
@@ -152,7 +162,8 @@ function createHarness(
     adapter,
     listInputs,
     emit: (type, data) => {
-      for (const listener of listeners.get(type) ?? []) listener({ data });
+      if (!live || live.closed) return;
+      for (const listener of live.listeners.get(type) ?? []) listener({ data });
     },
     closed: () => closes,
   };
@@ -213,6 +224,23 @@ describe("InboxPanel lifecycle", () => {
     // brand new one was dropped and the inbox looked empty all day.
     expect(view.textContent).toContain("Arrived later");
     expect(view.textContent).toContain("First");
+  });
+
+  it("does not let a nudge drop a pending item into History", async () => {
+    const items = [inboxItem({ id: 1, title: "Old news", status: "responded" })];
+    const harness = createHarness(items);
+    const view = await mount(harness.adapter);
+    await clickText("history");
+    expect(view.textContent).toContain("Old news");
+
+    items.push(inboxItem({ id: 2, title: "Brand new" }));
+    await act(async () => {
+      harness.emit("item", JSON.stringify({ item_id: 2, kind: "task_complete" }));
+      await Promise.resolve();
+    });
+
+    // Something the agent just raised is the opposite of history.
+    expect(view.textContent).not.toContain("Brand new");
   });
 
   it("ignores a malformed stream frame instead of throwing", async () => {
