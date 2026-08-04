@@ -115,7 +115,7 @@ async def test_list_agents_returns_created_agent(
             "name": "code-reviewer",
             "content": _valid_agent_md(
                 name="code-reviewer",
-                extra_fm="model: claude-sonnet-4-6\nmax_iterations: 20\npolicy_profile: read_only",
+                extra_fm="model: claude-sonnet-4-6\nmax_iterations: 20",
             ),
         },
         headers={"Authorization": f"Bearer {token}"},
@@ -134,7 +134,6 @@ async def test_list_agents_returns_created_agent(
     assert entry["source"] == "user"
     assert entry["model"] == "claude-sonnet-4-6"
     assert entry["max_iterations"] == 20
-    assert entry["policy_profile"] == "read_only"
     assert entry["enabled"] is True
 
 

@@ -101,7 +101,6 @@ def _install_stub_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
         disallowed_tools = None
         model = None
         max_iterations = None
-        policy_profile = None
 
     async def _stub(name, tenant, *, session_factory=None, bundle=None):  # noqa: ARG001
         return _AgentDef()

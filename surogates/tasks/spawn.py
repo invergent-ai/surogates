@@ -66,9 +66,6 @@ def _build_task_worker_config(agent_def: Any | None, task: Any) -> dict[str, Any
     }
     if task.agent_def_name:
         cfg["agent_type"] = task.agent_def_name
-    if agent_def is not None and agent_def.policy_profile:
-        cfg["policy_profile"] = agent_def.policy_profile
-
     # Tool filter precedence: an explicit agent_def allowlist trumps
     # the default exclusion-only set.  Coordinator-family tools are
     # always stripped, even out of an allowlist, so a misconfigured
@@ -123,8 +120,7 @@ async def _create_session_for_task(
 
     1. Load the parent Session (to inherit workspace + identity).
     2. Resolve ``task.agent_def_name`` to an :class:`AgentDef` if set.
-    3. Build the child config (max_iterations, agent_type, tool filter,
-       policy_profile).
+    3. Build the child config (max_iterations, agent_type, tool filter).
     4. Call :func:`create_child_session` with ``task_id=task.id`` and
        ``channel="task"``.
     5. Emit ``USER_MESSAGE`` on the child carrying the goal (and context

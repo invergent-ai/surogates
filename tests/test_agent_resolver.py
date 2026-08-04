@@ -79,7 +79,6 @@ def _agent_md(
     disallowed_tools: list[str] | None = None,
     model: str | None = None,
     max_iterations: int | None = None,
-    policy_profile: str | None = None,
     enabled: bool = True,
     body: str = "Body.",
 ) -> str:
@@ -92,8 +91,6 @@ def _agent_md(
         lines.append(f"model: {model}")
     if max_iterations is not None:
         lines.append(f"max_iterations: {max_iterations}")
-    if policy_profile is not None:
-        lines.append(f"policy_profile: {policy_profile}")
     if not enabled:
         lines.append("enabled: false")
     lines.append("---")
@@ -257,20 +254,6 @@ class TestApplyAgentDefToSession:
         apply_agent_def_to_session(session, agent)
         assert session.config["max_iterations"] == _MAX_ITERATIONS_CEILING
 
-    def test_populates_policy_profile_when_unset(self):
-        session = _make_session(agent_type="x")
-        agent = self._make_def(policy_profile="read_only")
-        apply_agent_def_to_session(session, agent)
-        assert session.config["policy_profile"] == "read_only"
-
-    def test_does_not_overwrite_explicit_policy_profile(self):
-        session = _make_session(
-            agent_type="x", config={"policy_profile": "strict"},
-        )
-        agent = self._make_def(policy_profile="read_only")
-        apply_agent_def_to_session(session, agent)
-        assert session.config["policy_profile"] == "strict"
-
     def test_populates_model_when_session_model_is_none(self):
         session = _make_session(agent_type="x", model=None)
         agent = self._make_def(model="claude-opus-4-7")
@@ -290,7 +273,6 @@ class TestApplyAgentDefToSession:
         assert "allowed_tools" not in session.config
         assert "excluded_tools" not in session.config
         assert "max_iterations" not in session.config
-        assert "policy_profile" not in session.config
 
 
 # =========================================================================
@@ -309,7 +291,6 @@ class TestResolveAndApplyEndToEnd:
             disallowed_tools=["write_file"],
             model="claude-sonnet-4-6",
             max_iterations=25,
-            policy_profile="read_only",
         )
 
         session = _make_session(agent_type="researcher")
@@ -324,7 +305,6 @@ class TestResolveAndApplyEndToEnd:
         assert session.config["allowed_tools"] == ["read_file", "search_files", "web_search"]
         assert session.config["excluded_tools"] == ["write_file"]
         assert session.config["max_iterations"] == 25
-        assert session.config["policy_profile"] == "read_only"
         assert session.model == "claude-sonnet-4-6"
 
     @pytest.mark.asyncio

@@ -530,7 +530,7 @@ async def test_create_session_for_task_passes_bundle_to_resolver():
         captured["bundle"] = bundle
         captured["name"] = name
         return SimpleNamespace(
-            name=name, model=None, max_iterations=None, policy_profile=None,
+            name=name, model=None, max_iterations=None,
             tools=None, disallowed_tools=None,
             preloaded_skills=["arbor-executor"],
         )

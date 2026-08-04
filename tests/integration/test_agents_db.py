@@ -114,7 +114,6 @@ async def test_org_db_layer_loads_rows(
             "disallowed_tools": ["write_file"],
             "model": "claude-sonnet-4-6",
             "max_iterations": 15,
-            "policy_profile": "read_only",
             "tags": ["review"],
         },
     )
@@ -133,7 +132,6 @@ async def test_org_db_layer_loads_rows(
     assert a.disallowed_tools == ["write_file"]
     assert a.model == "claude-sonnet-4-6"
     assert a.max_iterations == 15
-    assert a.policy_profile == "read_only"
     assert a.tags == ["review"]
     assert a.system_prompt == "You are the org-wide sub-agent."
 
@@ -391,7 +389,6 @@ async def test_jsonb_config_round_trip(
             "disallowed_tools": ["x"],
             "model": "claude-opus-4-7",
             "max_iterations": 42,
-            "policy_profile": "strict",
             "category": "research",
             "tags": ["alpha", "beta"],
         },
@@ -408,7 +405,6 @@ async def test_jsonb_config_round_trip(
     assert a.disallowed_tools == ["x"]
     assert a.model == "claude-opus-4-7"
     assert a.max_iterations == 42
-    assert a.policy_profile == "strict"
     assert a.category == "research"
     assert a.tags == ["alpha", "beta"]
     assert a.system_prompt == "Body"

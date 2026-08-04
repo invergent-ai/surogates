@@ -17,7 +17,6 @@ Coordinator session                  Child session (sub-agent)
    |                                     |    resolves agent_type="code-reviewer"
    |                                     |    applies: system_prompt, tool filter,
    |                                     |             model, max_iterations,
-   |                                     |             policy_profile
    |                                     |  runs full LLM loop
    |                                     |
    |  worker.complete (result inline)    |
@@ -46,7 +45,9 @@ For durable, DAG-aware coordination on top of sub-agents — fan-in dependencies
 
 1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and configured agent bucket. Only the preset (prompt, tool filter, model, iteration cap, policy profile) is scoped per sub-agent.
 
-2. **Every tool call is governed.** The same `GovernanceGate` the parent runs through also guards the child. An optional `policy_profile` narrows (intersects allowed, unions denied) on top of the base policy; profiles never widen.
+2. **Every tool call is governed, by the parent's policy.** A child inherits the parent's `agent_id` and therefore the same governance blob — the same allow/deny lists and the same network egress rules. A sub-agent is never *more* privileged than its parent, and never *less* either.
+
+   To restrict a child, use `tools` / `disallowed_tools`. Those are enforced by never handing the tool's schema to the model, which is stronger than a runtime denial: there is nothing to refuse, override, or talk around.
 
 3. **Spawn is explicit.** The coordinator LLM sees the catalog in its system prompt and explicitly invokes `spawn_worker(agent_type=...)`. No implicit upgrades, no transparent interception.
 
@@ -78,7 +79,6 @@ tools: [read_file, search_files, terminal]
 disallowed_tools: [write_file, patch]
 model: claude-sonnet-4-6
 max_iterations: 20
-policy_profile: read_only
 category: review
 tags: [security, quality]
 ---
@@ -106,7 +106,6 @@ Place it in one of the layered locations below, or create via the REST API / Web
 | `disallowed_tools` | No | `null` | Denylist — applied as a subtraction from the inherited toolset |
 | `model` | No | inherited | LLM model override for the child session |
 | `max_iterations` | No | `null` | Hard cap on child loop iterations. Clamped at the worker ceiling (30) |
-| `policy_profile` | No | `null` | Named governance profile that narrows the tenant base policy for this child |
 | `category` | No | `null` | Freeform grouping, used for directory organization |
 | `tags` | No | `[]` | Metadata labels |
 | `enabled` | No | `true` | When `false`, the agent is filtered out of the catalog and cannot be spawned |
@@ -252,7 +251,7 @@ When a coordinator calls `spawn_worker(agent_type=...)`, the following happens:
 
 1. **Resolution.** The handler calls `resolve_agent_by_name(name, tenant)` — the shared helper that both spawn-time and wake-time resolution use, so the rules cannot drift.
 2. **Child creation.** A new `Session` row is inserted with `parent_id` set to the coordinator, and `config.agent_type` stamped with the resolved name.
-3. **Hydration.** The agent def's `tools` / `disallowed_tools` / `max_iterations` / `policy_profile` are merged into `config` alongside any explicit spawn arguments.
+3. **Hydration.** The agent def's `tools` / `disallowed_tools` / `max_iterations` are merged into `config` alongside any explicit spawn arguments.
 4. **Enqueue.** The child's session id is pushed onto the Redis work queue.
 5. **Event.** A `worker.spawned` event fires in the parent so the UI sees the child immediately.
 
@@ -317,7 +316,7 @@ Use the session event log to reconstruct any completed sub-agent interaction —
 
 - Lists all visible sub-agents grouped by source: **Built-in** (platform filesystem), **Organization** (org bucket + DB overlay), **My sub-agents** (user bucket + DB overlay).
 - Search box filters by name, description, category, or model.
-- Detail view shows the full AGENT.md body (rendered as markdown), configuration panel (model, max_iterations, policy_profile, allowed/disallowed tools), category, and tags.
+- Detail view shows the full AGENT.md body (rendered as markdown), configuration panel (model, max_iterations, allowed/disallowed tools), category, and tags.
 - User-scoped agents get **Edit** and **Delete** buttons; platform and org agents are read-only from the UI (admin tooling handles org changes).
 - **New** opens a pre-filled AGENT.md template in a dialog.
 
@@ -362,10 +361,9 @@ End-to-end flow for a coordinator spawning two sub-agents in parallel:
    disallowed_tools=[write_file, patch]
    model=claude-sonnet-4-6
    max_iterations=20
-   policy_profile=read_only
 
    perf-runner child wakes with its own preset (different model,
-   different tools, no policy_profile).
+   different tools).
 
 5. Both children complete.
    worker.complete events flow into the parent's event log with

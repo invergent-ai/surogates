@@ -160,7 +160,6 @@ def _install_resolver_stub(monkeypatch: pytest.MonkeyPatch) -> None:
         disallowed_tools: Any = None
         model: Any = None
         max_iterations: Any = None
-        policy_profile: Any = None
 
     async def _stub(name, tenant, *, session_factory=None, bundle=None):  # noqa: ARG001
         return _StubAgentDef()

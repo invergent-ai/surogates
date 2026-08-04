@@ -346,9 +346,6 @@ async def _spawn_worker_handler(
     }
     if agent_type:
         worker_config["agent_type"] = agent_type
-    if agent_def is not None and agent_def.policy_profile:
-        worker_config["policy_profile"] = agent_def.policy_profile
-
     # Tool whitelist — explicit LLM argument wins, then agent def, then default.
     if tool_whitelist is not None:
         # Strip coordinator-only tools from the whitelist.

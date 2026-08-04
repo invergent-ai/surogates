@@ -444,9 +444,6 @@ async def _run_single_delegation(
             allowed_tools = list(agent_def.tools)
         if agent_def.disallowed_tools:
             excluded_tools = list(agent_def.disallowed_tools)
-        if agent_def.policy_profile:
-            child_config["policy_profile"] = agent_def.policy_profile
-
     # Inherit parent's exclusions: anything the parent can't run, the
     # child can't either.
     parent_config = parent_session.config or {}
