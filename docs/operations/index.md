@@ -200,6 +200,35 @@ rate(surogates_llm_requests_total{status="error"}[5m])
 
 ## Troubleshooting
 
+### `surogates doctor` — why is this session stuck?
+
+Read-only coherence checks for one session, so the first question does not
+need a psql shell:
+
+```bash
+surogates doctor <session-id>
+```
+
+```text
+waiting_on_user: 1 question(s) open on tool call call_1, asked 47 min ago
+input_request_expired: the asking tool call already timed out; an answer now
+  has nowhere to go. Reply in the session instead.
+```
+
+| Code | Meaning |
+| --- | --- |
+| `waiting_on_user` | An open `input_required` item — the commonest reason a session looks dead |
+| `input_request_expired` | Past the asking tool's wait cap; nobody is listening for the answer |
+| `objective_conflict` | An active `/goal` beside an active mission. Exclusivity is enforced only when a mission is *created*, so a row written directly can hold both |
+| `unusable_max_iterations` | A config value the worker cannot use and silently replaces with the platform default |
+
+Exit code is 0 with no findings, 1 with findings. Nothing it does mutates
+state.
+
+It deliberately does not restate what the event log already shows. It reports
+invariants enforced only at creation, and config the runtime silently ignores
+— the two kinds of problem nothing else surfaces.
+
 ### Crash Recovery
 
 **Symptom:** Session appears stuck, no new events.
@@ -212,6 +241,21 @@ rate(surogates_llm_requests_total{status="error"}[5m])
 **Resolution:**
 - Normally, crash recovery is automatic: lease expires -> re-enqueue -> new worker picks up.
 - If recovery doesn't happen, manually enqueue the session via Redis or restart the worker deployment.
+
+**Recovery is bounded.** A session that kills its worker every time would
+otherwise be re-enqueued forever. The sweeper counts `harness.recovered`
+events since the session last showed a sign of life — an `llm.response`, a
+`tool.result`, or a new `user.message` — and after 3 it stops, emitting
+`session.fail` with `reason="recovery_loop"` instead. Any real progress
+resets the count, so a session that works between crashes never approaches
+the ceiling.
+
+```sql
+SELECT session_id, count(*) FROM events
+ WHERE type = 'session.fail' AND data->>'reason' = 'recovery_loop'
+   AND created_at > now() - interval '1 day'
+ GROUP BY 1;
+```
 
 ### Lease Expiry
 

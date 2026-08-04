@@ -135,6 +135,73 @@ Outcome behavior:
 - Evaluator failures fail open as `needs_revision`; repeated unparseable
   evaluator output pauses the outcome.
 
+### `/mission <description>`
+
+Creates a **mission** — an objective the coordinator decomposes into tasks and
+an LLM judge evaluates against a rubric, across as many turns as it takes.
+
+```text
+/mission Audit every test file for tests that pass for the wrong reason.
+
+Budget: 20M
+Rubric: every directory under tests/ has a completed task, and each finding
+names a file, a test, and a demonstrated reason it is vacuous.
+```
+
+`Rubric:` is required. `Budget:` is optional and may sit either side of it.
+
+| Command | Behavior |
+|---|---|
+| `/mission status` | Current status, iteration, and last verdict |
+| `/mission pause [reason]` | Pause automatic continuation |
+| `/mission resume` | Resume a paused mission |
+| `/mission cancel [--cascade] [reason]` | Cancel (with `--cascade`, its running workers too) |
+| `/mission budget <count>` | Set the token allowance on a running mission |
+| `/mission budget none` | Remove the ceiling |
+
+#### Token budget
+
+`Budget:` / `/mission budget` caps what the whole objective may spend. Counts
+are human — `20M`, `500k`, `1.5M`, `2_000_000`, or a raw integer. A value that
+cannot be parsed is rejected rather than treated as unbounded.
+
+Spend is **derived**, not counted: it sums the coordinator session plus every
+session attached to one of the mission's tasks, so it cannot drift from what
+was actually billed. `/mission budget` reports the spend so far alongside the
+new ceiling.
+
+Tokens, not cost, deliberately: tier-sentinel models are priced at 0.0, so a
+cost ceiling would never trip.
+
+When the allowance is spent the mission pauses with
+`paused_reason="budget_exhausted"` at the next evaluation boundary. Budget is
+checked *after* health and gates — it is never a reason to run, only a reason
+to stop. With no `Budget:` the mission is unbounded.
+
+#### When the judge stops the loop
+
+Three gates run at the evaluator boundary, all machine-checked rather than
+taken on the coordinator's word:
+
+- **No corroboration.** A `satisfied` verdict is demoted to `needs_revision`
+  when the mission has tasks and none completed. Task status is written by the
+  dispatcher, not by the agent's prose. A mission that spawned no tasks is
+  exempt — there is nothing to corroborate against.
+- **No progress.** Consecutive evaluations that do not report progress are
+  counted. The judge is shown its own previous verdict and the streak length,
+  and is told to return `blocked` rather than repeat guidance. The count
+  resets on `satisfied`.
+- **Budget spent.** As above.
+
+Behavior notes:
+
+- Requires a user or service-account session — anonymous channels cannot own
+  missions.
+- One evaluator loop per session: a session with an active `/goal` cannot also
+  start a mission.
+- `/auto-research` is a research-kind alias over this command with extra
+  merge-gate rules.
+
 ### `/auto-research`
 
 Creates a **research-kind mission** — an autonomous, long-horizon optimization

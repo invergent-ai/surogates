@@ -85,15 +85,21 @@ Create a new session.
 **Request:**
 ```json
 {
-  "model": "claude-sonnet-4-20250514",
-  "system": "You are a helpful assistant",
-  "tools": ["terminal", "web_search"],
-  "workspace": {"mode": "persistent"},
-  "sandbox": {"image": "python:3.12"}
+  "system": "Answer only in SQL. Never write prose.",
+  "config": {"max_iterations": 30}
 }
 ```
 
-All fields are optional. Defaults come from org config.
+Both fields are optional; defaults come from the agent and org config.
+
+| Field | Behaviour |
+| --- | --- |
+| `system` | A session-level instruction. **Appended** to the agent's own system prompt as a `## Session instructions` section — it narrows behaviour for this session, it does not replace the agent. Blank or non-string values are ignored. |
+| `config` | Session config keys (e.g. `max_iterations`). |
+
+> Earlier revisions of this page also listed `model`, `tools`, `workspace` and
+> `sandbox`. Those fields have never existed on this endpoint and were
+> silently discarded. Set the equivalent through the agent definition.
 
 **Response (201):**
 ```json

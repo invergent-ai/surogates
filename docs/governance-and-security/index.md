@@ -27,6 +27,39 @@ The allow-list governs the **built-in** tool catalog. MCP tools
 attachment enforced by the MCP proxy, plus package entitlements — so a
 built-in allow-list does not reject them.
 
+### Tools that need a human's approval
+
+`policy.require_approval` names tools an agent may only run once a human
+has said yes. A call to one is denied **overridably**: the LLM receives
+`policy_blocked_overridable`, the operator gets an inbox
+`governance_gate` item, and the work pauses rather than failing.
+
+Approving mints an **approval grant** — a durable, scoped, expiring
+record, not a chat message:
+
+| Property | Behaviour |
+| --- | --- |
+| Scope | The exact call. The grant is keyed on a hash of the canonical arguments, so approving one `deploy prod` does not approve `deploy staging`. |
+| Lifetime | Expires (1 hour by default). |
+| Uses | Single-use by default; spent atomically, so two parallel calls cannot both consume one grant. |
+| Validity | Recomputed on every read from `revoked_at` / `expires_at` / `used_count` — never a stored flag that can drift. |
+
+On the agent's retry the same call is allowed and recorded as
+`policy.allowed` with reason `human approval`. A grant that has expired or
+been spent is surfaced as a near miss on the denial ("prior approval
+exhausted"), which is a different message to the operator than "never
+approved".
+
+Unlike `allowed_tools` / `denied_tools`, this list accepts `mcp__*`
+names. External-side-effect MCP tools are the highest-value approval
+targets, and the check runs *before* the gate's MCP fast path so they are
+genuinely reachable. An explicitly denied tool is never approvable —
+`denied_tools` wins.
+
+> Set it through the agents API. Studio's governance form does not yet
+> render `require_approval`, and saving that form rebuilds the policy from
+> its fields — which drops the value.
+
 ### AI disclosure (EU AI Act Art. 50)
 
 Per-agent disclosure is part of the agent policy
