@@ -384,6 +384,37 @@ async def test_handle_mission_cancel_clears_in_memory_active_mission_id(
 
 
 @pytest.mark.asyncio
+async def test_handle_auto_research_budget_routes_to_the_mission_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: ``budget`` is a control verb the /auto-research parser
+    accepts, so a dispatcher without a branch for it drops the operator's
+    adjustment into the usage message and leaves the run unbounded."""
+    store = FakeStore()
+    harness = _make_harness(store, session_factory=MagicMock())
+    session = _session()
+    lease = _lease(session.id)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_budget(**kwargs: Any) -> str:
+        captured.update(kwargs)
+        return "Mission budget set to 20,000,000 tokens (0 already spent)."
+
+    monkeypatch.setattr(
+        "surogates.missions.commands.handle_mission_budget", fake_budget,
+    )
+
+    await harness._handle_auto_research_command(
+        session, "/auto-research budget 20M", lease,
+    )
+
+    assert captured["budget_tokens"] == 20_000_000
+    response = [e for e in store.events if e[1] == EventType.LLM_RESPONSE][-1]
+    assert "20,000,000 tokens" in response[2]["message"]["content"]
+
+
+@pytest.mark.asyncio
 async def test_mission_has_pending_work_returns_false_without_session_factory(
 ) -> None:
     """No session_factory wired => fall back to allowing completion. The
