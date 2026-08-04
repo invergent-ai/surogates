@@ -14,6 +14,7 @@ import pytest
 
 from surogates.missions.commands import (
     MissionCommandParseError,
+    parse_auto_research_command,
     parse_mission_command,
 )
 
@@ -97,3 +98,49 @@ def test_budget_none_clears_the_ceiling():
     assert cmd.action == "budget"
     assert cmd.budget_tokens is None
     assert cmd.clear_budget is True
+
+
+# -- on a research run ------------------------------------------------------
+
+def test_a_research_run_keeps_the_budget_its_parse_found():
+    """/auto-research delegates to the /mission parser and then rebuilds the
+    command; a field dropped in that rebuild is a ceiling the operator typed
+    and never got."""
+    cmd = parse_auto_research_command(
+        "repo=/workspace/r Improve F1\nBudget: 3M\n\nRubric:\n- improves",
+    )
+    assert cmd.budget_tokens == 3_000_000
+
+
+def test_a_bad_research_budget_says_so():
+    """/auto-research reframes parse errors into 'you need a repo and a
+    Rubric'; on a control verb that hides the only useful part."""
+    with pytest.raises(MissionCommandParseError, match="unusable budget"):
+        parse_auto_research_command("budget 20MB")
+
+
+async def test_a_research_budget_reaches_the_mission_row(monkeypatch):
+    """A research mission IS a mission, so its ceiling belongs on the same
+    column — which only happens if the research create path forwards it."""
+    from uuid import uuid4
+
+    from surogates.missions import commands
+
+    captured: dict = {}
+
+    async def spy(**kwargs):
+        captured.update(kwargs)
+        # Bail before the research sidecar so this stays DB-free.
+        return commands.MissionHandlerResult(ok=False, error="stop")
+
+    monkeypatch.setattr(commands, "handle_mission_create", spy)
+
+    await commands.handle_research_mission_create(
+        cmd=parse_auto_research_command(
+            "repo=/workspace/r Improve F1\nBudget: 3M\n\nRubric:\n- improves",
+        ),
+        session_id=uuid4(), org_id=uuid4(), agent_id="agent-a",
+        session_store=None, session_factory=None, mission_store=None,
+        user_id=uuid4(),
+    )
+    assert captured["budget_tokens"] == 3_000_000

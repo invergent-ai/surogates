@@ -227,6 +227,10 @@ def parse_auto_research_command(raw: str) -> AutoResearchCommand:
     try:
         base = parse_mission_command(text)
     except MissionCommandParseError as exc:
+        if text.partition(" ")[0].lower() in _CONTROL_VERBS:
+            # 'budget 20MB' failed on its own value, not on the create shape —
+            # the reframe below would hide the only useful part of the message.
+            raise
         # parse_mission_command's message names /mission and omits the
         # research-specific repo= token. Reframe it for /auto-research so the
         # operator sees the actual required shape.
@@ -235,11 +239,13 @@ def parse_auto_research_command(raw: str) -> AutoResearchCommand:
             "/auto-research repo=/workspace/<repo> [max_iterations=N] "
             "[baseline=<dev>] [baseline_test=<test>] <objective>\n\n"
             "Rubric:\n<criteria>\n"
-            "(or a control verb: status | pause | resume | cancel [--cascade])"
+            "(or a control verb: status | pause | resume | cancel [--cascade]"
+            " | budget <20M|none>)"
         ) from exc
     return AutoResearchCommand(
         action=base.action, description=base.description, rubric=base.rubric,
         reason=base.reason, cascade_to_workers=base.cascade_to_workers,
+        budget_tokens=base.budget_tokens, clear_budget=base.clear_budget,
         max_iterations=_as_int("max_iterations"),
         resume_run=kv.get("resume"),
         repo=kv.get("repo"),
@@ -487,6 +493,7 @@ async def handle_research_mission_create(
         mission_store=mission_store,
         user_id=user_id, service_account_id=service_account_id,
         max_iterations=cmd.max_iterations or 20,
+        budget_tokens=cmd.budget_tokens,
     )
     if not base.ok:
         return base

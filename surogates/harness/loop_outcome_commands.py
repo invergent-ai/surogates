@@ -328,6 +328,7 @@ class OutcomeCommandMixin:
         from surogates.missions.commands import (
             MissionCommandParseError,
             MissionHandlerResult,
+            handle_mission_budget,
             handle_mission_cancel,
             handle_mission_pause,
             handle_mission_resume,
@@ -390,6 +391,12 @@ class OutcomeCommandMixin:
                                 row = await db.get(ORMSession, session.id)
                                 if row is not None:
                                     session.config = dict(row.config or {})
+                elif command.action == "budget":
+                    message = await handle_mission_budget(
+                        session_id=session.id,
+                        budget_tokens=command.budget_tokens,
+                        mission_store=mission_store,
+                    )
                 elif command.action == "status":
                     result = await handle_mission_status(
                         session_id=session.id, mission_store=mission_store,

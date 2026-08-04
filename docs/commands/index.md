@@ -242,6 +242,10 @@ Controls (delegated to the same handlers as `/mission`):
 | `/auto-research pause` | Pause automatic continuation |
 | `/auto-research resume` | Resume a paused run |
 | `/auto-research cancel [--cascade]` | Cancel the run (and, with `--cascade`, its running executors) |
+| `/auto-research budget <count>` \| `budget none` | Set / remove the token allowance, as `/mission budget` |
+
+A `Budget:` line in the create body works here too, with the same token
+semantics as `/mission` — it caps the coordinator plus every executor session.
 
 Behavior notes:
 
