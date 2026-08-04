@@ -124,51 +124,51 @@ function kindIcon(kind: AgentChatInboxKind) {
 
 type InboxView = "active" | "updates" | "history";
 
-const VIEWS: InboxView[] = ["active", "updates", "history"];
-
-// History is asked for by name: a request that omits the status filter
-// gets everything except expired, which is exactly the half of history
-// worth keeping — a question the agent stopped waiting for, or an item
-// that was dismissed.
-const STATUSES_BY_VIEW: Record<InboxView, AgentChatInboxStatus[]> = {
-  active: ["pending"],
-  updates: ["pending"],
-  history: ["acknowledged", "responded", "expired"],
-};
-
-// Active and Updates share a status and differ by kind: what is waiting
+// One record per view: what it asks the server for, and what it says
+// when nothing comes back.
+//
+// Active and Updates share a status and differ by kind — what is waiting
 // on the user, and what the agent finished while they were away. Mixed
 // together, one notice per completed session buried the questions that
-// actually needed an answer. History spans both, so it names no kind.
+// actually needed an answer. History is asked for by name: a request
+// that omits the status filter gets everything except expired, which is
+// exactly the half of history worth keeping — a question the agent
+// stopped waiting for, or an item that was dismissed — and it spans both
+// kinds, so it names none.
 //
 // Studio carries the same split in its own inbox page — its pin predates
 // this one. Export these if a third surface ever needs them, and delete
 // that copy rather than letting a third appear.
-const ANSWERABLE_KINDS: AgentChatInboxKind[] = [
-  "input_required",
-  "action_required",
-  "governance_gate",
-];
-const INFORMATIONAL_KINDS: AgentChatInboxKind[] = [
-  "task_complete",
-  "progress_checkin",
-];
-const KINDS_BY_VIEW: Record<InboxView, AgentChatInboxKind[] | undefined> = {
-  active: ANSWERABLE_KINDS,
-  updates: INFORMATIONAL_KINDS,
-  history: undefined,
+const VIEWS: Record<
+  InboxView,
+  {
+    statuses: AgentChatInboxStatus[];
+    kinds?: AgentChatInboxKind[];
+    empty: string;
+  }
+> = {
+  active: {
+    statuses: ["pending"],
+    kinds: ["input_required", "action_required", "governance_gate"],
+    empty: "Nothing needs you right now",
+  },
+  updates: {
+    statuses: ["pending"],
+    kinds: ["task_complete", "progress_checkin"],
+    empty: "No news from your agent",
+  },
+  history: {
+    statuses: ["acknowledged", "responded", "expired"],
+    empty: "No history yet",
+  },
 };
 
-const EMPTY_BY_VIEW: Record<InboxView, string> = {
-  active: "Nothing needs you right now",
-  updates: "No news from your agent",
-  history: "No history yet",
-};
+const VIEW_NAMES = Object.keys(VIEWS) as InboxView[];
 
 function belongsToView(item: AgentChatInboxItem, view: InboxView): boolean {
-  const kinds = KINDS_BY_VIEW[view];
+  const kinds = VIEWS[view].kinds;
   return (
-    STATUSES_BY_VIEW[view].includes(item.status) &&
+    VIEWS[view].statuses.includes(item.status) &&
     (kinds === undefined || kinds.includes(item.kind))
   );
 }
@@ -917,8 +917,8 @@ export function InboxPanel({
       setLoading(true);
       try {
         const response = await inboxAdapter.listInbox({
-          status: STATUSES_BY_VIEW[view],
-          kind: KINDS_BY_VIEW[view],
+          status: VIEWS[view].statuses,
+          kind: VIEWS[view].kinds,
           cursor: cursor ?? undefined,
           limit,
         });
@@ -1011,7 +1011,7 @@ export function InboxPanel({
           </div>
         )}
         <div className="flex gap-1 border-b border-line px-2 py-2">
-          {VIEWS.map((value) => (
+          {VIEW_NAMES.map((value) => (
             <button
               key={value}
               type="button"
@@ -1038,7 +1038,7 @@ export function InboxPanel({
           )}
           {items.length === 0 && !error && !loading && (
             <div className="px-4 py-8 text-sm text-muted-foreground">
-              {EMPTY_BY_VIEW[view]}
+              {VIEWS[view].empty}
             </div>
           )}
           {items.map((item) => {
