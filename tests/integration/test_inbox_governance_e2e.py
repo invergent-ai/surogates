@@ -14,7 +14,7 @@ from surogates.harness.tool_exec import execute_single_tool
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry
 
-from .inbox_e2e_helpers import StubTenant
+from .inbox_e2e_helpers import StubTenant, inbox_path
 from .inbox_e2e_helpers import create_user_token_session
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -86,9 +86,11 @@ async def test_governance_approval_wakes_session(
     assert result_content["error"] == "policy_blocked_overridable"
 
     list_response = await inbox_client.get(
-        (
-            "/v1/inbox?kind=governance_gate"
-            f"&session_id={user_session.session.id}"
+        inbox_path(
+            query=(
+                "kind=governance_gate"
+                f"&session_id={user_session.session.id}"
+            )
         ),
         headers=user_session.auth_headers,
     )
@@ -101,7 +103,7 @@ async def test_governance_approval_wakes_session(
     assert item["payload"]["tool_call_id"] == "tc-e2e-gov"
 
     response = await inbox_client.post(
-        f"/v1/inbox/{item['id']}/respond",
+        inbox_path(f"/{item['id']}/respond"),
         json={"decision": "approve"},
         headers=user_session.auth_headers,
     )

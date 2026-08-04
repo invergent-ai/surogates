@@ -26,6 +26,7 @@ from surogates.harness.loop_messages import (
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
+from surogates.session.inbox_payload import raises_completion_inbox_item
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +837,12 @@ class ArtifactCompletionMixin:
                 )
 
         inbox_event_id: int | None = None
-        if loop_result_parent is None:
+        # A scheduled run keeps announcing itself whatever its channel: it
+        # is unwatched work by construction, and the branch above already
+        # took the web/api parents that receive the result inline instead.
+        if loop_result_parent is None and (
+            _is_scheduled_run(session) or raises_completion_inbox_item(session)
+        ):
             inbox_event_id = await self._store.emit_event(
                 session.id,
                 EventType.INBOX_TASK_COMPLETE,

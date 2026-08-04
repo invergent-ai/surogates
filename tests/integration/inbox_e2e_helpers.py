@@ -33,6 +33,55 @@ class StubTenant:
     user_id: UUID
 
 
+AGENT_ID = "test-agent"
+OTHER_AGENT_ID = "other-agent"
+
+
+class FakeRuntimeCache:
+    """Minimal stand-in for ``app.state.runtime_config_cache``.
+
+    Returns a valid runtime-config payload for the agents it knows and
+    raises ``LookupError`` for everything else, mirroring the real
+    cache's contract — which is what lets ``agent_runtime_context_dep``
+    resolve an agent without a live management plane.
+    """
+
+    def __init__(self, *agent_ids: str) -> None:
+        self._agent_ids = frozenset(agent_ids)
+
+    async def get(self, agent_id: str) -> dict:
+        if agent_id not in self._agent_ids:
+            raise LookupError(agent_id)
+        return {
+            "agent_id": agent_id,
+            "org_id": "00000000-0000-0000-0000-000000000000",
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        }
+
+
+def inbox_path(
+    suffix: str = "",
+    *,
+    agent_id: str | None = AGENT_ID,
+    query: str = "",
+) -> str:
+    """A ``/v1/inbox`` URL that names the agent whose inbox it is.
+
+    Every real client names one: the SPA through its host subdomain in
+    production, through an ``agent_id`` the dev proxy injects otherwise.
+    ``agent_id=None`` builds the nameless URL the API rejects.
+    """
+    parts = [
+        part
+        for part in (query, f"agent_id={agent_id}" if agent_id else "")
+        if part
+    ]
+    return f"/v1/inbox{suffix}" + (f"?{'&'.join(parts)}" if parts else "")
+
+
 def build_inbox_test_app(session_factory, redis_client, pg_url, redis_url):
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
@@ -53,6 +102,9 @@ def build_inbox_test_app(session_factory, redis_client, pg_url, redis_url):
     application.state.credential_vault = CredentialVault(
         session_factory,
         Fernet.generate_key(),
+    )
+    application.state.runtime_config_cache = FakeRuntimeCache(
+        AGENT_ID, OTHER_AGENT_ID,
     )
     return application
 

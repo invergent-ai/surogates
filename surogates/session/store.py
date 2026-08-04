@@ -53,6 +53,7 @@ from surogates.session.acting_principal import (
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
+    apply_read_receipt,
     build_inbox_row,
 )
 from surogates.session.models import (
@@ -1671,12 +1672,31 @@ class SessionStore:
         async with self._sf() as db:
             return int((await db.execute(stmt)).scalar_one())
 
+    @staticmethod
+    def _inbox_scope(user_id: UUID, agent_id: str):
+        """The rows one person may see in one agent's inbox.
+
+        ``agent_id`` lives on the session, not the item, so it is applied
+        as a subquery rather than a join — every accessor here selects
+        whole ``InboxItem`` rows and stays that shape. Scoping is not
+        optional: a person talking to several agents has items from all
+        of them, and an unscoped read shows one agent's inbox the others'
+        work.
+        """
+        return and_(
+            InboxItem.user_id == user_id,
+            InboxItem.session_id.in_(
+                select(SessionRow.id).where(SessionRow.agent_id == agent_id)
+            ),
+        )
+
     async def list_inbox(
         self,
         *,
         user_id: UUID,
+        agent_id: str,
         status: str | Sequence[str] | None = None,
-        kind: str | None = None,
+        kind: str | Sequence[str] | None = None,
         session_id: UUID | None = None,
         cursor: tuple[datetime, int] | None = None,
         limit: int = 50,
@@ -1685,13 +1705,16 @@ class SessionStore:
         # responded and expired), so the filter takes a set as readily as
         # a single value. Without one, expired items stay hidden.
         statuses = [status] if isinstance(status, str) else list(status or ())
-        stmt = select(InboxItem).where(InboxItem.user_id == user_id)
+        stmt = select(InboxItem).where(self._inbox_scope(user_id, agent_id))
         if statuses:
             stmt = stmt.where(InboxItem.status.in_(statuses))
         else:
             stmt = stmt.where(InboxItem.status != "expired")
-        if kind:
-            stmt = stmt.where(InboxItem.kind == kind)
+        # Like the status filter: a view asks for a set of kinds — the
+        # ones that need a response, or the ones that are only news.
+        kinds = [kind] if isinstance(kind, str) else list(kind or ())
+        if kinds:
+            stmt = stmt.where(InboxItem.kind.in_(kinds))
         if session_id:
             stmt = stmt.where(InboxItem.session_id == session_id)
         if cursor:
@@ -1713,12 +1736,13 @@ class SessionStore:
         *,
         item_id: int,
         user_id: UUID,
+        agent_id: str,
     ) -> InboxItem | None:
         async with self._sf() as db:
             result = await db.execute(
                 select(InboxItem).where(
                     InboxItem.id == item_id,
-                    InboxItem.user_id == user_id,
+                    self._inbox_scope(user_id, agent_id),
                 )
             )
             return result.scalar_one_or_none()
@@ -1728,18 +1752,18 @@ class SessionStore:
         *,
         item_id: int,
         user_id: UUID,
+        agent_id: str,
     ) -> InboxItem:
         async with self._sf() as db:
             row = (
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        InboxItem.user_id == user_id,
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one()
-            if row.read_at is None:
-                row.read_at = datetime.now(timezone.utc)
+            if apply_read_receipt(row):
                 await db.commit()
                 await db.refresh(row)
             return row
@@ -1749,6 +1773,7 @@ class SessionStore:
         *,
         item_id: int,
         user_id: UUID,
+        agent_id: str,
         new_status: str,
     ) -> InboxItem:
         if new_status not in self._INBOX_TERMINAL:
@@ -1759,7 +1784,7 @@ class SessionStore:
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        InboxItem.user_id == user_id,
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one()
@@ -1784,6 +1809,7 @@ class SessionStore:
         *,
         item_id: int,
         user_id: UUID,
+        agent_id: str,
     ) -> InboxItem | None:
         """Hide a user-owned inbox item from default inbox views.
 
@@ -1795,7 +1821,7 @@ class SessionStore:
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        InboxItem.user_id == user_id,
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one_or_none()

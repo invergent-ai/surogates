@@ -8,7 +8,7 @@ from sqlalchemy import select
 from surogates.db.models import Event
 from surogates.session.events import EventType
 
-from .inbox_e2e_helpers import create_user_token_session
+from .inbox_e2e_helpers import create_user_token_session, inbox_path
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -31,9 +31,11 @@ async def test_ask_user_question_through_inbox(
     )
 
     list_response = await inbox_client.get(
-        (
-            "/v1/inbox?kind=input_required"
-            f"&session_id={user_session.session.id}"
+        inbox_path(
+            query=(
+                "kind=input_required"
+                f"&session_id={user_session.session.id}"
+            )
         ),
         headers=user_session.auth_headers,
     )
@@ -58,7 +60,7 @@ async def test_ask_user_question_through_inbox(
     assert response.status_code == 201, response.text
 
     detail_response = await inbox_client.get(
-        f"/v1/inbox/{item['id']}",
+        inbox_path(f"/{item['id']}"),
         headers=user_session.auth_headers,
     )
     assert detail_response.status_code == 200, detail_response.text

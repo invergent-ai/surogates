@@ -122,16 +122,56 @@ function kindIcon(kind: AgentChatInboxKind) {
   return CircleDotIcon;
 }
 
-type InboxView = "active" | "history";
+type InboxView = "active" | "updates" | "history";
 
-// History is asked for by name: a request that omits the status filter
-// gets everything except expired, which is exactly the half of history
-// worth keeping — a question the agent stopped waiting for, or an item
-// that was dismissed.
-const STATUSES_BY_VIEW: Record<InboxView, AgentChatInboxStatus[]> = {
-  active: ["pending"],
-  history: ["acknowledged", "responded", "expired"],
+// One record per view: what it asks the server for, and what it says
+// when nothing comes back.
+//
+// Active and Updates share a status and differ by kind — what is waiting
+// on the user, and what the agent finished while they were away. Mixed
+// together, one notice per completed session buried the questions that
+// actually needed an answer. History is asked for by name: a request
+// that omits the status filter gets everything except expired, which is
+// exactly the half of history worth keeping — a question the agent
+// stopped waiting for, or an item that was dismissed — and it spans both
+// kinds, so it names none.
+//
+// Studio carries the same split in its own inbox page — its pin predates
+// this one. Export these if a third surface ever needs them, and delete
+// that copy rather than letting a third appear.
+const VIEWS: Record<
+  InboxView,
+  {
+    statuses: AgentChatInboxStatus[];
+    kinds?: AgentChatInboxKind[];
+    empty: string;
+  }
+> = {
+  active: {
+    statuses: ["pending"],
+    kinds: ["input_required", "action_required", "governance_gate"],
+    empty: "Nothing needs you right now",
+  },
+  updates: {
+    statuses: ["pending"],
+    kinds: ["task_complete", "progress_checkin"],
+    empty: "No news from your agent",
+  },
+  history: {
+    statuses: ["acknowledged", "responded", "expired"],
+    empty: "No history yet",
+  },
 };
+
+const VIEW_NAMES = Object.keys(VIEWS) as InboxView[];
+
+function belongsToView(item: AgentChatInboxItem, view: InboxView): boolean {
+  const kinds = VIEWS[view].kinds;
+  return (
+    VIEWS[view].statuses.includes(item.status) &&
+    (kinds === undefined || kinds.includes(item.kind))
+  );
+}
 
 function sortItems(items: AgentChatInboxItem[]): AgentChatInboxItem[] {
   // Paging can overlap with a stream update; the first copy of a row
@@ -852,7 +892,7 @@ export function InboxPanel({
       if (current.some((item) => item.id === nextItem.id)) {
         return sortItems([nextItem, ...current]);
       }
-      return STATUSES_BY_VIEW[viewRef.current].includes(nextItem.status)
+      return belongsToView(nextItem, viewRef.current)
         ? sortItems([nextItem, ...current])
         : current;
     });
@@ -877,7 +917,8 @@ export function InboxPanel({
       setLoading(true);
       try {
         const response = await inboxAdapter.listInbox({
-          status: STATUSES_BY_VIEW[view],
+          status: VIEWS[view].statuses,
+          kind: VIEWS[view].kinds,
           cursor: cursor ?? undefined,
           limit,
         });
@@ -916,10 +957,13 @@ export function InboxPanel({
         return;
       }
       if (typeof itemId !== "number") return;
-      // Only the Active view moves on its own — a nudge means something
-      // new is pending, which by definition is not history. Read from
-      // the ref so a tab click does not tear down the connection.
-      if (viewRef.current !== "active") return;
+      // A nudge means something new is pending, which by definition is
+      // not history — but Updates is a second pending view, and work
+      // finishing while the user watches that tab is exactly what it is
+      // for. applyItem files the item under the view it belongs to.
+      // Read from the ref so a tab click does not tear down the
+      // connection.
+      if (viewRef.current === "history") return;
       void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
     });
     return () => stream.close();
@@ -967,7 +1011,7 @@ export function InboxPanel({
           </div>
         )}
         <div className="flex gap-1 border-b border-line px-2 py-2">
-          {(["active", "history"] as const).map((value) => (
+          {VIEW_NAMES.map((value) => (
             <button
               key={value}
               type="button"
@@ -994,9 +1038,7 @@ export function InboxPanel({
           )}
           {items.length === 0 && !error && !loading && (
             <div className="px-4 py-8 text-sm text-muted-foreground">
-              {view === "active"
-                ? "Nothing needs you right now"
-                : "No history yet"}
+              {VIEWS[view].empty}
             </div>
           )}
           {items.map((item) => {

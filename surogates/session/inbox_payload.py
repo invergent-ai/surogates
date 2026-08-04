@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
+from surogates.channels.constants import INBOX_NOTIFY_CHANNELS
 from surogates.session.events import EventType
 
 
@@ -25,6 +27,49 @@ ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 _TITLE_TRUNCATE = 120
 _BODY_TRUNCATE = 1000
+
+
+def apply_read_receipt(item) -> bool:
+    """Mark *item* read, retiring it if reading is all it needed.
+
+    Returns whether anything changed, so a caller can skip the write.
+
+    An informational item is finished the moment it has been read: there
+    is nothing else to do to a "task done" notice, and leaving it pending
+    kept it in the list until someone acknowledged each one by hand. A
+    kind that needs a real response stays pending — a question is not
+    answered by being looked at.
+
+    Lives here, next to the kinds it reads, because two processes write
+    this table: the harness store and the ops control plane. They used to
+    carry a copy each with a comment warning they must not drift.
+    """
+    if item.read_at is not None:
+        return False
+    now = datetime.now(timezone.utc)
+    item.read_at = now
+    if item.kind in ACKNOWLEDGE_ONLY_KINDS and item.status == "pending":
+        item.status = "acknowledged"
+        item.responded_at = now
+        item.updated_at = now
+    return True
+
+
+def raises_completion_inbox_item(session) -> bool:
+    """Whether a completed session should announce itself in the inbox.
+
+    Two conditions, both about whether a person can ever act on the row:
+
+    * it is a root conversation — a delegated child's result reaches its
+      coordinator as ``WORKER_COMPLETE`` and is read in the parent
+      conversation, so a second copy in the inbox is unreachable noise;
+    * its channel is one the operator can open (:data:`INBOX_NOTIFY_CHANNELS`),
+      because opening the conversation is what clears the item.
+    """
+    return (
+        getattr(session, "parent_id", None) is None
+        and getattr(session, "channel", None) in INBOX_NOTIFY_CHANNELS
+    )
 
 
 def _truncate(value: str | None, *, limit: int) -> str:
