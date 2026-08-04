@@ -1612,6 +1612,25 @@ class SessionStore:
         todos = row.get("todos")
         return todos if isinstance(todos, list) else None
 
+    async def count_synthetic_since(
+        self, session_id: UUID, *, synthetic: str, since: Any,
+    ) -> int:
+        """Count synthetic user messages of one kind emitted after *since*.
+
+        Used to bound automated nudges: the caller re-reads this each pass and
+        stops once the count reaches its ceiling, so a coordinator that keeps
+        going quiet is handed to a human rather than poked forever.
+        """
+        stmt = select(func.count()).select_from(EventRow).where(
+            EventRow.session_id == session_id,
+            EventRow.type == EventType.USER_MESSAGE.value,
+            EventRow.data["synthetic"].as_string() == synthetic,
+        )
+        if since is not None:
+            stmt = stmt.where(EventRow.created_at > since)
+        async with self._sf() as db:
+            return int((await db.execute(stmt)).scalar_one())
+
     async def count_recoveries_since_progress(self, session_id: UUID) -> int:
         """Count ``harness.recovered`` events since the session last progressed.
 
