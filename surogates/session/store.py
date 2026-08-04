@@ -1695,7 +1695,7 @@ class SessionStore:
         user_id: UUID,
         agent_id: str,
         status: str | Sequence[str] | None = None,
-        kind: str | None = None,
+        kind: str | Sequence[str] | None = None,
         session_id: UUID | None = None,
         cursor: tuple[datetime, int] | None = None,
         limit: int = 50,
@@ -1709,8 +1709,11 @@ class SessionStore:
             stmt = stmt.where(InboxItem.status.in_(statuses))
         else:
             stmt = stmt.where(InboxItem.status != "expired")
-        if kind:
-            stmt = stmt.where(InboxItem.kind == kind)
+        # Like the status filter: a view asks for a set of kinds — the
+        # ones that need a response, or the ones that are only news.
+        kinds = [kind] if isinstance(kind, str) else list(kind or ())
+        if kinds:
+            stmt = stmt.where(InboxItem.kind.in_(kinds))
         if session_id:
             stmt = stmt.where(InboxItem.session_id == session_id)
         if cursor:

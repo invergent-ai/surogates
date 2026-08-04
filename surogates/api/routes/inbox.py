@@ -41,10 +41,17 @@ router = APIRouter(prefix="/inbox")
 # production, explicit agent_id otherwise.
 AgentRuntime = Annotated[AgentRuntimeContext, Depends(agent_runtime_context_dep)]
 
-# Repeat the parameter to ask for several at once. Declared as a literal
+# Repeat the parameter to ask for several at once. Declared as literals
 # so an unknown value is rejected by the framework, rather than filtering
 # everything out and reading as an empty inbox.
 InboxStatus = Literal["pending", "acknowledged", "responded", "expired"]
+InboxKind = Literal[
+    "input_required",
+    "action_required",
+    "governance_gate",
+    "task_complete",
+    "progress_checkin",
+]
 
 
 class InboxResponse(BaseModel):
@@ -179,7 +186,7 @@ async def list_inbox(
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
     agent_runtime: AgentRuntime,
     status: list[InboxStatus] | None = Query(default=None),
-    kind: str | None = Query(default=None),
+    kind: list[InboxKind] | None = Query(default=None),
     session_id: str | None = Query(default=None),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -190,7 +197,7 @@ async def list_inbox(
         user_id=tenant.user_id,
         agent_id=agent_runtime.agent_id,
         status=status or [],
-        kind=kind,
+        kind=kind or [],
         session_id=UUID(session_id) if session_id else None,
         cursor=_decode_cursor(cursor),
         limit=limit,

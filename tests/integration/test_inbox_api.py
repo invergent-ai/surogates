@@ -341,6 +341,68 @@ async def test_list_accepts_several_statuses_at_once(
     assert still_pending.id not in returned
 
 
+async def test_list_accepts_several_kinds_at_once(
+    client,
+    session_factory,
+    session_store,
+):
+    """Active and Updates are two lists, not one list filtered twice.
+
+    The kinds that need a response and the ones that are only news are
+    shown apart, so the request has to be able to name a set.
+    """
+    _, _, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    update = await _emit_task_complete(session_store, session.id)
+    question_event = await session_store.emit_event(
+        session.id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-kinds-1",
+            "questions": [{"prompt": "Which one?"}],
+            "context": "",
+        },
+    )
+    question = await _get_inbox_item_for_event(session_store, question_event)
+
+    answerable = await client.get(
+        inbox_path(query="kind=input_required&kind=governance_gate"),
+        headers=headers_for(token),
+    )
+    news = await client.get(
+        inbox_path(query="kind=task_complete&kind=progress_checkin"),
+        headers=headers_for(token),
+    )
+
+    assert answerable.status_code == 200, answerable.text
+    assert [row["id"] for row in answerable.json()["items"]] == [question.id]
+    assert news.status_code == 200, news.text
+    assert [row["id"] for row in news.json()["items"]] == [update.id]
+
+
+async def test_list_rejects_an_unknown_kind(
+    client,
+    session_factory,
+    session_store,
+):
+    """Same reason an unknown status is rejected: an empty list would
+    read as an empty inbox."""
+    _, _, token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+
+    response = await client.get(
+        inbox_path(query="kind=nonsense"),
+        headers=headers_for(token),
+    )
+
+    assert response.status_code == 422, response.text
+    assert "nonsense" in response.text
+
+
 async def test_list_rejects_an_unknown_status(
     client,
     session_factory,
