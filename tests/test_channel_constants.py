@@ -11,8 +11,13 @@ from types import SimpleNamespace
 import surogates.channels.platforms  # noqa: F401  (registers every platform)
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
+    API_CHANNEL,
+    DIRECT_UI_CHANNELS,
     END_USER_CHANNELS,
+    INBOX_NOTIFY_CHANNELS,
     INTERACTIVE_PROMPT_CHANNELS,
+    SERVICE_ACCOUNT_CHANNELS,
+    STUDIO_CHANNEL,
 )
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.channels.registry import registry
@@ -72,6 +77,54 @@ def test_whatsapp_can_still_be_switched_off():
     )
     kinds = {p.kind for p in reg.enabled_platforms(settings)}
     assert "whatsapp" not in kinds
+
+
+def test_studio_renders_its_own_conversation():
+    # Outside DIRECT_UI_CHANNELS a scheduled run's result is dropped
+    # instead of delivered to its parent conversation
+    # (_resolve_loop_result_parent), and long code runs start posting a
+    # channel heartbeat into a UI that already streams progress.
+    assert STUDIO_CHANNEL in DIRECT_UI_CHANNELS
+    assert API_CHANNEL in DIRECT_UI_CHANNELS
+    assert "web" in DIRECT_UI_CHANNELS
+
+
+def test_studio_authenticates_as_a_service_account():
+    # Drives the prompt-injection detector's source profile: a studio
+    # session carries no user_id, so it must not be screened as if a
+    # logged-in end-user typed it.
+    assert STUDIO_CHANNEL in SERVICE_ACCOUNT_CHANNELS
+    assert API_CHANNEL in SERVICE_ACCOUNT_CHANNELS
+
+
+def test_studio_is_not_an_end_user_channel():
+    # The operator talking to their own agent is not a customer of it.
+    # Inclusion would mint agent_users bindings and inflate every
+    # Users-page engagement number with the operator's own testing.
+    assert STUDIO_CHANNEL not in END_USER_CHANNELS
+    assert STUDIO_CHANNEL not in INBOX_NOTIFY_CHANNELS
+    assert STUDIO_CHANNEL not in ADAPTER_CHANNELS
+    assert STUDIO_CHANNEL not in INTERACTIVE_PROMPT_CHANNELS
+
+
+def test_studio_behaves_exactly_like_api_everywhere_but_naming():
+    # The split exists to report operator chats separately, NOT to change
+    # how they run. Any set that disagrees about the two is a behaviour
+    # change smuggled in under a naming change.
+    sets = {
+        "ADAPTER_CHANNELS": ADAPTER_CHANNELS,
+        "END_USER_CHANNELS": END_USER_CHANNELS,
+        "INBOX_NOTIFY_CHANNELS": INBOX_NOTIFY_CHANNELS,
+        "INTERACTIVE_PROMPT_CHANNELS": INTERACTIVE_PROMPT_CHANNELS,
+        "SERVICE_ACCOUNT_CHANNELS": SERVICE_ACCOUNT_CHANNELS,
+        "DIRECT_UI_CHANNELS": DIRECT_UI_CHANNELS,
+    }
+    disagree = [
+        name
+        for name, members in sets.items()
+        if (API_CHANNEL in members) != (STUDIO_CHANNEL in members)
+    ]
+    assert not disagree, f"studio diverges from api in: {disagree}"
 
 
 def test_other_kinds_still_default_off():

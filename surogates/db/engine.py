@@ -110,6 +110,7 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
     async def _create_all() -> None:
         from surogates.db.agent_users import BACKFILL_SQL
         from surogates.db.inbox_backlog import RETIRE_UNREACHABLE_INBOX_SQL
+        from surogates.db.studio_channel import RELABEL_STUDIO_SESSIONS_SQL
 
         engine = async_engine_from_settings(db_settings)
         async with engine.begin() as conn:
@@ -123,6 +124,10 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
             # rows the current emission rule would never write, so it
             # settles to a no-op instead of fighting live data.
             await conn.exec_driver_sql(RETIRE_UNREACHABLE_INBOX_SQL)
+            # Relabel operator conversations that predate the studio
+            # channel. Matches only the old label, so it settles to a
+            # no-op once every historical row has been converted.
+            await conn.exec_driver_sql(RELABEL_STUDIO_SESSIONS_SQL)
         await engine.dispose()
 
     asyncio.run(_create_all())

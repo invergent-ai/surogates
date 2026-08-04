@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
+from surogates.channels.constants import API_CHANNEL
 from surogates.config import enqueue_session
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -40,7 +41,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-API_CHANNEL = "api"
 # Upper bound on a single batch request.  Larger batches should page.
 MAX_BATCH_SIZE = 100
 # Upper bound on a single prompt body.  ~200k characters is ~50k tokens —
