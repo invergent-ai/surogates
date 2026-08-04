@@ -193,11 +193,13 @@ async def _create_session_for_task(
     if task.context:
         user_msg = f"{task.goal}\n\n## Context\n{task.context}"
 
-    # On retry (attempt_count > 1 by the time we're spawning), inject a
-    # summary of prior attempts so the new worker can avoid repeating
-    # what already failed. Skip on the first attempt — there's no
-    # history to show and the section header would just be noise.
-    if task.attempt_count and task.attempt_count > 1:
+    # Inject a summary of prior attempts so the new worker can avoid
+    # repeating what already failed. ``current_session_id`` still points at
+    # the previous attempt at this point (the caller rewires it after the
+    # spawn) and is None only on a genuine first attempt — attempt_count
+    # can't be used here because worker_block hands its attempt back, which
+    # would hide the very attempt that asked the question.
+    if task.current_session_id is not None:
         from surogates.tasks.completion import (
             fetch_prior_attempt_summaries,
             render_prior_attempts_section,

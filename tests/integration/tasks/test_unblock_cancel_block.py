@@ -448,17 +448,21 @@ async def test_worker_block_refuses_when_attempt_was_reclaimed(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_worker_block_does_not_increment_attempt_count(
+async def test_worker_block_returns_the_claimed_attempt(
     session_factory, org_id: uuid.UUID, parent_session, session_store,
 ):
-    """Blocking is a deliberate pause, NOT a failure — attempt_count stays."""
-    from surogates.tasks.tools import _worker_block_handler
+    """Blocking is a deliberate pause, NOT a failure — the claim's attempt is
+    handed back, so an unblocked task still has its full max_attempts."""
+    from surogates.tasks.tools import (
+        _unblock_task_handler,
+        _worker_block_handler,
+    )
 
     worker_session_id = uuid.uuid4()
     async with session_factory() as db:
         t = Task(
             org_id=org_id, parent_session_id=parent_session.id,
-            goal="g", status="running", attempt_count=1,
+            goal="g", status="running", attempt_count=1, max_attempts=3,
         )
         db.add(t)
         await db.flush()
@@ -483,4 +487,19 @@ async def test_worker_block_does_not_increment_attempt_count(
 
     async with session_factory() as db:
         t = await db.get(Task, tid)
-        assert t.attempt_count == 1  # unchanged
+        assert t.attempt_count == 0  # claim's +1 undone
+
+    await _unblock_task_handler(
+        {"task_id": str(tid)},
+        session_store=session_store, redis=redis,
+        tenant=MagicMock(org_id=org_id),
+        session_id=str(parent_session.id),
+        session_factory=session_factory,
+    )
+
+    # Back in the ready pool with every attempt still available.
+    async with session_factory() as db:
+        t = await db.get(Task, tid)
+        assert t.status == "ready"
+        assert t.attempt_count == 0
+        assert t.max_attempts == 3
