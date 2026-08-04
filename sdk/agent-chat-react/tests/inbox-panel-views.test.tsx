@@ -181,6 +181,25 @@ describe("InboxPanel views", () => {
     expect(view.textContent).not.toContain("Which colour?");
   });
 
+  it("shows an update the stream announces while Updates is open", async () => {
+    // Updates is a second pending view, not history: work finishing
+    // while the user watches that tab is exactly what it is for.
+    const items = [inboxItem({ id: 1, kind: "task_complete", title: "First" })];
+    const harness = createHarness(items);
+    const view = await mount(harness.adapter);
+    await clickText("updates");
+
+    items.push(
+      inboxItem({ id: 2, kind: "task_complete", title: "Arrived later" }),
+    );
+    await act(async () => {
+      harness.emit("item", JSON.stringify({ item_id: 2, kind: "task_complete" }));
+      await Promise.resolve();
+    });
+
+    expect(view.textContent).toContain("Arrived later");
+  });
+
   it("does not let a nudge drop an update into Active", async () => {
     const items = [inboxItem({ id: 1, kind: "input_required", title: "Which colour?" })];
     const harness = createHarness(items);

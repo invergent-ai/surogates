@@ -953,10 +953,13 @@ export function InboxPanel({
         return;
       }
       if (typeof itemId !== "number") return;
-      // Only the Active view moves on its own — a nudge means something
-      // new is pending, which by definition is not history. Read from
-      // the ref so a tab click does not tear down the connection.
-      if (viewRef.current !== "active") return;
+      // A nudge means something new is pending, which by definition is
+      // not history — but Updates is a second pending view, and work
+      // finishing while the user watches that tab is exactly what it is
+      // for. applyItem files the item under the view it belongs to.
+      // Read from the ref so a tab click does not tear down the
+      // connection.
+      if (viewRef.current === "history") return;
       void inboxAdapter.getInboxItem({ itemId }).then(applyItem, () => undefined);
     });
     return () => stream.close();
