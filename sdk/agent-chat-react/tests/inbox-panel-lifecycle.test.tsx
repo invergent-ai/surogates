@@ -175,9 +175,14 @@ describe("InboxPanel lifecycle", () => {
     const harness = createHarness(items);
     const view = await mount(harness.adapter);
 
-    items.push(inboxItem({ id: 2, title: "Arrived later" }));
+    items.push(
+      inboxItem({ id: 2, title: "Arrived later", kind: "input_required" }),
+    );
     await act(async () => {
-      harness.emit("item", JSON.stringify({ item_id: 2, kind: "task_complete" }));
+      harness.emit(
+        "item",
+        JSON.stringify({ item_id: 2, kind: "input_required" }),
+      );
       await Promise.resolve();
     });
 
@@ -257,9 +262,14 @@ describe("InboxPanel lifecycle", () => {
     });
     const view = await mount(harness.adapter);
 
-    items.push(inboxItem({ id: 2, title: "Arrived mid-load" }));
+    items.push(
+      inboxItem({ id: 2, title: "Arrived mid-load", kind: "input_required" }),
+    );
     await act(async () => {
-      harness.emit("item", JSON.stringify({ item_id: 2, kind: "task_complete" }));
+      harness.emit(
+        "item",
+        JSON.stringify({ item_id: 2, kind: "input_required" }),
+      );
       await Promise.resolve();
     });
     await act(async () => {

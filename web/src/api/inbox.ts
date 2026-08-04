@@ -65,7 +65,10 @@ function listUrl(input: AgentChatInboxListInput = {}): string {
   for (const status of [input.status ?? []].flat()) {
     params.append("status", status);
   }
-  if (input.kind) params.set("kind", input.kind);
+  // Repeated, like status: Active and Updates each ask for a set of kinds.
+  for (const kind of [input.kind ?? []].flat()) {
+    params.append("kind", kind);
+  }
   if (input.sessionId) params.set("session_id", input.sessionId);
   if (input.cursor) params.set("cursor", input.cursor);
   if (input.limit) params.set("limit", String(input.limit));

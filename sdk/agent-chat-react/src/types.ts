@@ -471,7 +471,11 @@ export interface AgentChatInboxListInput {
    * request that does not name them.
    */
   status?: AgentChatInboxStatus | AgentChatInboxStatus[];
-  kind?: AgentChatInboxKind;
+  /**
+   * Active and Updates are two lists over the same statuses, split by
+   * kind: what needs an answer, and what is only news.
+   */
+  kind?: AgentChatInboxKind | AgentChatInboxKind[];
   sessionId?: string;
   cursor?: string;
   limit?: number;
