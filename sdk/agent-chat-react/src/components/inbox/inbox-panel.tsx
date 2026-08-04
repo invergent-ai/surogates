@@ -140,6 +140,10 @@ const STATUSES_BY_VIEW: Record<InboxView, AgentChatInboxStatus[]> = {
 // on the user, and what the agent finished while they were away. Mixed
 // together, one notice per completed session buried the questions that
 // actually needed an answer. History spans both, so it names no kind.
+//
+// Studio carries the same split in its own inbox page — its pin predates
+// this one. Export these if a third surface ever needs them, and delete
+// that copy rather than letting a third appear.
 const ANSWERABLE_KINDS: AgentChatInboxKind[] = [
   "input_required",
   "action_required",

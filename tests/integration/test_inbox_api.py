@@ -4,28 +4,24 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import uuid
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
-from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from starlette.responses import StreamingResponse
 
 from surogates.db.models import Event, InboxItem
 from surogates.session.events import EventType
-from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
-from surogates.tenant.credentials import CredentialVault
 
 from .conftest import create_org, create_user, issue_service_account_token
 from .inbox_e2e_helpers import (
     AGENT_ID,
     OTHER_AGENT_ID,
-    FakeRuntimeCache,
+    build_inbox_test_app,
     inbox_path,
 )
 
@@ -34,30 +30,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def app(session_factory, redis_client, pg_url, redis_url):
-    os.environ["SUROGATES_DB_URL"] = pg_url
-    os.environ["SUROGATES_REDIS_URL"] = redis_url
-
-    from surogates.api.app import create_app
-    from surogates.config import Settings
-    from surogates.storage.backend import create_backend
-
-    application = create_app()
-    application.state.session_factory = session_factory
-    application.state.redis = redis_client
-    application.state.session_store = SessionStore(
-        session_factory,
-        redis=redis_client,
-    )
-    application.state.settings = Settings()
-    application.state.storage = create_backend(application.state.settings)
-    application.state.credential_vault = CredentialVault(
-        session_factory,
-        Fernet.generate_key(),
-    )
-    application.state.runtime_config_cache = FakeRuntimeCache(
-        AGENT_ID, OTHER_AGENT_ID,
-    )
-    return application
+    return build_inbox_test_app(session_factory, redis_client, pg_url, redis_url)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

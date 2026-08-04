@@ -9,7 +9,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NON_INBOX_ADAPTER } from "./inbox-adapter-stub";
+import { NON_INBOX_ADAPTER, inboxItem } from "./inbox-adapter-stub";
 import { InboxPanel } from "../src/components/inbox/inbox-panel";
 import type {
   AgentChatAdapter,
@@ -20,29 +20,6 @@ import type {
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
-
-function inboxItem(
-  input: Partial<AgentChatInboxItem> & { id: number },
-): AgentChatInboxItem {
-  const createdAt = new Date().toISOString();
-  return {
-    orgId: "org-1",
-    userId: "user-1",
-    sessionId: "session-1",
-    sourceEventId: input.id,
-    kind: "task_complete",
-    status: "pending",
-    title: `Item ${input.id}`,
-    body: "Body",
-    payload: {},
-    actionRef: null,
-    createdAt,
-    updatedAt: createdAt,
-    readAt: null,
-    respondedAt: null,
-    ...input,
-  };
-}
 
 interface Harness {
   adapter: AgentChatAdapter;

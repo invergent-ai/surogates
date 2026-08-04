@@ -53,6 +53,7 @@ from surogates.session.acting_principal import (
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
+    apply_read_receipt,
     build_inbox_row,
 )
 from surogates.session.models import (
@@ -1682,7 +1683,7 @@ class SessionStore:
         of them, and an unscoped read shows one agent's inbox the others'
         work.
         """
-        return (
+        return and_(
             InboxItem.user_id == user_id,
             InboxItem.session_id.in_(
                 select(SessionRow.id).where(SessionRow.agent_id == agent_id)
@@ -1704,7 +1705,7 @@ class SessionStore:
         # responded and expired), so the filter takes a set as readily as
         # a single value. Without one, expired items stay hidden.
         statuses = [status] if isinstance(status, str) else list(status or ())
-        stmt = select(InboxItem).where(*self._inbox_scope(user_id, agent_id))
+        stmt = select(InboxItem).where(self._inbox_scope(user_id, agent_id))
         if statuses:
             stmt = stmt.where(InboxItem.status.in_(statuses))
         else:
@@ -1741,7 +1742,7 @@ class SessionStore:
             result = await db.execute(
                 select(InboxItem).where(
                     InboxItem.id == item_id,
-                    *self._inbox_scope(user_id, agent_id),
+                    self._inbox_scope(user_id, agent_id),
                 )
             )
             return result.scalar_one_or_none()
@@ -1758,22 +1759,11 @@ class SessionStore:
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        *self._inbox_scope(user_id, agent_id),
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one()
-            if row.read_at is None:
-                now = datetime.now(timezone.utc)
-                row.read_at = now
-                # An informational item is finished the moment it has been
-                # read: there is nothing else to do to a "task complete"
-                # notice, and leaving it pending kept it in the list until
-                # the operator acknowledged each one by hand. A kind that
-                # needs a real response stays pending — a question is not
-                # answered by being looked at.
-                if row.kind in ACKNOWLEDGE_ONLY_KINDS and row.status == "pending":
-                    row.status = "acknowledged"
-                    row.responded_at = now
+            if apply_read_receipt(row):
                 await db.commit()
                 await db.refresh(row)
             return row
@@ -1794,7 +1784,7 @@ class SessionStore:
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        *self._inbox_scope(user_id, agent_id),
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one()
@@ -1831,7 +1821,7 @@ class SessionStore:
                 await db.execute(
                     select(InboxItem).where(
                         InboxItem.id == item_id,
-                        *self._inbox_scope(user_id, agent_id),
+                        self._inbox_scope(user_id, agent_id),
                     )
                 )
             ).scalar_one_or_none()

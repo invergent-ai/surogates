@@ -9,6 +9,7 @@ import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import type {
   AgentChatAdapter,
   AgentChatArtifactPayload,
+  AgentChatInboxItem,
   AgentChatSession,
   AgentChatSessionList,
   AgentChatWorkspaceFile,
@@ -69,3 +70,31 @@ export const NON_INBOX_ADAPTER: AgentChatAdapter = {
     throw new Error("not used by inbox tests");
   },
 };
+
+/**
+ * An inbox row with sensible defaults, stamped now so relative times
+ * render. Shared by the lifecycle and view suites, which both build
+ * dozens of these and would otherwise each carry the same factory.
+ */
+export function inboxItem(
+  input: Partial<AgentChatInboxItem> & { id: number },
+): AgentChatInboxItem {
+  const createdAt = new Date().toISOString();
+  return {
+    orgId: "org-1",
+    userId: "user-1",
+    sessionId: "session-1",
+    sourceEventId: input.id,
+    kind: "task_complete",
+    status: "pending",
+    title: `Item ${input.id}`,
+    body: "Body",
+    payload: {},
+    actionRef: null,
+    createdAt,
+    updatedAt: createdAt,
+    readAt: null,
+    respondedAt: null,
+    ...input,
+  };
+}
