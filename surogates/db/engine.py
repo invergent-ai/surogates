@@ -109,6 +109,7 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
 
     async def _create_all() -> None:
         from surogates.db.agent_users import BACKFILL_SQL
+        from surogates.db.inbox_backlog import RETIRE_UNREACHABLE_INBOX_SQL
 
         engine = async_engine_from_settings(db_settings)
         async with engine.begin() as conn:
@@ -118,6 +119,10 @@ def run_migrations(db_settings: DatabaseSettings) -> None:
             # Derive agent-user bindings from historical sessions once
             # the table exists; ON CONFLICT keeps re-runs free.
             await conn.exec_driver_sql(BACKFILL_SQL)
+            # Drain inbox notifications no surface can clear. Matches only
+            # rows the current emission rule would never write, so it
+            # settles to a no-op instead of fighting live data.
+            await conn.exec_driver_sql(RETIRE_UNREACHABLE_INBOX_SQL)
         await engine.dispose()
 
     asyncio.run(_create_all())
