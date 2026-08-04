@@ -147,7 +147,19 @@ Create, update, and delete skills. Includes validation (name, frontmatter, conte
 
 ### `todo` -- Task Tracking
 
-Per-session todo list for tracking progress on multi-step tasks.
+Per-session todo list for tracking progress on multi-step tasks. Call with no
+parameters to read; pass `todos` to write, with `merge=true` to update by id
+rather than replace.
+
+The list is stored as `todo.updated` events, so it **survives a wake
+boundary**: a new worker or pod loads the latest snapshot instead of starting
+blank. That matters most for `merge=true`, which previously merged onto an
+empty list on a cold worker and silently dropped everything written earlier.
+
+Every response carries the full list, so recovery reads one row rather than
+replaying a log. If the list cannot be read the call returns an error rather
+than an empty list — an empty list is indistinguishable from "you have no
+plan", and a merge on top of that would persist the truncation.
 
 ### `cron_create` / `cron_delete` / `cron_list` -- Scheduled Sessions
 
