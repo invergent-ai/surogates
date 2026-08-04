@@ -27,6 +27,9 @@ _NOTIFY_CHANNELS_SQL = ", ".join(
 # hidden from every view that does not ask for it by name" — the same one
 # the delete action writes.
 #
+# An empty scheduled_session_id is not a scheduled run — the Python
+# predicate reads it as falsy, and this has to agree with it.
+#
 # Scheduled runs are excluded to match the emission rule: they are
 # unwatched work by construction and their announcement is the only one
 # they get. ``progress_checkin`` is excluded because it is still raised
@@ -42,7 +45,7 @@ WHERE s.id = i.session_id
   AND i.kind = 'task_complete'
   AND NOT (
         s.channel = 'scheduled'
-     OR s.config ->> 'scheduled_session_id' IS NOT NULL
+     OR COALESCE(s.config ->> 'scheduled_session_id', '') <> ''
      OR (s.parent_id IS NULL AND s.channel IN ({_NOTIFY_CHANNELS_SQL}))
   )
 """

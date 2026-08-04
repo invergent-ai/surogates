@@ -784,6 +784,60 @@ async def test_sse_snapshot_counts_only_pending_unread(
     assert snapshot["unread_ids"] == [still_pending.id]
 
 
+async def test_sse_drops_a_nudge_about_another_agents_item(
+    client,
+    app,
+    session_factory,
+    monkeypatch,
+):
+    """The nudge half of the stream is scoped like the snapshot half.
+
+    The Redis channel is keyed by principal, so every agent this person
+    talks to publishes onto the one this stream listens to. An unscoped
+    nudge sends the client after an item it is then refused.
+    """
+    store = app.state.session_store
+    org_id, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        store,
+    )
+    theirs = await _item_on_another_agent(session_factory, store, org_id, user_id)
+    mine = await _emit_task_complete(store, session.id)
+
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox.EventSourceResponse",
+        _finite_event_source("item"),
+        raising=False,
+    )
+
+    async def publish_both():
+        await asyncio.sleep(0.1)
+        # Straight onto the channel, the way the other agent's worker
+        # does: the foreign item first, so a stream that forwarded it
+        # would end the response before ever reaching ours.
+        for item_id in (theirs.id, mine.id):
+            await app.state.redis.publish(
+                f"surogates:inbox:{user_id}", f"{item_id}:task_complete",
+            )
+
+    publisher = asyncio.create_task(publish_both())
+    try:
+        async with asyncio.timeout(5):
+            response = await client.get(
+                inbox_path("/stream"), headers=headers_for(token),
+            )
+    finally:
+        await publisher
+
+    assert response.status_code == 200, response.text
+    nudged = [
+        json.loads(line[len("data: "):])["item_id"]
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and "item_id" in line
+    ]
+    assert nudged == [mine.id]
+
+
 async def test_sse_snapshot_excludes_another_agents_items(
     client,
     app,
