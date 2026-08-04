@@ -3596,7 +3596,25 @@ class AgentHarness(
                     )
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
+            from surogates.runtime.governance import (
+                BOARD_SELF_TOOLS,
+                WORKER_SELF_TOOLS,
+            )
+
             tool_filter = set(config["allowed_tools"])
+            # Execution-context self-tools ride over an AgentDef allowlist:
+            # it scopes what a worker may DO, not how it reports doing it.
+            # ``worker._filter_effective_tools`` force-adds them to the
+            # prompt surface; without the same rule here the schemas
+            # disagree with the prompt and the worker is told to call
+            # ``worker_complete`` while holding no such tool.  Observed in
+            # the wild: a ``claude-coder`` task worker could not signal
+            # failure, so its refusal was filed as a successful result and
+            # the parent mission stalled with no failure signal.
+            if session.task_id is not None:
+                tool_filter |= WORKER_SELF_TOOLS
+            if config.get("context_group_id"):
+                tool_filter |= BOARD_SELF_TOOLS
         else:
             from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
 
