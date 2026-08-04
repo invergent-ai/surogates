@@ -244,6 +244,25 @@ class MissionStore:
                 last = last.replace(tzinfo=timezone.utc)
             return datetime.now(timezone.utc) - last < timedelta(seconds=window_seconds)
 
+    async def set_budget(
+        self, mission_id: UUID, *, budget_tokens: int | None,
+    ) -> None:
+        """Set or clear a mission's token allowance.
+
+        ``None`` removes the ceiling. Settable after creation because that is
+        when the need usually shows up — a mission already running turns out
+        to be burning more than expected.
+        """
+        async with self._sf() as db:
+            res = await db.execute(
+                update(MissionRow)
+                .where(MissionRow.id == mission_id)
+                .values(budget_tokens=budget_tokens, updated_at=func.now())
+            )
+            if res.rowcount == 0:
+                raise MissionNotFoundError(f"mission {mission_id} not found")
+            await db.commit()
+
     async def is_stagnant(self, mission_id: UUID) -> bool:
         """True when the evaluator has returned no progress too many times.
 

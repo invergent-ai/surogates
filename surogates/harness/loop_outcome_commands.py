@@ -117,6 +117,7 @@ class OutcomeCommandMixin:
             handle_mission_create,
             handle_mission_pause,
             handle_mission_resume,
+            handle_mission_budget,
             handle_mission_status,
             parse_mission_command,
         )
@@ -174,6 +175,7 @@ class OutcomeCommandMixin:
                             session_store=self._store,
                             session_factory=self._session_factory,
                             mission_store=mission_store,
+                            budget_tokens=command.budget_tokens,
                         )
                         message = result.message or result.error
                         if result.ok and result.mission_id is not None:
@@ -198,6 +200,12 @@ class OutcomeCommandMixin:
                                 preloaded.append("subagent-task-orchestrator")
                             cfg["preloaded_skills"] = preloaded
                             session.config = cfg
+                elif command.action == "budget":
+                    message = await handle_mission_budget(
+                        session_id=session.id,
+                        budget_tokens=command.budget_tokens,
+                        mission_store=mission_store,
+                    )
                 elif command.action == "status":
                     result = await handle_mission_status(
                         session_id=session.id, mission_store=mission_store,

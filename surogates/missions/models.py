@@ -65,6 +65,8 @@ class Mission(BaseModel):
     status: MissionStatus
     iteration: int = 0
     max_iterations: int = 20
+    # Token allowance for the whole objective; None = unbounded.
+    budget_tokens: int | None = None
     last_evaluation_result: EvaluationResult | None = None
     last_evaluation_explanation: str | None = None
     last_evaluation_feedback: str | None = None
