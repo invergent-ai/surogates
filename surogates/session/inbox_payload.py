@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from surogates.channels.constants import INBOX_NOTIFY_CHANNELS
 from surogates.session.events import EventType
 
 
@@ -25,6 +26,23 @@ ACKNOWLEDGE_ONLY_KINDS = frozenset({"task_complete", "progress_checkin"})
 
 _TITLE_TRUNCATE = 120
 _BODY_TRUNCATE = 1000
+
+
+def raises_completion_inbox_item(session) -> bool:
+    """Whether a completed session should announce itself in the inbox.
+
+    Two conditions, both about whether a person can ever act on the row:
+
+    * it is a root conversation — a delegated child's result reaches its
+      coordinator as ``WORKER_COMPLETE`` and is read in the parent
+      conversation, so a second copy in the inbox is unreachable noise;
+    * its channel is one the operator can open (:data:`INBOX_NOTIFY_CHANNELS`),
+      because opening the conversation is what clears the item.
+    """
+    return (
+        getattr(session, "parent_id", None) is None
+        and getattr(session, "channel", None) in INBOX_NOTIFY_CHANNELS
+    )
 
 
 def _truncate(value: str | None, *, limit: int) -> str:

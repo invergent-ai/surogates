@@ -14,6 +14,7 @@ from __future__ import annotations
 __all__ = [
     "ADAPTER_CHANNELS",
     "END_USER_CHANNELS",
+    "INBOX_NOTIFY_CHANNELS",
     "INTERACTIVE_PROMPT_CHANNELS",
     "multi_session_disabled",
 ]
@@ -54,3 +55,16 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 END_USER_CHANNELS = frozenset(
     {"web", "website", "slack", "telegram", "teams", "whatsapp"}
 )
+
+#: Channels whose completed sessions raise a ``task_complete`` inbox item.
+#: Narrower than :data:`END_USER_CHANNELS` on purpose — this set is about
+#: where the notification can be RETIRED, not who is talking.  The item is
+#: cleared by opening its session's conversation (the chat surfaces delete
+#: it on open, and the store suppresses it outright for a live viewer), so
+#: a channel outside this set mints rows nothing can ever clear: ``api``,
+#: ``worker``/``task``/``delegation``, ``scheduled``, ``ambient`` and
+#: ``browser_setup`` have no conversation a person opens, and the adapter
+#: channels deliver the result in the conversation itself, where a second
+#: "Task complete" is noise.  Child sessions are excluded regardless of
+#: channel — see :func:`surogates.session.inbox_payload.raises_completion_inbox_item`.
+INBOX_NOTIFY_CHANNELS = frozenset({"web", "website"})
