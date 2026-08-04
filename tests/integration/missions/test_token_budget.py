@@ -218,3 +218,50 @@ async def test_a_mission_within_budget_still_evaluates(
         rate_limit_seconds=0,
     )
     assert decision.should is True
+
+
+async def test_the_budget_verb_sets_it_on_a_running_mission(
+    session_factory, org_id, user_id, chat_session,
+):
+    """The case that motivated this: a mission is already running and turns
+    out to be burning more than expected."""
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=chat_session.id,
+        agent_id="a", description="ship", rubric="works",
+    )
+    assert (await store.get(mid)).budget_tokens is None
+
+    await store.set_budget(mid, budget_tokens=5_000_000)
+    assert (await store.get(mid)).budget_tokens == 5_000_000
+
+
+async def test_the_ceiling_can_be_taken_off_again(
+    session_factory, org_id, user_id, chat_session,
+):
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=chat_session.id,
+        agent_id="a", description="ship", rubric="works",
+        budget_tokens=1000,
+    )
+    await store.set_budget(mid, budget_tokens=None)
+
+    assert (await store.get(mid)).budget_tokens is None
+    assert await store.budget_exhausted(mid) is False
+
+
+async def test_a_budget_set_at_creation_via_the_command_path(
+    session_factory, org_id, user_id, chat_session,
+):
+    """End to end: the parsed value reaches the row."""
+    from surogates.missions.commands import parse_mission_command
+
+    cmd = parse_mission_command("ship it\nBudget: 3M\nRubric: works")
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=chat_session.id,
+        agent_id="a", description=cmd.description, rubric=cmd.rubric,
+        budget_tokens=cmd.budget_tokens,
+    )
+    assert (await store.get(mid)).budget_tokens == 3_000_000

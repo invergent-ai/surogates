@@ -28,7 +28,9 @@ from surogates.session.events import EventType
 logger = logging.getLogger(__name__)
 
 
-MissionAction = Literal["create", "status", "pause", "resume", "cancel"]
+MissionAction = Literal[
+    "create", "status", "pause", "resume", "cancel", "budget",
+]
 
 
 class MissionCommandParseError(ValueError):
@@ -44,6 +46,10 @@ class MissionCommand:
     rubric: str | None = None
     reason: str | None = None
     cascade_to_workers: bool = False
+    # Token allowance. ``None`` means "not specified"; with action="budget"
+    # and clear_budget=True it means "take the ceiling off".
+    budget_tokens: int | None = None
+    clear_budget: bool = False
 
 
 @dataclass(slots=True)
@@ -62,11 +68,51 @@ class AutoResearchCommand(MissionCommand):
     baseline_test: float | None = None
 
 
-_CONTROL_VERBS = ("status", "pause", "resume", "cancel")
+_CONTROL_VERBS = ("status", "pause", "resume", "cancel", "budget")
 _RUBRIC_RE = re.compile(r"\bRubric\s*:", re.IGNORECASE)
 _AUTO_RESEARCH_KV_RE = re.compile(
     r"^(max_iterations|resume|repo|baseline|baseline_test)=(\S+)\s*"
 )
+
+
+
+# A ``Budget:`` directive line, anywhere in a create body. Anchored to a whole
+# line so prose like "reconcile the marketing Budget: Q3" is not a directive.
+_BUDGET_LINE_RE = re.compile(
+    r"^[ \t]*Budget[ \t]*:[ \t]*(?P<value>[^\n]*?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_TOKEN_COUNT_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)(?P<suffix>[kKmM]?)$")
+_SUFFIX_SCALE = {"": 1, "k": 1_000, "m": 1_000_000}
+
+
+def parse_token_budget(raw: str) -> int:
+    """Parse a human token count: ``20000000``, ``20M``, ``500k``, ``1.5M``.
+
+    Raises :class:`MissionCommandParseError` on anything unusable rather than
+    falling back to "unbounded" — a mistyped ceiling that silently means no
+    ceiling is the failure mode this exists to prevent.
+    """
+    text = (raw or "").strip().replace("_", "")
+    m = _TOKEN_COUNT_RE.match(text)
+    if m is None:
+        raise MissionCommandParseError(
+            f"unusable budget {raw!r}. Use a token count like "
+            "'20M', '500k' or '20000000'."
+        )
+    value = int(float(m.group("num")) * _SUFFIX_SCALE[m.group("suffix").lower()])
+    if value <= 0:
+        raise MissionCommandParseError("budget must be greater than zero")
+    return value
+
+
+def _extract_budget(text: str) -> tuple[str, int | None]:
+    """Pull a ``Budget:`` directive out of *text*; return (remainder, tokens)."""
+    match = _BUDGET_LINE_RE.search(text)
+    if match is None:
+        return text, None
+    tokens = parse_token_budget(match.group("value"))
+    return text[:match.start()] + text[match.end():], tokens
 
 
 def parse_mission_command(raw: str) -> MissionCommand:
@@ -105,7 +151,22 @@ def parse_mission_command(raw: str) -> MissionCommand:
             return MissionCommand(action="pause", reason=rest or None)
         if verb == "resume":
             return MissionCommand(action="resume")
+        if verb == "budget":
+            if not rest:
+                raise MissionCommandParseError(
+                    "budget needs a value: '/mission budget 20M', or "
+                    "'/mission budget none' to remove the ceiling."
+                )
+            if rest.lower() in ("none", "off", "clear", "unlimited"):
+                return MissionCommand(
+                    action="budget", budget_tokens=None, clear_budget=True,
+                )
+            return MissionCommand(
+                action="budget", budget_tokens=parse_token_budget(rest),
+            )
         return MissionCommand(action="status")
+
+    text, budget_tokens = _extract_budget(text)
 
     match = _RUBRIC_RE.search(text)
     if match is None:
@@ -121,6 +182,7 @@ def parse_mission_command(raw: str) -> MissionCommand:
         raise MissionCommandParseError("Rubric: block is empty")
     return MissionCommand(
         action="create", description=description, rubric=rubric,
+        budget_tokens=budget_tokens,
     )
 
 
@@ -280,6 +342,7 @@ async def handle_mission_create(
     user_id: UUID | None = None,
     service_account_id: UUID | None = None,
     max_iterations: int = 20,
+    budget_tokens: int | None = None,
 ) -> MissionHandlerResult:
     """Create a new mission on the calling session.
 
@@ -341,6 +404,7 @@ async def handle_mission_create(
             description=description,
             rubric=rubric,
             max_iterations=max_iterations,
+            budget_tokens=budget_tokens,
         )
     except ActiveMissionConflictError as exc:
         return MissionHandlerResult(ok=False, error=str(exc))
@@ -649,3 +713,23 @@ async def _cascade_cancel_workers(
                 "Failed to publish interrupt for session %s during mission %s cascade",
                 sid, mission_id, exc_info=True,
             )
+
+
+async def handle_mission_budget(
+    *,
+    session_id: UUID,
+    budget_tokens: int | None,
+    mission_store: MissionStore,
+) -> str:
+    """Set or clear the active mission's token allowance."""
+    mission = await mission_store.get_active_for_session(session_id)
+    if mission is None:
+        return "No active mission on this session."
+    await mission_store.set_budget(mission.id, budget_tokens=budget_tokens)
+    if budget_tokens is None:
+        return "Mission budget cleared — the objective is now unbounded."
+    spent = await mission_store.tokens_spent(mission.id)
+    return (
+        f"Mission budget set to {budget_tokens:,} tokens "
+        f"({spent:,} already spent)."
+    )
