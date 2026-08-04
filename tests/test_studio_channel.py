@@ -61,3 +61,32 @@ def test_relabel_requires_an_ops_chat_service_account():
     assert "service_accounts" in RELABEL_STUDIO_SESSIONS_SQL
     assert "sa.id = s.service_account_id" in RELABEL_STUDIO_SESSIONS_SQL
     assert "ops-chat-%" in RELABEL_STUDIO_SESSIONS_SQL
+
+
+def test_membership_alone_does_not_entitle_a_caller_to_studio():
+    # The validator answers "is this value spellable", not "may this
+    # caller use it". The route asks the second question separately via
+    # _is_ops_chat_account, because any service-account token passes the
+    # first one — and a third party filing its traffic under the
+    # operator's own conversations would empty the label of meaning.
+    import inspect
+
+    from surogates.api.routes import sessions as route
+
+    src = inspect.getsource(route.create_api_session)
+    assert "is_ops_chat_service_account" in src
+    assert "STUDIO_CHANNEL" in src
+
+
+def test_ops_chat_proof_is_shared_with_owner_scope():
+    # One implementation of the name proof, not two: the route and the
+    # owner-scope check must never disagree about who counts as the
+    # control plane.
+    import inspect
+
+    from surogates.tools import owner_scope
+
+    assert inspect.iscoroutinefunction(owner_scope.is_ops_chat_service_account)
+    assert "is_ops_chat_service_account" in inspect.getsource(
+        owner_scope.is_owner_scoped
+    )

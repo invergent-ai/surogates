@@ -39,8 +39,10 @@ from surogates.api.session_guards import (
 from surogates.channels.constants import (
     API_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
+    STUDIO_CHANNEL,
 )
 from surogates.coding_agents.command import is_code_command
+from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
@@ -538,12 +540,28 @@ async def create_api_session(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This endpoint requires a service-account token.",
         )
+    channel = body.channel or API_CHANNEL
+    # Only the control plane's per-operator account may claim to be one.
+    # Membership in SERVICE_ACCOUNT_CHANNELS says the value is spellable,
+    # not that this caller is entitled to it — without the name check any
+    # third-party token could file its traffic under the operator's own
+    # conversations and take the label's meaning away.
+    if channel == STUDIO_CHANNEL and not await is_ops_chat_service_account(
+        _get_session_store(request), service_account_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"channel={STUDIO_CHANNEL!r} is reserved for the control "
+                "plane's operator accounts."
+            ),
+        )
     return await _create_session(
         body,
         request,
         tenant,
         agent_runtime.agent_id,
-        channel=body.channel or API_CHANNEL,
+        channel=channel,
         user_id=None,
         service_account_id=service_account_id,
     )
