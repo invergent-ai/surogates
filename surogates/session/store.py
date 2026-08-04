@@ -1760,7 +1760,17 @@ class SessionStore:
                 )
             ).scalar_one()
             if row.read_at is None:
-                row.read_at = datetime.now(timezone.utc)
+                now = datetime.now(timezone.utc)
+                row.read_at = now
+                # An informational item is finished the moment it has been
+                # read: there is nothing else to do to a "task complete"
+                # notice, and leaving it pending kept it in the list until
+                # the operator acknowledged each one by hand. A kind that
+                # needs a real response stays pending — a question is not
+                # answered by being looked at.
+                if row.kind in ACKNOWLEDGE_ONLY_KINDS and row.status == "pending":
+                    row.status = "acknowledged"
+                    row.responded_at = now
                 await db.commit()
                 await db.refresh(row)
             return row

@@ -83,6 +83,82 @@ async def test_mark_inbox_read_sets_read_at_idempotently(
     assert again.read_at == first_read_at
 
 
+async def _emit_question(session_store, session_id):
+    event_id = await session_store.emit_event(
+        session_id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-read-1",
+            "questions": [{"prompt": "Which one?"}],
+            "context": "",
+        },
+    )
+    async with session_store._sf() as db:
+        return (
+            await db.execute(
+                select(InboxItem).where(InboxItem.source_event_id == event_id)
+            )
+        ).scalar_one()
+
+
+async def test_reading_an_update_retires_it(session_store, session_factory):
+    """An informational item is finished the moment it has been read.
+
+    There is nothing else to do to a "task complete" notice, so leaving
+    it pending kept it in the list forever and made the operator
+    acknowledge each one by hand — hundreds of them, in practice.
+    """
+    session = await _create_user_session(session_store, session_factory)
+    item = await _emit_task_complete(session_store, session.id)
+
+    updated = await session_store.mark_inbox_read(
+        item_id=item.id,
+        user_id=session.user_id,
+        agent_id="test-agent",
+    )
+
+    assert updated.read_at is not None
+    assert updated.status == "acknowledged"
+    assert updated.responded_at is not None
+
+
+async def test_reading_an_update_twice_is_idempotent(
+    session_store,
+    session_factory,
+):
+    session = await _create_user_session(session_store, session_factory)
+    item = await _emit_task_complete(session_store, session.id)
+
+    first = await session_store.mark_inbox_read(
+        item_id=item.id, user_id=session.user_id, agent_id="test-agent",
+    )
+    again = await session_store.mark_inbox_read(
+        item_id=item.id, user_id=session.user_id, agent_id="test-agent",
+    )
+
+    assert again.read_at == first.read_at
+    assert again.status == "acknowledged"
+
+
+async def test_reading_a_question_leaves_it_pending(
+    session_store,
+    session_factory,
+):
+    """A question is not answered by being looked at."""
+    session = await _create_user_session(session_store, session_factory)
+    item = await _emit_question(session_store, session.id)
+
+    updated = await session_store.mark_inbox_read(
+        item_id=item.id,
+        user_id=session.user_id,
+        agent_id="test-agent",
+    )
+
+    assert updated.read_at is not None
+    assert updated.status == "pending"
+    assert updated.responded_at is None
+
+
 async def test_set_inbox_status_rejects_terminal_transition(
     session_store,
     session_factory,
