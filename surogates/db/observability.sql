@@ -32,6 +32,14 @@ CREATE INDEX IF NOT EXISTS idx_events_audit_user_time
 CREATE INDEX IF NOT EXISTS idx_events_session_type
     ON events (session_id, type);
 
+-- Retrofit for databases created before ``idx_sessions_parent`` joined the
+-- model: create_all adds missing tables, never missing indexes on tables
+-- that already exist.  Anything that walks a conversation's spawned work
+-- recurses on parent_id, and each level of that recursion is a lookup —
+-- without this it is a sequential scan per level.
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions (parent_id);
+
 -- Backing index for ``SessionStore.find_feedback_on_event`` — the
 -- feedback dedupe query filters on (session_id, type, target_event_id,
 -- and either rated_by_user_id or rated_by_service_account_id).  Without

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import DIRECT_UI_CHANNELS
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -528,7 +529,12 @@ class ArtifactCompletionMixin:
         return out
 
     async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
-        """Return the web/api parent that should receive this loop run result."""
+        """Return the direct-UI parent that should receive this loop run result.
+
+        Messaging-platform parents are excluded on purpose: their result
+        reaches the user through the channel's own outbound adapter, so
+        delivering it here as well would double-post.
+        """
         if not _is_scheduled_run(session) or session.parent_id is None:
             return None
 
@@ -539,7 +545,7 @@ class ArtifactCompletionMixin:
         except SessionNotFoundError:
             return None
 
-        if parent.channel not in {"web", "api"}:
+        if parent.channel not in DIRECT_UI_CHANNELS:
             return None
         return parent
 

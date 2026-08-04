@@ -313,6 +313,11 @@ class Session(Base):
         Index("idx_sessions_org", "org_id"),
         Index("idx_sessions_agent", "agent_id"),
         Index("idx_sessions_service_account", "service_account_id"),
+        # Walking a conversation's spawned work means recursing on
+        # parent_id, and every level of that recursion is a fresh lookup —
+        # unindexed it degrades to a sequential scan per level, which is
+        # what makes an otherwise-bounded walk expensive on a large table.
+        Index("idx_sessions_parent", "parent_id"),
         # Partial unique index: each (org, idempotency_key) is unique when
         # the key is present.  Supports fire-and-forget `POST /v1/api/prompts`
         # retries by making a duplicate insert fail fast with IntegrityError.

@@ -27,6 +27,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import text as sa_text
+
 logger = logging.getLogger(__name__)
 
 # Matches ops_chat_service_account_name in surogate-ops
@@ -35,6 +37,37 @@ logger = logging.getLogger(__name__)
 # accounts; creating one with a matching name requires org-admin
 # rights.
 OPS_CHAT_SA_PREFIX = "ops-chat-"
+
+
+async def is_ops_chat_service_account(
+    session_store: Any, service_account_id: UUID | None,
+) -> bool:
+    """Whether this account is one the control plane mints per operator.
+
+    The name is the proof: creating an account matching the pattern
+    requires org-admin rights, so a third-party token cannot forge one.
+    Shared by the full owner-scope check and by session creation, which
+    needs the same proof without the config half of the question.
+    """
+    if service_account_id is None:
+        return False
+    try:
+        async with session_store._sf() as db:
+            name = (
+                await db.execute(
+                    sa_text("SELECT name FROM service_accounts WHERE id = :id"),
+                    {"id": str(service_account_id)},
+                )
+            ).scalar_one_or_none()
+    except Exception:
+        # Fail closed: an unreadable account is not a proven operator.
+        logger.warning(
+            "ops-chat service-account lookup failed; treating as "
+            "principal-scoped",
+            exc_info=True,
+        )
+        return False
+    return bool(name) and name.startswith(OPS_CHAT_SA_PREFIX)
 
 
 def owner_scope_config_ok(
@@ -64,20 +97,4 @@ async def is_owner_scoped(
     """Full owner-scope check, including the service-account name proof."""
     if not owner_scope_config_ok(service_account_id, session_config):
         return False
-    try:
-        from sqlalchemy import text as sa_text
-
-        async with session_store._sf() as db:
-            row = await db.execute(
-                sa_text("SELECT name FROM service_accounts WHERE id = :id"),
-                {"id": service_account_id},
-            )
-            name = row.scalar_one_or_none()
-    except Exception:
-        logger.warning(
-            "Owner-scope service-account lookup failed; treating as "
-            "principal-scoped",
-            exc_info=True,
-        )
-        return False
-    return bool(name) and name.startswith(OPS_CHAT_SA_PREFIX)
+    return await is_ops_chat_service_account(session_store, service_account_id)

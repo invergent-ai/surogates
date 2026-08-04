@@ -36,7 +36,13 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.channels.constants import (
+    API_CHANNEL,
+    SERVICE_ACCOUNT_CHANNELS,
+    STUDIO_CHANNEL,
+)
 from surogates.coding_agents.command import is_code_command
+from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
@@ -74,8 +80,6 @@ def _get_injection_detector():
 
 router = APIRouter()
 
-API_CHANNEL = "api"
-
 
 # ---------------------------------------------------------------------------
 # Request / response schemas
@@ -85,6 +89,23 @@ API_CHANNEL = "api"
 class CreateSessionRequest(BaseModel):
     system: str | None = None
     config: dict = Field(default_factory=dict)
+    #: Which kind of service-account client is creating this session.
+    #: Honoured only on the service-account route, and only for a value
+    #: in :data:`SERVICE_ACCOUNT_CHANNELS` — the web route ignores it
+    #: outright, so a logged-in end-user cannot label their own session
+    #: as an operator's.  Absent means :data:`API_CHANNEL`, which keeps
+    #: every existing third-party client working unchanged.
+    channel: str | None = None
+
+    @field_validator("channel")
+    @classmethod
+    def _validate_channel(cls, v: str | None) -> str | None:
+        if v is not None and v not in SERVICE_ACCOUNT_CHANNELS:
+            allowed = ", ".join(sorted(SERVICE_ACCOUNT_CHANNELS))
+            raise ValueError(
+                f"channel must be one of: {allowed} (got {v!r})"
+            )
+        return v
 
 
 _ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -501,7 +522,14 @@ async def create_api_session(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     _rate: None = Depends(rate_limit_dep),
 ) -> Session:
-    """Create a new API-channel session for a service-account client."""
+    """Create a new session for a service-account client.
+
+    Lands on :data:`API_CHANNEL` unless the caller declares another
+    service-account channel — the control plane declares
+    :data:`STUDIO_CHANNEL` so an operator's own Work conversation is
+    distinguishable from a third-party integration.  Both authenticate
+    identically; only the label differs.
+    """
     service_account_id = _require_service_account_api_route(
         request,
         tenant,
@@ -512,12 +540,28 @@ async def create_api_session(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This endpoint requires a service-account token.",
         )
+    channel = body.channel or API_CHANNEL
+    # Only the control plane's per-operator account may claim to be one.
+    # Membership in SERVICE_ACCOUNT_CHANNELS says the value is spellable,
+    # not that this caller is entitled to it — without the name check any
+    # third-party token could file its traffic under the operator's own
+    # conversations and take the label's meaning away.
+    if channel == STUDIO_CHANNEL and not await is_ops_chat_service_account(
+        _get_session_store(request), service_account_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"channel={STUDIO_CHANNEL!r} is reserved for the control "
+                "plane's operator accounts."
+            ),
+        )
     return await _create_session(
         body,
         request,
         tenant,
         agent_runtime.agent_id,
-        channel=API_CHANNEL,
+        channel=channel,
         user_id=None,
         service_account_id=service_account_id,
     )
@@ -616,7 +660,9 @@ async def send_message(
     # agent (parsed by the harness, never fed to the platform LLM), and coding
     # prompts routinely trip the detector.  Attachments/filenames stay screened.
     injection_source = (
-        "api_channel" if session.channel == API_CHANNEL else "web_channel"
+        "api_channel"
+        if session.channel in SERVICE_ACCOUNT_CHANNELS
+        else "web_channel"
     )
     detector = _get_injection_detector()
     if not is_code_command(body.content):

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
+from surogates.channels.constants import DIRECT_UI_CHANNELS
 from surogates.coding_agents.agents import CodeResult, build_invocation
 from surogates.coding_agents.credentials import (
     CodingAgentCredentials,
@@ -170,8 +171,8 @@ async def execute_coding_run(
     # Channel heartbeat: code-run PROGRESS renders live in the web UI but is
     # never delivered to channels, so a Slack/Telegram user sees nothing for
     # the minutes a run takes.  Post a throttled "still working" update for
-    # channel sessions (web/api render progress themselves).
-    wants_updates = getattr(session, "channel", "") not in ("web", "api")
+    # channel sessions (DIRECT_UI_CHANNELS render progress themselves).
+    wants_updates = getattr(session, "channel", "") not in DIRECT_UI_CHANNELS
     last_update = time.monotonic()
     if wants_updates:
         await store.emit_event(
