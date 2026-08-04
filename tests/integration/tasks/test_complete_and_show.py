@@ -374,7 +374,8 @@ async def test_retry_attempt_user_message_includes_prior_attempts(
     async with session_factory() as db:
         task = await db.get(Task, task_id)
         task.attempt_count = 2
-        task.current_session_id = None  # will be set by tick after spawn
+        # Still points at the prior attempt; the tick rewires it after spawn.
+        task.current_session_id = prior_session_id
         await db.commit()
         # Re-fetch a fresh row for the spawn.
         task = await db.get(Task, task_id)
@@ -411,7 +412,7 @@ async def test_retry_attempt_user_message_includes_prior_attempts(
 async def test_first_attempt_user_message_omits_prior_attempts_section(
     session_factory, session_store, org_id: uuid.UUID, parent_session,
 ):
-    """First attempt (attempt_count <= 1 at spawn time) has no Prior Attempts header."""
+    """A task with no prior Sessions has no Prior Attempts header."""
     from surogates.tasks.spawn import _create_session_for_task
 
     async with session_factory() as db:
@@ -439,6 +440,52 @@ async def test_first_attempt_user_message_omits_prior_attempts_section(
     events = await session_store.get_events(sess.id)
     user_msgs = [e for e in events if e.type == EventType.USER_MESSAGE.value]
     assert "## Prior attempts" not in user_msgs[0].data["content"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_resumed_after_block_still_sees_the_blocked_attempt(
+    session_factory, session_store, org_id: uuid.UUID, parent_session,
+):
+    """worker_block gives its attempt back, so the attempt spawned after
+    unblock_task is again attempt_count == 1 — it must still be shown the
+    session that did the work and asked the question."""
+    from surogates.tasks.spawn import _create_session_for_task
+
+    async with session_factory() as db:
+        t = Task(
+            org_id=org_id, parent_session_id=parent_session.id,
+            goal="ask me", status="ready",
+            attempt_count=1,  # blocked attempt handed its count back
+        )
+        db.add(t)
+        await db.flush()
+        blocked_session_id = uuid.uuid4()
+        db.add(ORMSession(
+            id=blocked_session_id, org_id=org_id, agent_id="orchestrator",
+            channel="task", status="stopped", task_id=t.id,
+        ))
+        await db.flush()
+        t.current_session_id = blocked_session_id
+        await db.commit()
+        task = await db.get(Task, t.id)
+
+    await _create_session_for_task(
+        task,
+        session_store=session_store,
+        session_factory=session_factory,
+        tenant=MagicMock(org_id=org_id),
+    )
+
+    async with session_factory() as db:
+        resumed = (await db.execute(
+            select(ORMSession)
+            .where(ORMSession.task_id == task.id)
+            .where(ORMSession.id != blocked_session_id)
+        )).scalar_one()
+
+    events = await session_store.get_events(resumed.id)
+    user_msgs = [e for e in events if e.type == EventType.USER_MESSAGE.value]
+    assert "## Prior attempts on this task" in user_msgs[0].data["content"]
 
 
 # ---------------------------------------------------------------------------

@@ -1374,9 +1374,10 @@ class Task(Base):
     )
     # One-sentence reason captured by the ``worker_block`` tool.
     blocked_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Number of Sessions that have been claimed for this task (including
-    # in-flight). ``worker_block`` deliberately does not increment this —
-    # blocking is a pause, not a failure.
+    # Retry attempts consumed: incremented on claim, and given back by
+    # ``worker_block`` / ``_block_claim`` — blocking is a pause, not a
+    # failure. Not a count of Sessions spawned (a blocked attempt leaves
+    # its Session behind).
     attempt_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )

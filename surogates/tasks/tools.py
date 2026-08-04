@@ -705,6 +705,11 @@ async def _worker_context_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 async def _worker_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Pause the calling Session's task without consuming a retry attempt.
 
+    The claim already counted this attempt, so the block hands it back
+    (same as ``dispatcher._block_claim``) — here rather than in
+    ``unblock_task`` so a task blocked forever isn't sitting on an attempt
+    nobody will return.
+
     Gating: the per-session filter in
     ``surogates.orchestrator.worker._filter_effective_tools`` strips this
     tool from the schema when ``Session.task_id is None``, so the LLM
@@ -767,6 +772,7 @@ async def _worker_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str
 
         task.status = "blocked"
         task.blocked_reason = reason_clean
+        task.attempt_count -= 1
         parent_session_id = task.parent_session_id
         await db.commit()
 

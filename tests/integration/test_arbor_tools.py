@@ -540,6 +540,7 @@ async def test_create_session_for_task_passes_bundle_to_resolver():
     task = SimpleNamespace(
         id=uuid.uuid4(), agent_def_name="arbor-executor", goal="g",
         context=None, attempt_count=0, parent_session_id=parent.id,
+        current_session_id=None,
     )
     store = SimpleNamespace(
         get_session=AsyncMock(return_value=parent), emit_event=AsyncMock(),
