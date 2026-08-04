@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.config import enqueue_session
+from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import ACKNOWLEDGE_ONLY_KINDS
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -31,6 +32,14 @@ from surogates.tools.builtin.ask_user_question import (
 )
 
 router = APIRouter(prefix="/inbox")
+
+# The inbox belongs to one person AND one agent. A person talking to
+# several agents accumulates items from all of them on the same principal
+# — the SPA is served per agent, so showing it the others' work is a leak
+# of the same kind the session list already refuses to make. Resolved the
+# way every other agent-scoped route resolves it: host subdomain in
+# production, explicit agent_id otherwise.
+AgentRuntime = Annotated[AgentRuntimeContext, Depends(agent_runtime_context_dep)]
 
 # Repeat the parameter to ask for several at once. Declared as a literal
 # so an unknown value is rejected by the framework, rather than filtering
@@ -168,6 +177,7 @@ async def _wake_session_from_request(request: Request, session_id: UUID) -> None
 async def list_inbox(
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
     status: list[InboxStatus] | None = Query(default=None),
     kind: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
@@ -178,6 +188,7 @@ async def list_inbox(
     store = request.app.state.session_store
     items = await store.list_inbox(
         user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
         status=status or [],
         kind=kind,
         session_id=UUID(session_id) if session_id else None,
@@ -205,6 +216,7 @@ async def list_inbox(
 async def stream_inbox(
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     redis = getattr(request.app.state, "redis", None)
@@ -226,7 +238,10 @@ async def stream_inbox(
             # badge jump the moment the stream connected.
             snapshot = await asyncio.shield(
                 store.list_inbox(
-                    user_id=tenant.user_id, status="pending", limit=200,
+                    user_id=tenant.user_id,
+                    agent_id=agent_runtime.agent_id,
+                    status="pending",
+                    limit=200,
                 )
             )
             unread_ids = [item.id for item in snapshot if item.read_at is None]
@@ -254,6 +269,16 @@ async def stream_inbox(
                     data = {"item_id": int(item_id), "kind": kind}
                 except (TypeError, ValueError):
                     continue
+                # The channel is keyed by principal, so every agent this
+                # person talks to publishes onto it. Nudging about someone
+                # else's agent would send the client after an item it is
+                # then refused.
+                if await store.get_inbox_item(
+                    item_id=data["item_id"],
+                    user_id=tenant.user_id,
+                    agent_id=agent_runtime.agent_id,
+                ) is None:
+                    continue
                 yield {"event": "item", "data": json.dumps(data, default=str)}
         except asyncio.CancelledError:
             return
@@ -272,10 +297,15 @@ async def get_inbox_item(
     item_id: int,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
-    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    item = await store.get_inbox_item(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     if item is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -289,16 +319,25 @@ async def mark_inbox_item_read(
     item_id: int,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
-    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    item = await store.get_inbox_item(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     if item is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Inbox item not found.",
         )
-    item = await store.mark_inbox_read(item_id=item_id, user_id=tenant.user_id)
+    item = await store.mark_inbox_read(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     return _serialize_item(item, await _agent_fields_for(request, item.session_id))
 
 
@@ -307,10 +346,15 @@ async def acknowledge_inbox_item(
     item_id: int,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
-    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    item = await store.get_inbox_item(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     if item is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -325,6 +369,7 @@ async def acknowledge_inbox_item(
         item = await store.set_inbox_status(
             item_id=item_id,
             user_id=tenant.user_id,
+            agent_id=agent_runtime.agent_id,
             new_status="acknowledged",
         )
     except ValueError as exc:
@@ -340,10 +385,15 @@ async def delete_inbox_item(
     item_id: int,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
-    item = await store.delete_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    item = await store.delete_inbox_item(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     if item is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -358,10 +408,15 @@ async def respond_to_inbox_item(
     payload: InboxResponse,
     request: Request,
     tenant: Annotated[TenantContext, Depends(get_current_tenant)],
+    agent_runtime: AgentRuntime,
 ):
     tenant = _require_user_tenant(tenant)
     store = request.app.state.session_store
-    item = await store.get_inbox_item(item_id=item_id, user_id=tenant.user_id)
+    item = await store.get_inbox_item(
+        item_id=item_id,
+        user_id=tenant.user_id,
+        agent_id=agent_runtime.agent_id,
+    )
     if item is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -431,6 +486,7 @@ async def respond_to_inbox_item(
         item = await store.set_inbox_status(
             item_id=item_id,
             user_id=tenant.user_id,
+            agent_id=agent_runtime.agent_id,
             new_status="responded",
         )
     except ValueError as exc:

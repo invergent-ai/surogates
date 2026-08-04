@@ -22,6 +22,12 @@ from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 
 from .conftest import create_org, create_user, issue_service_account_token
+from .inbox_e2e_helpers import (
+    AGENT_ID,
+    OTHER_AGENT_ID,
+    FakeRuntimeCache,
+    inbox_path,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -48,6 +54,9 @@ async def app(session_factory, redis_client, pg_url, redis_url):
         session_factory,
         Fernet.generate_key(),
     )
+    application.state.runtime_config_cache = FakeRuntimeCache(
+        AGENT_ID, OTHER_AGENT_ID,
+    )
     return application
 
 
@@ -60,7 +69,12 @@ async def client(app):
         yield c
 
 
-async def _create_user_token_session(session_factory, session_store):
+async def _create_user_token_session(
+    session_factory,
+    session_store,
+    *,
+    agent_id: str = AGENT_ID,
+):
     org_id = await create_org(session_factory)
     user_id = uuid.uuid4()
     await create_user(session_factory, org_id, user_id=user_id)
@@ -72,7 +86,7 @@ async def _create_user_token_session(session_factory, session_store):
     session = await session_store.create_session(
         user_id=user_id,
         org_id=org_id,
-        agent_id="test-agent",
+        agent_id=agent_id,
     )
     return org_id, user_id, token, session
 
@@ -127,7 +141,7 @@ async def test_list_inbox_returns_only_callers_items(
     )
 
     response = await client.get(
-        "/v1/inbox",
+        inbox_path(),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -145,7 +159,7 @@ async def test_list_inbox_rejects_service_account(
     _, token = await _create_service_account_token(session_factory)
 
     response = await client.get(
-        "/v1/inbox",
+        inbox_path(),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -160,7 +174,7 @@ async def test_get_inbox_item(client, session_factory, session_store):
     item = await _emit_task_complete(session_store, session.id)
 
     response = await client.get(
-        f"/v1/inbox/{item.id}",
+        inbox_path(f"/{item.id}"),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -185,7 +199,7 @@ async def test_get_other_users_item_returns_404(
     item = await _emit_task_complete(session_store, session.id)
 
     response = await client.get(
-        f"/v1/inbox/{item.id}",
+        inbox_path(f"/{item.id}"),
         headers={"Authorization": f"Bearer {other_token}"},
     )
 
@@ -200,8 +214,8 @@ async def test_mark_read_is_idempotent(client, session_factory, session_store):
     item = await _emit_task_complete(session_store, session.id)
     headers = {"Authorization": f"Bearer {token}"}
 
-    first = await client.post(f"/v1/inbox/{item.id}/read", headers=headers)
-    second = await client.post(f"/v1/inbox/{item.id}/read", headers=headers)
+    first = await client.post(inbox_path(f"/{item.id}/read"), headers=headers)
+    second = await client.post(inbox_path(f"/{item.id}/read"), headers=headers)
 
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
@@ -221,7 +235,7 @@ async def test_ack_flips_status_to_acknowledged(
     item = await _emit_task_complete(session_store, session.id)
 
     response = await client.post(
-        f"/v1/inbox/{item.id}/ack",
+        inbox_path(f"/{item.id}/ack"),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -251,7 +265,7 @@ async def test_ack_rejects_non_ackable_kind(
     item = await _get_inbox_item_for_event(session_store, event_id)
 
     response = await client.post(
-        f"/v1/inbox/{item.id}/ack",
+        inbox_path(f"/{item.id}/ack"),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -270,15 +284,15 @@ async def test_delete_inbox_item_expires_and_hides_item(
     item = await _emit_task_complete(session_store, session.id)
     headers = {"Authorization": f"Bearer {token}"}
 
-    response = await client.delete(f"/v1/inbox/{item.id}", headers=headers)
+    response = await client.delete(inbox_path(f"/{item.id}"), headers=headers)
 
     assert response.status_code == 204, response.text
 
-    default_list = await client.get("/v1/inbox", headers=headers)
+    default_list = await client.get(inbox_path(), headers=headers)
     assert default_list.status_code == 200, default_list.text
     assert default_list.json()["items"] == []
 
-    expired_list = await client.get("/v1/inbox?status=expired", headers=headers)
+    expired_list = await client.get(inbox_path(query="status=expired"), headers=headers)
     assert expired_list.status_code == 200, expired_list.text
     assert [row["id"] for row in expired_list.json()["items"]] == [item.id]
     assert expired_list.json()["items"][0]["status"] == "expired"
@@ -307,12 +321,17 @@ async def test_list_accepts_several_statuses_at_once(
     acknowledged = await _emit_task_complete(session_store, session.id)
     hidden = await _emit_task_complete(session_store, session.id)
     await session_store.set_inbox_status(
-        item_id=acknowledged.id, user_id=user_id, new_status="acknowledged",
+        item_id=acknowledged.id,
+        user_id=user_id,
+        agent_id=AGENT_ID,
+        new_status="acknowledged",
     )
-    await session_store.delete_inbox_item(item_id=hidden.id, user_id=user_id)
+    await session_store.delete_inbox_item(
+        item_id=hidden.id, user_id=user_id, agent_id=AGENT_ID,
+    )
 
     response = await client.get(
-        "/v1/inbox?status=acknowledged&status=responded&status=expired",
+        inbox_path(query="status=acknowledged&status=responded&status=expired"),
         headers=headers,
     )
 
@@ -334,7 +353,7 @@ async def test_list_rejects_an_unknown_status(
     )
 
     response = await client.get(
-        "/v1/inbox?status=pending&status=nonsense",
+        inbox_path(query="status=pending&status=nonsense"),
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -359,11 +378,112 @@ async def test_delete_other_users_item_returns_404(
     item = await _emit_task_complete(session_store, session.id)
 
     response = await client.delete(
-        f"/v1/inbox/{item.id}",
+        inbox_path(f"/{item.id}"),
         headers={"Authorization": f"Bearer {other_token}"},
     )
 
     assert response.status_code == 404
+
+
+def headers_for(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _item_on_another_agent(session_factory, session_store, org_id, user_id):
+    """One inbox item for the same person, raised by a different agent."""
+    other_session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id=OTHER_AGENT_ID,
+    )
+    return await _emit_task_complete(session_store, other_session.id)
+
+
+async def test_list_excludes_items_raised_by_another_agent(
+    client,
+    session_factory,
+    session_store,
+):
+    """Each agent's inbox is its own.
+
+    One person talking to several agents has items from all of them; the
+    inbox they are looking at must show only the agent whose app they
+    opened, the same way the session list already does.
+    """
+    org_id, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    mine = await _emit_task_complete(session_store, session.id)
+    theirs = await _item_on_another_agent(
+        session_factory, session_store, org_id, user_id,
+    )
+
+    response = await client.get(
+        inbox_path(),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    returned = {row["id"] for row in response.json()["items"]}
+    assert returned == {mine.id}
+    assert theirs.id not in returned
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "body"),
+    [
+        ("get", "", None),
+        ("post", "/read", None),
+        ("post", "/ack", None),
+        ("delete", "", None),
+        ("post", "/respond", {"completed": True}),
+    ],
+    ids=["get", "read", "ack", "delete", "respond"],
+)
+async def test_item_of_another_agent_is_not_found(
+    client,
+    session_factory,
+    session_store,
+    method,
+    suffix,
+    body,
+):
+    org_id, user_id, token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+    theirs = await _item_on_another_agent(
+        session_factory, session_store, org_id, user_id,
+    )
+
+    kwargs = {"headers": {"Authorization": f"Bearer {token}"}}
+    if body is not None:
+        kwargs["json"] = body
+    response = await getattr(client, method)(
+        inbox_path(f"/{theirs.id}{suffix}"), **kwargs,
+    )
+
+    assert response.status_code == 404, response.text
+
+
+async def test_inbox_requires_an_agent(
+    client,
+    session_factory,
+    session_store,
+):
+    """Without an agent there is no inbox to show — say so, don't guess."""
+    _, _, token, _ = await _create_user_token_session(
+        session_factory,
+        session_store,
+    )
+
+    response = await client.get(
+        inbox_path(agent_id=None),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400, response.text
 
 
 async def test_respond_governance_records_decision_and_wakes_session(
@@ -401,7 +521,7 @@ async def test_respond_governance_records_decision_and_wakes_session(
     )
 
     response = await client.post(
-        f"/v1/inbox/{item.id}/respond",
+        inbox_path(f"/{item.id}/respond"),
         json={"decision": "approve"},
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -464,7 +584,7 @@ async def test_respond_action_required_records_completion_and_wakes_session(
     )
 
     response = await client.post(
-        f"/v1/inbox/{item.id}/respond",
+        inbox_path(f"/{item.id}/respond"),
         json={"completed": True},
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -504,7 +624,7 @@ async def test_respond_rejects_non_governance_kind(
     item = await _emit_task_complete(session_store, session.id)
 
     response = await client.post(
-        f"/v1/inbox/{item.id}/respond",
+        inbox_path(f"/{item.id}/respond"),
         json={"decision": "approve"},
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -572,7 +692,7 @@ async def test_sse_stream_emits_snapshot_and_nudge_for_new_item(
     try:
         async with asyncio.timeout(5):
             response = await client.get(
-                "/v1/inbox/stream",
+                inbox_path("/stream"),
                 headers=headers,
             )
     finally:
@@ -605,6 +725,7 @@ async def test_sse_snapshot_counts_only_pending_unread(
     await store.set_inbox_status(
         item_id=already_handled.id,
         user_id=user_id,
+        agent_id=AGENT_ID,
         new_status="acknowledged",
     )
 
@@ -615,7 +736,7 @@ async def test_sse_snapshot_counts_only_pending_unread(
     )
 
     async with asyncio.timeout(5):
-        response = await client.get("/v1/inbox/stream", headers=headers)
+        response = await client.get(inbox_path("/stream"), headers=headers)
 
     assert response.status_code == 200, response.text
     snapshot = json.loads(
@@ -628,42 +749,56 @@ async def test_sse_snapshot_counts_only_pending_unread(
     assert snapshot["unread_ids"] == [still_pending.id]
 
 
-class _FakeRuntimeCache:
-    """Minimal stand-in for ``app.state.runtime_config_cache``.
+async def test_sse_snapshot_excludes_another_agents_items(
+    client,
+    app,
+    session_factory,
+    monkeypatch,
+):
+    """The stream seeds the unread badge, so it is scoped like the list.
 
-    Returns a valid runtime-config payload for ``agent_id`` and raises
-    ``LookupError`` for everything else, mirroring the real cache's
-    contract.
+    Items published to this person's channel by their OTHER agents land
+    on the same Redis channel — the snapshot must not count them, or the
+    badge shows a number the list cannot explain.
     """
+    store = app.state.session_store
+    org_id, user_id, token, session = await _create_user_token_session(
+        session_factory,
+        store,
+    )
+    mine = await _emit_task_complete(store, session.id)
+    theirs = await _item_on_another_agent(
+        session_factory, store, org_id, user_id,
+    )
 
-    def __init__(self, agent_id: str) -> None:
-        self._agent_id = agent_id
+    monkeypatch.setattr(
+        "surogates.api.routes.inbox.EventSourceResponse",
+        _finite_event_source("snapshot"),
+        raising=False,
+    )
 
-    async def get(self, agent_id: str) -> dict:
-        if agent_id != self._agent_id:
-            raise LookupError(agent_id)
-        return {
-            "agent_id": agent_id,
-            "org_id": "00000000-0000-0000-0000-000000000000",
-            "project_id": "test-project",
-            "enabled": True,
-            "version": 1,
-            "storage_key_prefix": "",
-        }
-
-
-async def test_auth_config_returns_current_agent_id(client, app):
-    # Seed the runtime-config cache so agent_runtime_context_dep can resolve
-    # "test-agent" without a live management-plane connection.
-    original = getattr(app.state, "runtime_config_cache", None)
-    app.state.runtime_config_cache = _FakeRuntimeCache("test-agent")
-    try:
-        response = await client.get("/v1/auth/config?agent_id=test-agent")
-    finally:
-        app.state.runtime_config_cache = original
+    async with asyncio.timeout(5):
+        response = await client.get(inbox_path("/stream"), headers=headers_for(token))
 
     assert response.status_code == 200, response.text
-    assert response.json()["agent_id"] == "test-agent"
+    snapshot = json.loads(
+        next(
+            line[len("data: "):]
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        )
+    )
+    assert snapshot["unread_ids"] == [mine.id]
+    assert theirs.id not in snapshot["unread_ids"]
+
+
+async def test_auth_config_returns_current_agent_id(client):
+    # The app fixture seeds the runtime-config cache so
+    # agent_runtime_context_dep resolves without a live management plane.
+    response = await client.get(f"/v1/auth/config?agent_id={AGENT_ID}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agent_id"] == AGENT_ID
 
 
 async def test_ask_user_question_response_flips_inbox_to_responded(

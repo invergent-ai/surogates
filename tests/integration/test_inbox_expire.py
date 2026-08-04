@@ -287,6 +287,7 @@ async def test_sweeper_does_not_touch_responded_items(
     await session_store.set_inbox_status(
         item_id=item.id,
         user_id=session.user_id,
+        agent_id="test-agent",
         new_status="responded",
     )
     async with session_store._sf() as db:
