@@ -67,7 +67,7 @@ AGENT_SOURCE_USER_DB = "user_db"
 _KNOWN_AGENT_FRONTMATTER_KEYS: frozenset[str] = frozenset({
     "name", "description",
     "tools", "disallowed_tools",
-    "model", "max_iterations", "policy_profile",
+    "model", "max_iterations",
     "category", "tags", "enabled",
     "preloaded_skills",
 })
@@ -164,7 +164,6 @@ class AgentDef:
     disallowed_tools: list[str] | None = None  # denylist (removed from inherited)
     model: str | None = None  # optional model override for the child session
     max_iterations: int | None = None  # optional cap on the child's iteration budget
-    policy_profile: str | None = None  # named governance profile to apply
     enabled: bool = True
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
@@ -832,7 +831,7 @@ def _agent_from_db_row(row: Any, source: str) -> AgentDef:
     DB columns supply ``name``, ``description``, ``system_prompt``, and
     ``enabled``.  The ``config`` JSONB column supplies the remaining
     fields: ``tools``, ``disallowed_tools``, ``model``,
-    ``max_iterations``, ``policy_profile``, ``category``, ``tags``.
+    ``max_iterations``, ``category``, ``tags``.
     """
     cfg = row.config or {}
 
@@ -886,7 +885,6 @@ def _agent_from_db_row(row: Any, source: str) -> AgentDef:
         disallowed_tools=disallowed,
         model=cfg.get("model"),
         max_iterations=max_iter,
-        policy_profile=cfg.get("policy_profile"),
         enabled=bool(row.enabled),
         category=cfg.get("category"),
         tags=tags,
@@ -920,7 +918,6 @@ def _build_agent_def(
         disallowed_tools=parsed.get("disallowed_tools"),
         model=parsed.get("model"),
         max_iterations=max_iter,
-        policy_profile=parsed.get("policy_profile"),
         enabled=bool(enabled),
         category=category or parsed.get("category"),
         tags=parsed.get("tags"),
@@ -936,7 +933,7 @@ def _parse_agent_frontmatter(
 
     Returns a dict with keys: ``name``, ``description``, ``system_prompt``,
     and optional ``tools``, ``disallowed_tools``, ``model``,
-    ``max_iterations``, ``policy_profile``, ``category``, ``tags``,
+    ``max_iterations``, ``category``, ``tags``,
     ``enabled``.
     """
     result: dict[str, Any] = {
@@ -968,7 +965,7 @@ def _parse_agent_frontmatter(
                         result[key] = [str(v).strip() for v in val if v]
 
             # Scalar fields.
-            for key in ("model", "policy_profile", "category"):
+            for key in ("model", "category"):
                 val = fm.get(key)
                 if val:
                     result[key] = str(val)

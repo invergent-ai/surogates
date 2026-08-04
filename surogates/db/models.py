@@ -1132,7 +1132,6 @@ class Agent(Base):
         - ``disallowed_tools`` (list[str] | None) -- denylist
         - ``model`` (str | None)                -- model override
         - ``max_iterations`` (int | None)       -- iteration cap
-        - ``policy_profile`` (str | None)       -- governance profile name
         - ``category`` (str | None)             -- subdirectory grouping
         - ``tags`` (list[str] | None)           -- metadata tags
     """

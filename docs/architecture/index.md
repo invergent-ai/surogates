@@ -211,77 +211,22 @@ Both paths go through the same function to prevent drift.
 
 A session's `parent_id` column threads the whole coordinator → worker → sub-worker chain. The `v_session_tree` recursive SQL view exposes the full descendant graph with root, depth, and ancestor path, and powers the `GET /v1/sessions/{id}/tree` + `/children` endpoints that drive the "Running" panel in the web UI.
 
-### Governance Profile Composition
+### Sub-Agent Governance
 
-Sub-agents can declare an optional `policy_profile` that **narrows** (never widens) the tenant's base governance gate for the duration of the child session:
+A sub-agent carries **the same policy as its parent**. The child inherits the
+parent's `agent_id`, and the gate is built from that agent's runtime-config
+`governance` blob — so the allow/deny lists and the network egress rules are
+identical on both. A sub-agent is never more privileged than its parent, and
+never less.
 
-- `allowed_tools` is intersected with the base allowlist.
-- `denied_tools` is unioned with the base denylist.
-- Egress defaults pick the stricter action (`deny` always beats `allow`).
-- The composed gate is frozen at creation.
+To restrict what a child can do, use the agent definition's `tools` /
+`disallowed_tools`. Those are enforced by never handing the tool's schema to
+the model, which is stronger than a runtime denial: there is nothing to
+refuse, override, or talk around.
 
-See [Sub-Agents](../sub-agents/index.md) for the full preset format, REST API, and UI walkthrough.
-
-## Event-Driven Design
-
-The session log is the core abstraction. It is an append-only, monotonically sequenced event stream in PostgreSQL.
-
-Every interaction is recorded as an event: user messages, LLM requests/responses, tool calls/results, sandbox operations, session lifecycle transitions, governance decisions.
-
-Key properties:
-
-- **Append-only**: Events are never modified or deleted during a session's lifetime.
-- **Monotonic**: Each event has a `BIGSERIAL` primary key. Events within a session are totally ordered.
-- **Replayable**: Any worker can reconstruct the full session state by replaying events from the beginning (or from a cursor).
-- **The audit log**: The events table IS the audit log. Every action is recorded, including governance policy denials.
-
-## Trust Boundaries
-
-```
-+-----------------------------------------------------------+
-| API Server (trusted)                                      |
-| - S3 credentials for all tenant-* and agent-* buckets     |
-| - DB credentials (sessions, tenants)                      |
-| - Serves skills, memory, workspace files to frontend      |
-| - Issues scoped tokens to worker pods                     |
-+------------------------+----------------------------------+
-                         | HTTP API (session-scoped token)
-+------------------------v----------------------------------+
-| Worker (trusted, but no tenant S3 access)                 |
-| - DB + Redis access (session state, event log)            |
-| - API token for calling API server (skills, memory)       |
-| - Manages sandbox pods via K8s API                        |
-| - Does NOT run untrusted code directly                    |
-+------------------------+----------------------------------+
-                         | K8s exec API / subprocess
-+------------------------v----------------------------------+
-| Sandbox (untrusted)                                       |
-| - S3 credentials scoped to the agent bucket session path  |
-| - s3fs-fuse mounts session path as /workspace             |
-| - Runs tool commands (terminal, file I/O, code exec)      |
-| - No DB access, no API token, no tenant S3 access         |
-| - Cannot access other sessions or tenant data             |
-+-----------------------------------------------------------+
-```
-
-The structural fix for prompt injection: credentials and tenant data are never reachable from the sandbox where the LLM's generated code runs.
-
-## Storage Architecture
-
-One Garage bucket per agent for workspace files, with each session stored
-under `sessions/{session_id}/`. One bucket per tenant stores skills and
-memory. The sandbox pod mounts only the current session path. All tenant-level
-operations go through the API server.
-
-| Data | Storage | Location | Accessed by |
-|---|---|---|---|
-| System skills | Surogate Hub | `platform/system-skills` (one repo, every agent) | API server + Worker (Hub SDK, `SystemBundleCache`) |
-| Per-agent platform skills | Surogate Hub | per-agent bundle, `skills/` prefix | API server + Worker (Hub SDK) |
-| Org/user skills + experts | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
-| Memory | Garage | `tenant-{org_id}` bucket | API server (S3 API) |
-| Workspace files | Garage | `{agent_bucket}/sessions/{session_id}/` | Sandbox (s3fs-fuse), API server (S3 API) |
-| Session metadata | PostgreSQL | `sessions`, `events` tables | API server, Worker |
-| Tenant metadata | PostgreSQL | `orgs`, `users` tables | API server |
+`with_profile` composition (allow-lists intersect, deny-lists union, strictest
+egress default wins) is still how the *agent-level* policy is layered onto the
+platform floor. It is not applied per sub-agent.
 
 ### Why This Design?
 

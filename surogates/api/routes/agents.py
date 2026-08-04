@@ -64,7 +64,6 @@ class AgentSummary(BaseModel):
     category: str | None = None
     model: str | None = None
     max_iterations: int | None = None
-    policy_profile: str | None = None
     enabled: bool = True
 
 
@@ -84,7 +83,6 @@ class AgentDetail(BaseModel):
     disallowed_tools: list[str] | None = None
     model: str | None = None
     max_iterations: int | None = None
-    policy_profile: str | None = None
     category: str | None = None
     tags: list[str] | None = None
     enabled: bool = True
@@ -276,7 +274,7 @@ async def list_agents(
     """List available sub-agent types from all four layers.
 
     Returns lightweight summaries: name, description, source,
-    category, model, max_iterations, policy_profile, enabled.
+    category, model, max_iterations, enabled.
     """
     require_not_channel_principal(tenant)
     all_agents = await _merged_agent_catalog(request, tenant)
@@ -289,7 +287,6 @@ async def list_agents(
             category=a.category,
             model=a.model,
             max_iterations=a.max_iterations,
-            policy_profile=a.policy_profile,
             enabled=a.enabled,
         )
         for a in all_agents
@@ -327,7 +324,6 @@ async def view_agent(
         disallowed_tools=agent_def.disallowed_tools,
         model=agent_def.model,
         max_iterations=agent_def.max_iterations,
-        policy_profile=agent_def.policy_profile,
         category=agent_def.category,
         tags=agent_def.tags,
         enabled=agent_def.enabled,

@@ -51,7 +51,6 @@ class TestLoadAgentsFromDir:
             "disallowed_tools: [write_file, patch]\n"
             "model: claude-sonnet-4-6\n"
             "max_iterations: 20\n"
-            "policy_profile: read_only\n"
             "---\n"
             "You are a senior code reviewer.  Focus on security, "
             "correctness, and maintainability.\n",
@@ -69,7 +68,6 @@ class TestLoadAgentsFromDir:
         assert a.disallowed_tools == ["write_file", "patch"]
         assert a.model == "claude-sonnet-4-6"
         assert a.max_iterations == 20
-        assert a.policy_profile == "read_only"
         assert a.source == "platform"
         assert a.enabled is True
         assert "senior code reviewer" in a.system_prompt
@@ -281,6 +279,5 @@ class TestAgentDefDefaults:
         assert a.disallowed_tools is None
         assert a.model is None
         assert a.max_iterations is None
-        assert a.policy_profile is None
         assert a.category is None
         assert a.tags is None

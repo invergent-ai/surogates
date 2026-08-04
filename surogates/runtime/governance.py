@@ -179,37 +179,6 @@ def build_governance_gate(
     return _FLOOR_GATE.with_profile(profile)
 
 
-def warn_if_profile_unenforced(
-    session_config: dict[str, Any] | None, *, agent_id: str | None = None,
-) -> None:
-    """Log when a session declares a ``policy_profile`` nothing can enforce.
-
-    ``session.config["policy_profile"]`` is stamped by four spawn paths, shown
-    in the UI, and documented by the shipped ``build-sub-agent`` skill as
-    narrowing the tenant base policy.  No registry maps a profile *name* to
-    the ``allowed_tools`` / ``denied_tools`` / ``egress`` shape
-    :meth:`GovernanceGate.with_profile` needs, and the gate is built solely
-    from the agent's runtime-config governance blob — so the declaration is
-    inert.
-
-    Defining what each name permits is a security decision, not something to
-    infer.  Until that exists this at least makes the gap visible instead of
-    accepting a restriction and dropping it.
-    """
-    if not isinstance(session_config, dict):
-        return
-    declared = session_config.get("policy_profile")
-    if not isinstance(declared, str) or not declared.strip():
-        return
-    logger.warning(
-        "Session declares policy_profile %r (agent=%s) but named profiles are "
-        "not resolved: the session runs under the agent's governance policy "
-        "unchanged. Express the restriction as governance.allowed_tools / "
-        "denied_tools on the agent instead.",
-        declared, agent_id or "?",
-    )
-
-
 def disclosure_config(
     governance: dict[str, Any] | None,
 ) -> dict[str, Any] | None:

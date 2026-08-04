@@ -68,14 +68,13 @@ def _agent(
     disallowed_tools: list[str] | None = None,
     model: str | None = None,
     max_iterations: int | None = None,
-    policy_profile: str | None = None,
     enabled: bool = True,
 ) -> AgentDef:
     return AgentDef(
         name=name, description=description, system_prompt=system_prompt,
         source="platform", tools=tools, disallowed_tools=disallowed_tools,
         model=model, max_iterations=max_iterations,
-        policy_profile=policy_profile, enabled=enabled,
+        enabled=enabled,
     )
 
 
@@ -105,7 +104,6 @@ class TestSpawnWorkerAgentType:
             disallowed_tools=["write_file"],
             model="claude-sonnet-4-6",
             max_iterations=12,
-            policy_profile="read_only",
         )
 
         with patch(
@@ -130,7 +128,6 @@ class TestSpawnWorkerAgentType:
         assert cfg["agent_type"] == "researcher"
         assert cfg["allowed_tools"] == ["read_file", "search_files"]
         assert cfg["max_iterations"] == 12
-        assert cfg["policy_profile"] == "read_only"
         # When allowed_tools is set, we don't emit excluded_tools.
         assert "excluded_tools" not in cfg
         # Model override from the agent def is applied to the child.
@@ -346,7 +343,6 @@ class TestDelegateTaskAgentType:
             tools=["read_file"],
             model="claude-opus-4-7",
             max_iterations=8,
-            policy_profile="read_only",
         )
 
         with patch(
@@ -373,7 +369,6 @@ class TestDelegateTaskAgentType:
         assert cfg["agent_type"] == "analyzer"
         assert cfg["allowed_tools"] == ["read_file"]
         assert cfg["max_iterations"] == 8
-        assert cfg["policy_profile"] == "read_only"
         assert call_kwargs["model"] == "claude-opus-4-7"
 
     @pytest.mark.asyncio
@@ -429,7 +424,6 @@ class TestDelegateTaskAgentType:
         cfg = store.create_session.call_args[1]["config"]
         assert "agent_type" not in cfg
         assert "allowed_tools" not in cfg
-        assert "policy_profile" not in cfg
 
 
 # =========================================================================

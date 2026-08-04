@@ -130,13 +130,11 @@ class _StubAgentDef:
         disallowed_tools: list[str] | None = None,
         model: str | None = None,
         max_iterations: int | None = None,
-        policy_profile: str | None = None,
     ) -> None:
         self.tools = tools
         self.disallowed_tools = disallowed_tools
         self.model = model
         self.max_iterations = max_iterations
-        self.policy_profile = policy_profile
 
 
 def _install_stub_agent_resolver(

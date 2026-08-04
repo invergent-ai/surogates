@@ -49,7 +49,6 @@ def test_build_task_worker_config_preloaded_alongside_agent_def_presets():
 
     agent_def = MagicMock(
         name="reviewer", max_iterations=20,
-        policy_profile="read_only",
         tools=["read_file", "search_files"],
         disallowed_tools=None,
         model="claude-sonnet-4-6",
@@ -59,7 +58,6 @@ def test_build_task_worker_config_preloaded_alongside_agent_def_presets():
     cfg = _build_task_worker_config(agent_def=agent_def, task=task)
     assert "subagent-task-worker" in cfg["preloaded_skills"]
     assert cfg["agent_type"] == "reviewer"
-    assert cfg["policy_profile"] == "read_only"
     assert "read_file" in cfg["allowed_tools"]
 
 

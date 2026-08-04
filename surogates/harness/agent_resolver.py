@@ -156,7 +156,6 @@ def apply_agent_def_to_session(
     - ``allowed_tools`` -- from ``agent_def.tools`` (allowlist)
     - ``excluded_tools`` -- from ``agent_def.disallowed_tools`` (denylist)
     - ``max_iterations`` -- from ``agent_def.max_iterations``
-    - ``policy_profile`` -- from ``agent_def.policy_profile`` (consulted in Step 6)
 
     Also fills in ``session.model`` if the session has no explicit
     model and the agent def provides one.
@@ -174,8 +173,5 @@ def apply_agent_def_to_session(
         cfg["max_iterations"] = min(
             agent_def.max_iterations, _MAX_ITERATIONS_CEILING,
         )
-    if agent_def.policy_profile and not cfg.get("policy_profile"):
-        cfg["policy_profile"] = agent_def.policy_profile
-
     if not session.model and agent_def.model:
         session.model = agent_def.model

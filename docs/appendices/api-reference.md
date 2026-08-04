@@ -376,7 +376,6 @@ List all sub-agent types visible to the current tenant (merged: platform FS + us
       "category": "review",
       "model": "claude-sonnet-4-6",
       "max_iterations": 20,
-      "policy_profile": "read_only",
       "enabled": true
     }
   ],
@@ -401,7 +400,6 @@ Full sub-agent definition.
   "disallowed_tools": ["write_file", "patch"],
   "model": "claude-sonnet-4-6",
   "max_iterations": 20,
-  "policy_profile": "read_only",
   "category": "review",
   "tags": ["security", "quality"],
   "enabled": true

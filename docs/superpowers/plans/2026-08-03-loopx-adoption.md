@@ -51,9 +51,11 @@ Each is flagged in its own PR rather than quietly dropped.
   verdict and streak. A criteria table would be speculative until churn is
   shown to persist — and the proposed "latch settled criteria" design is
   anti-LoopX with no invalidation driver.
-- **`policy_profile` enforcement** (surfaced by #183). Needs a decision on what
-  each profile permits; `GovernanceGate.with_profile` already exists and name
-  resolution is the only missing piece.
+- **`policy_profile`** — decided and removed. A sub-agent carries the same
+  policy as its parent by design, so per-child narrowing was not wanted.
+  Verified unused first: 2,623 PROD sessions and 0 PROD skills referenced
+  it. Tool restriction was never affected — that comes from `tools` /
+  `disallowed_tools`, enforced by schema filtering.
 
 ## 0b. Corrections this report needed
 

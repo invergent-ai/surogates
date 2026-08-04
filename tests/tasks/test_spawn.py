@@ -154,7 +154,7 @@ async def test_create_session_for_task_resolves_agent_def_when_set():
     child = _make_session(id=uuid4(), parent_id=task.parent_session_id)
 
     fake_agent_def = MagicMock(
-        name="reviewer", max_iterations=20, policy_profile=None,
+        name="reviewer", max_iterations=20,
         tools=["read_file"], disallowed_tools=None, model="claude-sonnet-4",
     )
 
