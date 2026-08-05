@@ -17,6 +17,8 @@ import {
   GlobeIcon,
   HardDriveIcon,
   IdCardIcon,
+  ListTreeIcon,
+  MessageSquareIcon,
   PaperclipIcon,
   PlusIcon,
   SparklesIcon,
@@ -746,35 +748,35 @@ function ChatComposerInner({
 
   // ── Render ───────────────────────────────────────────────────────
 
-  // Rendered in one of two places depending on the width — beside Send with a
-  // cursor, above the input on a phone — so it is built once here and the two
-  // call sites pick with a media query. Stateless and driven by props, so the
-  // duplicate render costs nothing.
+  // Two icons in the tools row, beside add / browser profile / workspace /
+  // context — which is where a control that changes what the thread shows
+  // belongs. It was a pair of text buttons next to Send: ~120px of chrome
+  // reading "Simple Advanced" beside the one control you press every message,
+  // and wide enough that the footer wrapped on a phone and stacked the tools
+  // into a second toolbar. The labels move to tooltips and screen readers.
   const viewModeToggle = onViewModeChange ? (
     <ButtonGroup
       aria-label="Chat view mode"
       className="overflow-hidden rounded-md border border-border"
     >
-      <Button
-        type="button"
-        size="xs"
-        className="capitalize font-normal"
-        variant={viewMode === "simple" ? "secondary" : "ghost"}
+      <PromptInputButton
+        aria-label="Simple view"
         aria-pressed={viewMode === "simple"}
+        tooltip="Simple — just the conversation"
+        variant={viewMode === "simple" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("simple")}
       >
-        Simple
-      </Button>
-      <Button
-        type="button"
-        size="xs"
-        className="capitalize font-normal"
-        variant={viewMode === "expert" ? "secondary" : "ghost"}
+        <MessageSquareIcon className="size-4" />
+      </PromptInputButton>
+      <PromptInputButton
+        aria-label="Advanced view"
         aria-pressed={viewMode === "expert"}
+        tooltip="Advanced — every step the agent took"
+        variant={viewMode === "expert" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("expert")}
       >
-        Advanced
-      </Button>
+        <ListTreeIcon className="size-4" />
+      </PromptInputButton>
     </ButtonGroup>
   ) : null;
 
@@ -798,17 +800,6 @@ function ChatComposerInner({
       }}
     >
       <AttachmentPreviewStrip />
-      {/* Simple/Advanced is a standing preference, not something you decide
-          per message, so on a phone it does not compete with Send for the
-          footer's one line — it sits above the input with the other
-          mode-scoped controls. Beside Send it was pushing the tools group
-          (add, browser profile, workspace, context) onto a line of its own,
-          which read as two stacked toolbars. */}
-      {viewModeToggle && (
-        <div className="flex items-center justify-end px-1 pb-2 md:hidden">
-          {viewModeToggle}
-        </div>
-      )}
       {viewMode === "expert" && !disabled && (
         <div className="flex flex-wrap items-center justify-end gap-2 px-1 pb-2">
           <ComposerMenuButton
@@ -1096,13 +1087,11 @@ function ChatComposerInner({
                   </ContextContent>
                 </Context>
               )}
+              {viewModeToggle}
             </PromptInputTools>
             {/* ml-auto keeps this group right-aligned once the footer wraps,
                 where justify-between no longer applies to a lone line. */}
             <div className="ml-auto flex shrink-0 items-center gap-2">
-              {/* Above `md` the mode toggle sits beside Send. Below it, it
-                  moves out of this group entirely — see viewModeToggle. */}
-              <span className="hidden md:flex">{viewModeToggle}</span>
               {!disabled && (
                 <PromptInputSubmit
                   status={status}
