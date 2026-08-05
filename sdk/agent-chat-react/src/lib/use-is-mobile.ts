@@ -8,6 +8,11 @@ import { useSyncExternalStore } from "react";
  */
 const MOBILE_QUERY = "(max-width: 767px)";
 
+// Deliberately not caching the MediaQueryList across calls. getSnapshot does
+// run per render, but matchMedia is ~1µs and a module-level cache would pin
+// the first `window.matchMedia` this module ever saw — which makes the hook
+// untestable by stubbing it, and the sheet branch is only reachable in tests
+// that way. Not a trade worth making for a cost that does not register.
 function subscribe(onChange: () => void): () => void {
   const mql = window.matchMedia(MOBILE_QUERY);
   mql.addEventListener("change", onChange);

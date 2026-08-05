@@ -74,7 +74,6 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/command";
-import { useIsMobile } from "../../lib/use-is-mobile";
 import { ResponsivePanel } from "../ui/responsive-panel";
 import {
   ComposerCommandMenu,
@@ -750,7 +749,6 @@ function ChatComposerInner({
   // reading "Simple Advanced" beside the one control you press every message,
   // and wide enough that the footer wrapped on a phone and stacked the tools
   // into a second toolbar. The labels move to tooltips and screen readers.
-  const isMobile = useIsMobile();
   const [contextOpen, setContextOpen] = useState(false);
   // Whole percent: the popover header already prints the exact figure, and a
   // decimal on a button this size is noise.
@@ -778,10 +776,9 @@ function ChatComposerInner({
       onSelectBrowserProfile &&
       adapter.listBrowserProfiles,
   );
-  const showProfilePicker = canPickProfile;
   // With nothing to put in it the button itself is noise — and a read-only or
   // awaiting-answer session with no panes has exactly nothing.
-  const showToolsPanel = canAttach || showPaneToggles || showProfilePicker;
+  const showToolsPanel = canAttach || showPaneToggles || canPickProfile;
 
   const viewModeToggle = onViewModeChange ? (
     <ButtonGroup
@@ -891,7 +888,12 @@ function ChatComposerInner({
                     setAddMenuOpen(open);
                     // The profile list is fetched lazily; the panel that shows
                     // it is now this one.
-                    if (open && canPickProfile) {
+                    if (
+                      open &&
+                      canPickProfile &&
+                      !browserProfileLocked &&
+                      browserProfiles === null
+                    ) {
                       loadBrowserProfiles();
                     }
                   }}
@@ -906,7 +908,7 @@ function ChatComposerInner({
                   }
                 >
                   <Command>
-                    <CommandList className={cn(isMobile && "max-h-none")}>
+                    <CommandList className="max-md:max-h-none">
                       {canAttach && (
                         <CommandGroup heading="Attach">
                           <CommandItem
@@ -955,7 +957,7 @@ function ChatComposerInner({
                           )}
                         </CommandGroup>
                       )}
-                      {showProfilePicker && (
+                      {canPickProfile && (
                         <CommandGroup heading="Browser profile">
                           {browserProfileLocked ? (
                             // A profile is bound at session creation and cannot

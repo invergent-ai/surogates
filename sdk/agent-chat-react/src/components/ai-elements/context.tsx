@@ -1,11 +1,5 @@
 "use client";
 
-import { Button } from "../ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { cn } from "../../lib/utils";
 import type { LanguageModelUsage } from "ai";
@@ -34,7 +28,9 @@ const useContextValue = () => {
   const context = useContext(ContextContext);
 
   if (!context) {
-    throw new Error("Context components must be used within Context");
+    throw new Error(
+      "Context components must be used within ContextValueProvider",
+    );
   }
 
   return context;
@@ -45,10 +41,9 @@ export type ContextValueProviderProps = ContextSchema & {
 };
 
 /**
- * The usage figures on their own, without the popover `Context` pairs them
- * with. Every ContextContent* part reads from here, so a caller that needs to
- * present them in something other than a popover — a bottom sheet, say — can
- * wrap that instead and still use the same parts.
+ * The usage figures. Every ContextContent* part reads from here, so a caller
+ * can present them in whatever container suits — the composer wraps a
+ * ResponsivePanel, which is a popover with a cursor and a sheet on a phone.
  */
 export const ContextValueProvider = ({
   usedTokens,
@@ -68,25 +63,6 @@ export const ContextValueProvider = ({
     </ContextContext.Provider>
   );
 };
-
-export type ContextProps = ComponentProps<typeof Popover> & ContextSchema;
-
-export const Context = ({
-  usedTokens,
-  maxTokens,
-  usage,
-  modelId,
-  ...props
-}: ContextProps) => (
-  <ContextValueProvider
-    maxTokens={maxTokens}
-    modelId={modelId}
-    usage={usage}
-    usedTokens={usedTokens}
-  >
-    <Popover {...props} />
-  </ContextValueProvider>
-);
 
 export const ContextIcon = () => {
   const { usedTokens, maxTokens } = useContextValue();
@@ -128,32 +104,6 @@ export const ContextIcon = () => {
     </svg>
   );
 };
-
-export type ContextTriggerProps = ComponentProps<typeof Button>;
-
-export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => {
-  return (
-    <PopoverTrigger asChild>
-      {children ?? (
-        <Button type="button" variant="ghost" {...props}>
-          <ContextIcon />
-        </Button>
-      )}
-    </PopoverTrigger>
-  );
-};
-
-export type ContextContentProps = ComponentProps<typeof PopoverContent>;
-
-export const ContextContent = ({
-  className,
-  ...props
-}: ContextContentProps) => (
-  <PopoverContent
-    className={cn("min-w-60 divide-y overflow-hidden p-0", className)}
-    {...props}
-  />
-);
 
 export type ContextContentHeaderProps = ComponentProps<"div">;
 

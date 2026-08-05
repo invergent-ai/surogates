@@ -41,8 +41,6 @@ export interface ResponsivePanelProps {
    * popover's sections drew a rule under the sheet's grab handle instead.
    */
   popoverClassName?: string;
-  /** Styling for the sheet form only. Same reasoning as popoverClassName. */
-  sheetClassName?: string;
 }
 
 export function ResponsivePanel({
@@ -53,7 +51,6 @@ export function ResponsivePanel({
   children,
   align = "start",
   popoverClassName,
-  sheetClassName,
 }: ResponsivePanelProps) {
   const isMobile = useIsMobile();
 
@@ -86,7 +83,6 @@ export function ResponsivePanel({
           className={cn(
             "fixed inset-x-0 bottom-0 z-50 flex max-h-[80svh] flex-col overflow-hidden rounded-t-2xl border-t border-border bg-popover pb-[env(safe-area-inset-bottom)] text-popover-foreground shadow-lg",
             "data-[state=closed]:animate-out data-[state=closed]:slide-out-to-bottom data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom",
-            sheetClassName,
           )}
         >
           <DialogPrimitive.Title className="sr-only">
