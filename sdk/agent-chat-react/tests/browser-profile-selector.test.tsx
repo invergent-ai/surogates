@@ -77,17 +77,27 @@ async function renderComposer(
 }
 
 describe("browser profile selector", () => {
-  it("lists profiles and selects one", async () => {
-    const onSelect = vi.fn();
-    const node = await renderComposer(onSelect);
+  // The profile picker used to be its own button in the composer tools row.
+  // It is a group inside the one tools panel now (see ResponsivePanel), so
+  // every case here opens that panel first. What is asserted is unchanged:
+  // which profiles are offered, which is checked, and that a locked session
+  // cannot change the binding.
+  const openTools = async (node: HTMLElement) => {
     const trigger = node.querySelector(
-      '[aria-label^="Select browser profile"]',
+      '[aria-label="Composer tools"]',
     ) as HTMLElement;
+    expect(trigger).not.toBeNull();
     await act(async () => trigger.click());
     await act(async () => {
       await Promise.resolve();
     });
-    // PopoverContent portals to document.body, so query the document.
+  };
+
+  it("lists profiles and selects one", async () => {
+    const onSelect = vi.fn();
+    const node = await renderComposer(onSelect);
+    await openTools(node);
+    // The panel portals to document.body, so query the document.
     expect(document.body.textContent).toContain("Personal");
     expect(document.body.textContent).toContain("Work");
     const work = [...document.querySelectorAll("[cmdk-item]")].find((el) =>
@@ -97,46 +107,49 @@ describe("browser profile selector", () => {
     expect(onSelect).toHaveBeenCalledWith("p2");
   });
 
-  it("is shown without a live browser (so a profile can be picked first)", async () => {
-    // The selector gates on browserProfilesEnabled — NOT canShowBrowser — so it
+  it("is offered without a live browser (so a profile can be picked first)", async () => {
+    // The group gates on browserProfilesEnabled — NOT canShowBrowser — so it
     // is available before a session/browser exists, the only point at which a
     // profile binds to the session.
     const node = await renderComposer(vi.fn());
-    expect(
-      node.querySelector('[aria-label^="Select browser profile"]'),
-    ).not.toBeNull();
+    await openTools(node);
+    expect(document.body.textContent).toContain("Browser profile");
+    expect(document.body.textContent).toContain("Personal");
   });
 
-  it("locks the selector for an active session", async () => {
+  it("locks the selection for an active session", async () => {
     const onSelect = vi.fn();
-    const node = await renderComposer(onSelect, { locked: true });
-    const trigger = node.querySelector(
-      '[aria-label^="Select browser profile"]',
-    ) as HTMLElement;
-    expect(trigger).not.toBeNull();
-    expect(trigger.getAttribute("aria-disabled")).toBe("true");
-    // Clicking the locked trigger opens no popover and selects nothing.
-    await act(async () => trigger.click());
-    await act(async () => {
-      await Promise.resolve();
+    const node = await renderComposer(onSelect, {
+      locked: true,
+      profileId: "p1",
     });
+    await openTools(node);
+    // The bound profile is named and the reason is stated outright — in a
+    // menu there is nothing to hover, so it cannot live in a tooltip.
+    expect(document.body.textContent).toContain("Personal");
+    expect(document.body.textContent).toContain("Locked for this session.");
+    // The other profiles are not offered at all, so none can be picked.
+    expect(document.body.textContent).not.toContain("Work");
+    const items = [...document.querySelectorAll("[cmdk-item]")].filter((el) =>
+      el.textContent?.includes("Personal"),
+    );
+    for (const item of items) {
+      await act(async () => (item as HTMLElement).click());
+    }
     expect(onSelect).not.toHaveBeenCalled();
-    expect(document.body.textContent).not.toContain("Personal");
   });
 
-  it("marks the selected profile with a check and names it on the trigger", async () => {
-    const dom = await renderComposer(vi.fn(), { profileId: "p2" });
+  it("explains why nothing can be chosen when a locked session has no profile", async () => {
+    const node = await renderComposer(vi.fn(), { locked: true });
+    await openTools(node);
+    expect(document.body.textContent).toContain(
+      "A profile can only be chosen before the session starts.",
+    );
+  });
 
-    // The trigger no longer prints the profile name beside its icon — that
-    // made this one button several times wider than every other tool in the
-    // row. It says which profile is active through its accessible name (and
-    // its tooltip), which is the only name it now has.
-    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
-    expect(trigger.getAttribute("aria-label")).toContain("Work");
-
-    await act(async () => {
-      (trigger as HTMLElement).click();
-    });
+  it("marks the selected profile with a check", async () => {
+    const node = await renderComposer(vi.fn(), { profileId: "p2" });
+    await openTools(node);
     const checked = [...document.querySelectorAll("[data-checked]")];
     expect(checked).toHaveLength(1);
     expect(checked[0]?.textContent).toContain("Work");
@@ -144,19 +157,10 @@ describe("browser profile selector", () => {
   });
 
   it("marks 'No profile' as selected when no profile is chosen", async () => {
-    const dom = await renderComposer(vi.fn());
-    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
-    await act(async () => {
-      (trigger as HTMLElement).click();
-    });
+    const node = await renderComposer(vi.fn());
+    await openTools(node);
     const checked = [...document.querySelectorAll("[data-checked]")];
     expect(checked).toHaveLength(1);
     expect(checked[0]?.textContent).toContain("No profile");
-  });
-
-  it("names the bound profile on the locked trigger", async () => {
-    const dom = await renderComposer(vi.fn(), { locked: true, profileId: "p1" });
-    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
-    expect(trigger.getAttribute("aria-label")).toContain("Personal");
   });
 });

@@ -10,7 +10,6 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
-  ChevronRightIcon,
   ClockIcon,
   CloudIcon,
   FolderIcon,
@@ -69,17 +68,14 @@ import {
   PromptInputProvider,
   usePromptInputController,
 } from "../ai-elements/prompt-input";
-import {
-  Popover,
-  PopoverAnchor,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
+import { Popover, PopoverAnchor } from "../ui/popover";
 import {
   Command,
+  CommandGroup,
   CommandItem,
   CommandList,
 } from "../ui/command";
+import { ResponsivePanel } from "../ui/responsive-panel";
 import {
   ComposerCommandMenu,
   type ComposerMenuMode,
@@ -88,6 +84,11 @@ import {
 // ── Slash command entry ──────────────────────────────────────────────
 
 type SlashCommand = AgentChatSlashCommand;
+
+// A row in the composer tools panel. 44px on touch — these are the panel's
+// only targets, and in a bottom sheet they are what the thumb lands on.
+const TOOLS_ITEM_CLASS =
+  "gap-3 rounded-md px-3 py-2 pointer-coarse:min-h-11 pointer-coarse:text-[15px]";
 
 // ── Props ────────────────────────────────────────────────────────────
 
@@ -403,7 +404,6 @@ function ChatComposerInner({
   onViewModeChange,
 }: ChatComposerProps) {
   const { adapter } = useAgentChatAdapterContext();
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   // null = never loaded. Failures keep the last known list — blanking
   // it would erase the trigger's active-profile name over a transient
   // error.
@@ -750,6 +750,31 @@ function ChatComposerInner({
   // reading "Simple Advanced" beside the one control you press every message,
   // and wide enough that the footer wrapped on a phone and stacked the tools
   // into a second toolbar. The labels move to tooltips and screen readers.
+  // ── What the tools panel contains ──────────────────────────────────
+  //
+  // Attach, the pane toggles and the profile picker were four buttons in a
+  // row that a phone has no width for. They are one panel now, but their
+  // gates stay independent — folding them together must not make any of them
+  // appear where it did not, or disappear where it did.
+  //
+  // Attachments are new material for the next turn: the server refuses to
+  // read them as the pending answer (see _resolve_pending_question), so
+  // offering them while a question is open would park it until it times out.
+  // The panes and the profile have no such constraint.
+  const canAttach = !disabled && !awaitingAnswer;
+  const showPaneToggles = Boolean(
+    (canShowBrowser && onToggleBrowser) || (canShowWorkspace && onToggleWorkspace),
+  );
+  const canPickProfile = Boolean(
+    browserProfilesEnabled &&
+      onSelectBrowserProfile &&
+      adapter.listBrowserProfiles,
+  );
+  const showProfilePicker = canPickProfile;
+  // With nothing to put in it the button itself is noise — and a read-only or
+  // awaiting-answer session with no panes has exactly nothing.
+  const showToolsPanel = canAttach || showPaneToggles || showProfilePicker;
+
   const viewModeToggle = onViewModeChange ? (
     <ButtonGroup
       aria-label="Chat view mode"
@@ -847,184 +872,128 @@ function ChatComposerInner({
           </PromptInputBody>
           <PromptInputFooter>
             <PromptInputTools>
-              {/* Attachments are new material for the next turn -- the
-                  server refuses to read them as the pending answer (see
-                  _resolve_pending_question), so offering them here would
-                  park the question until it times out. */}
-              {!disabled && !awaitingAnswer && (
-              <Popover open={addMenuOpen} onOpenChange={setAddMenuOpen}>
-                <PopoverTrigger asChild>
-                  <PromptInputButton aria-label="Add">
-                    <PlusIcon className="size-4" />
-                  </PromptInputButton>
-                </PopoverTrigger>
-                <PopoverContent
-                  side="top"
-                  align="start"
-                  className="w-64 overflow-hidden rounded-xl p-1"
+              {showToolsPanel && (
+                <ResponsivePanel
+                  open={addMenuOpen}
+                  onOpenChange={(open) => {
+                    setAddMenuOpen(open);
+                    // The profile list is fetched lazily; the panel that shows
+                    // it is now this one.
+                    if (open && canPickProfile) {
+                      loadBrowserProfiles();
+                    }
+                  }}
+                  title="Composer tools"
+                  trigger={
+                    <PromptInputButton
+                      aria-label="Composer tools"
+                      tooltip="Attach files, panes and browser profile"
+                    >
+                      <PlusIcon className="size-4" />
+                    </PromptInputButton>
+                  }
                 >
                   <Command>
-                    <CommandList>
-                      <CommandItem
-                        disabled
-                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
-                      >
-                        <CloudIcon className="size-4 shrink-0 text-sky-500" />
-                        Add from OneDrive
-                        <ChevronRightIcon className="ml-auto size-4 shrink-0 text-muted-foreground" />
-                      </CommandItem>
-                      <CommandItem
-                        disabled
-                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
-                      >
-                        <HardDriveIcon className="size-4 shrink-0 text-emerald-500" />
-                        Add from Google Drive
-                      </CommandItem>
-                      <CommandItem
-                        onSelect={() => {
-                          setAddMenuOpen(false);
-                          attachments.openFileDialog();
-                        }}
-                        className="gap-3 rounded-md px-3 py-2 [&>svg:last-child]:hidden"
-                      >
-                        <PaperclipIcon className="size-4 shrink-0 text-muted-foreground" />
-                        Add local files
-                      </CommandItem>
+                    <CommandList className="max-h-none">
+                      {canAttach && (
+                        <CommandGroup heading="Attach">
+                          <CommandItem
+                            onSelect={() => {
+                              setAddMenuOpen(false);
+                              attachments.openFileDialog();
+                            }}
+                            className={TOOLS_ITEM_CLASS}
+                          >
+                            <PaperclipIcon className="size-4 shrink-0 text-muted-foreground" />
+                            Add local files
+                          </CommandItem>
+                          <CommandItem disabled className={TOOLS_ITEM_CLASS}>
+                            <CloudIcon className="size-4 shrink-0 text-sky-500" />
+                            Add from OneDrive
+                          </CommandItem>
+                          <CommandItem disabled className={TOOLS_ITEM_CLASS}>
+                            <HardDriveIcon className="size-4 shrink-0 text-emerald-500" />
+                            Add from Google Drive
+                          </CommandItem>
+                        </CommandGroup>
+                      )}
+                      {showPaneToggles && (
+                        // Panes stay available while a question is pending —
+                        // only attachments are suppressed there.
+                        <CommandGroup heading="Panes">
+                          {canShowBrowser && onToggleBrowser && (
+                            <CommandItem
+                              onSelect={onToggleBrowser}
+                              data-checked={showBrowser || undefined}
+                              className={TOOLS_ITEM_CLASS}
+                            >
+                              <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
+                              Browser
+                            </CommandItem>
+                          )}
+                          {canShowWorkspace && onToggleWorkspace && (
+                            <CommandItem
+                              onSelect={onToggleWorkspace}
+                              data-checked={showWorkspace || undefined}
+                              className={TOOLS_ITEM_CLASS}
+                            >
+                              <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                              Workspace
+                            </CommandItem>
+                          )}
+                        </CommandGroup>
+                      )}
+                      {showProfilePicker && (
+                        <CommandGroup heading="Browser profile">
+                          {browserProfileLocked ? (
+                            // A profile is bound at session creation and cannot
+                            // change mid-session. In a menu there is nothing to
+                            // hover, so the reason is stated outright rather
+                            // than hidden in a tooltip as it was on the button.
+                            <>
+                              <CommandItem
+                                disabled
+                                data-checked={!!browserProfileId || undefined}
+                                className={TOOLS_ITEM_CLASS}
+                              >
+                                <IdCardIcon className="size-4 shrink-0 text-muted-foreground" />
+                                {activeBrowserProfile?.name ?? "No profile"}
+                              </CommandItem>
+                              <p className="px-3 pt-0.5 pb-1.5 text-xs text-muted-foreground">
+                                {activeBrowserProfile
+                                  ? "Locked for this session."
+                                  : "A profile can only be chosen before the session starts."}
+                              </p>
+                            </>
+                          ) : (
+                            // data-checked lights CommandItem's built-in
+                            // trailing check on the selected entry.
+                            [
+                              { id: null as string | null, name: "No profile" },
+                              ...(browserProfiles ?? []),
+                            ].map((p) => (
+                              <CommandItem
+                                key={p.id ?? "none"}
+                                onSelect={() => {
+                                  setAddMenuOpen(false);
+                                  onSelectBrowserProfile?.(p.id);
+                                }}
+                                data-checked={
+                                  (browserProfileId ?? null) === p.id ||
+                                  undefined
+                                }
+                                className={TOOLS_ITEM_CLASS}
+                              >
+                                <IdCardIcon className="size-4 shrink-0 text-muted-foreground" />
+                                {p.name}
+                              </CommandItem>
+                            ))
+                          )}
+                        </CommandGroup>
+                      )}
                     </CommandList>
                   </Command>
-                </PopoverContent>
-              </Popover>
-              )}
-              {canShowBrowser && onToggleBrowser && (
-                <PromptInputButton
-                  aria-label={
-                    showBrowser ? "Hide browser pane" : "Show browser pane"
-                  }
-                  aria-pressed={showBrowser}
-                  onClick={onToggleBrowser}
-                  tooltip={
-                    showBrowser ? "Hide browser pane" : "Show browser pane"
-                  }
-                  className={
-                    showBrowser
-                      ? "bg-accent text-foreground"
-                      : undefined
-                  }
-                >
-                  <GlobeIcon className="size-4" />
-                </PromptInputButton>
-              )}
-              {browserProfilesEnabled &&
-                onSelectBrowserProfile &&
-                adapter.listBrowserProfiles &&
-                (browserProfileLocked ? (
-                  // A profile is bound at session creation; once a session is
-                  // active the choice can't change. Render disabled (via
-                  // aria-disabled, not the `disabled` attribute, so the
-                  // tooltip still shows on hover) with an explanation.
-                  <PromptInputButton
-                    aria-label={
-                      activeBrowserProfile
-                        ? `Select browser profile: ${activeBrowserProfile.name}`
-                        : "Select browser profile"
-                    }
-                    aria-disabled
-                    aria-pressed={!!browserProfileId}
-                    tooltip={
-                      activeBrowserProfile
-                        ? `Browser profile: ${activeBrowserProfile.name} (locked for this session)`
-                        : "A browser profile must be chosen before starting the session"
-                    }
-                    className={`cursor-not-allowed opacity-50 ${
-                      browserProfileId ? "bg-accent text-foreground" : ""
-                    }`}
-                  >
-                    <IdCardIcon className="size-4" />
-                  </PromptInputButton>
-                ) : (
-                  <Popover
-                    open={profileMenuOpen}
-                    onOpenChange={(open) => {
-                      setProfileMenuOpen(open);
-                      if (open) loadBrowserProfiles();
-                    }}
-                  >
-                    <PopoverTrigger asChild>
-                      <PromptInputButton
-                        aria-label={
-                          activeBrowserProfile
-                            ? `Select browser profile: ${activeBrowserProfile.name}`
-                            : "Select browser profile"
-                        }
-                        aria-pressed={!!browserProfileId}
-                        tooltip={
-                          activeBrowserProfile
-                            ? `Browser profile: ${activeBrowserProfile.name}`
-                            : "Select browser profile"
-                        }
-                        className={
-                          browserProfileId
-                            ? "bg-accent text-foreground"
-                            : undefined
-                        }
-                      >
-                        <IdCardIcon className="size-4" />
-                      </PromptInputButton>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      side="top"
-                      align="start"
-                      className="w-64 overflow-hidden rounded-xl p-1"
-                    >
-                      <Command>
-                        <CommandList>
-                          {/* data-checked lights CommandItem's built-in
-                              trailing check on the selected entry. */}
-                          {[
-                            { id: null as string | null, name: "No profile" },
-                            ...(browserProfiles ?? []),
-                          ].map((p) => (
-                            <CommandItem
-                              key={p.id ?? "none"}
-                              onSelect={() => {
-                                setProfileMenuOpen(false);
-                                onSelectBrowserProfile(p.id);
-                              }}
-                              data-checked={
-                                (browserProfileId ?? null) === p.id || undefined
-                              }
-                              className="gap-3 rounded-md px-3 py-2"
-                            >
-                              {p.name}
-                            </CommandItem>
-                          ))}
-                        </CommandList>
-                      </Command>
-                    </PopoverContent>
-                  </Popover>
-                ))}
-              {canShowWorkspace && onToggleWorkspace && (
-                <PromptInputButton
-                  aria-label={
-                    showWorkspace
-                      ? "Hide workspace pane"
-                      : "Show workspace pane"
-                  }
-                  aria-pressed={showWorkspace}
-                  onClick={onToggleWorkspace}
-                  tooltip={
-                    showWorkspace
-                      ? "Hide workspace pane"
-                      : "Show workspace pane"
-                  }
-                  className={
-                    showWorkspace
-                      ? "bg-accent text-foreground"
-                      : undefined
-                  }
-                >
-                  <FolderIcon className="size-4" />
-                </PromptInputButton>
+                </ResponsivePanel>
               )}
               {!disabled && tokenUsage && tokenUsage.contextWindow > 0 && (
                 <Context

@@ -1108,16 +1108,24 @@ describe("AgentChat", () => {
 
     // The composer still renders a disabled textarea so the
     // Simple/Advanced toggle stays accessible -- but the textarea is
-    // disabled, the upload "+" button is hidden, and the read-only
-    // reason is surfaced as the textarea placeholder.
+    // disabled and the read-only reason is surfaced as its placeholder.
     const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
-    const addButton = container.querySelector(
-      'button[aria-label="Add"]',
-    ) as HTMLButtonElement | null;
-
     expect(textarea).not.toBeNull();
     expect(textarea?.disabled).toBe(true);
     expect(textarea?.placeholder).toContain("Scheduled run is read-only");
-    expect(addButton).toBeNull();
+
+    // The tools panel stays: a read-only run still has a workspace worth
+    // opening. What read-only removes is the ability to add material to the
+    // next turn, so the Attach group is gone from inside it.
+    const tools = container.querySelector(
+      'button[aria-label="Composer tools"]',
+    ) as HTMLButtonElement | null;
+    expect(tools).not.toBeNull();
+    await act(async () => {
+      tools?.click();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("Workspace");
+    expect(document.body.textContent).not.toContain("Add local files");
   });
 });
