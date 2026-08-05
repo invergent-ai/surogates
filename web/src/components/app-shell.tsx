@@ -6,10 +6,17 @@ import { useTheme } from "next-themes";
 import type * as React from "react";
 import { useState } from "react";
 
+import { getAppRouteTitle } from "@/components/app-route-title";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
+  /**
+   * Contents of the phone header's title area. Defaults to the current route's
+   * name — no page was passing this, so the header rendered blank on every
+   * route while the page below spelled its own title out. Pass something only
+   * where a page has a better title than its route does.
+   */
   headerSlot?: React.ReactNode;
   children: React.ReactNode;
 };
@@ -72,7 +79,9 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
             >
               <MenuIcon className="h-5 w-5" />
             </button>
-            <div className="min-w-0 flex-1">{headerSlot}</div>
+            <div className="min-w-0 flex-1 truncate text-[15px] font-semibold">
+              {headerSlot ?? getAppRouteTitle(pathname)}
+            </div>
             <button
               type="button"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}

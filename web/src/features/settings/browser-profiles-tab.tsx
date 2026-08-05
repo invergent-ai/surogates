@@ -60,8 +60,10 @@ export function BrowserProfilesTab() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
-        <div>
+      {/* Title, explanation and action do not fit one line on a phone; the
+          action takes its own row there rather than squeezing the copy. */}
+      <div className="mb-2 flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        <div className="min-w-0">
           <h2 className="text-base font-semibold text-foreground">
             Browser Profiles
           </h2>
@@ -69,7 +71,11 @@ export function BrowserProfilesTab() {
             Preserve browser state and login sessions across tasks.
           </p>
         </div>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
+        <Button
+          size="sm"
+          onClick={() => setCreateOpen(true)}
+          className="shrink-0"
+        >
           <Plus className="size-4" /> Create Profile
         </Button>
       </div>
@@ -85,11 +91,13 @@ export function BrowserProfilesTab() {
               key={p.id}
               className="bg-card border border-line rounded-xl px-5 py-4"
             >
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold text-foreground">
+              {/* "Set up authentication" is a wide button; beside a profile
+                  name on a phone neither has room, so the row wraps. */}
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+                <div className="min-w-0 text-sm font-semibold text-foreground">
                   {p.name}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="ml-auto flex shrink-0 items-center gap-2">
                   <Button
                     size="sm"
                     variant="outline"

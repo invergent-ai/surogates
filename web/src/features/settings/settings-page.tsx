@@ -4,10 +4,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  SaveIcon,
-  Loader2Icon,
-  TrashIcon,
+  ArrowLeftIcon,
+  ChevronRightIcon,
+  Code2Icon,
+  CreditCardIcon,
+  GlobeIcon,
   LinkIcon,
+  Loader2Icon,
+  type LucideIcon,
+  SaveIcon,
+  TrashIcon,
+  UserIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
@@ -56,6 +63,98 @@ const PLATFORM_LABELS: Record<string, string> = {
   telegram: "Telegram",
 };
 
+type TabId =
+  | "profile"
+  | "channels"
+  | "plan"
+  | "coding-agents"
+  | "browser-profiles";
+
+const TAB_META: Record<
+  TabId,
+  { label: string; blurb: string; Icon: LucideIcon }
+> = {
+  profile: {
+    label: "Profile",
+    blurb: "Your name, email and password",
+    Icon: UserIcon,
+  },
+  channels: {
+    label: "Connected Channels",
+    blurb: "Slack or Telegram accounts linked to you",
+    Icon: LinkIcon,
+  },
+  plan: {
+    label: "Plan & Usage",
+    blurb: "Your subscription and what you have used",
+    Icon: CreditCardIcon,
+  },
+  "coding-agents": {
+    label: "Coding Agents",
+    blurb: "Repositories the assistant can work in",
+    Icon: Code2Icon,
+  },
+  "browser-profiles": {
+    label: "Browser Profiles",
+    blurb: "Saved logins its browser can reuse",
+    Icon: GlobeIcon,
+  },
+};
+
+/**
+ * Phone navigation for Settings: an index naming every section, and the
+ * section itself with a way back.
+ *
+ * Five tabs, four of them two words long, do not fit a 375px strip — three
+ * labels fit and the rest are found by swiping a bar most people never
+ * realise scrolls. The sections are also a list of unrelated settings, which
+ * is the case the drill-down exists for. The strip stays from `md` up, where
+ * it fits and a cursor makes it cheap to use.
+ */
+function SettingsIndex({
+  tabs,
+  onSelect,
+}: {
+  tabs: TabId[];
+  onSelect: (id: TabId) => void;
+}) {
+  return (
+    <nav aria-label="Settings sections" className="md:hidden">
+      <ul className="overflow-hidden rounded-2xl border border-line bg-card">
+        {tabs.map((id, index) => {
+          const { label, blurb, Icon } = TAB_META[id];
+          return (
+            <li key={id}>
+              {index > 0 && (
+                <div
+                  aria-hidden="true"
+                  className="ml-[52px] h-px bg-foreground/[0.06]"
+                />
+              )}
+              <button
+                type="button"
+                onClick={() => onSelect(id)}
+                className="flex min-h-14 w-full items-center gap-3 px-4 py-3 text-left active:bg-foreground/[0.04]"
+              >
+                <Icon className="size-5 shrink-0 text-muted-foreground" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-[15px] font-medium text-foreground">
+                    {label}
+                  </span>
+                  <span className="truncate text-[12px] text-muted-foreground">
+                    {blurb}
+                  </span>
+                </span>
+                <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground/60" />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
 export function SettingsPage() {
   const navigate = useNavigate();
   const user = useAppStore((s) => s.user);
@@ -83,6 +182,23 @@ export function SettingsPage() {
     void fetchUser();
     void fetchCapabilities();
   }, [fetchSessions, fetchUser, fetchCapabilities]);
+
+  // ── Section navigation ─────────────────────────────────────────────
+  //
+  // One selection drives both forms: the tab strip from `md` up, and the
+  // index/section drill-down below it. `sectionOpen` only means anything on a
+  // phone — the desktop strip always shows its section.
+
+  const [tab, setTab] = useState<TabId>("profile");
+  const [sectionOpen, setSectionOpen] = useState(false);
+
+  const availableTabs: TabId[] = [
+    "profile",
+    ...(channelsEnabled ? (["channels"] as const) : []),
+    "plan",
+    ...(codingAgentsEnabled ? (["coding-agents"] as const) : []),
+    ...(browserProfilesEnabled ? (["browser-profiles"] as const) : []),
+  ];
 
   // ── Profile tab state ──────────────────────────────────────────────
 
@@ -134,6 +250,18 @@ export function SettingsPage() {
     }
   }, []);
 
+  // Channels load on first visit rather than on mount, from either form.
+  const selectTab = useCallback(
+    (next: TabId) => {
+      setTab(next);
+      setSectionOpen(true);
+      if (next === "channels" && channels.length === 0) {
+        void loadChannels();
+      }
+    },
+    [channels.length, loadChannels],
+  );
+
   const handleUnlink = useCallback(async () => {
     if (!unlinkTarget) return;
     try {
@@ -153,25 +281,22 @@ export function SettingsPage() {
     <AppShell sidebar={<SessionSidebar />}>
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
-          {/* Header */}
-          <div className="flex items-center gap-3 mb-8">
+          {/* The phone header already names this page (see app-route-title),
+              so the title only appears where that header does not. */}
+          <div className="mb-8 hidden items-center gap-3 md:flex">
             <h1 className="text-xl font-bold tracking-tight text-foreground">
               Settings
             </h1>
           </div>
 
-          <Tabs defaultValue="profile">
-            <TabsList variant="line" className="mb-6 overflow-x-auto">
+          <Tabs value={tab} onValueChange={(value) => selectTab(value as TabId)}>
+            <TabsList
+              variant="line"
+              className="mb-6 hidden overflow-x-auto md:inline-flex"
+            >
               <TabsTrigger value="profile">Profile</TabsTrigger>
               {channelsEnabled && (
-                <TabsTrigger
-                  value="channels"
-                  onClick={() => {
-                    if (channels.length === 0) void loadChannels();
-                  }}
-                >
-                  Connected Channels
-                </TabsTrigger>
+                <TabsTrigger value="channels">Connected Channels</TabsTrigger>
               )}
               <TabsTrigger value="plan">Plan &amp; Usage</TabsTrigger>
               {codingAgentsEnabled && (
@@ -183,6 +308,24 @@ export function SettingsPage() {
                 </TabsTrigger>
               )}
             </TabsList>
+
+            {!sectionOpen && (
+              <SettingsIndex tabs={availableTabs} onSelect={selectTab} />
+            )}
+            {sectionOpen && (
+              <button
+                type="button"
+                onClick={() => setSectionOpen(false)}
+                className="-ml-2 mb-4 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium text-muted-foreground active:bg-foreground/[0.04] md:hidden"
+              >
+                <ArrowLeftIcon className="size-4" />
+                Settings
+              </button>
+            )}
+
+            {/* Radix renders only the active section; on a phone it stays
+                hidden until one is picked from the index above. */}
+            <div className={cn("md:block", sectionOpen ? "block" : "hidden")}>
 
             {/* ── Plan & usage ── */}
             <TabsContent value="plan">
@@ -361,6 +504,7 @@ export function SettingsPage() {
                 <BrowserProfilesTab />
               </TabsContent>
             )}
+            </div>
           </Tabs>
         </div>
       </div>
