@@ -93,6 +93,30 @@ describe("Composer view-mode toggle", () => {
     ]);
   });
 
+  it("renders the toggle once per width, never both at once", () => {
+    // The toggle exists twice — above the input on a phone, beside Send with
+    // a cursor — and a media query hides one. jsdom applies no media queries,
+    // so this asserts the gating classes rather than visibility: dropping one
+    // would show two mode toggles at the same time, and every other test here
+    // uses querySelector and would not notice.
+    const dom = mount(
+      <ChatComposer
+        onSend={sendFn}
+        onStop={stopFn}
+        isRunning={false}
+        viewMode="simple"
+        onViewModeChange={vi.fn()}
+      />,
+    );
+    const groups = Array.from(
+      dom.querySelectorAll("[role='group'][aria-label='Chat view mode']"),
+    );
+    expect(groups.length).toBe(2);
+    const gates = groups.map((g) => g.parentElement?.className ?? "");
+    expect(gates.some((c) => c.includes("md:hidden"))).toBe(true);
+    expect(gates.some((c) => c.includes("hidden md:flex"))).toBe(true);
+  });
+
   it("shows the current mode as aria-pressed", () => {
     const dom = mount(
       <ChatComposer
