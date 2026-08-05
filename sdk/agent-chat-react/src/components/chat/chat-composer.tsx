@@ -48,6 +48,7 @@ import {
   ContextTrigger,
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
+import { cn } from "../../lib/utils";
 import { ButtonGroup } from "../ui/button-group";
 import {
   Item,
@@ -757,7 +758,7 @@ function ChatComposerInner({
   const viewModeToggle = onViewModeChange ? (
     <ButtonGroup
       aria-label="Chat view mode"
-      className="overflow-hidden rounded-md border border-border"
+      className="overflow-hidden rounded-full border border-border bg-muted/40 p-0.5"
     >
       <PromptInputButton
         aria-label="Simple view"
@@ -765,8 +766,12 @@ function ChatComposerInner({
         tooltip="Simple — just the conversation"
         variant={viewMode === "simple" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("simple")}
+        className={cn(
+          "size-8 rounded-full",
+          viewMode === "simple" && "shadow-sm",
+        )}
       >
-        <MessageSquareIcon className="size-4" />
+        <MessageSquareIcon className="size-[18px]" />
       </PromptInputButton>
       <PromptInputButton
         aria-label="Advanced view"
@@ -774,8 +779,12 @@ function ChatComposerInner({
         tooltip="Advanced — every step the agent took"
         variant={viewMode === "expert" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("expert")}
+        className={cn(
+          "size-8 rounded-full",
+          viewMode === "expert" && "shadow-sm",
+        )}
       >
-        <ListTreeIcon className="size-4" />
+        <ListTreeIcon className="size-[18px]" />
       </PromptInputButton>
     </ButtonGroup>
   ) : null;
