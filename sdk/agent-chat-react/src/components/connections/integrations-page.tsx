@@ -154,7 +154,7 @@ export function IntegrationsPage({ agentId, adapter, onBack }: IntegrationsPageP
       <button
         type="button"
         onClick={onBack}
-        className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        className="-mx-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-lg px-2 text-sm text-muted-foreground pointer-fine:mx-0 pointer-fine:min-h-0 pointer-fine:px-0 pointer-fine:hover:text-foreground"
       >
         <ArrowLeftIcon className="h-4 w-4" />
         Back

@@ -109,7 +109,7 @@ export function CodingAgentsPanel({ agentId, adapter, onBack }: CodingAgentsPane
         <button
           type="button"
           onClick={onBack}
-          className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          className="-mx-2 inline-flex min-h-11 w-fit items-center gap-1.5 rounded-lg px-2 text-sm text-muted-foreground pointer-fine:mx-0 pointer-fine:min-h-0 pointer-fine:px-0 pointer-fine:hover:text-foreground"
         >
           <ArrowLeftIcon className="h-4 w-4" />
           Back
@@ -282,7 +282,7 @@ function ProviderCard({
           type="button"
           disabled={busy}
           onClick={submit}
-          className="inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:bg-accent disabled:opacity-60"
+          className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-border px-3 text-xs text-foreground disabled:opacity-60 pointer-fine:min-h-0 pointer-fine:py-1.5 pointer-fine:hover:bg-accent"
         >
           {busy && <Loader2Icon className="h-3.5 w-3.5 animate-spin" />}
           {connected ? "Update" : "Connect"}
