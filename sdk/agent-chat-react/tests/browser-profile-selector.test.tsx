@@ -81,7 +81,7 @@ describe("browser profile selector", () => {
     const onSelect = vi.fn();
     const node = await renderComposer(onSelect);
     const trigger = node.querySelector(
-      '[aria-label="Select browser profile"]',
+      '[aria-label^="Select browser profile"]',
     ) as HTMLElement;
     await act(async () => trigger.click());
     await act(async () => {
@@ -103,7 +103,7 @@ describe("browser profile selector", () => {
     // profile binds to the session.
     const node = await renderComposer(vi.fn());
     expect(
-      node.querySelector('[aria-label="Select browser profile"]'),
+      node.querySelector('[aria-label^="Select browser profile"]'),
     ).not.toBeNull();
   });
 
@@ -111,7 +111,7 @@ describe("browser profile selector", () => {
     const onSelect = vi.fn();
     const node = await renderComposer(onSelect, { locked: true });
     const trigger = node.querySelector(
-      '[aria-label="Select browser profile"]',
+      '[aria-label^="Select browser profile"]',
     ) as HTMLElement;
     expect(trigger).not.toBeNull();
     expect(trigger.getAttribute("aria-disabled")).toBe("true");
@@ -127,10 +127,12 @@ describe("browser profile selector", () => {
   it("marks the selected profile with a check and names it on the trigger", async () => {
     const dom = await renderComposer(vi.fn(), { profileId: "p2" });
 
-    // The trigger itself shows which profile is active — no need to
-    // open the menu to find out.
-    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
-    expect(trigger.textContent).toContain("Work");
+    // The trigger no longer prints the profile name beside its icon — that
+    // made this one button several times wider than every other tool in the
+    // row. It says which profile is active through its accessible name (and
+    // its tooltip), which is the only name it now has.
+    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
+    expect(trigger.getAttribute("aria-label")).toContain("Work");
 
     await act(async () => {
       (trigger as HTMLElement).click();
@@ -143,7 +145,7 @@ describe("browser profile selector", () => {
 
   it("marks 'No profile' as selected when no profile is chosen", async () => {
     const dom = await renderComposer(vi.fn());
-    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
+    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
     await act(async () => {
       (trigger as HTMLElement).click();
     });
@@ -154,7 +156,7 @@ describe("browser profile selector", () => {
 
   it("names the bound profile on the locked trigger", async () => {
     const dom = await renderComposer(vi.fn(), { locked: true, profileId: "p1" });
-    const trigger = dom.querySelector('[aria-label="Select browser profile"]')!;
-    expect(trigger.textContent).toContain("Personal");
+    const trigger = dom.querySelector('[aria-label^="Select browser profile"]')!;
+    expect(trigger.getAttribute("aria-label")).toContain("Personal");
   });
 });

@@ -425,11 +425,6 @@ function ChatComposerInner({
   }, [browserProfilesEnabled, browserProfileId, browserProfiles, loadBrowserProfiles]);
   const activeBrowserProfile =
     (browserProfiles ?? []).find((p) => p.id === browserProfileId) ?? null;
-  const profileTriggerLabel = activeBrowserProfile && (
-    <span className="max-w-24 truncate text-xs">
-      {activeBrowserProfile.name}
-    </span>
-  );
   const { textInput, attachments } = usePromptInputController();
   // While the agent is parked on a question, the turn is technically
   // still running but the user is the one being waited on: the composer
@@ -928,7 +923,11 @@ function ChatComposerInner({
                   // aria-disabled, not the `disabled` attribute, so the
                   // tooltip still shows on hover) with an explanation.
                   <PromptInputButton
-                    aria-label="Select browser profile"
+                    aria-label={
+                      activeBrowserProfile
+                        ? `Select browser profile: ${activeBrowserProfile.name}`
+                        : "Select browser profile"
+                    }
                     aria-disabled
                     aria-pressed={!!browserProfileId}
                     tooltip={
@@ -941,7 +940,6 @@ function ChatComposerInner({
                     }`}
                   >
                     <IdCardIcon className="size-4" />
-                    {profileTriggerLabel}
                   </PromptInputButton>
                 ) : (
                   <Popover
@@ -953,7 +951,11 @@ function ChatComposerInner({
                   >
                     <PopoverTrigger asChild>
                       <PromptInputButton
-                        aria-label="Select browser profile"
+                        aria-label={
+                          activeBrowserProfile
+                            ? `Select browser profile: ${activeBrowserProfile.name}`
+                            : "Select browser profile"
+                        }
                         aria-pressed={!!browserProfileId}
                         tooltip={
                           activeBrowserProfile
@@ -967,7 +969,6 @@ function ChatComposerInner({
                         }
                       >
                         <IdCardIcon className="size-4" />
-                        {profileTriggerLabel}
                       </PromptInputButton>
                     </PopoverTrigger>
                     <PopoverContent
@@ -1096,11 +1097,11 @@ function ChatComposerInner({
                   </ContextContent>
                 </Context>
               )}
-              {viewModeToggle}
             </PromptInputTools>
             {/* ml-auto keeps this group right-aligned once the footer wraps,
                 where justify-between no longer applies to a lone line. */}
             <div className="ml-auto flex shrink-0 items-center gap-2">
+              {viewModeToggle}
               {!disabled && (
                 <PromptInputSubmit
                   status={status}
