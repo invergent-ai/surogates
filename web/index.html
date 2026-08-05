@@ -5,19 +5,41 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
+    <meta name="description" content="Chat with your assistant." />
+
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0c0a09" media="(prefers-color-scheme: dark)" />
+
+    <!-- Installed-app behaviour. `apple-mobile-web-app-capable` is the old
+         spelling iOS still reads; `mobile-web-app-capable` is the standard
+         one everywhere else. Only the latter was here, so iOS opened the
+         home-screen shortcut in Safari chrome instead of standalone. -->
     <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Surogate" />
+    <meta name="application-name" content="Surogate" />
+
+    <!-- Link previews. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Surogate" />
+    <meta property="og:title" content="Surogate" />
+    <meta property="og:description" content="Chat with your assistant." />
+    <meta property="og:image" content="/icons/icon-512.png" />
+    <meta name="twitter:card" content="summary" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-    <title>Surogates Web UI</title>
+    <title>Surogate</title>
   </head>
   <body>
     <div id="root"></div>
