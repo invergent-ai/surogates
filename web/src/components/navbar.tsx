@@ -110,7 +110,7 @@ export function SessionSidebar() {
           "flex items-center border-b border-line min-h-14",
           "justify-center py-4",
           "lg:justify-start lg:px-4 lg:py-4 lg:gap-2.5",
-          "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-4 group-data-[mode=sheet]:py-4 group-data-[mode=sheet]:gap-2.5",
+          "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-4 group-data-[mode=sheet]:py-3 group-data-[mode=sheet]:gap-2.5",
           // The sheet's close button floats over the end of this row — see
           // AppShell — so the brand keeps clear of it.
           "group-data-[mode=sheet]:pe-12",
@@ -132,8 +132,8 @@ export function SessionSidebar() {
       {/* Nav buttons */}
       <div
         className={cn(
-          "border-b border-line",
-          "p-1.5 lg:p-3 group-data-[mode=sheet]:p-3",
+          "flex flex-col gap-0.5 border-b border-line",
+          "p-1.5 lg:p-2.5 group-data-[mode=sheet]:p-2.5",
         )}
       >
         {singleSession ? (
@@ -143,7 +143,7 @@ export function SessionSidebar() {
             variant="outline"
             onClick={handleOpenChat}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
               "justify-center px-0 lg:justify-start lg:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
@@ -156,7 +156,7 @@ export function SessionSidebar() {
             variant="outline"
             onClick={handleNewSession}
             className={cn(
-              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
               "justify-center px-0 lg:justify-start lg:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
@@ -170,7 +170,7 @@ export function SessionSidebar() {
             variant="ghost"
             onClick={() => void navigate({ to: "/skills" })}
             className={cn(
-              "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
               "justify-center px-0 lg:justify-start lg:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
@@ -184,7 +184,7 @@ export function SessionSidebar() {
             variant="ghost"
             onClick={() => void navigate({ to: "/agents" })}
             className={cn(
-              "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11",
+              "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]",
               "justify-center px-0 lg:justify-start lg:px-3",
               "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
             )}
@@ -197,7 +197,7 @@ export function SessionSidebar() {
           variant="ghost"
           onClick={() => void navigate({ to: "/inbox" })}
           className={cn(
-            "w-full gap-2 mt-1 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11 relative",
+            "w-full gap-2 min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px] relative",
             "justify-center px-0 lg:justify-start lg:px-3",
             "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-3",
           )}
@@ -304,7 +304,7 @@ export function SessionSidebar() {
           <button
             type="button"
             onClick={() => void navigate({ to: "/settings" })}
-            className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11"
+            className="flex items-center gap-2 px-1 py-1.5 mb-1.5 w-full rounded-md hover:bg-input transition-colors cursor-pointer min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12"
           >
             <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center font-bold text-primary text-xs shrink-0">
               {(user.display_name ?? user.email)?.[0]?.toUpperCase() ?? "?"}
@@ -321,7 +321,7 @@ export function SessionSidebar() {
           <button
             type="button"
             onClick={handleLogout}
-            className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-11"
+            className="flex items-center gap-2 flex-1 px-2.5 py-1.5 rounded-md text-sm text-subtle hover:bg-input hover:text-foreground transition-colors min-h-11 lg:min-h-9 group-data-[mode=sheet]:min-h-12 group-data-[mode=sheet]:text-[15px]"
           >
             <LogOutIcon className="w-4 h-4" />
             Sign out
