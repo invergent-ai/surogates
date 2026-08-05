@@ -111,6 +111,9 @@ export function SessionSidebar() {
           "justify-center py-4",
           "lg:justify-start lg:px-4 lg:py-4 lg:gap-2.5",
           "group-data-[mode=sheet]:justify-start group-data-[mode=sheet]:px-4 group-data-[mode=sheet]:py-4 group-data-[mode=sheet]:gap-2.5",
+          // The sheet's close button floats over the end of this row — see
+          // AppShell — so the brand keeps clear of it.
+          "group-data-[mode=sheet]:pe-12",
         )}
       >
         <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center shrink-0">

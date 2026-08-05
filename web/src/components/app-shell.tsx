@@ -1,13 +1,18 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useRouterState } from "@tanstack/react-router";
-import { MenuIcon, MoonIcon, SunIcon } from "lucide-react";
+import { MenuIcon, MoonIcon, SunIcon, XIcon } from "lucide-react";
 import { useTheme } from "next-themes";
 import type * as React from "react";
 import { useState } from "react";
 
 import { getAppRouteTitle } from "@/components/app-route-title";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetTitle,
+} from "@/components/ui/sheet";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
@@ -49,14 +54,28 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
         {sidebar}
       </aside>
 
-      {/* Phone: sheet drawer */}
+      {/* Phone: sheet drawer. It owns the device insets — the footer used to
+          sit under the home indicator — and keeps a visible way to shut
+          itself: swiping and tapping the scrim both work, but neither is
+          visible, and a drawer with no button to close reads as stuck. */}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
         <SheetContent
           side="left"
-          className="md:hidden p-0"
+          // The built-in close is 32px and sits at a fixed `top-3`, which on a
+          // notched phone lands inside the notch; this one clears the inset
+          // and meets the 44px touch minimum.
           showCloseButton={false}
+          className="p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] ps-[env(safe-area-inset-left)] md:hidden"
         >
-          <SheetTitle>Navigation</SheetTitle>
+          {/* The sidebar below carries its own visible branding, so this is
+              the accessible name only — Radix Dialog requires one. */}
+          <SheetTitle className="sr-only">Navigation</SheetTitle>
+          <SheetClose
+            aria-label="Close navigation"
+            className="absolute end-2 top-[calc(0.75rem+env(safe-area-inset-top))] z-10 inline-flex size-11 items-center justify-center rounded-xl text-subtle transition-colors active:bg-input"
+          >
+            <XIcon className="size-5" />
+          </SheetClose>
           <div
             data-mode="sheet"
             className="group flex flex-col h-full overflow-hidden"
