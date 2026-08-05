@@ -36,15 +36,14 @@ import type {
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { splitComposerFiles } from "../../lib/split-composer-files";
 import {
-  Context,
   ContextCacheUsage,
-  ContextContent,
   ContextContentBody,
   ContextContentHeader,
+  ContextIcon,
   ContextInputUsage,
   ContextOutputUsage,
   ContextReasoningUsage,
-  ContextTrigger,
+  ContextValueProvider,
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
@@ -750,6 +749,13 @@ function ChatComposerInner({
   // reading "Simple Advanced" beside the one control you press every message,
   // and wide enough that the footer wrapped on a phone and stacked the tools
   // into a second toolbar. The labels move to tooltips and screen readers.
+  const [contextOpen, setContextOpen] = useState(false);
+  // Whole percent: the popover header already prints the exact figure, and a
+  // decimal on a button this size is noise.
+  const contextPercentLabel = tokenUsage?.contextWindow
+    ? `${Math.min(100, Math.round((tokenUsage.totalTokens / tokenUsage.contextWindow) * 100))}%`
+    : "0%";
+
   // ── What the tools panel contains ──────────────────────────────────
   //
   // Attach, the pane toggles and the profile picker were four buttons in a
@@ -787,11 +793,13 @@ function ChatComposerInner({
         variant={viewMode === "simple" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("simple")}
         className={cn(
-          "size-8 rounded-full",
+          // 32px is a comfortable segment for a cursor and a miss for a
+          // thumb, so touch takes both halves to the 44px floor.
+          "size-8 rounded-full pointer-coarse:size-11",
           viewMode === "simple" && "shadow-sm",
         )}
       >
-        <MessageSquareIcon className="size-[18px]" />
+        <MessageSquareIcon className="size-[18px] pointer-coarse:size-5" />
       </PromptInputButton>
       <PromptInputButton
         aria-label="Advanced view"
@@ -800,11 +808,13 @@ function ChatComposerInner({
         variant={viewMode === "expert" ? "secondary" : "ghost"}
         onClick={() => onViewModeChange("expert")}
         className={cn(
-          "size-8 rounded-full",
+          // 32px is a comfortable segment for a cursor and a miss for a
+          // thumb, so touch takes both halves to the 44px floor.
+          "size-8 rounded-full pointer-coarse:size-11",
           viewMode === "expert" && "shadow-sm",
         )}
       >
-        <ListTreeIcon className="size-[18px]" />
+        <ListTreeIcon className="size-[18px] pointer-coarse:size-5" />
       </PromptInputButton>
     </ButtonGroup>
   ) : null;
@@ -996,7 +1006,7 @@ function ChatComposerInner({
                 </ResponsivePanel>
               )}
               {!disabled && tokenUsage && tokenUsage.contextWindow > 0 && (
-                <Context
+                <ContextValueProvider
                   usedTokens={tokenUsage.totalTokens}
                   maxTokens={tokenUsage.contextWindow}
                   modelId={tokenUsage.model}
@@ -1010,11 +1020,29 @@ function ChatComposerInner({
                     outputTokenDetails: undefined as never,
                   }}
                 >
-                  <ContextTrigger
-                    size="icon-sm"
-                    className="rounded-sm border border-input/70 text-foreground hover:bg-accent"
-                  />
-                  <ContextContent>
+                  <ResponsivePanel
+                    open={contextOpen}
+                    onOpenChange={setContextOpen}
+                    title="Session context"
+                    align="end"
+                    className="min-w-60 divide-y p-0"
+                    trigger={
+                      <PromptInputButton
+                        aria-label={`Session context: ${contextPercentLabel} of the window used`}
+                        tooltip="Session context"
+                        // A bare ring is legible next to a cursor, where a
+                        // tooltip explains it. On touch there is no hover, so
+                        // the ring gets its number and reads as a button with
+                        // something to say rather than an unexplained glyph.
+                        className="gap-1.5 rounded-sm border border-input/70 text-foreground hover:bg-accent"
+                      >
+                        <ContextIcon />
+                        <span className="hidden text-xs tabular-nums pointer-coarse:inline">
+                          {contextPercentLabel}
+                        </span>
+                      </PromptInputButton>
+                    }
+                  >
                     <ContextContentHeader />
                     <ContextContentBody>
                       {tokenUsage.totalTokens > 0 ? (
@@ -1057,14 +1085,20 @@ function ChatComposerInner({
                         <Button
                           type="button"
                           size="xs"
-                          onClick={() => onSend("/compress")}
+                          className="pointer-coarse:h-11 pointer-coarse:px-4 pointer-coarse:text-sm"
+                          onClick={() => {
+                            // The sheet does not close itself on a plain
+                            // button the way it does on a menu selection.
+                            setContextOpen(false);
+                            onSend("/compress");
+                          }}
                         >
                           Compress
                         </Button>
                       </div>
                     )}
-                  </ContextContent>
-                </Context>
+                  </ResponsivePanel>
+                </ContextValueProvider>
               )}
             </PromptInputTools>
             {/* ml-auto keeps this group right-aligned once the footer wraps,

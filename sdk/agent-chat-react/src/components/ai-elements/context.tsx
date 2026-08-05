@@ -9,7 +9,7 @@ import {
 import { Progress } from "../ui/progress";
 import { cn } from "../../lib/utils";
 import type { LanguageModelUsage } from "ai";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { createContext, useContext, useMemo } from "react";
 import { getUsage } from "tokenlens";
 
@@ -40,6 +40,35 @@ const useContextValue = () => {
   return context;
 };
 
+export type ContextValueProviderProps = ContextSchema & {
+  children?: ReactNode;
+};
+
+/**
+ * The usage figures on their own, without the popover `Context` pairs them
+ * with. Every ContextContent* part reads from here, so a caller that needs to
+ * present them in something other than a popover — a bottom sheet, say — can
+ * wrap that instead and still use the same parts.
+ */
+export const ContextValueProvider = ({
+  usedTokens,
+  maxTokens,
+  usage,
+  modelId,
+  children,
+}: ContextValueProviderProps) => {
+  const contextValue = useMemo(
+    () => ({ maxTokens, modelId, usage, usedTokens }),
+    [maxTokens, modelId, usage, usedTokens]
+  );
+
+  return (
+    <ContextContext.Provider value={contextValue}>
+      {children}
+    </ContextContext.Provider>
+  );
+};
+
 export type ContextProps = ComponentProps<typeof Popover> & ContextSchema;
 
 export const Context = ({
@@ -48,20 +77,18 @@ export const Context = ({
   usage,
   modelId,
   ...props
-}: ContextProps) => {
-  const contextValue = useMemo(
-    () => ({ maxTokens, modelId, usage, usedTokens }),
-    [maxTokens, modelId, usage, usedTokens]
-  );
+}: ContextProps) => (
+  <ContextValueProvider
+    maxTokens={maxTokens}
+    modelId={modelId}
+    usage={usage}
+    usedTokens={usedTokens}
+  >
+    <Popover {...props} />
+  </ContextValueProvider>
+);
 
-  return (
-    <ContextContext.Provider value={contextValue}>
-      <Popover {...props} />
-    </ContextContext.Provider>
-  );
-};
-
-const ContextIcon = () => {
+export const ContextIcon = () => {
   const { usedTokens, maxTokens } = useContextValue();
   const circumference = 2 * Math.PI * ICON_RADIUS;
   const usedPercent = usedTokens / maxTokens;
