@@ -1054,7 +1054,9 @@ function ChatComposerInner({
                 </Context>
               )}
             </PromptInputTools>
-            <div className="flex items-center gap-2">
+            {/* ml-auto keeps this group right-aligned once the footer wraps,
+                where justify-between no longer applies to a lone line. */}
+            <div className="ml-auto flex items-center gap-2">
               {onViewModeChange && (
                 <ButtonGroup
                   aria-label="Chat view mode"

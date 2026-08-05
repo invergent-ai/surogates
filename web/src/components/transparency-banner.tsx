@@ -1,3 +1,7 @@
+import * as sessionsApi from "@/api/sessions";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { ShieldCheckIcon } from "lucide-react";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
@@ -7,10 +11,6 @@
 // agent can execute tools. Declining disables interaction.
 //
 import { useState } from "react";
-import { ShieldCheckIcon } from "lucide-react";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import * as sessionsApi from "@/api/sessions";
 
 type TransparencyLevel = "none" | "basic" | "enhanced" | "full";
 
@@ -78,7 +78,9 @@ export function TransparencyBanner({
   };
 
   return (
-    <Alert className="w-full max-w-2xl border-primary/30 bg-primary/5 shadow-lg">
+    // h-fit keeps the card at its content height inside the scrolling
+    // phone overlay rather than stretching to fill it.
+    <Alert className="h-fit w-full max-w-2xl border-primary/30 bg-primary/5 shadow-lg">
       <ShieldCheckIcon className="text-primary" />
       <AlertTitle className="text-base font-semibold">
         AI System Disclosure
@@ -86,12 +88,8 @@ export function TransparencyBanner({
       <AlertDescription className="mt-2 space-y-3">
         <p>{texts.body}</p>
         <p className="text-xs text-muted-foreground">{texts.legal}</p>
-        <div className="flex items-center gap-2 pt-1">
-          <Button
-            size="sm"
-            onClick={handleAccept}
-            disabled={confirming}
-          >
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <Button size="sm" onClick={handleAccept} disabled={confirming}>
             {confirming ? "Confirming..." : "I understand and accept"}
           </Button>
           <Button

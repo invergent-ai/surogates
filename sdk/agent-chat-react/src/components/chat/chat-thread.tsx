@@ -2361,13 +2361,17 @@ export function ChatThread({
   // session) — otherwise fall through to the normal scroll-thread layout.
   if (messages.length === 0 && !isLoadingHistory && !disabled) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center overflow-hidden bg-background px-3 text-base">
-        <div className="w-full">
-          <h2 className="mb-8 text-center text-2xl font-bold text-foreground">
+      // A centred hero is a deliberate desktop look. On a phone it leaves the
+      // input floating mid-screen with dead space under it, and the keyboard
+      // then opens across that gap. There the composer keeps its usual place
+      // at the bottom edge and the greeting takes the space above it.
+      <div className="flex flex-1 flex-col items-center justify-end overflow-hidden bg-background px-3 text-base md:justify-center">
+        <div className="flex w-full flex-1 flex-col justify-center md:flex-none">
+          <h2 className="mb-6 text-center text-2xl font-bold text-foreground md:mb-8">
             What should we do ?
           </h2>
-          {composerArea}
         </div>
+        <div className="w-full">{composerArea}</div>
       </div>
     );
   }

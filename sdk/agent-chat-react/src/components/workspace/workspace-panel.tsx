@@ -1,42 +1,44 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { MouseEvent, ReactNode } from "react";
 import {
-  AlertCircleIcon,
-  DownloadIcon,
-  FolderOpenIcon,
-  Loader2Icon,
-  RefreshCwIcon,
-  TrashIcon,
-  UploadIcon,
+	AlertCircleIcon,
+	DownloadIcon,
+	FolderOpenIcon,
+	Loader2Icon,
+	RefreshCwIcon,
+	TrashIcon,
+	UploadIcon,
 } from "lucide-react";
 import {
-  FileTree,
-  FileTreeFile,
-  FileTreeFolder,
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
+import type { MouseEvent, ReactNode } from "react";
+import { formatFileSize } from "../../lib/format";
+import { cn } from "../../lib/utils";
+import type {
+	AgentChatAdapter,
+	AgentChatWorkspaceEntry,
+	AgentChatWorkspaceFile,
+} from "../../types";
+import {
+	FileTree,
+	FileTreeFile,
+	FileTreeFolder,
 } from "../ai-elements/file-tree";
 import { Button } from "../ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+	Dialog,
+	DialogContent,
+	DialogDescription,
+	DialogFooter,
+	DialogHeader,
+	DialogTitle,
 } from "../ui/dialog";
 import { ScrollArea } from "../ui/scroll-area";
 import { Skeleton } from "../ui/skeleton";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "../ui/tooltip";
-import { cn } from "../../lib/utils";
-import { formatFileSize } from "../../lib/format";
-import type {
-  AgentChatAdapter,
-  AgentChatWorkspaceEntry,
-  AgentChatWorkspaceFile,
-} from "../../types";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { FileViewer } from "./file-viewer";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
@@ -45,591 +47,620 @@ const MIN_WIDTH = 300;
 const MAX_WIDTH = 900;
 
 interface WorkspacePanelProps {
-  adapter: AgentChatAdapter;
-  sessionId: string | null;
-  selectedPath: string | null;
-  onSelectedPathChange: (path: string | null) => void;
-  refreshSignal?: number;
-  disabled?: boolean;
-  fillParent?: boolean;
+	adapter: AgentChatAdapter;
+	sessionId: string | null;
+	selectedPath: string | null;
+	onSelectedPathChange: (path: string | null) => void;
+	refreshSignal?: number;
+	disabled?: boolean;
+	fillParent?: boolean;
 }
 
 function collectExpandedPaths(
-  entries: AgentChatWorkspaceEntry[],
-  depth = 0,
+	entries: AgentChatWorkspaceEntry[],
+	depth = 0,
 ): string[] {
-  const paths: string[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "dir" && depth < 1) {
-      paths.push(entry.path);
-      if (entry.children) {
-        paths.push(...collectExpandedPaths(entry.children, depth + 1));
-      }
-    }
-  }
-  return paths;
+	const paths: string[] = [];
+	for (const entry of entries) {
+		if (entry.kind === "dir" && depth < 1) {
+			paths.push(entry.path);
+			if (entry.children) {
+				paths.push(...collectExpandedPaths(entry.children, depth + 1));
+			}
+		}
+	}
+	return paths;
 }
 
 function findEntry(
-  entries: AgentChatWorkspaceEntry[],
-  path: string,
+	entries: AgentChatWorkspaceEntry[],
+	path: string,
 ): AgentChatWorkspaceEntry | null {
-  for (const entry of entries) {
-    if (entry.path === path) return entry;
-    if (entry.kind === "dir" && entry.children) {
-      const found = findEntry(entry.children, path);
-      if (found) return found;
-    }
-  }
-  return null;
+	for (const entry of entries) {
+		if (entry.path === path) return entry;
+		if (entry.kind === "dir" && entry.children) {
+			const found = findEntry(entry.children, path);
+			if (found) return found;
+		}
+	}
+	return null;
 }
 
 const FILENAME_MAX_CHARS = 42;
 
 function truncateFilename(name: string, max: number): string {
-  if (name.length <= max) return name;
-  // Keep the extension visible — useful for telling files apart when
-  // only the prefix differs (e.g. timestamped uploads).
-  const dot = name.lastIndexOf(".");
-  if (dot > 0 && name.length - dot <= 12) {
-    const ext = name.slice(dot);
-    const head = name.slice(0, Math.max(1, max - ext.length - 1));
-    return `${head}…${ext}`;
-  }
-  return `${name.slice(0, max - 1)}…`;
+	if (name.length <= max) return name;
+	// Keep the extension visible — useful for telling files apart when
+	// only the prefix differs (e.g. timestamped uploads).
+	const dot = name.lastIndexOf(".");
+	if (dot > 0 && name.length - dot <= 12) {
+		const ext = name.slice(dot);
+		const head = name.slice(0, Math.max(1, max - ext.length - 1));
+		return `${head}…${ext}`;
+	}
+	return `${name.slice(0, max - 1)}…`;
 }
 
 function TruncatedFileName({ name }: { name: string }) {
-  const truncated = truncateFilename(name, FILENAME_MAX_CHARS);
-  const isTruncated = truncated !== name;
-  const node = (
-    <span className="min-w-0 flex-1 truncate">{truncated}</span>
-  );
-  if (!isTruncated) return node;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{node}</TooltipTrigger>
-      <TooltipContent side="top" className="max-w-md break-all">
-        {name}
-      </TooltipContent>
-    </Tooltip>
-  );
+	const truncated = truncateFilename(name, FILENAME_MAX_CHARS);
+	const isTruncated = truncated !== name;
+	const node = <span className="min-w-0 flex-1 truncate">{truncated}</span>;
+	if (!isTruncated) return node;
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>{node}</TooltipTrigger>
+			<TooltipContent side="top" className="max-w-md break-all">
+				{name}
+			</TooltipContent>
+		</Tooltip>
+	);
 }
 
 function RenderEntries({
-  entries,
-  onDelete,
-  downloadUrlFor,
+	entries,
+	onDelete,
+	downloadUrlFor,
 }: {
-  entries: AgentChatWorkspaceEntry[];
-  onDelete: (path: string) => void;
-  downloadUrlFor: (path: string) => string;
+	entries: AgentChatWorkspaceEntry[];
+	onDelete: (path: string) => void;
+	downloadUrlFor: (path: string) => string;
 }) {
-  return (
-    <>
-      {entries.map((entry) => {
-        if (entry.kind === "dir") {
-          return (
-            <FileTreeFolder key={entry.path} name={entry.name} path={entry.path}>
-              {entry.children && entry.children.length > 0 && (
-                <RenderEntries
-                  entries={entry.children}
-                  onDelete={onDelete}
-                  downloadUrlFor={downloadUrlFor}
-                />
-              )}
-            </FileTreeFolder>
-          );
-        }
+	return (
+		<>
+			{entries.map((entry) => {
+				if (entry.kind === "dir") {
+					return (
+						<FileTreeFolder
+							key={entry.path}
+							name={entry.name}
+							path={entry.path}
+						>
+							{entry.children && entry.children.length > 0 && (
+								<RenderEntries
+									entries={entry.children}
+									onDelete={onDelete}
+									downloadUrlFor={downloadUrlFor}
+								/>
+							)}
+						</FileTreeFolder>
+					);
+				}
 
-        const fileName = entry.name;
+				const fileName = entry.name;
 
-        return (
-          <FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
-            <span className="size-4 shrink-0" />
-            <TruncatedFileName name={entry.name} />
-            {entry.size != null && (
-              <span className="ml-1 shrink-0 text-xs text-muted-foreground/60">
-                {formatFileSize(entry.size)}
-              </span>
-            )}
-            <div className="ml-1 flex shrink-0 items-center gap-0 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-              <a
-                href={downloadUrlFor(entry.path)}
-                download={fileName}
-                className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                onClick={(event) => event.stopPropagation()}
-                title="Download"
-                aria-label={`Download ${fileName}`}
-              >
-                <DownloadIcon className="size-3" />
-              </a>
-              <button
-                type="button"
-                className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDelete(entry.path);
-                }}
-                title="Delete"
-                aria-label={`Delete ${fileName}`}
-              >
-                <TrashIcon className="size-3" />
-              </button>
-            </div>
-          </FileTreeFile>
-        );
-      })}
-    </>
-  );
+				return (
+					<FileTreeFile key={entry.path} name={entry.name} path={entry.path}>
+						<span className="size-4 shrink-0" />
+						<TruncatedFileName name={entry.name} />
+						{entry.size != null && (
+							<span className="ml-1 shrink-0 text-xs text-muted-foreground/60">
+								{formatFileSize(entry.size)}
+							</span>
+						)}
+						<div className="ml-1 flex shrink-0 items-center gap-0 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
+							<a
+								href={downloadUrlFor(entry.path)}
+								download={fileName}
+								className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+								onClick={(event) => event.stopPropagation()}
+								title="Download"
+								aria-label={`Download ${fileName}`}
+							>
+								<DownloadIcon className="size-3" />
+							</a>
+							<button
+								type="button"
+								className="rounded p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+								onClick={(event) => {
+									event.stopPropagation();
+									onDelete(entry.path);
+								}}
+								title="Delete"
+								aria-label={`Delete ${fileName}`}
+							>
+								<TrashIcon className="size-3" />
+							</button>
+						</div>
+					</FileTreeFile>
+				);
+			})}
+		</>
+	);
 }
 
 export function WorkspacePanel({
-  adapter,
-  sessionId,
-  selectedPath,
-  onSelectedPathChange,
-  refreshSignal = 0,
-  disabled = false,
-  fillParent = false,
+	adapter,
+	sessionId,
+	selectedPath,
+	onSelectedPathChange,
+	refreshSignal = 0,
+	disabled = false,
+	fillParent = false,
 }: WorkspacePanelProps) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
-  const [treeLoading, setTreeLoading] = useState(false);
-  const [treeError, setTreeError] = useState<string | null>(null);
-  const [file, setFile] = useState<AgentChatWorkspaceFile | null>(null);
-  const [fileLoading, setFileLoading] = useState(false);
-  const [fileError, setFileError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-  const [width, setWidth] = useState(DEFAULT_WIDTH);
-  const sessionIdRef = useRef(sessionId);
-  const isResizing = useRef(false);
-  const startX = useRef(0);
-  const startWidth = useRef(DEFAULT_WIDTH);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
+	const [treeLoading, setTreeLoading] = useState(false);
+	const [treeError, setTreeError] = useState<string | null>(null);
+	const [file, setFile] = useState<AgentChatWorkspaceFile | null>(null);
+	const [fileLoading, setFileLoading] = useState(false);
+	const [fileError, setFileError] = useState<string | null>(null);
+	const [notice, setNotice] = useState<string | null>(null);
+	const [uploading, setUploading] = useState(false);
+	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+	const [width, setWidth] = useState(DEFAULT_WIDTH);
+	// Below md the panel is the whole screen, so the resizable inline width
+	// does not apply: DEFAULT_WIDTH is 400px and MIN_WIDTH 300px, which on a
+	// 375px phone made the panel wider than the viewport and offered a
+	// col-resize handle no finger can use. Inline styles cannot be
+	// media-queried, so the breakpoint is read here.
+	const narrow = useSyncExternalStore(
+		(cb) => {
+			const mql = window.matchMedia("(max-width: 767px)");
+			mql.addEventListener("change", cb);
+			return () => mql.removeEventListener("change", cb);
+		},
+		() => window.matchMedia("(max-width: 767px)").matches,
+		() => false,
+	);
+	const sessionIdRef = useRef(sessionId);
+	const isResizing = useRef(false);
+	const startX = useRef(0);
+	const startWidth = useRef(DEFAULT_WIDTH);
 
-  sessionIdRef.current = sessionId;
+	sessionIdRef.current = sessionId;
 
-  const fetchTree = useCallback(async () => {
-    if (!sessionId) {
-      setEntries([]);
-      setExpandedPaths(new Set());
-      setTreeLoading(false);
-      setTreeError(null);
-      return;
-    }
-    const requestedSessionId = sessionId;
-    setTreeLoading(true);
-    setTreeError(null);
-    try {
-      const tree = await adapter.getWorkspaceTree({
-        sessionId: requestedSessionId,
-      });
-      if (sessionIdRef.current !== requestedSessionId) return;
-      setEntries(tree.entries);
-      setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
-    } catch (error) {
-      if (sessionIdRef.current !== requestedSessionId) return;
-      setEntries([]);
-      setTreeError((error as Error).message);
-    } finally {
-      if (sessionIdRef.current === requestedSessionId) {
-        setTreeLoading(false);
-      }
-    }
-  }, [adapter, sessionId]);
+	const fetchTree = useCallback(async () => {
+		if (!sessionId) {
+			setEntries([]);
+			setExpandedPaths(new Set());
+			setTreeLoading(false);
+			setTreeError(null);
+			return;
+		}
+		const requestedSessionId = sessionId;
+		setTreeLoading(true);
+		setTreeError(null);
+		try {
+			const tree = await adapter.getWorkspaceTree({
+				sessionId: requestedSessionId,
+			});
+			if (sessionIdRef.current !== requestedSessionId) return;
+			setEntries(tree.entries);
+			setExpandedPaths(new Set(collectExpandedPaths(tree.entries)));
+		} catch (error) {
+			if (sessionIdRef.current !== requestedSessionId) return;
+			setEntries([]);
+			setTreeError((error as Error).message);
+		} finally {
+			if (sessionIdRef.current === requestedSessionId) {
+				setTreeLoading(false);
+			}
+		}
+	}, [adapter, sessionId]);
 
-  const fetchFile = useCallback(
-    async (path: string) => {
-      if (!sessionId) return;
-      const requestedSessionId = sessionId;
-      setFileLoading(true);
-      setFileError(null);
-      try {
-        const nextFile = await adapter.getWorkspaceFile({
-          sessionId: requestedSessionId,
-          path,
-        });
-        if (sessionIdRef.current !== requestedSessionId) return;
-        setFile(nextFile);
-      } catch (error) {
-        if (sessionIdRef.current !== requestedSessionId) return;
-        setFile(null);
-        setFileError((error as Error).message);
-      } finally {
-        if (sessionIdRef.current === requestedSessionId) {
-          setFileLoading(false);
-        }
-      }
-    },
-    [adapter, sessionId],
-  );
+	const fetchFile = useCallback(
+		async (path: string) => {
+			if (!sessionId) return;
+			const requestedSessionId = sessionId;
+			setFileLoading(true);
+			setFileError(null);
+			try {
+				const nextFile = await adapter.getWorkspaceFile({
+					sessionId: requestedSessionId,
+					path,
+				});
+				if (sessionIdRef.current !== requestedSessionId) return;
+				setFile(nextFile);
+			} catch (error) {
+				if (sessionIdRef.current !== requestedSessionId) return;
+				setFile(null);
+				setFileError((error as Error).message);
+			} finally {
+				if (sessionIdRef.current === requestedSessionId) {
+					setFileLoading(false);
+				}
+			}
+		},
+		[adapter, sessionId],
+	);
 
-  useEffect(() => {
-    void fetchTree();
-  }, [fetchTree]);
+	useEffect(() => {
+		void fetchTree();
+	}, [fetchTree]);
 
-  useEffect(() => {
-    if (!sessionId || refreshSignal === 0) return;
-    const timer = setTimeout(() => {
-      void fetchTree();
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [refreshSignal, sessionId, fetchTree]);
+	useEffect(() => {
+		if (!sessionId || refreshSignal === 0) return;
+		const timer = setTimeout(() => {
+			void fetchTree();
+		}, 300);
+		return () => clearTimeout(timer);
+	}, [refreshSignal, sessionId, fetchTree]);
 
-  useEffect(() => {
-    if (!sessionId) {
-      setFile(null);
-      setFileError(null);
-      onSelectedPathChange(null);
-    }
-  }, [onSelectedPathChange, sessionId]);
+	useEffect(() => {
+		if (!sessionId) {
+			setFile(null);
+			setFileError(null);
+			onSelectedPathChange(null);
+		}
+	}, [onSelectedPathChange, sessionId]);
 
-  useEffect(() => {
-    if (!selectedPath) return;
-    const parts = selectedPath.split("/");
-    if (parts.length <= 1) return;
-    setExpandedPaths((prev) => {
-      const next = new Set(prev);
-      let path = "";
-      for (let index = 0; index < parts.length - 1; index += 1) {
-        path = path ? `${path}/${parts[index]}` : parts[index];
-        next.add(path);
-      }
-      return next;
-    });
-  }, [selectedPath]);
+	useEffect(() => {
+		if (!selectedPath) return;
+		const parts = selectedPath.split("/");
+		if (parts.length <= 1) return;
+		setExpandedPaths((prev) => {
+			const next = new Set(prev);
+			let path = "";
+			for (let index = 0; index < parts.length - 1; index += 1) {
+				path = path ? `${path}/${parts[index]}` : parts[index];
+				next.add(path);
+			}
+			return next;
+		});
+	}, [selectedPath]);
 
-  useEffect(() => {
-    if (!selectedPath || !sessionId || entries.length === 0) return;
-    const entry = findEntry(entries, selectedPath);
-    if (entry?.kind === "file" && file?.path !== selectedPath) {
-      void fetchFile(selectedPath);
-    }
-  }, [entries, fetchFile, file?.path, selectedPath, sessionId]);
+	useEffect(() => {
+		if (!selectedPath || !sessionId || entries.length === 0) return;
+		const entry = findEntry(entries, selectedPath);
+		if (entry?.kind === "file" && file?.path !== selectedPath) {
+			void fetchFile(selectedPath);
+		}
+	}, [entries, fetchFile, file?.path, selectedPath, sessionId]);
 
-  const handleSelect = useCallback(
-    (path: string) => {
-      onSelectedPathChange(path);
-      const entry = findEntry(entries, path);
-      if (entry?.kind === "file") {
-        void fetchFile(path);
-      }
-    },
-    [entries, fetchFile, onSelectedPathChange],
-  );
+	const handleSelect = useCallback(
+		(path: string) => {
+			onSelectedPathChange(path);
+			const entry = findEntry(entries, path);
+			if (entry?.kind === "file") {
+				void fetchFile(path);
+			}
+		},
+		[entries, fetchFile, onSelectedPathChange],
+	);
 
-  const handleUpload = useCallback(
-    async (files: FileList) => {
-      if (disabled || !sessionId || files.length === 0) return;
-      setUploading(true);
-      setNotice(null);
-      try {
-        for (const uploadedFile of Array.from(files)) {
-          await adapter.uploadWorkspaceFile({
-            sessionId,
-            file: uploadedFile,
-          });
-        }
-        setNotice(
-          files.length === 1
-            ? `Uploaded ${files[0]?.name ?? "file"}`
-            : `Uploaded ${files.length} files`,
-        );
-        await fetchTree();
-      } catch (error) {
-        setNotice((error as Error).message);
-      } finally {
-        setUploading(false);
-        if (fileInputRef.current) fileInputRef.current.value = "";
-      }
-    },
-    [adapter, disabled, fetchTree, sessionId],
-  );
+	const handleUpload = useCallback(
+		async (files: FileList) => {
+			if (disabled || !sessionId || files.length === 0) return;
+			setUploading(true);
+			setNotice(null);
+			try {
+				for (const uploadedFile of Array.from(files)) {
+					await adapter.uploadWorkspaceFile({
+						sessionId,
+						file: uploadedFile,
+					});
+				}
+				setNotice(
+					files.length === 1
+						? `Uploaded ${files[0]?.name ?? "file"}`
+						: `Uploaded ${files.length} files`,
+				);
+				await fetchTree();
+			} catch (error) {
+				setNotice((error as Error).message);
+			} finally {
+				setUploading(false);
+				if (fileInputRef.current) fileInputRef.current.value = "";
+			}
+		},
+		[adapter, disabled, fetchTree, sessionId],
+	);
 
-  const handleDelete = useCallback(
-    async (path: string) => {
-      if (disabled || !sessionId) return;
-      try {
-        await adapter.deleteWorkspaceFile({ sessionId, path });
-        if (selectedPath === path) {
-          onSelectedPathChange(null);
-          setFile(null);
-          setFileError(null);
-        }
-        setNotice(`Deleted ${path.split("/").pop() ?? path}`);
-        await fetchTree();
-      } catch (error) {
-        setNotice((error as Error).message);
-      } finally {
-        setDeleteTarget(null);
-      }
-    },
-    [adapter, disabled, fetchTree, onSelectedPathChange, selectedPath, sessionId],
-  );
+	const handleDelete = useCallback(
+		async (path: string) => {
+			if (disabled || !sessionId) return;
+			try {
+				await adapter.deleteWorkspaceFile({ sessionId, path });
+				if (selectedPath === path) {
+					onSelectedPathChange(null);
+					setFile(null);
+					setFileError(null);
+				}
+				setNotice(`Deleted ${path.split("/").pop() ?? path}`);
+				await fetchTree();
+			} catch (error) {
+				setNotice((error as Error).message);
+			} finally {
+				setDeleteTarget(null);
+			}
+		},
+		[
+			adapter,
+			disabled,
+			fetchTree,
+			onSelectedPathChange,
+			selectedPath,
+			sessionId,
+		],
+	);
 
-  const onResizeStart = useCallback(
-    (event: MouseEvent) => {
-      event.preventDefault();
-      isResizing.current = true;
-      startX.current = event.clientX;
-      startWidth.current = width;
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-    },
-    [width],
-  );
+	const onResizeStart = useCallback(
+		(event: MouseEvent) => {
+			event.preventDefault();
+			isResizing.current = true;
+			startX.current = event.clientX;
+			startWidth.current = width;
+			document.body.style.cursor = "col-resize";
+			document.body.style.userSelect = "none";
+		},
+		[width],
+	);
 
-  useEffect(() => {
-    const onMouseMove = (event: globalThis.MouseEvent) => {
-      if (!isResizing.current) return;
-      const delta = startX.current - event.clientX;
-      setWidth(
-        Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta)),
-      );
-    };
-    const onMouseUp = () => {
-      if (!isResizing.current) return;
-      isResizing.current = false;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-  }, []);
+	useEffect(() => {
+		const onMouseMove = (event: globalThis.MouseEvent) => {
+			if (!isResizing.current) return;
+			const delta = startX.current - event.clientX;
+			setWidth(
+				Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta)),
+			);
+		};
+		const onMouseUp = () => {
+			if (!isResizing.current) return;
+			isResizing.current = false;
+			document.body.style.cursor = "";
+			document.body.style.userSelect = "";
+		};
+		window.addEventListener("mousemove", onMouseMove);
+		window.addEventListener("mouseup", onMouseUp);
+		return () => {
+			window.removeEventListener("mousemove", onMouseMove);
+			window.removeEventListener("mouseup", onMouseUp);
+		};
+	}, []);
 
-  return (
-    <aside
-      data-testid="workspace-panel"
-      className={cn(
-        "relative z-10 flex h-full min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card",
-        fillParent && "w-full",
-      )}
-      style={
-        fillParent
-          ? undefined
-          : { width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }
-      }
-    >
-      {!fillParent && (
-        <div
-          className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/30"
-          onMouseDown={onResizeStart}
-        />
-      )}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="hidden"
-        disabled={disabled}
-        onChange={(event) => {
-          if (event.target.files) void handleUpload(event.target.files);
-        }}
-      />
+	return (
+		<aside
+			data-testid="workspace-panel"
+			className={cn(
+				"relative z-10 flex h-full min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card",
+				(fillParent || narrow) && "w-full",
+			)}
+			style={
+				fillParent || narrow
+					? undefined
+					: { width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }
+			}
+		>
+			{!(fillParent || narrow) && (
+				<div
+					className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/30"
+					onMouseDown={onResizeStart}
+				/>
+			)}
+			<input
+				ref={fileInputRef}
+				type="file"
+				multiple
+				className="hidden"
+				disabled={disabled}
+				onChange={(event) => {
+					if (event.target.files) void handleUpload(event.target.files);
+				}}
+			/>
 
-      <div className="flex min-h-14 items-center gap-2 border-b border-line px-3 py-3">
-        <FolderOpenIcon className="size-4 shrink-0 text-amber-500" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-foreground">
-            {disabled ? "Workspace - Read-only" : "Workspace"}
-          </div>
-        </div>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={disabled || !sessionId || uploading}
-              aria-label="Upload files"
-            >
-              {uploading ? (
-                <Loader2Icon className="size-4 animate-spin" />
-              ) : (
-                <UploadIcon className="size-4" />
-              )}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Upload files</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => void fetchTree()}
-              disabled={!sessionId || treeLoading}
-              aria-label="Refresh workspace"
-            >
-              <RefreshCwIcon
-                className={cn("size-4", treeLoading && "animate-spin")}
-              />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Refresh</TooltipContent>
-        </Tooltip>
-      </div>
+			<div className="flex min-h-14 items-center gap-2 border-b border-line px-3 py-3">
+				<FolderOpenIcon className="size-4 shrink-0 text-amber-500" />
+				<div className="min-w-0 flex-1">
+					<div className="truncate text-sm font-medium text-foreground">
+						{disabled ? "Workspace - Read-only" : "Workspace"}
+					</div>
+				</div>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							variant="ghost"
+							size="icon-sm"
+							onClick={() => fileInputRef.current?.click()}
+							disabled={disabled || !sessionId || uploading}
+							aria-label="Upload files"
+						>
+							{uploading ? (
+								<Loader2Icon className="size-4 animate-spin" />
+							) : (
+								<UploadIcon className="size-4" />
+							)}
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">Upload files</TooltipContent>
+				</Tooltip>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<Button
+							variant="ghost"
+							size="icon-sm"
+							onClick={() => void fetchTree()}
+							disabled={!sessionId || treeLoading}
+							aria-label="Refresh workspace"
+						>
+							<RefreshCwIcon
+								className={cn("size-4", treeLoading && "animate-spin")}
+							/>
+						</Button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">Refresh</TooltipContent>
+				</Tooltip>
+			</div>
 
-      {notice && (
-        <div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
-          {notice}
-        </div>
-      )}
+			{notice && (
+				<div className="border-b border-line px-3 py-2 text-xs text-muted-foreground">
+					{notice}
+				</div>
+			)}
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="px-1 py-1">
-          {treeLoading && entries.length === 0 && (
-            <div className="space-y-1 p-2">
-              {Array.from({ length: 8 }).map((_, index) => (
-                <Skeleton
-                  key={index}
-                  className="h-5 rounded"
-                  style={{
-                    width: `${SKELETON_WIDTHS[index % SKELETON_WIDTHS.length]}%`,
-                  }}
-                />
-              ))}
-            </div>
-          )}
+			<ScrollArea className="min-h-0 flex-1">
+				<div className="px-1 py-1">
+					{treeLoading && entries.length === 0 && (
+						<div className="space-y-1 p-2">
+							{Array.from({ length: 8 }).map((_, index) => (
+								<Skeleton
+									key={index}
+									className="h-5 rounded"
+									style={{
+										width: `${SKELETON_WIDTHS[index % SKELETON_WIDTHS.length]}%`,
+									}}
+								/>
+							))}
+						</div>
+					)}
 
-          {treeError && (
-            <div className="flex items-start gap-2 p-3 text-sm text-destructive">
-              <AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
-              <span>{treeError}</span>
-            </div>
-          )}
+					{treeError && (
+						<div className="flex items-start gap-2 p-3 text-sm text-destructive">
+							<AlertCircleIcon className="mt-0.5 size-4 shrink-0" />
+							<span>{treeError}</span>
+						</div>
+					)}
 
-          {!treeLoading && !treeError && entries.length === 0 && (
-            <div className="px-4 py-8 text-center text-sm text-faint">
-              <p>No workspace files</p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3 gap-1.5"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled || !sessionId}
-              >
-                <UploadIcon className="size-3.5" />
-                Upload files
-              </Button>
-            </div>
-          )}
+					{!treeLoading && !treeError && entries.length === 0 && (
+						<div className="px-4 py-8 text-center text-sm text-faint">
+							<p>No workspace files</p>
+							<Button
+								variant="outline"
+								size="sm"
+								className="mt-3 gap-1.5"
+								onClick={() => fileInputRef.current?.click()}
+								disabled={disabled || !sessionId}
+							>
+								<UploadIcon className="size-3.5" />
+								Upload files
+							</Button>
+						</div>
+					)}
 
-          {entries.length > 0 && (
-            <FileTree
-              expanded={expandedPaths}
-              onExpandedChange={setExpandedPaths}
-              selectedPath={selectedPath}
-              onSelect={handleSelect}
-              className="rounded-none border-0"
-            >
-              <RenderEntries
-                entries={entries}
-                onDelete={setDeleteTarget}
-                downloadUrlFor={(path) =>
-                  sessionId
-                    ? adapter.getWorkspaceDownloadUrl({ sessionId, path })
-                    : "#"
-                }
-              />
-            </FileTree>
-          )}
-        </div>
-      </ScrollArea>
+					{entries.length > 0 && (
+						<FileTree
+							expanded={expandedPaths}
+							onExpandedChange={setExpandedPaths}
+							selectedPath={selectedPath}
+							onSelect={handleSelect}
+							className="rounded-none border-0"
+						>
+							<RenderEntries
+								entries={entries}
+								onDelete={setDeleteTarget}
+								downloadUrlFor={(path) =>
+									sessionId
+										? adapter.getWorkspaceDownloadUrl({ sessionId, path })
+										: "#"
+								}
+							/>
+						</FileTree>
+					)}
+				</div>
+			</ScrollArea>
 
-      <FileViewer
-        file={file}
-        loading={fileLoading}
-        error={fileError}
-        downloadUrl={
-          file && sessionId
-            ? adapter.getWorkspaceDownloadUrl({
-                sessionId,
-                path: file.path,
-              })
-            : null
-        }
-        onDelete={file && !disabled ? () => setDeleteTarget(file.path) : null}
-        onClose={() => {
-          onSelectedPathChange(null);
-          setFile(null);
-          setFileError(null);
-        }}
-      />
+			<FileViewer
+				file={file}
+				loading={fileLoading}
+				error={fileError}
+				downloadUrl={
+					file && sessionId
+						? adapter.getWorkspaceDownloadUrl({
+								sessionId,
+								path: file.path,
+							})
+						: null
+				}
+				onDelete={file && !disabled ? () => setDeleteTarget(file.path) : null}
+				onClose={() => {
+					onSelectedPathChange(null);
+					setFile(null);
+					setFileError(null);
+				}}
+			/>
 
-      <ConfirmDialog
-        open={deleteTarget !== null}
-        title="Delete file?"
-        description={`This will permanently delete ${
-          deleteTarget?.split("/").pop() ?? "this file"
-        } from the workspace.`}
-        confirmLabel="Delete"
-        onConfirm={() =>
-          deleteTarget ? handleDelete(deleteTarget) : Promise.resolve()
-        }
-        onCancel={() => setDeleteTarget(null)}
-      />
-    </aside>
-  );
+			<ConfirmDialog
+				open={deleteTarget !== null}
+				title="Delete file?"
+				description={`This will permanently delete ${
+					deleteTarget?.split("/").pop() ?? "this file"
+				} from the workspace.`}
+				confirmLabel="Delete"
+				onConfirm={() =>
+					deleteTarget ? handleDelete(deleteTarget) : Promise.resolve()
+				}
+				onCancel={() => setDeleteTarget(null)}
+			/>
+		</aside>
+	);
 }
 
 interface ConfirmDialogProps {
-  open: boolean;
-  title: string;
-  description: ReactNode;
-  confirmLabel: string;
-  onConfirm: () => Promise<void> | void;
-  onCancel: () => void;
+	open: boolean;
+	title: string;
+	description: ReactNode;
+	confirmLabel: string;
+	onConfirm: () => Promise<void> | void;
+	onCancel: () => void;
 }
 
 function ConfirmDialog({
-  open,
-  title,
-  description,
-  confirmLabel,
-  onConfirm,
-  onCancel,
+	open,
+	title,
+	description,
+	confirmLabel,
+	onConfirm,
+	onCancel,
 }: ConfirmDialogProps) {
-  const [loading, setLoading] = useState(false);
+	const [loading, setLoading] = useState(false);
 
-  const handleConfirm = async () => {
-    setLoading(true);
-    try {
-      await onConfirm();
-    } finally {
-      setLoading(false);
-    }
-  };
+	const handleConfirm = async () => {
+		setLoading(true);
+		try {
+			await onConfirm();
+		} finally {
+			setLoading(false);
+		}
+	};
 
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen && !loading) onCancel();
-      }}
-    >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" disabled={loading} onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button variant="destructive" disabled={loading} onClick={handleConfirm}>
-            {loading && <Loader2Icon className="mr-1.5 size-3.5 animate-spin" />}
-            {confirmLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
+	return (
+		<Dialog
+			open={open}
+			onOpenChange={(nextOpen) => {
+				if (!nextOpen && !loading) onCancel();
+			}}
+		>
+			<DialogContent className="sm:max-w-md">
+				<DialogHeader>
+					<DialogTitle>{title}</DialogTitle>
+					<DialogDescription>{description}</DialogDescription>
+				</DialogHeader>
+				<DialogFooter>
+					<Button variant="outline" disabled={loading} onClick={onCancel}>
+						Cancel
+					</Button>
+					<Button
+						variant="destructive"
+						disabled={loading}
+						onClick={handleConfirm}
+					>
+						{loading && (
+							<Loader2Icon className="mr-1.5 size-3.5 animate-spin" />
+						)}
+						{confirmLabel}
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
 }

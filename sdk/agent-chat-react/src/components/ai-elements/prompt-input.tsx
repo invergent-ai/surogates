@@ -1121,9 +1121,14 @@ export const PromptInputFooter = ({
   className,
   ...props
 }: PromptInputFooterProps) => (
+  // flex-wrap: the footer holds a left tools group (add, browser profile,
+  // workspace) and a right group (view mode, send). On a phone those stop
+  // fitting one line as soon as a profile or workspace chip appears, and a
+  // non-wrapping row crushes the icons instead. Wrapping only engages when
+  // the space is genuinely gone, so wider screens are unchanged.
   <InputGroupAddon
     align="block-end"
-    className={cn("justify-between gap-1", className)}
+    className={cn("flex-wrap justify-between gap-1", className)}
     {...props}
   />
 );

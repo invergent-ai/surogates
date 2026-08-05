@@ -12,6 +12,7 @@ import {
 import { formatDistanceToNow } from "date-fns";
 import {
   CheckIcon,
+  ChevronLeftIcon,
   CircleDotIcon,
   ClipboardCheckIcon,
   ExternalLinkIcon,
@@ -774,17 +775,33 @@ function InboxDetail({
   onUpdated,
   onDeleted,
   onSessionSelect,
+  onBack,
 }: {
   item: AgentChatInboxItem;
   adapter: InboxAdapter;
   onUpdated: (item: AgentChatInboxItem) => void;
   onDeleted: (itemId: number) => Promise<void>;
   onSessionSelect?: OnSessionSelect;
+  /** Clears the selection. Phones show one pane, so without it the detail
+   *  is a dead end. */
+  onBack?: () => void;
 }) {
   const Icon = kindIcon(item.kind);
 
   return (
-    <section className="min-w-0 flex-1 overflow-y-auto p-6">
+    <section className="min-w-0 flex-1 overflow-y-auto p-4 md:p-6">
+      {/* Below md the detail replaced the list, so it has to offer the way
+          back; above md both panes are on screen and this is noise. */}
+      {onBack && (
+        <button
+          type="button"
+          onClick={onBack}
+          className="-ml-2 mb-2 inline-flex min-h-11 items-center gap-1.5 px-2 text-sm font-medium text-muted-foreground md:hidden"
+        >
+          <ChevronLeftIcon className="size-4" />
+          Inbox
+        </button>
+      )}
       <div className="mb-5 flex min-w-0 items-start gap-3">
         <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center border border-line text-muted-foreground">
           <Icon className="size-4" />
@@ -898,6 +915,13 @@ export function InboxPanel({
     });
   }, []);
 
+  // Deselect, returning the phone from the detail pane to the list. Kept
+  // separate from selectItem, which fetches and marks read.
+  const clearSelection = useCallback(() => {
+    if (selectedId === undefined) setInternalSelectedId(null);
+    onSelectedIdChange?.(null);
+  }, [onSelectedIdChange, selectedId]);
+
   const selectItem = useCallback(
     async (itemId: number) => {
       if (selectedId === undefined) setInternalSelectedId(itemId);
@@ -1003,7 +1027,12 @@ export function InboxPanel({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 bg-background text-foreground">
-      <aside className="flex w-80 min-w-72 max-w-sm shrink-0 flex-col border-r border-line">
+      <aside
+        className={cn(
+          "flex min-w-0 flex-col border-line md:w-80 md:min-w-72 md:max-w-sm md:shrink-0 md:border-r",
+          selectedItemId != null ? "hidden md:flex" : "w-full",
+        )}
+      >
         {!hideHeader && (
           <div className="flex min-h-14 items-center gap-2 border-b border-line px-4">
             <InboxIcon className="size-4 text-muted-foreground" />
@@ -1099,9 +1128,10 @@ export function InboxPanel({
           onUpdated={updateSelectedItem}
           onDeleted={deleteItem}
           onSessionSelect={onSessionSelect}
+          onBack={clearSelection}
         />
       ) : (
-        <main className="flex min-w-0 flex-1 items-center justify-center px-4 text-sm text-muted-foreground">
+        <main className="hidden min-w-0 flex-1 items-center justify-center px-4 text-sm text-muted-foreground md:flex">
           Select an item
         </main>
       )}
