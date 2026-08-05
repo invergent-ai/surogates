@@ -171,9 +171,9 @@ export function PlanUsageTab() {
             </p>
           ) : (
             <>
-              <div className="flex items-center justify-between">
+              <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Subscription</span>
-                <span className="font-medium">
+                <span className="shrink-0 text-right font-medium">
                   {ACTIVE_SUB.has(ent.subscription_status)
                     ? `Active${
                         ent.current_period_end
@@ -185,29 +185,29 @@ export function PlanUsageTab() {
                     : "None"}
                 </span>
               </div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">
                   Included usage left this period
                 </span>
-                <span className="font-medium tabular-nums">
+                <span className="shrink-0 text-right font-medium tabular-nums">
                   {approxMessagesLabel(ent.period_token_remaining)}
                 </span>
               </div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Extra usage</span>
-                <span className="font-medium tabular-nums">
+                <span className="shrink-0 text-right font-medium tabular-nums">
                   {approxMessagesLabel(ent.topup_token_remaining)}
                 </span>
               </div>
               {ent.browser_minutes?.metered ? (
                 <div
-                  className="flex items-center justify-between"
+                  className="flex items-start justify-between gap-4"
                   data-testid="plan-tab-browser-minutes"
                 >
                   <span className="text-muted-foreground">
                     Browsing time left
                   </span>
-                  <span className="font-medium tabular-nums">
+                  <span className="shrink-0 text-right font-medium tabular-nums">
                     {ent.browser_minutes.period_remaining +
                       ent.browser_minutes.topup_remaining}{" "}
                     min
@@ -216,13 +216,13 @@ export function PlanUsageTab() {
               ) : null}
               {ent.media_credits?.metered ? (
                 <div
-                  className="flex items-center justify-between"
+                  className="flex items-start justify-between gap-4"
                   data-testid="plan-tab-media-credits"
                 >
                   <span className="text-muted-foreground">
                     Media generation left
                   </span>
-                  <span className="font-medium tabular-nums">
+                  <span className="shrink-0 text-right font-medium tabular-nums">
                     {formatPrice(
                       ent.media_credits.period_remaining +
                         ent.media_credits.topup_remaining,

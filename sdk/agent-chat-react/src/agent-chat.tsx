@@ -92,6 +92,15 @@ const RIGHT_STACK_STYLE = {
   ["--right-stack-w" as string]: "440px",
 } as React.CSSProperties;
 
+/** The panes the phone layout shows one at a time. */
+type MobilePane = "chat" | "browser" | "workspace";
+
+const MOBILE_PANE_LABELS: Record<MobilePane, string> = {
+  chat: "Chat",
+  browser: "Browser",
+  workspace: "Workspace",
+};
+
 export function AgentChat({
   adapter,
   agentId,
@@ -115,10 +124,13 @@ export function AgentChat({
   onOpenBilling,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
-  // On phones the chat and workspace panes don't fit side-by-side. A
-  // segmented control at the top of the layout swaps between them. On md+
-  // both are visible and the toggle is hidden.
-  const [mobileView, setMobileView] = useState<"chat" | "workspace">("chat");
+  // On phones the chat, browser and workspace panes don't fit side-by-side. A
+  // segmented control at the top of the layout swaps between them, one at a
+  // time and full-height. On md+ they lay out together and the toggle is
+  // hidden. Splitting the right stack 50/50 the way the desktop does would
+  // give each pane ~200px on a phone, which is not a file tree or a browser
+  // so much as a rumour of one.
+  const [mobileView, setMobileView] = useState<MobilePane>("chat");
   // User-controlled visibility for the desktop right-stack panes.
   // Expert mode defaults both visible (the long-standing behavior);
   // Simple mode hides the workspace pane so the conversation stays
@@ -201,8 +213,21 @@ export function AgentChat({
     setShowWorkspace((prev) => !prev);
   }, []);
 
-  // Mobile toggle only makes sense if the right stack has something to show.
-  const showMobileToggle = rightStackVisible;
+  // The phone toggle offers exactly the panes that currently exist, so it
+  // disappears when there is only the chat. `mobileView` is validated against
+  // that list rather than trusted: a browser that closes, or a workspace that
+  // goes away with the session, would otherwise leave the layout parked on a
+  // tab that renders nothing.
+  const mobilePanes = useMemo<MobilePane[]>(() => {
+    const panes: MobilePane[] = ["chat"];
+    if (browserVisible) panes.push("browser");
+    if (workspaceVisible) panes.push("workspace");
+    return panes;
+  }, [browserVisible, workspaceVisible]);
+  const activeMobilePane = mobilePanes.includes(mobileView)
+    ? mobileView
+    : "chat";
+  const showMobileToggle = mobilePanes.length > 1;
 
   return (
     <AgentChatAdapterProvider
@@ -232,44 +257,37 @@ export function AgentChat({
           style={{ direction: "ltr", ...RIGHT_STACK_STYLE }}
         >
           {showMobileToggle && (
-            <div className="md:hidden flex shrink-0 border-b border-line bg-card">
-              <button
-                type="button"
-                onClick={() => setMobileView("chat")}
-                aria-pressed={mobileView === "chat"}
-                className={cn(
-                  "flex-1 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
-                  mobileView === "chat"
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-subtle hover:text-foreground",
-                )}
-              >
-                Chat
-              </button>
-              <button
-                type="button"
-                onClick={() => setMobileView("workspace")}
-                aria-pressed={mobileView === "workspace"}
-                className={cn(
-                  "flex-1 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
-                  mobileView === "workspace"
-                    ? "border-primary text-foreground"
-                    : "border-transparent text-subtle hover:text-foreground",
-                )}
-              >
-                Workspace
-              </button>
+            <div
+              data-testid="mobile-pane-toggle"
+              className="md:hidden flex shrink-0 border-b border-line bg-card"
+            >
+              {mobilePanes.map((pane) => (
+                <button
+                  key={pane}
+                  type="button"
+                  onClick={() => setMobileView(pane)}
+                  aria-pressed={activeMobilePane === pane}
+                  className={cn(
+                    "flex-1 min-h-11 px-4 py-3 text-sm font-medium border-b-2 -mb-px transition-colors",
+                    activeMobilePane === pane
+                      ? "border-primary text-foreground"
+                      : "border-transparent text-subtle hover:text-foreground",
+                  )}
+                >
+                  {MOBILE_PANE_LABELS[pane]}
+                </button>
+              ))}
             </div>
           )}
 
           <div
             data-testid="chat-panel"
-            data-mobile-view={mobileView}
+            data-mobile-view={activeMobilePane}
             className={cn(
-              // Phone: full width column, hidden when workspace tab active.
+              // Phone: full width column, hidden while another pane is picked.
               "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
               showMobileToggle &&
-                "data-[mobile-view=workspace]:hidden md:flex!",
+                "data-[mobile-view=browser]:hidden data-[mobile-view=workspace]:hidden md:flex!",
               // md+: positioning depends on whether the browser/workspace
               // right stack is laid out. When the browser pane is shown
               // we pin a fixed-width column on the right and absolutely
@@ -326,7 +344,7 @@ export function AgentChat({
           {rightStackVisible && (
             <div
               data-testid="right-stack"
-              data-mobile-view={mobileView}
+              data-mobile-view={activeMobilePane}
               className={cn(
                 // Phone: full width column, hidden when chat tab active.
                 "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
@@ -346,10 +364,14 @@ export function AgentChat({
               {browserVisible && (
                 <div
                   data-testid="browser-panel"
+                  data-mobile-view={activeMobilePane}
                   className={cn(
                     "min-h-0 w-full overflow-hidden",
+                    // With both panes the desktop splits the column in half.
+                    // A phone gives whichever pane is selected the whole
+                    // height instead — see the mobile toggle above.
                     bothPanesVisible
-                      ? "h-1/2 border-b border-line"
+                      ? "h-full data-[mobile-view=workspace]:hidden md:block! md:h-1/2 md:border-b md:border-line"
                       : "h-full",
                   )}
                 >
@@ -364,9 +386,10 @@ export function AgentChat({
               {workspaceVisible && (
                 <div
                   data-testid="workspace-panel-frame"
+                  data-mobile-view={activeMobilePane}
                   className={
                     bothPanesVisible
-                      ? "h-1/2 min-h-0 w-full overflow-hidden"
+                      ? "h-full min-h-0 w-full overflow-hidden data-[mobile-view=browser]:hidden md:block! md:h-1/2"
                       : "min-h-0 h-full"
                   }
                 >

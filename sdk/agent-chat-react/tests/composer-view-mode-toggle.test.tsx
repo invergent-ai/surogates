@@ -87,9 +87,11 @@ describe("Composer view-mode toggle", () => {
     expect(group).not.toBeNull();
     const buttons = group!.querySelectorAll("button");
     expect(buttons.length).toBe(2);
-    expect(Array.from(buttons).map((b) => b.textContent)).toEqual([
-      "Simple",
-      "Advanced",
+    // The labels are icons now, so they live on aria-label rather than in
+    // the text — the accessible name is the only name these buttons have.
+    expect(Array.from(buttons).map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Simple view",
+      "Advanced view",
     ]);
   });
 
@@ -122,7 +124,7 @@ describe("Composer view-mode toggle", () => {
     );
     const group = dom.querySelector("[role='group'][aria-label='Chat view mode']")!;
     const expert = Array.from(group.querySelectorAll("button")).find(
-      (b) => b.textContent === "Advanced",
+      (b) => b.getAttribute("aria-label") === "Advanced view",
     )!;
     act(() => expert.click());
     expect(onViewModeChange).toHaveBeenCalledWith("expert");

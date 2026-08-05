@@ -72,7 +72,7 @@ function SheetContent({
       <DialogPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          "fixed z-50 flex w-80 max-w-[85vw] flex-col bg-card text-sm text-foreground shadow-xl ring-1 ring-foreground/10 outline-none duration-150 data-open:animate-in data-closed:animate-out",
+          "fixed z-50 flex w-[21rem] max-w-[88vw] flex-col bg-card text-sm text-foreground shadow-xl ring-1 ring-foreground/10 outline-none duration-150 data-open:animate-in data-closed:animate-out",
           sideClasses,
           className,
         )}

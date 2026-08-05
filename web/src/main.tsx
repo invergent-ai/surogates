@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 
 import "./index.css";
 import { App } from "./app/app";
+import { registerServiceWorker } from "./register-sw";
 
 const globalCrypto = globalThis.crypto as Crypto | undefined;
 
@@ -37,3 +38,7 @@ createRoot(rootElement).render(
     <App />
   </StrictMode>,
 );
+
+// Chrome gates its install prompt on a registered worker that handles fetch.
+// This one caches nothing — see public/sw.js.
+registerServiceWorker();

@@ -1,15 +1,9 @@
 "use client";
 
-import { Button } from "../ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "../ui/popover";
 import { Progress } from "../ui/progress";
 import { cn } from "../../lib/utils";
 import type { LanguageModelUsage } from "ai";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { createContext, useContext, useMemo } from "react";
 import { getUsage } from "tokenlens";
 
@@ -34,21 +28,30 @@ const useContextValue = () => {
   const context = useContext(ContextContext);
 
   if (!context) {
-    throw new Error("Context components must be used within Context");
+    throw new Error(
+      "Context components must be used within ContextValueProvider",
+    );
   }
 
   return context;
 };
 
-export type ContextProps = ComponentProps<typeof Popover> & ContextSchema;
+export type ContextValueProviderProps = ContextSchema & {
+  children?: ReactNode;
+};
 
-export const Context = ({
+/**
+ * The usage figures. Every ContextContent* part reads from here, so a caller
+ * can present them in whatever container suits — the composer wraps a
+ * ResponsivePanel, which is a popover with a cursor and a sheet on a phone.
+ */
+export const ContextValueProvider = ({
   usedTokens,
   maxTokens,
   usage,
   modelId,
-  ...props
-}: ContextProps) => {
+  children,
+}: ContextValueProviderProps) => {
   const contextValue = useMemo(
     () => ({ maxTokens, modelId, usage, usedTokens }),
     [maxTokens, modelId, usage, usedTokens]
@@ -56,12 +59,12 @@ export const Context = ({
 
   return (
     <ContextContext.Provider value={contextValue}>
-      <Popover {...props} />
+      {children}
     </ContextContext.Provider>
   );
 };
 
-const ContextIcon = () => {
+export const ContextIcon = ({ className }: { className?: string }) => {
   const { usedTokens, maxTokens } = useContextValue();
   const circumference = 2 * Math.PI * ICON_RADIUS;
   const usedPercent = usedTokens / maxTokens;
@@ -70,6 +73,7 @@ const ContextIcon = () => {
   return (
     <svg
       aria-label="Model context usage"
+      className={className}
       height="20"
       role="img"
       style={{ color: "currentcolor" }}
@@ -101,32 +105,6 @@ const ContextIcon = () => {
     </svg>
   );
 };
-
-export type ContextTriggerProps = ComponentProps<typeof Button>;
-
-export const ContextTrigger = ({ children, ...props }: ContextTriggerProps) => {
-  return (
-    <PopoverTrigger asChild>
-      {children ?? (
-        <Button type="button" variant="ghost" {...props}>
-          <ContextIcon />
-        </Button>
-      )}
-    </PopoverTrigger>
-  );
-};
-
-export type ContextContentProps = ComponentProps<typeof PopoverContent>;
-
-export const ContextContent = ({
-  className,
-  ...props
-}: ContextContentProps) => (
-  <PopoverContent
-    className={cn("min-w-60 divide-y overflow-hidden p-0", className)}
-    {...props}
-  />
-);
 
 export type ContextContentHeaderProps = ComponentProps<"div">;
 

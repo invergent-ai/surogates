@@ -12,9 +12,9 @@ import {
 	useEffect,
 	useRef,
 	useState,
-	useSyncExternalStore,
 } from "react";
 import type { MouseEvent, ReactNode } from "react";
+import { useIsMobile } from "../../lib/use-is-mobile";
 import { formatFileSize } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import type {
@@ -214,15 +214,7 @@ export function WorkspacePanel({
 	// 375px phone made the panel wider than the viewport and offered a
 	// col-resize handle no finger can use. Inline styles cannot be
 	// media-queried, so the breakpoint is read here.
-	const narrow = useSyncExternalStore(
-		(cb) => {
-			const mql = window.matchMedia("(max-width: 767px)");
-			mql.addEventListener("change", cb);
-			return () => mql.removeEventListener("change", cb);
-		},
-		() => window.matchMedia("(max-width: 767px)").matches,
-		() => false,
-	);
+	const narrow = useIsMobile();
 	const sessionIdRef = useRef(sessionId);
 	const isResizing = useRef(false);
 	const startX = useRef(0);

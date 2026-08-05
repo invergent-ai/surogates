@@ -152,7 +152,12 @@ export function BrowserProfileSetupDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-dvh w-screen max-w-none sm:max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0">
+      {/* Full-bleed on a phone, so it carries the device insets itself, and
+          its height comes from the visual viewport: 100dvh ignores the
+          on-screen keyboard, which this dialog opens the moment you type a
+          password into the live browser. Matches the app shell — see
+          hooks/use-visual-viewport. */}
+      <DialogContent className="flex h-(--viewport-h,100dvh) w-screen max-w-none flex-col gap-0 rounded-none border-0 bg-background p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:max-w-none">
         <DialogHeader className="h-12 shrink-0 flex-row items-center justify-between border-b border-line px-4">
           <DialogTitle className="text-sm">
             Set up browser authentication

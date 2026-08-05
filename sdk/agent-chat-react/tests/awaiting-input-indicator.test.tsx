@@ -254,7 +254,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.querySelector('[aria-label="Add"]')).toBeNull();
+    expect(dom.querySelector('[aria-label="Composer tools"]')).toBeNull();
   });
 
   it("offers the attachment picker when no question is pending", () => {
@@ -269,7 +269,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.querySelector('[aria-label="Add"]')).not.toBeNull();
+    expect(dom.querySelector('[aria-label="Composer tools"]')).not.toBeNull();
   });
 
   it("offers quick replies but keeps typing available when other is allowed", () => {
