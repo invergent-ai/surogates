@@ -721,20 +721,20 @@ function ChatComposerInner({
         return;
       }
 
-      // Stopping first is how a user interrupts a working agent. When
-      // the agent is waiting on an answer, stopping would pause the
-      // session and the pending ask_user_question would come back
-      // ``cancelled`` — the message must go straight through instead.
-      if (isRunning && !awaitingAnswer) {
-        await onStop();
-      }
+      // Send straight through even while the agent is working: the
+      // harness folds a mid-turn user.message into the running wake at
+      // the next iteration boundary, so a correction lands without
+      // discarding the turn. Stopping first would pause the session,
+      // compensate its sagas and destroy the sandbox pod — a cold
+      // restart to deliver one sentence. The Stop button remains the
+      // way to actually abort.
       await onSend(
         text,
         images.length > 0 ? images : undefined,
         pending.length > 0 ? pending : undefined,
       );
     },
-    [onSend, onStop, onComposerError, isRunning, awaitingAnswer, disabled],
+    [onSend, onComposerError, disabled],
   );
 
   const handlePromptInputError = useCallback(

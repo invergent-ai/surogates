@@ -311,7 +311,7 @@ describe("AgentChat", () => {
     expect(badges.length).toBe(1);
   });
 
-  it("stops the active response before sending a submitted message while streaming", async () => {
+  it("sends a message submitted while streaming without pausing the session", async () => {
     const stream = new FakeEventStream();
     const calls: string[] = [];
     const adapter: AgentChatAdapter = {
@@ -349,10 +349,9 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
-    expect(calls).toEqual([
-      "stop:s-1",
-      "send:s-1:interrupt with this",
-    ]);
+    // The harness steers a mid-turn user.message into the running wake,
+    // so pausing first would only cost a sandbox teardown and replay.
+    expect(calls).toEqual(["send:s-1:interrupt with this"]);
   });
 
   it("packages the workspace panel and file viewer with the chat component", async () => {
