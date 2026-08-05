@@ -247,14 +247,16 @@
   }
 }
 
-/* Safe-area padding for chrome pinned to a device edge (notch, home bar).
-   Additive, so a `p-4` stays a `p-4` on hardware without insets. */
-.pt-safe {
-  padding-top: env(safe-area-inset-top);
-}
-.pb-safe {
-  padding-bottom: env(safe-area-inset-bottom);
-}
+/* REMOVED: .pt-safe / .pb-safe.
+   They were declared here, outside any layer, while Tailwind emits every
+   utility inside `@layer utilities` — so an unlayered rule beat `p-4` no
+   matter the source order and REPLACED the padding rather than adding to it.
+   On hardware with no inset that is `0`, so any element combining the two
+   lost its padding entirely. Chrome pinned to a device edge now spells the
+   sum out where it is used: `pt-[env(safe-area-inset-top)]`, or
+   `pb-[calc(1rem+env(safe-area-inset-bottom))]` where there is padding to
+   add to. Verbose, but it composes with the rest of the class list instead
+   of silently outranking it. */
 
 /* The chat SDK owns most of this app's UI, and its compact controls — the
    `xs` button size and the inbox/coding filter pills — sit at 24-30px. Every

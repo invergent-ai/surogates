@@ -401,6 +401,68 @@ describe("AgentChat", () => {
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
   });
 
+  it("offers one phone tab per live pane, and falls back when one goes away", async () => {
+    const stream = new FakeEventStream();
+    const adapter = {
+      ...createAdapter(stream),
+      browserLiveViewUrl() {
+        return "about:blank#browser-live";
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+
+    const tabLabels = () =>
+      Array.from(
+        container?.querySelectorAll<HTMLElement>(
+          '[data-testid="mobile-pane-toggle"] button',
+        ) ?? [],
+      ).map((button) => button.textContent);
+
+    // Workspace only, so far.
+    expect(tabLabels()).toEqual(["Chat", "Workspace"]);
+
+    await act(async () => {
+      stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+      await Promise.resolve();
+    });
+    expect(tabLabels()).toEqual(["Chat", "Browser", "Workspace"]);
+
+    // Park the layout on the browser tab, then close the browser: the tab it
+    // was showing no longer exists, so it must not be left on a blank pane.
+    const browserTab = Array.from(
+      container?.querySelectorAll<HTMLElement>(
+        '[data-testid="mobile-pane-toggle"] button',
+      ) ?? [],
+    ).find((button) => button.textContent === "Browser");
+    await act(async () => {
+      browserTab?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container
+        ?.querySelector('[data-testid="right-stack"]')
+        ?.getAttribute("data-mobile-view"),
+    ).toBe("browser");
+
+    await act(async () => {
+      stream.emit("browser.destroyed", 11, { session_id: "s-1" });
+      await Promise.resolve();
+    });
+    expect(tabLabels()).toEqual(["Chat", "Workspace"]);
+    expect(
+      container
+        ?.querySelector('[data-testid="chat-panel"]')
+        ?.getAttribute("data-mobile-view"),
+    ).toBe("chat");
+  });
+
   it("stacks BrowserPane above WorkspacePanel when browser is live", async () => {
     const stream = new FakeEventStream();
     const adapter = {
@@ -451,10 +513,14 @@ describe("AgentChat", () => {
     expect(rightStack?.className).toContain("md:right-0");
     expect(rightStack?.className).toContain("md:w-(--right-stack-w,440px)");
     expect(browserPanel?.className).toContain("w-full");
-    expect(browserPanel?.className).toContain("h-1/2");
+    // The 50/50 split is a desktop arrangement; a phone shows whichever pane
+    // the toggle selects, full height.
+    expect(browserPanel?.className).toContain("md:h-1/2");
+    expect(browserPanel?.className).toContain("h-full");
     expect(browserPanel?.className).toContain("overflow-hidden");
     expect(workspacePanel?.className).toContain("w-full");
-    expect(workspacePanelFrame?.className).toContain("h-1/2");
+    expect(workspacePanelFrame?.className).toContain("md:h-1/2");
+    expect(workspacePanelFrame?.className).toContain("h-full");
     expect(workspacePanelFrame?.className).toContain("w-full");
     expect(workspacePanelFrame?.className).toContain("overflow-hidden");
     expect(workspacePanel).not.toBeNull();

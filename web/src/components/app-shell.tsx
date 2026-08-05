@@ -62,7 +62,7 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Phone-only top header */}
         {/* Pinned to the top edge, so it carries the notch inset itself. */}
-        <header className="pt-safe md:hidden shrink-0 border-b border-line">
+        <header className="shrink-0 border-b border-line pt-[env(safe-area-inset-top)] md:hidden">
           <div className="flex h-14 items-center gap-2 px-2">
             <button
               type="button"
