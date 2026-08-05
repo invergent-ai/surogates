@@ -44,6 +44,13 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Delimiter used when a summary has to be merged into the first tail message
+# because neither role would preserve alternation.
+SUMMARY_END_DELIMITER = (
+    "--- END OF CONTEXT SUMMARY — respond to the message below, "
+    "not the summary above ---"
+)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -762,6 +769,41 @@ Use this exact structure:
 
         return "\n".join(out)
 
+    def _recover_previous_summary(
+        self,
+        messages: list[dict[str, Any]],
+        start: int,
+        end: int,
+    ) -> int:
+        """Adopt the newest summary marker in ``messages[start:end]``.
+
+        ``harness_factory`` rebuilds the compressor every wake, so
+        ``_previous_summary`` is None on the first compaction of a turn even
+        when the context already carries a summary from an earlier one.
+        Without this the iterative-update prompt never fires across wakes and
+        the stable plan-step index contract silently stops holding.
+
+        Returns the marker's index so the caller can keep it out of the turns
+        being summarised -- otherwise the same text is fed to the summariser
+        twice, once as PREVIOUS SUMMARY and again verbatim as a new turn.
+        """
+        for idx in range(end - 1, start - 1, -1):
+            content = messages[idx].get("content")
+            if not isinstance(content, str):
+                continue
+            for prefix in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
+                pos = content.find(prefix)
+                if pos == -1:
+                    continue
+                if self._previous_summary is None:
+                    body = content[pos + len(prefix):]
+                    # A merged summary carries the live tail message after the
+                    # delimiter; that part is not summary text.
+                    body = body.split(SUMMARY_END_DELIMITER, 1)[0]
+                    self._previous_summary = body.strip()
+                return idx
+        return -1
+
     @staticmethod
     def _with_summary_prefix(summary: str) -> str:
         """Normalise summary text to the current compaction handoff format."""
@@ -1003,7 +1045,16 @@ Use this exact structure:
                 strategy="boundaries_overlap",
             )
 
-        turns_to_summarize = messages[compress_start:compress_end]
+        summary_idx = self._recover_previous_summary(
+            messages, compress_start, compress_end,
+        )
+        turns_to_summarize = [
+            msg
+            for i, msg in enumerate(
+                messages[compress_start:compress_end], compress_start,
+            )
+            if i != summary_idx
+        ]
 
         if not self.quiet_mode:
             logger.info(
@@ -1033,6 +1084,19 @@ Use this exact structure:
             llm_client,
             pre_compress_guidance=pre_compress_guidance,
         )
+
+        # A summariser outage still has to free tokens, but dropping the
+        # middle silently makes the agent re-do finished work and contradict
+        # its own decisions with no visible cause.  Say so in-context and in
+        # the event payload instead; placement then reuses the normal path.
+        summary_failed = summary is None
+        if summary_failed:
+            summary = (
+                f"{SUMMARY_PREFIX}\n[{len(turns_to_summarize)} earlier messages "
+                "were dropped to free context space and could not be summarised "
+                "-- the summarisation model was unavailable. That detail is not "
+                "recoverable here; ask the user rather than assuming.]"
+            )
 
         # Phase 4: Assemble compressed message list.
         compressed: list[dict[str, Any]] = []
@@ -1069,19 +1133,13 @@ Use this exact structure:
                     _merge_summary_into_tail = True
             if not _merge_summary_into_tail:
                 compressed.append({"role": summary_role, "content": summary})
-        else:
-            if not self.quiet_mode:
-                logger.debug("No summary model available — middle turns dropped without summary")
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
             if _merge_summary_into_tail and i == compress_end:
                 original = msg.get("content") or ""
                 msg["content"] = (
-                    summary
-                    + "\n\n--- END OF CONTEXT SUMMARY — "
-                    "respond to the message below, not the summary above ---\n\n"
-                    + original
+                    summary + "\n\n" + SUMMARY_END_DELIMITER + "\n\n" + original
                 )
                 _merge_summary_into_tail = False
             compressed.append(msg)
@@ -1106,7 +1164,7 @@ Use this exact structure:
             original_tokens=original_tokens,
             compressed_count=len(compressed),
             compressed_tokens=compressed_tokens,
-            strategy="summarise",
+            strategy="summary_unavailable" if summary_failed else "summarise",
             summary=summary,
         )
 

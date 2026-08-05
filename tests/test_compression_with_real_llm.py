@@ -550,7 +550,8 @@ async def test_third_compaction_preserves_first_compaction_indices(llm_client):
 
 async def test_compressor_swallows_summariser_exception(llm_client):
     """Robustness: if the summariser endpoint refuses the request, the
-    compressor must not crash — it sets a cooldown and drops middle turns.
+    compressor must not crash — it sets a cooldown and drops middle turns,
+    reporting the loss rather than passing it off as a normal compaction.
     Simulated by pointing at an obviously-bad model name; the endpoint
     should reject and we verify recovery."""
     from openai import AsyncOpenAI
@@ -569,7 +570,7 @@ async def test_compressor_swallows_summariser_exception(llm_client):
     # Compression must complete without raising even though summarisation fails.
     compressed, summary_data = await compressor.compress(messages, bad_client)
 
-    assert summary_data["strategy"] == "summarise"
+    assert summary_data["strategy"] == "summary_unavailable"
     # Cooldown should now be active.
     import time
     assert compressor._summary_failure_cooldown_until > time.monotonic(), (
