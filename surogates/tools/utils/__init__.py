@@ -39,7 +39,6 @@ from surogates.tools.utils.env_passthrough import (
     register_env_passthrough,
     reset_config_cache,
 )
-from surogates.tools.utils.fuzzy_match import fuzzy_find_and_replace
 from surogates.tools.utils.checkpoint_manager import CheckpointManager, format_checkpoint_list
 from surogates.tools.utils.url_safety import is_always_blocked_url, is_safe_url
 
@@ -55,8 +54,6 @@ __all__ = [
     "is_env_passthrough",
     "register_env_passthrough",
     "reset_config_cache",
-    # fuzzy_match
-    "fuzzy_find_and_replace",
     # url_safety
     "is_always_blocked_url",
     "is_safe_url",

@@ -915,9 +915,9 @@ PATCH_SCHEMA = ToolSchema(
     name="patch",
     description=(
         "Targeted find-and-replace edits in files. Use this instead of sed/awk in "
-        "terminal. Uses fuzzy matching (9 strategies) so minor whitespace/indentation "
-        "differences won't break it. Returns a unified diff. Auto-runs syntax checks "
-        "after editing.\n\n"
+        "terminal. Whitespace and indentation differences won't break the match, "
+        "but old_string must identify exactly one place in the file. Returns a "
+        "unified diff. Auto-runs syntax checks after editing.\n\n"
         "Replace mode (default): find a unique string and replace it.\n"
         "Patch mode: apply V4A multi-file patches for bulk changes."
     ),
@@ -1705,6 +1705,40 @@ async def _patch_handler(
         return _tool_error(str(exc))
 
 
+def _line_ending(line: str) -> str:
+    """Return the newline sequence that terminates ``line`` (or "" if none)."""
+    for ending in ("\r\n", "\n", "\r"):
+        if line.endswith(ending):
+            return ending
+    return ""
+
+
+def _normalize_for_match(line: str) -> str:
+    """Reduce a line to its whitespace-insensitive form, for matching only.
+
+    Never used to build file content -- only to decide whether two lines
+    refer to the same source line.
+    """
+    return re.sub(r"[ \t]+", " ", line.strip())
+
+
+def _fuzzy_line_windows(
+    content_lines: list[str],
+    old_lines: list[str],
+) -> list[int]:
+    """Return start indices where ``old_lines`` matches ignoring whitespace."""
+    if not old_lines:
+        return []
+    norm_old = [_normalize_for_match(line) for line in old_lines]
+    norm_content = [_normalize_for_match(line) for line in content_lines]
+    span = len(norm_old)
+    return [
+        i
+        for i in range(len(norm_content) - span + 1)
+        if norm_content[i : i + span] == norm_old
+    ]
+
+
 def _apply_replace(
     path: str,
     old_string: str,
@@ -1714,17 +1748,40 @@ def _apply_replace(
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
-    Tries exact match first, then falls back through multiple fuzzy
-    matching strategies (9 total) to handle whitespace/indentation
-    differences.  Returns a result dict.
+    Tries an exact match first, then a whitespace-insensitive line-window
+    match that must be unique.  Either way the replacement is spliced into
+    the original text, so nothing outside the matched region is rewritten.
+    Returns a result dict.
     """
+    if not old_string.strip():
+        return {
+            "error": (
+                "old_string must contain non-whitespace text. An empty or "
+                "whitespace-only target matches all over the file and would "
+                "rewrite every line rather than the one you meant."
+            ),
+            "path": path,
+        }
+
+    if old_string == new_string:
+        return {
+            "error": (
+                "old_string and new_string are identical -- this edit would "
+                "not change anything."
+            ),
+            "path": path,
+        }
+
     resolved = _resolve_user_path(path, workspace_path)
 
     if not os.path.exists(resolved):
         return {"error": f"File not found: {path}"}
 
     try:
-        with open(resolved, encoding="utf-8") as fh:
+        # newline="" keeps CRLF intact: universal-newline translation here
+        # plus a plain write-back silently converts every line ending in the
+        # file, far outside the region being edited.
+        with open(resolved, encoding="utf-8", newline="") as fh:
             content = fh.read()
     except OSError as exc:
         return {"error": f"Failed to read file: {exc}"}
@@ -1749,106 +1806,38 @@ def _apply_replace(
 
         return _write_patched(resolved, path, content, new_content)
 
-    # --- Fuzzy matching strategies ---
-    # Strategy 1: Normalize line endings (CRLF → LF)
-    normalized_content = content.replace("\r\n", "\n")
-    normalized_old = old_string.replace("\r\n", "\n")
-    if normalized_old in normalized_content:
-        if not replace_all:
-            new_content = normalized_content.replace(normalized_old, new_string, 1)
-        else:
-            new_content = normalized_content.replace(normalized_old, new_string)
-        return _write_patched(resolved, path, content, new_content)
+    # --- Scoped fuzzy match ---
+    # Whitespace differences (indentation, tabs vs spaces, runs of spaces,
+    # trailing blanks, CRLF) are tolerated when LOCATING the edit, but the
+    # splice happens in the original line list.  Bytes outside the matched
+    # window are therefore untouchable by construction -- the reason the old
+    # normalise-the-whole-file strategies had to go.
+    content_lines = content.splitlines(keepends=True)
+    old_lines = old_string.splitlines()
+    starts = _fuzzy_line_windows(content_lines, old_lines)
 
-    # Strategy 2: Strip trailing whitespace from each line
-    def strip_trailing(text: str) -> str:
-        return "\n".join(line.rstrip() for line in text.split("\n"))
+    if len(starts) > 1:
+        return {
+            "error": (
+                f"Found {len(starts)} whitespace-insensitive matches for "
+                f"old_string in {path}. Include more surrounding context to "
+                "make it unique."
+            ),
+            "path": path,
+            "occurrences": len(starts),
+        }
 
-    stripped_content = strip_trailing(content)
-    stripped_old = strip_trailing(old_string)
-    if stripped_old in stripped_content:
-        if not replace_all:
-            new_content = stripped_content.replace(stripped_old, new_string, 1)
-        else:
-            new_content = stripped_content.replace(stripped_old, new_string)
-        return _write_patched(resolved, path, content, new_content)
-
-    # Strategy 3: Tabs ↔ spaces (try both 2-space and 4-space)
-    for tab_width in (4, 2):
-        spaces = " " * tab_width
-        content_tabs_as_spaces = content.replace("\t", spaces)
-        old_tabs_as_spaces = old_string.replace("\t", spaces)
-        if old_tabs_as_spaces in content_tabs_as_spaces:
-            if not replace_all:
-                new_content = content_tabs_as_spaces.replace(
-                    old_tabs_as_spaces, new_string.replace("\t", spaces), 1
-                )
-            else:
-                new_content = content_tabs_as_spaces.replace(
-                    old_tabs_as_spaces, new_string.replace("\t", spaces)
-                )
-            return _write_patched(resolved, path, content, new_content)
-
-        # Try the reverse: spaces → tabs
-        content_spaces_as_tabs = content.replace(spaces, "\t")
-        old_spaces_as_tabs = old_string.replace(spaces, "\t")
-        if old_spaces_as_tabs in content_spaces_as_tabs:
-            if not replace_all:
-                new_content = content_spaces_as_tabs.replace(
-                    old_spaces_as_tabs, new_string.replace(spaces, "\t"), 1
-                )
-            else:
-                new_content = content_spaces_as_tabs.replace(
-                    old_spaces_as_tabs, new_string.replace(spaces, "\t")
-                )
-            return _write_patched(resolved, path, content, new_content)
-
-    # Strategy 4: Collapse all whitespace runs to single space
-    def collapse_ws(text: str) -> str:
-        return re.sub(r"[ \t]+", " ", text)
-
-    collapsed_content = collapse_ws(content)
-    collapsed_old = collapse_ws(old_string)
-    if collapsed_old in collapsed_content:
-        # Find the position in collapsed, map back to original
-        # For simplicity, just do the replace on original with best-effort
-        # line-by-line matching
-        if not replace_all:
-            new_content = collapsed_content.replace(collapsed_old, collapse_ws(new_string), 1)
-        else:
-            new_content = collapsed_content.replace(collapsed_old, collapse_ws(new_string))
-        return _write_patched(resolved, path, content, new_content)
-
-    # Strategy 5: Indentation-agnostic matching
-    # Dedent both old_string and content lines, try to match
-    old_lines = old_string.split("\n")
-    if len(old_lines) >= 2:
-        import textwrap
-
-        dedented_old = textwrap.dedent(old_string)
-        dedented_content = textwrap.dedent(content)
-        if dedented_old in dedented_content:
-            if not replace_all:
-                new_content = dedented_content.replace(
-                    dedented_old, textwrap.dedent(new_string), 1
-                )
-            else:
-                new_content = dedented_content.replace(
-                    dedented_old, textwrap.dedent(new_string)
-                )
-            return _write_patched(resolved, path, content, new_content)
-
-    # Strategy 6: Case-insensitive matching (last resort for minor typos)
-    lower_content = content.lower()
-    lower_old = old_string.lower()
-    if lower_old in lower_content:
-        # Find the actual case in content and replace it
-        idx = lower_content.find(lower_old)
-        actual = content[idx : idx + len(old_string)]
-        if not replace_all:
-            new_content = content.replace(actual, new_string, 1)
-        else:
-            new_content = content.replace(actual, new_string)
+    if len(starts) == 1:
+        start = starts[0]
+        end = start + len(old_lines)
+        replacement = new_string
+        if not replacement.endswith(("\n", "\r")):
+            replacement += _line_ending(content_lines[end - 1])
+        new_content = (
+            "".join(content_lines[:start])
+            + replacement
+            + "".join(content_lines[end:])
+        )
         return _write_patched(resolved, path, content, new_content)
 
     return {
@@ -2195,7 +2184,7 @@ def _write_patched(
         # Atomic write
         tmp_path = resolved_path + ".tmp"
         try:
-            with open(tmp_path, "w", encoding="utf-8") as fh:
+            with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
                 fh.write(new_content)
             os.replace(tmp_path, resolved_path)
         except Exception:
