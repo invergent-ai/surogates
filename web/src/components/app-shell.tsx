@@ -61,28 +61,31 @@ export function AppShell({ sidebar, headerSlot, children }: AppShellProps) {
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Phone-only top header */}
-        <header className="md:hidden flex h-12 shrink-0 items-center gap-2 border-b border-line px-2">
-          <button
-            type="button"
-            onClick={() => setSheetOpen(true)}
-            aria-label="Open navigation"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-subtle hover:bg-input hover:text-foreground"
-          >
-            <MenuIcon className="h-5 w-5" />
-          </button>
-          <div className="min-w-0 flex-1">{headerSlot}</div>
-          <button
-            type="button"
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            aria-label="Toggle theme"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-subtle hover:bg-input hover:text-foreground"
-          >
-            {theme === "dark" ? (
-              <SunIcon className="h-4 w-4" />
-            ) : (
-              <MoonIcon className="h-4 w-4" />
-            )}
-          </button>
+        {/* Pinned to the top edge, so it carries the notch inset itself. */}
+        <header className="pt-safe md:hidden shrink-0 border-b border-line">
+          <div className="flex h-14 items-center gap-2 px-2">
+            <button
+              type="button"
+              onClick={() => setSheetOpen(true)}
+              aria-label="Open navigation"
+              className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-subtle active:bg-input"
+            >
+              <MenuIcon className="h-5 w-5" />
+            </button>
+            <div className="min-w-0 flex-1">{headerSlot}</div>
+            <button
+              type="button"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              aria-label="Toggle theme"
+              className="inline-flex size-11 shrink-0 items-center justify-center rounded-lg text-subtle active:bg-input"
+            >
+              {theme === "dark" ? (
+                <SunIcon className="h-4 w-4" />
+              ) : (
+                <MoonIcon className="h-4 w-4" />
+              )}
+            </button>
+          </div>
         </header>
 
         <main className="flex min-h-0 flex-1 min-w-0 flex-col overflow-hidden">

@@ -1,28 +1,28 @@
-// Copyright (c) 2026, Invergent SA, developed by Flavius Burca
-// SPDX-License-Identifier: AGPL-3.0-only
-//
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useNavigate } from "@tanstack/react-router";
+import * as sessionsApi from "@/api/sessions";
 import {
-  AgentChat,
-  type AgentChatAdapter,
-  type AgentChatMessage,
-} from "@invergent/agent-chat-react";
+  type TransparencyConfig,
+  getTransparencyConfig,
+} from "@/api/transparency";
 import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAppStore } from "@/stores/app-store";
 import { slashCommandEnabled } from "@/stores/capabilities-slice";
-import * as sessionsApi from "@/api/sessions";
 import {
-  getTransparencyConfig,
-  type TransparencyConfig,
-} from "@/api/transparency";
+  AgentChat,
+  type AgentChatAdapter,
+  type AgentChatMessage,
+} from "@invergent/agent-chat-react";
+import { useNavigate, useParams } from "@tanstack/react-router";
+// Copyright (c) 2026, Invergent SA, developed by Flavius Burca
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getChatRouteState } from "./chat-route-state";
 import {
   surogatesWebChatAdapter,
   toAgentChatSession,
 } from "./surogates-web-chat-adapter";
-import { getChatRouteState } from "./chat-route-state";
 
 const PRE_SESSION_KEY = "__pre_session__";
 
@@ -207,7 +207,12 @@ export function ChatPage() {
     <AppShell sidebar={<SessionSidebar />}>
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {needsDisclosure && (
-          <div className="absolute inset-x-0 top-0 z-30 p-4 flex justify-center">
+          // The disclosure is a gate: nothing below it may be used until it
+          // is answered. On a phone the server-composed body is long enough
+          // to overflow the pane and bury the composer, so there it covers
+          // the pane and scrolls itself; from sm up it keeps the original
+          // top-anchored float.
+          <div className="absolute inset-0 z-30 flex justify-center overflow-y-auto bg-background/85 p-4 backdrop-blur-sm sm:inset-x-0 sm:bottom-auto sm:overflow-visible sm:bg-transparent sm:backdrop-blur-none">
             <TransparencyBanner
               sessionId={sessionId ?? undefined}
               level={transparencyConfig?.level ?? "basic"}
@@ -225,12 +230,12 @@ export function ChatPage() {
               <p className="leading-relaxed italic">
                 In accordance with the EU Artificial Intelligence Act
                 (Regulation 2024/1689), Articles 13 and 50, users must
-                acknowledge that they are interacting with an AI system
-                before it can process requests.
+                acknowledge that they are interacting with an AI system before
+                it can process requests.
               </p>
               <p>
-                Without your acknowledgment, this session cannot continue
-                and has been deactivated.
+                Without your acknowledgment, this session cannot continue and
+                has been deactivated.
               </p>
             </div>
           </div>
