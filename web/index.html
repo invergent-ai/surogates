@@ -11,7 +11,11 @@
     />
     <meta name="description" content="Chat with your assistant." />
 
-    <link rel="icon" type="image/png" href="/favicon.png" />
+    <!-- The SVG is what any current browser picks; the .ico carries 16/32/48
+         for the ones that still ask for it by convention, and for a
+         bookmarked shortcut on Windows. Matches Studio. -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
 

@@ -64,7 +64,7 @@ export const ContextValueProvider = ({
   );
 };
 
-export const ContextIcon = () => {
+export const ContextIcon = ({ className }: { className?: string }) => {
   const { usedTokens, maxTokens } = useContextValue();
   const circumference = 2 * Math.PI * ICON_RADIUS;
   const usedPercent = usedTokens / maxTokens;
@@ -73,6 +73,7 @@ export const ContextIcon = () => {
   return (
     <svg
       aria-label="Model context usage"
+      className={className}
       height="20"
       role="img"
       style={{ color: "currentcolor" }}

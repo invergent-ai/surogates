@@ -1034,14 +1034,16 @@ function ChatComposerInner({
                       <PromptInputButton
                         aria-label={`Session context: ${contextPercentLabel} of the window used`}
                         tooltip="Session context"
-                        // A bare ring is legible next to a cursor, where a
-                        // tooltip explains it. On touch there is no hover, so
-                        // the ring gets its number and reads as a button with
-                        // something to say rather than an unexplained glyph.
-                        className="gap-1.5 rounded-sm border border-input/70 text-foreground hover:bg-accent"
+                        // This reports rather than commands, so it is styled
+                        // as a readout: no box, no fill, muted until hovered.
+                        // The bordered button it used to be carried the same
+                        // weight as Send while saying far less. It keeps a
+                        // full-height hit area — padding, not bulk.
+                        variant="ghost"
+                        className="h-9 gap-1 rounded-md border-0 bg-transparent px-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground pointer-coarse:h-11"
                       >
-                        <ContextIcon />
-                        <span className="hidden text-xs tabular-nums pointer-coarse:inline">
+                        <ContextIcon className="size-4" />
+                        <span className="text-[11px] tabular-nums">
                           {contextPercentLabel}
                         </span>
                       </PromptInputButton>
