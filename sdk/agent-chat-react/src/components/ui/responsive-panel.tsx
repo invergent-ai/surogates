@@ -30,7 +30,19 @@ export interface ResponsivePanelProps {
   children: ReactNode;
   /** Popover-only; the sheet is always full width. */
   align?: ComponentProps<typeof PopoverContent>["align"];
-  className?: string;
+  /**
+   * Styling for the popover form only.
+   *
+   * Deliberately not a shared `className`: `cn` is tailwind-merge, so a class
+   * written for the popover silently deletes a conflicting one from the
+   * sheet's own base list. `p-0` and `pb-[env(safe-area-inset-bottom)]` are
+   * the same conflict group, so passing the popover's `p-0` through dropped
+   * the sheet's home-indicator inset — and a `divide-y` meant for the
+   * popover's sections drew a rule under the sheet's grab handle instead.
+   */
+  popoverClassName?: string;
+  /** Styling for the sheet form only. Same reasoning as popoverClassName. */
+  sheetClassName?: string;
 }
 
 export function ResponsivePanel({
@@ -40,7 +52,8 @@ export function ResponsivePanel({
   title,
   children,
   align = "start",
-  className,
+  popoverClassName,
+  sheetClassName,
 }: ResponsivePanelProps) {
   const isMobile = useIsMobile();
 
@@ -51,7 +64,7 @@ export function ResponsivePanel({
         <PopoverContent
           side="top"
           align={align}
-          className={cn("w-64 overflow-hidden rounded-xl p-1", className)}
+          className={cn("w-64 overflow-hidden rounded-xl p-1", popoverClassName)}
         >
           {children}
         </PopoverContent>
@@ -69,10 +82,11 @@ export function ResponsivePanel({
         />
         <DialogPrimitive.Content
           data-slot="responsive-panel-sheet"
+          aria-describedby={undefined}
           className={cn(
             "fixed inset-x-0 bottom-0 z-50 flex max-h-[80svh] flex-col overflow-hidden rounded-t-2xl border-t border-border bg-popover pb-[env(safe-area-inset-bottom)] text-popover-foreground shadow-lg",
             "data-[state=closed]:animate-out data-[state=closed]:slide-out-to-bottom data-[state=open]:animate-in data-[state=open]:slide-in-from-bottom",
-            className,
+            sheetClassName,
           )}
         >
           <DialogPrimitive.Title className="sr-only">

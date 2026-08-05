@@ -7,8 +7,8 @@
 // spelled its own title out. Pages now drop that title and the header carries
 // it, so every route needs an entry here.
 //
-// Longest prefix wins, so /settings/coding-agents resolves to "Coding agents"
-// rather than "Settings". Order within the list does not matter.
+// Longest prefix wins, so a nested route resolves to its own name rather than
+// its parent's. Order within the list does not matter.
 const SECTIONS: readonly (readonly [string, string])[] = [
   ["/chat", "Chat"],
   ["/inbox", "Inbox"],
@@ -18,7 +18,7 @@ const SECTIONS: readonly (readonly [string, string])[] = [
   ["/integrations", "Integrations"],
   ["/link", "Link a channel"],
   ["/settings", "Settings"],
-  ["/settings/coding-agents", "Coding agents"],
+  ["/coding-agents", "Coding agents"],
 ];
 
 /**

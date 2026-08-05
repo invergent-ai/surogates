@@ -74,6 +74,7 @@ import {
   CommandItem,
   CommandList,
 } from "../ui/command";
+import { useIsMobile } from "../../lib/use-is-mobile";
 import { ResponsivePanel } from "../ui/responsive-panel";
 import {
   ComposerCommandMenu,
@@ -749,6 +750,7 @@ function ChatComposerInner({
   // reading "Simple Advanced" beside the one control you press every message,
   // and wide enough that the footer wrapped on a phone and stacked the tools
   // into a second toolbar. The labels move to tooltips and screen readers.
+  const isMobile = useIsMobile();
   const [contextOpen, setContextOpen] = useState(false);
   // Whole percent: the popover header already prints the exact figure, and a
   // decimal on a button this size is noise.
@@ -904,7 +906,7 @@ function ChatComposerInner({
                   }
                 >
                   <Command>
-                    <CommandList className="max-h-none">
+                    <CommandList className={cn(isMobile && "max-h-none")}>
                       {canAttach && (
                         <CommandGroup heading="Attach">
                           <CommandItem
@@ -1025,7 +1027,7 @@ function ChatComposerInner({
                     onOpenChange={setContextOpen}
                     title="Session context"
                     align="end"
-                    className="min-w-60 divide-y p-0"
+                    popoverClassName="min-w-60 divide-y p-0"
                     trigger={
                       <PromptInputButton
                         aria-label={`Session context: ${contextPercentLabel} of the window used`}

@@ -33,7 +33,12 @@
     <meta property="og:site_name" content="Surogate" />
     <meta property="og:title" content="Surogate" />
     <meta property="og:description" content="Chat with your assistant." />
-    <meta property="og:image" content="/icons/icon-512.png" />
+    <!-- No og:image: Open Graph requires an absolute URL, and this app is
+         served from a different host per agent, so there is no single correct
+         one to hard-code. A relative path is simply ignored by every crawler,
+         which renders an imageless card either way — this states the reason
+         instead of looking configured. Add one here (or inject it at build
+         time) if a canonical host ever exists. -->
     <meta name="twitter:card" content="summary" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
