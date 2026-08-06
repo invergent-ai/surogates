@@ -1093,7 +1093,10 @@ class AgentHarness(
                     logger.debug("Memory manager initialization failed", exc_info=True)
 
             # 6. Rebuild the message list from the full event history.
-            messages = self._rebuild_messages(all_events)
+            messages = self._rebuild_messages(
+                all_events,
+                workspace_path=(session.config or {}).get("workspace_path"),
+            )
 
             # 6a. Kick off title generation in the background as soon as we
             # see the user's first message.  Runs in parallel with context

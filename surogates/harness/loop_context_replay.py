@@ -14,6 +14,7 @@ from surogates.harness.loop_attachments import (
 from surogates.harness.loop_messages import _view_context_note_from_metadata
 from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
+from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -186,12 +187,26 @@ class ContextReplayMixin:
             logger.debug("Memory prefetch failed", exc_info=True)
         return None
 
-    def _rebuild_messages(self, events: list[Event]) -> list[dict]:
+    def _rebuild_messages(
+        self, events: list[Event], workspace_path: str | None = None,
+    ) -> list[dict]:
         """Replay event log to reconstruct conversation messages.
 
         Processes events in order.  A ``CONTEXT_COMPACT`` event replaces
         all previously accumulated messages with the compacted set stored
         in its data payload.
+
+        ``workspace_path`` undoes the event-payload path sanitisation on the
+        way back in.  ``execute_tool`` hands the LLM raw paths but stores
+        ``_sanitize_paths(...)`` in the ``tool.result`` event so SSE
+        consumers never see real filesystem paths (see the comment above
+        ``sanitized_content`` in ``tool_exec.py``).  Replaying the stored
+        form verbatim would feed the model the very string that comment
+        says caused "cascades of broken commands" -- ``__WORKSPACE__``
+        treated as a real path -- and would contradict the assistant's own
+        ``tool_calls`` arguments, which ``llm.response`` stores raw.  So
+        the token is expanded here, making a replayed tool message
+        byte-identical to what the live turn returned.
 
         ``LLM_THINKING`` events are **skipped** during replay -- they are
         informational only and should not re-enter the conversation.
@@ -210,6 +225,9 @@ class ContextReplayMixin:
         ``tool_calls[*].id`` set from its ``llm.response`` until every id
         has a matching result.
         """
+        # Exact inverse of ``_sanitize_paths``, which replaces
+        # ``workspace_path.rstrip("/")``.
+        workspace_root = (workspace_path or "").rstrip("/")
         messages: list[dict] = []
         iteration_open = False
         awaiting_tool_ids: set[str] = set()
@@ -256,10 +274,13 @@ class ContextReplayMixin:
                     _flush_deferred()
 
             elif etype == EventType.TOOL_RESULT.value:
+                content = event.data.get("content", "")
+                if workspace_root and _WORKSPACE_TOKEN in content:
+                    content = content.replace(_WORKSPACE_TOKEN, workspace_root)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": event.data.get("tool_call_id", ""),
-                    "content": event.data.get("content", ""),
+                    "content": content,
                 })
                 if awaiting_tool_ids:
                     awaiting_tool_ids.discard(event.data.get("tool_call_id"))

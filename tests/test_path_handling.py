@@ -368,3 +368,72 @@ async def test_terminal_command_can_contain_dollar_var() -> None:
     )
 
     handler.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Replay round-trip: the sanitised event must expand back to the live string.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_replayed_tool_result_matches_what_the_llm_saw_live() -> None:
+    """A resumed session must see the same tool content as the live turn.
+
+    ``execute_single_tool`` stores the sanitised form in the event and
+    returns the raw form to the LLM.  Replay reads the event, so without
+    expansion every wake after the first feeds the model
+    ``__WORKSPACE__`` — exactly the confusion the sanitisation comment in
+    ``tool_exec.py`` says caused cascades of broken commands.
+    """
+    from surogates.harness.loop import AgentHarness
+
+    workspace = "/workspace"
+    raw_output = f"wrote {workspace}/foo.py (12 bytes)"
+    registry = _make_terminal_registry(raw_output)
+    store = _make_store()
+
+    live = await execute_single_tool(
+        {
+            "id": "tc_1",
+            "function": {
+                "name": "terminal",
+                "arguments": '{"command": "pwd"}',
+            },
+        },
+        session=_make_session(workspace),
+        lease=_make_lease(),
+        store=store,
+        tools=registry,
+        tenant=MagicMock(asset_root="/tmp/test"),
+    )
+
+    payload = next(
+        c.args[2] for c in store.emit_event.call_args_list
+        if c.args[1] is EventType.TOOL_RESULT
+    )
+    # Precondition: the stored payload really is the sanitised form.
+    assert "__WORKSPACE__" in payload["content"]
+
+    event = SimpleNamespace(
+        type=EventType.TOOL_RESULT.value, data=payload, id=1,
+    )
+    replayed = AgentHarness._rebuild_messages(
+        SimpleNamespace(), [event], workspace_path=workspace,
+    )
+
+    assert replayed[0]["content"] == live["content"]
+    assert "__WORKSPACE__" not in replayed[0]["content"]
+    assert replayed[0]["content"] == raw_output
+
+
+def test_replay_leaves_the_token_alone_without_a_workspace_path() -> None:
+    """No workspace on the session config — nothing to expand to."""
+    from surogates.harness.loop import AgentHarness
+
+    event = SimpleNamespace(
+        type=EventType.TOOL_RESULT.value,
+        data={"tool_call_id": "tc_1", "content": "wrote __WORKSPACE__/foo.py"},
+        id=1,
+    )
+    replayed = AgentHarness._rebuild_messages(SimpleNamespace(), [event])
+    assert replayed[0]["content"] == "wrote __WORKSPACE__/foo.py"
