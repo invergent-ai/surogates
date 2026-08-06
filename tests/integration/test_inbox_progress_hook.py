@@ -23,6 +23,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 class _StubTenant:
     org_id: UUID
     user_id: UUID
+    service_account_id: UUID | None = None
 
 
 async def _setup_harness(session_store, session_factory, *, interval):

@@ -31,6 +31,7 @@ class UserSession:
 class StubTenant:
     org_id: UUID
     user_id: UUID
+    service_account_id: UUID | None = None
 
 
 AGENT_ID = "test-agent"

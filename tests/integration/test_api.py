@@ -119,7 +119,7 @@ async def _create_scheduled_run_session(app, session_factory, org_id, user_id):
         org_id=org_id,
         agent_id=TEST_AGENT_ID,
         channel="scheduled",
-        model=app.state.settings.llm.model,
+        # No model: the worker stamps the resolved bundle model at wake.
         config={
             "storage_bucket": app.state.settings.storage.bucket,
             "scheduled_session_id": str(uuid.uuid4()),

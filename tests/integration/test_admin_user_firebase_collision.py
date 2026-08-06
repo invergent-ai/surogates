@@ -78,7 +78,6 @@ async def test_manual_create_refuses_existing_firebase_email(
         ))
         await session.commit()
 
-    # Without force: refused with 409 + pointer to the existing user.
     response = await admin_client.post(
         f"/v1/admin/orgs/{org_id}/users",
         json={
@@ -91,29 +90,17 @@ async def test_manual_create_refuses_existing_firebase_email(
     )
     assert response.status_code == 409, response.text
     body = response.json()
-    assert "already linked" in body["detail"].lower()
+    assert "already in use" in body["detail"].lower()
 
-    # With force: succeeds and creates a second row.
-    response = await admin_client.post(
-        f"/v1/admin/orgs/{org_id}/users",
-        json={
-            "email": "dup@example.com",
-            "display_name": "Manual",
-            "auth_provider": "database",
-            "password": "hunter2",
-            "force": True,
-        },
-        headers=headers,
-    )
-    assert response.status_code == 201, response.text
-
+    # No escape hatch: ``uq_users_org_lower_email`` allows exactly one
+    # account per (org, email), so the existing row stays alone.
     async with session_factory() as session:
         rows = (await session.execute(
             select(User).where(
                 User.org_id == org_id, User.email == "dup@example.com",
             )
         )).scalars().all()
-    assert len(rows) == 2
+    assert len(rows) == 1
 
 
 async def test_manual_create_succeeds_when_no_firebase_collision(
@@ -136,12 +123,12 @@ async def test_manual_create_succeeds_when_no_firebase_collision(
     assert response.status_code == 201, response.text
 
 
-async def test_manual_create_only_blocks_on_firebase_provider(
+async def test_manual_create_blocks_on_any_provider(
     admin_client, session_factory,
 ):
-    """Two manual ``database`` users with the same email is the pre-existing
-    behaviour — the guard MUST NOT change it. Only Firebase-namespaced
-    ``auth_provider`` rows trigger the collision check."""
+    """The collision guard is provider-agnostic: email is the org-scoped
+    login key, so a second ``database`` row on the same address is refused
+    with a 409 rather than 500-ing on the unique index."""
     org_id, headers = await _admin_token(session_factory)
     async with session_factory() as session:
         session.add(User(
@@ -164,4 +151,5 @@ async def test_manual_create_only_blocks_on_firebase_provider(
         },
         headers=headers,
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 409, response.text
+    assert "already in use" in response.json()["detail"].lower()

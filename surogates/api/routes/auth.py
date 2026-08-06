@@ -408,10 +408,22 @@ async def firebase_exchange(
             session.add(user)
             try:
                 await session.commit()
-            except IntegrityError:
+            except IntegrityError as exc:
+                await session.rollback()
+                if "uq_users_org_lower_email" in str(getattr(exc, "orig", exc)):
+                    # The email is the org-scoped login key and already
+                    # belongs to another account — most often a manual
+                    # ``database`` row, which we deliberately never link
+                    # to Firebase. Refuse rather than shadow it.
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "That email already belongs to an account in this "
+                            "organisation. Sign in with its existing method."
+                        ),
+                    ) from exc
                 # The username unique index caught a concurrent claim;
                 # retry once without it — account creation wins.
-                await session.rollback()
                 user.username = None
                 session.add(user)
                 await session.commit()

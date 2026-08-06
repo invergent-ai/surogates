@@ -345,7 +345,9 @@ def patched_send_message(monkeypatch):
             session_id=session.id,
             body=body,
             request=request,  # type: ignore[arg-type]
-            tenant=SimpleNamespace(),  # type: ignore[arg-type]
+            # Anonymous web caller: no user_id, so the commerce/allowance
+            # gates short-circuit and the test stays on the attachment path.
+            tenant=SimpleNamespace(user_id=None),  # type: ignore[arg-type]
             agent_runtime=_agent_runtime(),
         )
         return result, store, active_detector

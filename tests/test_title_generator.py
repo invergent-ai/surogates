@@ -19,6 +19,38 @@ from surogates.harness.loop import AgentHarness
 from surogates.session.models import Event, Session, SessionLease
 
 
+def _wake_harness(store, *, tenant_org_id, tenant_user_id) -> AgentHarness:
+    """A real ``AgentHarness`` with mocked collaborators, ready for ``wake``."""
+    from surogates.harness.context import ContextCompressor
+    from surogates.harness.prompt import PromptBuilder
+    from surogates.harness.budget import IterationBudget
+    from surogates.sandbox.pool import SandboxPool
+    from surogates.tenant.context import TenantContext
+    from surogates.tools.registry import ToolRegistry
+
+    return AgentHarness(
+        session_store=store,
+        tool_registry=ToolRegistry(),
+        llm_client=AsyncMock(),
+        tenant=TenantContext(
+            org_id=tenant_org_id,
+            user_id=tenant_user_id,
+            org_config={},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root="/tmp/test",
+        ),
+        worker_id="test-worker",
+        budget=IterationBudget(max_total=10),
+        context_compressor=MagicMock(spec=ContextCompressor),
+        prompt_builder=MagicMock(spec=PromptBuilder),
+        sandbox_pool=MagicMock(spec=SandboxPool),
+        default_model="gpt-4o",
+        vision_client=None,
+        vision_model="",
+    )
+
+
 def _response(content: str):
     return SimpleNamespace(
         choices=[
@@ -464,20 +496,6 @@ async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
         {"role": "user", "content": "/loop check bitcoin volatility"},
     ]
 
-    harness = AgentHarness.__new__(AgentHarness)
-    harness._llm = AsyncMock()
-    harness._worker_id = "test-worker"
-    harness._default_model = "gpt-4o"
-    harness._streaming_enabled = True
-    harness._memory_manager = None
-    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id)
-    harness._summary_client = None
-    harness._summary_model = ""
-    harness._session_factory = None
-    harness._bundle = None
-    harness._prompt = MagicMock()
-    harness._background_tasks = set()
-
     store = AsyncMock()
     store.get_session = AsyncMock(return_value=session)
     store.try_acquire_lease = AsyncMock(return_value=lease)
@@ -486,7 +504,12 @@ async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
     store.emit_event = AsyncMock(return_value=2)
     store.release_lease = AsyncMock()
     store.renew_lease = AsyncMock()
-    harness._store = store
+
+    # A real harness, not a hand-populated ``__new__`` shell: ``wake`` keeps
+    # growing new constructor-set attributes and a partial stub only fails
+    # once one of them is read.
+    harness = _wake_harness(store, tenant_org_id=session.org_id,
+                            tenant_user_id=session.user_id)
 
     harness._renew_lease_forever = AsyncMock()
     harness._rebuild_messages = MagicMock(return_value=rebuilt_messages)

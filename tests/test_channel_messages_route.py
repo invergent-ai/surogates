@@ -18,7 +18,8 @@ class _Store:
 
 def _session(*, channel="slack", config=None):
     return SimpleNamespace(
-        id=uuid4(), org_id=uuid4(), channel=channel,
+        id=uuid4(), org_id=uuid4(), agent_id="a1", parent_id=None,
+        channel=channel,
         config=config if config is not None
         else {"channel_identifier": "T1", "slack_channel_id": "C1"},
     )

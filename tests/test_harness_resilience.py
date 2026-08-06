@@ -331,9 +331,8 @@ class TestDynamicLoopToolPolicy:
 
     def test_coordinator_without_strict_flag_keeps_all_tools(self) -> None:
         """Legacy behaviour: a coordinator session with no strict flag
-        and no excluded_tools gets the full registry (no filter applied).
-        This protects AgentDef-driven coordinators from a silent shape
-        change."""
+        and no excluded_tools sees the full registry.  This protects
+        AgentDef-driven coordinators from a silent shape change."""
         from surogates.tools.registry import ToolRegistry, ToolSchema
 
         reg = ToolRegistry()
@@ -348,9 +347,10 @@ class TestDynamicLoopToolPolicy:
 
         tool_names = harness._tool_filter_for_session(session)
 
-        # ``None`` here means "no filter applied" — the LLM sees every
-        # tool the registry knows about.
-        assert tool_names is None
+        # The execution-context gates materialise the implicit "everything"
+        # filter so they can subtract from it, so the answer is the whole
+        # registry rather than ``None`` — the LLM still sees every tool.
+        assert tool_names == {"spawn_task", "terminal", "read_file"}
 
     def test_strict_coordinator_strips_implementation_tools(self) -> None:
         """/mission sets strict_coordinator=True so implementation tools

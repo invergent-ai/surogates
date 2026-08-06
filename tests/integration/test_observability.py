@@ -794,7 +794,8 @@ async def test_policy_allowed_emitted_when_log_allowed_true(
         ).mappings().one()
 
     assert row["data"]["tool"] == "write_file"
-    assert row["data"]["check"] == "workspace_sandbox"
+    # The bare workspace-sandbox check became the full governance gate.
+    assert row["data"]["check"] == "governance_gate"
 
 
 async def test_session_tool_allow_list_blocks_disallowed_tool(

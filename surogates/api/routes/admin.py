@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from surogates.db.models import ChannelIdentity, Org, User
 from surogates.tenant.auth.database import DatabaseAuthProvider
@@ -185,28 +186,24 @@ async def create_user(
                 detail=f"Organisation {org_id} not found.",
             )
 
-    # BYO Firebase collision guard. Without ``force=True``, refuse to
-    # create a row whose email matches an existing Firebase-linked user
-    # in the same org — silently shadowing such a user would be a
-    # security footgun (the admin loses the audit trail on which row a
-    # subsequent password reset applied to). Admins who explicitly want
-    # both rows (e.g. re-issuing local creds after Firebase removal) can
-    # pass ``force=True``.
-    if not body.force and body.email:
+    # Email is the org-scoped login key: ``uq_users_org_lower_email``
+    # allows exactly one account per (org, lower(email)), whatever the
+    # auth provider. Answer the collision here so the admin gets a 409
+    # naming the existing row instead of a 500 from the index.
+    if body.email:
         async with session_factory() as session:
             existing = await session.scalar(
                 select(User).where(
                     User.org_id == org_id,
-                    User.email == body.email,
-                    User.auth_provider.like("firebase:%"),
+                    func.lower(User.email) == body.email.lower(),
                 )
             )
         if existing is not None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"Email {body.email} is already linked to a Firebase user "
-                    f"(id={existing.id}). Pass force=true to create a duplicate."
+                    f"Email {body.email} is already in use by user "
+                    f"{existing.id} (auth_provider={existing.auth_provider})."
                 ),
             )
 
@@ -226,7 +223,14 @@ async def create_user(
 
     async with session_factory() as session:
         session.add(new_user)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            # Lost the race with a concurrent create on the same email.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Email {body.email} is already in use.",
+            ) from exc
         await session.refresh(new_user)
 
     return UserResponse(

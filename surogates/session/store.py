@@ -1553,7 +1553,17 @@ class SessionStore:
         async with self._sf() as db:
             claimed = (await db.execute(
                 update(ApprovalGrant)
-                .where(ApprovalGrant.id == live)
+                # The liveness predicates are repeated on the target row,
+                # not left to the subquery alone: an uncorrelated scalar
+                # subquery is an InitPlan evaluated once, so Postgres'
+                # concurrent-update recheck would re-test only ``id`` and
+                # let a second racer spend an already-exhausted grant.
+                .where(
+                    ApprovalGrant.id == live,
+                    ApprovalGrant.revoked_at.is_(None),
+                    ApprovalGrant.expires_at > now,
+                    ApprovalGrant.used_count < ApprovalGrant.max_uses,
+                )
                 .values(used_count=ApprovalGrant.used_count + 1)
                 .returning(ApprovalGrant.id)
                 .execution_options(synchronize_session=False)
