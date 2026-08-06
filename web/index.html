@@ -5,9 +5,14 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- `interactive-widget=resizes-content` makes Chrome on Android shrink
+         the layout viewport when the keyboard opens instead of sliding the
+         page up behind it, which keeps the composer attached to the top of
+         the keyboard. iOS ignores it; there use-visual-viewport handles the
+         same thing from JS. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <meta name="description" content="Chat with your assistant." />
 

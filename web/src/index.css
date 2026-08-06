@@ -220,6 +220,16 @@
   body {
     @apply bg-background text-foreground;
   }
+  html,
+  body {
+    /* The shell is a fixed box over the visual viewport, so the document
+       itself must never scroll: a scrollable document is what lets a phone
+       push the page up when the keyboard opens and strand the composer
+       off-screen. Every scroll in the app happens inside the shell. */
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
   html {
     @apply font-sans;
     /* Landscape rotation on iOS otherwise inflates every font size. */
