@@ -1093,7 +1093,10 @@ class AgentHarness(
                     logger.debug("Memory manager initialization failed", exc_info=True)
 
             # 6. Rebuild the message list from the full event history.
-            messages = self._rebuild_messages(all_events)
+            messages = self._rebuild_messages(
+                all_events,
+                workspace_path=(session.config or {}).get("workspace_path"),
+            )
 
             # 6a. Kick off title generation in the background as soon as we
             # see the user's first message.  Runs in parallel with context
@@ -3562,6 +3565,66 @@ class AgentHarness(
         names = set(self._tools.tool_names) if tool_filter is None else set(tool_filter)
         return names - drop
 
+    def _apply_execution_context_gates(
+        self, session: Session, tool_filter: set[str] | None,
+    ) -> set[str] | None:
+        """Gate self-tools on the execution context that makes them work.
+
+        Mirror of ``worker._filter_effective_tools``, which applies these
+        exact three conditions to the PROMPT surface.  Its output feeds
+        ``PromptBuilder(available_tools=...)`` only -- the LLM-visible
+        schemas come from here -- so the two must agree.  They did not:
+        the prompt already dropped these groups for sessions lacking the
+        gate, while the schema kept advertising them, and every handler
+        behind them fails closed on the same condition
+        (``board/tools.py`` returns "(no context_group_id on this
+        session)", ``arbor.py``'s ``_require_run`` raises, the
+        ``worker_*`` tools need ``Session.task_id``).  So the model was
+        paying context for tools it was never told about and could not
+        have used.
+
+        The force-add half matters as much as the subtract: a task worker
+        under a restrictive AgentDef allowlist still needs its
+        ``worker_*`` tools.  Observed in the wild before that rule
+        existed -- a ``claude-coder`` worker could not signal failure, so
+        its refusal was filed as a successful result and the parent
+        mission stalled.
+
+        ``None`` means "every registered tool"; it is materialised here
+        because the gates have to subtract from it.
+        """
+        from surogates.runtime.governance import (
+            BOARD_SELF_TOOLS,
+            RESEARCH_SPINE_TOOLS,
+            WORKER_SELF_TOOLS,
+        )
+
+        config = session.config or {}
+        result = (
+            set(self._tools.tool_names) if tool_filter is None
+            else set(tool_filter)
+        )
+
+        is_task_worker = session.task_id is not None
+        if is_task_worker:
+            result |= WORKER_SELF_TOOLS
+        else:
+            result -= WORKER_SELF_TOOLS
+
+        if config.get("context_group_id"):
+            result |= BOARD_SELF_TOOLS
+        else:
+            result -= BOARD_SELF_TOOLS
+
+        # The research spine is never force-added: it rides the registry's
+        # full set on the coordinator and is stripped everywhere else, so
+        # executors stay tree-blind and cannot invent a second
+        # shared-state protocol between themselves.
+        if not (config.get("active_research_run_id") and not is_task_worker):
+            result -= RESEARCH_SPINE_TOOLS
+
+        return result
+
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:
         """Return the tool allow-list for a session."""
         config = session.config or {}
@@ -3596,31 +3659,15 @@ class AgentHarness(
                     )
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
-            from surogates.runtime.governance import (
-                BOARD_SELF_TOOLS,
-                WORKER_SELF_TOOLS,
-            )
-
             tool_filter = set(config["allowed_tools"])
-            # Execution-context self-tools ride over an AgentDef allowlist:
-            # it scopes what a worker may DO, not how it reports doing it.
-            # ``worker._filter_effective_tools`` force-adds them to the
-            # prompt surface; without the same rule here the schemas
-            # disagree with the prompt and the worker is told to call
-            # ``worker_complete`` while holding no such tool.  Observed in
-            # the wild: a ``claude-coder`` task worker could not signal
-            # failure, so its refusal was filed as a successful result and
-            # the parent mission stalled with no failure signal.
-            if session.task_id is not None:
-                tool_filter |= WORKER_SELF_TOOLS
-            if config.get("context_group_id"):
-                tool_filter |= BOARD_SELF_TOOLS
         else:
             from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
 
             excluded = set(config.get("excluded_tools") or [])
             excluded.update(WORKER_EXCLUDED_TOOLS)
             tool_filter = set(self._tools.tool_names) - excluded
+
+        tool_filter = self._apply_execution_context_gates(session, tool_filter)
 
         # The autonomous coding tool follows the ``/code`` capability: when
         # that command is disabled the tool must also disappear from the

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.config import enqueue_session
 from surogates.db.models import Session as ORMSession, Task
+from surogates.harness.worker_notify import notify_parent_of_task_event
 from surogates.session.events import EventType
 from surogates.tasks.completion import (
     TaskAttemptOutcome,
@@ -85,6 +86,7 @@ async def _finalize_ended_sessions(
     db,
     *,
     session_store: Any,
+    redis: Any = None,
 ) -> int:
     """Walk every running Task whose Session ended, finalise its status.
 
@@ -139,24 +141,19 @@ async def _finalize_ended_sessions(
     await db.commit()
 
     # Emit TASK_FAILED events outside the txn so a slow event-write
-    # doesn't hold the row lock open.
+    # doesn't hold the row lock open.  ``notify_parent_of_task_event``
+    # also wakes the parent; it logs and swallows its own failures.
     for parent_session_id, task_id, attempt_count in failed_to_emit:
-        try:
-            await session_store.emit_event(
-                parent_session_id,
-                EventType.TASK_FAILED,
-                {
-                    "task_id": str(task_id),
-                    "attempt_count": attempt_count,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "tasks_tick: failed to emit TASK_FAILED for task %s on "
-                "parent session %s; parent agent will not see the failure "
-                "until it re-reads the task row",
-                task_id, parent_session_id,
-            )
+        await notify_parent_of_task_event(
+            session_store=session_store,
+            parent_session_id=parent_session_id,
+            event_type=EventType.TASK_FAILED,
+            payload={
+                "task_id": str(task_id),
+                "attempt_count": attempt_count,
+            },
+            redis=redis,
+        )
 
     return finalized
 
@@ -264,7 +261,10 @@ async def _enqueue_ready_tasks(
                 claimed.id, exc,
             )
             failed_this_tick.add(claimed.id)
-            await _block_claim(session_factory, claimed.id, reason=str(exc))
+            await _block_claim(
+                session_factory, claimed, reason=str(exc),
+                session_store=session_store, redis=redis,
+            )
             continue
         except ValueError as exc:
             # Permanent config error, same class as UnknownAgentDefError above:
@@ -280,7 +280,10 @@ async def _enqueue_ready_tasks(
                 claimed.id, exc,
             )
             failed_this_tick.add(claimed.id)
-            await _block_claim(session_factory, claimed.id, reason=str(exc))
+            await _block_claim(
+                session_factory, claimed, reason=str(exc),
+                session_store=session_store, redis=redis,
+            )
             continue
         except Exception as exc:
             logger.exception(
@@ -290,6 +293,7 @@ async def _enqueue_ready_tasks(
             failed_this_tick.add(claimed.id)
             await _retry_or_block(
                 session_factory, claimed, reason=f"spawn failed: {exc}",
+                session_store=session_store, redis=redis,
             )
             continue
 
@@ -324,7 +328,12 @@ async def _enqueue_ready_tasks(
 
 
 async def _block_claim(
-    session_factory: async_sessionmaker, task_id: UUID, *, reason: str,
+    session_factory: async_sessionmaker,
+    task: Task,
+    *,
+    reason: str,
+    session_store: Any = None,
+    redis: Any = None,
 ) -> None:
     """Best-effort: move a claimed task to ``blocked`` with ``blocked_reason``
     (a permanent config error — the referenced agent_def does not exist).
@@ -334,12 +343,17 @@ async def _block_claim(
     unblocked (``unblock_task`` → ``ready``), it gets a clean attempt. Unlike
     ``_rollback_claim`` this leaves the task OUT of the ``ready`` pool, so the
     dispatcher stops re-attempting (and re-logging) it every tick.
+
+    The block is surfaced to a human in the UI, but the coordinator that
+    spawned the task also has to learn its fan-out lost a member —
+    otherwise it waits on a task that will never run again until someone
+    calls ``unblock_task``.  Same signal ``worker_block`` sends.
     """
     try:
         async with session_factory() as db:
             await db.execute(
                 update(Task)
-                .where(Task.id == task_id)
+                .where(Task.id == task.id)
                 .values(
                     status="blocked",
                     blocked_reason=reason[:500],
@@ -351,12 +365,27 @@ async def _block_claim(
         logger.exception(
             "tasks_tick: block for task %s failed; finalize step will "
             "recover by treating the attempt as crashed",
-            task_id,
+            task.id,
+        )
+        return
+
+    if session_store is not None:
+        await notify_parent_of_task_event(
+            session_store=session_store,
+            parent_session_id=task.parent_session_id,
+            event_type=EventType.TASK_BLOCKED,
+            payload={"task_id": str(task.id), "reason": reason[:500]},
+            redis=redis,
         )
 
 
 async def _retry_or_block(
-    session_factory: async_sessionmaker, claimed: Task, *, reason: str,
+    session_factory: async_sessionmaker,
+    claimed: Task,
+    *,
+    reason: str,
+    session_store: Any = None,
+    redis: Any = None,
 ) -> None:
     """Return a failed claim to ``ready``, or block it once attempts are spent.
 
@@ -371,7 +400,10 @@ async def _retry_or_block(
             "tasks_tick: blocking task %s after %d/%d failed spawn attempts: %s",
             claimed.id, claimed.attempt_count, claimed.max_attempts, reason,
         )
-        await _block_claim(session_factory, claimed.id, reason=reason)
+        await _block_claim(
+            session_factory, claimed, reason=reason,
+            session_store=session_store, redis=redis,
+        )
         return
     await _rollback_claim(session_factory, claimed.id)
 
@@ -543,7 +575,9 @@ async def tasks_tick(
         promoted = await _promote_todo_to_ready(db)
         await db.commit()
     async with session_factory() as db:
-        finalized = await _finalize_ended_sessions(db, session_store=session_store)
+        finalized = await _finalize_ended_sessions(
+            db, session_store=session_store, redis=redis,
+        )
     enqueued = await _enqueue_ready_tasks(
         session_factory=session_factory,
         redis=redis,

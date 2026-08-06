@@ -62,6 +62,17 @@ BOARD_SELF_TOOLS: frozenset[str] = frozenset({
 TASK_LIFECYCLE_TOOLS: frozenset[str] = frozenset({
     "unblock_task", "cancel_task",
 })
+# The research coordinator's deterministic spine. Declared here for the
+# same reason as the sets above -- both the prompt surface
+# (``worker._filter_effective_tools``) and the model-visible schemas
+# (``AgentHarness._apply_execution_context_gates``) gate on it, and they
+# must not drift. Deliberately NOT in ``PROTECTED_TOOLS``: unlike the
+# self-tools these are never force-added, they ride the registry's full
+# set on the coordinator and are stripped everywhere else so executors
+# stay tree-blind.
+RESEARCH_SPINE_TOOLS: frozenset[str] = frozenset({
+    "idea_tree", "dispatch_experiments", "merge_experiment",
+})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with

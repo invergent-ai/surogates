@@ -99,13 +99,16 @@ The tick is **idempotent** under concurrent invocation across replicas: each ste
 
 ## Events emitted to the parent session
 
-When a worker session for a task ends, the parent session is woken via the existing inbox / wake mechanism. Three event types carry the outcome:
+When a worker session for a task ends, the event is written to the parent's log **and the parent is re-enqueued** on its own `(org_id, agent_id)` work queue — the parent's, not the worker's, since a task worker often runs a different `agent_def` than the coordinator that spawned it. Emitting alone is not enough: none of these signals runs inside the parent's wake, so a coordinator that is not already queued would never re-read its log.
 
 | Event | When emitted | Payload |
 |---|---|---|
 | `worker.complete` | Worker session ended (natural or via `worker_complete`) | `{worker_id, result, task_id?, metadata?}` |
 | `task.blocked` | Worker called `worker_block` | `{task_id, worker_id, reason}` |
-| `task.failed` | Tick observed crash after `attempt_count >= max_attempts` | `{task_id, worker_id, attempt_count}` |
+| `task.blocked` | Spawn hit a permanent config error and attempts are spent | `{task_id, reason}` |
+| `task.failed` | Tick observed crash after `attempt_count >= max_attempts` | `{task_id, attempt_count}` |
+
+All four go through `notify_parent_of_task_event` (`surogates/harness/worker_notify.py`), and each has a `_rebuild_messages` branch so the woken coordinator actually sees the signal as a synthetic user message.
 
 `WORKER_COMPLETE` is reused (rather than introducing a separate `TASK_COMPLETED`) so a parent agent's handling of "a child finished" stays uniform across `spawn_worker` and `spawn_task` paths. The `task_id` key is present only for task-backed sessions; plain `spawn_worker` completions omit it. When the worker called `worker_complete` explicitly, the `result` and `metadata` reflect the worker's structured handoff; when the worker completed naturally, `result` is the auto-extracted LLM final response and `metadata` is omitted.
 
