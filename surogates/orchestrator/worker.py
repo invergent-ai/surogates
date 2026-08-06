@@ -28,6 +28,7 @@ from surogates.runtime.entitlements import (
 )
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
+    RESEARCH_SPINE_TOOLS,
     WORKER_SELF_TOOLS,
     build_governance_gate,
 )
@@ -298,9 +299,7 @@ def _filter_effective_tools(
         and getattr(session, "task_id", None) is None
     )
     if not is_research_coordinator:
-        result.discard("idea_tree")
-        result.discard("dispatch_experiments")
-        result.discard("merge_experiment")
+        result -= RESEARCH_SPINE_TOOLS
 
     return result
 
