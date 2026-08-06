@@ -24,8 +24,9 @@ export function useVisualViewport() {
       // A pinch-zoom shrinks `height` too, and the shell is sized from it —
       // so only the unzoomed measurement means "the keyboard covers this".
       const zoomed = vv != null && Math.abs(vv.scale - 1) > 0.01;
-      const h = zoomed || !vv ? window.innerHeight : vv.height;
-      const top = zoomed || !vv ? 0 : Math.max(0, vv.offsetTop);
+      const unusable = zoomed || !vv;
+      const h = unusable ? window.innerHeight : vv.height;
+      const top = unusable ? 0 : Math.max(0, vv.offsetTop);
       root.style.setProperty("--viewport-h", `${h}px`);
       root.style.setProperty("--viewport-top", `${top}px`);
     }
