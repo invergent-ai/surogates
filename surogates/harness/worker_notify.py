@@ -30,6 +30,56 @@ logger = logging.getLogger(__name__)
 _MAX_RESULT_CHARS: int = 10_000
 
 
+async def notify_parent_of_task_event(
+    *,
+    session_store: SessionStore,
+    parent_session_id: UUID,
+    event_type: EventType,
+    payload: dict[str, Any],
+    redis: Redis | None = None,
+) -> None:
+    """Emit *event_type* into the parent's log and re-enqueue the parent.
+
+    The task layer's terminal signals (``TASK_BLOCKED``, ``TASK_FAILED``)
+    are emitted from the dispatcher tick or from ``worker_block``, neither
+    of which runs inside the parent's wake.  Emitting alone is not enough:
+    a coordinator that is not already queued has nothing to re-read the
+    event, so the fan-out stalls until an idle nudge fires — or forever,
+    for a plain ``spawn_task`` coordinator that has no nudge path.
+
+    The parent's own ``org_id``/``agent_id`` select the work queue, not
+    the worker's: a task worker frequently runs a different agent_def
+    than the coordinator that spawned it.  Failing to resolve the parent
+    is logged and swallowed — the event write is the durable part, and
+    the caller is mid-teardown.
+    """
+    try:
+        await session_store.emit_event(parent_session_id, event_type, payload)
+    except Exception:
+        logger.exception(
+            "Failed to emit %s on parent session %s",
+            event_type.value, parent_session_id,
+        )
+        return
+
+    if redis is None:
+        return
+    try:
+        parent = await session_store.get_session(parent_session_id)
+        await enqueue_session(
+            redis,
+            org_id=str(parent.org_id),
+            agent_id=parent.agent_id,
+            session_id=parent_session_id,
+        )
+    except Exception:
+        logger.exception(
+            "Emitted %s but failed to wake parent session %s; it will not "
+            "see the signal until something else enqueues it",
+            event_type.value, parent_session_id,
+        )
+
+
 async def notify_parent_on_completion(
     *,
     session_store: SessionStore,

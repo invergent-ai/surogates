@@ -383,6 +383,21 @@ async def test_worker_block_marks_blocked_emits_event_publishes_interrupt(
     channel = redis.publish.call_args[0][0]
     assert channel == f"{INTERRUPT_CHANNEL_PREFIX}{worker_session_id}"
 
+    # The parent must also be WOKEN, not just written to: the interrupt
+    # above stops the worker, and nothing else enqueues the coordinator.
+    from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
+
+    redis.zadd.assert_called_once()
+    key, mapping = redis.zadd.call_args[0]
+    assert key == SHARED_WORK_QUEUE_KEY
+    # The PARENT's queue tuple, not the worker's — a task worker often
+    # runs a different agent_def than the coordinator that spawned it.
+    assert encode_queue_member(
+        org_id=str(parent_session.org_id),
+        agent_id=str(parent_session.agent_id),
+        session_id=str(parent_session.id),
+    ) in mapping
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_worker_block_refuses_when_session_has_no_task(

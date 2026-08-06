@@ -348,6 +348,32 @@ class ContextReplayMixin:
                     "content": f"[Worker {worker_id} failed: {error}]",
                 })
 
+            # Task-layer terminal signals.  Same synthetic-user-message
+            # shape as the worker events above: without a branch here a
+            # coordinator woken by ``notify_parent_of_task_event`` replays
+            # its log, finds nothing new, and re-runs its previous turn.
+            elif etype == EventType.TASK_BLOCKED.value:
+                task_id = event.data.get("task_id", "?")
+                reason = event.data.get("reason", "no reason given")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Task {task_id} is blocked: {reason}] "
+                        "It will not run again until it is unblocked."
+                    ),
+                })
+
+            elif etype == EventType.TASK_FAILED.value:
+                task_id = event.data.get("task_id", "?")
+                attempts = event.data.get("attempt_count", "?")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Task {task_id} failed after {attempts} attempts "
+                        "and will not be retried]"
+                    ),
+                })
+
             # Coding-agent run result — surface the final message to the
             # coordinator LLM so it can follow up on what /code did.  Progress
             # events are UI-only (not replayed); STARTED is bookkeeping.

@@ -776,17 +776,22 @@ async def _worker_block_handler(arguments: dict[str, Any], **kwargs: Any) -> str
         parent_session_id = task.parent_session_id
         await db.commit()
 
-    # Tell the parent so its next wake sees the block as inbox-equivalent.
+    # Tell the parent and wake it.  The interrupt below stops THIS
+    # session, not the parent's, so without the enqueue a coordinator
+    # that is not already queued never learns the task blocked.
+    from surogates.harness.worker_notify import notify_parent_of_task_event
     from surogates.session.events import EventType
 
-    await session_store.emit_event(
-        parent_session_id,
-        EventType.TASK_BLOCKED,
-        {
+    await notify_parent_of_task_event(
+        session_store=session_store,
+        parent_session_id=parent_session_id,
+        event_type=EventType.TASK_BLOCKED,
+        payload={
             "task_id": str(task_id),
             "worker_id": str(session_id),
             "reason": reason_clean,
         },
+        redis=redis,
     )
     # Cleanly terminate this Session via the same interrupt mechanism
     # stop_worker uses; the harness loop exits between iterations.
