@@ -10,7 +10,6 @@ Without those fields the worker mounts no workspace and attachments are skipped.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest import mock
 from uuid import uuid4
 
 from surogates.channels.identity import get_or_create_channel_session
@@ -67,23 +66,19 @@ class TestChannelSessionWorkspace:
     async def test_provisions_workspace_when_storage_and_settings_given(self):
         store = _Store()
         storage = _Storage()
-        with mock.patch(
-            "surogates.session.provisioning.get_model_info",
-            return_value=SimpleNamespace(supports_vision=False),
-        ):
-            await get_or_create_channel_session(
-                store,
-                None,
-                session_key="agent:slack:dm:D1",
-                user_id=uuid4(),
-                org_id=uuid4(),
-                agent_id="a1",
-                channel="slack",
-                config={"slack_channel_id": "D1", "memory_boundary": "slack:d:D1"},
-                session_factory=_SessionFactory(),
-                storage=storage,
-                settings=_settings(),
-            )
+        await get_or_create_channel_session(
+            store,
+            None,
+            session_key="agent:slack:dm:D1",
+            user_id=uuid4(),
+            org_id=uuid4(),
+            agent_id="a1",
+            channel="slack",
+            config={"slack_channel_id": "D1", "memory_boundary": "slack:d:D1"},
+            session_factory=_SessionFactory(),
+            storage=storage,
+            settings=_settings(),
+        )
         cfg = store.created["config"]
         sid = store.created["session_id"]
         assert cfg["storage_bucket"] == "surogate-workspaces-dev"
@@ -107,23 +102,19 @@ class TestChannelSessionWorkspace:
                 return f"/ws/{sid}"
 
         store = _Store()
-        with mock.patch(
-            "surogates.session.provisioning.get_model_info",
-            return_value=SimpleNamespace(supports_vision=False),
-        ):
-            sid = await get_or_create_channel_session(
-                store,
-                None,
-                session_key="agent:slack:dm:D2",
-                user_id=uuid4(),
-                org_id=uuid4(),
-                agent_id="a1",
-                channel="slack",
-                config={"slack_channel_id": "D2"},
-                session_factory=_SessionFactory(),
-                storage=_FailStorage(),
-                settings=_settings(),
-            )
+        sid = await get_or_create_channel_session(
+            store,
+            None,
+            session_key="agent:slack:dm:D2",
+            user_id=uuid4(),
+            org_id=uuid4(),
+            agent_id="a1",
+            channel="slack",
+            config={"slack_channel_id": "D2"},
+            session_factory=_SessionFactory(),
+            storage=_FailStorage(),
+            settings=_settings(),
+        )
         # Session still created (no exception propagated), just without a workspace.
         assert sid == store.created["session_id"]
         cfg = store.created["config"]

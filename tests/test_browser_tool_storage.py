@@ -1,32 +1,52 @@
 """Verify the browser tool composes prefixed keys and source refs."""
 
+from surogates.storage.tenant import workspace_session_shim
 from surogates.tools.builtin.browser import (
     build_browser_session_source_ref,
     build_browser_screenshot_key,
 )
 
 
+def _session(config):
+    return workspace_session_shim(config, "s-1")
+
+
 def test_source_ref_without_prefix():
     ref = build_browser_session_source_ref(
         storage_bucket="b",
-        storage_key_prefix="",
+        session=_session({}),
         session_id="s-1",
     )
-    assert ref == "s3://b/s-1"
+    assert ref == "s3://b/s-1/"
 
 
 def test_source_ref_with_prefix():
     ref = build_browser_session_source_ref(
         storage_bucket="b",
-        storage_key_prefix="p-1/a-1",
+        session=_session({"storage_key_prefix": "p-1/a-1"}),
         session_id="s-1",
     )
-    assert ref == "s3://b/p-1/a-1/s-1"
+    assert ref == "s3://b/p-1/a-1/s-1/"
+
+
+def test_source_ref_on_managed_channel_uses_the_boundary_workspace():
+    # A slack thread shares one workspace across its participants, so the
+    # browser lands under the boundary prefix, not a per-session one.
+    ref = build_browser_session_source_ref(
+        storage_bucket="b",
+        session=_session({
+            "storage_key_prefix": "p-1/a-1",
+            "channel": "slack",
+            "memory_boundary": "slack:c:C1",
+        }),
+        session_id="s-1",
+    )
+    assert ref == "s3://b/p-1/a-1/boundaries/slack:c:C1/workspace/"
 
 
 def test_screenshot_key_without_prefix():
     key = build_browser_screenshot_key(
-        storage_key_prefix="",
+        session=_session({}),
         session_id="s-1",
         relative_path="browser-screenshots/x.png",
     )
@@ -35,7 +55,7 @@ def test_screenshot_key_without_prefix():
 
 def test_screenshot_key_with_prefix():
     key = build_browser_screenshot_key(
-        storage_key_prefix="p-1/a-1",
+        session=_session({"storage_key_prefix": "p-1/a-1"}),
         session_id="s-1",
         relative_path="browser-screenshots/x.png",
     )
@@ -44,7 +64,7 @@ def test_screenshot_key_with_prefix():
 
 def test_screenshot_key_strips_leading_slash_on_relative_path():
     key = build_browser_screenshot_key(
-        storage_key_prefix="p-1/a-1",
+        session=_session({"storage_key_prefix": "p-1/a-1"}),
         session_id="s-1",
         relative_path="/leading/slash.png",
     )

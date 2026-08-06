@@ -78,6 +78,8 @@ class _Harness(CodeCommandMixin):
         self._credential_vault = vault
         self._sandbox_pool = sandbox_pool
         self._interrupt_requested = False
+        self._summary_client = None
+        self._summary_model = ""
 
     async def _ensure_code_sandbox(self, session, sandbox_owner):
         await self._sandbox_pool.ensure(sandbox_owner, None)

@@ -359,10 +359,11 @@ async def test_firebase_exchange_does_not_link_manual_database_user(
         json={"id_token": "firebase-token"},
     )
 
-    # A brand-new firebase-provider row is provisioned (self-registration),
-    # but the pre-existing manual ``database`` row is left untouched: no
-    # silent link of a password account to Firebase.
-    assert response.status_code == 200, response.text
+    # Email is the org-scoped login key (``uq_users_org_lower_email``), so
+    # there is no second row to provision either: the exchange is refused
+    # and the manual ``database`` row is left untouched — no silent link of
+    # a password account to Firebase.
+    assert response.status_code == 409, response.text
     async with session_factory() as session:
         manual = await session.scalar(
             select(User).where(

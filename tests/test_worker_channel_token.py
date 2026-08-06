@@ -24,7 +24,12 @@ from surogates.tenant.context import TenantContext
 # ---------------------------------------------------------------------------
 
 
-def _tenant(*, user_id: UUID | None = None, tmp_path: Path) -> TenantContext:
+def _tenant(
+    *,
+    user_id: UUID | None = None,
+    service_account_id: UUID | None = None,
+    tmp_path: Path,
+) -> TenantContext:
     return TenantContext(
         org_id=uuid4(),
         user_id=user_id,
@@ -32,7 +37,7 @@ def _tenant(*, user_id: UUID | None = None, tmp_path: Path) -> TenantContext:
         user_preferences={},
         permissions=frozenset(),
         asset_root=str(tmp_path),
-        service_account_id=None,
+        service_account_id=service_account_id,
         session_scope_id=None,
     )
 
@@ -73,8 +78,8 @@ class TestSelectHarnessToken:
     ):
         from surogates.orchestrator.worker import _select_harness_token
 
-        tenant = _tenant(tmp_path=tmp_path)
         sa_id = uuid4()
+        tenant = _tenant(service_account_id=sa_id, tmp_path=tmp_path)
         session = _session(channel="api", service_account_id=sa_id)
 
         token = _select_harness_token(
@@ -221,11 +226,12 @@ class TestFilterEffectiveTools:
         """Regression: SA sessions retain memory/skill_manage."""
         from surogates.orchestrator.worker import _filter_effective_tools
 
+        sa_id = uuid4()
         tools = {"create_artifact", "memory", "skill_manage"}
         result = _filter_effective_tools(
             tools=tools,
-            tenant=_tenant(tmp_path=tmp_path),
-            session=_session(channel="api", service_account_id=uuid4()),
+            tenant=_tenant(service_account_id=sa_id, tmp_path=tmp_path),
+            session=_session(channel="api", service_account_id=sa_id),
             use_api_for_harness_tools=True,
         )
         assert "memory" in result

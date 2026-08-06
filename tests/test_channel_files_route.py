@@ -22,6 +22,8 @@ def _session(*, channel="slack", bucket="b"):
     return SimpleNamespace(
         id=uuid4(),
         org_id=uuid4(),
+        agent_id="a1",
+        parent_id=None,
         channel=channel,
         config={"channel_identifier": "T1", "slack_channel_id": "C1",
                 "storage_bucket": bucket},
