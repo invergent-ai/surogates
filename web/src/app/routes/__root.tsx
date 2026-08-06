@@ -17,11 +17,14 @@ function RootLayout() {
 
   return (
     <AppProvider>
+      {/* Fixed to the visual viewport, not just sized to it: opening the
+          keyboard also scrolls the layout viewport out from under a shell
+          that is merely the right height. See use-visual-viewport. */}
       <div
         className={
           isBare
-            ? "h-(--viewport-h,100dvh) bg-background text-foreground"
-            : "flex h-(--viewport-h,100dvh) overflow-hidden bg-background text-foreground"
+            ? "fixed inset-x-0 top-(--viewport-top,0px) h-(--viewport-h,100dvh) overflow-y-auto bg-background text-foreground"
+            : "fixed inset-x-0 top-(--viewport-top,0px) flex h-(--viewport-h,100dvh) overflow-hidden bg-background text-foreground"
         }
       >
         <Suspense fallback={null}>
