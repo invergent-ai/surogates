@@ -1812,15 +1812,16 @@ async def run_worker(settings: Settings) -> None:
                 kb for kb in attached_kbs
                 if str(kb.get("id")) in entitled_kb_ids
             ]
-        # Filter the tool set to drop kb_list_pages / kb_read_page
-        # when this agent has nothing to navigate. Keeps the LLM from
-        # ever seeing tool schemas it cannot meaningfully use, and
-        # also keeps the prompt KB section empty so the LLM is not
-        # primed to hallucinate kb_id values.
+        # Filter the tool set to drop kb_list_pages / kb_read_page /
+        # kb_search_pages when this agent has nothing to navigate. Keeps
+        # the LLM from ever seeing tool schemas it cannot meaningfully
+        # use, and also keeps the prompt KB section empty so the LLM is
+        # not primed to hallucinate kb_id values.
         effective_tools = set(tool_registry.tool_names)
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+            effective_tools.discard("kb_search_pages")
         # The "mate" toolset (mate_ambient_post) is only meaningful inside a
         # dedicated ambient review session; hide it from every other session
         # (same toolset-gating mechanism as the browser/kb tools above).

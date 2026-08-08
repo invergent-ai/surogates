@@ -110,6 +110,7 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     # Knowledge-base access
     "kb_list_pages",
     "kb_read_page",
+    "kb_search_pages",
     # Artifact materialisation (workers produce; coordinator orchestrates)
     "create_artifact",
     # Self-tools that require Session.task_id — useless for a parent

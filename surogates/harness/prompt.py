@@ -851,9 +851,12 @@ class PromptBuilder:
 
         lines = ["# Available Knowledge Bases", ""]
         lines.append(
-            "Use `kb_list_pages` to list a knowledge base's pages and "
-            "`kb_read_page` to read one. Pass the `id` value below as "
-            "the `kb_id` argument."
+            "Search first: `kb_search_pages` ranks pages across every "
+            "knowledge base below and returns the matching snippets -- "
+            "the trees shown here are truncated and list titles only. "
+            "Then read a hit in full with `kb_read_page`, or use "
+            "`kb_list_pages` for a knowledge base's complete listing. "
+            "Pass the `id` value below as the `kb_id` argument."
         )
 
         if grounding:
