@@ -163,6 +163,27 @@ async def test_scope_drops_kbs_outside_the_pinned_package() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scope_routes_through_the_shared_plan_gate(
+    monkeypatch,
+) -> None:
+    """kb_list_pages/kb_read_page gate through ``_kb_plan_denied`` --
+    search must use the exact same function, not a parallel inlined
+    check, so a future change to the gate (an org check, a KB-status
+    check) cannot land in two tools and silently miss the third."""
+    session = _FakeSession([(KB_A, "Biology"), (KB_B, "Chemistry")])
+    monkeypatch.setattr(
+        kb_tools, "_kb_plan_denied",
+        lambda kb_id, kwargs: f"Error: {kb_id} denied",
+    )
+
+    kbs = await kb_tools._searchable_kbs(
+        session, agent_id=AGENT_ID, kwargs={},
+    )
+
+    assert kbs == []
+
+
+@pytest.mark.asyncio
 async def test_named_kb_outside_scope_never_reaches_the_query(
     monkeypatch,
 ) -> None:

@@ -851,9 +851,12 @@ async def _load_attached_kbs(
     except Exception:
         import logging
 
-        logging.getLogger(__name__).warning(
-            "Failed to load attached KBs for agent %s; KB tools will be "
-            "disabled for this session",
+        logging.getLogger(__name__).error(
+            "KB grounding DISABLED for agent %s: the ops DB read for "
+            "attached knowledge bases failed, so every KB tool and the "
+            "KB prompt section are being dropped for this session -- "
+            "the agent will answer from memory on topics the KB was "
+            "meant to govern",
             agent_id,
             exc_info=True,
         )

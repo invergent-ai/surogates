@@ -853,10 +853,11 @@ class PromptBuilder:
         lines.append(
             "Search first: `kb_search_pages` ranks pages across every "
             "knowledge base below and returns the matching snippets -- "
-            "the trees shown here are truncated and list titles only. "
-            "Then read a hit in full with `kb_read_page`, or use "
-            "`kb_list_pages` for a knowledge base's complete listing. "
-            "Pass the `id` value below as the `kb_id` argument."
+            "the trees shown here may be partial and carry only a "
+            "one-line brief per page. Then read a hit in full with "
+            "`kb_read_page`, or use `kb_list_pages` for a knowledge "
+            "base's complete listing. Pass the `id` value below as the "
+            "`kb_id` argument."
         )
 
         if grounding:
@@ -865,9 +866,10 @@ class PromptBuilder:
             lines.append(
                 "These knowledge bases are your authoritative source "
                 "for the topics they cover. Before answering any "
-                "question within their scope, read the relevant "
-                "page(s) with `kb_read_page`. Do not answer from "
-                "memory when one of these covers the topic."
+                "question within their scope, find the relevant "
+                "page(s) with `kb_search_pages` and read them in full "
+                "with `kb_read_page`. Do not answer from memory when "
+                "one of these covers the topic."
             )
             for kb in grounding:
                 lines.append("")

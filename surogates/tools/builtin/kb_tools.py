@@ -500,11 +500,10 @@ async def _searchable_kbs(
         .where(agent_knowledge_bases.c.agent_id == agent_id)
         .order_by(OpsKnowledgeBase.display_name.asc())
     )).all()
-    session_config = kwargs.get("session_config")
     return [
         (str(kb_id), str(name))
         for kb_id, name in rows
-        if kb_allowed(session_config, kb_id)
+        if _kb_plan_denied(str(kb_id), kwargs) is None
     ]
 
 
@@ -721,11 +720,12 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="kb_list_pages",
             description=(
-                "List all pages in a knowledge base, grouped by page "
+                "Browse a knowledge base's structure, grouped by page "
                 "type (index, summary, concept, source). Returns a "
                 "markdown tree showing each page's path, title, "
-                "one-line brief and size. Use this first to see what's "
-                "available, then read specific pages with kb_read_page."
+                "one-line brief and size (large knowledge bases may be "
+                "cut off). To find the answer to a specific question, "
+                "use kb_search_pages instead."
             ),
             parameters=_KB_LIST_PAGES_PARAMS,
         ),
