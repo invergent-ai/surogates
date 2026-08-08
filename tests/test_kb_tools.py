@@ -12,9 +12,13 @@ of from the process environment.
 """
 from __future__ import annotations
 
+import random
+from collections import Counter
+
 import pytest
 
 from surogates.db import ops_engine
+from surogates.db.ops_models import OpsKBWikiPage
 from surogates.tools.builtin import kb_tools
 
 AGENT_ID = "43196a20-7af0-48c0-a355-3e3a03545f66"
@@ -67,3 +71,136 @@ def test_agent_knowledge_bases_read_model_has_mode_column():
     from surogates.db.ops_models import agent_knowledge_bases
 
     assert "mode" in agent_knowledge_bases.c
+
+
+def _page(path: str, page_type: str) -> OpsKBWikiPage:
+    """A detached wiki-page row. _select_tree_pages only reads path and
+    page_type, so no session and no real KB is needed."""
+    return OpsKBWikiPage(
+        id=path, kb_id="kb-1", path=path, page_type=page_type,
+        title=path.rsplit("/", 1)[-1], size_bytes=1024,
+    )
+
+
+def _prod_shaped_kb() -> list[OpsKBWikiPage]:
+    """The shape of the PROD KB that exposed the bug: 4572 pages whose
+    'concepts/' paths all sort before 'index.md' and 'summaries/'."""
+    return (
+        [_page("index.md", "index")]
+        + [_page(f"concepts/c{i:04d}.md", "concept") for i in range(625)]
+        + [_page(f"summaries/s{i:04d}.md", "summary") for i in range(3946)]
+    )
+
+
+def test_tree_selection_keeps_every_page_type_represented():
+    pages = (
+        [_page(f"concepts/c{i}.md", "concept") for i in range(625)]
+        + [_page("index.md", "index")]
+        + [_page(f"summaries/s{i}.md", "summary") for i in range(3946)]
+    )
+    picked = kb_tools._select_tree_pages(pages, budget=200)
+    kinds = {p.page_type for p in picked}
+    assert "index" in kinds, "the entry point must never be cut"
+    assert "summary" in kinds, "path-order truncation hid every summary"
+    assert "concept" in kinds
+    assert len(picked) <= 200
+
+
+def test_select_tree_pages_keeps_every_type_represented():
+    """The bug: a path-ordered slice taken before the group-by handed the
+    agent 200 concept pages, ZERO summaries and no index."""
+    selected = kb_tools._select_tree_pages(_prod_shaped_kb(), budget=200)
+
+    by_type = Counter(p.page_type for p in selected)
+    assert len(selected) == 200
+    assert by_type["index"] == 1
+    assert by_type["summary"] > 0
+    assert by_type["concept"] > 0
+    # Equal share of the 199 non-index slots, off by at most the odd page.
+    assert abs(by_type["summary"] - by_type["concept"]) <= 1
+
+
+def test_select_tree_pages_never_cuts_index_pages():
+    """Index pages are the entry point and are always few -- they come off
+    the top of the budget, never out of a type's share."""
+    pages = (
+        [_page(f"index-{i}.md", "index") for i in range(5)]
+        + [_page(f"summaries/s{i:04d}.md", "summary") for i in range(1000)]
+    )
+    selected = kb_tools._select_tree_pages(pages, budget=200)
+
+    assert sum(1 for p in selected if p.page_type == "index") == 5
+    assert len(selected) == 200
+
+
+def test_select_tree_pages_excludes_source_pages():
+    """'source' rows are raw document dumps: never in the ToC, still
+    readable with kb_read_page."""
+    pages = (
+        [_page(f"sources/d{i:03d}.md", "source") for i in range(300)]
+        + [_page(f"summaries/s{i:03d}.md", "summary") for i in range(10)]
+    )
+    selected = kb_tools._select_tree_pages(pages, budget=200)
+
+    assert [p.page_type for p in selected] == ["summary"] * 10
+    assert not any(p.path.startswith("sources/") for p in selected)
+
+
+def test_select_tree_pages_drops_a_source_only_kb_to_empty():
+    """Nothing but sources means nothing to navigate -- an empty list, not
+    a crash on the zip_longest with no buckets."""
+    pages = [_page(f"sources/d{i}.md", "source") for i in range(20)]
+
+    assert kb_tools._select_tree_pages(pages, budget=200) == []
+    assert kb_tools._select_tree_pages([], budget=200) == []
+
+
+def test_select_tree_pages_redistributes_an_unused_share():
+    """A type smaller than its equal share is taken whole and its leftover
+    quota flows to the bigger types instead of being wasted."""
+    pages = (
+        [_page("index.md", "index")]
+        + [_page(f"concepts/c{i}.md", "concept") for i in range(3)]
+        + [_page(f"summaries/s{i:04d}.md", "summary") for i in range(500)]
+    )
+    selected = kb_tools._select_tree_pages(pages, budget=200)
+
+    by_type = Counter(p.page_type for p in selected)
+    assert len(selected) == 200
+    assert by_type == {"summary": 196, "concept": 3, "index": 1}
+
+
+def test_select_tree_pages_under_budget_returns_everything_but_sources():
+    """No cut when the KB fits -- the caller's 'showing N of M' note keys
+    off this and must not fire for a small KB."""
+    pages = [_page("index.md", "index")] + [
+        _page(f"summaries/s{i}.md", "summary") for i in range(20)
+    ]
+
+    assert len(kb_tools._select_tree_pages(pages, budget=200)) == 21
+
+
+def test_select_tree_pages_is_deterministic_and_path_ordered():
+    """The tree is injected into the system prompt on every wake: the same
+    KB must yield the same bytes regardless of row order from the DB, and
+    the kept pages must be the lowest paths in each type."""
+    pages = _prod_shaped_kb()
+    shuffled = list(pages)
+    random.Random(1234).shuffle(shuffled)
+
+    first = kb_tools._select_tree_pages(pages, budget=200)
+    second = kb_tools._select_tree_pages(shuffled, budget=200)
+
+    assert [p.path for p in first] == [p.path for p in second]
+    concepts = [p.path for p in first if p.page_type == "concept"]
+    assert concepts == sorted(concepts)
+    assert concepts[0] == "concepts/c0000.md"
+
+
+def test_select_tree_pages_never_exceeds_budget():
+    """Hard cap, including the degenerate budgets."""
+    pages = _prod_shaped_kb()
+
+    assert len(kb_tools._select_tree_pages(pages, budget=1)) == 1
+    assert len(kb_tools._select_tree_pages(pages, budget=7)) == 7
+    assert len(kb_tools._select_tree_pages(pages, budget=200)) == 200

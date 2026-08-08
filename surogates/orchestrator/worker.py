@@ -769,9 +769,10 @@ async def _load_attached_kbs(
     SQLAlchemy row) lets us cache it and pass it across async
     boundaries without dragging the session.
     """
-    # ToC cap: protects the prompt from a pathological KB. The cut is
-    # announced in the tree so the LLM knows the listing is partial.
-    max_tree_pages = 200
+    # ToC budget: protects the prompt from a pathological KB. The cut is
+    # spread across page types by _select_tree_pages (a flat slice used to
+    # hand the agent 200 concept pages and zero summaries) and announced in
+    # the tree so the LLM knows the listing is partial.
 
     if not ops_db_url:
         return []
@@ -782,7 +783,10 @@ async def _load_attached_kbs(
             OpsKnowledgeBase,
             agent_knowledge_bases,
         )
-        from surogates.tools.builtin.kb_tools import _format_pages_tree
+        from surogates.tools.builtin.kb_tools import (
+            _format_pages_tree,
+            _select_tree_pages,
+        )
         import sqlalchemy as sa
 
         factory = get_ops_session_factory()
@@ -835,10 +839,11 @@ async def _load_attached_kbs(
         for kb in kbs:
             pages = pages_by_kb.get(kb["id"], [])
             kb["pages_total"] = len(pages)
-            tree = _format_pages_tree(pages[:max_tree_pages])
-            if len(pages) > max_tree_pages:
+            selected = _select_tree_pages(pages)
+            tree = _format_pages_tree(selected)
+            if len(selected) < len(pages):
                 tree += (
-                    f"\n(showing {max_tree_pages} of {len(pages)} pages"
+                    f"\n(showing {len(selected)} of {len(pages)} pages"
                     f" -- use kb_list_pages for the full listing)"
                 )
             kb["pages_tree"] = tree

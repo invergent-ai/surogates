@@ -135,3 +135,52 @@ async def test_load_attached_kbs_failure_still_degrades_to_empty(
         agent_id=AGENT_ID, ops_db_url="sqlite+aiosqlite://",
     )
     assert kbs == []
+
+
+async def test_load_attached_kbs_tree_spans_every_page_type(
+    seeded_ops_factory,
+):
+    """End-to-end shape of the PROD bug: a KB whose 'concepts/' paths sort
+    before 'index.md' and 'summaries/' must still show all three in the
+    injected tree, with sources excluded and an accurate cut note."""
+    async with seeded_ops_factory() as s:
+        for i in range(250):
+            s.add(OpsKBWikiPage(
+                id=f"sum-{i}", kb_id=KB_REFERENCE,
+                path=f"summaries/s{i:03d}.md", page_type="summary",
+                title=f"Summary {i}", size_bytes=512,
+            ))
+        for i in range(60):
+            s.add(OpsKBWikiPage(
+                id=f"con-{i}", kb_id=KB_REFERENCE,
+                path=f"concepts/c{i:03d}.md", page_type="concept",
+                title=f"Concept {i}", size_bytes=2048,
+            ))
+        for i in range(30):
+            s.add(OpsKBWikiPage(
+                id=f"src-{i}", kb_id=KB_REFERENCE,
+                path=f"sources/d{i:03d}.md", page_type="source",
+                title=f"Doc {i}", size_bytes=99_000,
+            ))
+        s.add(OpsKBWikiPage(
+            id="idx", kb_id=KB_REFERENCE, path="index.md",
+            page_type="index", title="Index", size_bytes=900,
+        ))
+        await s.commit()
+
+    kbs = await _load_attached_kbs(
+        agent_id=AGENT_ID, ops_db_url="sqlite+aiosqlite://",
+    )
+    tree = next(kb for kb in kbs if kb["id"] == KB_REFERENCE)["pages_tree"]
+
+    assert "## index" in tree
+    assert "## summary" in tree
+    assert "## concept" in tree
+    assert "index.md" in tree
+    # Raw document dumps stay out of the prompt (kb_read_page reaches them).
+    assert "sources/" not in tree
+    assert "## source" not in tree
+    # 341 rows total, 200 shown -- the note counts every page the agent can
+    # still reach via kb_list_pages, including the excluded sources.
+    assert "(showing 200 of 341 pages" in tree
+    assert len([ln for ln in tree.splitlines() if ln.startswith("- `")]) == 200

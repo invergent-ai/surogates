@@ -31,6 +31,8 @@ injection that handed the agent a kb_id outside its allowed set.
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from itertools import zip_longest
 from typing import Any
 
 import sqlalchemy as sa
@@ -113,6 +115,74 @@ async def _is_kb_attached(
     return result.first() is not None
 
 
+# Section order in the rendered tree, shared with _select_tree_pages so
+# selection and rendering agree on what comes first.
+_TREE_TYPE_ORDER = {"index": 0, "summary": 1, "concept": 2}
+
+# Page types that never belong in the injected ToC. ``source`` rows are
+# verbatim dumps of the ingested documents -- hundreds of them, each
+# huge, and every one of them is still reachable with kb_read_page. The
+# tree exists so the LLM can pick a page to read, and it never wants to
+# start from a raw source.
+_TREE_EXCLUDED_TYPES = frozenset({"source"})
+
+# Default ToC budget. Lives here next to the selection policy rather
+# than at the call site so both the tree and its "showing N of M"
+# announcement are computed from the same number.
+_TREE_PAGE_BUDGET = 200
+
+
+def _select_tree_pages(
+    pages: list[OpsKBWikiPage], budget: int = _TREE_PAGE_BUDGET,
+) -> list[OpsKBWikiPage]:
+    """Pick at most *budget* pages for the injected ToC, fairly by type.
+
+    The bug this replaces: the caller sliced a path-ordered list before
+    _format_pages_tree grouped it by page_type. On a real KB (625
+    concept + 3946 summary + 1 index) ``concepts/...`` sorts first, so
+    the agent saw 200 concept pages, zero summaries and no index -- it
+    could not even see that summaries existed.
+
+    Policy:
+
+    - ``index`` pages are taken whole and off the top. There are at
+      most a handful and they are the entry point to everything else.
+    - ``source`` pages are dropped (see _TREE_EXCLUDED_TYPES).
+    - The rest of the budget is dealt round-robin across the remaining
+      types, one page at a time in path order. A type smaller than its
+      equal share is exhausted and its unused quota flows to the larger
+      types automatically, so nothing is starved and nothing is wasted.
+    - Within a type the first N pages in ``path`` order are kept, so the
+      tree is byte-identical between wakes.
+    """
+    buckets: dict[str, list[OpsKBWikiPage]] = {}
+    for page in sorted(pages, key=lambda p: p.path):
+        if page.page_type in _TREE_EXCLUDED_TYPES:
+            continue
+        buckets.setdefault(page.page_type, []).append(page)
+
+    # Slicing index too is theatre (a KB with >200 index pages does not
+    # exist), but it keeps the "never returns more than budget" promise
+    # unconditional.
+    index_pages = buckets.pop("index", [])[:budget]
+    remaining = budget - len(index_pages)
+
+    types = sorted(buckets, key=lambda t: (_TREE_TYPE_ORDER.get(t, 99), t))
+    fair = [
+        page
+        for row in zip_longest(*(buckets[t] for t in types))
+        for page in row
+        if page is not None
+    ][:remaining]
+
+    # The round-robin always draws from the front of each bucket, so a
+    # per-type count is enough to rebuild the selection in tree order.
+    counts = Counter(page.page_type for page in fair)
+    return index_pages + [
+        page for t in types for page in buckets[t][:counts[t]]
+    ]
+
+
 def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
     """Render the wiki page list as a markdown tree the LLM can read.
 
@@ -124,10 +194,9 @@ def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
     if not pages:
         return "(empty -- no wiki pages have been compiled yet)"
 
-    type_order = {"index": 0, "summary": 1, "concept": 2}
     pages_sorted = sorted(
         pages,
-        key=lambda p: (type_order.get(p.page_type, 99), p.path),
+        key=lambda p: (_TREE_TYPE_ORDER.get(p.page_type, 99), p.path),
     )
 
     lines = []
