@@ -2,7 +2,7 @@
 
 ## What is a Sub-Agent?
 
-A sub-agent is a **declarative, reusable agent type** — a preset bundle of (system prompt, tool allowlist/denylist, model override, iteration cap, governance policy profile) that a coordinator session can apply to a freshly spawned child session by name.
+A sub-agent is a **declarative, reusable agent type** — a preset bundle of (system prompt, tool allowlist/denylist, model override, iteration cap) that a coordinator session can apply to a freshly spawned child session by name.
 
 Where a [skill](../skills/index.md) is a reusable *prompt* and an [expert](../experts/index.md) is a reusable *task-specialized model*, a sub-agent is a reusable *role*. It lets an admin say "code-reviewer" once and have every spawn inherit the same persona, tools, and governance envelope.
 
@@ -30,12 +30,12 @@ The base LLM always decides when to spawn. No transparent interception — the c
 | | Skill | Sub-agent | Expert |
 |---|---|---|---|
 | **Asset file** | `SKILL.md` | `AGENT.md` | `SKILL.md` (`type: expert`) |
-| **What it bundles** | Prompt | Prompt + tool filter + model + iteration cap + policy profile | Model + trigger + restricted tools |
+| **What it bundles** | Prompt | Prompt + tool filter + model + iteration cap | Model + trigger + restricted tools |
 | **Runs in** | Inlined into the parent session's prompt | A new child session (full harness loop) | A bounded mini-loop the base LLM delegates to |
 | **Invoked by** | The user typing `/<name>` or the LLM noticing the trigger | The coordinator LLM calling `spawn_worker(agent_type=...)` / `delegate_task(agent_type=...)` | Harness-enforced routing or the base LLM calling `consult_expert(name=...)` |
 | **Context isolation** | None (same session) | Full (separate event log, parent_id link) | Bounded mini-loop inside the parent session |
 | **Model** | Inherited from the session | Configurable per sub-agent | Configured by the expert's `model`/`base_model` field |
-| **Governance** | Tenant-wide | Tenant-wide + optional narrowing policy profile | Tenant-wide |
+| **Governance** | Tenant-wide | Tenant-wide | Tenant-wide |
 
 A task suits a sub-agent when it (a) benefits from a fresh context window, (b) needs its own tool envelope, or (c) should run in parallel with the parent.
 
@@ -43,7 +43,7 @@ For durable, DAG-aware coordination on top of sub-agents — fan-in dependencies
 
 ## Design Principles
 
-1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and configured agent bucket. Only the preset (prompt, tool filter, model, iteration cap, policy profile) is scoped per sub-agent.
+1. **Child sessions share the tenant.** Sub-agents inherit the parent's skills, MCP servers, experts, tenant memory, and configured agent bucket. Only the preset (prompt, tool filter, model, iteration cap) is scoped per sub-agent.
 
 2. **Every tool call is governed, by the parent's policy.** A child inherits the parent's `agent_id` and therefore the same governance blob — the same allow/deny lists and the same network egress rules. A sub-agent is never *more* privileged than its parent, and never *less* either.
 
@@ -281,7 +281,6 @@ What the child **overrides**:
 - Tool allowlist / denylist
 - Model
 - Iteration cap
-- Governance policy profile
 
 ## 7. Observing Sub-Agents
 
@@ -329,7 +328,7 @@ Shows the active session's live sub-agent tree, polls every 4s while any child i
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/v1/agents` | List all sub-agent types visible to the current tenant |
-| `GET` | `/v1/agents/{name}` | View full AGENT.md content, tools, model, policy profile |
+| `GET` | `/v1/agents/{name}` | View full AGENT.md content, tools, model |
 | `POST` | `/v1/agents` | Create a user-scoped sub-agent in the tenant bucket |
 | `PUT` | `/v1/agents/{name}` | Replace a user-scoped agent's AGENT.md content |
 | `DELETE` | `/v1/agents/{name}` | Remove a user-scoped agent from the bucket |
