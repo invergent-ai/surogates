@@ -52,6 +52,7 @@ harness-side either way is the sender's pinned plan entitlement
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import Counter
 from itertools import zip_longest
 from typing import Any
@@ -450,20 +451,30 @@ def _format_search_hits(hits: list[dict[str, Any]], *, query: str) -> str:
     ``kb_name`` comes from the hit itself -- the multi-KB search route
     stamps it per hit -- so this needs no separate id->name lookup.
     """
-    if not hits:
+    # A renamed/missing ops response field must not hand the model a
+    # blank path it can't feed back into kb_read_page -- drop those
+    # hits (loudly, so a real field-name drift is visible in logs)
+    # rather than render them uselessly.
+    valid = []
+    for hit in hits:
+        if not hit.get("path"):
+            logger.warning("KB search hit missing 'path'; dropping: %r", hit)
+            continue
+        valid.append(hit)
+
+    if not valid:
         return (
-            f"No knowledge-base pages matched {query!r}. Full-text"
-            f" search matches whole words, not substrings -- retry with"
-            f" fewer or different keywords, or browse with"
-            f" `kb_list_pages`."
+            f"No knowledge-base pages matched {query!r}. Try rephrasing"
+            f" as a natural-language question, using different or more"
+            f" specific keywords, or browse with `kb_list_pages`."
         )
 
-    lines = [f"{len(hits)} match(es) for {query!r}, best first:", ""]
-    for index, hit in enumerate(hits, start=1):
+    lines = [f"{len(valid)} match(es) for {query!r}, best first:", ""]
+    for index, hit in enumerate(valid, start=1):
         kb_id = hit.get("kb_id", "")
         kb_name = hit.get("kb_name") or kb_id
         lines.append(
-            f"{index}. `{hit.get('path', '')}` -- {hit.get('title', '')} "
+            f"{index}. `{hit['path']}` -- {hit.get('title', '')} "
             f"[{hit.get('page_type', '')} | kb {kb_name} `{kb_id}`]"
         )
         for text in (hit.get("brief"), hit.get("snippet")):
@@ -515,6 +526,23 @@ async def _kb_search_pages_handler(
         )
 
     if named_kb:
+        try:
+            uuid.UUID(named_kb)
+        except ValueError:
+            # A display name can't be resolved without the DB-backed
+            # attachment lookup this tool no longer has (see the module
+            # docstring). Sending it on anyway would either come back
+            # as an ops no-match (the model blames the query and
+            # rephrases, which fails identically) or, on a pinned
+            # session, as "not included in your plan" -- false when
+            # the KB *is* in the plan under its UUID. Refuse with a
+            # corrective message instead of either misleading outcome.
+            return (
+                f"Error: {named_kb!r} is not a knowledge base UUID. "
+                f"The `kb` argument takes a UUID from the Available "
+                f"Knowledge Bases section -- omit `kb` to search all "
+                f"of them."
+            )
         denied = _kb_plan_denied(named_kb, kwargs)
         if denied is not None:
             return denied
@@ -523,10 +551,15 @@ async def _kb_search_pages_handler(
         allowed = dimension_allowlist(kwargs.get("session_config"), "kb_ids")
         # ``None`` means unrestricted -- pass it straight through so ops
         # searches every KB it has attached, not zero. A pinned-but-empty
-        # allowlist must never reach ops as ``kb_ids=[]``: both this
-        # client and the ops service treat an empty list as falsy (no
-        # filter), which would silently widen a zero-KB package back to
-        # every attached KB. Refuse locally instead.
+        # allowlist must never reach ops as ``kb_ids=[]``: httpx drops an
+        # empty list from the query string entirely (``params={"kb_ids":
+        # []}`` puts nothing named ``kb_ids`` on the wire), so ops would
+        # see the same request as an unrestricted search no matter how
+        # it branches on the value -- this can't be fixed on the ops
+        # side. ``PlatformClient.search_agent_kb`` also refuses this
+        # shape locally (defense in depth for any other caller), but
+        # catching it here first gives the model a specific, actionable
+        # error instead of a bare "0 pages matched".
         if allowed is not None and not allowed:
             return "Error: no knowledge bases are available to this session."
         kb_ids = sorted(allowed) if allowed is not None else None
@@ -555,10 +588,12 @@ _KB_SEARCH_PAGES_PARAMS = {
         "query": {
             "type": "string",
             "description": (
-                "What you are looking for, as keywords or a short "
-                "phrase in the language of the source material. "
-                "Matching is on whole words, so prefer distinctive "
-                "terms over full sentences."
+                "What you are looking for. A natural-language question "
+                "and a short phrase of distinctive keywords both work "
+                "well -- semantic matching finds conceptually related "
+                "pages even without exact wording, and keyword matching "
+                "still helps pin down specific terms. Avoid vague "
+                "single words."
             ),
         },
         "kb": {
@@ -674,9 +709,14 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="kb_search_pages",
             description=(
-                "Full-text search across your knowledge bases. "
-                "Returns pages ranked by relevance, each with its "
-                "kb_id, path, title and the matching snippet.\n\n"
+                "Hybrid search across your knowledge bases: keyword "
+                "matching fused with semantic (meaning-based) ranking, "
+                "so a natural-language question and a handful of "
+                "distinctive keywords both work well. If the embedding "
+                "provider is unavailable, ranking falls back to "
+                "keyword matching alone. Returns pages ranked by "
+                "relevance, each with its kb_id, path, title and the "
+                "matching snippet.\n\n"
                 "USE THIS FIRST for any question a knowledge base "
                 "could answer. The page tree in your system prompt may "
                 "be partial and each entry carries only a one-line "

@@ -748,7 +748,7 @@ class PlatformClient:
         query: str,
         kb_ids: list[str] | None = None,
         limit: int = 20,
-        timeout: float = 15.0,
+        timeout: float = 25.0,
     ) -> list[dict]:
         """Hybrid (lexical + vector RRF) search across an agent's
         attached knowledge bases.
@@ -760,10 +760,27 @@ class PlatformClient:
         ``kb_service.search_agent_wiki`` on the ops side). ``None``
         means no narrowing -- every attached KB is searched.
 
-        ``timeout`` overrides the client's constructor default (5.0s):
-        ops computes a query embedding on top of running the RRF fusion
-        query per attached KB, so this call runs measurably slower than
-        the other runtime endpoints on this client.
+        ``kb_ids=[]`` (an allowlist pinned to zero KBs, as opposed to
+        ``None`` for "no pin at all") is answered locally with ``[]``,
+        without a request. This isn't optional: an empty list can't
+        cross the wire as a query param at all -- httpx drops it
+        entirely (``params={"kb_ids": []}`` puts nothing named
+        ``kb_ids`` in the request), so ops would receive the exact same
+        request as an unrestricted search and there is no way to fix
+        that from the ops side. Callers that already refuse this shape
+        themselves (see ``kb_tools._kb_search_pages_handler``, which
+        does so to give a more specific error) are still protected here
+        so a future caller can't reintroduce the widening bug.
+
+        ``timeout`` overrides the client's constructor default (5.0s).
+        Ops budgets 10s for the query embedding alone
+        (``_embed_search_query(timeout=10.0)`` in
+        ``surogate_ops/server/services/knowledge.py``) before it even
+        starts running the RRF fusion query once per attached KB -- a
+        multi-KB agent on a degraded embeddings provider can legitimately
+        take longer than a bare 10s+epsilon budget, so this gives
+        headroom over the embedding budget plus a handful of fusion
+        queries rather than racing it.
 
         Returns the raw list of hit dicts (``path``, ``page_type``,
         ``title``, ``brief``, ``snippet``, ``rank``, ``kb_id``,
@@ -775,6 +792,8 @@ class PlatformClient:
         * ``httpx.HTTPStatusError`` on any other non-2xx.
         * ``httpx.HTTPError`` (e.g. a timeout) on network-level failure.
         """
+        if kb_ids is not None and not kb_ids:
+            return []
         params: dict[str, Any] = {"q": query, "limit": limit}
         if kb_ids:
             params["kb_ids"] = kb_ids
