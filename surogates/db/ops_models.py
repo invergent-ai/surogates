@@ -81,8 +81,12 @@ class OpsKBWikiPage(OpsBase):
 
     The KB compile pipeline writes one row per generated wiki page.
     Tools need path (the address), page_type (so we can format the
-    tree by category), title (for human-readable listing), and
+    tree by category), title (for human-readable listing), brief (the
+    one-line semantic summary rendered next to each entry) and
     size_bytes (so we can warn the LLM about huge pages).
+
+    ``content`` and ``search_tsv`` are deliberately NOT mirrored: the
+    runtime reads page bodies from Hub, and search runs writer-side.
     """
     __tablename__ = "kb_wiki_pages"
 
@@ -91,6 +95,7 @@ class OpsKBWikiPage(OpsBase):
     path: Mapped[str] = mapped_column(sa.String(512))
     page_type: Mapped[str] = mapped_column(sa.String(32))
     title: Mapped[str] = mapped_column(sa.String(512))
+    brief: Mapped[Optional[str]] = mapped_column(sa.String(512))
     size_bytes: Mapped[int] = mapped_column(sa.Integer)
 
 
