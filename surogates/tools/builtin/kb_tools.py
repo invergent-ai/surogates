@@ -117,7 +117,7 @@ async def _is_kb_attached(
 
 # Section order in the rendered tree, shared with _select_tree_pages so
 # selection and rendering agree on what comes first.
-_TREE_TYPE_ORDER = {"index": 0, "summary": 1, "concept": 2}
+_TREE_TYPE_ORDER = {"index": 0, "summary": 1, "concept": 2, "source": 3}
 
 # Page types that never belong in the injected ToC. ``source`` rows are
 # verbatim dumps of the ingested documents -- hundreds of them, each
@@ -183,13 +183,48 @@ def _select_tree_pages(
     ]
 
 
+# Per-page brief budget in the rendered tree. The compile pipeline is
+# instructed to keep briefs under 100 chars, but models overrun it and
+# the column allows 512 -- at the 200-page tree cap that is ~100KB of
+# system prompt per attachment, paid on every turn. 120 chars keeps a
+# full sentence and costs ~25KB at the cap.
+_BRIEF_MAX_CHARS = 120
+
+
+def _brief_snippet(brief: str | None) -> str:
+    """Flatten *brief* to one line, capped at ``_BRIEF_MAX_CHARS``.
+
+    Collapsing whitespace is not cosmetic: briefs are model-written, and
+    one containing a newline would otherwise inject bogus entries into
+    the markdown tree the LLM reads as real pages.
+
+    Truncation cuts at the last word boundary and marks the cut with
+    ``...`` -- a hard mid-word cut yields fragments the LLM quotes back
+    as whole words, and an unmarked cut reads as a complete summary so
+    the agent never opens the page. A brief with no boundary to cut on
+    (one long URL, an unspaced CJK/Greek run) falls back to a hard cut
+    rather than degrading to a bare ellipsis.
+    """
+    flat = " ".join((brief or "").split())
+    if len(flat) <= _BRIEF_MAX_CHARS:
+        return flat
+    cut = flat[:_BRIEF_MAX_CHARS - 3]
+    head, _, _ = cut.rpartition(" ")
+    return (head or cut) + "..."
+
+
 def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
     """Render the wiki page list as a markdown tree the LLM can read.
 
-    Groups by ``page_type`` (index, summary, concept, ...) so the LLM
-    can scan the structure top-down: index first (the entry point),
-    then summaries (file-level overviews), then concepts (cross-cuts
-    extracted by the curator), then everything else.
+    Groups by ``page_type`` (index, summary, concept, source) so the LLM
+    can scan the structure top-down: index first (the entry point), then
+    summaries (file-level overviews), then concepts (cross-cuts
+    extracted by the curator), then raw sources, then everything else.
+
+    Each entry carries its ``brief`` when the compile pipeline wrote one
+    -- that one line is what lets the agent pick a page without reading
+    it. Pages with no brief render exactly as before, no dangling
+    separator.
     """
     if not pages:
         return "(empty -- no wiki pages have been compiled yet)"
@@ -206,8 +241,10 @@ def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
             current_type = p.page_type
             lines.append(f"\n## {current_type}")
         size_kb = max(1, p.size_bytes // 1024)
+        brief = _brief_snippet(p.brief)
+        suffix = f" -- {brief}" if brief else ""
         lines.append(
-            f"- `{p.path}` -- {p.title} ({size_kb} KB)"
+            f"- `{p.path}` -- {p.title} ({size_kb} KB){suffix}"
         )
     return "\n".join(lines).strip()
 
@@ -416,10 +453,10 @@ def register(registry: ToolRegistry) -> None:
             name="kb_list_pages",
             description=(
                 "List all pages in a knowledge base, grouped by page "
-                "type (index, summary, concept). Returns a markdown "
-                "tree showing each page's path, title, and size. Use "
-                "this first to see what's available, then read "
-                "specific pages with kb_read_page."
+                "type (index, summary, concept, source). Returns a "
+                "markdown tree showing each page's path, title, "
+                "one-line brief and size. Use this first to see what's "
+                "available, then read specific pages with kb_read_page."
             ),
             parameters=_KB_LIST_PAGES_PARAMS,
         ),

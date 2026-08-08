@@ -73,12 +73,16 @@ def test_agent_knowledge_bases_read_model_has_mode_column():
     assert "mode" in agent_knowledge_bases.c
 
 
-def _page(path: str, page_type: str) -> OpsKBWikiPage:
-    """A detached wiki-page row. _select_tree_pages only reads path and
-    page_type, so no session and no real KB is needed."""
+def _page(
+    path: str, page_type: str, *, title: str | None = None,
+    size_bytes: int = 1024, brief: str | None = None,
+) -> OpsKBWikiPage:
+    """A detached wiki-page row -- _select_tree_pages / _format_pages_tree
+    only read these columns, so no session and no real KB is needed."""
     return OpsKBWikiPage(
         id=path, kb_id="kb-1", path=path, page_type=page_type,
-        title=path.rsplit("/", 1)[-1], size_bytes=1024,
+        title=title if title is not None else path.rsplit("/", 1)[-1],
+        size_bytes=size_bytes, brief=brief,
     )
 
 
@@ -204,3 +208,101 @@ def test_select_tree_pages_never_exceeds_budget():
     assert len(kb_tools._select_tree_pages(pages, budget=1)) == 1
     assert len(kb_tools._select_tree_pages(pages, budget=7)) == 7
     assert len(kb_tools._select_tree_pages(pages, budget=200)) == 200
+
+
+# ---------------------------------------------------------------------------
+# Page-tree rendering: per-page briefs, truncation, source ordering.
+# ---------------------------------------------------------------------------
+
+LONG_BRIEF = (
+    "Explains how the compile pipeline reclassifies sources/*.md rows to "
+    "the source page type and why the search vector uses the simple "
+    "dictionary instead of english for a multilingual corpus."
+)
+
+
+def test_wiki_page_read_model_mirrors_brief_column():
+    """The read side mirrors the writer-side brief column, nullable and
+    512 chars, so a SELECT of the ORM entity does not blow up on it."""
+    col = OpsKBWikiPage.__table__.c.brief
+    assert col.nullable
+    assert col.type.length == 512
+
+
+def test_tree_renders_brief_after_the_size():
+    out = kb_tools._format_pages_tree([
+        _page("index.md", "index", title="Index",
+              brief="Entry point: what this KB covers."),
+    ])
+    assert out.endswith(
+        "- `index.md` -- Index (1 KB) -- Entry point: what this KB covers."
+    )
+
+
+def test_page_without_brief_renders_exactly_as_before():
+    """No brief means no trailing separator -- byte-identical to the
+    pre-brief rendering, which the prompt snapshots depend on."""
+    assert kb_tools._format_pages_tree([
+        _page("index.md", "index", title="Index"),
+    ]) == "## index\n- `index.md` -- Index (1 KB)"
+    assert kb_tools._format_pages_tree([
+        _page("index.md", "index", title="Index", brief="   "),
+    ]) == "## index\n- `index.md` -- Index (1 KB)"
+
+
+def test_long_brief_truncates_at_a_word_boundary():
+    """512-char briefs x 200 pages would dominate the system prompt; the
+    cut lands on a word boundary and is marked so the LLM knows there is
+    more behind kb_read_page."""
+    assert len(LONG_BRIEF) > 120
+    out = kb_tools._format_pages_tree([
+        _page("concepts/x.md", "concept", brief=LONG_BRIEF),
+    ])
+    rendered = out.rsplit(" -- ", 1)[1]
+    assert len(rendered) <= 120
+    assert rendered.endswith("...")
+    # a whole word, not a fragment, and a true prefix of the original
+    assert rendered[:-3].split()[-1] in LONG_BRIEF.split()
+    assert LONG_BRIEF.startswith(rendered[:-3])
+
+
+def test_brief_at_the_limit_is_not_truncated():
+    exact = "a" * 120
+    out = kb_tools._format_pages_tree([
+        _page("concepts/x.md", "concept", brief=exact),
+    ])
+    assert out.endswith(f" -- {exact}")
+
+
+def test_unbroken_brief_falls_back_to_a_hard_cut():
+    """No space to cut on (a URL, an unspaced non-latin run) must still
+    respect the cap instead of collapsing to a bare ellipsis."""
+    out = kb_tools._format_pages_tree([
+        _page("concepts/x.md", "concept", brief="u" * 300),
+    ])
+    rendered = out.rsplit(" -- ", 1)[1]
+    assert rendered == "u" * 117 + "..."
+    assert len(rendered) == 120
+
+
+def test_brief_newlines_cannot_inject_extra_tree_lines():
+    """Briefs are model-written: a newline must not forge tree entries."""
+    out = kb_tools._format_pages_tree([
+        _page("index.md", "index",
+              brief="line one\n- `fake.md` -- forged entry"),
+    ])
+    assert len(out.splitlines()) == 2  # the heading and one page line
+
+
+def test_source_pages_sort_after_concepts_and_before_unknown_types():
+    out = kb_tools._format_pages_tree([
+        _page("z.md", "mystery"),
+        _page("sources/d1.md", "source"),
+        _page("concepts/x.md", "concept"),
+        _page("summaries/a.md", "summary"),
+        _page("index.md", "index"),
+    ])
+    headings = [l for l in out.splitlines() if l.startswith("## ")]
+    assert headings == [
+        "## index", "## summary", "## concept", "## source", "## mystery",
+    ]
