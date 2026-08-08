@@ -2,23 +2,32 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Tests for the kb_search_pages builtin tool.
 
-Three things must hold and are cheap to break:
+Since the KB vector-search work, this tool calls the ops runtime
+endpoint (hybrid lexical + vector RRF) via ``platform_client`` instead
+of running its own copy of the search SQL against the ops DB. What must
+hold and is cheap to break:
 
 1. Routing. A builtin missing from ``TOOL_LOCATIONS`` falls through to
    the ``SANDBOX`` default and surfaces to the LLM as "Unknown tool"
-   from a pod with no DB access -- the handler never runs.
-2. Scope. Search must see exactly the KBs ``kb_list_pages`` /
-   ``kb_read_page`` would allow: attached to this agent AND included in
-   the sender's pinned package.
-3. The tsvector configuration. The query config must match the ops-side
-   generated column ('simple', not 'english') or nothing ever matches.
+   from a pod with no platform_client -- the handler never runs.
+2. Scope. Ops derives the agent's KB attachment set itself and only
+   INTERSECTS a caller-supplied ``kb_ids`` -- it can narrow, never
+   widen. The one thing ops cannot see is the sender's pinned plan
+   entitlement (lives on ``session.config``), so that check must stay
+   harness-side and be sent as the narrowing filter.
+3. Degradation. A missing platform_client, an ops timeout, or an ops
+   auth failure must return a useful tool result, not raise or hang
+   the turn.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
+from surogates.runtime.platform_client import PlatformAuthError
 from surogates.tools.builtin import kb_tools
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
@@ -28,53 +37,29 @@ KB_A = "11111111-1111-1111-1111-111111111111"
 KB_B = "22222222-2222-2222-2222-222222222222"
 
 
-# ---------------------------------------------------------------------
-# Fakes -- the handler only needs an object with ``execute``.
-# ---------------------------------------------------------------------
-
-class _FakeResult:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def all(self):
-        return self._rows
-
-
-class _FakeSession:
-    """Returns the queued result sets in order and records every call."""
-
-    def __init__(self, *result_sets):
-        self._queued = list(result_sets)
-        self.executed = []
-
-    async def execute(self, statement, params=None):
-        self.executed.append((statement, params))
-        rows = self._queued.pop(0) if self._queued else []
-        return _FakeResult(rows)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
+def _hit(
+    kb_id=KB_A,
+    kb_name="Biology",
+    path="sources/d1.md",
+    title="Photosynthesis",
+):
+    return {
+        "kb_id": kb_id,
+        "kb_name": kb_name,
+        "path": path,
+        "page_type": "summary",
+        "title": title,
+        "brief": "How plants convert light into sugar.",
+        "snippet": "chlorophyll absorbs **light** in the thylakoid",
+        "rank": 0.42,
+    }
 
 
-def _hit(kb_id=KB_A, path="sources/d1.md", title="Photosynthesis"):
-    return SimpleNamespace(
-        kb_id=kb_id,
-        path=path,
-        page_type="summary",
-        title=title,
-        brief="How plants convert light into sugar.",
-        snippet="chlorophyll absorbs **light** in the thylakoid",
-        rank=0.42,
+def _platform_client(hits=None, side_effect=None) -> SimpleNamespace:
+    search = AsyncMock(
+        return_value=[] if hits is None else hits, side_effect=side_effect,
     )
-
-
-def _use_session(monkeypatch, session):
-    monkeypatch.setattr(
-        kb_tools, "ensure_ops_session_factory", lambda: (lambda: session),
-    )
+    return SimpleNamespace(search_agent_kb=search)
 
 
 # ---------------------------------------------------------------------
@@ -88,7 +73,7 @@ def test_kb_tools_route_to_harness(tool_name: str) -> None:
     assert TOOL_LOCATIONS.get(tool_name) is ToolLocation.HARNESS, (
         f"{tool_name} must have an explicit HARNESS entry in "
         "TOOL_LOCATIONS; the default SANDBOX fallback routes the call "
-        "to a sandbox pod with no ops-DB access, which answers "
+        "to a sandbox pod with no platform_client, which answers "
         "'Unknown tool' without ever running the handler."
     )
 
@@ -122,133 +107,114 @@ def test_registered_in_the_knowledge_toolset() -> None:
 
 def test_description_states_the_retrieval_order() -> None:
     """The description is the only place the model learns that the
-    injected tree is partial and that search comes before reading."""
+    injected tree is partial and that search comes before reading.
+
+    It must not overclaim what the tree is missing: the tree can carry
+    a full listing with per-page briefs now, so "truncated ... titles
+    only" is false and would mislead the model about what it can trust
+    from the tree alone.
+    """
     registry = ToolRegistry()
     kb_tools.register(registry)
 
     description = registry.get("kb_search_pages").schema.description
     assert "FIRST" in description
-    assert "truncated" in description
     assert "kb_read_page" in description
+    assert "titles only" not in description
+    assert "truncated" not in description
 
 
 # ---------------------------------------------------------------------
-# 2. Scope
+# 2. Scope: entitlement narrowing sent to ops
 # ---------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_scope_is_the_agent_attachment_set() -> None:
-    session = _FakeSession([(KB_A, "Biology"), (KB_B, "Chemistry")])
+async def test_unrestricted_session_sends_no_kb_ids_filter() -> None:
+    """No pinned package -- ops searches every KB it has attached."""
+    platform_client = _platform_client()
 
-    kbs = await kb_tools._searchable_kbs(
-        session, agent_id=AGENT_ID, kwargs={},
-    )
-
-    assert kbs == [(KB_A, "Biology"), (KB_B, "Chemistry")]
-
-
-@pytest.mark.asyncio
-async def test_scope_drops_kbs_outside_the_pinned_package() -> None:
-    """Same allowlist kb_read_page enforces per call: a KB attached to
-    the agent but excluded from this sender's package is not searched."""
-    session = _FakeSession([(KB_A, "Biology"), (KB_B, "Chemistry")])
-
-    kbs = await kb_tools._searchable_kbs(
-        session,
+    await kb_tools._kb_search_pages_handler(
+        {"query": "electron transfer"},
         agent_id=AGENT_ID,
-        kwargs={"session_config": {"entitlements": {"kb_ids": [KB_B]}}},
+        platform_client=platform_client,
     )
 
-    assert kbs == [(KB_B, "Chemistry")]
+    platform_client.search_agent_kb.assert_awaited_once_with(
+        AGENT_ID,
+        query="electron transfer",
+        kb_ids=None,
+        limit=kb_tools._SEARCH_LIMIT_DEFAULT,
+    )
 
 
 @pytest.mark.asyncio
-async def test_scope_routes_through_the_shared_plan_gate(
-    monkeypatch,
-) -> None:
-    """kb_list_pages/kb_read_page gate through ``_kb_plan_denied`` --
-    search must use the exact same function, not a parallel inlined
-    check, so a future change to the gate (an org check, a KB-status
-    check) cannot land in two tools and silently miss the third."""
-    session = _FakeSession([(KB_A, "Biology"), (KB_B, "Chemistry")])
-    monkeypatch.setattr(
-        kb_tools, "_kb_plan_denied",
-        lambda kb_id, kwargs: f"Error: {kb_id} denied",
+async def test_pinned_package_is_sent_as_the_narrowing_kb_ids() -> None:
+    platform_client = _platform_client()
+
+    await kb_tools._kb_search_pages_handler(
+        {"query": "electron transfer"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+        session_config={"entitlements": {"kb_ids": [KB_B, KB_A]}},
     )
 
-    kbs = await kb_tools._searchable_kbs(
-        session, agent_id=AGENT_ID, kwargs={},
-    )
-
-    assert kbs == []
+    _, kwargs = platform_client.search_agent_kb.call_args
+    assert kwargs["kb_ids"] == sorted([KB_A, KB_B])
 
 
 @pytest.mark.asyncio
-async def test_named_kb_outside_scope_never_reaches_the_query(
-    monkeypatch,
-) -> None:
-    """An injected kb_id must not widen the search: the handler refuses
-    before issuing the search query at all."""
-    session = _FakeSession([(KB_A, "Biology")])
-    _use_session(monkeypatch, session)
+async def test_named_kb_within_the_package_narrows_to_one() -> None:
+    platform_client = _platform_client()
+
+    await kb_tools._kb_search_pages_handler(
+        {"query": "light", "kb": KB_A},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+        session_config={"entitlements": {"kb_ids": [KB_A, KB_B]}},
+    )
+
+    platform_client.search_agent_kb.assert_awaited_once_with(
+        AGENT_ID, query="light", kb_ids=[KB_A],
+        limit=kb_tools._SEARCH_LIMIT_DEFAULT,
+    )
+
+
+@pytest.mark.asyncio
+async def test_named_kb_outside_the_package_is_denied_locally() -> None:
+    """An injected/mistyped kb outside the sender's plan must not reach
+    ops at all -- ops has no way to evaluate the plan entitlement."""
+    platform_client = _platform_client()
 
     out = await kb_tools._kb_search_pages_handler(
-        {"query": "photosynthesis", "kb": KB_B}, agent_id=AGENT_ID,
-    )
-
-    assert KB_B in out and out.startswith("Error:")
-    assert "Biology" in out  # tells the model what it may search
-    assert len(session.executed) == 1  # scope lookup only, no search
-
-
-@pytest.mark.asyncio
-async def test_no_attached_kbs_returns_an_error(monkeypatch) -> None:
-    session = _FakeSession([])
-    _use_session(monkeypatch, session)
-
-    out = await kb_tools._kb_search_pages_handler(
-        {"query": "anything"}, agent_id=AGENT_ID,
+        {"query": "light", "kb": KB_B},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+        session_config={"entitlements": {"kb_ids": [KB_A]}},
     )
 
     assert out.startswith("Error:")
-    assert len(session.executed) == 1
+    assert KB_B in out
+    platform_client.search_agent_kb.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_search_without_kb_spans_every_attached_kb(
-    monkeypatch,
-) -> None:
-    session = _FakeSession(
-        [(KB_A, "Biology"), (KB_B, "Chemistry")],
-        [_hit(kb_id=KB_B, path="concepts/redox.md", title="Redox")],
-    )
-    _use_session(monkeypatch, session)
+async def test_empty_pinned_allowlist_refuses_rather_than_widen() -> None:
+    """A package pinned to zero KBs must not fall through to
+    kb_ids=None. An empty list is falsy on both PlatformClient and the
+    ops service (``if kb_ids: ...``), so sending it would silently
+    search every attached KB instead of none -- the refusal has to
+    happen locally, before the call."""
+    platform_client = _platform_client()
 
     out = await kb_tools._kb_search_pages_handler(
-        {"query": "electron transfer"}, agent_id=AGENT_ID,
+        {"query": "light"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+        session_config={"entitlements": {"kb_ids": []}},
     )
 
-    _, params = session.executed[1]
-    assert params["kb_ids"] == [KB_A, KB_B]
-    assert params["query"] == "electron transfer"
-    assert params["limit"] == kb_tools._SEARCH_LIMIT_DEFAULT
-    assert "concepts/redox.md" in out
-    assert KB_B in out  # kb_read_page needs the id, so it must be shown
-
-
-@pytest.mark.asyncio
-async def test_kb_can_be_named_by_display_name(monkeypatch) -> None:
-    session = _FakeSession(
-        [(KB_A, "Biology"), (KB_B, "Chemistry")], [_hit()],
-    )
-    _use_session(monkeypatch, session)
-
-    await kb_tools._kb_search_pages_handler(
-        {"query": "light", "kb": "biology"}, agent_id=AGENT_ID,
-    )
-
-    _, params = session.executed[1]
-    assert params["kb_ids"] == [KB_A]
+    assert out.startswith("Error:")
+    platform_client.search_agent_kb.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -269,26 +235,136 @@ async def test_empty_query_is_rejected() -> None:
 
 
 # ---------------------------------------------------------------------
-# 3. Query shape + rendering
+# 3. Degradation
 # ---------------------------------------------------------------------
 
-def test_search_sql_matches_the_ops_tsvector_configuration() -> None:
-    """'simple' must match the generated column's configuration, and the
-    NOT NULL predicate must match the partial index or PG seq-scans."""
-    sql = kb_tools._SEARCH_SQL.text
+@pytest.mark.asyncio
+async def test_missing_platform_client_degrades() -> None:
+    out = await kb_tools._kb_search_pages_handler(
+        {"query": "anything"}, agent_id=AGENT_ID,
+    )
 
-    assert "websearch_to_tsquery('simple', :query)" in sql
-    assert "ts_headline('simple'" in sql
-    assert "english" not in sql
-    assert "p.content IS NOT NULL" in sql
-    assert "p.search_tsv @@ q.tsq" in sql
+    assert out.startswith("Error:")
+    assert "kb_list_pages" in out
 
 
-def test_headline_runs_after_the_limit() -> None:
-    """Headlining before LIMIT would run over every matching page."""
-    sql = kb_tools._SEARCH_SQL.text
-    assert sql.index("LIMIT :limit") < sql.index("ts_headline")
+@pytest.mark.asyncio
+async def test_ops_timeout_degrades_instead_of_raising() -> None:
+    platform_client = _platform_client(
+        side_effect=httpx.ReadTimeout("ops took too long"),
+    )
 
+    out = await kb_tools._kb_search_pages_handler(
+        {"query": "anything"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+    )
+
+    assert out.startswith("Error:")
+    assert "kb_list_pages" in out
+
+
+@pytest.mark.asyncio
+async def test_ops_auth_failure_degrades_instead_of_raising() -> None:
+    platform_client = _platform_client(
+        side_effect=PlatformAuthError("token rejected"),
+    )
+
+    out = await kb_tools._kb_search_pages_handler(
+        {"query": "anything"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+    )
+
+    assert out.startswith("Error:")
+    assert "kb_list_pages" in out
+
+
+@pytest.mark.asyncio
+async def test_ops_http_status_error_degrades_instead_of_raising() -> None:
+    request = httpx.Request("GET", "http://ops/api/agents/agents/x/kb/search")
+    response = httpx.Response(500, request=request)
+    platform_client = _platform_client(
+        side_effect=httpx.HTTPStatusError(
+            "boom", request=request, response=response,
+        ),
+    )
+
+    out = await kb_tools._kb_search_pages_handler(
+        {"query": "anything"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+    )
+
+    assert out.startswith("Error:")
+
+
+# ---------------------------------------------------------------------
+# 4. Dispatch threading -- platform_client actually reaches the handler
+# ---------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_registry_dispatch_threads_platform_client() -> None:
+    registry = ToolRegistry()
+    kb_tools.register(registry)
+    platform_client = _platform_client([_hit()])
+
+    out = await registry.dispatch(
+        "kb_search_pages",
+        {"query": "light"},
+        agent_id=AGENT_ID,
+        platform_client=platform_client,
+    )
+
+    platform_client.search_agent_kb.assert_awaited_once()
+    assert "sources/d1.md" in out
+
+
+@pytest.mark.asyncio
+async def test_execute_single_tool_threads_platform_client() -> None:
+    """The real production call path: execute_single_tool ->
+    tools.dispatch -> _kb_search_pages_handler. If any hop in
+    tool_exec.py drops ``platform_client``, the handler sees None and
+    degrades instead of actually searching."""
+    from uuid import uuid4
+
+    from surogates.harness.tool_exec import execute_single_tool
+
+    registry = ToolRegistry()
+    kb_tools.register(registry)
+    platform_client = _platform_client([_hit()])
+
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(1, 500))
+    store.advance_harness_cursor = AsyncMock()
+
+    session = SimpleNamespace(
+        id=uuid4(), config={}, agent_id=AGENT_ID, org_id=uuid4(),
+    )
+
+    result = await execute_single_tool(
+        {
+            "id": "call_1",
+            "function": {
+                "name": "kb_search_pages",
+                "arguments": '{"query": "light"}',
+            },
+        },
+        session=session,
+        lease=SimpleNamespace(lease_token=uuid4()),
+        store=store,
+        tools=registry,
+        tenant=SimpleNamespace(org_id=session.org_id),
+        platform_client=platform_client,
+    )
+
+    platform_client.search_agent_kb.assert_awaited_once()
+    assert "sources/d1.md" in result["content"]
+
+
+# ---------------------------------------------------------------------
+# 5. Limit clamping + rendering
+# ---------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "raw,expected",
@@ -306,9 +382,7 @@ def test_limit_is_clamped(raw, expected) -> None:
 
 
 def test_hits_render_path_title_and_snippet() -> None:
-    out = kb_tools._format_search_hits(
-        [_hit()], names={KB_A: "Biology"}, query="light",
-    )
+    out = kb_tools._format_search_hits([_hit()], query="light")
 
     assert "`sources/d1.md`" in out
     assert "Photosynthesis" in out
@@ -318,9 +392,7 @@ def test_hits_render_path_title_and_snippet() -> None:
 
 
 def test_no_hits_points_at_the_recovery_path() -> None:
-    out = kb_tools._format_search_hits(
-        [], names={}, query="quantum badgers",
-    )
+    out = kb_tools._format_search_hits([], query="quantum badgers")
 
     assert "quantum badgers" in out
     assert "kb_list_pages" in out

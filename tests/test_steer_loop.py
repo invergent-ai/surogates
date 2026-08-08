@@ -94,6 +94,7 @@ def _make_loop_harness(*, session_store: Any, budget: IterationBudget | None = N
     harness._media_gen = None
     harness._turn_gate = None
     harness._bundle = None
+    harness._platform_client = None
     return harness
 
 

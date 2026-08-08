@@ -741,5 +741,55 @@ class PlatformClient:
             f"/api/agents/agents/{agent_id}/allowance/debit", body,
         )
 
+    async def search_agent_kb(
+        self,
+        agent_id: str,
+        *,
+        query: str,
+        kb_ids: list[str] | None = None,
+        limit: int = 20,
+        timeout: float = 15.0,
+    ) -> list[dict]:
+        """Hybrid (lexical + vector RRF) search across an agent's
+        attached knowledge bases.
+
+        ``kb_ids`` is a narrowing filter only -- the searchable set is
+        derived server-side from the agent's ``agent_knowledge_bases``
+        attachments and a caller-supplied ``kb_ids`` can only intersect
+        it, never widen it (see ``search_agent_knowledge_bases`` /
+        ``kb_service.search_agent_wiki`` on the ops side). ``None``
+        means no narrowing -- every attached KB is searched.
+
+        ``timeout`` overrides the client's constructor default (5.0s):
+        ops computes a query embedding on top of running the RRF fusion
+        query per attached KB, so this call runs measurably slower than
+        the other runtime endpoints on this client.
+
+        Returns the raw list of hit dicts (``path``, ``page_type``,
+        ``title``, ``brief``, ``snippet``, ``rank``, ``kb_id``,
+        ``kb_name``) on 200 -- an empty list means no matches, no
+        attached KBs, or an unknown agent (ops treats all three the
+        same to avoid an agent-enumeration oracle). Raises:
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        * ``httpx.HTTPError`` (e.g. a timeout) on network-level failure.
+        """
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if kb_ids:
+            params["kb_ids"] = kb_ids
+        resp = await self._client.get(
+            f"/api/agents/agents/{agent_id}/kb/search",
+            params=params,
+            timeout=timeout,
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()

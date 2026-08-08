@@ -1789,6 +1789,7 @@ class AgentHarness(
                     tool_guardrails=tool_guardrails,
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
+                    platform_client=self._platform_client,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2566,6 +2567,7 @@ class AgentHarness(
                     governance_gate=self._governance_gate,
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
+                    platform_client=self._platform_client,
                 )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(

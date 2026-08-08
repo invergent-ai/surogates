@@ -148,6 +148,7 @@ class StreamingToolExecutor:
         tool_guardrails: Any | None = None,
         bundle: Any | None = None,
         turn_gate: Any | None = None,
+        platform_client: Any | None = None,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -179,6 +180,7 @@ class StreamingToolExecutor:
         self._tool_guardrails = tool_guardrails
         self._bundle = bundle
         self._turn_gate = turn_gate
+        self._platform_client = platform_client
 
         self._tracked: list[TrackedTool] = []
         self._sibling_aborted: bool = False
@@ -406,6 +408,7 @@ class StreamingToolExecutor:
                 governance_gate=self._governance_gate,
                 bundle=self._bundle,
                 turn_gate=self._turn_gate,
+                platform_client=self._platform_client,
             )
             if guardrails is not None:
                 after = guardrails.after_call(
