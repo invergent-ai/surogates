@@ -892,6 +892,25 @@ class PromptBuilder:
                 "and is just as much a failure as answering from a page "
                 "that merely shares vocabulary with the question."
             )
+            # Citations are here for VERIFIABILITY, not for a measured
+            # accuracy gain: on the 54-query sonnet-5 set, requiring them
+            # moved the grounded-answer score 0.94 -> 0.96, which is inside
+            # the ~0.05 run-to-run spread. What they do buy is checkable:
+            # 0.92 of quoted spans occur verbatim in the page they name, so a
+            # reader (or a later mechanical check) can confirm any claim
+            # against its source. That matters because every residual
+            # grounding failure measured was an over-claim on a page that WAS
+            # correctly retrieved and read -- misattributing a quote, misfiling
+            # a category -- which no coverage- or retrieval-level check can see.
+            lines.append(
+                "Show your evidence. After a factual claim, name the page "
+                "it came from and quote the words that support it, like "
+                "`[summaries/01-intro.md] \"quoted words from the page\"`. "
+                "Quote verbatim -- do not paraphrase inside the quotation "
+                "marks, and never quote text you did not read. If you "
+                "cannot find words that support a sentence, leave the "
+                "sentence out."
+            )
             for kb in grounding:
                 lines.append("")
                 lines.extend(_render_kb(kb))
