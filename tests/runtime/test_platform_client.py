@@ -223,3 +223,120 @@ async def test_aclose_releases_underlying_client():
     await client.aclose()
     with pytest.raises(RuntimeError):
         await client.get_runtime_config("a-1")
+
+
+# ---------------------------------------------------------------------------
+# search_agent_kb
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_agent_kb_sends_q_limit_and_repeated_kb_ids():
+    from surogates.runtime import PlatformClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/agents/agents/a-1/kb/search"
+        params = httpx.QueryParams(request.url.query)
+        assert params.get("q") == "photosynthesis"
+        assert params.get("limit") == "5"
+        assert params.get_list("kb_ids") == ["kb-1", "kb-2"]
+        return httpx.Response(200, json=[])
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        hits = await client.search_agent_kb(
+            "a-1", query="photosynthesis", kb_ids=["kb-1", "kb-2"], limit=5,
+        )
+    finally:
+        await client.aclose()
+
+    assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_search_agent_kb_none_omits_the_kb_ids_param():
+    from surogates.runtime import PlatformClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "kb_ids" not in request.url.params
+        return httpx.Response(200, json=[{"path": "a.md"}])
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        hits = await client.search_agent_kb("a-1", query="q", kb_ids=None)
+    finally:
+        await client.aclose()
+
+    assert hits == [{"path": "a.md"}]
+
+
+@pytest.mark.asyncio
+async def test_search_agent_kb_empty_kb_ids_short_circuits_without_a_request():
+    """An empty allowlist (as opposed to ``None``, unrestricted) can't
+    cross the wire as a query param at all -- httpx drops an empty list
+    from the query string, so the request ops would see is identical to
+    an unrestricted search. This must never reach the network: answer
+    ``[]`` locally instead of silently searching everything."""
+    from surogates.runtime import PlatformClient
+
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json=[{"path": "should-not-be-seen.md"}])
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        hits = await client.search_agent_kb("a-1", query="q", kb_ids=[])
+    finally:
+        await client.aclose()
+
+    assert hits == []
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_search_agent_kb_401_raises_platform_auth_error():
+    from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "nope"})
+
+    client = PlatformClient(
+        base_url="https://ops.example.com",
+        token="t",
+        transport=_mock_transport(handler),
+    )
+    try:
+        with pytest.raises(PlatformAuthError):
+            await client.search_agent_kb("a-1", query="q")
+    finally:
+        await client.aclose()
+
+
+def test_search_agent_kb_default_timeout_is_25_seconds():
+    """25s, not the client's 5s constructor default: ops budgets 10s for
+    the query embedding alone before it even starts the fusion query,
+    once per attached KB (see the method's docstring)."""
+    import inspect
+
+    from surogates.runtime import PlatformClient
+
+    default = inspect.signature(
+        PlatformClient.search_agent_kb,
+    ).parameters["timeout"].default
+    assert default == 25.0

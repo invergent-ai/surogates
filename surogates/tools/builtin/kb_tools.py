@@ -1,12 +1,17 @@
-"""Knowledge-base navigation tools: kb_list_pages + kb_read_page.
+"""Knowledge-base navigation tools: kb_search_pages, kb_list_pages,
+kb_read_page.
 
-These two tools let the agent inspect the curated wiki of a knowledge
-base and read individual pages on demand. Together they implement
-"agent navigates the KB itself" -- there is no sub-LLM curator. The
-agent's own reasoning chain decides which pages are worth reading,
-which keeps cost low and makes every step visible in the trace.
+These tools let the agent inspect the curated wiki of a knowledge base
+and read individual pages on demand. Together they implement "agent
+navigates the KB itself" -- there is no sub-LLM curator. The agent's
+own reasoning chain decides which pages are worth reading, which keeps
+cost low and makes every step visible in the trace.
 
 Architecture:
+
+    +----------------+   GET /agents/agents/{id}/kb/search  +--------+
+    | kb_search_pages|-------------------------------------->| ops API|
+    +----------------+   (hybrid lexical + vector RRF)       +--------+
 
     +--------------+       SELECT path, page_type, title  +----------+
     | kb_list_pages|------------------------------------>|  ops DB  |
@@ -17,31 +22,52 @@ Architecture:
     |              |       GET /repositories/.../objects-->|  Hub   |
     +--------------+
 
-Both tools accept ``kb_id`` directly. We could rewrite to take a
-human-friendly name, but production agents are wired by the platform
-(not typed by humans), so UUIDs are the natural primary key here.
+kb_list_pages/kb_read_page read the read-only ops DB connection
+directly (see ``surogates/db/ops_engine.py``). kb_search_pages instead
+calls the runtime-scoped ``/agents/agents/{agent_id}/kb/search`` route
+over ``platform_client`` (a bearer-token-authed service call, not the
+JWT-authed Studio `/wiki/search` route) -- the fused lexical+vector
+query and its tsvector/embedding-model configuration live once on the
+ops side, so this tool never has its own copy to drift.
 
-Validation: every call confirms ``(agent_id, kb_id)`` is present in
-``agent_knowledge_bases``. This is defense-in-depth -- the platform
-already filters available_tools per agent, but a tool handler that
-trusted only the registry would be vulnerable to a system-prompt
-injection that handed the agent a kb_id outside its allowed set.
+Both kb_list_pages/kb_read_page accept ``kb_id`` directly. We could
+rewrite to take a human-friendly name, but production agents are wired
+by the platform (not typed by humans), so UUIDs are the natural
+primary key here. kb_search_pages searches every attached KB by
+default since the agent usually knows what it's looking for, not
+which KB holds it.
+
+Validation: kb_list_pages/kb_read_page confirm ``(agent_id, kb_id)``
+is present in ``agent_knowledge_bases`` before touching the DB --
+defense-in-depth against a system-prompt injection that hands the
+agent a kb_id outside its allowed set, on top of the platform's own
+available_tools filtering. kb_search_pages has no DB handle to make
+that check itself; ops derives the attachment set from the same table
+server-side and only lets a caller-supplied ``kb_ids`` narrow it (see
+``_kb_search_pages_handler``). The one check that must stay
+harness-side either way is the sender's pinned plan entitlement
+(``kb_allowed``/``session_config``), which ops has no way to see.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
+from collections import Counter
+from itertools import zip_longest
 from typing import Any
 
+import httpx
 import sqlalchemy as sa
 
 from surogates.db.ops_engine import ensure_ops_session_factory
-from surogates.runtime.entitlements import kb_allowed
+from surogates.runtime.entitlements import dimension_allowlist, kb_allowed
 from surogates.db.ops_models import (
     OpsKBWikiPage,
     OpsKnowledgeBase,
     agent_knowledge_bases,
 )
+from surogates.runtime.platform_client import PlatformAuthError
 from surogates.storage.kb_hub import KBHubError, fetch_wiki_object
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -113,21 +139,123 @@ async def _is_kb_attached(
     return result.first() is not None
 
 
+# Section order in the rendered tree, shared with _select_tree_pages so
+# selection and rendering agree on what comes first.
+_TREE_TYPE_ORDER = {"index": 0, "summary": 1, "concept": 2, "source": 3}
+
+# Page types that never belong in the injected ToC. ``source`` rows are
+# verbatim dumps of the ingested documents -- hundreds of them, each
+# huge, and every one of them is still reachable with kb_read_page. The
+# tree exists so the LLM can pick a page to read, and it never wants to
+# start from a raw source.
+_TREE_EXCLUDED_TYPES = frozenset({"source"})
+
+# Default ToC budget. Lives here next to the selection policy rather
+# than at the call site so both the tree and its "showing N of M"
+# announcement are computed from the same number.
+_TREE_PAGE_BUDGET = 200
+
+
+def _select_tree_pages(
+    pages: list[OpsKBWikiPage], budget: int = _TREE_PAGE_BUDGET,
+) -> list[OpsKBWikiPage]:
+    """Pick at most *budget* pages for the injected ToC, fairly by type.
+
+    The bug this replaces: the caller sliced a path-ordered list before
+    _format_pages_tree grouped it by page_type. On a real KB (625
+    concept + 3946 summary + 1 index) ``concepts/...`` sorts first, so
+    the agent saw 200 concept pages, zero summaries and no index -- it
+    could not even see that summaries existed.
+
+    Policy:
+
+    - ``index`` pages are taken whole and off the top. There are at
+      most a handful and they are the entry point to everything else.
+    - ``source`` pages are dropped (see _TREE_EXCLUDED_TYPES).
+    - The rest of the budget is dealt round-robin across the remaining
+      types, one page at a time in path order. A type smaller than its
+      equal share is exhausted and its unused quota flows to the larger
+      types automatically, so nothing is starved and nothing is wasted.
+    - Within a type the first N pages in ``path`` order are kept, so the
+      tree is byte-identical between wakes.
+    """
+    buckets: dict[str, list[OpsKBWikiPage]] = {}
+    for page in sorted(pages, key=lambda p: p.path):
+        if page.page_type in _TREE_EXCLUDED_TYPES:
+            continue
+        buckets.setdefault(page.page_type, []).append(page)
+
+    # Slicing index too is theatre (a KB with >200 index pages does not
+    # exist), but it keeps the "never returns more than budget" promise
+    # unconditional.
+    index_pages = buckets.pop("index", [])[:budget]
+    remaining = budget - len(index_pages)
+
+    types = sorted(buckets, key=lambda t: (_TREE_TYPE_ORDER.get(t, 99), t))
+    fair = [
+        page
+        for row in zip_longest(*(buckets[t] for t in types))
+        for page in row
+        if page is not None
+    ][:remaining]
+
+    # The round-robin always draws from the front of each bucket, so a
+    # per-type count is enough to rebuild the selection in tree order.
+    counts = Counter(page.page_type for page in fair)
+    return index_pages + [
+        page for t in types for page in buckets[t][:counts[t]]
+    ]
+
+
+# Per-page brief budget in the rendered tree. The compile pipeline is
+# instructed to keep briefs under 100 chars, but models overrun it and
+# the column allows 512 -- at the 200-page tree cap that is ~100KB of
+# system prompt per attachment, paid on every turn. 120 chars keeps a
+# full sentence and costs ~25KB at the cap.
+_BRIEF_MAX_CHARS = 120
+
+
+def _brief_snippet(brief: str | None) -> str:
+    """Flatten *brief* to one line, capped at ``_BRIEF_MAX_CHARS``.
+
+    Collapsing whitespace is not cosmetic: briefs are model-written, and
+    one containing a newline would otherwise inject bogus entries into
+    the markdown tree the LLM reads as real pages.
+
+    Truncation cuts at the last word boundary and marks the cut with
+    ``...`` -- a hard mid-word cut yields fragments the LLM quotes back
+    as whole words, and an unmarked cut reads as a complete summary so
+    the agent never opens the page. A brief with no boundary to cut on
+    (one long URL, an unspaced CJK/Greek run) falls back to a hard cut
+    rather than degrading to a bare ellipsis.
+    """
+    flat = " ".join((brief or "").split())
+    if len(flat) <= _BRIEF_MAX_CHARS:
+        return flat
+    cut = flat[:_BRIEF_MAX_CHARS - 3]
+    head, _, _ = cut.rpartition(" ")
+    return (head or cut) + "..."
+
+
 def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
     """Render the wiki page list as a markdown tree the LLM can read.
 
-    Groups by ``page_type`` (index, summary, concept, ...) so the LLM
-    can scan the structure top-down: index first (the entry point),
-    then summaries (file-level overviews), then concepts (cross-cuts
-    extracted by the curator), then everything else.
+    Groups by ``page_type`` (index, summary, concept, source) so the LLM
+    can scan the structure top-down: index first (the entry point), then
+    summaries (file-level overviews), then concepts (cross-cuts
+    extracted by the curator), then raw sources, then everything else.
+
+    Each entry carries its ``brief`` when the compile pipeline wrote one
+    -- that one line is what lets the agent pick a page without reading
+    it. Pages with no brief render exactly as before, no dangling
+    separator.
     """
     if not pages:
         return "(empty -- no wiki pages have been compiled yet)"
 
-    type_order = {"index": 0, "summary": 1, "concept": 2}
     pages_sorted = sorted(
         pages,
-        key=lambda p: (type_order.get(p.page_type, 99), p.path),
+        key=lambda p: (_TREE_TYPE_ORDER.get(p.page_type, 99), p.path),
     )
 
     lines = []
@@ -137,8 +265,10 @@ def _format_pages_tree(pages: list[OpsKBWikiPage]) -> str:
             current_type = p.page_type
             lines.append(f"\n## {current_type}")
         size_kb = max(1, p.size_bytes // 1024)
+        brief = _brief_snippet(p.brief)
+        suffix = f" -- {brief}" if brief else ""
         lines.append(
-            f"- `{p.path}` -- {p.title} ({size_kb} KB)"
+            f"- `{p.path}` -- {p.title} ({size_kb} KB){suffix}"
         )
     return "\n".join(lines).strip()
 
@@ -292,6 +422,206 @@ async def _kb_read_page_handler(
     return f"# {page.title}\n\n{content}"
 
 
+# Ranked-search caps. The result is a triage list, not a corpus: 10
+# hits is enough for the LLM to pick a page, 25 is the ceiling so a
+# vague query cannot flood the context window.
+_SEARCH_LIMIT_DEFAULT = 10
+_SEARCH_LIMIT_MAX = 25
+
+
+def _clamp_limit(raw: Any) -> int:
+    """Coerce the model-supplied ``limit`` into the allowed range.
+
+    LLMs pass strings, floats and nonsense here; a bad value is not
+    worth an error turn, so we fall back to the default.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _SEARCH_LIMIT_DEFAULT
+    return max(1, min(value, _SEARCH_LIMIT_MAX))
+
+
+def _format_search_hits(hits: list[dict[str, Any]], *, query: str) -> str:
+    """Render ranked hits (raw ``WikiSearchHit`` dicts from ops) as
+    lines the LLM can act on directly.
+
+    Every line carries the kb_id and path, i.e. the exact arguments
+    ``kb_read_page`` needs, so the follow-up call requires no guessing.
+    ``kb_name`` comes from the hit itself -- the multi-KB search route
+    stamps it per hit -- so this needs no separate id->name lookup.
+    """
+    # A renamed/missing ops response field must not hand the model a
+    # blank path it can't feed back into kb_read_page -- drop those
+    # hits (loudly, so a real field-name drift is visible in logs)
+    # rather than render them uselessly.
+    valid = []
+    for hit in hits:
+        if not hit.get("path"):
+            logger.warning("KB search hit missing 'path'; dropping: %r", hit)
+            continue
+        valid.append(hit)
+
+    if not valid:
+        return (
+            f"No knowledge-base pages matched {query!r}. Try rephrasing"
+            f" as a natural-language question, using different or more"
+            f" specific keywords, or browse with `kb_list_pages`."
+        )
+
+    lines = [f"{len(valid)} match(es) for {query!r}, best first:", ""]
+    for index, hit in enumerate(valid, start=1):
+        kb_id = hit.get("kb_id", "")
+        kb_name = hit.get("kb_name") or kb_id
+        lines.append(
+            f"{index}. `{hit['path']}` -- {hit.get('title', '')} "
+            f"[{hit.get('page_type', '')} | kb {kb_name} `{kb_id}`]"
+        )
+        for text in (hit.get("brief"), hit.get("snippet")):
+            flat = " ".join((text or "").split())
+            if flat:
+                lines.append(f"   {flat}")
+    lines.append("")
+    lines.append(
+        "Snippets are excerpts. Read the promising hits in full with "
+        "`kb_read_page(kb_id=..., path=...)` before answering."
+    )
+    return "\n".join(lines)
+
+
+async def _kb_search_pages_handler(
+    arguments: dict[str, Any], **kwargs: Any,
+) -> str:
+    """Handler for ``kb_search_pages``.
+
+    One query across every KB the session may see, fanned out server-
+    side by the ops runtime endpoint (hybrid lexical + vector RRF).
+    Unlike the other two tools this one takes no mandatory kb_id -- the
+    agent usually knows what it is looking for, not which of its KBs
+    holds it.
+
+    Ops derives the searchable set from ``agent_knowledge_bases`` and
+    treats ``kb_ids`` as a narrowing filter only (never widening) --
+    see ``PlatformClient.search_agent_kb``. The one thing ops cannot
+    see is the sender's pinned plan entitlement, since that lives on
+    ``session.config`` and never reaches ops: this handler resolves it
+    locally through the same ``_kb_plan_denied``/``kb_allowed`` gate
+    ``kb_list_pages``/``kb_read_page`` use, and sends the result as
+    ``kb_ids`` so the two checks intersect.
+    """
+    query = (arguments.get("query") or "").strip()
+    if not query:
+        return "Error: query is required."
+    named_kb = (arguments.get("kb") or "").strip()
+    limit = _clamp_limit(arguments.get("limit"))
+
+    agent_id = _agent_id_from_kwargs(kwargs)
+
+    platform_client = kwargs.get("platform_client")
+    if platform_client is None:
+        return (
+            "Error: knowledge-base search is unavailable right now -- "
+            "no connection to the management plane. Use `kb_list_pages` "
+            "to browse instead."
+        )
+
+    if named_kb:
+        try:
+            uuid.UUID(named_kb)
+        except ValueError:
+            # A display name can't be resolved without the DB-backed
+            # attachment lookup this tool no longer has (see the module
+            # docstring). Sending it on anyway would either come back
+            # as an ops no-match (the model blames the query and
+            # rephrases, which fails identically) or, on a pinned
+            # session, as "not included in your plan" -- false when
+            # the KB *is* in the plan under its UUID. Refuse with a
+            # corrective message instead of either misleading outcome.
+            return (
+                f"Error: {named_kb!r} is not a knowledge base UUID. "
+                f"The `kb` argument takes a UUID from the Available "
+                f"Knowledge Bases section -- omit `kb` to search all "
+                f"of them."
+            )
+        denied = _kb_plan_denied(named_kb, kwargs)
+        if denied is not None:
+            return denied
+        kb_ids: list[str] | None = [named_kb]
+    else:
+        allowed = dimension_allowlist(kwargs.get("session_config"), "kb_ids")
+        # ``None`` means unrestricted -- pass it straight through so ops
+        # searches every KB it has attached, not zero. A pinned-but-empty
+        # allowlist must never reach ops as ``kb_ids=[]``: httpx drops an
+        # empty list from the query string entirely (``params={"kb_ids":
+        # []}`` puts nothing named ``kb_ids`` on the wire), so ops would
+        # see the same request as an unrestricted search no matter how
+        # it branches on the value -- this can't be fixed on the ops
+        # side. ``PlatformClient.search_agent_kb`` also refuses this
+        # shape locally (defense in depth for any other caller), but
+        # catching it here first gives the model a specific, actionable
+        # error instead of a bare "0 pages matched".
+        if allowed is not None and not allowed:
+            return "Error: no knowledge bases are available to this session."
+        kb_ids = sorted(allowed) if allowed is not None else None
+
+    try:
+        hits = await platform_client.search_agent_kb(
+            agent_id, query=query, kb_ids=kb_ids, limit=limit,
+        )
+    except (PlatformAuthError, httpx.HTTPError):
+        # A failed search must not kill the turn: the LLM can fall back
+        # to kb_list_pages + kb_read_page.
+        logger.warning(
+            "KB search failed for agent %s", agent_id, exc_info=True,
+        )
+        return (
+            "Error: knowledge-base search is unavailable right now. "
+            "Use `kb_list_pages` to browse instead."
+        )
+
+    return _format_search_hits(hits, query=query)
+
+
+_KB_SEARCH_PAGES_PARAMS = {
+    "type": "object",
+    "properties": {
+        "query": {
+            "type": "string",
+            "description": (
+                "What you are looking for. A natural-language question "
+                "and a short phrase of distinctive keywords both work "
+                "well -- semantic matching finds conceptually related "
+                "pages even without exact wording, and keyword matching "
+                "still helps pin down specific terms. Avoid vague "
+                "single words."
+            ),
+        },
+        "kb": {
+            "type": "string",
+            "description": (
+                "Optional. Restrict the search to one knowledge base, "
+                "by its UUID exactly as listed in the system prompt's "
+                "Available Knowledge Bases section. Omit to search "
+                "every knowledge base available to you -- that is "
+                "usually what you want."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Optional. Maximum hits to return "
+                f"(default {_SEARCH_LIMIT_DEFAULT}, "
+                f"max {_SEARCH_LIMIT_MAX})."
+            ),
+            "minimum": 1,
+            "maximum": _SEARCH_LIMIT_MAX,
+            "default": _SEARCH_LIMIT_DEFAULT,
+        },
+    },
+    "required": ["query"],
+}
+
+
 _KB_LIST_PAGES_PARAMS = {
     "type": "object",
     "properties": {
@@ -346,11 +676,12 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="kb_list_pages",
             description=(
-                "List all pages in a knowledge base, grouped by page "
-                "type (index, summary, concept). Returns a markdown "
-                "tree showing each page's path, title, and size. Use "
-                "this first to see what's available, then read "
-                "specific pages with kb_read_page."
+                "Browse a knowledge base's structure, grouped by page "
+                "type (index, summary, concept, source). Returns a "
+                "markdown tree showing each page's path, title, "
+                "one-line brief and size (large knowledge bases may be "
+                "cut off). To find the answer to a specific question, "
+                "use kb_search_pages instead."
             ),
             parameters=_KB_LIST_PAGES_PARAMS,
         ),
@@ -372,4 +703,45 @@ def register(registry: ToolRegistry) -> None:
         handler=_kb_read_page_handler,
         toolset="knowledge",
         max_result_size=200_000,
+    )
+    registry.register(
+        name="kb_search_pages",
+        schema=ToolSchema(
+            name="kb_search_pages",
+            # Wording below is A/B-measured (see surogates/harness/prompt.py
+            # _kb_section for the full note): 0.65 -> 0.72 overall on a
+            # 54-query eval set on claude-sonnet-5, no bucket regressing;
+            # an earlier one-sided variant regressed to 0.59. Do not trim
+            # the loop framing back to a numbered checklist.
+            description=(
+                "Hybrid search across your knowledge bases: keyword "
+                "matching fused with semantic (meaning-based) ranking, "
+                "so a natural-language question and a handful of "
+                "distinctive keywords both work well. If the embedding "
+                "provider is unavailable, ranking falls back to "
+                "keyword matching alone. Returns pages ranked by "
+                "relevance, each with its kb_id, path, title and the "
+                "matching snippet.\n\n"
+                "USE THIS FIRST for any question a knowledge base "
+                "could answer. The page tree in your system prompt may "
+                "be partial and each entry carries only a one-line "
+                "brief -- neither tells you which page actually holds "
+                "the answer, and a page missing from the tree may "
+                "still exist.\n\n"
+                "Retrieval is a loop, not a single step: a high-ranked "
+                "hit was only the closest text available, never a "
+                "guarantee it answers the question, so read a "
+                "plausible hit in full with kb_read_page before "
+                "answering -- uncertainty is a reason to read, not a "
+                "reason to stop. When a question has several parts, "
+                "read more than the top hit, since different pages may "
+                "each hold one part. Never guess a path -- use one "
+                "returned here. kb_list_pages is for browsing a KB's "
+                "full structure, not for finding an answer."
+            ),
+            parameters=_KB_SEARCH_PAGES_PARAMS,
+        ),
+        handler=_kb_search_pages_handler,
+        toolset="knowledge",
+        max_result_size=20_000,
     )

@@ -724,6 +724,7 @@ async def execute_tool_calls(
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
+    platform_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -780,6 +781,7 @@ async def execute_tool_calls(
             governance_gate=governance_gate,
             bundle=bundle,
             turn_gate=turn_gate,
+            platform_client=platform_client,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -813,6 +815,7 @@ async def execute_tool_calls(
         tool_guardrails=tool_guardrails,
         bundle=bundle,
         turn_gate=turn_gate,
+        platform_client=platform_client,
     )
 
 
@@ -849,6 +852,7 @@ async def execute_tool_calls_sequential(
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
+    platform_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -906,6 +910,7 @@ async def execute_tool_calls_sequential(
             governance_gate=governance_gate,
             bundle=bundle,
             turn_gate=turn_gate,
+            platform_client=platform_client,
         )
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
@@ -959,6 +964,7 @@ async def execute_tool_calls_concurrent(
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
+    platform_client: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -1023,6 +1029,7 @@ async def execute_tool_calls_concurrent(
                 governance_gate=governance_gate,
                 bundle=bundle,
                 turn_gate=turn_gate,
+                platform_client=platform_client,
             )
 
     # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
@@ -1128,6 +1135,7 @@ async def execute_single_tool(
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
     turn_gate: Any | None = None,
+    platform_client: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
@@ -1545,6 +1553,7 @@ async def execute_single_tool(
                 session_config=session.config,
                 bundle=bundle,
                 turn_gate=turn_gate,
+                platform_client=platform_client,
             )
     except KeyError:
         tool_failed = True

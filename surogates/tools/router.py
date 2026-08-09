@@ -88,6 +88,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # Knowledge base tools (ops DB + Hub reads, no isolation needed)
     "kb_list_pages": ToolLocation.HARNESS,
     "kb_read_page": ToolLocation.HARNESS,
+    "kb_search_pages": ToolLocation.HARNESS,
     # Coordinator tools (session management, no isolation needed)
     "spawn_worker": ToolLocation.HARNESS,
     "send_worker_message": ToolLocation.HARNESS,

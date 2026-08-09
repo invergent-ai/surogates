@@ -757,9 +757,13 @@ async def _load_attached_kbs(
     Empty list is the safe default and is returned in three cases:
 
       - ``ops_db_url`` is empty (worker not wired to the KB platform).
-      - The ops engine fails to initialize or query (network glitch,
-        schema drift, etc.) -- we log and degrade gracefully rather
-        than refuse to start the session.
+      - The KB-list query itself fails to initialize or run (network
+        glitch, the ``knowledge_bases``/``agent_knowledge_bases``
+        tables missing, etc.) -- we log and degrade gracefully rather
+        than refuse to start the session. An empty list here is
+        load-bearing: the caller drops kb_list_pages/kb_read_page/
+        kb_search_pages from the tool set and empties the prompt's KB
+        section whenever this returns ``[]``.
       - The agent simply has no KBs attached.
 
     The dicts returned mirror what PromptBuilder._kb_section consumes:
@@ -768,10 +772,29 @@ async def _load_attached_kbs(
     and ``pages_total``. Keeping the surface plain dict (not a
     SQLAlchemy row) lets us cache it and pass it across async
     boundaries without dragging the session.
+
+    The page-tree query (``OpsKBWikiPage``) is wrapped in its own,
+    narrower try/except, separate from the KB-list query above it.
+    Both hit the same DB, but they are not the same failure mode: the
+    page-tree query reads columns (e.g. ``brief``, added in a later
+    ops migration than the KB-list query needs) that can go missing on
+    an ops DB the runtime image has outrun, while the KB-list query
+    only needs the much older core tables. Before this split, one
+    ``except Exception`` covered both, so a page-tree-only failure
+    returned ``[]`` exactly like a total connection failure -- which
+    silently discarded kb_search_pages too, even though it never reads
+    this table at all (it calls the ops HTTP endpoint, not this DB).
+    Losing the tree now costs only the tree: ``kbs`` keeps its
+    names/ids/descriptions/mode, so the KB prompt section still
+    renders (without a tree) and every KB tool -- including
+    kb_list_pages, whose own per-call read hits the same missing
+    column and fails visibly as a tool-result error, not silently --
+    stays registered.
     """
-    # ToC cap: protects the prompt from a pathological KB. The cut is
-    # announced in the tree so the LLM knows the listing is partial.
-    max_tree_pages = 200
+    # ToC budget: protects the prompt from a pathological KB. The cut is
+    # spread across page types by _select_tree_pages (a flat slice used to
+    # hand the agent 200 concept pages and zero summaries) and announced in
+    # the tree so the LLM knows the listing is partial.
 
     if not ops_db_url:
         return []
@@ -782,7 +805,10 @@ async def _load_attached_kbs(
             OpsKnowledgeBase,
             agent_knowledge_bases,
         )
-        from surogates.tools.builtin.kb_tools import _format_pages_tree
+        from surogates.tools.builtin.kb_tools import (
+            _format_pages_tree,
+            _select_tree_pages,
+        )
         import sqlalchemy as sa
 
         factory = get_ops_session_factory()
@@ -821,34 +847,67 @@ async def _load_attached_kbs(
             # One round-trip for every attached KB's page list. The
             # page tree makes the KB's contents visible in the system
             # prompt so the agent can judge relevance instead of being
-            # blind to what the KB covers.
-            kb_ids = [kb["id"] for kb in kbs]
-            pages_result = await session.execute(
-                sa.select(OpsKBWikiPage)
-                .where(OpsKBWikiPage.kb_id.in_(kb_ids))
-                .order_by(OpsKBWikiPage.path.asc())
-            )
-            pages_by_kb: dict[str, list] = {kb_id: [] for kb_id in kb_ids}
-            for page in pages_result.scalars().all():
-                pages_by_kb[page.kb_id].append(page)
-
-        for kb in kbs:
-            pages = pages_by_kb.get(kb["id"], [])
-            kb["pages_total"] = len(pages)
-            tree = _format_pages_tree(pages[:max_tree_pages])
-            if len(pages) > max_tree_pages:
-                tree += (
-                    f"\n(showing {max_tree_pages} of {len(pages)} pages"
-                    f" -- use kb_list_pages for the full listing)"
+            # blind to what the KB covers. Isolated in its own
+            # try/except (see the docstring): this is the query that
+            # actually reads columns a lagging ops DB might not have
+            # yet, and its failure must not take kb_search_pages (which
+            # never touches this table) down with it.
+            pages_by_kb: dict[str, list] = {}
+            tree_query_ok = False
+            try:
+                kb_ids = [kb["id"] for kb in kbs]
+                pages_result = await session.execute(
+                    sa.select(OpsKBWikiPage)
+                    .where(OpsKBWikiPage.kb_id.in_(kb_ids))
+                    .order_by(OpsKBWikiPage.path.asc())
                 )
-            kb["pages_tree"] = tree
+                pages_by_kb = {kb_id: [] for kb_id in kb_ids}
+                for page in pages_result.scalars().all():
+                    pages_by_kb[page.kb_id].append(page)
+                tree_query_ok = True
+            except Exception:
+                import logging
+
+                # Leave the session usable for the rest of the `async
+                # with` block (a no-op today, but this session is
+                # read-only anyway -- cheap insurance against a future
+                # query added after this point inheriting a dirty
+                # transaction from the failed one above).
+                await session.rollback()
+                logging.getLogger(__name__).error(
+                    "KB page tree UNAVAILABLE for agent %s: the ops DB "
+                    "read for wiki pages failed, so the injected KB "
+                    "prompt section will show no page tree for these "
+                    "KBs and kb_list_pages will hit the same failure "
+                    "per call -- KB names/descriptions and "
+                    "kb_search_pages (which does not read this table) "
+                    "are unaffected",
+                    agent_id,
+                    exc_info=True,
+                )
+
+        if tree_query_ok:
+            for kb in kbs:
+                pages = pages_by_kb.get(kb["id"], [])
+                kb["pages_total"] = len(pages)
+                selected = _select_tree_pages(pages)
+                tree = _format_pages_tree(selected)
+                if len(selected) < len(pages):
+                    tree += (
+                        f"\n(showing {len(selected)} of {len(pages)} pages"
+                        f" -- use kb_list_pages for the full listing)"
+                    )
+                kb["pages_tree"] = tree
         return kbs
     except Exception:
         import logging
 
-        logging.getLogger(__name__).warning(
-            "Failed to load attached KBs for agent %s; KB tools will be "
-            "disabled for this session",
+        logging.getLogger(__name__).error(
+            "KB grounding DISABLED for agent %s: the ops DB read for "
+            "attached knowledge bases failed, so every KB tool and the "
+            "KB prompt section are being dropped for this session -- "
+            "the agent will answer from memory on topics the KB was "
+            "meant to govern",
             agent_id,
             exc_info=True,
         )
@@ -1807,15 +1866,16 @@ async def run_worker(settings: Settings) -> None:
                 kb for kb in attached_kbs
                 if str(kb.get("id")) in entitled_kb_ids
             ]
-        # Filter the tool set to drop kb_list_pages / kb_read_page
-        # when this agent has nothing to navigate. Keeps the LLM from
-        # ever seeing tool schemas it cannot meaningfully use, and
-        # also keeps the prompt KB section empty so the LLM is not
-        # primed to hallucinate kb_id values.
+        # Filter the tool set to drop kb_list_pages / kb_read_page /
+        # kb_search_pages when this agent has nothing to navigate. Keeps
+        # the LLM from ever seeing tool schemas it cannot meaningfully
+        # use, and also keeps the prompt KB section empty so the LLM is
+        # not primed to hallucinate kb_id values.
         effective_tools = set(tool_registry.tool_names)
         if not attached_kbs:
             effective_tools.discard("kb_list_pages")
             effective_tools.discard("kb_read_page")
+            effective_tools.discard("kb_search_pages")
         # The "mate" toolset (mate_ambient_post) is only meaningful inside a
         # dedicated ambient review session; hide it from every other session
         # (same toolset-gating mechanism as the browser/kb tools above).

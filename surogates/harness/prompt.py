@@ -849,11 +849,30 @@ class PromptBuilder:
             if (kb.get("mode") or "grounding") != "grounding"
         ]
 
+        # Wording below is A/B-measured, not stylistic. Against a 54-query
+        # eval set on claude-sonnet-5 (the model base-tier agents run) this
+        # loop framing plus the two-sided grounding/reference split lifted
+        # overall retrieval-decision accuracy 0.65 -> 0.72 with no bucket
+        # regressing (keyword 0.90->1.00, paraphrase 0.75->0.83,
+        # question 0.67->0.78, multihop 0.12->0.25). An earlier variant that
+        # gave the grounding KB permission to decline WITHOUT the symmetric
+        # "don't reach for that too quickly" warning regressed to 0.59 on a
+        # smaller model (vs 0.63 baseline) by causing declines on answerable
+        # questions -- keep both directions of that warning.
         lines = ["# Available Knowledge Bases", ""]
         lines.append(
-            "Use `kb_list_pages` to list a knowledge base's pages and "
-            "`kb_read_page` to read one. Pass the `id` value below as "
-            "the `kb_id` argument."
+            "Retrieval is a loop, not a single step.\n"
+            "Search, then judge what came back -- search always returns "
+            "its best matches, and \"best\" can still mean \"not "
+            "relevant\". High ranking says a page was the closest text "
+            "available, never that it answers the question. Reading is "
+            "cheap: if a page is plausibly on the subject, read it in "
+            "full with `kb_read_page` before deciding anything. "
+            "Uncertainty is a reason to read, not a reason to stop. When "
+            "a question has several parts, several returned pages may "
+            "each hold one part -- read more than the top hit. Never "
+            "guess a path; use one returned by search.\n\n"
+            "Pass the `id` value below as the `kb_id` argument."
         )
 
         if grounding:
@@ -861,10 +880,36 @@ class PromptBuilder:
             lines.append("## Authoritative (consult first)")
             lines.append(
                 "These knowledge bases are your authoritative source "
-                "for the topics they cover. Before answering any "
-                "question within their scope, read the relevant "
-                "page(s) with `kb_read_page`. Do not answer from "
-                "memory when one of these covers the topic."
+                "for the topics they cover. Every factual claim must "
+                "come from a page you have read -- do not add "
+                "information from your own knowledge even when "
+                "confident, because the user chose this knowledge base "
+                "as the source of truth. If it genuinely does not "
+                "address the question, say so plainly rather than "
+                "answering from memory -- but do not reach for that too "
+                "quickly: declining when the material did cover the "
+                "question denies the user an answer that was there, "
+                "and is just as much a failure as answering from a page "
+                "that merely shares vocabulary with the question."
+            )
+            # Citations are here for VERIFIABILITY, not for a measured
+            # accuracy gain: on the 54-query sonnet-5 set, requiring them
+            # moved the grounded-answer score 0.94 -> 0.96, which is inside
+            # the ~0.05 run-to-run spread. What they do buy is checkable:
+            # 0.92 of quoted spans occur verbatim in the page they name, so a
+            # reader (or a later mechanical check) can confirm any claim
+            # against its source. That matters because every residual
+            # grounding failure measured was an over-claim on a page that WAS
+            # correctly retrieved and read -- misattributing a quote, misfiling
+            # a category -- which no coverage- or retrieval-level check can see.
+            lines.append(
+                "Show your evidence. After a factual claim, name the page "
+                "it came from and quote the words that support it, like "
+                "`[summaries/01-intro.md] \"quoted words from the page\"`. "
+                "Quote verbatim -- do not paraphrase inside the quotation "
+                "marks, and never quote text you did not read. If you "
+                "cannot find words that support a sentence, leave the "
+                "sentence out."
             )
             for kb in grounding:
                 lines.append("")
@@ -874,9 +919,12 @@ class PromptBuilder:
             lines.append("")
             lines.append("## Reference (consult when relevant)")
             lines.append(
-                "Optional supporting material. Consult these when the "
-                "question touches their topics or your own knowledge "
-                "is thin."
+                "Supporting material, not the only source. Prefer it "
+                "and ground your answer in it when it covers the "
+                "question; when it does not, answer from your own "
+                "knowledge as normal -- declining here is unhelpful "
+                "rather than careful. Say which parts came from the "
+                "knowledge base so the user can tell the two apart."
             )
             for kb in reference:
                 lines.append("")

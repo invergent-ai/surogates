@@ -106,6 +106,7 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
         session_factory=overrides.get("session_factory"),
         saga=overrides.get("saga"),
         tool_guardrails=overrides.get("tool_guardrails"),
+        platform_client=overrides.get("platform_client"),
     )
 
 
@@ -254,6 +255,29 @@ class TestExecutorLifecycle:
         assert stats["total"] == 0
         assert stats["concurrent"] == 0
         assert stats["sequential"] == 0
+
+    @pytest.mark.asyncio
+    async def test_platform_client_reaches_dispatch(self) -> None:
+        """__init__ accepting platform_client is not enough -- _run_tool
+        must actually forward it through execute_single_tool into
+        tools.dispatch. Accept-but-drop is exactly the class of bug the
+        kb_search_pages wiring exists to catch, and streaming is the
+        default tool-execution path in production."""
+        captured: dict[str, Any] = {}
+
+        async def mock_dispatch(name, args, **kwargs):
+            captured["platform_client"] = kwargs.get("platform_client")
+            return json.dumps({"ok": True})
+
+        tools = _make_registry("read_file")
+        tools.dispatch = mock_dispatch
+        marker = object()
+
+        executor = _make_executor(tools=tools, platform_client=marker)
+        executor.add_tool(_make_tool_call("read_file"))
+        await executor.get_all_results()
+
+        assert captured["platform_client"] is marker
 
 
 # ---------------------------------------------------------------------------

@@ -741,5 +741,74 @@ class PlatformClient:
             f"/api/agents/agents/{agent_id}/allowance/debit", body,
         )
 
+    async def search_agent_kb(
+        self,
+        agent_id: str,
+        *,
+        query: str,
+        kb_ids: list[str] | None = None,
+        limit: int = 20,
+        timeout: float = 25.0,
+    ) -> list[dict]:
+        """Hybrid (lexical + vector RRF) search across an agent's
+        attached knowledge bases.
+
+        ``kb_ids`` is a narrowing filter only -- the searchable set is
+        derived server-side from the agent's ``agent_knowledge_bases``
+        attachments and a caller-supplied ``kb_ids`` can only intersect
+        it, never widen it (see ``search_agent_knowledge_bases`` /
+        ``kb_service.search_agent_wiki`` on the ops side). ``None``
+        means no narrowing -- every attached KB is searched.
+
+        ``kb_ids=[]`` (an allowlist pinned to zero KBs, as opposed to
+        ``None`` for "no pin at all") is answered locally with ``[]``,
+        without a request. This isn't optional: an empty list can't
+        cross the wire as a query param at all -- httpx drops it
+        entirely (``params={"kb_ids": []}`` puts nothing named
+        ``kb_ids`` in the request), so ops would receive the exact same
+        request as an unrestricted search and there is no way to fix
+        that from the ops side. Callers that already refuse this shape
+        themselves (see ``kb_tools._kb_search_pages_handler``, which
+        does so to give a more specific error) are still protected here
+        so a future caller can't reintroduce the widening bug.
+
+        ``timeout`` overrides the client's constructor default (5.0s).
+        Ops budgets 10s for the query embedding alone
+        (``_embed_search_query(timeout=10.0)`` in
+        ``surogate_ops/server/services/knowledge.py``) before it even
+        starts running the RRF fusion query once per attached KB -- a
+        multi-KB agent on a degraded embeddings provider can legitimately
+        take longer than a bare 10s+epsilon budget, so this gives
+        headroom over the embedding budget plus a handful of fusion
+        queries rather than racing it.
+
+        Returns the raw list of hit dicts (``path``, ``page_type``,
+        ``title``, ``brief``, ``snippet``, ``rank``, ``kb_id``,
+        ``kb_name``) on 200 -- an empty list means no matches, no
+        attached KBs, or an unknown agent (ops treats all three the
+        same to avoid an agent-enumeration oracle). Raises:
+
+        * :class:`PlatformAuthError` on 401 -- operations problem.
+        * ``httpx.HTTPStatusError`` on any other non-2xx.
+        * ``httpx.HTTPError`` (e.g. a timeout) on network-level failure.
+        """
+        if kb_ids is not None and not kb_ids:
+            return []
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if kb_ids:
+            params["kb_ids"] = kb_ids
+        resp = await self._client.get(
+            f"/api/agents/agents/{agent_id}/kb/search",
+            params=params,
+            timeout=timeout,
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError(
+                "surogate-ops rejected runtime token (401); "
+                "is the token revoked or missing the 'runtime' scope?",
+            )
+        resp.raise_for_status()
+        return resp.json()
+
     async def aclose(self) -> None:
         await self._client.aclose()

@@ -53,8 +53,8 @@ def test_grounding_kb_gets_directive_header_and_tree(tmp_path: Path):
     )
     section = builder._kb_section()
     assert "authoritative" in section.lower()
-    assert "before answering" in section.lower()
-    assert "do not answer from memory" in section.lower()
+    assert "before deciding" in section.lower()
+    assert "own knowledge" in section.lower()
     assert "Platform Docs" in section
     assert "kb-g" in section
     assert "index.md" in section  # the ToC is rendered
@@ -100,3 +100,23 @@ def test_kb_section_appears_in_full_build(tmp_path: Path):
     prompt = builder.build()
     assert "Platform Docs" in prompt
     assert "kb_read_page" in prompt
+
+
+def test_citation_contract_is_grounding_only(tmp_path: Path):
+    """Quote-your-evidence belongs to the authoritative level only.
+
+    Reference-level answers may legitimately come from the model's own
+    knowledge, so demanding a page citation for every claim there would
+    push it toward declining -- the exact failure that level exists to
+    avoid. Asserted in both directions because leaking the contract into
+    the reference block is silent: the prompt still renders fine.
+    """
+    grounded = PromptBuilder(
+        _make_tenant(tmp_path), available_kbs=[GROUNDING_KB],
+    )._kb_section()
+    assert "Quote verbatim" in grounded
+
+    referenced = PromptBuilder(
+        _make_tenant(tmp_path), available_kbs=[REFERENCE_KB],
+    )._kb_section()
+    assert "Quote verbatim" not in referenced
