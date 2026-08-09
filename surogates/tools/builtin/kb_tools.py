@@ -708,6 +708,11 @@ def register(registry: ToolRegistry) -> None:
         name="kb_search_pages",
         schema=ToolSchema(
             name="kb_search_pages",
+            # Wording below is A/B-measured (see surogates/harness/prompt.py
+            # _kb_section for the full note): 0.65 -> 0.72 overall on a
+            # 54-query eval set on claude-sonnet-5, no bucket regressing;
+            # an earlier one-sided variant regressed to 0.59. Do not trim
+            # the loop framing back to a numbered checklist.
             description=(
                 "Hybrid search across your knowledge bases: keyword "
                 "matching fused with semantic (meaning-based) ranking, "
@@ -723,13 +728,16 @@ def register(registry: ToolRegistry) -> None:
                 "brief -- neither tells you which page actually holds "
                 "the answer, and a page missing from the tree may "
                 "still exist.\n\n"
-                "Order of retrieval: (1) kb_search_pages to find "
-                "candidate pages, (2) kb_read_page(kb_id, path) on the "
-                "top hits to read them in full, (3) only then answer. "
-                "Never answer from the tree or from a snippet alone, "
-                "and never guess a path -- use one returned here. "
-                "kb_list_pages is for browsing a KB's full structure, "
-                "not for finding an answer."
+                "Retrieval is a loop, not a single step: a high-ranked "
+                "hit was only the closest text available, never a "
+                "guarantee it answers the question, so read a "
+                "plausible hit in full with kb_read_page before "
+                "answering -- uncertainty is a reason to read, not a "
+                "reason to stop. When a question has several parts, "
+                "read more than the top hit, since different pages may "
+                "each hold one part. Never guess a path -- use one "
+                "returned here. kb_list_pages is for browsing a KB's "
+                "full structure, not for finding an answer."
             ),
             parameters=_KB_SEARCH_PAGES_PARAMS,
         ),
