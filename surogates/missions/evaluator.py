@@ -495,6 +495,9 @@ async def apply_verdict(
     Writes the ``last_evaluation_*`` fields, emits the
     ``mission.evaluation.end`` event, then dispatches by verdict:
 
+    * ``blocked`` / ``failed`` carrying a judge-authored ``proposed_rubric``
+      → pause awaiting the user's authorization instead of terminating, and
+      hold the verdict announcement until it takes effect.
     * ``satisfied`` / ``blocked`` / ``failed`` → set the matching status
       (terminal), clear the session's ``active_mission_id`` so the
       coordinator wakes free of mission context.
@@ -511,6 +514,26 @@ async def apply_verdict(
         mission_id, result=result, explanation=explanation, feedback=feedback,
     )
 
+    # The refinement check runs before the verdict is announced. Clients
+    # derive the mission's verdict from ``mission.evaluation.end``, so
+    # announcing `blocked` for a mission that is actually pausing to ask the
+    # user a question would show a terminal verdict for something that has
+    # not terminated. On the held path the verdict is carried by
+    # ``mission.refinement_proposed`` and announced later, by
+    # ``handle_mission_reject``, if and when it takes effect.
+    #
+    # A `satisfied` mission has nothing to refine, and refining the criteria
+    # of work that just met them is precisely the drift this gate exists to
+    # prevent -- so only the two failure verdicts can carry a proposal.
+    if result in ("blocked", "failed") and await _propose_refinement(
+        mission_id=mission_id,
+        verdict=verdict,
+        coordinator_session_id=coordinator_session_id,
+        session_store=session_store,
+        mission_store=mission_store,
+    ):
+        return
+
     await session_store.emit_event(
         coordinator_session_id, EventType.MISSION_EVALUATION_END,
         {
@@ -523,18 +546,6 @@ async def apply_verdict(
     )
 
     if result in ("satisfied", "blocked", "failed"):
-        # A `satisfied` mission has nothing to refine, and refining the
-        # criteria of work that just met them is precisely the drift this
-        # gate exists to prevent -- so only the two failure verdicts can
-        # carry a proposal.
-        if result in ("blocked", "failed") and await _propose_refinement(
-            mission_id=mission_id,
-            verdict=verdict,
-            coordinator_session_id=coordinator_session_id,
-            session_store=session_store,
-            mission_store=mission_store,
-        ):
-            return
         await mission_store.set_status(mission_id, result)
         await session_store.clear_session_config_key(
             coordinator_session_id, "active_mission_id",

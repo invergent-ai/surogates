@@ -16,6 +16,21 @@ from surogates.missions.store import MissionStore
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+async def _events_of_type(session_factory, session_id, event_type):
+    """Payloads of every event of *event_type* on *session_id*, oldest first."""
+    from sqlalchemy import select
+
+    from surogates.db.models import Event
+
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(Event.data)
+            .where(Event.session_id == session_id, Event.type == event_type)
+            .order_by(Event.id.asc())
+        )).scalars().all()
+    return [r for r in rows if isinstance(r, dict)]
+
+
 async def _mission(session_factory, org_id, user_id, chat_session, **kw):
     store = MissionStore(session_factory)
     mid = await store.create(
@@ -476,3 +491,109 @@ async def test_a_second_amendment_is_allowed_and_a_third_is_not(
     m = await store.get(mid)
     assert m.status == "blocked"
     assert m.rubric == "Satisfied when CI is green."
+
+
+async def test_resume_clears_the_pause_reason(
+    session_factory, org_id, user_id, chat_session,
+):
+    """`paused_reason` explains why a mission is paused. A mission that is
+    running again has no such reason, and leaving one behind turns a display
+    string into a stale authorization token."""
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    await store.set_status(mid, "paused", paused_reason="awaiting_refinement")
+
+    await store.set_status(mid, "active")
+
+    assert (await store.get(mid)).paused_reason is None
+
+
+async def test_accept_is_refused_after_the_user_resumed_the_mission(
+    session_factory, session_store, org_id, user_id, chat_session, redis_client,
+):
+    """`/mission resume` on a pending proposal declines it by implication.
+    Accept must not then hot-swap the rubric of a mission that is working."""
+    from surogates.missions.commands import (
+        handle_mission_accept, handle_mission_resume,
+    )
+
+    store, mid = await _proposed(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await handle_mission_resume(
+        session_id=chat_session.id, org_id=str(org_id),
+        agent_id="orchestrator", session_store=session_store,
+        mission_store=store, redis=redis_client,
+    )
+
+    result = await handle_mission_accept(
+        session_id=chat_session.id, session_store=session_store,
+        mission_store=store,
+    )
+    assert result.ok is False
+    m = await store.get(mid)
+    assert m.status == "active"
+    assert m.rubric == "Satisfied when dist/app.js exists."
+
+
+async def test_reject_is_refused_after_the_user_resumed_the_mission(
+    session_factory, session_store, org_id, user_id, chat_session, redis_client,
+):
+    """The dangerous half: reject would terminate a live, working mission."""
+    from surogates.missions.commands import (
+        handle_mission_reject, handle_mission_resume,
+    )
+
+    store, mid = await _proposed(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await handle_mission_resume(
+        session_id=chat_session.id, org_id=str(org_id),
+        agent_id="orchestrator", session_store=session_store,
+        mission_store=store, redis=redis_client,
+    )
+
+    result = await handle_mission_reject(
+        session_id=chat_session.id, session_store=session_store,
+        mission_store=store,
+    )
+    assert result.ok is False
+    assert (await store.get(mid)).status == "active"
+
+
+async def test_a_held_verdict_is_not_announced_as_the_mission_verdict(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """The dashboard derives the mission's verdict from mission.evaluation.end.
+    While the user is deciding, the mission is paused -- announcing `blocked`
+    would show a terminal verdict for a mission that has not terminated."""
+    from surogates.session.events import EventType
+
+    store, mid = await _proposed(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    events = await _events_of_type(
+        session_factory, chat_session.id, EventType.MISSION_EVALUATION_END.value,
+    )
+    assert events == []
+
+
+async def test_the_verdict_is_announced_once_the_user_rejects(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """It fires when the verdict actually takes effect, not before."""
+    from surogates.missions.commands import handle_mission_reject
+    from surogates.session.events import EventType
+
+    store, mid = await _proposed(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await handle_mission_reject(
+        session_id=chat_session.id, session_store=session_store,
+        mission_store=store, reason="the new rubric drops the test gate",
+    )
+    events = await _events_of_type(
+        session_factory, chat_session.id, EventType.MISSION_EVALUATION_END.value,
+    )
+    assert len(events) == 1
+    assert events[0]["result"] == "blocked"
+    assert events[0]["reason"] == "the new rubric drops the test gate"

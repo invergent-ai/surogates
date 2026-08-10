@@ -760,6 +760,7 @@ async def handle_mission_reject(
     session_id: UUID,
     session_store: Any,
     mission_store: MissionStore,
+    reason: str | None = None,
 ) -> MissionHandlerResult:
     """Decline the proposal; the mission ends as the judge originally ruled.
 
@@ -771,6 +772,10 @@ async def handle_mission_reject(
     -- a breadcrumb that this mission ended after a refinement was declined.
     ``get_active_for_session`` excludes terminal statuses, so it cannot be
     mistaken for a live proposal.
+
+    ``reason`` is the user's own justification for declining. It is recorded
+    on the verdict event: the whole point of this mechanism is that a pivot
+    leaves a trail, and so should a refusal to pivot.
     """
     active = await mission_store.get_active_for_session(session_id)
     if active is None or active.paused_reason != "awaiting_refinement":
@@ -793,6 +798,7 @@ async def handle_mission_reject(
             "result": held,
             "explanation": str((proposal or {}).get("explanation") or ""),
             "feedback": "",
+            "reason": reason or "",
         },
     )
     return MissionHandlerResult(

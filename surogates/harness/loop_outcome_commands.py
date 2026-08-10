@@ -264,17 +264,31 @@ class OutcomeCommandMixin:
                             cfg.pop("active_mission_id", None)
                             session.config = cfg
                 elif command.action == "accept":
-                    result = await handle_mission_accept(
-                        session_id=session.id,
-                        session_store=self._store,
-                        mission_store=mission_store,
-                    )
-                    message = result.message or result.error
+                    if redis_client is None:
+                        # The amendment commits before the deferred
+                        # continuation is emitted, and that emit is what
+                        # enqueues the coordinator. Without Redis the
+                        # mission would go active carrying a continuation
+                        # nothing wakes to process, and accept could not be
+                        # retried — amend_rubric has already cleared the
+                        # paused_reason the handler authorizes on.
+                        message = (
+                            "/mission accept cannot wake the coordinator "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_accept(
+                            session_id=session.id,
+                            session_store=self._store,
+                            mission_store=mission_store,
+                        )
+                        message = result.message or result.error
                 elif command.action == "reject":
                     result = await handle_mission_reject(
                         session_id=session.id,
                         session_store=self._store,
                         mission_store=mission_store,
+                        reason=command.reason,
                     )
                     message = result.message or result.error
                     if result.ok:

@@ -141,6 +141,13 @@ class MissionStore:
         values: dict[str, Any] = {"status": status}
         if paused_reason is not None:
             values["paused_reason"] = paused_reason
+        elif status == "active":
+            # A running mission has no reason to be paused. Leaving the old
+            # one behind is not merely cosmetic: `/mission accept|reject`
+            # authorize on ``paused_reason == "awaiting_refinement"``, so a
+            # stale value would let a resumed, working mission be terminated
+            # or have its rubric swapped out from under it.
+            values["paused_reason"] = None
         if cancelled_reason is not None:
             values["cancelled_reason"] = cancelled_reason
         async with self._sf() as db:
