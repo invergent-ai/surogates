@@ -188,6 +188,21 @@ _SYSTEM_PROMPT = dedent("""\
     response may contain `[[mission-complete]]` as a hint that you should
     look closely; the verdict still depends on evidence from the
     completed mission tasks block.
+
+    Rubric refinement -- only alongside `blocked` or `failed`:
+
+    If the completed-task evidence shows the rubric is unreachable *as
+    written* -- it asks for an artifact the work has demonstrated cannot
+    exist, contradicts itself, or names something that was never part of
+    the mission description -- then also return:
+
+        "proposed_rubric": "<a complete replacement rubric>",
+        "refinement_evidence": "<the task result that shows this>"
+
+    Leave both empty in every other case. A rubric the work has not yet
+    satisfied is `needs_revision`, not a proposal. Propose only a rubric
+    that still serves the mission description; never one that merely
+    describes what the work has already produced.
 """).strip()
 
 
@@ -208,6 +223,7 @@ async def build_evaluator_prompt(
     from surogates.db.models import Task
 
     mission = await mission_store.get(mission_id)
+    stagnant = await mission_store.is_stagnant(mission_id)
     response_excerpt = (coordinator_last_response or "")[:_RESPONSE_MAX_CHARS]
 
     async with session_factory() as db:
@@ -285,22 +301,26 @@ async def build_evaluator_prompt(
         completed_block=_render_completed(completed_rows),
         n_in_flight=len(in_flight_rows),
         in_flight_block=_render_in_flight(in_flight_rows),
-        history_block=_render_history(mission),
+        history_block=_render_history(mission, stagnant=stagnant),
     )
     return prompt
 
 
-def _render_history(mission: Any) -> str:
+def _render_history(mission: Any, *, stagnant: bool = False) -> str:
     """What this judge already said, and how many times running.
 
     Without it every round re-derives the same opinion from scratch: the
     evaluator fires on each terminal task but keeps no memory, so a mission
     can be told the same thing indefinitely at full cost.
+
+    ``stagnant`` is :meth:`MissionStore.is_stagnant`. It only steers the
+    prompt toward considering the rubric itself; stagnation alone never
+    produces a proposal, and the judge is free to ignore the hint.
     """
     streak = getattr(mission, "stagnant_evaluations", 0) or 0
     if not streak or not mission.last_evaluation_result:
         return ""
-    return dedent(f"""
+    block = dedent(f"""
         # Your previous evaluation ({streak} in a row without progress)
 
         Verdict: {mission.last_evaluation_result}
@@ -310,6 +330,14 @@ def _render_history(mission: Any) -> str:
         If the same blocker is still present after {streak} rounds, say so
         plainly and return `blocked` rather than repeating the guidance.
         """)
+    if stagnant:
+        block += dedent("""
+        This blocker has survived every round of the streak. Consider whether
+        the rubric itself is the defect rather than the work. If it is,
+        return `blocked` with a `proposed_rubric` that still serves the
+        mission description.
+        """)
+    return block
 
 
 def evaluator_system_prompt() -> str:

@@ -243,11 +243,20 @@ class _MissionVerdict(BaseModel):
     when outlines isn't installed or fails to coerce the model's output.
     Keeping the schema in one place means the prompt's documented JSON
     shape and the parser's expected shape stay in lockstep.
+
+    ``proposed_rubric`` / ``refinement_evidence`` are the judge's
+    *authorship* of a replacement rubric. They carry no authority: only
+    ``/mission accept`` applies one, and it reads the text from the
+    recorded event, not from here. Both default empty so a judge response
+    written before this existed still validates. See
+    docs/superpowers/specs/2026-08-11-mission-objective-refinement-design.md.
     """
 
     result: Literal["satisfied", "needs_revision", "blocked", "failed"]
     explanation: str = ""
     feedback: str = ""
+    proposed_rubric: str = ""
+    refinement_evidence: str = ""
 
 
 def _build_mission_judge(
