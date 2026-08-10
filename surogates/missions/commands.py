@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 MissionAction = Literal[
     "create", "status", "pause", "resume", "cancel", "budget",
+    "accept", "reject",
 ]
 
 
@@ -68,7 +69,9 @@ class AutoResearchCommand(MissionCommand):
     baseline_test: float | None = None
 
 
-_CONTROL_VERBS = ("status", "pause", "resume", "cancel", "budget")
+_CONTROL_VERBS = (
+    "status", "pause", "resume", "cancel", "budget", "accept", "reject",
+)
 _RUBRIC_RE = re.compile(r"\bRubric\s*:", re.IGNORECASE)
 _AUTO_RESEARCH_KV_RE = re.compile(
     r"^(max_iterations|resume|repo|baseline|baseline_test)=(\S+)\s*"
@@ -151,6 +154,8 @@ def parse_mission_command(raw: str) -> MissionCommand:
             return MissionCommand(action="pause", reason=rest or None)
         if verb == "resume":
             return MissionCommand(action="resume")
+        if verb in ("accept", "reject"):
+            return MissionCommand(action=verb, reason=rest or None)
         if verb == "budget":
             if not rest:
                 raise MissionCommandParseError(
