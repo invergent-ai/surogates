@@ -1351,32 +1351,9 @@ git commit -m "feat(missions): add /mission accept and reject handlers"
 - Consumes: `handle_mission_accept`, `handle_mission_reject`, `MissionHandlerResult.kickoff_synthetic` (Task 5).
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Write the failing test**
+**No new test.** This task is wiring: two imports, two `elif` branches, one string. `tests/integration/missions/test_commands.py` drives the handlers directly and never constructs an `AgentHarness` — nothing in the suite exercises `_handle_mission_command`, and standing up a harness to assert on an `elif` would be the most expensive test in the file for the least signal. The branches are verified by the existing suite still passing plus the Step 5 smoke check.
 
-Append to `tests/integration/missions/test_refinement.py`:
-
-```python
-async def test_the_usage_string_lists_the_new_verbs(
-    session_factory, org_id, user_id, chat_session,
-):
-    """A user who mistypes the command has to be able to find accept/reject."""
-    import inspect
-
-    from surogates.harness import loop_outcome_commands
-
-    source = inspect.getsource(loop_outcome_commands)
-    usage_start = source.index("Usage: /mission")
-    usage = source[usage_start:usage_start + 400]
-    assert "/mission accept" in usage
-    assert "/mission reject" in usage
-```
-
-- [ ] **Step 2: Run it to verify it fails**
-
-Run: `cd /work/surogates && pytest tests/integration/missions/test_refinement.py -v -k usage_string`
-Expected: FAIL on `assert "/mission accept" in usage`.
-
-- [ ] **Step 3: Import the two handlers**
+- [ ] **Step 1: Import the two handlers**
 
 In `surogates/harness/loop_outcome_commands.py`, add to the import block at `:113-123` (keep it alphabetical):
 
@@ -1396,7 +1373,7 @@ In `surogates/harness/loop_outcome_commands.py`, add to the import block at `:11
         )
 ```
 
-- [ ] **Step 4: Add the two dispatch branches**
+- [ ] **Step 2: Add the two dispatch branches**
 
 In `_handle_mission_command`, after the `elif command.action == "cancel":` block (ends :263) and before the trailing `else:`:
 
@@ -1425,7 +1402,7 @@ In `_handle_mission_command`, after the `elif command.action == "cancel":` block
 
 Neither branch needs Redis: `accept` returns `kickoff_content`, and the existing deferred-emit block enqueues the session itself; `reject` is terminal and wakes nobody.
 
-- [ ] **Step 5: Extend the usage string**
+- [ ] **Step 3: Extend the usage string**
 
 Replace the `else:` branch's message (:264-269):
 
@@ -1439,7 +1416,7 @@ Replace the `else:` branch's message (:264-269):
                     )
 ```
 
-- [ ] **Step 6: Honour the synthetic label on the deferred emit**
+- [ ] **Step 4: Honour the synthetic label on the deferred emit**
 
 In the deferred-emit block (:291-297), replace the hardcoded label:
 
@@ -1453,12 +1430,12 @@ In the deferred-emit block (:291-297), replace the hardcoded label:
             )
 ```
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [ ] **Step 5: Run the tests to verify nothing regressed**
 
-Run: `cd /work/surogates && pytest tests/integration/missions/test_refinement.py tests/integration/missions/test_commands.py -v`
-Expected: all pass. `test_commands.py` is included because it exercises the dispatcher's other branches.
+Run: `cd /work/surogates && pytest tests/integration/missions/ tests/missions/ -v`
+Expected: all pass. Then smoke the wiring by hand: `python -c "from surogates.harness.loop_outcome_commands import *"` must import cleanly, and `python -c "from surogates.missions.commands import parse_mission_command as p; print(p('accept').action, p('reject').action)"` must print `accept reject`.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /work/surogates
@@ -1528,6 +1505,37 @@ git commit -m "docs(missions): document /mission accept and reject"
 ```
 
 ---
+
+## Known limitations of the shipped shape
+
+Named here so they are decisions, not oversights.
+
+**Chat is the only channel that surfaces the proposal.** The user learns about
+a pending refinement from the coordinator's relayed message. Both new event
+types do reach `GET /missions/{id}/events` — `_HIDDEN_EVENT_TYPES`
+(`surogates/api/routes/missions.py:393`) is only `{"llm.delta"}` — but nothing
+renders them specially, and this plan adds **no REST endpoints** to match the
+existing `POST /{mission_id}/pause|resume|cancel`. A user looking at the
+mission dashboard has to type `/mission accept` in the chat. Add the two
+endpoints when someone actually tries to do it from the dashboard.
+
+**The amended mission restarts on a prompt, not a gate.** After `/mission
+accept` the evaluator still only fires on `task_terminal` or
+`completion_claim` (`should_evaluate`). If every task was already `done` when
+the rubric changed, nothing machine-written will re-trigger it — the mission
+depends on the coordinator emitting `[[mission-complete]]`, which
+`_AMENDED_CONTINUATION_TEMPLATE` instructs but cannot enforce. This does not
+hang: the dispatcher's mission-nudge loop (`surogates/tasks/dispatcher.py:507`)
+wakes an idle mission and blocks it after `_MAX_MISSION_NUDGES`. It is the
+weakest link in the flow and the first place to look if an amended mission
+goes quiet.
+
+**`kickoff_synthetic` is read by nothing.** `count_synthetic_since` is called
+in exactly one place and only counts `"mission_nudge"`. The field exists so an
+amendment continuation does not appear in the event log labelled
+`mission_kickoff` — transcript legibility during PROD session debugging, not
+control flow. Drop it and hardcode the label if that trade reads differently
+to you.
 
 ## Self-Review
 
