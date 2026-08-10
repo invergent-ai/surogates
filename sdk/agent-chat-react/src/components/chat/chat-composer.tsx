@@ -47,7 +47,6 @@ import {
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
-import { ButtonGroup } from "../ui/button-group";
 import {
   Item,
   ItemActions,
@@ -88,6 +87,22 @@ type SlashCommand = AgentChatSlashCommand;
 // only targets, and in a bottom sheet they are what the thumb lands on.
 const TOOLS_ITEM_CLASS =
   "gap-3 rounded-md px-3 py-2 pointer-coarse:min-h-11 pointer-coarse:text-[15px]";
+
+// The two halves of the view-mode switch, in the order they are shown.
+const VIEW_MODE_SEGMENTS = [
+  {
+    mode: "simple" as const,
+    label: "Simple",
+    icon: MessageSquareIcon,
+    tooltip: "Simple — just the conversation",
+  },
+  {
+    mode: "expert" as const,
+    label: "Advanced",
+    icon: ListTreeIcon,
+    tooltip: "Advanced — every step the agent took",
+  },
+];
 
 // ── Props ────────────────────────────────────────────────────────────
 
@@ -780,42 +795,49 @@ function ChatComposerInner({
   // awaiting-answer session with no panes has exactly nothing.
   const showToolsPanel = canAttach || showPaneToggles || canPickProfile;
 
+  // A segmented control, not two buttons that happen to touch: one track,
+  // two segments, only the selected one filled. The words are the label a
+  // cursor gets — they read at a glance and cost nothing at that width. A
+  // phone has no room for them beside Send, so there the icons stand in and
+  // the words move to the accessible name (which both widths carry anyway).
+  //
+  // Plain <div> rather than ButtonGroup: the group squares off the inner
+  // edges of every child, which fights the pill and leaves each segment
+  // outlined inside an outline.
   const viewModeToggle = onViewModeChange ? (
-    <ButtonGroup
+    <div
+      role="group"
       aria-label="Chat view mode"
-      className="overflow-hidden rounded-full border border-border bg-muted/40 p-0.5"
+      className="flex shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5"
     >
-      <PromptInputButton
-        aria-label="Simple view"
-        aria-pressed={viewMode === "simple"}
-        tooltip="Simple — just the conversation"
-        variant={viewMode === "simple" ? "secondary" : "ghost"}
-        onClick={() => onViewModeChange("simple")}
-        className={cn(
-          // 32px is a comfortable segment for a cursor and a miss for a
-          // thumb, so touch takes both halves to the 44px floor.
-          "size-8 rounded-full pointer-coarse:size-11",
-          viewMode === "simple" && "shadow-sm",
-        )}
-      >
-        <MessageSquareIcon className="size-[18px] pointer-coarse:size-5" />
-      </PromptInputButton>
-      <PromptInputButton
-        aria-label="Advanced view"
-        aria-pressed={viewMode === "expert"}
-        tooltip="Advanced — every step the agent took"
-        variant={viewMode === "expert" ? "secondary" : "ghost"}
-        onClick={() => onViewModeChange("expert")}
-        className={cn(
-          // 32px is a comfortable segment for a cursor and a miss for a
-          // thumb, so touch takes both halves to the 44px floor.
-          "size-8 rounded-full pointer-coarse:size-11",
-          viewMode === "expert" && "shadow-sm",
-        )}
-      >
-        <ListTreeIcon className="size-[18px] pointer-coarse:size-5" />
-      </PromptInputButton>
-    </ButtonGroup>
+      {VIEW_MODE_SEGMENTS.map(({ mode, label, icon: Icon, tooltip }) => {
+        const selected = viewMode === mode;
+        return (
+          <PromptInputButton
+            key={mode}
+            size="sm"
+            aria-label={`${label} view`}
+            aria-pressed={selected}
+            tooltip={tooltip}
+            variant="ghost"
+            onClick={() => onViewModeChange(mode)}
+            className={cn(
+              // Icon-width on a phone, word-width with a cursor; the coarse
+              // bump takes the segment to the 44px touch floor either way.
+              // Words, not the shouted uppercase the button base defaults to —
+              // this is a label on a switch, not a call to action.
+              "h-8 gap-1.5 rounded-full border-0 bg-transparent px-3.5 text-xs font-normal capitalize tracking-normal md:px-3 pointer-coarse:h-11 pointer-coarse:px-5",
+              selected
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+            )}
+          >
+            <Icon className="size-4 md:hidden" />
+            <span className="hidden md:inline">{label}</span>
+          </PromptInputButton>
+        );
+      })}
+    </div>
   ) : null;
 
   return (
