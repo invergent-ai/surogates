@@ -22,8 +22,49 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The version comes from the tag being released, NOT from
+      # setuptools-scm's `git describe`. Describe is unreliable here for two
+      # compounding reasons, and v2.13.3 shipped a wheel named 2.13.2 because
+      # of them:
+      #
+      #   1. Several tags can sit on one commit (v2.9.3, v2.13.2 and v2.13.3
+      #      all point at 8d949552), so describe has more than one exact match
+      #      to choose between.
+      #   2. actions/checkout fetches the pushed tag as a LIGHTWEIGHT ref,
+      #      dropping the annotation, so describe can prefer a different
+      #      annotated tag on the same commit over the one being released.
+      #
+      # Pinning it removes the guesswork: a release tagged vX.Y.Z produces a
+      # wheel named X.Y.Z, whatever the tag topology looks like. The images
+      # job already derives its tag from GITHUB_REF_NAME the same way, which
+      # is why the container tags were right while the wheel names were not.
+      - name: Resolve version from the tag
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build wheel and sdist
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.version.outputs.value }}
         run: uv build
+
+      # A wheel whose name disagrees with its tag is worse than a failed
+      # release: the download URL in every consumer's pin is built from the
+      # tag, so it 404s, and anyone who "fixes" the URL by hand pins a version
+      # string that does not match what they think they are installing.
+      # Fail here instead, while it is still cheap to re-cut.
+      - name: Verify the artifacts match the tag
+        run: |
+          set -euo pipefail
+          expected="${{ steps.version.outputs.value }}"
+          for ext in "py3-none-any.whl" "tar.gz"; do
+            if [ ! -f "dist/surogates-${expected}-${ext}" ] \
+               && [ ! -f "dist/surogates-${expected}.${ext}" ]; then
+              echo "::error::expected an artifact for version ${expected}, got:"
+              ls -1 dist/
+              exit 1
+            fi
+          done
+          ls -1 dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
