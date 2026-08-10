@@ -64,3 +64,99 @@ async def test_a_merely_slow_mission_is_not_nudged_to_repropose(
         session_factory=session_factory, mission_store=store,
     )
     assert "proposed_rubric" not in prompt
+
+
+async def test_amend_rubric_replaces_the_text_and_reactivates(
+    session_factory, org_id, user_id, chat_session,
+):
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    await store.record_evaluation(
+        mid, result="needs_revision", explanation="no", feedback="f",
+    )
+    await store.set_status(mid, "paused", paused_reason="awaiting_refinement")
+
+    await store.amend_rubric(mid, new_rubric="Satisfied when dist/bundle.js exists.")
+
+    m = await store.get(mid)
+    assert m.rubric == "Satisfied when dist/bundle.js exists."
+    assert m.status == "active"
+    assert m.paused_reason is None
+    assert m.stagnant_evaluations == 0
+    assert m.description == "ship the bundle"
+
+
+async def test_amend_rubric_leaves_the_iteration_allowance_alone(
+    session_factory, org_id, user_id, chat_session,
+):
+    """The amendment changes the target, not the budget."""
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    for _ in range(4):
+        await store.increment_iteration(mid)
+
+    await store.amend_rubric(mid, new_rubric="Satisfied when the build is green.")
+
+    assert (await store.get(mid)).iteration == 4
+
+
+async def test_amend_rubric_rejects_empty_text(
+    session_factory, org_id, user_id, chat_session,
+):
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    with pytest.raises(ValueError):
+        await store.amend_rubric(mid, new_rubric="   ")
+
+
+async def test_proposal_lookup_ignores_another_missions_proposal(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """Events are keyed by session, not mission. A session outlives its
+    missions, so a stale proposal from a terminated one must not be found."""
+    from surogates.session.events import EventType
+
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    await session_store.emit_event(
+        chat_session.id, EventType.MISSION_REFINEMENT_PROPOSED,
+        {"mission_id": "00000000-0000-0000-0000-0000000000ff",
+         "proposed_rubric": "someone else's rubric"},
+    )
+    assert await session_store.latest_mission_proposal(chat_session.id, mid) is None
+
+    await session_store.emit_event(
+        chat_session.id, EventType.MISSION_REFINEMENT_PROPOSED,
+        {"mission_id": str(mid), "proposed_rubric": "ours"},
+    )
+    found = await session_store.latest_mission_proposal(chat_session.id, mid)
+    assert found is not None and found["proposed_rubric"] == "ours"
+
+
+async def test_proposal_lookup_takes_the_newest(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.session.events import EventType
+
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    for text in ("first", "second"):
+        await session_store.emit_event(
+            chat_session.id, EventType.MISSION_REFINEMENT_PROPOSED,
+            {"mission_id": str(mid), "proposed_rubric": text},
+        )
+    found = await session_store.latest_mission_proposal(chat_session.id, mid)
+    assert found["proposed_rubric"] == "second"
+
+
+async def test_amendment_count_is_per_mission(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.session.events import EventType
+
+    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
+    assert await session_store.count_mission_amendments(chat_session.id, mid) == 0
+
+    await session_store.emit_event(
+        chat_session.id, EventType.MISSION_AMENDED, {"mission_id": str(mid)},
+    )
+    await session_store.emit_event(
+        chat_session.id, EventType.MISSION_AMENDED,
+        {"mission_id": "00000000-0000-0000-0000-0000000000ff"},
+    )
+    assert await session_store.count_mission_amendments(chat_session.id, mid) == 1

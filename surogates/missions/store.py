@@ -263,6 +263,38 @@ class MissionStore:
                 raise MissionNotFoundError(f"mission {mission_id} not found")
             await db.commit()
 
+    async def amend_rubric(self, mission_id: UUID, *, new_rubric: str) -> None:
+        """Replace the rubric and put the mission back to work.
+
+        The caller passes text it read from a ``mission.refinement_proposed``
+        event, never text from the coordinator or from the command line.
+
+        ``iteration`` is deliberately untouched: the amendment changes the
+        target, not the allowance. A mission that burned 18 of 20 iterations
+        getting the target wrong does not get 20 more for free --
+        ``/mission budget`` funds a pivot explicitly.
+
+        ``description`` is never written. It is the standing intent.
+        """
+        cleaned = (new_rubric or "").strip()
+        if not cleaned:
+            raise ValueError("amend_rubric requires a non-empty rubric")
+        async with self._sf() as db:
+            res = await db.execute(
+                update(MissionRow)
+                .where(MissionRow.id == mission_id)
+                .values(
+                    rubric=cleaned,
+                    status="active",
+                    paused_reason=None,
+                    stagnant_evaluations=0,
+                    updated_at=func.now(),
+                )
+            )
+            if res.rowcount == 0:
+                raise MissionNotFoundError(f"mission {mission_id} not found")
+            await db.commit()
+
     async def is_stagnant(self, mission_id: UUID) -> bool:
         """True when the evaluator has returned no progress too many times.
 

@@ -172,6 +172,13 @@ class EventType(str, Enum):
     MISSION_RESUMED = "mission.resumed"
     MISSION_CANCELLED = "mission.cancelled"
 
+    # Evidence-gated rubric refinement. The proposal event is the *only*
+    # source `/mission accept` reads the new rubric from, so it is durable
+    # state, not just telemetry. See
+    # docs/superpowers/specs/2026-08-11-mission-objective-refinement-design.md.
+    MISSION_REFINEMENT_PROPOSED = "mission.refinement_proposed"
+    MISSION_AMENDED = "mission.amended"
+
     # Research missions (Arbor). Emitted on the research coordinator session;
     # the mission dashboard's Activity tab surfaces them. See
     # docs/superpowers/specs/2026-06-12-arbor-research-missions-design.md.

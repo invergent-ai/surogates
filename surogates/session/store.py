@@ -1623,6 +1623,53 @@ class SessionStore:
         todos = row.get("todos")
         return todos if isinstance(todos, list) else None
 
+    async def latest_mission_proposal(
+        self, session_id: UUID | str, mission_id: UUID | str,
+    ) -> dict | None:
+        """The newest rubric proposal recorded for *mission_id*, or ``None``.
+
+        This is what ``/mission accept`` applies. The command takes no rubric
+        argument on purpose, so the text it commits can only come from here --
+        the same shape as ``merge_experiment`` accepting no score.
+
+        Events are keyed by session, not by mission, and a session outlives
+        its missions, so the payload's ``mission_id`` is matched in SQL to
+        keep a terminated mission's stale proposal out of the result.
+        """
+        stmt = (
+            select(EventRow.data)
+            .where(
+                EventRow.session_id == session_id,
+                EventRow.type == EventType.MISSION_REFINEMENT_PROPOSED.value,
+                EventRow.data["mission_id"].astext == str(mission_id),
+            )
+            .order_by(EventRow.id.desc())
+            .limit(1)
+        )
+        async with self._sf() as db:
+            row = (await db.execute(stmt)).scalar_one_or_none()
+        return row if isinstance(row, dict) else None
+
+    async def count_mission_amendments(
+        self, session_id: UUID | str, mission_id: UUID | str,
+    ) -> int:
+        """How many rubric amendments have been *applied* to *mission_id*.
+
+        Counts applications, not proposals: a user who declines twice has
+        not spent the mission's allowance.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(EventRow)
+            .where(
+                EventRow.session_id == session_id,
+                EventRow.type == EventType.MISSION_AMENDED.value,
+                EventRow.data["mission_id"].astext == str(mission_id),
+            )
+        )
+        async with self._sf() as db:
+            return int((await db.execute(stmt)).scalar_one() or 0)
+
     async def count_synthetic_since(
         self, session_id: UUID, *, synthetic: str, since: Any,
     ) -> int:
