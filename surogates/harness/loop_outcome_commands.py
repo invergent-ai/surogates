@@ -113,9 +113,11 @@ class OutcomeCommandMixin:
         from surogates.missions.commands import (
             MissionCommandParseError,
             MissionHandlerResult,
+            handle_mission_accept,
             handle_mission_cancel,
             handle_mission_create,
             handle_mission_pause,
+            handle_mission_reject,
             handle_mission_resume,
             handle_mission_budget,
             handle_mission_status,
@@ -261,11 +263,46 @@ class OutcomeCommandMixin:
                             cfg = dict(session.config or {})
                             cfg.pop("active_mission_id", None)
                             session.config = cfg
+                elif command.action == "accept":
+                    if redis_client is None:
+                        # The amendment commits before the deferred
+                        # continuation is emitted, and that emit is what
+                        # enqueues the coordinator. Without Redis the
+                        # mission would go active carrying a continuation
+                        # nothing wakes to process, and accept could not be
+                        # retried — amend_rubric has already cleared the
+                        # paused_reason the handler authorizes on.
+                        message = (
+                            "/mission accept cannot wake the coordinator "
+                            "without a Redis connection."
+                        )
+                    else:
+                        result = await handle_mission_accept(
+                            session_id=session.id,
+                            session_store=self._store,
+                            mission_store=mission_store,
+                        )
+                        message = result.message or result.error
+                elif command.action == "reject":
+                    result = await handle_mission_reject(
+                        session_id=session.id,
+                        session_store=self._store,
+                        mission_store=mission_store,
+                        reason=command.reason,
+                    )
+                    message = result.message or result.error
+                    if result.ok:
+                        # Mirror the DB clear_session_config_key call in the
+                        # in-memory session, the way the cancel branch does.
+                        cfg = dict(session.config or {})
+                        cfg.pop("active_mission_id", None)
+                        session.config = cfg
                 else:
                     message = (
                         "Usage: /mission <description>\\n\\nRubric:\\n<criterion>"
                         " | /mission status | /mission pause [reason]"
                         " | /mission resume | /mission cancel [--cascade] [reason]"
+                        " | /mission accept | /mission reject [reason]"
                     )
 
         response_event_id = await self._store.emit_event(
@@ -292,7 +329,7 @@ class OutcomeCommandMixin:
                 session.id, EventType.USER_MESSAGE,
                 {
                     "content": result.kickoff_content,
-                    "synthetic": "mission_kickoff",
+                    "synthetic": result.kickoff_synthetic,
                 },
             )
             if redis_client is not None:
@@ -474,7 +511,7 @@ class OutcomeCommandMixin:
                 session.id, EventType.USER_MESSAGE,
                 {
                     "content": result.kickoff_content,
-                    "synthetic": "mission_kickoff",
+                    "synthetic": result.kickoff_synthetic,
                 },
             )
             if redis_client is not None:

@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 MissionAction = Literal[
     "create", "status", "pause", "resume", "cancel", "budget",
+    "accept", "reject",
 ]
 
 
@@ -68,7 +69,9 @@ class AutoResearchCommand(MissionCommand):
     baseline_test: float | None = None
 
 
-_CONTROL_VERBS = ("status", "pause", "resume", "cancel", "budget")
+_CONTROL_VERBS = (
+    "status", "pause", "resume", "cancel", "budget", "accept", "reject",
+)
 _RUBRIC_RE = re.compile(r"\bRubric\s*:", re.IGNORECASE)
 _AUTO_RESEARCH_KV_RE = re.compile(
     r"^(max_iterations|resume|repo|baseline|baseline_test)=(\S+)\s*"
@@ -151,6 +154,8 @@ def parse_mission_command(raw: str) -> MissionCommand:
             return MissionCommand(action="pause", reason=rest or None)
         if verb == "resume":
             return MissionCommand(action="resume")
+        if verb in ("accept", "reject"):
+            return MissionCommand(action=verb, reason=rest or None)
         if verb == "budget":
             if not rest:
                 raise MissionCommandParseError(
@@ -277,6 +282,11 @@ class MissionHandlerResult:
     message: str = ""
     error: str = ""
     kickoff_content: str | None = None
+    # Label written into the deferred synthetic user.message's ``synthetic``
+    # key. Defaults to the create path's value so existing callers are
+    # unchanged; the amendment path overrides it so the two are
+    # distinguishable in the event log and in ``count_synthetic_since``.
+    kickoff_synthetic: str = "mission_kickoff"
 
 
 _KICKOFF_TEMPLATE = """\
@@ -295,6 +305,24 @@ end criterion-driven rounds with a verifier task whose
 Do NOT claim completion in prose alone — the evaluator only honours
 completion claims backed by verifier-task evidence OR an explicit
 ``[[mission-complete]]`` marker on its own line in your response.
+"""
+
+
+_AMENDED_CONTINUATION_TEMPLATE = """\
+[Mission rubric amended by the user]
+
+The rubric you were being graded against has been replaced. You are not
+starting over -- everything already completed still counts.
+
+Previous rubric:
+{old_rubric}
+
+New rubric:
+{new_rubric}
+
+Re-read the new rubric against the work already done, then continue. If the
+completed work already satisfies it, say so with the evidence and mark
+completion with [[mission-complete]] on its own line.
 """
 
 
@@ -668,6 +696,114 @@ async def handle_mission_cancel(
     )
     return MissionHandlerResult(
         ok=True, mission_id=active.id, message="Mission cancelled.",
+    )
+
+
+async def handle_mission_accept(
+    *,
+    session_id: UUID,
+    session_store: Any,
+    mission_store: MissionStore,
+) -> MissionHandlerResult:
+    """Apply the judge's proposed rubric. This is the authority act.
+
+    The new rubric is read from the ``mission.refinement_proposed`` event,
+    never from the command and never from anything the coordinator wrote --
+    the same idiom as ``merge_experiment`` accepting no score argument. The
+    coordinator relays the proposal to the user; what it types cannot change
+    what this commits.
+
+    The continuation is returned as ``kickoff_content`` rather than emitted
+    here: the slash dispatcher advances the harness cursor past its own
+    reply, so an inline emit would be skipped on the next wake.
+    """
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None or active.paused_reason != "awaiting_refinement":
+        return MissionHandlerResult(
+            ok=False,
+            error="No rubric refinement is awaiting your decision.",
+        )
+    proposal = await session_store.latest_mission_proposal(session_id, active.id)
+    new_rubric = str((proposal or {}).get("proposed_rubric") or "").strip()
+    if not new_rubric:
+        return MissionHandlerResult(
+            ok=False, mission_id=active.id,
+            error=(
+                "The recorded proposal is missing or empty; use "
+                "/mission reject or /mission cancel."
+            ),
+        )
+
+    old_rubric = active.rubric
+    await mission_store.amend_rubric(active.id, new_rubric=new_rubric)
+    await session_store.emit_event(
+        session_id, EventType.MISSION_AMENDED,
+        {
+            "mission_id": str(active.id),
+            "old_rubric": old_rubric,
+            "new_rubric": new_rubric,
+            "evidence": str((proposal or {}).get("evidence") or ""),
+        },
+    )
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id,
+        message="Rubric amended; mission resumed.",
+        kickoff_content=_AMENDED_CONTINUATION_TEMPLATE.format(
+            old_rubric=old_rubric, new_rubric=new_rubric,
+        ),
+        kickoff_synthetic="mission_amended",
+    )
+
+
+async def handle_mission_reject(
+    *,
+    session_id: UUID,
+    session_store: Any,
+    mission_store: MissionStore,
+    reason: str | None = None,
+) -> MissionHandlerResult:
+    """Decline the proposal; the mission ends as the judge originally ruled.
+
+    ``held_verdict`` comes off the proposal event rather than from a fresh
+    judge call: the user is declining *this* proposal against *that* ruling,
+    and a second call could return something else.
+
+    ``paused_reason`` is left as ``awaiting_refinement`` on the terminal row
+    -- a breadcrumb that this mission ended after a refinement was declined.
+    ``get_active_for_session`` excludes terminal statuses, so it cannot be
+    mistaken for a live proposal.
+
+    ``reason`` is the user's own justification for declining. It is recorded
+    on the verdict event: the whole point of this mechanism is that a pivot
+    leaves a trail, and so should a refusal to pivot.
+    """
+    active = await mission_store.get_active_for_session(session_id)
+    if active is None or active.paused_reason != "awaiting_refinement":
+        return MissionHandlerResult(
+            ok=False,
+            error="No rubric refinement is awaiting your decision.",
+        )
+    proposal = await session_store.latest_mission_proposal(session_id, active.id)
+    held = str((proposal or {}).get("held_verdict") or "blocked")
+    if held not in ("blocked", "failed"):
+        held = "blocked"
+
+    await mission_store.set_status(active.id, held)
+    await session_store.clear_session_config_key(session_id, "active_mission_id")
+    await session_store.emit_event(
+        session_id, EventType.MISSION_EVALUATION_END,
+        {
+            "mission_id": str(active.id),
+            "trigger": "refinement_rejected",
+            "result": held,
+            "explanation": str((proposal or {}).get("explanation") or ""),
+            "feedback": "",
+            "reason": reason or "",
+        },
+    )
+    return MissionHandlerResult(
+        ok=True, mission_id=active.id,
+        message=f"Refinement declined; mission {held}.",
     )
 
 

@@ -159,6 +159,12 @@ _RESPONSE_MAX_CHARS: int = 16_384
 _RESULT_MAX_CHARS: int = 400
 _TASKS_BLOCK_LIMIT: int = 20
 
+# Applied rubric amendments allowed per mission. Without a ceiling the
+# mechanism inverts: each amendment moves the criteria toward what the work
+# already produced, and a long-running mission negotiates its rubric down to
+# something trivially satisfiable.
+MAX_MISSION_AMENDMENTS: int = 2
+
 
 _SYSTEM_PROMPT = dedent("""\
     You are the rubric judge for a Surogates Mission. Read the rubric and
@@ -188,6 +194,21 @@ _SYSTEM_PROMPT = dedent("""\
     response may contain `[[mission-complete]]` as a hint that you should
     look closely; the verdict still depends on evidence from the
     completed mission tasks block.
+
+    Rubric refinement -- only alongside `blocked` or `failed`:
+
+    If the completed-task evidence shows the rubric is unreachable *as
+    written* -- it asks for an artifact the work has demonstrated cannot
+    exist, contradicts itself, or names something that was never part of
+    the mission description -- then also return:
+
+        "proposed_rubric": "<a complete replacement rubric>",
+        "refinement_evidence": "<the task result that shows this>"
+
+    Leave both empty in every other case. A rubric the work has not yet
+    satisfied is `needs_revision`, not a proposal. Propose only a rubric
+    that still serves the mission description; never one that merely
+    describes what the work has already produced.
 """).strip()
 
 
@@ -208,6 +229,7 @@ async def build_evaluator_prompt(
     from surogates.db.models import Task
 
     mission = await mission_store.get(mission_id)
+    stagnant = await mission_store.is_stagnant(mission_id)
     response_excerpt = (coordinator_last_response or "")[:_RESPONSE_MAX_CHARS]
 
     async with session_factory() as db:
@@ -285,22 +307,26 @@ async def build_evaluator_prompt(
         completed_block=_render_completed(completed_rows),
         n_in_flight=len(in_flight_rows),
         in_flight_block=_render_in_flight(in_flight_rows),
-        history_block=_render_history(mission),
+        history_block=_render_history(mission, stagnant=stagnant),
     )
     return prompt
 
 
-def _render_history(mission: Any) -> str:
+def _render_history(mission: Any, *, stagnant: bool = False) -> str:
     """What this judge already said, and how many times running.
 
     Without it every round re-derives the same opinion from scratch: the
     evaluator fires on each terminal task but keeps no memory, so a mission
     can be told the same thing indefinitely at full cost.
+
+    ``stagnant`` is :meth:`MissionStore.is_stagnant`. It only steers the
+    prompt toward considering the rubric itself; stagnation alone never
+    produces a proposal, and the judge is free to ignore the hint.
     """
     streak = getattr(mission, "stagnant_evaluations", 0) or 0
     if not streak or not mission.last_evaluation_result:
         return ""
-    return dedent(f"""
+    block = dedent(f"""
         # Your previous evaluation ({streak} in a row without progress)
 
         Verdict: {mission.last_evaluation_result}
@@ -310,6 +336,14 @@ def _render_history(mission: Any) -> str:
         If the same blocker is still present after {streak} rounds, say so
         plainly and return `blocked` rather than repeating the guidance.
         """)
+    if stagnant:
+        block += dedent("""
+        This blocker has survived every round of the streak. Consider whether
+        the rubric itself is the defect rather than the work. If it is,
+        return `blocked` with a `proposed_rubric` that still serves the
+        mission description.
+        """)
+    return block
 
 
 def evaluator_system_prompt() -> str:
@@ -349,6 +383,104 @@ _CONTINUATION_TEMPLATE = dedent("""\
 """).strip()
 
 
+_REFINEMENT_RELAY_TEMPLATE = dedent("""\
+    [Mission paused -- rubric refinement proposed]
+
+    The evaluator was about to end this mission as `{held_verdict}`:
+    {explanation}
+
+    It judges the rubric itself to be the defect, and proposes replacing it.
+
+    Current rubric:
+    {old_rubric}
+
+    Proposed rubric:
+    {proposed_rubric}
+
+    Evidence:
+    {evidence}
+
+    Relay this to the user verbatim -- both rubrics and the evidence -- and
+    end your turn. Do not paraphrase either rubric, and do not argue for or
+    against the change: you are the messenger, not a party to it. Only the
+    user can authorize it, with `/mission accept` or `/mission reject`.
+    `/mission accept` applies the proposed rubric exactly as recorded above;
+    nothing you write can change what it commits.
+""").strip()
+
+
+async def _propose_refinement(
+    *,
+    mission_id: UUID,
+    verdict: dict[str, Any],
+    coordinator_session_id: UUID,
+    session_store: Any,
+    mission_store: Any,
+) -> bool:
+    """Pause the mission on a judge-authored rubric proposal.
+
+    Returns ``True`` when the mission was paused awaiting authorization, so
+    the caller skips termination. ``False`` leaves the terminal path exactly
+    as it was -- which covers every case where the judge proposed nothing,
+    proposed a no-op, or the mission has already spent its amendments.
+
+    Nothing here applies the rubric. The proposal is recorded as an event
+    and the mission waits for the user; see
+    docs/superpowers/specs/2026-08-11-mission-objective-refinement-design.md.
+    """
+    proposed = str(verdict.get("proposed_rubric") or "").strip()
+    if not proposed:
+        return False
+
+    mission = await mission_store.get(mission_id)
+    if proposed == (mission.rubric or "").strip():
+        return False
+
+    amendments = await session_store.count_mission_amendments(
+        coordinator_session_id, mission_id,
+    )
+    if amendments >= MAX_MISSION_AMENDMENTS:
+        logger.info(
+            "Mission %s proposed a rubric refinement past the cap (%d); "
+            "terminating as %s instead",
+            mission_id, MAX_MISSION_AMENDMENTS, verdict.get("result"),
+        )
+        return False
+
+    held_verdict = str(verdict.get("result") or "blocked")
+    explanation = str(verdict.get("explanation") or "")
+    evidence = str(verdict.get("refinement_evidence") or "")
+
+    await session_store.emit_event(
+        coordinator_session_id, EventType.MISSION_REFINEMENT_PROPOSED,
+        {
+            "mission_id": str(mission_id),
+            "old_rubric": mission.rubric,
+            "proposed_rubric": proposed,
+            "evidence": evidence,
+            "held_verdict": held_verdict,
+            "explanation": explanation,
+        },
+    )
+    await mission_store.set_status(
+        mission_id, "paused", paused_reason="awaiting_refinement",
+    )
+    await session_store.emit_event(
+        coordinator_session_id, EventType.USER_MESSAGE,
+        {
+            "content": _REFINEMENT_RELAY_TEMPLATE.format(
+                held_verdict=held_verdict,
+                explanation=explanation,
+                old_rubric=mission.rubric,
+                proposed_rubric=proposed,
+                evidence=evidence or "(none given)",
+            ),
+            "synthetic": "mission_refinement_proposed",
+        },
+    )
+    return True
+
+
 async def apply_verdict(
     *,
     mission_id: UUID,
@@ -363,6 +495,9 @@ async def apply_verdict(
     Writes the ``last_evaluation_*`` fields, emits the
     ``mission.evaluation.end`` event, then dispatches by verdict:
 
+    * ``blocked`` / ``failed`` carrying a judge-authored ``proposed_rubric``
+      → pause awaiting the user's authorization instead of terminating, and
+      hold the verdict announcement until it takes effect.
     * ``satisfied`` / ``blocked`` / ``failed`` → set the matching status
       (terminal), clear the session's ``active_mission_id`` so the
       coordinator wakes free of mission context.
@@ -378,6 +513,26 @@ async def apply_verdict(
     await mission_store.record_evaluation(
         mission_id, result=result, explanation=explanation, feedback=feedback,
     )
+
+    # The refinement check runs before the verdict is announced. Clients
+    # derive the mission's verdict from ``mission.evaluation.end``, so
+    # announcing `blocked` for a mission that is actually pausing to ask the
+    # user a question would show a terminal verdict for something that has
+    # not terminated. On the held path the verdict is carried by
+    # ``mission.refinement_proposed`` and announced later, by
+    # ``handle_mission_reject``, if and when it takes effect.
+    #
+    # A `satisfied` mission has nothing to refine, and refining the criteria
+    # of work that just met them is precisely the drift this gate exists to
+    # prevent -- so only the two failure verdicts can carry a proposal.
+    if result in ("blocked", "failed") and await _propose_refinement(
+        mission_id=mission_id,
+        verdict=verdict,
+        coordinator_session_id=coordinator_session_id,
+        session_store=session_store,
+        mission_store=mission_store,
+    ):
+        return
 
     await session_store.emit_event(
         coordinator_session_id, EventType.MISSION_EVALUATION_END,

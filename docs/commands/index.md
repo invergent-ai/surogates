@@ -158,6 +158,8 @@ names a file, a test, and a demonstrated reason it is vacuous.
 | `/mission cancel [--cascade] [reason]` | Cancel (with `--cascade`, its running workers too) |
 | `/mission budget <count>` | Set the token allowance on a running mission |
 | `/mission budget none` | Remove the ceiling |
+| `/mission accept` | Apply a proposed rubric refinement and resume |
+| `/mission reject [reason]` | Decline it; the mission ends with the held verdict |
 
 #### Token budget
 

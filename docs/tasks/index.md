@@ -176,15 +176,45 @@ The slash command's other forms:
 | `/mission resume` | Resume a paused mission |
 | `/mission cancel [reason]` | Cancel without touching workers — they finish whatever they're on |
 | `/mission cancel --cascade [reason]` | Cancel and interrupt every still-running worker |
+| `/mission accept` | Apply a proposed rubric refinement and resume — see [Rubric refinement](#rubric-refinement) |
+| `/mission reject [reason]` | Decline the refinement; the mission ends with the verdict that was held back |
 
 You can have at most one `/mission` or `/goal` per chat session — they share an evaluator loop.
+
+### Rubric refinement
+
+When the evaluator is about to end a mission `blocked` or `failed` because the
+**rubric itself** is unreachable as written — it names an artifact the work has
+shown cannot exist, contradicts itself, or asks for something that was never
+part of the description — it may propose a replacement rubric instead of
+terminating. The mission pauses with `paused_reason=awaiting_refinement`, the
+coordinator relays the proposal, and the mission waits. No judge calls run
+while it waits.
+
+Three parties hold one power each, so a *pivot* stays distinguishable from
+*drift*:
+
+| Party | Holds | Cannot |
+|---|---|---|
+| Judge | authorship of the proposed rubric | apply it |
+| Coordinator | relay of the proposal to the user | author or apply it |
+| User | authority to apply | author it |
+
+`/mission accept` commits the rubric recorded in the `mission.refinement_proposed`
+event. It takes no rubric argument, so nothing the coordinator writes can change
+what is committed — the same guarantee as `merge_experiment` accepting no score.
+
+The mission's `description` is never amended — it is the standing intent — and
+`iteration` is not reset, so a pivot does not refill the allowance
+(`/mission budget` does that). A mission accepts at most **two** amendments;
+past that, `blocked` is `blocked`.
 
 ### Mission states
 
 | Status | Meaning |
 |---|---|
 | `active` | The judge is grading new evidence as it arrives |
-| `paused` | Evaluator suspended; workers continue. `/mission resume` reactivates. |
+| `paused` | Evaluator suspended; workers continue. `/mission resume` reactivates. A `paused_reason` of `awaiting_refinement` means it is waiting on `/mission accept` or `/mission reject` instead. |
 | `satisfied` | Terminal — rubric met |
 | `blocked` | Terminal — judge says the rubric needs external input the agent hasn't requested |
 | `failed` | Terminal — judge says the rubric is unreachable from where things stand |

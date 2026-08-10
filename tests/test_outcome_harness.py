@@ -509,6 +509,10 @@ def test_judge_prefers_structured_generation_when_outlines_available(
         "result": "satisfied",
         "explanation": "rubric met",
         "feedback": "",
+        # Always present, never populated on a `satisfied` verdict: only
+        # blocked/failed may carry a rubric refinement proposal.
+        "proposed_rubric": "",
+        "refinement_evidence": "",
     }
 
 
@@ -584,6 +588,10 @@ def test_judge_falls_back_to_reasoning_content_when_content_empty() -> None:
         "result": "satisfied",
         "explanation": "ok",
         "feedback": "",
+        # The fallback path validates through _MissionVerdict too, so it
+        # returns the same documented shape as the structured path.
+        "proposed_rubric": "",
+        "refinement_evidence": "",
     }
 
 
