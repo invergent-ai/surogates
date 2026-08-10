@@ -160,3 +160,163 @@ async def test_amendment_count_is_per_mission(
         {"mission_id": "00000000-0000-0000-0000-0000000000ff"},
     )
     assert await session_store.count_mission_amendments(chat_session.id, mid) == 1
+
+
+async def _created(session_factory, session_store, org_id, user_id, chat_session):
+    """A mission created through the real command handler, so the session
+    config carries active_mission_id the way production does."""
+    from surogates.missions.commands import handle_mission_create
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="ship the bundle",
+        rubric="Satisfied when dist/app.js exists.",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id,
+        agent_id="orchestrator", session_store=session_store,
+        session_factory=session_factory, mission_store=store,
+    )
+    return store, created.mission_id
+
+
+_PROPOSAL = {
+    "result": "blocked",
+    "explanation": "the rubric names dist/app.js; the build emits dist/bundle.js",
+    "feedback": "",
+    "proposed_rubric": "Satisfied when dist/bundle.js exists and tests pass.",
+    "refinement_evidence": "build task output tree contains only dist/bundle.js",
+}
+
+
+async def test_a_blocked_verdict_with_a_proposal_pauses_instead_of_terminating(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.db.models import Session as ORMSession
+    from surogates.missions.evaluator import apply_verdict
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await apply_verdict(
+        mission_id=mid, verdict=dict(_PROPOSAL),
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+
+    m = await store.get(mid)
+    assert m.status == "paused"
+    assert m.paused_reason == "awaiting_refinement"
+    assert m.rubric == "Satisfied when dist/app.js exists."  # not applied yet
+
+    async with session_factory() as db:
+        sess = await db.get(ORMSession, chat_session.id)
+        assert "active_mission_id" in (sess.config or {})
+
+    proposal = await session_store.latest_mission_proposal(chat_session.id, mid)
+    assert proposal["held_verdict"] == "blocked"
+    assert proposal["proposed_rubric"] == _PROPOSAL["proposed_rubric"]
+    assert proposal["old_rubric"] == "Satisfied when dist/app.js exists."
+
+
+async def test_a_blocked_verdict_without_a_proposal_still_terminates(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """The un-split branch is unchanged."""
+    from surogates.missions.evaluator import apply_verdict
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await apply_verdict(
+        mission_id=mid,
+        verdict={"result": "blocked", "explanation": "no access", "feedback": ""},
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+    assert (await store.get(mid)).status == "blocked"
+
+
+async def test_a_satisfied_verdict_ignores_a_proposal(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """Refining the criteria of a mission that just met them is the drift
+    case the whole gate exists to prevent."""
+    from surogates.missions.evaluator import apply_verdict
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await apply_verdict(
+        mission_id=mid,
+        verdict={**_PROPOSAL, "result": "satisfied"},
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+    assert (await store.get(mid)).status == "satisfied"
+
+
+async def test_a_proposal_identical_to_the_standing_rubric_is_not_raised(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """A no-op proposal would cost the user a round-trip to approve nothing."""
+    from surogates.missions.evaluator import apply_verdict
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await apply_verdict(
+        mission_id=mid,
+        verdict={**_PROPOSAL,
+                 "proposed_rubric": "Satisfied when dist/app.js exists."},
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+    assert (await store.get(mid)).status == "blocked"
+
+
+async def test_the_third_proposal_terminates(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    from surogates.missions.evaluator import apply_verdict
+    from surogates.session.events import EventType
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    for _ in range(2):
+        await session_store.emit_event(
+            chat_session.id, EventType.MISSION_AMENDED, {"mission_id": str(mid)},
+        )
+    await apply_verdict(
+        mission_id=mid, verdict=dict(_PROPOSAL),
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+    assert (await store.get(mid)).status == "blocked"
+
+
+async def test_a_paused_mission_fires_no_evaluator(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    """No judge calls burn while a proposal waits for the user."""
+    from surogates.missions.evaluator import apply_verdict, should_evaluate
+
+    store, mid = await _created(
+        session_factory, session_store, org_id, user_id, chat_session,
+    )
+    await apply_verdict(
+        mission_id=mid, verdict=dict(_PROPOSAL),
+        coordinator_session_id=chat_session.id,
+        session_store=session_store, mission_store=store,
+        trigger="completion_claim",
+    )
+    decision = await should_evaluate(
+        mission_id=mid, coordinator_last_response="[[mission-complete]]",
+        session_factory=session_factory, mission_store=store,
+        rate_limit_seconds=0,
+    )
+    assert decision.should is False
