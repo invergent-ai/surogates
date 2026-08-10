@@ -20,6 +20,7 @@ import {
   MessageSquareIcon,
   PaperclipIcon,
   PlusIcon,
+  ShrinkIcon,
   SparklesIcon,
   TerminalIcon,
   type LucideIcon,
@@ -36,13 +37,9 @@ import type {
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { splitComposerFiles } from "../../lib/split-composer-files";
 import {
-  ContextCacheUsage,
   ContextContentBody,
   ContextContentHeader,
   ContextIcon,
-  ContextInputUsage,
-  ContextOutputUsage,
-  ContextReasoningUsage,
   ContextValueProvider,
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
@@ -771,6 +768,22 @@ function ChatComposerInner({
     ? `${Math.min(100, Math.round((tokenUsage.totalTokens / tokenUsage.contextWindow) * 100))}%`
     : "0%";
 
+  // Input and output are the shape of every turn, so they are listed even at
+  // zero. Reasoning and cache are model-dependent — a zero row for a model
+  // that has neither is a line that says nothing.
+  const contextBreakdown = tokenUsage
+    ? [
+        { label: "Input", tokens: tokenUsage.inputTokens },
+        { label: "Output", tokens: tokenUsage.outputTokens },
+        ...(tokenUsage.reasoningTokens > 0
+          ? [{ label: "Reasoning", tokens: tokenUsage.reasoningTokens }]
+          : []),
+        ...(tokenUsage.cachedInputTokens > 0
+          ? [{ label: "Cache", tokens: tokenUsage.cachedInputTokens }]
+          : []),
+      ]
+    : [];
+
   // ── What the tools panel contains ──────────────────────────────────
   //
   // Attach, the pane toggles and the profile picker were four buttons in a
@@ -1074,46 +1087,35 @@ function ChatComposerInner({
                     <ContextContentHeader />
                     <ContextContentBody>
                       {tokenUsage.totalTokens > 0 ? (
-                        <>
-                          <ContextInputUsage>
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">Input</span>
-                              <span>{tokenUsage.inputTokens.toLocaleString()}</span>
-                            </div>
-                          </ContextInputUsage>
-                          <ContextOutputUsage>
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">Output</span>
-                              <span>{tokenUsage.outputTokens.toLocaleString()}</span>
-                            </div>
-                          </ContextOutputUsage>
-                          {tokenUsage.reasoningTokens > 0 && (
-                            <ContextReasoningUsage>
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="text-muted-foreground">Reasoning</span>
-                                <span>{tokenUsage.reasoningTokens.toLocaleString()}</span>
-                              </div>
-                            </ContextReasoningUsage>
-                          )}
-                          {tokenUsage.cachedInputTokens > 0 && (
-                            <ContextCacheUsage>
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="text-muted-foreground">Cache</span>
-                                <span>{tokenUsage.cachedInputTokens.toLocaleString()}</span>
-                              </div>
-                            </ContextCacheUsage>
-                          )}
-                        </>
+                        contextBreakdown.map(({ label, tokens }) => (
+                          <div
+                            key={label}
+                            className="flex items-center justify-between gap-4 text-xs"
+                          >
+                            <span className="text-muted-foreground">{label}</span>
+                            <span className="tabular-nums">
+                              {tokens.toLocaleString()}
+                            </span>
+                          </div>
+                        ))
                       ) : (
                         <p className="text-xs text-muted-foreground text-center py-1">Empty</p>
                       )}
                     </ContextContentBody>
                     {tokenUsage.totalTokens > 0 && (
-                      <div className="flex w-full items-center justify-end gap-3 bg-secondary p-2">
+                      // The action the panel exists for, so it gets the panel's
+                      // width rather than a filled block shoved into the corner
+                      // of a grey bar — that bar was a second surface inside a
+                      // small popover, squaring its own corners off against the
+                      // rounded ones around it. It keeps a rule of its own
+                      // because the sheet form has no divide-y, and the one
+                      // division worth drawing is between reading and acting.
+                      <div className="space-y-1.5 border-t border-border px-3 py-2.5">
                         <Button
                           type="button"
-                          size="xs"
-                          className="pointer-coarse:h-11 pointer-coarse:px-4 pointer-coarse:text-sm"
+                          size="sm"
+                          variant="outline"
+                          className="w-full"
                           onClick={() => {
                             // The sheet does not close itself on a plain
                             // button the way it does on a menu selection.
@@ -1121,8 +1123,12 @@ function ChatComposerInner({
                             onSend("/compress");
                           }}
                         >
+                          <ShrinkIcon />
                           Compress
                         </Button>
+                        <p className="text-center text-[11px] leading-snug text-muted-foreground">
+                          Sums up the thread to free the window
+                        </p>
                       </div>
                     )}
                   </ResponsivePanel>

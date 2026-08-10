@@ -8,6 +8,7 @@ import { createContext, useContext, useMemo } from "react";
 import { getUsage } from "tokenlens";
 
 const PERCENT_MAX = 100;
+const NEARLY_FULL = 0.9;
 const ICON_RADIUS = 10;
 const ICON_VIEWBOX = 24;
 const ICON_CENTER = 12;
@@ -126,19 +127,44 @@ export const ContextContentHeader = ({
     notation: "compact",
   }).format(maxTokens);
 
+  // A bar that looks the same at 30% as at 95% reports without warning. The
+  // last tenth of the window is where a turn starts losing its earlier
+  // history, so that is where the bar stops being decorative.
+  const nearlyFull = usedPercent >= NEARLY_FULL;
+
   return (
-    <div className={cn("w-full space-y-2 p-3", className)} {...props}>
+    <div className={cn("w-full space-y-2 px-3 py-2.5", className)} {...props}>
       {children ?? (
         <>
-          <div className="flex items-center justify-between gap-3 text-xs">
-            <p>{displayPct}</p>
-            <p className=" text-muted-foreground">
+          <div className="flex items-baseline justify-between gap-3">
+            <p
+              className={cn(
+                "text-sm font-medium tabular-nums",
+                nearlyFull && "text-destructive",
+              )}
+            >
+              {displayPct}
+            </p>
+            <p className="text-xs text-muted-foreground tabular-nums">
               {used} / {total}
             </p>
           </div>
-          <div className="space-y-2">
-            <Progress className="bg-muted" value={usedPercent * PERCENT_MAX} />
-          </div>
+          <Progress
+            className={cn(
+              // The primitive only clips its x-axis, which leaves the fill's
+              // square end poking out of the pill at both ends.
+              "h-1 overflow-hidden rounded-full bg-muted",
+              // Amber, not `bg-primary`: primary is the host app's colour, and
+              // the two hosts disagree — the agent web app is amber, Studio is
+              // near-black — so the same bar came out black beside a Send
+              // button the composer hardcodes amber. This is the composer's
+              // own accent, so it reads the same wherever it is embedded.
+              "[&>[data-slot=progress-indicator]]:bg-amber-500",
+              nearlyFull &&
+                "[&>[data-slot=progress-indicator]]:bg-destructive",
+            )}
+            value={usedPercent * PERCENT_MAX}
+          />
         </>
       )}
     </div>
@@ -152,7 +178,7 @@ export const ContextContentBody = ({
   className,
   ...props
 }: ContextContentBodyProps) => (
-  <div className={cn("w-full p-3", className)} {...props}>
+  <div className={cn("w-full space-y-1.5 px-3 py-2.5", className)} {...props}>
     {children}
   </div>
 );
