@@ -945,8 +945,19 @@ export const PromptInput = ({
         ref={formRef}
         {...props}
       >
-        <BrandBeam size="line" active={beamActive} strength={0.7} borderRadius={24}>
-          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
+        {/* No explicit borderRadius: the beam wraps this box in a rounded
+            clip, and any radius that does not match the box's own erases
+            its corners — a clip wider than the corner cuts the whole arc
+            away and leaves four straight edges that stop short. `rounded-3xl`
+            is theme-derived (`--radius * 2.2`), so no literal can track it;
+            the beam measures the child instead. */}
+        <BrandBeam size="line" active={beamActive} strength={0.7}>
+          {/* The radius overrides repeat InputGroup's own `has-data-[align=…]`
+              variants, not just the `has-[>[data-align=…]]` spelling: those are
+              distinct keys to tailwind-merge, so a mismatched pair leaves both
+              the base `rounded-none` and this `rounded-3xl` on the element and
+              stylesheet order — not this file — decides which one lands. */}
+          <InputGroup className="overflow-hidden rounded-3xl border border-input bg-white px-4 py-2 shadow-sm dark:bg-card dark:shadow-none dark:ring-1 dark:ring-white/5 has-[textarea]:rounded-3xl has-data-[align=block-end]:rounded-3xl has-data-[align=block-start]:rounded-3xl has-[>[data-align=block-end]]:rounded-3xl has-[>[data-align=block-start]]:rounded-3xl">
             {children}
           </InputGroup>
         </BrandBeam>

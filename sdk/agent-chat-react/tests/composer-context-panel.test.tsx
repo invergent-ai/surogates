@@ -121,6 +121,66 @@ describe("composer session context", () => {
     expect(document.body.textContent).not.toContain("Input");
   });
 
+  it("lists reasoning and cache only once they have run", async () => {
+    const dom = mount(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        isRunning={false}
+        tokenUsage={{ ...tokenUsage, reasoningTokens: 250 }}
+      />,
+    );
+    await act(async () => {
+      contextTrigger(dom).click();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).toContain("Reasoning");
+    expect(document.body.textContent).toContain("250");
+    // Cache stayed at zero, so it is a row that would say nothing.
+    expect(document.body.textContent).not.toContain("Cache");
+  });
+
+  it("turns the readout destructive in the last tenth of the window", async () => {
+    const dom = mount(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        isRunning={false}
+        tokenUsage={{ ...tokenUsage, inputTokens: 14000, totalTokens: 15000 }}
+      />,
+    );
+    await act(async () => {
+      contextTrigger(dom).click();
+      await Promise.resolve();
+    });
+    const panel = document.querySelector("[data-slot='popover-content']")!;
+    const percent = panel.querySelector("p")!;
+    expect(percent.textContent).toBe("93.8%");
+    expect(percent.className).toContain("text-destructive");
+    expect(panel.querySelector("[data-slot='progress']")?.className).toContain(
+      "[&>[data-slot=progress-indicator]]:bg-destructive",
+    );
+  });
+
+  it("keeps the readout unalarmed below that", async () => {
+    const dom = mount(
+      <ChatComposer
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        isRunning={false}
+        tokenUsage={tokenUsage}
+      />,
+    );
+    await act(async () => {
+      contextTrigger(dom).click();
+      await Promise.resolve();
+    });
+    const panel = document.querySelector("[data-slot='popover-content']")!;
+    expect(panel.querySelector("p")?.className).not.toContain(
+      "text-destructive",
+    );
+  });
+
   it("renders nothing without a known context window", () => {
     const dom = mount(
       <ChatComposer onSend={vi.fn()} onStop={vi.fn()} isRunning={false} />,

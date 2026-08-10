@@ -87,12 +87,46 @@ describe("Composer view-mode toggle", () => {
     expect(group).not.toBeNull();
     const buttons = group!.querySelectorAll("button");
     expect(buttons.length).toBe(2);
-    // The labels are icons now, so they live on aria-label rather than in
-    // the text — the accessible name is the only name these buttons have.
+    // The accessible name is the same at every width; the icon (phone) and
+    // the word (cursor) are two renderings of it, and both are in the DOM
+    // with only a media query deciding which one shows.
     expect(Array.from(buttons).map((b) => b.getAttribute("aria-label"))).toEqual([
       "Simple view",
       "Advanced view",
     ]);
+    expect(Array.from(buttons).map((b) => b.textContent?.trim())).toEqual([
+      "Simple",
+      "Advanced",
+    ]);
+    for (const button of buttons) {
+      const word = button.querySelector("span");
+      const icon = button.querySelector("svg");
+      expect(word?.className).toContain("hidden");
+      expect(word?.className).toContain("md:inline");
+      expect(icon?.getAttribute("class")).toContain("md:hidden");
+    }
+  });
+
+  it("keeps the segments pill-shaped — no squared inner edges", () => {
+    const dom = mount(
+      <ChatComposer
+        onSend={sendFn}
+        onStop={stopFn}
+        isRunning={false}
+        viewMode="simple"
+        onViewModeChange={vi.fn()}
+      />,
+    );
+    const group = dom.querySelector("[role='group'][aria-label='Chat view mode']")!;
+    // ButtonGroup squares off the inner edges of everything it holds, which
+    // leaves each segment outlined inside the track's own outline. A plain
+    // track keeps both halves round; nothing may reintroduce the group.
+    expect(group.getAttribute("data-slot")).not.toBe("button-group");
+    for (const button of group.querySelectorAll("button")) {
+      expect(button.className).toContain("rounded-full");
+      expect(button.className).not.toMatch(/rounded-[lr]-none/);
+      expect(button.className).toContain("border-0");
+    }
   });
 
   it("shows the current mode as aria-pressed", () => {

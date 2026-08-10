@@ -20,6 +20,7 @@ import {
   MessageSquareIcon,
   PaperclipIcon,
   PlusIcon,
+  ShrinkIcon,
   SparklesIcon,
   TerminalIcon,
   type LucideIcon,
@@ -36,18 +37,13 @@ import type {
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { splitComposerFiles } from "../../lib/split-composer-files";
 import {
-  ContextCacheUsage,
   ContextContentBody,
   ContextContentHeader,
   ContextIcon,
-  ContextInputUsage,
-  ContextOutputUsage,
-  ContextReasoningUsage,
   ContextValueProvider,
 } from "../ai-elements/context";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
-import { ButtonGroup } from "../ui/button-group";
 import {
   Item,
   ItemActions,
@@ -88,6 +84,22 @@ type SlashCommand = AgentChatSlashCommand;
 // only targets, and in a bottom sheet they are what the thumb lands on.
 const TOOLS_ITEM_CLASS =
   "gap-3 rounded-md px-3 py-2 pointer-coarse:min-h-11 pointer-coarse:text-[15px]";
+
+// The two halves of the view-mode switch, in the order they are shown.
+const VIEW_MODE_SEGMENTS = [
+  {
+    mode: "simple" as const,
+    label: "Simple",
+    icon: MessageSquareIcon,
+    tooltip: "Simple — just the conversation",
+  },
+  {
+    mode: "expert" as const,
+    label: "Advanced",
+    icon: ListTreeIcon,
+    tooltip: "Advanced — every step the agent took",
+  },
+];
 
 // ── Props ────────────────────────────────────────────────────────────
 
@@ -756,6 +768,22 @@ function ChatComposerInner({
     ? `${Math.min(100, Math.round((tokenUsage.totalTokens / tokenUsage.contextWindow) * 100))}%`
     : "0%";
 
+  // Input and output are the shape of every turn, so they are listed even at
+  // zero. Reasoning and cache are model-dependent — a zero row for a model
+  // that has neither is a line that says nothing.
+  const contextBreakdown = tokenUsage
+    ? [
+        { label: "Input", tokens: tokenUsage.inputTokens },
+        { label: "Output", tokens: tokenUsage.outputTokens },
+        ...(tokenUsage.reasoningTokens > 0
+          ? [{ label: "Reasoning", tokens: tokenUsage.reasoningTokens }]
+          : []),
+        ...(tokenUsage.cachedInputTokens > 0
+          ? [{ label: "Cache", tokens: tokenUsage.cachedInputTokens }]
+          : []),
+      ]
+    : [];
+
   // ── What the tools panel contains ──────────────────────────────────
   //
   // Attach, the pane toggles and the profile picker were four buttons in a
@@ -780,42 +808,49 @@ function ChatComposerInner({
   // awaiting-answer session with no panes has exactly nothing.
   const showToolsPanel = canAttach || showPaneToggles || canPickProfile;
 
+  // A segmented control, not two buttons that happen to touch: one track,
+  // two segments, only the selected one filled. The words are the label a
+  // cursor gets — they read at a glance and cost nothing at that width. A
+  // phone has no room for them beside Send, so there the icons stand in and
+  // the words move to the accessible name (which both widths carry anyway).
+  //
+  // Plain <div> rather than ButtonGroup: the group squares off the inner
+  // edges of every child, which fights the pill and leaves each segment
+  // outlined inside an outline.
   const viewModeToggle = onViewModeChange ? (
-    <ButtonGroup
+    <div
+      role="group"
       aria-label="Chat view mode"
-      className="overflow-hidden rounded-full border border-border bg-muted/40 p-0.5"
+      className="flex shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5"
     >
-      <PromptInputButton
-        aria-label="Simple view"
-        aria-pressed={viewMode === "simple"}
-        tooltip="Simple — just the conversation"
-        variant={viewMode === "simple" ? "secondary" : "ghost"}
-        onClick={() => onViewModeChange("simple")}
-        className={cn(
-          // 32px is a comfortable segment for a cursor and a miss for a
-          // thumb, so touch takes both halves to the 44px floor.
-          "size-8 rounded-full pointer-coarse:size-11",
-          viewMode === "simple" && "shadow-sm",
-        )}
-      >
-        <MessageSquareIcon className="size-[18px] pointer-coarse:size-5" />
-      </PromptInputButton>
-      <PromptInputButton
-        aria-label="Advanced view"
-        aria-pressed={viewMode === "expert"}
-        tooltip="Advanced — every step the agent took"
-        variant={viewMode === "expert" ? "secondary" : "ghost"}
-        onClick={() => onViewModeChange("expert")}
-        className={cn(
-          // 32px is a comfortable segment for a cursor and a miss for a
-          // thumb, so touch takes both halves to the 44px floor.
-          "size-8 rounded-full pointer-coarse:size-11",
-          viewMode === "expert" && "shadow-sm",
-        )}
-      >
-        <ListTreeIcon className="size-[18px] pointer-coarse:size-5" />
-      </PromptInputButton>
-    </ButtonGroup>
+      {VIEW_MODE_SEGMENTS.map(({ mode, label, icon: Icon, tooltip }) => {
+        const selected = viewMode === mode;
+        return (
+          <PromptInputButton
+            key={mode}
+            size="sm"
+            aria-label={`${label} view`}
+            aria-pressed={selected}
+            tooltip={tooltip}
+            variant="ghost"
+            onClick={() => onViewModeChange(mode)}
+            className={cn(
+              // Icon-width on a phone, word-width with a cursor; the coarse
+              // bump takes the segment to the 44px touch floor either way.
+              // Words, not the shouted uppercase the button base defaults to —
+              // this is a label on a switch, not a call to action.
+              "h-8 gap-1.5 rounded-full border-0 bg-transparent px-3.5 text-xs font-normal capitalize tracking-normal md:px-3 pointer-coarse:h-11 pointer-coarse:px-5",
+              selected
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+            )}
+          >
+            <Icon className="size-4 md:hidden" />
+            <span className="hidden md:inline">{label}</span>
+          </PromptInputButton>
+        );
+      })}
+    </div>
   ) : null;
 
   return (
@@ -1052,46 +1087,35 @@ function ChatComposerInner({
                     <ContextContentHeader />
                     <ContextContentBody>
                       {tokenUsage.totalTokens > 0 ? (
-                        <>
-                          <ContextInputUsage>
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">Input</span>
-                              <span>{tokenUsage.inputTokens.toLocaleString()}</span>
-                            </div>
-                          </ContextInputUsage>
-                          <ContextOutputUsage>
-                            <div className="flex items-center justify-between text-xs">
-                              <span className="text-muted-foreground">Output</span>
-                              <span>{tokenUsage.outputTokens.toLocaleString()}</span>
-                            </div>
-                          </ContextOutputUsage>
-                          {tokenUsage.reasoningTokens > 0 && (
-                            <ContextReasoningUsage>
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="text-muted-foreground">Reasoning</span>
-                                <span>{tokenUsage.reasoningTokens.toLocaleString()}</span>
-                              </div>
-                            </ContextReasoningUsage>
-                          )}
-                          {tokenUsage.cachedInputTokens > 0 && (
-                            <ContextCacheUsage>
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="text-muted-foreground">Cache</span>
-                                <span>{tokenUsage.cachedInputTokens.toLocaleString()}</span>
-                              </div>
-                            </ContextCacheUsage>
-                          )}
-                        </>
+                        contextBreakdown.map(({ label, tokens }) => (
+                          <div
+                            key={label}
+                            className="flex items-center justify-between gap-4 text-xs"
+                          >
+                            <span className="text-muted-foreground">{label}</span>
+                            <span className="tabular-nums">
+                              {tokens.toLocaleString()}
+                            </span>
+                          </div>
+                        ))
                       ) : (
                         <p className="text-xs text-muted-foreground text-center py-1">Empty</p>
                       )}
                     </ContextContentBody>
                     {tokenUsage.totalTokens > 0 && (
-                      <div className="flex w-full items-center justify-end gap-3 bg-secondary p-2">
+                      // The action the panel exists for, so it gets the panel's
+                      // width rather than a filled block shoved into the corner
+                      // of a grey bar — that bar was a second surface inside a
+                      // small popover, squaring its own corners off against the
+                      // rounded ones around it. It keeps a rule of its own
+                      // because the sheet form has no divide-y, and the one
+                      // division worth drawing is between reading and acting.
+                      <div className="space-y-1.5 border-t border-border px-3 py-2.5">
                         <Button
                           type="button"
-                          size="xs"
-                          className="pointer-coarse:h-11 pointer-coarse:px-4 pointer-coarse:text-sm"
+                          size="sm"
+                          variant="outline"
+                          className="w-full"
                           onClick={() => {
                             // The sheet does not close itself on a plain
                             // button the way it does on a menu selection.
@@ -1099,8 +1123,12 @@ function ChatComposerInner({
                             onSend("/compress");
                           }}
                         >
+                          <ShrinkIcon />
                           Compress
                         </Button>
+                        <p className="text-center text-[11px] leading-snug text-muted-foreground">
+                          Sums up the thread to free the window
+                        </p>
                       </div>
                     )}
                   </ResponsivePanel>
