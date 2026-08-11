@@ -58,7 +58,7 @@ async def test_text_path_unchanged_after_refactor(tmp_path: Path) -> None:
     src.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
     result_json = await _read_file_handler({"path": str(src)})
     result = json.loads(result_json)
-    assert result["content"] == "1|a = 1\n2|b = 2\n3|c = 3\n"
+    assert result["content"] == "a = 1\nb = 2\nc = 3\n"
     assert result["total_lines"] == 3
     assert result["lines_shown"] == 3
     assert result["truncated"] is False
@@ -324,11 +324,10 @@ async def test_pagination_via_offset_limit(
     )
     result = json.loads(result_json)
     assert "error" not in result, result
-    # Content is line-number-prefixed in the same format as _handle_text.
-    assert "50|line 50" in result["content"]
-    assert "54|line 54" in result["content"]
-    assert "55|line 55" not in result["content"]
+    # Content is emitted verbatim, in the same format as _handle_text.
+    assert result["content"] == "".join(f"line {i}\n" for i in range(50, 55))
     assert result["truncated"] is True
+    assert result["next_offset"] == 55
     assert result["offset"] == 50
     assert result["limit"] == 5
 

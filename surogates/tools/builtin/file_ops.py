@@ -474,20 +474,30 @@ def _is_image(path: str) -> bool:
 # ---------------------------------------------------------------------------
 # Linters by file extension — run syntax check after write/patch
 # ---------------------------------------------------------------------------
+# Only whole-file *syntax* checkers belong here.  A checker qualifies when
+# it is correct on a single file in isolation, needs no project config, and
+# returns fast.  Deliberately absent:
+#   .ts  -- `tsc --noEmit <file>` ignores the tsconfig `paths` map, so every
+#           aliased import reports a spurious "cannot find module" straight
+#           back into the model's context, and npx startup costs seconds.
+#   .go  -- `go vet` analyses packages; run on one file of a multi-file
+#           package it reports undefined symbols that are defined next door.
+#   .rs  -- `rustfmt --check` reports *formatting* drift, not errors.
+# Project-wide type checking is the agent's job via the terminal tool, where
+# the model chooses the command and reads the real output.
 LINTERS = {
     '.py': 'python -m py_compile {file} 2>&1',
     '.js': 'node --check {file} 2>&1',
-    '.ts': 'npx tsc --noEmit {file} 2>&1',
-    '.go': 'go vet {file} 2>&1',
-    '.rs': 'rustfmt --check {file} 2>&1',
 }
 
 
 def _check_lint(filepath: str) -> dict[str, Any] | None:
-    """Run syntax check on a file after editing.
+    """Run a syntax check on a file after editing.
 
-    Returns a dict with lint status, or None if no linter is available
-    for this file type.
+    Returns ``{"status": "ok"}`` or ``{"status": "error", "output": ...}``,
+    or ``None`` when no check ran -- unsupported extension, missing binary,
+    timeout, or crash.  Non-results are ``None`` rather than a "skipped"
+    dict so callers never have to filter them out of model-visible output.
     """
     ext = os.path.splitext(filepath)[1].lower()
     if ext not in LINTERS:
@@ -497,7 +507,7 @@ def _check_lint(filepath: str) -> dict[str, Any] | None:
     # Extract the base command (first word) and check availability
     base_cmd = linter_template.split()[0]
     if not shutil.which(base_cmd):
-        return {"status": "skipped", "message": f"{base_cmd} not available"}
+        return None
 
     resolved = str(Path(filepath).expanduser().resolve())
     cmd = linter_template.format(file=repr(resolved))
@@ -509,8 +519,6 @@ def _check_lint(filepath: str) -> dict[str, Any] | None:
             return {"status": "ok"}
         output = (result.stdout or "") + (result.stderr or "")
         return {"status": "error", "output": output.strip()}
-    except subprocess.TimeoutExpired:
-        return {"status": "skipped", "message": "lint timed out"}
     except Exception:
         return None
 
@@ -539,19 +547,13 @@ def _suggest_similar_files(path: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Read-size guard: cap the character count returned to the model.
-# We're model-agnostic so we can't count tokens; characters are a safe proxy.
-# 100K chars ≈ 25–35K tokens across typical tokenisers.  Files larger than
-# this in a single read are a context-window hazard — the model should use
-# offset+limit to read the relevant section.
-#
-# Configurable via config.yaml:  file_read_max_chars: 200000
+# Read-size guard: the character budget for a single read is
+# ``SUROGATES_TOOL_OUTPUT_MAX_BYTES`` (see ToolOutputSettings), read through
+# ``get_max_bytes()``.  We're model-agnostic so we can't count tokens;
+# characters are a safe proxy.  A window over budget is cut at a line
+# boundary and reports ``next_offset`` rather than failing -- see
+# ``_render_read_window``.
 # ---------------------------------------------------------------------------
-_DEFAULT_MAX_READ_CHARS = 100_000
-
-# If the total file size exceeds this AND the caller didn't specify a narrow
-# range (limit <= 200), we include a hint encouraging targeted reads.
-_LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
 
 # ---------------------------------------------------------------------------
 # Binary file extensions — imported from shared utils module.
@@ -839,18 +841,16 @@ def _tool_error(message: str) -> str:
 READ_FILE_SCHEMA = ToolSchema(
     name="read_file",
     description=(
-        "Read a file with line numbers and pagination. Use this instead of "
-        "cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. "
-        "Handles plain text plus .pdf (via liteparse/mupdf), Word "
+        "Read a file with pagination. Use this instead of cat/head/tail in "
+        "terminal. Handles plain text plus .pdf (via liteparse/mupdf), Word "
         "(.doc/.docx/.docm), Excel (.xls/.xlsx/.xlsm), PowerPoint "
         "(.ppt/.pptx/.pptm), OpenDocument (.odt/.ods/.odp), and .rtf — all "
         "parsed to text natively — and image files (described by a vision "
         "model). Do NOT pre-extract documents with subprocess tools or "
         "pip-install pypdf/python-docx/openpyxl yourself; just call "
-        "read_file. Suggests similar filenames if not found. Use offset "
-        "and limit for large files. Reads exceeding ~100K characters are "
-        "rejected; use offset and limit to read specific sections of "
-        "large files."
+        "read_file. Suggests similar filenames if not found. Long reads are "
+        "cut at a line boundary rather than rejected: when the response has "
+        "'truncated': true, resume from the returned 'next_offset'."
     ),
     parameters={
         "type": "object",
@@ -867,8 +867,8 @@ READ_FILE_SCHEMA = ToolSchema(
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of lines to read (default: 500, max: 2000)",
-                "default": 500,
+                "description": "Maximum number of lines to read (default: 2000, max: 2000)",
+                "default": 2000,
                 "maximum": 2000,
             },
         },
@@ -1184,6 +1184,43 @@ def _apply_line_window(
     return selected, total_lines, start_idx, end_idx, truncated
 
 
+def _render_read_window(
+    selected: list[str],
+    offset: int,
+    total_lines: int,
+) -> tuple[str, int, int | None]:
+    """Join *selected* into model-visible content within the char budget.
+
+    Returns ``(content, lines_rendered, next_offset)``, where ``next_offset``
+    is the 1-indexed line to resume from and ``None`` once the end of the
+    file has been shown.
+
+    Overflow drops whole trailing lines rather than failing the read.  An
+    error with no content costs a full round trip and teaches the model
+    nothing about where to look; content plus a resume offset lets it
+    continue immediately.  Lines are never split, so a window always ends on
+    a real line boundary -- except for the degenerate single-line-too-large
+    case, where a hard character cut is the only option.
+    """
+    max_chars = get_max_bytes()
+    content = "".join(selected)
+    rendered = len(selected)
+
+    if len(content) > max_chars:
+        budget = 0
+        rendered = 0
+        for line in selected:
+            if budget + len(line) > max_chars:
+                break
+            budget += len(line)
+            rendered += 1
+        rendered = max(rendered, 1)
+        content = "".join(selected[:rendered])[:max_chars]
+
+    next_offset = offset + rendered
+    return content, rendered, (next_offset if next_offset <= total_lines else None)
+
+
 async def _read_file_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -1260,14 +1297,14 @@ async def _handle_document(
 ) -> str:
     """Parse a PDF/docx/xlsx/pptx via liteparse and return its text.
 
-    Pagination matches ``_handle_text``: ``offset`` is 1-indexed,
-    ``limit`` caps the line count, and lines are emitted with
-    ``"{lineno}|{content}"`` prefixes.
+    Pagination matches ``_handle_text``: ``offset`` is 1-indexed and
+    ``limit`` caps the line count, with the window rendered verbatim by
+    ``_render_read_window``.
     """
     from surogates.tools.utils.document_cache import default_cache
 
     offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), get_max_lines())
+    limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
     if not resolved.exists():
         return json.dumps(
@@ -1292,44 +1329,34 @@ async def _handle_document(
         markdown += "\n"
     lines = markdown.splitlines(keepends=True)
 
-    selected, total_lines, _start, _end, truncated = _apply_line_window(
+    selected, total_lines, _start, _end, _truncated = _apply_line_window(
         lines, offset, limit,
     )
 
-    content = ""
-    for i, line in enumerate(selected, start=offset):
-        content += f"{i}|{line}"
-
-    content_len = len(content)
-    max_chars = get_max_bytes()
-    if content_len > max_chars:
-        return json.dumps({
-            "error": (
-                f"Read produced {content_len:,} characters which exceeds "
-                f"the safety limit ({max_chars:,} chars). "
-                "Use offset and limit to read a smaller range. "
-                f"The document has {total_lines} lines total."
-            ),
-            "path": path,
-            "total_lines": total_lines,
-        }, ensure_ascii=False)
+    content, lines_shown, next_offset = _render_read_window(
+        selected, offset, total_lines,
+    )
+    truncated = next_offset is not None
 
     logger.info(
         "event=document.parse path=%s ext=%s bytes_md=%d total_lines=%d "
         "lines_shown=%d truncated=%s",
         path, resolved.suffix.lower(), len(markdown), total_lines,
-        len(selected), truncated,
+        lines_shown, truncated,
     )
 
-    return json.dumps({
+    result_dict: dict[str, Any] = {
         "content": content,
         "path": path,
         "total_lines": total_lines,
-        "lines_shown": len(selected),
+        "lines_shown": lines_shown,
         "offset": offset,
         "limit": limit,
         "truncated": truncated,
-    }, ensure_ascii=False)
+    }
+    if next_offset is not None:
+        result_dict["next_offset"] = next_offset
+    return json.dumps(result_dict, ensure_ascii=False)
 
 
 async def _handle_text(
@@ -1346,7 +1373,7 @@ async def _handle_text(
     ``_apply_line_window``.
     """
     offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), get_max_lines())
+    limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
     task_id = kwargs.get("task_id", "default")
     resolved_str = str(resolved)
 
@@ -1423,56 +1450,31 @@ async def _handle_text(
     except (OSError, UnicodeDecodeError) as exc:
         return _tool_error(f"Failed to read file: {exc}")
 
-    selected, total_lines, _start_idx, _end_idx, truncated = _apply_line_window(
+    selected, total_lines, _start_idx, _end_idx, _truncated = _apply_line_window(
         lines, offset, limit,
     )
 
-    # Format with line numbers
-    content = ""
-    for i, line in enumerate(selected, start=offset):
-        content += f"{i}|{line}"
-
-    # ── Character-count guard ─────────────────────────────────────
-    # We're model-agnostic so we can't count tokens; characters are
-    # the best proxy we have.  If the read produced an unreasonable
-    # amount of content, reject it and tell the model to narrow down.
-    # Note: we check the formatted content (with line-number prefixes),
-    # not the raw file size, because that's what actually enters context.
-    content_len = len(content)
-    max_chars = get_max_bytes()
-    if content_len > max_chars:
-        return json.dumps({
-            "error": (
-                f"Read produced {content_len:,} characters which exceeds "
-                f"the safety limit ({max_chars:,} chars). "
-                "Use offset and limit to read a smaller range. "
-                f"The file has {total_lines} lines total."
-            ),
-            "path": path,
-            "total_lines": total_lines,
-            "file_size": file_size,
-        }, ensure_ascii=False)
+    content, lines_shown, next_offset = _render_read_window(
+        selected, offset, total_lines,
+    )
+    truncated = next_offset is not None
 
     result_dict = {
         "content": content,
         "path": path,
         "total_lines": total_lines,
-        "lines_shown": len(selected),
+        "lines_shown": lines_shown,
         "offset": offset,
         "limit": limit,
         "truncated": truncated,
         "file_size": file_size,
     }
 
-    # Large-file hint: if the file is big and the caller didn't ask
-    # for a narrow window, nudge toward targeted reads.
-    if (file_size and file_size > _LARGE_FILE_HINT_BYTES
-            and limit > 200
-            and truncated):
+    if next_offset is not None:
+        result_dict["next_offset"] = next_offset
         result_dict["_hint"] = (
-            f"This file is large ({file_size:,} bytes). "
-            "Consider reading only the section you need with offset and limit "
-            "to keep context usage efficient."
+            f"Showing lines {offset}-{offset + lines_shown - 1} of "
+            f"{total_lines}. Continue with offset={next_offset}."
         )
 
     # ── Track for consecutive-loop detection ──────────────────────
@@ -1681,7 +1683,7 @@ async def _patch_handler(
         if not result_dict.get("error"):
             for p in paths_to_check:
                 lint_result = _check_lint(resolved_paths[p])
-                if lint_result and lint_result.get("status") != "skipped":
+                if lint_result:
                     result_dict.setdefault("lint", {})[p] = lint_result
 
         # Refresh stored timestamps for all successfully-patched paths so

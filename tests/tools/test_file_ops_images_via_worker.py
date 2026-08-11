@@ -113,10 +113,10 @@ async def test_read_image_pagination_via_offset_limit(tmp_path: Path) -> None:
     assert "error" not in result, result
     # Header on line 1, blank on 2, body starts at line 3.
     # offset=5 → start at body line 3 ("line 3"), limit=3 → 3 lines.
-    assert "5|line 3" in result["content"]
-    assert "7|line 5" in result["content"]
-    assert "8|line 6" not in result["content"]
+    assert result["content"] == "line 3\nline 4\nline 5\n"
+    assert result["lines_shown"] == 3
     assert result["truncated"] is True
+    assert result["next_offset"] == 8
 
 
 @pytest.mark.asyncio
