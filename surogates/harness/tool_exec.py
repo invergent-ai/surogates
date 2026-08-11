@@ -317,6 +317,12 @@ PATH_SCOPED_TOOLS: frozenset[str] = frozenset({
     "file_write",
     "read_file",
     "write_file",
+    # ``patch`` in its default replace mode names one file in ``path``, so a
+    # batch of edits to distinct files is safe to run concurrently.  Its V4A
+    # mode carries the target paths inside the patch body instead, which
+    # ``paths_do_not_overlap`` cannot see -- that case falls back to
+    # sequential because an unresolvable path counts as an overlap.
+    "patch",
 })
 
 # Sandbox tools that are safe to run in parallel.  These execute as
@@ -662,6 +668,12 @@ def paths_do_not_overlap(tool_calls: list[dict[str, Any]]) -> bool:
 
     Two paths overlap if one is a prefix of the other (i.e. same file or
     parent-child directory relationship).
+
+    A call whose target path cannot be read from its arguments -- malformed
+    JSON, or a tool that carries paths somewhere else, like ``patch`` in V4A
+    mode -- is treated as overlapping everything.  Guessing "no overlap" for
+    a call whose target is unknown is how two concurrent writes to the same
+    file get past this check.
     """
     paths: list[str] = []
     for tc in tool_calls:
@@ -670,11 +682,14 @@ def paths_do_not_overlap(tool_calls: list[dict[str, Any]]) -> bool:
         try:
             args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
         except (json.JSONDecodeError, TypeError):
-            args = {}
+            return False
+        if not isinstance(args, dict):
+            return False
         # Common argument names for file paths.
         path = args.get("path") or args.get("file_path") or args.get("filename") or ""
-        if path:
-            paths.append(str(path))
+        if not path:
+            return False
+        paths.append(str(path))
 
     # Check pairwise overlap.
     for i in range(len(paths)):
