@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
+from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -1066,7 +1067,16 @@ class AgentHarness(
                 "wake step=load_events session=%s", session_id,
             )
             cursor = await self._store.get_harness_cursor(session_id)
-            all_events = await self._store.get_events(session_id)
+            # LLM_DELTA is excluded at the query: replay drops it anyway
+            # (see loop_context_replay) and nothing else in wake() reads it,
+            # but it is the only per-token event type -- fetching it makes
+            # the pre-first-token hydration cost grow with the square of the
+            # session length.  Every turn that emits deltas emits an
+            # LLM_REQUEST at a lower id, so the pending check below still
+            # sees mid-turn crash recovery work.
+            all_events = await self._store.get_events(
+                session_id, exclude_types=[EventType.LLM_DELTA],
+            )
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
@@ -3083,6 +3093,17 @@ class AgentHarness(
         # Route for either principal: user sessions (agent chat) and
         # service-account sessions (ops chats) both get the judge rescue.
         if session.user_id is None and session.service_account_id is None:
+            return None
+        # The rescue only pays for itself on a channel someone actually
+        # opens.  ``api`` carries a service_account_id and so passes the
+        # principal check above, but a third-party integration reads the
+        # response off the API — an inbox item it mints there is a row
+        # nothing ever clears, bought with up to three blocking main-model
+        # requests at the end of every turn.
+        if (
+            session.channel not in END_USER_CHANNELS
+            and session.channel != STUDIO_CHANNEL
+        ):
             return None
 
         decision = await self._judge_final_response_user_action(
