@@ -390,3 +390,53 @@ async def test_execute_tool_calls_blocks_consecutive_no_progress_by_default() ->
     blocked = json.loads(results[3]["content"])
     assert blocked["guardrail"]["code"] == "consecutive_no_progress_block"
     assert guardrails.halt_decision is not None
+
+
+def test_benign_nonzero_exit_is_not_a_failure() -> None:
+    """`rg` exiting 1 means "no matches", not a failed command.
+
+    The terminal tool labels those with ``exit_code_meaning``; counting them
+    as failures drives the repeated-failure warning at the model for a
+    command that worked.
+    """
+    from surogates.harness.tool_guardrails import classify_tool_failure
+
+    no_match = json.dumps({
+        "output": "",
+        "exit_code": 1,
+        "error": None,
+        "exit_code_meaning": "No matches found (not an error)",
+    })
+    assert classify_tool_failure("terminal", no_match) is False
+
+    real_failure = json.dumps({"output": "boom", "exit_code": 2, "error": None})
+    assert classify_tool_failure("terminal", real_failure) is True
+
+    ok = json.dumps({"output": "hi", "exit_code": 0, "error": None})
+    assert classify_tool_failure("terminal", ok) is False
+
+
+def test_successful_edit_clears_earlier_failures() -> None:
+    """run tests (fail) -> patch -> run tests must not warn on the 2nd run."""
+    guardrails = ToolGuardrails(ToolGuardrailConfig(exact_failure_warn_after=2))
+    args = {"command": "pytest -q"}
+    failure = json.dumps({"output": "1 failed", "exit_code": 1, "error": None})
+
+    first = guardrails.after_call("terminal", args, failure)
+    assert first.action == "allow"
+
+    guardrails.after_call("patch", {"path": "a.py"}, json.dumps({"ok": True}))
+
+    second = guardrails.after_call("terminal", args, failure)
+    assert second.action == "allow", second.message
+
+
+def test_repeated_failure_without_edit_still_warns() -> None:
+    guardrails = ToolGuardrails(ToolGuardrailConfig(exact_failure_warn_after=2))
+    args = {"command": "pytest -q"}
+    failure = json.dumps({"output": "1 failed", "exit_code": 1, "error": None})
+
+    guardrails.after_call("terminal", args, failure)
+    second = guardrails.after_call("terminal", args, failure)
+    assert second.action == "warn"
+    assert second.code == "repeated_exact_failure_warning"
