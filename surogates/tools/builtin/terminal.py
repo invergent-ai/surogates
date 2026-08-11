@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -377,18 +378,56 @@ def _build_child_env() -> dict[str, str]:
 # Output truncation
 # ---------------------------------------------------------------------------
 
+# Head/tail split of the character budget for over-long command output.
+# Weighted to the tail because that is where a command reports what it
+# concluded: the failing assertions, the stack trace, the summary line.  The
+# head is kept at all because a command that dies during startup says so
+# first, and that line is worth more than another page of test names.
+_TRUNCATE_HEAD_FRACTION = 0.2
+
+
+def _spill_full_output(output: str) -> str | None:
+    """Persist untruncated output so the model can go back for the middle.
+
+    Written to the local temp dir of whichever process ran the command --
+    the sandbox pod for sandboxed sessions -- which is the same filesystem
+    ``read_file`` and ``search_files`` resolve against, so the returned path
+    is directly usable.  Returns ``None`` if the spill fails; a failed spill
+    must never fail the command whose output it was trying to save.
+    """
+    try:
+        fd, path = tempfile.mkstemp(prefix="terminal-output-", suffix=".log")
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(output)
+        return path
+    except OSError:
+        logger.debug("Failed to spill full terminal output", exc_info=True)
+        return None
+
+
 def _truncate_output(output: str) -> str:
-    """Truncate output to MAX_OUTPUT_CHARS using 40/60 head/tail split."""
+    """Cap output at the configured budget, keeping the head and the tail.
+
+    The omitted middle is not lost: the full output is written to a file and
+    its path named in the notice, so recovering it costs one targeted read
+    instead of re-running the command.
+    """
     max_output_chars = get_max_bytes()
     if len(output) <= max_output_chars:
         return output
 
-    head_chars = int(max_output_chars * 0.4)
+    head_chars = int(max_output_chars * _TRUNCATE_HEAD_FRACTION)
     tail_chars = max_output_chars - head_chars
     omitted = len(output) - head_chars - tail_chars
+
+    full_path = _spill_full_output(output)
+    recovery = (
+        f" Full output: {full_path}" if full_path
+        else " Re-run with a narrower command to see the omitted section."
+    )
     truncated_notice = (
         f"\n\n... [OUTPUT TRUNCATED - {omitted} chars omitted "
-        f"out of {len(output)} total] ...\n\n"
+        f"out of {len(output)} total].{recovery} ...\n\n"
     )
     return output[:head_chars] + truncated_notice + output[-tail_chars:]
 

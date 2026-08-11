@@ -39,3 +39,42 @@ def test_terminal_truncation_uses_configured_byte_limit(monkeypatch) -> None:
     assert len(result) > 100
     assert "OUTPUT TRUNCATED" in result
     assert "50 chars omitted" in result
+
+
+def test_terminal_truncation_keeps_the_tail_and_spills_the_rest(
+    monkeypatch, tmp_path,
+) -> None:
+    """The end of a command's output is where it says what happened."""
+    from surogates.tools.builtin import terminal
+
+    monkeypatch.setenv("SUROGATES_TOOL_OUTPUT_MAX_BYTES", "100")
+    monkeypatch.setattr(terminal.tempfile, "tempdir", str(tmp_path))
+
+    output = "START" + ("x" * 500) + "ASSERTION FAILED"
+    result = terminal._truncate_output(output)
+
+    assert result.startswith("START")
+    assert result.endswith("ASSERTION FAILED")
+    # Tail gets the larger share of the budget.
+    head, _, tail = result.partition("...\n\n")
+    assert len(tail) > 100 * 0.5
+
+    spilled = [p for p in tmp_path.iterdir() if p.name.startswith("terminal-output-")]
+    assert len(spilled) == 1
+    assert spilled[0].read_text() == output
+    assert str(spilled[0]) in result
+
+
+def test_terminal_truncation_survives_a_failed_spill(monkeypatch) -> None:
+    from surogates.tools.builtin import terminal
+
+    monkeypatch.setenv("SUROGATES_TOOL_OUTPUT_MAX_BYTES", "100")
+
+    def boom(*a, **kw):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(terminal.tempfile, "mkstemp", boom)
+
+    result = terminal._truncate_output("x" * 500)
+    assert "OUTPUT TRUNCATED" in result
+    assert "Re-run with a narrower command" in result
