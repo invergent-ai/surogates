@@ -1032,9 +1032,29 @@ class SessionStore:
             event_id: int = row.id
 
             # Atomic counter update (raw SQL — ORM can't do col = col + 1).
+            #
+            # LLM_DELTA fires once per streamed token and increments no
+            # counter, so its only effect here is bumping ``updated_at`` on a
+            # single hot row -- hundreds of dead tuples and WAL records for
+            # one response, multiplied by every streaming session on the
+            # fleet.  ``updated_at`` is a liveness signal for the orphan
+            # sweeper, which uses a 60s threshold, so a bump every few
+            # seconds is as good as a bump per token: the guard makes the
+            # statement match no row and write nothing the rest of the time.
+            params: dict[str, Any] = {"id": session_id}
+            touch_guard = ""
+            if event_type == EventType.LLM_DELTA:
+                touch_guard = (
+                    " AND updated_at < now() - "
+                    "make_interval(secs => :touch_window)"
+                )
+                params["touch_window"] = _DELTA_TOUCH_THROTTLE_SECONDS
             await db.execute(
-                text(f"UPDATE sessions SET {counter_clause} WHERE id = :id"),  # noqa: S608
-                {"id": session_id},
+                text(  # noqa: S608
+                    f"UPDATE sessions SET {counter_clause} "
+                    f"WHERE id = :id{touch_guard}"
+                ),
+                params,
             )
 
             if inbox_row is not None and not suppress_for_viewer:
@@ -2219,6 +2239,12 @@ class SessionStore:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+#: How stale ``sessions.updated_at`` may get while a response streams.  Only
+#: has to stay well under the dispatcher's ``_ORPHAN_STALE_SECONDS`` (60s) so
+#: an actively-streaming session is never mistaken for an abandoned one.
+_DELTA_TOUCH_THROTTLE_SECONDS = 5
 
 
 def _build_counter_update_clause(event_type: EventType, data: dict) -> str:
