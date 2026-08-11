@@ -19,6 +19,6 @@ def test_warns_when_base_model_missing_from_metadata(caplog):
 def test_does_not_warn_for_known_base_model(caplog):
     caplog.set_level(logging.WARNING, logger="surogates.orchestrator.worker")
 
-    _warn_if_base_model_missing_from_metadata("gpt-5.5")
+    _warn_if_base_model_missing_from_metadata("claude-sonnet-5")
 
     assert caplog.text == ""

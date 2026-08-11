@@ -17,17 +17,17 @@ class TestGetModelInfo:
     """Lookup by exact ID and alias."""
 
     def test_returns_known_model_by_exact_id(self):
-        info = get_model_info("gpt-5.5")
+        info = get_model_info("openai/gpt-5.6-sol")
         assert info is not None
-        assert info.id == "gpt-5.5"
+        assert info.id == "openai/gpt-5.6-sol"
         assert info.context_window == 1_050_000
 
     def test_returns_known_model_by_alias(self):
         info = get_model_info("sonnet")
         assert info is not None
-        assert info.id == "claude-sonnet-4-6"
+        assert info.id == "anthropic/claude-sonnet-5"
         assert info.context_window == 1_000_000
-        assert info.max_output_tokens == 64_000
+        assert info.max_output_tokens == 128_000
         assert info.supports_vision is True
 
     def test_returns_none_for_unknown_model(self):
@@ -36,48 +36,53 @@ class TestGetModelInfo:
     def test_returns_claude_opus(self):
         info = get_model_info("claude-opus")
         assert info is not None
-        assert info.id == "claude-opus-4-7"
+        assert info.id == "anthropic/claude-opus-5"
         assert info.context_window == 1_000_000
         assert info.max_output_tokens == 128_000
         assert info.supports_vision is True
 
-    def test_returns_claude_haiku(self):
-        info = get_model_info("haiku")
-        assert info is not None
-        assert info.id == "claude-haiku-4-5"
-        assert info.context_window == 200_000
-        assert info.max_output_tokens == 64_000
-        assert info.supports_vision is True
+    def test_retired_generations_resolve_to_nothing(self):
+        """Retiring a model must retire its aliases with it -- a leftover
+        alias is worse than a miss, because it silently prices the wrong
+        model."""
+        for model_id in (
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-haiku-4-5",
+            "haiku",
+            "glm-5.1",
+            "z-ai/glm-5.1",
+            "kimi-k2.6",
+            "qwen3.7-max",
+            "gpt-5.4-nano",
+            "gpt-5.5",
+            "gpt-5.4-mini",
+            "minimax-m3",
+            "gemini-3-pro",
+        ):
+            assert get_model_info(model_id) is None, model_id
 
     def test_returns_deepseek_alias(self):
         info = get_model_info("deepseek")
         assert info is not None
         assert info.id == "deepseek/deepseek-v4-pro"
-        assert info.context_window == 1_000_000
-        assert info.max_output_tokens == 384_000
+        assert info.context_window == 1_048_576
+        assert info.max_output_tokens == 393_216
         assert info.supports_vision is False
 
         reasoner = get_model_info("deepseek-reasoner")
         assert reasoner is not None
-        assert reasoner.id == "deepseek/deepseek-v4-flash"
-        assert reasoner.context_window == 1_000_000
+        assert reasoner.id == "deepseek/deepseek-v4-flash-0731"
+        assert reasoner.context_window == 1_048_576
         assert reasoner.max_output_tokens == 384_000
         assert reasoner.supports_vision is False
 
-    def test_returns_glm_5_1_aliases_as_text_only(self):
-        for model_id in (
-            "glm-5.1",
-            "glm5.1",
-            "zai/glm-5.1",
-            "z-ai/glm-5.1",
-            "zai-org/GLM-5.1",
-        ):
+    def test_returns_qwen_max_by_alias(self):
+        for model_id in ("qwen3.8-max", "qwen/qwen3.8-max", "@preset/qwen-3-8-max"):
             info = get_model_info(model_id)
-            assert info is not None
-            assert info.id == "glm-5.1"
-            assert info.context_window == 202_752
-            assert info.max_output_tokens == 131_072
-            assert info.supports_vision is False
+            assert info is not None, model_id
+            assert info.id == "qwen/qwen3.8-max"
+            assert info.context_window == 1_000_000
 
 
 class TestModelCatalog:
@@ -85,16 +90,20 @@ class TestModelCatalog:
 
     def test_catalog_has_expected_models(self):
         expected = {
-            "gpt-5.5",
-            "gpt-5.4-mini",
-            "gpt-5.4-nano",
-            "claude-sonnet-4-6",
-            "claude-opus-4-7",
-            "claude-haiku-4-5",
+            "openai/gpt-5.6-luna",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-sol",
+            "anthropic/claude-sonnet-5",
+            "anthropic/claude-opus-5",
             "deepseek/deepseek-v4-pro",
-            "deepseek/deepseek-v4-flash",
-            "gemini-3-pro",
-            "gemini-3-flash",
+            "deepseek/deepseek-v4-flash-0731",
+            "google/gemini-3-flash-preview",
+            "google/gemini-3.5-flash",
+            "z-ai/glm-5.2",
+            "moonshotai/kimi-k3",
+            "qwen/qwen3.8-max",
+            "surogate",
+            "surogate-pro",
         }
         assert expected.issubset(set(MODEL_CATALOG.keys()))
 
@@ -141,13 +150,13 @@ class TestEstimateCost:
     """USD cost estimation."""
 
     def test_known_model_cost(self):
-        # gpt-5.4-nano: input=0.0002/1k, output=0.00125/1k
-        cost = estimate_cost("gpt-5.4-nano", input_tokens=1000, output_tokens=1000)
-        expected = 0.0002 + 0.00125
+        # gpt-5.6-terra: input=0.001/1k, output=0.006/1k
+        cost = estimate_cost("gpt-5.6-terra", input_tokens=1000, output_tokens=1000)
+        expected = 0.001 + 0.006
         assert abs(cost - expected) < 1e-9
 
     def test_zero_tokens(self):
-        cost = estimate_cost("gpt-5.4-nano", input_tokens=0, output_tokens=0)
+        cost = estimate_cost("gpt-5.6-terra", input_tokens=0, output_tokens=0)
         assert cost == 0.0
 
     def test_unknown_model_returns_zero(self):
@@ -155,38 +164,38 @@ class TestEstimateCost:
         assert cost == 0.0
 
     def test_large_token_counts(self):
-        cost = estimate_cost("gpt-5.4-nano", input_tokens=100_000, output_tokens=50_000)
-        # 100k * 0.0002/1k + 50k * 0.00125/1k = 0.02 + 0.0625 = 0.0825
-        assert abs(cost - 0.0825) < 1e-9
+        cost = estimate_cost("gpt-5.6-terra", input_tokens=100_000, output_tokens=50_000)
+        # 100k * 0.001/1k + 50k * 0.006/1k = 0.1 + 0.3 = 0.40
+        assert abs(cost - 0.40) < 1e-9
 
 
-class TestOpus48Cost:
-    """claude-opus-4-8 pricing + cache-read discount (the prod base model)."""
+class TestOpusCost:
+    """claude-opus-5 pricing + cache-read discount (the prod Pro tier)."""
 
-    def test_opus_4_8_in_catalog(self):
-        info = get_model_info("claude-opus-4-8")
+    def test_opus_in_catalog(self):
+        info = get_model_info("claude-opus-5")
         assert info is not None
-        assert info.id == "claude-opus-4-8"
-        # Opus 4.8 lists at $5 / $25 per 1M tokens.
+        assert info.id == "anthropic/claude-opus-5"
+        # Opus 5 lists at $5 / $25 per 1M tokens.
         assert info.input_cost_per_1k == 0.005
         assert info.output_cost_per_1k == 0.025
 
-    def test_opus_4_8_cost_is_nonzero(self):
+    def test_opus_cost_is_nonzero(self):
         # Regression: the model was missing from the catalog, so estimate_cost
         # returned 0.0 and sessions.estimated_cost_usd never accrued.
-        cost = estimate_cost("claude-opus-4-8", input_tokens=1000, output_tokens=1000)
+        cost = estimate_cost("claude-opus-5", input_tokens=1000, output_tokens=1000)
         assert cost == pytest.approx(0.005 + 0.025)
 
     def test_cache_read_defaults_to_no_discount(self):
         # Backward compatible: omitting cache_read_tokens matches the old 3-arg
         # behaviour (whole prompt billed at the input rate).
-        cost = estimate_cost("claude-opus-4-8", input_tokens=1000, output_tokens=0)
+        cost = estimate_cost("claude-opus-5", input_tokens=1000, output_tokens=0)
         assert cost == pytest.approx(0.005)
 
     def test_fully_cached_input_billed_at_cache_rate(self):
         # All input served from cache -> 10% of the input rate.
         cost = estimate_cost(
-            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            "claude-opus-5", input_tokens=1000, output_tokens=0,
             cache_read_tokens=1000,
         )
         assert cost == pytest.approx(0.005 * 0.1)
@@ -194,7 +203,7 @@ class TestOpus48Cost:
     def test_partial_cache_splits_rates(self):
         # 400 of 1000 input tokens cached: 600 @ full + 400 @ 10%.
         cost = estimate_cost(
-            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            "claude-opus-5", input_tokens=1000, output_tokens=0,
             cache_read_tokens=400,
         )
         expected = (600 / 1000) * 0.005 + (400 / 1000) * (0.005 * 0.1)
@@ -207,7 +216,7 @@ class TestOpus48Cost:
         # cached bucket never exceeds the prompt and uncached never goes
         # negative.
         cost = estimate_cost(
-            "claude-opus-4-8", input_tokens=1000, output_tokens=0,
+            "claude-opus-5", input_tokens=1000, output_tokens=0,
             cache_read_tokens=5000,
         )
         assert cost == pytest.approx(0.005 * 0.1)
@@ -239,20 +248,20 @@ class TestEstimateCallCost:
         from surogates.harness.model_metadata import estimate_call_cost
 
         cost, priced = estimate_call_cost(
-            model_id="surogate", usage_model="gpt-5.5",
+            model_id="surogate", usage_model="anthropic/claude-sonnet-5",
             input_tokens=1_000_000, output_tokens=10_000,
         )
-        assert priced == "gpt-5.5"
+        assert priced == "anthropic/claude-sonnet-5"
         assert cost > 0
 
     def test_falls_back_to_the_sentinel_when_usage_model_is_absent(self):
         from surogates.harness.model_metadata import estimate_call_cost
 
         cost, priced = estimate_call_cost(
-            model_id="gpt-5.5", usage_model=None,
+            model_id="openai/gpt-5.6-sol", usage_model=None,
             input_tokens=1_000, output_tokens=100,
         )
-        assert priced == "gpt-5.5"
+        assert priced == "openai/gpt-5.6-sol"
         assert cost > 0
 
     def test_reports_unpriced_when_no_source_has_a_rate(self):
@@ -335,3 +344,49 @@ class TestClaudeCatalogRates:
             cache_read_tokens=1_000_000,
         )
         assert cost == pytest.approx(0.20)  # all cached: $2/M * 0.1
+
+
+class TestCatalogIntegrity:
+    """Structural invariants that silently degrade lookups when broken."""
+
+    def test_every_alias_resolves_to_a_catalog_entry(self) -> None:
+        """A dangling alias resolves to None, and the caller then falls back
+        to a default context window and zero pricing -- no error, just a
+        mis-sized context and an unbilled session."""
+        from surogates.harness.model_metadata import MODEL_CATALOG, _ALIASES
+
+        dangling = {a: t for a, t in _ALIASES.items() if t not in MODEL_CATALOG}
+        assert not dangling, f"aliases pointing at missing entries: {dangling}"
+
+    def test_no_alias_shadows_a_catalog_key(self) -> None:
+        """get_model_info checks the catalog first, so such an alias is dead."""
+        from surogates.harness.model_metadata import MODEL_CATALOG, _ALIASES
+
+        shadowed = sorted(set(_ALIASES) & set(MODEL_CATALOG))
+        assert not shadowed, f"aliases shadowed by catalog keys: {shadowed}"
+
+    def test_entry_ids_match_their_catalog_key(self) -> None:
+        from surogates.harness.model_metadata import MODEL_CATALOG
+
+        mismatched = {k: v.id for k, v in MODEL_CATALOG.items() if v.id != k}
+        assert not mismatched, f"ModelInfo.id != catalog key: {mismatched}"
+
+    def test_configured_vision_model_is_priced(self) -> None:
+        """vision_llm_model is gemini-3.5-flash; without an entry every
+        vision call prices at zero."""
+        from surogates.harness.model_metadata import get_model_info
+
+        info = get_model_info("gemini-3.5-flash")
+        assert info is not None
+        assert info.input_cost_per_1k > 0
+        assert info.supports_vision is True
+
+    def test_tier_sentinels_carry_no_rate(self) -> None:
+        """Sentinels must stay unpriced so estimate_call_cost falls through
+        to the model that actually served the call."""
+        from surogates.harness.model_metadata import MODEL_CATALOG
+
+        for sentinel in ("surogate", "surogate-pro"):
+            info = MODEL_CATALOG[sentinel]
+            assert info.input_cost_per_1k == 0.0
+            assert info.output_cost_per_1k == 0.0
