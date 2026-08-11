@@ -164,6 +164,19 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.015,
         supports_vision=True,
     ),
+    # --- Thinking Machines --------------------------------------------------
+    # ``supports_vision`` is the only modality flag :class:`ModelInfo` has, so
+    # the audio input this model accepts (and the audio+video mimo-v2.5 below
+    # accepts) is not represented.  Noted rather than modelled because nothing
+    # routes either yet; add a flag when something does.
+    "thinkingmachines/inkling-small": ModelInfo(
+        id="thinkingmachines/inkling-small",
+        context_window=524_288,
+        max_output_tokens=262_144,
+        input_cost_per_1k=0.00045,
+        output_cost_per_1k=0.0012,
+        supports_vision=True,
+    ),
     # --- Alibaba -----------------------------------------------------------
     "qwen/qwen3.8-max": ModelInfo(
         id="qwen/qwen3.8-max",
@@ -172,6 +185,35 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         input_cost_per_1k=0.002,
         output_cost_per_1k=0.006,
         supports_vision=True,
+    ),
+    # --- Tencent ------------------------------------------------------------
+    "tencent/hy3": ModelInfo(
+        id="tencent/hy3",
+        context_window=262_144,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.000132,
+        output_cost_per_1k=0.000528,
+    ),
+    # --- Xiaomi -------------------------------------------------------------
+    "xiaomi/mimo-v2.5": ModelInfo(
+        id="xiaomi/mimo-v2.5",
+        context_window=1_050_000,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.00014,
+        output_cost_per_1k=0.00028,
+        supports_vision=True,
+    ),
+    # --- Poolside -----------------------------------------------------------
+    # The paid tier deliberately, not the ``:free`` one: free variants serve a
+    # quarter of the context (262k vs 1M) and a quarter of the output cap, and
+    # a zero rate is indistinguishable from an unpriced sentinel to
+    # ``_has_rate``, so usage would record as a pricing gap rather than a cost.
+    "poolside/laguna-s-2.1": ModelInfo(
+        id="poolside/laguna-s-2.1",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=9e-05,
+        output_cost_per_1k=0.00018,
     ),
     # --- Surogate tier sentinels ------------------------------------------
     # Sessions run under a tier sentinel rather than a concrete model id.
@@ -237,6 +279,18 @@ _ALIASES: dict[str, str] = {
     "glm-5.2": "z-ai/glm-5.2",
     "z-ai/glm-5.2-20260616": "z-ai/glm-5.2",
     "zai-org/GLM-5.2": "z-ai/glm-5.2",
+    "laguna-s-2.1": "poolside/laguna-s-2.1",
+    "poolside/laguna-s-2.1-20260720": "poolside/laguna-s-2.1",
+    "poolside/Laguna-S-2.1": "poolside/laguna-s-2.1",
+    "hy3": "tencent/hy3",
+    "tencent/hy3-20260706": "tencent/hy3",
+    "tencent/Hy3": "tencent/hy3",
+    "mimo-v2.5": "xiaomi/mimo-v2.5",
+    "xiaomi/mimo-v2.5-20260422": "xiaomi/mimo-v2.5",
+    "XiaomiMiMo/MiMo-V2.5": "xiaomi/mimo-v2.5",
+    "inkling-small": "thinkingmachines/inkling-small",
+    "thinkingmachines/inkling-small-20260730": "thinkingmachines/inkling-small",
+    "thinkingmachines/Inkling-Small": "thinkingmachines/inkling-small",
     "muse-glimmer-30b": "meta/muse-glimmer-30b",
     "meta/muse-glimmer-30b-20260810": "meta/muse-glimmer-30b",
     "meta-models/Muse-Glimmer-30B": "meta/muse-glimmer-30b",

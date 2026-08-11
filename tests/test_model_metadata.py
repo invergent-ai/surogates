@@ -101,6 +101,10 @@ class TestModelCatalog:
             "google/gemini-3.5-flash",
             "z-ai/glm-5.2",
             "moonshotai/kimi-k3",
+            "thinkingmachines/inkling-small",
+            "tencent/hy3",
+            "xiaomi/mimo-v2.5",
+            "poolside/laguna-s-2.1",
             "qwen/qwen3.8-max",
             "surogate",
             "surogate-pro",
@@ -380,6 +384,26 @@ class TestCatalogIntegrity:
         assert info is not None
         assert info.input_cost_per_1k > 0
         assert info.supports_vision is True
+
+    def test_no_free_variants(self) -> None:
+        """`:free` tiers serve a fraction of the paid context and output cap,
+        and a zero rate is indistinguishable from an unpriced sentinel to
+        `_has_rate`, so usage records as a pricing gap rather than a cost."""
+        from surogates.harness.model_metadata import MODEL_CATALOG, _ALIASES
+
+        free = [k for k in MODEL_CATALOG if k.endswith(":free")]
+        free += [a for a, t in _ALIASES.items() if t.endswith(":free")]
+        assert not free, f"free model variants present: {free}"
+
+    def test_only_sentinels_are_unpriced(self) -> None:
+        """Any other zero-rate entry silently records usage as unpriced."""
+        from surogates.harness.model_metadata import MODEL_CATALOG
+
+        unpriced = {
+            k for k, v in MODEL_CATALOG.items()
+            if v.input_cost_per_1k == 0.0 and v.output_cost_per_1k == 0.0
+        }
+        assert unpriced == {"surogate", "surogate-pro"}
 
     def test_tier_sentinels_carry_no_rate(self) -> None:
         """Sentinels must stay unpriced so estimate_call_cost falls through
