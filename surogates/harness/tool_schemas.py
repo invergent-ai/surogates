@@ -47,3 +47,51 @@ def filter_schemas_for_tenant(
         filtered.append(clone)
 
     return filtered
+
+
+# Tools whose backing resource is decidable from the agent's config. Shipping
+# them when the resource is absent is pure overhead: the model cannot use a KB
+# that is not attached or post to a channel that does not exist. Measured on
+# the GAIA agent, 21 of 45 shipped tools were never called across 270
+# sessions, costing ~5,825 tokens on every request.
+_KB_TOOLS: frozenset[str] = frozenset({
+    "kb_search_pages", "kb_list_pages", "kb_read_page",
+})
+_CHANNEL_TOOLS: frozenset[str] = frozenset({
+    "fetch_channel_messages", "fetch_channel_file", "mate_ambient_post",
+})
+_CRON_TOOLS: frozenset[str] = frozenset({
+    "cron_create", "cron_list", "cron_delete",
+})
+
+
+def drop_unusable_tools(
+    schemas: list[dict[str, Any]],
+    *,
+    has_kbs: bool,
+    has_channel: bool,
+    is_scheduled: bool,
+) -> list[dict[str, Any]]:
+    """Drop tools whose backing resource this agent does not have.
+
+    Deliberately conservative: only gates on facts already known from the
+    runtime config, never on usage history. A tool that is merely unused
+    stays, because "not called yet" is not "cannot be called" -- that
+    distinction is what makes this safe to apply to every agent rather
+    than to one benchmark workload.
+
+    Never returns an empty list: a request with no tools at all is worse
+    than an oversized one.
+    """
+    drop: set[str] = set()
+    if not has_kbs:
+        drop |= _KB_TOOLS
+    if not has_channel:
+        drop |= _CHANNEL_TOOLS
+    if not is_scheduled:
+        drop |= _CRON_TOOLS
+    if not drop:
+        return schemas
+
+    kept = [s for s in schemas if s["function"]["name"] not in drop]
+    return kept or schemas

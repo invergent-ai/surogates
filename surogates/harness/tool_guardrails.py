@@ -20,6 +20,13 @@ IDEMPOTENT_TOOL_NAMES = frozenset({
     "skill_view",
 })
 
+# Tools whose success means the workspace itself changed, so any earlier
+# command failure was measured against a file tree that no longer exists.
+# Deliberately excludes ``terminal``: a failing test run is a mutating call
+# by this file's broader definition, but it is not evidence that the code
+# under test changed.
+WORKSPACE_EDIT_TOOL_NAMES = frozenset({"write_file", "patch"})
+
 MUTATING_TOOL_NAMES = frozenset({
     "terminal",
     "execute_code",
@@ -177,7 +184,15 @@ def classify_tool_failure(tool_name: str, result: str | None) -> bool:
     parsed = _safe_json_loads(result)
     if tool_name == "terminal" and isinstance(parsed, dict):
         exit_code = parsed.get("exit_code")
-        return exit_code is not None and exit_code != 0
+        if exit_code is None or exit_code == 0:
+            return False
+        # The terminal tool sets ``exit_code_meaning`` when it recognises a
+        # non-zero exit as a normal result rather than a failure -- ``rg``
+        # finding nothing, ``diff`` seeing a difference, ``test`` evaluating
+        # false, ``git diff`` reporting changes.  Counting those as failures
+        # makes the repeated-failure guard tell the model to abandon
+        # commands that are working exactly as intended.
+        return not parsed.get("exit_code_meaning")
     if isinstance(parsed, dict):
         if parsed.get("error") or parsed.get("failed") is True:
             return True
@@ -403,6 +418,15 @@ class ToolGuardrails:
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
+
+        if tool_name in WORKSPACE_EDIT_TOOL_NAMES:
+            # A successful edit invalidates every earlier failure: the
+            # red-green loop is `run tests (fail) -> edit -> run tests`, and
+            # the second run has identical arguments, so without this the
+            # guardrail tells the model to "change strategy instead of
+            # retrying unchanged" when it changed exactly the right thing.
+            self._exact_failure_counts.clear()
+            self._same_tool_failure_counts.clear()
 
         if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)

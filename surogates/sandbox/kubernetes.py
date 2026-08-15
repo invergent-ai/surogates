@@ -21,6 +21,7 @@ import logging
 import os
 import secrets
 import socket
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,9 +63,20 @@ class _PodEntry:
     pod_ip: str = ""
     token: str = ""
     status: SandboxStatus = SandboxStatus.PENDING
+    # Monotonic timestamp of the last successful apiserver status read.
+    # Only meaningful while ``status`` is RUNNING -- see ``status()``.
+    status_checked_at: float = 0.0
     # SSH remote-access resources reaped alongside the pod.
     ssh_secret_name: str | None = None
     ssh_netpol_name: str | None = None
+
+
+#: How long a RUNNING pod status is trusted without re-reading it from the
+#: apiserver.  ``SandboxPool.ensure`` health-checks before *every* tool call,
+#: so without this each call pays an apiserver round trip to re-learn what it
+#: learned a moment ago.  A pod that dies inside the window surfaces as a
+#: failed executor request on the next call, which is already handled.
+_RUNNING_STATUS_TTL_SECONDS = 10.0
 
 
 class K8sSandbox:
@@ -317,11 +329,22 @@ class K8sSandbox:
         if entry is None:
             return SandboxStatus.TERMINATED
 
+        # A recently-confirmed RUNNING pod is trusted without another read.
+        # Only RUNNING is cached: every other status is transitional, and a
+        # caller asking about a PENDING pod is waiting for it to change.
+        if (
+            entry.status == SandboxStatus.RUNNING
+            and time.monotonic() - entry.status_checked_at
+            < _RUNNING_STATUS_TTL_SECONDS
+        ):
+            return entry.status
+
         api = await self._get_api()
         try:
             pod = await api.read_namespaced_pod(entry.pod_name, self._namespace)
             new_status = self._map_pod_status(pod)
             entry.status = new_status
+            entry.status_checked_at = time.monotonic()
             return new_status
         except ApiException as exc:
             if exc.status == 404:

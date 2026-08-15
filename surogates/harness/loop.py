@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
+from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -39,7 +40,7 @@ from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
 )
-from surogates.harness.prompt_cache import SystemPromptCache
+from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
 from surogates.harness.reasoning import (
     THINK_RE,
@@ -71,7 +72,11 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.harness.tool_schemas import filter_schemas_for_tenant
+from surogates.channels.memory_boundary import MANAGED_CHANNELS
+from surogates.harness.tool_schemas import (
+    drop_unusable_tools,
+    filter_schemas_for_tenant,
+)
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
 from surogates.session import LeaseNotHeldError
@@ -1066,7 +1071,16 @@ class AgentHarness(
                 "wake step=load_events session=%s", session_id,
             )
             cursor = await self._store.get_harness_cursor(session_id)
-            all_events = await self._store.get_events(session_id)
+            # LLM_DELTA is excluded at the query: replay drops it anyway
+            # (see loop_context_replay) and nothing else in wake() reads it,
+            # but it is the only per-token event type -- fetching it makes
+            # the pre-first-token hydration cost grow with the square of the
+            # session length.  Every turn that emits deltas emits an
+            # LLM_REQUEST at a lower id, so the pending check below still
+            # sees mid-turn crash recovery work.
+            all_events = await self._store.get_events(
+                session_id, exclude_types=[EventType.LLM_DELTA],
+            )
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
@@ -1684,6 +1698,22 @@ class AgentHarness(
                 self._tools.get_schemas(names=tool_filter),
                 has_agents=self._prompt.has_agents,
             )
+            # Drop tools whose backing resource this agent does not have.
+            # Schemas ship on every request, so an unusable one is paid for
+            # on every turn of every session.
+            tool_schemas = drop_unusable_tools(
+                tool_schemas,
+                # Default to "has it" when the attribute is absent: an
+                # unknown resource must never cause a tool to vanish.
+                has_kbs=getattr(self._prompt, "has_kbs", True),
+                has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
+                is_scheduled=bool(
+                    (getattr(session, "config", None) or {}).get(
+                        "scheduled_session_id")
+                    or (getattr(session, "config", None) or {}).get(
+                        "scheduled_dynamic_loop")
+                ),
+            )
 
             # Build the message list: system → prefill → memory → conversation.
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
@@ -1746,6 +1776,13 @@ class AgentHarness(
             }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
+
+            # Mark the static prefix (tools + system) cacheable. Without
+            # this every turn re-pays the full prefix at input rate --
+            # measured at ~21.5k tokens per call with cache_read_tokens
+            # sitting at 0. Applied after `tools` is set so the breakpoint
+            # covers the schemas, which are the larger half.
+            mark_prefix_cacheable(create_kwargs, model_id)
 
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their
@@ -3083,6 +3120,17 @@ class AgentHarness(
         # Route for either principal: user sessions (agent chat) and
         # service-account sessions (ops chats) both get the judge rescue.
         if session.user_id is None and session.service_account_id is None:
+            return None
+        # The rescue only pays for itself on a channel someone actually
+        # opens.  ``api`` carries a service_account_id and so passes the
+        # principal check above, but a third-party integration reads the
+        # response off the API — an inbox item it mints there is a row
+        # nothing ever clears, bought with up to three blocking main-model
+        # requests at the end of every turn.
+        if (
+            session.channel not in END_USER_CHANNELS
+            and session.channel != STUDIO_CHANNEL
+        ):
             return None
 
         decision = await self._judge_final_response_user_action(

@@ -26,14 +26,50 @@ _CACHE_BREAKPOINT_COUNT: int = 3
 # ---------------------------------------------------------------------------
 
 
+# Platform tier sentinels. The harness sends these as the model id while the
+# proxy resolves them to Claude, so gating on "claude" in the id left caching
+# off for every platform session -- the same sentinel-vs-resolved-model bug
+# that kept estimated_cost_usd at zero.
+_CACHEABLE_SENTINELS = frozenset({"surogate", "surogate-pro"})
+
+
 def is_cacheable_model(model_id: str, base_url: str | None = None) -> bool:
     """Check if the model supports Anthropic prompt caching."""
     model_lower = model_id.lower()
+    if model_lower in _CACHEABLE_SENTINELS:
+        return True
     if "claude" in model_lower:
         return True
     if base_url and "anthropic" in base_url.lower():
         return True
     return False
+
+
+def mark_prefix_cacheable(create_kwargs: dict, model_id: str) -> None:
+    """Put a cache breakpoint on the system block, in place.
+
+    Anthropic caches in ``tools -> system -> messages`` order, so one
+    breakpoint on system covers the tool schemas too -- which is where the
+    bulk sits (measured: 51.6k chars of tools against 33k of system).
+
+    The OpenAI-compatible wire format carries the marker inside a content
+    part, so a plain string system prompt is promoted to a one-element list.
+    No-ops when the model cannot cache, when there is no system message, or
+    when the marker is already present.
+    """
+    if not is_cacheable_model(model_id):
+        return
+    for msg in create_kwargs.get("messages", []):
+        if msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = [{
+                "type": "text",
+                "text": content,
+                "cache_control": {"type": "ephemeral"},
+            }]
+        return
 
 
 # ---------------------------------------------------------------------------

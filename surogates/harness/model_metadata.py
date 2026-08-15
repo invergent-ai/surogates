@@ -35,181 +35,192 @@ class ModelInfo:
 # Catalog
 # ---------------------------------------------------------------------------
 
+# Keys are OpenRouter model ids -- the reference identity for every model we
+# price.  OpenRouter publishes context window, max output, per-token pricing
+# and modality for all of them in one place, so these numbers can be
+# re-derived from ``GET https://openrouter.ai/api/v1/models`` instead of being
+# hand-maintained per provider.  HuggingFace repo ids, gateway (yunwu) ids,
+# dated release slugs and bare short names are all ALIASES onto these keys.
 MODEL_CATALOG: dict[str, ModelInfo] = {
-    # --- OpenAI -----------------------------------------------------------
-    "gpt-5.5": ModelInfo(
-        id="gpt-5.5",
+    # --- OpenAI ------------------------------------------------------------
+    # The 5.6 line is three price/capability points on one 1.05M window;
+    # OpenRouter also carries ``-pro`` and ``:batch`` variants of each, which
+    # we do not route to.
+    "openai/gpt-5.6-luna": ModelInfo(
+        id="openai/gpt-5.6-luna",
+        context_window=1_050_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.0001,
+        output_cost_per_1k=0.0006,
+        supports_vision=True,
+    ),
+    "openai/gpt-5.6-terra": ModelInfo(
+        id="openai/gpt-5.6-terra",
+        context_window=1_050_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.006,
+        supports_vision=True,
+    ),
+    "openai/gpt-5.6-sol": ModelInfo(
+        id="openai/gpt-5.6-sol",
         context_window=1_050_000,
         max_output_tokens=128_000,
         input_cost_per_1k=0.005,
         output_cost_per_1k=0.03,
         supports_vision=True,
     ),
-    "gpt-5.4-mini": ModelInfo(
-        id="gpt-5.4-mini",
-        context_window=400_000,
-        max_output_tokens=128_000,
-        input_cost_per_1k=0.00075,
-        output_cost_per_1k=0.0045,
-        supports_vision=True,
-    ),
-    "gpt-5.4-nano": ModelInfo(
-        id="gpt-5.4-nano",
-        context_window=400_000,
-        max_output_tokens=128_000,
-        input_cost_per_1k=0.0002,
-        output_cost_per_1k=0.00125,
-        supports_vision=True,
-    ),
-    # --- Anthropic --------------------------------------------------------
-    "claude-sonnet-4-6": ModelInfo(
-        id="claude-sonnet-4-6",
+    # --- Anthropic ---------------------------------------------------------
+    "anthropic/claude-sonnet-5": ModelInfo(
+        id="anthropic/claude-sonnet-5",
         context_window=1_000_000,
-        max_output_tokens=64_000,
-        input_cost_per_1k=0.003,
-        output_cost_per_1k=0.015,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.01,
         supports_vision=True,
     ),
-    "claude-opus-4-8": ModelInfo(
-        id="claude-opus-4-8",
+    "anthropic/claude-opus-5": ModelInfo(
+        id="anthropic/claude-opus-5",
         context_window=1_000_000,
         max_output_tokens=128_000,
         input_cost_per_1k=0.005,
         output_cost_per_1k=0.025,
         supports_vision=True,
     ),
-    "claude-opus-4-7": ModelInfo(
-        id="claude-opus-4-7",
-        context_window=1_000_000,
-        max_output_tokens=128_000,
-        input_cost_per_1k=0.005,
-        output_cost_per_1k=0.025,
-        supports_vision=True,
-    ),
-    "claude-haiku-4-5": ModelInfo(
-        id="claude-haiku-4-5",
-        context_window=200_000,
-        max_output_tokens=64_000,
-        input_cost_per_1k=0.001,
-        output_cost_per_1k=0.005,
-        supports_vision=True,
-    ),
-    # --- DeepSeek ---------------------------------------------------------
+    # --- DeepSeek ----------------------------------------------------------
     "deepseek/deepseek-v4-pro": ModelInfo(
         id="deepseek/deepseek-v4-pro",
-        context_window=1_000_000,
-        max_output_tokens=384_000,
-        input_cost_per_1k=0.000435,
-        output_cost_per_1k=0.00087,
-        supports_vision=False,
-    ),
-    "deepseek/deepseek-v4-flash": ModelInfo(
-        id="deepseek/deepseek-v4-flash",
-        context_window=1_000_000,
-        max_output_tokens=384_000,
-        input_cost_per_1k=0.00014,
-        output_cost_per_1k=0.00028,
-        supports_vision=False,
-    ),
-    # --- Moonshot AI -------------------------------------------------------
-    "moonshotai/Kimi-K2.6": ModelInfo(
-        id="moonshotai/Kimi-K2.6",
-        context_window=262_144,
-        max_output_tokens=32_768,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
-        supports_vision=True,
-    ),
-    # --- Google -----------------------------------------------------------
-    "gemini-3-pro": ModelInfo(
-        id="gemini-3-pro",
         context_window=1_048_576,
-        max_output_tokens=65_536,
-        input_cost_per_1k=0.002,
-        output_cost_per_1k=0.012,
-        supports_vision=True,
+        max_output_tokens=393_216,
+        input_cost_per_1k=0.00063168,
+        output_cost_per_1k=0.00126336,
     ),
-    "gemini-3-flash": ModelInfo(
-        id="gemini-3-flash",
+    # The dated -0731 build is the current Flash release; the undated
+    # ``deepseek/deepseek-v4-flash`` is the older 0423 one and is kept only
+    # as an alias, so callers naming either get the current rates.
+    "deepseek/deepseek-v4-flash-0731": ModelInfo(
+        id="deepseek/deepseek-v4-flash-0731",
+        context_window=1_048_576,
+        max_output_tokens=384_000,
+        input_cost_per_1k=8e-05,
+        output_cost_per_1k=0.00018,
+    ),
+    # --- Google ------------------------------------------------------------
+    "google/gemini-3-flash-preview": ModelInfo(
+        id="google/gemini-3-flash-preview",
         context_window=1_048_576,
         max_output_tokens=65_536,
         input_cost_per_1k=0.0005,
         output_cost_per_1k=0.003,
         supports_vision=True,
     ),
-    # --- Z.AI --------------------------------------------------------------
-    "glm-5.1": ModelInfo(
-        id="glm-5.1",
-        context_window=202_752,
-        max_output_tokens=131_072,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
-        supports_vision=False,
-    ),
-    "glm-5.2": ModelInfo(
-        id="glm-5.2",
-        context_window=1_000_000,
-        max_output_tokens=131_072,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
-        supports_vision=False,
-    ),
-    "mimo-v2.5-pro": ModelInfo(
-        id="mimo-v2.5-pro",
+    "google/gemini-3.5-flash": ModelInfo(
+        id="google/gemini-3.5-flash",
         context_window=1_048_576,
-        max_output_tokens=131_072,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
-        supports_vision=False,
-    ),
-    "qwen-3-7-max": ModelInfo(
-        id="qwen-3-7-max",
-        context_window=900000,
         max_output_tokens=65_536,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
-        supports_vision=False,
+        input_cost_per_1k=0.0015,
+        output_cost_per_1k=0.009,
+        supports_vision=True,
     ),
-    "minimax-m3": ModelInfo(
-        id="minimax-m3",
+    # --- Z.AI --------------------------------------------------------------
+    "z-ai/glm-5.2": ModelInfo(
+        id="z-ai/glm-5.2",
+        context_window=1_048_576,
+        max_output_tokens=262_144,
+        input_cost_per_1k=0.00076,
+        output_cost_per_1k=0.00242,
+    ),
+    # --- Meta ---------------------------------------------------------------
+    # Output cap is a local default: OpenRouter publishes no
+    # ``max_completion_tokens`` for this model (see the Moonshot note below).
+    "meta/muse-spark-1.2": ModelInfo(
+        id="meta/muse-spark-1.2",
         context_window=1_048_576,
         max_output_tokens=131_072,
-        input_cost_per_1k=0.0,
-        output_cost_per_1k=0.0,
+        input_cost_per_1k=0.00125,
+        output_cost_per_1k=0.00425,
         supports_vision=True,
     ),
-    # --- Anthropic (via the yunwu gateway) ---
-    # Rates from yunwu's public /api/pricing for the `default` group:
-    # price per 1M = model_ratio * group_ratio * $2, output = input *
-    # completion_ratio. sonnet-5 is ratio 1, opus-5 ratio 2.5, both with
-    # completion_ratio 5 and cache_ratio 0.1 (which matches
-    # _CACHE_READ_DISCOUNT). These are gateway rates, NOT Anthropic list
-    # prices -- re-derive from /api/pricing if the gateway or group changes.
-    # The tier sentinels below deliberately carry no rate; cost is priced
-    # against whichever of these actually served the call.
-    # Both are 1M context / 128k max output -- 1M is the default, with no
-    # smaller variant and no beta header required.
-    #
-    # NOTE: sonnet-5's $2/$10 is INTRODUCTORY pricing that ends 2026-08-31,
-    # after which list is $3/$15 per MTok. Re-derive from /api/pricing then.
-    # opus-5 at $5/$25 matches Anthropic list, so the gateway is at parity.
-    "claude-sonnet-5": ModelInfo(
-        id="claude-sonnet-5",
+    # Note the much smaller 128k window -- the only model here that is not
+    # 1M-class, so context sizing differs materially from its siblings.
+    "meta/muse-glimmer-30b": ModelInfo(
+        id="meta/muse-glimmer-30b",
+        context_window=131_072,
+        max_output_tokens=32_768,
+        input_cost_per_1k=0.00035,
+        output_cost_per_1k=0.0015,
+        supports_vision=True,
+    ),
+    # --- Moonshot ----------------------------------------------------------
+    # OpenRouter publishes no ``max_completion_tokens`` for this model, so the
+    # output cap below is a conservative local default rather than an upstream
+    # figure -- it bounds what we request, so erring low costs a continuation
+    # at worst, while a fabricated high value would get rejected at the API.
+    "moonshotai/kimi-k3": ModelInfo(
+        id="moonshotai/kimi-k3",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.003,
+        output_cost_per_1k=0.015,
+        supports_vision=True,
+    ),
+    # --- Thinking Machines --------------------------------------------------
+    # ``supports_vision`` is the only modality flag :class:`ModelInfo` has, so
+    # the audio input this model accepts (and the audio+video mimo-v2.5 below
+    # accepts) is not represented.  Noted rather than modelled because nothing
+    # routes either yet; add a flag when something does.
+    "thinkingmachines/inkling-small": ModelInfo(
+        id="thinkingmachines/inkling-small",
+        context_window=524_288,
+        max_output_tokens=262_144,
+        input_cost_per_1k=0.00045,
+        output_cost_per_1k=0.0012,
+        supports_vision=True,
+    ),
+    # --- Alibaba -----------------------------------------------------------
+    "qwen/qwen3.8-max": ModelInfo(
+        id="qwen/qwen3.8-max",
         context_window=1_000_000,
-        max_output_tokens=128_000,
+        max_output_tokens=131_072,
         input_cost_per_1k=0.002,
-        output_cost_per_1k=0.010,
+        output_cost_per_1k=0.006,
         supports_vision=True,
     ),
-    "claude-opus-5": ModelInfo(
-        id="claude-opus-5",
-        context_window=1_000_000,
+    # --- Tencent ------------------------------------------------------------
+    "tencent/hy3": ModelInfo(
+        id="tencent/hy3",
+        context_window=262_144,
         max_output_tokens=128_000,
-        input_cost_per_1k=0.005,
-        output_cost_per_1k=0.025,
+        input_cost_per_1k=0.000132,
+        output_cost_per_1k=0.000528,
+    ),
+    # --- Xiaomi -------------------------------------------------------------
+    "xiaomi/mimo-v2.5": ModelInfo(
+        id="xiaomi/mimo-v2.5",
+        context_window=1_050_000,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.00014,
+        output_cost_per_1k=0.00028,
         supports_vision=True,
     ),
-    # --- Surogate -----------------------
+    # --- Poolside -----------------------------------------------------------
+    # The paid tier deliberately, not the ``:free`` one: free variants serve a
+    # quarter of the context (262k vs 1M) and a quarter of the output cap, and
+    # a zero rate is indistinguishable from an unpriced sentinel to
+    # ``_has_rate``, so usage would record as a pricing gap rather than a cost.
+    "poolside/laguna-s-2.1": ModelInfo(
+        id="poolside/laguna-s-2.1",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=9e-05,
+        output_cost_per_1k=0.00018,
+    ),
+    # --- Surogate tier sentinels ------------------------------------------
+    # Sessions run under a tier sentinel rather than a concrete model id.
+    # They are in the catalog so the compressor can size their context, and
+    # they deliberately carry NO rate: ``estimate_call_cost`` falls through
+    # to the model the gateway reports as having actually served the call.
+    # Pricing them here would bill every session at the wrong rate.
     "surogate": ModelInfo(
         id="surogate",
         context_window=262_144,
@@ -218,9 +229,6 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
-    # The Pro tier is a distinct sentinel, so it needs its own entry —
-    # without one the compressor falls back to a default window for
-    # every Pro session and mis-sizes the context.
     "surogate-pro": ModelInfo(
         id="surogate-pro",
         context_window=262_144,
@@ -231,41 +239,79 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
     ),
 }
 
-# Build alias lookup: allow matching by short prefix or common alias.
+# Alias -> canonical OpenRouter id.
+#
+# Four shapes: the bare model name, the dated release slug OpenRouter reports
+# as ``canonical_slug``, the HuggingFace repo id for open-weight models, and
+# the gateway/preset ids our own config uses (``claude-sonnet-5``,
+# ``@preset/...``).  Every value MUST be a key of MODEL_CATALOG -- an alias
+# pointing at a missing entry resolves to ``None`` and the caller silently
+# falls back to a default context window and zero pricing, with no error
+# anywhere.  ``test_model_metadata`` pins the invariant so retiring a model
+# can never leave its aliases behind pointing at nothing.
 _ALIASES: dict[str, str] = {
-    "gpt-4.1": "gpt-5.5",
-    "gpt-5.5-2026-04-23": "gpt-5.5",
-    "gpt-4.1-mini": "gpt-5.4-mini",
-    "gpt-5.4-mini-2026-03-17": "gpt-5.4-mini",
-    "gpt-4.1-nano": "gpt-5.4-nano",
-    "gpt-5.4-nano-2026-03-17": "gpt-5.4-nano",
-    "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-7",
-    "claude-haiku": "claude-haiku-4-5",
-    "sonnet": "claude-sonnet-4-6",
-    "claude-sonnet-4-20250514": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-7",
-    "claude-opus-4-20250514": "claude-opus-4-7",
-    "haiku": "claude-haiku-4-5",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+    "gpt-5.6-luna": "openai/gpt-5.6-luna",
+    "openai/gpt-5.6-luna-20260709": "openai/gpt-5.6-luna",
+    "gpt-5.6-terra": "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-terra-20260709": "openai/gpt-5.6-terra",
+    "gpt-5.6-sol": "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-sol-20260709": "openai/gpt-5.6-sol",
+    "claude-sonnet-5": "anthropic/claude-sonnet-5",
+    "anthropic/claude-sonnet-5-20260630": "anthropic/claude-sonnet-5",
+    "claude-opus-5": "anthropic/claude-opus-5",
+    "anthropic/claude-opus-5-20260723": "anthropic/claude-opus-5",
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-pro-20260423": "deepseek/deepseek-v4-pro",
+    "deepseek-ai/DeepSeek-V4-Pro": "deepseek/deepseek-v4-pro",
+    "deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-flash-20260731": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek/deepseek-v4-flash-0731",
+    # Undated Flash ids point at the current release rather than the older
+    # 0423 build they originally named.
+    "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-flash-20260423": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-ai/DeepSeek-V4-Flash": "deepseek/deepseek-v4-flash-0731",
+    "gemini-3-flash-preview": "google/gemini-3-flash-preview",
+    "google/gemini-3-flash-preview-20251217": "google/gemini-3-flash-preview",
+    "gemini-3.5-flash": "google/gemini-3.5-flash",
+    "google/gemini-3.5-flash-20260519": "google/gemini-3.5-flash",
+    "glm-5.2": "z-ai/glm-5.2",
+    "z-ai/glm-5.2-20260616": "z-ai/glm-5.2",
+    "zai-org/GLM-5.2": "z-ai/glm-5.2",
+    "laguna-s-2.1": "poolside/laguna-s-2.1",
+    "poolside/laguna-s-2.1-20260720": "poolside/laguna-s-2.1",
+    "poolside/Laguna-S-2.1": "poolside/laguna-s-2.1",
+    "hy3": "tencent/hy3",
+    "tencent/hy3-20260706": "tencent/hy3",
+    "tencent/Hy3": "tencent/hy3",
+    "mimo-v2.5": "xiaomi/mimo-v2.5",
+    "xiaomi/mimo-v2.5-20260422": "xiaomi/mimo-v2.5",
+    "XiaomiMiMo/MiMo-V2.5": "xiaomi/mimo-v2.5",
+    "inkling-small": "thinkingmachines/inkling-small",
+    "thinkingmachines/inkling-small-20260730": "thinkingmachines/inkling-small",
+    "thinkingmachines/Inkling-Small": "thinkingmachines/inkling-small",
+    "muse-glimmer-30b": "meta/muse-glimmer-30b",
+    "meta/muse-glimmer-30b-20260810": "meta/muse-glimmer-30b",
+    "meta-models/Muse-Glimmer-30B": "meta/muse-glimmer-30b",
+    "muse-spark-1.2": "meta/muse-spark-1.2",
+    "meta/muse-spark-1.2-20260805": "meta/muse-spark-1.2",
+    "kimi-k3": "moonshotai/kimi-k3",
+    "moonshotai/kimi-k3-20260715": "moonshotai/kimi-k3",
+    "moonshotai/Kimi-K3": "moonshotai/kimi-k3",
+    "qwen3.8-max": "qwen/qwen3.8-max",
+    "qwen/qwen3.8-max-20260803": "qwen/qwen3.8-max",
+    # Short names and gateway ids used by our own config and by callers.
+    "sonnet": "anthropic/claude-sonnet-5",
+    "claude-sonnet": "anthropic/claude-sonnet-5",
+    "opus": "anthropic/claude-opus-5",
+    "claude-opus": "anthropic/claude-opus-5",
     "deepseek": "deepseek/deepseek-v4-pro",
     "deepseek-chat": "deepseek/deepseek-v4-pro",
-    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-    "deepseek-reasoner": "deepseek/deepseek-v4-flash",
-    "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
-    "moonshotai/kimi-k2.6": "moonshotai/Kimi-K2.6",
-    "kimi-k2.6": "moonshotai/Kimi-K2.6",
-    "Kimi-K2.6": "moonshotai/Kimi-K2.6",
-    "glm5.1": "glm-5.1",
-    "zai/glm-5.1": "glm-5.1",
-    "z-ai/glm-5.1": "glm-5.1",
-    "zai-org/GLM-5.1": "glm-5.1",
-    "@preset/glm-5-2": "glm-5.2",
-    "@preset/qwen-3-7-max": "qwen-3-7-max",
-    "qwen3.7-max": "qwen-3-7-max",
-    "xiaomi/mimo-v2.5-pro": "mimo-v2.5-pro",
-    "minimax/minimax-m3": "minimax-m3",
-    "z-ai/glm-5.2": "glm-5.2",
+    "deepseek-reasoner": "deepseek/deepseek-v4-flash-0731",
+    "gemini-3-flash": "google/gemini-3-flash-preview",
+    "@preset/glm-5-2": "z-ai/glm-5.2",
+    "@preset/qwen-3-8-max": "qwen/qwen3.8-max",
 }
 
 

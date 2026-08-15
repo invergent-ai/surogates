@@ -133,8 +133,31 @@ class TestCoerceValue:
         assert result is True
 
     def test_unknown_type_unchanged(self) -> None:
+        result = _coerce_value("data", "widget")
+        assert result == "data"
+
+    def test_non_json_string_for_array_unchanged(self) -> None:
         result = _coerce_value("data", "array")
         assert result == "data"
+
+    def test_json_string_parsed_for_array(self) -> None:
+        result = _coerce_value('[{"old": "a", "new": "b"}]', "array")
+        assert result == [{"old": "a", "new": "b"}]
+
+    def test_json_string_parsed_for_object(self) -> None:
+        result = _coerce_value('{"k": 1}', "object")
+        assert result == {"k": 1}
+
+    def test_json_shape_mismatch_unchanged(self) -> None:
+        # Declared array, but the payload decodes to an object -- keep the
+        # string so the tool reports a real shape error rather than us
+        # silently handing it the wrong type.
+        result = _coerce_value('{"k": 1}', "array")
+        assert result == '{"k": 1}'
+
+    def test_malformed_json_unchanged(self) -> None:
+        result = _coerce_value('[{"old": ', "array")
+        assert result == '[{"old": '
 
 
 # ---------------------------------------------------------------------------

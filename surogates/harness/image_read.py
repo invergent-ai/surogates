@@ -100,12 +100,12 @@ async def handle_image_read(
     # Import lazily — file_ops pulls in the whole tool registry.
     from surogates.tools.builtin.file_ops import (
         _apply_line_window,
-        get_max_bytes,
+        _render_read_window,
         get_max_lines,
     )
 
     offset = max(arguments.get("offset", 1), 1)
-    limit = min(arguments.get("limit", 500), get_max_lines())
+    limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
     cache_disabled = os.environ.get(_CACHE_DISABLED_ENV) == "1"
     key = None if cache_disabled else _build_key(path, kwargs)
@@ -149,37 +149,29 @@ async def handle_image_read(
     markdown = f"# Image: {filename}\n\n{analysis}\n"
     lines = markdown.splitlines(keepends=True)
 
-    selected, total_lines, _start, _end, truncated = _apply_line_window(
+    selected, total_lines, _start, _end, _truncated = _apply_line_window(
         lines, offset, limit,
     )
 
-    content = ""
-    for i, line in enumerate(selected, start=offset):
-        content += f"{i}|{line}"
-
-    content_len = len(content)
-    max_chars = get_max_bytes()
-    if content_len > max_chars:
-        return json.dumps({
-            "error": (
-                f"Image analysis produced {content_len:,} characters which "
-                f"exceeds the safety limit ({max_chars:,} chars). Use "
-                "offset and limit to read a smaller range."
-            ),
-            "path": path,
-        }, ensure_ascii=False)
+    content, lines_shown, next_offset = _render_read_window(
+        selected, offset, total_lines,
+    )
+    truncated = next_offset is not None
 
     logger.info(
         "event=image.analyze path=%s bytes=%d cached=%s",
         path, len(analysis), cached_hit,
     )
 
-    return json.dumps({
+    result: dict[str, Any] = {
         "content": content,
         "path": path,
         "total_lines": total_lines,
-        "lines_shown": len(selected),
+        "lines_shown": lines_shown,
         "offset": offset,
         "limit": limit,
         "truncated": truncated,
-    }, ensure_ascii=False)
+    }
+    if next_offset is not None:
+        result["next_offset"] = next_offset
+    return json.dumps(result, ensure_ascii=False)

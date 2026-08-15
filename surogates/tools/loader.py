@@ -120,7 +120,7 @@ class SkillDef:
     requires_tools: list[str] | None = None  # show only when these tools ARE available
     trigger: str | None = None  # trigger description
     # Expert-specific fields (None/default for regular skills).
-    expert_model: str | None = None  # model name (e.g. "claude-sonnet-4-6")
+    expert_model: str | None = None  # model name (e.g. "anthropic/claude-sonnet-5")
     expert_endpoint: str | None = None  # OpenAI-compatible inference URL
     expert_adapter: str | None = None  # LoRA adapter path in tenant storage
     expert_max_iterations: int = 10  # iteration budget for expert mini-loop

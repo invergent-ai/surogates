@@ -1,12 +1,14 @@
 """Tool argument type coercion.
 
-LLMs frequently return numbers as strings (``"42"`` instead of ``42``) and
-booleans as strings (``"true"`` instead of ``true``).  This coerces values
-to match the tool's JSON Schema type declarations.
+LLMs frequently return numbers as strings (``"42"`` instead of ``42``),
+booleans as strings (``"true"`` instead of ``true``), and structured
+arguments double-encoded (``"[{...}]"`` where the schema wants an array).
+This coerces values to match the tool's JSON Schema type declarations.
 """
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -60,7 +62,30 @@ def _coerce_value(value: str, expected_type: str | list[str]) -> Any:
         return _coerce_number(value, integer_only=(expected_type == "integer"))
     if expected_type == "boolean":
         return _coerce_boolean(value)
+    if expected_type in ("array", "object"):
+        return _coerce_json(value, expected_type)
     return value
+
+
+def _coerce_json(value: str, expected_type: str) -> Any:
+    """Parse a JSON-encoded array/object argument.
+
+    Models routinely serialise structured arguments twice, sending
+    ``"edits": "[{\\"old\\": ...}]"`` where the schema declares an array.
+    Rejecting that costs a full round trip; parsing it costs nothing.  The
+    parsed value is only accepted when it actually has the declared shape,
+    so a genuine string never gets rewritten into something else.
+    """
+    stripped = value.strip()
+    opener = "[" if expected_type == "array" else "{"
+    if not stripped.startswith(opener):
+        return value
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, RecursionError):
+        return value
+    wanted = list if expected_type == "array" else dict
+    return parsed if isinstance(parsed, wanted) else value
 
 
 def _coerce_number(value: str, integer_only: bool = False) -> Any:

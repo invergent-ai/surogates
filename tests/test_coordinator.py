@@ -827,3 +827,57 @@ class TestCoordinatorPrompt:
 
         prompt = builder.build()
         assert "spawn_worker" not in prompt
+
+
+class TestPatchBatchParallel:
+    """`patch` edits to distinct files run concurrently; ambiguous ones don't."""
+
+    def test_disjoint_patches_parallelize(self) -> None:
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "1"},
+            {"function": {"name": "patch", "arguments": '{"path": "/b.py"}'}, "id": "2"},
+        ]
+        assert should_parallelize(tool_calls) is True
+
+    def test_same_file_patches_stay_sequential(self) -> None:
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "1"},
+            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "2"},
+        ]
+        assert should_parallelize(tool_calls) is False
+
+    def test_v4a_patches_stay_sequential(self) -> None:
+        """V4A mode hides its targets inside the patch body, so we cannot
+        prove two calls are disjoint -- they must not race."""
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {
+                "function": {
+                    "name": "patch",
+                    "arguments": '{"mode": "patch", "patch": "*** Begin Patch"}',
+                },
+                "id": "1",
+            },
+            {
+                "function": {
+                    "name": "patch",
+                    "arguments": '{"mode": "patch", "patch": "*** Begin Patch"}',
+                },
+                "id": "2",
+            },
+        ]
+        assert should_parallelize(tool_calls) is False
+
+    def test_malformed_arguments_stay_sequential(self) -> None:
+        from surogates.harness.tool_exec import should_parallelize
+
+        tool_calls = [
+            {"function": {"name": "patch", "arguments": "{not json"}, "id": "1"},
+            {"function": {"name": "write_file", "arguments": '{"path": "/b.py"}'}, "id": "2"},
+        ]
+        assert should_parallelize(tool_calls) is False
