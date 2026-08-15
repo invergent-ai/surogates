@@ -40,7 +40,7 @@ from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
 )
-from surogates.harness.prompt_cache import SystemPromptCache
+from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
 from surogates.harness.reasoning import (
     THINK_RE,
@@ -72,7 +72,11 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.harness.tool_schemas import filter_schemas_for_tenant
+from surogates.channels.memory_boundary import MANAGED_CHANNELS
+from surogates.harness.tool_schemas import (
+    drop_unusable_tools,
+    filter_schemas_for_tenant,
+)
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
 from surogates.session import LeaseNotHeldError
@@ -1694,6 +1698,22 @@ class AgentHarness(
                 self._tools.get_schemas(names=tool_filter),
                 has_agents=self._prompt.has_agents,
             )
+            # Drop tools whose backing resource this agent does not have.
+            # Schemas ship on every request, so an unusable one is paid for
+            # on every turn of every session.
+            tool_schemas = drop_unusable_tools(
+                tool_schemas,
+                # Default to "has it" when the attribute is absent: an
+                # unknown resource must never cause a tool to vanish.
+                has_kbs=getattr(self._prompt, "has_kbs", True),
+                has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
+                is_scheduled=bool(
+                    (getattr(session, "config", None) or {}).get(
+                        "scheduled_session_id")
+                    or (getattr(session, "config", None) or {}).get(
+                        "scheduled_dynamic_loop")
+                ),
+            )
 
             # Build the message list: system → prefill → memory → conversation.
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
@@ -1756,6 +1776,13 @@ class AgentHarness(
             }
             if tool_schemas:
                 create_kwargs["tools"] = tool_schemas
+
+            # Mark the static prefix (tools + system) cacheable. Without
+            # this every turn re-pays the full prefix at input rate --
+            # measured at ~21.5k tokens per call with cache_read_tokens
+            # sitting at 0. Applied after `tools` is set so the breakpoint
+            # covers the schemas, which are the larger half.
+            mark_prefix_cacheable(create_kwargs, model_id)
 
             # Create a streaming tool executor when eligible.  The executor
             # starts executing concurrency-safe (read-only) tools as their

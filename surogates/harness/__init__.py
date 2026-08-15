@@ -61,6 +61,7 @@ from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.prompt_cache import (
     SystemPromptCache,
     apply_cache_control,
+    mark_prefix_cacheable,
     build_cache_extra_body,
     is_cacheable_model,
 )
@@ -138,6 +139,7 @@ __all__ = [
     "SubdirectoryHintTracker",
     "SystemPromptCache",
     "apply_cache_control",
+    "mark_prefix_cacheable",
     "build_cache_extra_body",
     "call_llm_non_streaming",
     "call_llm_streaming",

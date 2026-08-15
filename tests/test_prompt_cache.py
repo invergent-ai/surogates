@@ -196,3 +196,71 @@ class TestSystemPromptCache:
         cache.invalidate(sid1)
         assert cache.get(sid1) is None
         assert cache.get(sid2) == "prompt-2"
+
+
+# ---------------------------------------------------------------------------
+# Prefix caching on the outgoing payload
+# ---------------------------------------------------------------------------
+
+
+class TestMarkPrefixCacheable:
+    """The static prefix (tools + system) is ~85% of every request.
+
+    Measured: 51.6k chars of tool schemas + 33k of system prompt, re-sent
+    every turn with cache_read_tokens = 0. A breakpoint on the system block
+    caches tools+system, since Anthropic caches in tools -> system ->
+    messages order.
+    """
+
+    def _payload(self):
+        return {
+            "model": "surogate",
+            "messages": [
+                {"role": "system", "content": "S" * 100},
+                {"role": "user", "content": "hello"},
+            ],
+            "tools": [{"type": "function", "function": {"name": "t"}}],
+        }
+
+    def test_system_block_gets_a_cache_breakpoint(self):
+        from surogates.harness.prompt_cache import mark_prefix_cacheable
+
+        p = self._payload()
+        mark_prefix_cacheable(p, "surogate")
+        sys_msg = p["messages"][0]
+        assert isinstance(sys_msg["content"], list)
+        assert sys_msg["content"][0]["cache_control"] == {"type": "ephemeral"}
+        assert sys_msg["content"][0]["text"] == "S" * 100
+
+    def test_tier_sentinels_are_cacheable(self):
+        # The sentinel is what the harness sends; it resolves to Claude.
+        # Gating on "claude" in the model id left caching off for every
+        # platform session -- the same sentinel bug as cost attribution.
+        from surogates.harness.prompt_cache import is_cacheable_model
+
+        assert is_cacheable_model("surogate")
+        assert is_cacheable_model("surogate-pro")
+        assert is_cacheable_model("claude-sonnet-5")
+
+    def test_non_anthropic_model_is_left_alone(self):
+        from surogates.harness.prompt_cache import mark_prefix_cacheable
+
+        p = self._payload()
+        p["model"] = "gpt-5.5"
+        mark_prefix_cacheable(p, "gpt-5.5")
+        assert p["messages"][0]["content"] == "S" * 100  # untouched str
+
+    def test_is_idempotent(self):
+        from surogates.harness.prompt_cache import mark_prefix_cacheable
+
+        p = self._payload()
+        mark_prefix_cacheable(p, "surogate")
+        mark_prefix_cacheable(p, "surogate")
+        assert len(p["messages"][0]["content"]) == 1
+
+    def test_no_system_message_is_a_noop(self):
+        from surogates.harness.prompt_cache import mark_prefix_cacheable
+
+        p = {"model": "surogate", "messages": [{"role": "user", "content": "x"}]}
+        mark_prefix_cacheable(p, "surogate")  # must not raise
+        assert p["messages"][0]["content"] == "x"

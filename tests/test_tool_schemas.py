@@ -146,3 +146,80 @@ def test_tool_registry_exports_sanitized_schema_without_mutating_entry() -> None
     assert registry.get("problem_tool").schema.parameters is raw_parameters
     assert "oneOf" in raw_parameters
     assert raw_parameters["required"] == ["path", "ghost"]
+
+
+# ---------------------------------------------------------------------------
+# Dropping tools the agent's config makes unusable
+# ---------------------------------------------------------------------------
+
+
+class TestDropUnusableTools:
+    """Schemas ship on every request, so unusable ones are pure overhead.
+
+    Measured on the GAIA agent: 21 of 45 shipped tools were never called
+    once across 270 sessions, costing ~5,825 tokens per call. Most were
+    not merely unused but *unusable* -- no KB attached, no channel, no
+    memory objects -- which is decidable from config rather than guessed
+    from history.
+    """
+
+    def _schemas(self, *names):
+        return [
+            {"type": "function", "function": {"name": n, "parameters": {}}}
+            for n in names
+        ]
+
+    def test_kb_tools_dropped_when_no_kb_attached(self):
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        out = drop_unusable_tools(
+            self._schemas("kb_search_pages", "kb_read_page", "web_search"),
+            has_kbs=False, has_channel=False, is_scheduled=False,
+        )
+        assert [s["function"]["name"] for s in out] == ["web_search"]
+
+    def test_kb_tools_kept_when_a_kb_is_attached(self):
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        out = drop_unusable_tools(
+            self._schemas("kb_search_pages", "web_search"),
+            has_kbs=True, has_channel=False, is_scheduled=False,
+        )
+        assert len(out) == 2
+
+    def test_channel_tools_dropped_without_a_channel(self):
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        out = drop_unusable_tools(
+            self._schemas("fetch_channel_messages", "fetch_channel_file", "terminal"),
+            has_kbs=False, has_channel=False, is_scheduled=False,
+        )
+        assert [s["function"]["name"] for s in out] == ["terminal"]
+
+    def test_cron_tools_dropped_for_a_non_scheduled_agent(self):
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        out = drop_unusable_tools(
+            self._schemas("cron_create", "cron_list", "cron_delete", "terminal"),
+            has_kbs=False, has_channel=False, is_scheduled=False,
+        )
+        assert [s["function"]["name"] for s in out] == ["terminal"]
+
+    def test_never_returns_an_empty_tool_set(self):
+        # A toolless request is worse than a fat one -- mirrors Pi's guard.
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        schemas = self._schemas("kb_read_page")
+        out = drop_unusable_tools(
+            schemas, has_kbs=False, has_channel=False, is_scheduled=False,
+        )
+        assert out == schemas
+
+    def test_input_is_not_mutated(self):
+        from surogates.harness.tool_schemas import drop_unusable_tools
+
+        schemas = self._schemas("kb_read_page", "terminal")
+        drop_unusable_tools(
+            schemas, has_kbs=False, has_channel=False, is_scheduled=False,
+        )
+        assert len(schemas) == 2
