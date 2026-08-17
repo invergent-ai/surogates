@@ -244,14 +244,21 @@ def extract_final_response(
     returns its ``message.content``.  Returns *fallback* if no response
     is found.
 
+    A seeded response is skipped: it is a transcript the caller wrote into
+    the session before the agent ran, so returning it would report a turn
+    that produced nothing as if the agent had answered — and, for an
+    evaluation row, grade the row against its own recorded answer.
+
     Used by :mod:`~surogates.tools.builtin.delegate` and
     :mod:`~surogates.harness.worker_notify` to retrieve a child
     session's final output.
     """
-    from surogates.session.events import EventType
+    from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 
     for event in reversed(events):
         if event.type == EventType.LLM_RESPONSE.value:
+            if event.data.get("synthetic") == SEED_SYNTHETIC_MARKER:
+                continue
             message = event.data.get("message", {})
             content = message.get("content")
             if content:

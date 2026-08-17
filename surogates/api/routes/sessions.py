@@ -42,10 +42,7 @@ from surogates.channels.constants import (
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
 )
-from surogates.channels.memory_boundary import (
-    EVAL_BOUNDARY_PREFIX,
-    is_eval_session,
-)
+from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -55,7 +52,7 @@ from surogates.api.routes._commerce_turn import (
     firebase_buyer_identity,
     runtime_commerce_payload,
 )
-from surogates.session.events import EventType
+from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -148,14 +145,6 @@ class CreateSessionRequest(BaseModel):
                 f"channel must be one of: {allowed} (got {v!r})"
             )
         return v
-
-
-#: Marker stamped on every seeded event, following the ``synthetic`` key
-#: :meth:`SessionStore.emit_synthetic_user_message` already uses.  A consumer
-#: reading the log back (the evaluation facade takes the last ``llm.response``
-#: as the agent's answer) must be able to tell a recorded turn from one the
-#: agent actually produced, or a failed row grades against its own transcript.
-SEED_SYNTHETIC_MARKER = "seed"
 
 
 def seed_turn_events(
@@ -558,6 +547,57 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     return resolved
 
 
+def _require_eval_seeding(body: CreateSessionRequest, *, channel: str) -> None:
+    """Refuse ``seed_turns`` on anything but an evaluation session.
+
+    Asks :func:`apply_eval_isolation` the same question
+    :func:`~surogates.channels.memory_boundary.is_eval_session` asks of the
+    created row, one step earlier: would this request be stamped with an
+    evaluation boundary?  Running the real stamping function keeps the two
+    answers from drifting, and surfaces a malformed ``eval_partition_id``
+    before anything is committed.
+    """
+    boundary = str(
+        apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
+        or ""
+    )
+    if not boundary.startswith(EVAL_BOUNDARY_PREFIX):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="seed_turns requires an evaluation session (set eval_partition_id).",
+        )
+
+
+def _screen_seed_turns(turns: list[SeedTurn]) -> None:
+    """Run seeded ``user`` turns through the message route's injection screen.
+
+    Seeding writes straight into the event log, so without this it is a way
+    to put arbitrary text into a model's context while skipping the
+    :class:`PromptInjectionDetector` that screens every real message on this
+    route: hide the payload in a seeded user turn, then send an innocuous
+    real prompt and the agent carries out the injected instruction with its
+    full tool set and the service account's credentials.  Being an
+    evaluation session is no defence — the stamp is unconditional on
+    request, so it costs one config key.
+
+    ``assistant`` turns are deliberately not screened: they are the
+    benchmark's own recorded answers being replayed, not instructions being
+    introduced, and screening them would fail benchmarks whose reference
+    answers discuss prompt injection.  ``MAX_SEED_TURNS`` and
+    ``MAX_SEED_CONTENT_LENGTH`` bound what this has to scan.
+    """
+    detector = _get_injection_detector()
+    for turn in turns:
+        if turn.role != "user":
+            continue
+        result = detector.detect(turn.content, source="api_channel")
+        if result.is_injection:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Seeded turn blocked: {result.explanation}",
+            )
+
+
 async def _create_session(
     body: CreateSessionRequest,
     request: Request,
@@ -701,6 +741,12 @@ async def create_api_session(
                 "plane's operator accounts."
             ),
         )
+    # Both seeding gates run BEFORE creation: rejecting afterwards leaves a
+    # committed session row, a created bucket and a stamped workspace prefix
+    # that nobody will ever use or clean up.
+    if body.seed_turns:
+        _require_eval_seeding(body, channel=channel)
+        _screen_seed_turns(body.seed_turns)
     session = await _create_session(
         body,
         request,
@@ -710,14 +756,6 @@ async def create_api_session(
         user_id=None,
         service_account_id=service_account_id,
     )
-    if body.seed_turns and not is_eval_session(session):
-        # Seeding bypasses the injection screen that guards the message route,
-        # so it is only available where it is needed: a session the server
-        # itself stamped with an evaluation boundary.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="seed_turns requires an evaluation session (set eval_partition_id).",
-        )
     await emit_seed_turns(
         _get_session_store(request),
         session_id=session.id,
