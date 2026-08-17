@@ -9,7 +9,13 @@ gets an isolated token.  Fail closed: when in doubt, isolate.
 
 from __future__ import annotations
 
-__all__ = ["MANAGED_CHANNELS", "EVAL_BOUNDARY_PREFIX", "boundary_token", "session_memory_boundary"]
+__all__ = [
+    "MANAGED_CHANNELS",
+    "EVAL_BOUNDARY_PREFIX",
+    "boundary_token",
+    "is_eval_session",
+    "session_memory_boundary",
+]
 
 # Channel platforms whose sessions are memory-partitioned by conversation.
 MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp"})
@@ -64,6 +70,20 @@ def boundary_token(
     return f"{platform}:iso:{fallback_id}"
 
 
+def is_eval_session(session: object) -> bool:
+    """True when this session is one row of an evaluation run.
+
+    Keyed on the server-stamped ``memory_boundary``, which is unforgeable:
+    ``apply_eval_isolation`` strips any client-supplied boundary before
+    deciding whether to stamp its own.  This prevents a client from
+    supplying ``eval_run_id`` in config and claiming evaluation treatment
+    for a session the server never isolated.
+    """
+    cfg = getattr(session, "config", None) or {}
+    boundary = str(cfg.get("memory_boundary") or "").strip()
+    return boundary.startswith(EVAL_BOUNDARY_PREFIX)
+
+
 def _legacy_boundary_fallback_id(session: object, cfg: dict) -> str:
     return str(cfg.get("channel_session_key") or getattr(session, "id", ""))
 
@@ -81,14 +101,12 @@ def session_memory_boundary(session: object) -> str | None:
     by the session route.
     """
     channel = getattr(session, "channel", None)
+    cfg = getattr(session, "config", None) or {}
+    persisted = str(cfg.get("memory_boundary") or "").strip()
     if channel not in MANAGED_CHANNELS:
-        cfg = getattr(session, "config", None) or {}
-        persisted = str(cfg.get("memory_boundary") or "").strip()
         if persisted.startswith(EVAL_BOUNDARY_PREFIX):
             return persisted
         return None
-    cfg = getattr(session, "config", None) or {}
-    persisted = str(cfg.get("memory_boundary") or "").strip()
     if persisted:
         return persisted
 

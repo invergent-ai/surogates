@@ -79,8 +79,8 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 #: One source of truth with the memory-boundary set so credential-switching and
 #: conversation-scoped memory isolation can never drift to different channels.
 from surogates.channels.memory_boundary import (
-    EVAL_BOUNDARY_PREFIX,
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
+    is_eval_session,
 )  # noqa: E402
 
 
@@ -207,20 +207,6 @@ def _select_harness_token(
             channel=session.channel,
         )
     return None
-
-
-def is_eval_session(session: Any) -> bool:
-    """True when this session is one row of an evaluation run.
-
-    Keyed on the server-stamped ``memory_boundary``, which is unforgeable:
-    ``apply_eval_isolation`` strips any client-supplied boundary before
-    deciding whether to stamp its own. This prevents a web client from
-    supplying ``eval_run_id`` in config and silently stripping ``ask_user_question``
-    from a non-isolated session.
-    """
-    config = getattr(session, "config", None) or {}
-    boundary = str(config.get("memory_boundary") or "").strip()
-    return boundary.startswith(EVAL_BOUNDARY_PREFIX)
 
 
 def _filter_effective_tools(
