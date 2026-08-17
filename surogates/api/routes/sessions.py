@@ -86,6 +86,19 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
+class SeedTurn(BaseModel):
+    """One already-completed turn written into a session at creation.
+
+    Used by the evaluation facade, where a multi-turn benchmark resends its
+    whole conversation on every call. Re-running the earlier turns would give
+    the agent a history that differs from the one the grader is scoring
+    against, so the recorded exchange is written verbatim instead.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class CreateSessionRequest(BaseModel):
     system: str | None = None
     config: dict = Field(default_factory=dict)
@@ -96,6 +109,9 @@ class CreateSessionRequest(BaseModel):
     #: as an operator's.  Absent means :data:`API_CHANNEL`, which keeps
     #: every existing third-party client working unchanged.
     channel: str | None = None
+    #: A pre-written transcript to seed the session with. Honoured only by
+    #: :func:`create_api_session` — see :func:`emit_seed_turns`.
+    seed_turns: list[SeedTurn] | None = None
 
     @field_validator("channel")
     @classmethod
@@ -106,6 +122,37 @@ class CreateSessionRequest(BaseModel):
                 f"channel must be one of: {allowed} (got {v!r})"
             )
         return v
+
+
+def seed_turn_events(
+    turns: list[SeedTurn] | None,
+) -> list[tuple[EventType, dict]]:
+    """Map seeded turns onto the event shapes the runtime already stores.
+
+    An assistant turn is wrapped as ``{"message": {"content": ...}}`` because
+    that is the ``llm.response`` contract every reader expects; a bare
+    ``content`` key would store an event nothing reads back as an answer.
+    """
+    events: list[tuple[EventType, dict]] = []
+    for turn in turns or []:
+        if turn.role == "user":
+            events.append((EventType.USER_MESSAGE, {"content": turn.content}))
+        else:
+            events.append(
+                (EventType.LLM_RESPONSE, {"message": {"content": turn.content}})
+            )
+    return events
+
+
+async def emit_seed_turns(store, *, session_id, turns) -> None:
+    """Write seeded turns onto a session without enqueueing it.
+
+    Deliberately no ``enqueue_session`` call: seeding records what already
+    happened, so the worker must not wake and answer the last seeded message.
+    The agent runs only when the caller sends the real turn afterwards.
+    """
+    for event_type, data in seed_turn_events(turns):
+        await store.emit_event(session_id, event_type, data)
 
 
 _ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -579,7 +626,7 @@ async def create_api_session(
                 "plane's operator accounts."
             ),
         )
-    return await _create_session(
+    session = await _create_session(
         body,
         request,
         tenant,
@@ -588,6 +635,12 @@ async def create_api_session(
         user_id=None,
         service_account_id=service_account_id,
     )
+    await emit_seed_turns(
+        _get_session_store(request),
+        session_id=session.id,
+        turns=body.seed_turns,
+    )
+    return session
 
 
 async def _resolve_pending_question(
