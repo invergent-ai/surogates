@@ -78,7 +78,10 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 #: service-account principal (when the agent has one) instead of the end user.
 #: One source of truth with the memory-boundary set so credential-switching and
 #: conversation-scoped memory isolation can never drift to different channels.
-from surogates.channels.memory_boundary import MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS  # noqa: E402
+from surogates.channels.memory_boundary import (
+    EVAL_BOUNDARY_PREFIX,
+    MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
+)  # noqa: E402
 
 
 # Platform ceiling on iterations per wake.  Agent-supplied configuration may
@@ -209,11 +212,15 @@ def _select_harness_token(
 def is_eval_session(session: Any) -> bool:
     """True when this session is one row of an evaluation run.
 
-    Set by the ops evaluation facade, which opens one session per benchmark
-    row. Used to strip tools that cannot complete without a human.
+    Keyed on the server-stamped ``memory_boundary``, which is unforgeable:
+    ``apply_eval_isolation`` strips any client-supplied boundary before
+    deciding whether to stamp its own. This prevents a web client from
+    supplying ``eval_run_id`` in config and silently stripping ``ask_user_question``
+    from a non-isolated session.
     """
     config = getattr(session, "config", None) or {}
-    return bool(str(config.get("eval_run_id") or "").strip())
+    boundary = str(config.get("memory_boundary") or "").strip()
+    return boundary.startswith(EVAL_BOUNDARY_PREFIX)
 
 
 def _filter_effective_tools(
