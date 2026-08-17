@@ -93,6 +93,29 @@ def test_workspace_boundary_ignores_non_channel_memory_boundary():
     assert workspace_boundary(session) is None
 
 
+def test_eval_rows_of_one_run_do_not_share_a_workspace():
+    # An eval boundary partitions memory only. Two rows of the same run must
+    # keep separate workspaces, or a file the first row writes shows up in the
+    # second and they contaminate each other.
+    config = {"memory_boundary": "eval:run-1", "storage_key_prefix": "p/a"}
+    row_one = _boundary_session("api", dict(config), sid="row-1")
+    row_two = _boundary_session("api", dict(config), sid="row-2")
+
+    assert workspace_boundary(row_one) is None
+    prefix_one = boundary_workspace_prefix(config, row_one, "row-1")
+    prefix_two = boundary_workspace_prefix(config, row_two, "row-2")
+    assert prefix_one != prefix_two
+    assert "eval:run-1" not in prefix_one
+
+
+def test_managed_channel_workspace_boundary_is_unaffected():
+    session = _boundary_session("slack", {"memory_boundary": "slack:c:G1"})
+    assert workspace_boundary(session) == "slack:c:G1"
+    assert boundary_workspace_prefix(
+        {"storage_key_prefix": "p/a"}, session, "session-1",
+    ) == "p/a/boundaries/slack:c:G1/workspace/"
+
+
 def test_boundary_workspace_prefix_uses_boundary_with_trailing_slash():
     session = _boundary_session("slack", {"memory_boundary": "slack:c:G1"})
     assert (

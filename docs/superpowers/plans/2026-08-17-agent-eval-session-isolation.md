@@ -666,6 +666,12 @@ because no unit test covers them:
 - An evaluation session's memory object lands under
   `boundaries/eval:<run id>/memory.json` and the agent's `shared/memory.json`
   is untouched after a seeded session runs.
+- Two evaluation sessions carrying the same `eval:<run id>` boundary resolve to
+  *different* workspace prefixes. The boundary is memory-only: sharing it with
+  the workspace would let a file one benchmark row writes appear in the next,
+  which is the contamination this work exists to remove. Check
+  `boundary_workspace_prefix` for both sessions and confirm neither is
+  `boundaries/eval:<run id>/workspace/`.
 
 The facade that drives all of this lives in the ops repository, so end-to-end
 verification happens there once both branches run together.
