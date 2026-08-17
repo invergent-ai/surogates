@@ -234,7 +234,11 @@ def _filter_effective_tools(
        exclusion keeps the LLM from advertising capability it doesn't
        have.
     3. Evaluation sessions never see ``ask_user_question``: no human is
-       watching, so the tool can only ever time out.
+       watching, so the tool can only ever time out.  This set is the
+       PROMPT surface only; the model-visible SCHEMAS come from
+       ``AgentHarness._drop_eval_excluded_tools``, which has to repeat
+       the rule.  Dropping it here alone told the model in prose that
+       the tool was gone while still handing it the schema.
 
     All other tools pass through unchanged.
     """
