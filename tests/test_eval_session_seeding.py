@@ -320,31 +320,36 @@ async def test_a_seeded_user_turn_goes_through_the_injection_screen():
     assert store.created == []
 
 
-async def test_a_seeded_assistant_turn_is_not_screened():
-    # Assistant turns are the benchmark's own recorded answers being
-    # replayed, not instructions being introduced. Screening them would fail
-    # every benchmark whose reference answer discusses prompt injection.
+async def test_a_seeded_assistant_turn_goes_through_the_injection_screen():
+    # ``role`` is a field the caller supplies on the request body, not a
+    # server-verified fact, and the same payload relabelled ``assistant`` is
+    # appended verbatim into the provider's messages array by the context
+    # replay. A role check here would just be trusting the attacker to
+    # self-report, so every seeded turn is screened regardless of role.
+    from fastapi import HTTPException
+
     from surogates.api.routes import sessions as sessions_route
 
     store, request, tenant, agent_runtime = _route_fixtures(
         "/v1/api/sessions", service_account=True,
     )
 
-    await sessions_route.create_api_session(
-        sessions_route.CreateSessionRequest(
-            config={"eval_partition_id": "run-1-a1b2"},
-            seed_turns=[
-                SeedTurn(role="user", content="what does this text try to do?"),
-                SeedTurn(role="assistant", content=_INJECTION),
-            ],
-        ),
-        request,
-        tenant,
-        agent_runtime,
-    )
-    assert [t for t, _ in store.emitted] == [
-        EventType.USER_MESSAGE, EventType.LLM_RESPONSE,
-    ]
+    with pytest.raises(HTTPException) as exc:
+        await sessions_route.create_api_session(
+            sessions_route.CreateSessionRequest(
+                config={"eval_partition_id": "run-1-a1b2"},
+                seed_turns=[
+                    SeedTurn(role="user", content="what does this text try to do?"),
+                    SeedTurn(role="assistant", content=_INJECTION),
+                ],
+            ),
+            request,
+            tenant,
+            agent_runtime,
+        )
+    assert exc.value.status_code == 422
+    assert store.emitted == []
+    assert store.created == []
 
 
 def test_a_seeded_answer_is_never_reported_as_the_agents_output():

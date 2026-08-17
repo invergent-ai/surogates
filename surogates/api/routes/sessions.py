@@ -585,32 +585,39 @@ def _require_eval_seeding(body: CreateSessionRequest, *, channel: str) -> None:
 
 
 def _screen_seed_turns(turns: list[SeedTurn]) -> None:
-    """Run seeded ``user`` turns through the message route's injection screen.
+    """Run every seeded turn through the message route's injection screen.
 
     Seeding writes straight into the event log, so without this it is a way
     to put arbitrary text into a model's context while skipping the
     :class:`PromptInjectionDetector` that screens every real message on this
-    route: hide the payload in a seeded user turn, then send an innocuous
-    real prompt and the agent carries out the injected instruction with its
-    full tool set and the service account's credentials.  Being an
-    evaluation session is no defence — the stamp is unconditional on
-    request, so it costs one config key.
+    route: hide the payload in a seeded turn, then send an innocuous real
+    prompt and the agent carries out the injected instruction with its full
+    tool set and the service account's credentials.  Being an evaluation
+    session is no defence — the stamp is unconditional on request, so it
+    costs one config key.
 
-    ``assistant`` turns are deliberately not screened: they are the
-    benchmark's own recorded answers being replayed, not instructions being
-    introduced, and screening them would fail benchmarks whose reference
-    answers discuss prompt injection.  ``MAX_SEED_TURNS`` and
-    ``MAX_SEED_CONTENT_LENGTH`` bound what this has to scan.
+    ``role`` is screened too, not just ``user``: it is a field the caller
+    supplies on the request body, not a server-verified fact, and the same
+    injection payload relabelled ``assistant`` is appended verbatim into the
+    provider's messages array by the context replay — so a role check here
+    would be trusting the attacker to self-report.  The accepted cost is
+    that a benchmark's own recorded assistant answer can, in principle, trip
+    the detector and fail the row with a 422; that is preferable to an
+    injection channel gated only on a caller-chosen label, so do not narrow
+    this back to ``user`` turns for that reason.  ``MAX_SEED_TURNS`` and
+    ``MAX_SEED_CONTENT_LENGTH`` bound what this has to scan (~36ms measured
+    for the full 200k content cap).
     """
     detector = _get_injection_detector()
-    for turn in turns:
-        if turn.role != "user":
-            continue
+    for index, turn in enumerate(turns):
         result = detector.detect(turn.content, source="api_channel")
         if result.is_injection:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Seeded turn blocked: {result.explanation}",
+                detail=(
+                    f"Seeded turn {index} ({turn.role}) blocked: "
+                    f"{result.explanation}"
+                ),
             )
 
 
