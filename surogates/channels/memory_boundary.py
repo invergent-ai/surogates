@@ -104,7 +104,7 @@ def session_memory_boundary(session: object) -> str | None:
     cfg = getattr(session, "config", None) or {}
     persisted = str(cfg.get("memory_boundary") or "").strip()
     if channel not in MANAGED_CHANNELS:
-        if persisted.startswith(EVAL_BOUNDARY_PREFIX):
+        if is_eval_session(session):
             return persisted
         return None
     if persisted:

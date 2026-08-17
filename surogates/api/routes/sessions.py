@@ -172,6 +172,9 @@ def seed_turn_events(
     events: list[tuple[EventType, dict]] = []
     for turn in turns or []:
         if turn.role == "user":
+            # Mirrors the shape SessionStore.emit_synthetic_user_message
+            # builds for a live synthetic turn. A required field added
+            # there needs adding here too.
             events.append((
                 EventType.USER_MESSAGE,
                 {"content": turn.content, "synthetic": SEED_SYNTHETIC_MARKER},

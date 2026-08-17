@@ -138,12 +138,12 @@ def workspace_boundary(session: object) -> str | None:
         return pinned
 
     from surogates.channels.memory_boundary import (
-        EVAL_BOUNDARY_PREFIX,
+        is_eval_session,
         session_memory_boundary,
     )
 
     boundary = session_memory_boundary(session)
-    if boundary and boundary.startswith(EVAL_BOUNDARY_PREFIX):
+    if is_eval_session(session):
         return None
     return boundary
 
