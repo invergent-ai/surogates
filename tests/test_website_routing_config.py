@@ -79,7 +79,11 @@ class TestWebsiteEnabledDefault:
     cannot see this flag.
     """
 
-    def test_defaults_on(self):
+    def test_defaults_on(self, monkeypatch):
+        # load_settings() writes flattened YAML keys into os.environ
+        # permanently, so a sibling test that loaded a config carrying
+        # website.enabled=false would otherwise decide this one.
+        monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
         from surogates.config import WebsiteSettings
 
         assert WebsiteSettings().enabled is True
@@ -90,8 +94,9 @@ class TestWebsiteEnabledDefault:
         monkeypatch.setenv("SUROGATES_WEBSITE_ENABLED", "false")
         assert WebsiteSettings().enabled is False
 
-    def test_absent_website_block_leaves_it_on(self):
+    def test_absent_website_block_leaves_it_on(self, monkeypatch):
         """A config file with no ``website:`` key is the prod case."""
+        monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
         from surogates.config import Settings
 
         assert Settings().website.enabled is True

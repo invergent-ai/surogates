@@ -76,6 +76,7 @@ from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
     PlatformAuthError,
 )
+from surogates.runtime.resolver import resolve_agent_id_soft
 from surogates.channels.constants import multi_session_disabled
 from surogates.session.events import EventType
 from surogates.session.models import REUSABLE_SESSION_STATUSES
@@ -436,6 +437,17 @@ async def _resolve_website_routing(request: Request) -> dict:
     find ``(org_id, agent_id)`` — the same way the Slack/Telegram adapters
     resolve their tenant.  A missing or inactive row is indistinguishable from
     "no such key" and returns 404, so a wrong key cannot enumerate agents.
+
+    When the request also *addresses* an agent — the ``Host`` subdomain, or
+    an explicit ``?agent_id`` — the key's agent must be that agent.
+    ``channel_routing`` rows are global, keyed on
+    ``(channel_kind, channel_identifier)`` with no deployment column, and the
+    ops lookup authorises on "holds a runtime-scoped key", not on "owns this
+    row".  Without this check a publishable key — public by design, it ships
+    in an embed snippet — resolves on any host that serves this route, so a
+    deployment could be made to run anonymous sessions on its own compute
+    and storage for an agent it does not host.  Requests that address no
+    agent (a bare host, tests) cannot be checked and pass through.
     """
     token = _extract_bearer(request)
     if not token or not is_publishable_key(token):
@@ -458,6 +470,19 @@ async def _resolve_website_routing(request: Request) -> dict:
         )
     routing = await cache.get(f"website:{token}")
     if not routing or not routing.get("agent_id") or not routing.get("org_id"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown or inactive website key.",
+        )
+    addressed = await resolve_agent_id_soft(request)
+    if addressed and addressed != routing["agent_id"]:
+        # Same 404 as an unknown key: telling a caller that the key is
+        # valid-but-for-another-agent is the enumeration this route
+        # already refuses to offer.
+        logger.warning(
+            "Website key for agent %s presented on a host addressing %s",
+            routing["agent_id"], addressed,
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Unknown or inactive website key.",

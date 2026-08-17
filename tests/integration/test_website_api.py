@@ -726,3 +726,47 @@ async def test_stream_race_recovery_streams_resumed_events(
         f"session.done must not be emitted when the race is recovered; "
         f"got: {types}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The key's agent must be the agent the request addresses
+# ---------------------------------------------------------------------------
+
+
+async def test_bootstrap_rejects_a_key_for_another_agent(
+    app, client: AsyncClient, session_factory,
+):
+    """``channel_routing`` rows are global — keyed on (kind, identifier)
+    with no deployment column — and a publishable key is public by design.
+    Without this check any host serving the route would run anonymous
+    sessions on its own compute for an agent it does not host."""
+    org_id = await create_org(session_factory)
+    key = configure_website(app, org_id=org_id)
+
+    resp = await client.post(
+        "/v1/website/sessions",
+        headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
+        params={"agent_id": "some-other-agent"},
+    )
+
+    # Same 404 as an unknown key: "valid, but for another agent" is the
+    # enumeration this route already refuses to offer.
+    assert resp.status_code == 404, resp.text
+    assert "Unknown or inactive website key" in resp.text
+
+
+async def test_bootstrap_allows_the_key_on_its_own_agent(
+    app, client: AsyncClient, session_factory,
+):
+    """The check is an equality test, not a blanket rejection of an
+    addressed agent — the embed snippet points at the agent's own host."""
+    org_id = await create_org(session_factory)
+    key = configure_website(app, org_id=org_id)
+
+    resp = await client.post(
+        "/v1/website/sessions",
+        headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
+        params={"agent_id": _AGENT_ID},
+    )
+
+    assert resp.status_code == 201, resp.text
