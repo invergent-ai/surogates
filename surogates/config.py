@@ -559,11 +559,19 @@ class WebsiteSettings(BaseSettings):
     redeploying with a fresh value — the key only ever appears in the
     bootstrap ``Authorization`` header, so the blast radius of a leak
     is one redeploy.
+
+    ``enabled`` defaults on for the same reason WhatsApp's does (see
+    :class:`WhatsAppChannelSettings`) — since per-agent routing landed,
+    ``channel_routing`` is the only gate that matters, and an absent or
+    inactive row 404s either way.  The website-specific symptom of the
+    missing ConfigMap edit: Studio reported the channel "Live on your
+    site", reading the routing row it had just written, while every
+    ``/v1/website/*`` request 404'd.
     """
 
     model_config = {"env_prefix": "SUROGATES_WEBSITE_"}
 
-    enabled: bool = False
+    enabled: bool = True
     publishable_key: str = ""
     allowed_origins: str = ""           # CSV of scheme://host[:port]
 

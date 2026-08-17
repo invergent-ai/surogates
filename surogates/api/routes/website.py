@@ -76,6 +76,7 @@ from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
     PlatformAuthError,
 )
+from surogates.runtime.resolver import resolve_agent_id_soft
 from surogates.channels.constants import multi_session_disabled
 from surogates.session.events import EventType
 from surogates.session.models import REUSABLE_SESSION_STATUSES
@@ -414,6 +415,7 @@ async def _load_and_authorize_session(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="The website channel for this agent has been turned off.",
             )
+        await _reject_key_for_another_agent(request, routing)
         agent_origins = _agent_allowed_origins(_routing_channel_config(routing))
         if agent_origins is not None:
             allowed = agent_origins
@@ -436,6 +438,17 @@ async def _resolve_website_routing(request: Request) -> dict:
     find ``(org_id, agent_id)`` — the same way the Slack/Telegram adapters
     resolve their tenant.  A missing or inactive row is indistinguishable from
     "no such key" and returns 404, so a wrong key cannot enumerate agents.
+
+    When the request also *addresses* an agent — the ``Host`` subdomain, or
+    an explicit ``?agent_id`` — the key's agent must be that agent.
+    ``channel_routing`` rows are global, keyed on
+    ``(channel_kind, channel_identifier)`` with no deployment column, and the
+    ops lookup authorises on "holds a runtime-scoped key", not on "owns this
+    row".  Without this check a publishable key — public by design, it ships
+    in an embed snippet — resolves on any host that serves this route, so a
+    deployment could be made to run anonymous sessions on its own compute
+    and storage for an agent it does not host.  Requests that address no
+    agent (a bare host, tests) cannot be checked and pass through.
     """
     token = _extract_bearer(request)
     if not token or not is_publishable_key(token):
@@ -458,11 +471,36 @@ async def _resolve_website_routing(request: Request) -> dict:
         )
     routing = await cache.get(f"website:{token}")
     if not routing or not routing.get("agent_id") or not routing.get("org_id"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Unknown or inactive website key.",
-        )
+        raise _unknown_key()
     return routing
+
+
+def _unknown_key() -> HTTPException:
+    """The one 404 both key-rejection paths raise.
+
+    The detail string has to stay identical between "no such key" and
+    "another agent's key" or the difference becomes the enumeration
+    oracle this route refuses to offer.
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Unknown or inactive website key.",
+    )
+
+
+async def _reject_key_for_another_agent(request: Request, routing: dict) -> None:
+    """Raise unless the key's agent is the agent the request addresses.
+
+    Guards both lookup sites, so the binding holds for the life of the
+    session rather than only at bootstrap.
+    """
+    addressed = await resolve_agent_id_soft(request)
+    if addressed and addressed != routing["agent_id"]:
+        logger.warning(
+            "Website key for agent %s presented on a host addressing %s",
+            routing["agent_id"], addressed,
+        )
+        raise _unknown_key()
 
 
 async def _enforce_website_rate_limit(
@@ -618,6 +656,9 @@ async def bootstrap_website_session(
     await _enforce_website_rate_limit(
         request, routing["org_id"], routing["agent_id"],
     )
+    # After the limiter: resolving the addressed agent can miss the slug
+    # cache and cost an ops round-trip, and that cache is unbounded.
+    await _reject_key_for_another_agent(request, routing)
 
     request_origin = _extract_origin(request)
     routing_config = _routing_channel_config(routing)

@@ -12,6 +12,7 @@ from surogates.api.routes.website import (
     _agent_allowed_origins,
     _routing_channel_config,
 )
+from surogates.config import Settings, WebsiteSettings
 from surogates.channels.website_session import (
     create_website_session_token,
     decode_website_session_token,
@@ -67,3 +68,30 @@ class TestChannelIdentifierClaim:
         )
         claims = decode_website_session_token(token)
         assert claims.channel_identifier == ""
+
+
+class TestWebsiteEnabledDefault:
+    """``channel_routing`` is the gate; the global flag must not be a
+    second one that a deployment has to remember to set.
+
+    A prod deployment whose runtime config carried no ``website:`` block
+    404'd every ``/v1/website/*`` request while Studio showed the channel
+    "Live on your site" — Studio reads the routing row it just wrote and
+    cannot see this flag.
+    """
+
+    def test_defaults_on(self, monkeypatch):
+        # load_settings() writes flattened YAML keys into os.environ
+        # permanently, so a sibling test that loaded a config carrying
+        # website.enabled=false would otherwise decide this one.
+        monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
+        assert WebsiteSettings().enabled is True
+
+    def test_env_can_still_turn_it_off(self, monkeypatch):
+        monkeypatch.setenv("SUROGATES_WEBSITE_ENABLED", "false")
+        assert WebsiteSettings().enabled is False
+
+    def test_absent_website_block_leaves_it_on(self, monkeypatch):
+        """A config file with no ``website:`` key is the prod case."""
+        monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
+        assert Settings().website.enabled is True

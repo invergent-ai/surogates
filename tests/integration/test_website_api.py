@@ -721,3 +721,40 @@ async def test_stream_race_recovery_streams_resumed_events(
         f"session.done must not be emitted when the race is recovered; "
         f"got: {types}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The key's agent must be the agent the request addresses
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "addressed,expected",
+    [("some-other-agent", 404), (_AGENT_ID, 201)],
+)
+async def test_bootstrap_binds_the_key_to_the_agent_it_addresses(
+    app, client: AsyncClient, session_factory, addressed, expected,
+):
+    """``channel_routing`` rows are global — keyed on (kind, identifier)
+    with no deployment column — and a publishable key is public by design.
+    Without this check any host serving the route would run anonymous
+    sessions on its own compute for an agent it does not host.
+
+    The 201 case matters as much as the 404: an equality check is easy to
+    over-tighten into rejecting the normal embed, which addresses its own
+    agent on every request.
+    """
+    org_id = await create_org(session_factory)
+    key = configure_website(app, org_id=org_id)
+
+    resp = await client.post(
+        "/v1/website/sessions",
+        headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
+        params={"agent_id": addressed},
+    )
+
+    assert resp.status_code == expected, resp.text
+    if expected == 404:
+        # Same 404 as an unknown key: "valid, but for another agent" is
+        # the enumeration this route already refuses to offer.
+        assert "Unknown or inactive website key" in resp.text
