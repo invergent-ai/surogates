@@ -144,7 +144,12 @@ def seed_turn_events(
     return events
 
 
-async def emit_seed_turns(store, *, session_id, turns) -> None:
+async def emit_seed_turns(
+    store: SessionStore,
+    *,
+    session_id: UUID,
+    turns: list[SeedTurn] | None,
+) -> None:
     """Write seeded turns onto a session without enqueueing it.
 
     Deliberately no ``enqueue_session`` call: seeding records what already
