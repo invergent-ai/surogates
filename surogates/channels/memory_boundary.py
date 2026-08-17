@@ -9,10 +9,16 @@ gets an isolated token.  Fail closed: when in doubt, isolate.
 
 from __future__ import annotations
 
-__all__ = ["MANAGED_CHANNELS", "boundary_token", "session_memory_boundary"]
+__all__ = ["MANAGED_CHANNELS", "EVAL_BOUNDARY_PREFIX", "boundary_token", "session_memory_boundary"]
 
 # Channel platforms whose sessions are memory-partitioned by conversation.
 MANAGED_CHANNELS: frozenset[str] = frozenset({"slack", "telegram", "whatsapp"})
+
+# Memory-boundary namespace for evaluation sessions. Outside the managed
+# channels this is the ONLY prefix honoured: an evaluation needs a scratch
+# partition, and letting a caller name any boundary would let it read or
+# overwrite the memory of a private conversation on the same agent.
+EVAL_BOUNDARY_PREFIX = "eval:"
 
 
 def boundary_token(
@@ -70,10 +76,16 @@ def session_memory_boundary(session: object) -> str | None:
     boundary.  Only older Slack rows with a confident public channel id
     (``C...``) collapse to ``public``; every other older row is isolated by
     ``channel_session_key`` or ``session.id``.  Every non-channel session
-    returns ``None`` so the caller keeps today's per-user / shared memory.
+    returns ``None`` so the caller keeps today's per-user / shared memory,
+    except an evaluation session, which carries an ``eval:`` boundary stamped
+    by the session route.
     """
     channel = getattr(session, "channel", None)
     if channel not in MANAGED_CHANNELS:
+        cfg = getattr(session, "config", None) or {}
+        persisted = str(cfg.get("memory_boundary") or "").strip()
+        if persisted.startswith(EVAL_BOUNDARY_PREFIX):
+            return persisted
         return None
     cfg = getattr(session, "config", None) or {}
     persisted = str(cfg.get("memory_boundary") or "").strip()

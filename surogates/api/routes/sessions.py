@@ -413,6 +413,29 @@ async def _get_session_for_tenant(
     return session
 
 
+def apply_eval_isolation(config: dict, *, channel: str) -> dict:
+    """Return *config* with the evaluation memory boundary resolved.
+
+    The boundary is server-owned. A client-supplied ``memory_boundary`` is
+    always dropped, because a caller able to name its own boundary could read
+    or overwrite the memory of any conversation on the same agent. An
+    ``api``-channel session declaring ``eval_run_id`` instead gets a derived
+    ``eval:<run id>`` partition, which starts empty and is discarded when the
+    run finishes.
+    """
+    from surogates.channels.constants import API_CHANNEL
+    from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
+
+    resolved = dict(config)
+    resolved.pop("memory_boundary", None)
+    if channel != API_CHANNEL:
+        return resolved
+    run_id = str(resolved.get("eval_run_id") or "").strip()
+    if run_id:
+        resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{run_id}"
+    return resolved
+
+
 async def _create_session(
     body: CreateSessionRequest,
     request: Request,
@@ -432,7 +455,7 @@ async def _create_session(
     store = _get_session_store(request)
     settings = request.app.state.settings
 
-    config = body.config.copy()
+    config = apply_eval_isolation(body.config.copy(), channel=channel)
     if body.system:
         config["system"] = body.system
 

@@ -106,3 +106,33 @@ def test_non_channel_session_is_per_user():
     assert session_memory_boundary(_session("web", {"memory_boundary": "x"})) is None
     assert session_memory_boundary(_session("api", {})) is None
     assert session_memory_boundary(_session("ambient", {})) is None
+
+
+def test_api_session_honours_an_eval_boundary():
+    session = SimpleNamespace(
+        channel="api", config={"memory_boundary": "eval:run-1"},
+    )
+    assert session_memory_boundary(session) == "eval:run-1"
+
+
+def test_api_session_ignores_a_non_eval_boundary():
+    # Fail closed: outside the managed channels only the eval namespace is
+    # honoured, so a caller cannot address a Slack conversation's memory.
+    session = SimpleNamespace(
+        channel="api", config={"memory_boundary": "slack:c:C123"},
+    )
+    assert session_memory_boundary(session) is None
+
+
+def test_api_session_without_a_boundary_is_unchanged():
+    session = SimpleNamespace(channel="api", config={})
+    assert session_memory_boundary(session) is None
+
+
+def test_web_session_ignores_an_eval_boundary_it_did_not_earn():
+    # The stamp is only ever applied to api-channel sessions, but the
+    # resolver is the hard boundary, so it is asserted here too.
+    session = SimpleNamespace(
+        channel="web", config={"memory_boundary": "eval:run-1"},
+    )
+    assert session_memory_boundary(session) == "eval:run-1"
