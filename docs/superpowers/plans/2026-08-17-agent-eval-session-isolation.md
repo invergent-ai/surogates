@@ -4,7 +4,7 @@
 
 **Goal:** Let an API-channel session run as an isolated evaluation session: its own throwaway memory partition, no tool that waits on a human, and the ability to start from a pre-written transcript.
 
-**Architecture:** Three independent changes to existing seams. A session created on the `api` channel may declare an `eval_run_id` in its config. The server derives a memory boundary from it (never trusting a client-supplied boundary), the worker's tool filter drops `ask_user_question` for such sessions, and `create_api_session` can seed prior turns as events without waking the worker.
+**Architecture:** Three independent changes to existing seams. A session created on the `api` channel may declare an `eval_partition_id` in its config. The server derives a memory boundary from it (never trusting a client-supplied boundary), the worker's tool filter drops `ask_user_question` for such sessions, and `create_api_session` can seed prior turns as events without waking the worker.
 
 **Tech Stack:** Python 3.12, FastAPI, SQLAlchemy async, pytest with `asyncio_mode = "auto"`.
 
@@ -20,7 +20,9 @@ from each other and from the live agent, which today they are not:
 - An `api`-channel session has `user_id = None` and no memory boundary, so it
   reads and writes the agent's **shared** memory. One benchmark row can write
   a memory a later row reads, making scores order-dependent, and running an
-  evaluation permanently edits a customer's live agent memory.
+  evaluation permanently edits a customer's live agent memory. The fix is a
+  partition per benchmark row, not per run: sharing one partition across a
+  run's rows would reproduce the same order-dependence at a smaller scale.
 - `ask_user_question` waits up to 30 minutes for a human answer. In an
   evaluation nobody ever answers, so any row that trips the tool stalls until
   the caller times out.
@@ -38,7 +40,7 @@ evaluation sets.
 - Default branch is `master`. Work happens on `feat/agent-eval-session-isolation`.
 - Commit messages follow Conventional Commits: `type(scope): subject`.
 - Never mention AI tooling in commit messages or any committed artifact.
-- The eval boundary namespace is exactly `eval:` and the config key is exactly `eval_run_id`.
+- The eval boundary namespace is exactly `eval:` and the config key is exactly `eval_partition_id`.
 - A client-supplied `memory_boundary` is never trusted on any channel.
 - Run tests with `uv run pytest <path> -v` from the repository root.
 
@@ -61,7 +63,7 @@ evaluation sets.
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
-- Produces: the config contract every later task reads. A session config carrying `eval_run_id` (a non-empty string) is an evaluation session. `_create_session` stamps `config["memory_boundary"] = f"eval:{eval_run_id}"` and strips any client-supplied `memory_boundary`. `session_memory_boundary(session)` returns that string for non-managed channels.
+- Produces: the config contract every later task reads. A session config carrying `eval_partition_id` (a non-empty string) is an evaluation session. `_create_session` stamps `config["memory_boundary"] = f"eval:{eval_partition_id}"` and strips any client-supplied `memory_boundary`. `session_memory_boundary(session)` returns that string for non-managed channels.
 
 - [ ] **Step 1: Write the failing boundary-resolution tests**
 
@@ -156,8 +158,8 @@ from __future__ import annotations
 from surogates.api.routes.sessions import apply_eval_isolation
 
 
-def test_eval_run_id_produces_a_namespaced_boundary():
-    config = apply_eval_isolation({"eval_run_id": "run-1"}, channel="api")
+def test_eval_partition_id_produces_a_namespaced_boundary():
+    config = apply_eval_isolation({"eval_partition_id": "run-1"}, channel="api")
     assert config["memory_boundary"] == "eval:run-1"
 
 
@@ -168,21 +170,21 @@ def test_client_supplied_boundary_is_stripped():
     assert "memory_boundary" not in config
 
 
-def test_client_boundary_cannot_survive_alongside_an_eval_run_id():
+def test_client_boundary_cannot_survive_alongside_an_eval_partition_id():
     config = apply_eval_isolation(
-        {"eval_run_id": "run-1", "memory_boundary": "slack:c:C123"},
+        {"eval_partition_id": "run-1", "memory_boundary": "slack:c:C123"},
         channel="api",
     )
     assert config["memory_boundary"] == "eval:run-1"
 
 
 def test_non_api_channel_gets_no_boundary():
-    config = apply_eval_isolation({"eval_run_id": "run-1"}, channel="web")
+    config = apply_eval_isolation({"eval_partition_id": "run-1"}, channel="web")
     assert "memory_boundary" not in config
 
 
-def test_blank_eval_run_id_is_not_a_boundary():
-    config = apply_eval_isolation({"eval_run_id": "   "}, channel="api")
+def test_blank_eval_partition_id_is_not_a_boundary():
+    config = apply_eval_isolation({"eval_partition_id": "   "}, channel="api")
     assert "memory_boundary" not in config
 
 
@@ -207,9 +209,13 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     The boundary is server-owned. A client-supplied ``memory_boundary`` is
     always dropped, because a caller able to name its own boundary could read
     or overwrite the memory of any conversation on the same agent. An
-    ``api``-channel session declaring ``eval_run_id`` instead gets a derived
-    ``eval:<run id>`` partition, which starts empty and is discarded when the
-    run finishes.
+    ``api``-channel session declaring ``eval_partition_id`` instead gets a
+    derived ``eval:<partition id>`` partition, which starts empty and is
+    discarded once its row is done. The partition is per benchmark row, not
+    per run, so one row's memory is never readable while another row is
+    answered; the facade composes the value as ``<run id>-<short unique
+    suffix>``, so a whole run's partitions still share the run id as a
+    common prefix.
     """
     from surogates.channels.constants import API_CHANNEL
     from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
@@ -218,9 +224,9 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     resolved.pop("memory_boundary", None)
     if channel != API_CHANNEL:
         return resolved
-    run_id = str(resolved.get("eval_run_id") or "").strip()
-    if run_id:
-        resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{run_id}"
+    partition_id = str(resolved.get("eval_partition_id") or "").strip()
+    if partition_id:
+        resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{partition_id}"
     return resolved
 ```
 
@@ -249,10 +255,12 @@ git add surogates/channels/memory_boundary.py surogates/api/routes/sessions.py \
   tests/test_memory_boundary.py tests/test_eval_session_boundary.py
 git commit -m "feat(sessions): give evaluation sessions their own memory partition
 
-An api-channel session declaring eval_run_id now runs against a derived
-eval:<run id> memory boundary instead of the agent's shared memory, so one
-evaluation row cannot read what another wrote and an evaluation no longer
-edits the live agent's memory.
+An api-channel session declaring eval_partition_id now runs against a derived
+eval:<partition id> memory boundary instead of the agent's shared memory, so
+one evaluation row cannot read what another wrote and an evaluation no longer
+edits the live agent's memory. The partition is per benchmark row: the
+facade sends a distinct id per request, so two rows of the same run never
+share a partition.
 
 The boundary is server-derived and a client-supplied memory_boundary is
 always stripped: a caller able to name its own boundary could read or
@@ -270,7 +278,7 @@ stripping and the resolution both fail closed."
 - Test: `tests/test_eval_session_tools.py` (create)
 
 **Interfaces:**
-- Consumes: the `eval_run_id` config key established in Task 1.
+- Consumes: the `eval_partition_id` config key established in Task 1.
 - Produces: `is_eval_session(session) -> bool` exported from `surogates/orchestrator/worker.py`.
 
 - [ ] **Step 1: Write the failing test**
@@ -299,23 +307,23 @@ def _session(config):
     return SimpleNamespace(channel="api", config=config)
 
 
-def test_eval_session_is_detected_by_run_id():
-    assert is_eval_session(_session({"eval_run_id": "run-1"})) is True
+def test_eval_session_is_detected_by_partition_id():
+    assert is_eval_session(_session({"eval_partition_id": "run-1"})) is True
 
 
 def test_ordinary_api_session_is_not_an_eval_session():
     assert is_eval_session(_session({})) is False
 
 
-def test_blank_run_id_is_not_an_eval_session():
-    assert is_eval_session(_session({"eval_run_id": "  "})) is False
+def test_blank_partition_id_is_not_an_eval_session():
+    assert is_eval_session(_session({"eval_partition_id": "  "})) is False
 
 
 def test_eval_session_loses_ask_user_question():
     result = _filter_effective_tools(
         tools=_TOOLS,
         tenant=_tenant(),
-        session=_session({"eval_run_id": "run-1"}),
+        session=_session({"eval_partition_id": "run-1"}),
         use_api_for_harness_tools=True,
     )
     assert "ask_user_question" not in result
@@ -327,7 +335,7 @@ def test_eval_session_keeps_every_other_tool():
     result = _filter_effective_tools(
         tools=_TOOLS,
         tenant=_tenant(),
-        session=_session({"eval_run_id": "run-1"}),
+        session=_session({"eval_partition_id": "run-1"}),
         use_api_for_harness_tools=True,
     )
     assert {"memory", "web_search", "skill_manage"} <= result
@@ -360,7 +368,7 @@ def is_eval_session(session: Any) -> bool:
     row. Used to strip tools that cannot complete without a human.
     """
     config = getattr(session, "config", None) or {}
-    return bool(str(config.get("eval_run_id") or "").strip())
+    return bool(str(config.get("eval_partition_id") or "").strip())
 ```
 
 Then add to `_filter_effective_tools`, after the anonymous-channel block:
@@ -660,18 +668,20 @@ would be a forgery."
 Run the full suite once: `uv run pytest -q`. Two things to check by hand,
 because no unit test covers them:
 
-- A session created without `eval_run_id` still resolves to the same memory
+- A session created without `eval_partition_id` still resolves to the same memory
   key as before the change. Compare `_build_r2_memory_keys` output for an
   ordinary `api` session against `master`.
 - An evaluation session's memory object lands under
-  `boundaries/eval:<run id>/memory.json` and the agent's `shared/memory.json`
-  is untouched after a seeded session runs.
-- Two evaluation sessions carrying the same `eval:<run id>` boundary resolve to
-  *different* workspace prefixes. The boundary is memory-only: sharing it with
-  the workspace would let a file one benchmark row writes appear in the next,
+  `boundaries/eval:<partition id>/memory.json` and the agent's
+  `shared/memory.json` is untouched after a seeded session runs.
+- Two rows of the same run carry different `eval:<partition id>` boundaries
+  (the facade composes each as `<run id>-<short unique suffix>`, so they
+  share only the run id as a common prefix) and resolve to *different*
+  workspace prefixes. The boundary is memory-only: sharing it with the
+  workspace would let a file one benchmark row writes appear in the next,
   which is the contamination this work exists to remove. Check
   `boundary_workspace_prefix` for both sessions and confirm neither is
-  `boundaries/eval:<run id>/workspace/`.
+  `boundaries/eval:<partition id>/workspace/`.
 
 The facade that drives all of this lives in the ops repository, so end-to-end
 verification happens there once both branches run together.

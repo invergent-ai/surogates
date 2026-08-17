@@ -76,8 +76,8 @@ def is_eval_session(session: object) -> bool:
     Keyed on the server-stamped ``memory_boundary``, which is unforgeable:
     ``apply_eval_isolation`` strips any client-supplied boundary before
     deciding whether to stamp its own.  This prevents a client from
-    supplying ``eval_run_id`` in config and claiming evaluation treatment
-    for a session the server never isolated.
+    supplying ``eval_partition_id`` in config and claiming evaluation
+    treatment for a session the server never isolated.
     """
     cfg = getattr(session, "config", None) or {}
     boundary = str(cfg.get("memory_boundary") or "").strip()

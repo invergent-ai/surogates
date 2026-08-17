@@ -224,7 +224,7 @@ async def test_api_session_seeds_only_when_it_is_an_evaluation():
 
     await sessions_route.create_api_session(
         sessions_route.CreateSessionRequest(
-            config={"eval_run_id": "run-1"},
+            config={"eval_partition_id": "run-1-a1b2"},
             seed_turns=[SeedTurn(role="user", content="one")],
         ),
         request,
@@ -234,7 +234,7 @@ async def test_api_session_seeds_only_when_it_is_an_evaluation():
     assert [t for t, _ in store.emitted] == [EventType.USER_MESSAGE]
 
 
-async def test_api_session_without_an_eval_run_id_cannot_seed():
+async def test_api_session_without_an_eval_partition_id_cannot_seed():
     from fastapi import HTTPException
 
     from surogates.api.routes import sessions as sessions_route

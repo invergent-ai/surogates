@@ -508,9 +508,10 @@ async def _get_session_for_tenant(
     return session
 
 
-#: Run ids come from the control plane as UUIDs.  Kept deliberately narrow
-#: because the value becomes both an object-key and a filesystem-path segment.
-_EVAL_RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+#: Partition ids come from the facade as ``<run id>-<short unique suffix>``,
+#: one per benchmark row.  Kept deliberately narrow because the value becomes
+#: both an object-key and a filesystem-path segment.
+_EVAL_PARTITION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 def apply_eval_isolation(config: dict, *, channel: str) -> dict:
@@ -519,18 +520,25 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     The boundary is server-owned. A client-supplied ``memory_boundary`` is
     always dropped, because a caller able to name its own boundary could read
     or overwrite the memory of any conversation on the same agent. An
-    ``api``-channel session declaring ``eval_run_id`` instead gets a derived
-    ``eval:<run id>`` partition, which starts empty and is discarded when the
-    run finishes.
+    ``api``-channel session declaring ``eval_partition_id`` instead gets a
+    derived ``eval:<partition id>`` partition, which starts empty and is
+    discarded once its row is done.
+
+    The partition is per benchmark row, not per run: one row's memory must
+    never be readable while another row is answered, which is why each row
+    gets its own partition rather than sharing one across the whole run. The
+    facade composes the value as ``<run id>-<short unique suffix>``, so a
+    whole run's partitions still share the run id as a common prefix and can
+    be swept together later.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
     if channel != API_CHANNEL:
         return resolved
-    run_id = str(resolved.get("eval_run_id") or "").strip()
-    if not run_id:
+    partition_id = str(resolved.get("eval_partition_id") or "").strip()
+    if not partition_id:
         return resolved
-    if not _EVAL_RUN_ID_RE.fullmatch(run_id):
+    if not _EVAL_PARTITION_ID_RE.fullmatch(partition_id):
         # The id is interpolated into memory object keys and into on-disk
         # memory directory components, so anything outside this alphabet
         # could walk out of the agent's asset root.  Refuse loudly: dropping
@@ -539,11 +547,11 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                "eval_run_id must be 1-64 characters of letters, digits, "
-                "'.', '_' or '-'."
+                "eval_partition_id must be 1-64 characters of letters, "
+                "digits, '.', '_' or '-'."
             ),
         )
-    resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{run_id}"
+    resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{partition_id}"
     return resolved
 
 
@@ -705,7 +713,7 @@ async def create_api_session(
         # itself stamped with an evaluation boundary.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="seed_turns requires an evaluation session (set eval_run_id).",
+            detail="seed_turns requires an evaluation session (set eval_partition_id).",
         )
     await emit_seed_turns(
         _get_session_store(request),
