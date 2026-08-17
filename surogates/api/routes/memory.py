@@ -110,7 +110,20 @@ async def _session_boundary(
     working unchanged.  Every failure mode collapses into 404, matching
     the session routes: a caller must not be able to probe which session
     ids exist outside its scope.
+
+    A caller that omits it entirely falls back to ``tenant.session_scope_id``
+    — the session id baked into a worker-minted ``service_account_session``
+    JWT (see ``create_service_account_session_token``).  Without this,
+    enforcement depended on ``HarnessAPIClient`` also being told the session
+    id and choosing to forward it as a query param: a client built without
+    one (its constructor defaults ``session_id`` to ``None``) would silently
+    write an evaluation session's memory into shared memory again, with no
+    server-side signal.  A regular user JWT never carries
+    ``session_scope_id``, so this leaves the Studio panel's own lookup
+    (``session_id`` query param and JWT both absent) untouched.
     """
+    if session_id is None:
+        session_id = tenant.session_scope_id
     if session_id is None:
         return None
     from surogates.session.store import SessionNotFoundError

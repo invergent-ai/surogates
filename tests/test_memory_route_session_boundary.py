@@ -13,6 +13,7 @@ evaluation isolation exists to prevent.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -174,14 +175,37 @@ async def test_a_plain_web_session_keeps_the_per_user_layout():
 
 async def test_no_session_id_keeps_todays_layout():
     # The Studio memory panel talks about a user's memory, not any one
-    # session, and must keep working unchanged.
+    # session, and must keep working unchanged. A user JWT never carries
+    # session_scope_id, so the new fallback has nothing to catch here.
     _, request, tenant, agent_runtime = _fixtures(service_account=False)
+    assert tenant.session_scope_id is None
 
     store = await memory_route._build_store(request, tenant, agent_runtime)
 
     assert store._keys["memory"] == (
         f"agents/support-bot/users/{tenant.user_id}/memory.json"
     )
+
+
+async def test_a_session_scoped_token_with_no_session_id_still_resolves_the_boundary():
+    # The worker mints a service-account session token scoped to the
+    # session id (create_service_account_session_token). A client built
+    # without session_id -- HarnessAPIClient defaults it to None -- sends no
+    # session_id query param, but the boundary must still resolve from the
+    # token itself: the query param cannot be the only thing standing
+    # between an eval session and shared memory.
+    org_id = uuid4()
+    session = _session(org_id, {"memory_boundary": _EVAL_BOUNDARY})
+    backend, request, tenant, agent_runtime = _fixtures(session, org_id=org_id)
+    tenant = replace(tenant, session_scope_id=session.id)
+
+    result = await _mutate(request, tenant, agent_runtime, None)
+
+    assert result.success is True
+    assert backend.written == [
+        f"agents/support-bot/boundaries/{_EVAL_BOUNDARY}/memory.json",
+    ]
+    assert "agents/support-bot/shared/memory.json" not in backend.written
 
 
 async def test_a_session_from_another_org_is_a_404():
