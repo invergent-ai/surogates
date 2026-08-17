@@ -206,6 +206,16 @@ def _select_harness_token(
     return None
 
 
+def is_eval_session(session: Any) -> bool:
+    """True when this session is one row of an evaluation run.
+
+    Set by the ops evaluation facade, which opens one session per benchmark
+    row. Used to strip tools that cannot complete without a human.
+    """
+    config = getattr(session, "config", None) or {}
+    return bool(str(config.get("eval_run_id") or "").strip())
+
+
 def _filter_effective_tools(
     *,
     tools: set[str],
@@ -215,7 +225,7 @@ def _filter_effective_tools(
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
-    Two rules layered on top of the caller's starting set:
+    Three rules layered on top of the caller's starting set:
 
     1. ``create_artifact`` requires the harness API client.  It stays
        only when the session WILL have one — that is, when
@@ -230,6 +240,8 @@ def _filter_effective_tools(
        try.  Belt + braces: route gate is the hard boundary, tool-set
        exclusion keeps the LLM from advertising capability it doesn't
        have.
+    3. Evaluation sessions never see ``ask_user_question``: no human is
+       watching, so the tool can only ever time out.
 
     All other tools pass through unchanged.
     """
@@ -251,6 +263,13 @@ def _filter_effective_tools(
     if session_is_anonymous_channel:
         result.discard("memory")
         result.discard("skill_manage")
+
+    # An evaluation row has no human behind it, and ``ask_user_question``
+    # blocks the turn for up to 30 minutes waiting for one. Left in place it
+    # stalls the row until the caller's timeout, which reads as a hung agent
+    # rather than as a tool that could never have been answered.
+    if is_eval_session(session):
+        result.discard("ask_user_question")
 
     # worker_block / worker_complete / worker_context are only meaningful
     # when this session is executing a subagent task (the dispatcher set
