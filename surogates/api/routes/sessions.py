@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +41,10 @@ from surogates.channels.constants import (
     API_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
+)
+from surogates.channels.memory_boundary import (
+    EVAL_BOUNDARY_PREFIX,
+    is_eval_session,
 )
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
@@ -86,6 +91,14 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
+#: Seeding writes straight into the event log, so it skips the prompt-
+#: injection screen every ordinary message goes through.  Bound what an
+#: evaluation can push into the model's context, mirroring the batch/length
+#: caps the prompts route already applies to its own bulk entry point.
+MAX_SEED_TURNS = 100
+MAX_SEED_CONTENT_LENGTH = 200_000
+
+
 class SeedTurn(BaseModel):
     """One already-completed turn written into a session at creation.
 
@@ -110,8 +123,21 @@ class CreateSessionRequest(BaseModel):
     #: every existing third-party client working unchanged.
     channel: str | None = None
     #: A pre-written transcript to seed the session with. Honoured only by
-    #: :func:`create_api_session` — see :func:`emit_seed_turns`.
-    seed_turns: list[SeedTurn] | None = None
+    #: :func:`create_api_session`, and only for an evaluation session — see
+    #: :func:`emit_seed_turns`.
+    seed_turns: list[SeedTurn] | None = Field(
+        default=None, max_length=MAX_SEED_TURNS,
+    )
+
+    @model_validator(mode="after")
+    def _cap_seed_content(self) -> CreateSessionRequest:
+        total = sum(len(turn.content) for turn in self.seed_turns or [])
+        if total > MAX_SEED_CONTENT_LENGTH:
+            raise ValueError(
+                f"seed_turns content must total at most "
+                f"{MAX_SEED_CONTENT_LENGTH} characters (got {total})."
+            )
+        return self
 
     @field_validator("channel")
     @classmethod
@@ -124,23 +150,40 @@ class CreateSessionRequest(BaseModel):
         return v
 
 
+#: Marker stamped on every seeded event, following the ``synthetic`` key
+#: :meth:`SessionStore.emit_synthetic_user_message` already uses.  A consumer
+#: reading the log back (the evaluation facade takes the last ``llm.response``
+#: as the agent's answer) must be able to tell a recorded turn from one the
+#: agent actually produced, or a failed row grades against its own transcript.
+SEED_SYNTHETIC_MARKER = "seed"
+
+
 def seed_turn_events(
     turns: list[SeedTurn] | None,
 ) -> list[tuple[EventType, dict]]:
     """Map seeded turns onto the event shapes the runtime already stores.
 
-    An assistant turn is wrapped as ``{"message": {"content": ...}}`` because
-    that is the ``llm.response`` contract every reader expects; a bare
-    ``content`` key would store an event nothing reads back as an answer.
+    An assistant turn is wrapped as ``{"message": {"role": "assistant",
+    "content": ...}}`` because that is the ``llm.response`` contract every
+    reader expects: the context replay appends ``data["message"]`` verbatim
+    into the provider's messages array, which rejects a message without a
+    ``role``.  Both roles carry :data:`SEED_SYNTHETIC_MARKER`.
     """
     events: list[tuple[EventType, dict]] = []
     for turn in turns or []:
         if turn.role == "user":
-            events.append((EventType.USER_MESSAGE, {"content": turn.content}))
+            events.append((
+                EventType.USER_MESSAGE,
+                {"content": turn.content, "synthetic": SEED_SYNTHETIC_MARKER},
+            ))
         else:
-            events.append(
-                (EventType.LLM_RESPONSE, {"message": {"content": turn.content}})
-            )
+            events.append((
+                EventType.LLM_RESPONSE,
+                {
+                    "message": {"role": "assistant", "content": turn.content},
+                    "synthetic": SEED_SYNTHETIC_MARKER,
+                },
+            ))
     return events
 
 
@@ -465,6 +508,11 @@ async def _get_session_for_tenant(
     return session
 
 
+#: Run ids come from the control plane as UUIDs.  Kept deliberately narrow
+#: because the value becomes both an object-key and a filesystem-path segment.
+_EVAL_RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     """Return *config* with the evaluation memory boundary resolved.
 
@@ -475,16 +523,27 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     ``eval:<run id>`` partition, which starts empty and is discarded when the
     run finishes.
     """
-    from surogates.channels.constants import API_CHANNEL
-    from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
-
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
     if channel != API_CHANNEL:
         return resolved
     run_id = str(resolved.get("eval_run_id") or "").strip()
-    if run_id:
-        resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{run_id}"
+    if not run_id:
+        return resolved
+    if not _EVAL_RUN_ID_RE.fullmatch(run_id):
+        # The id is interpolated into memory object keys and into on-disk
+        # memory directory components, so anything outside this alphabet
+        # could walk out of the agent's asset root.  Refuse loudly: dropping
+        # the boundary silently would run the evaluation against the agent's
+        # real memory.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "eval_run_id must be 1-64 characters of letters, digits, "
+                "'.', '_' or '-'."
+            ),
+        )
+    resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{run_id}"
     return resolved
 
 
@@ -640,6 +699,14 @@ async def create_api_session(
         user_id=None,
         service_account_id=service_account_id,
     )
+    if body.seed_turns and not is_eval_session(session):
+        # Seeding bypasses the injection screen that guards the message route,
+        # so it is only available where it is needed: a session the server
+        # itself stamped with an evaluation boundary.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="seed_turns requires an evaluation session (set eval_run_id).",
+        )
     await emit_seed_turns(
         _get_session_store(request),
         session_id=session.id,
