@@ -67,3 +67,31 @@ class TestChannelIdentifierClaim:
         )
         claims = decode_website_session_token(token)
         assert claims.channel_identifier == ""
+
+
+class TestWebsiteEnabledDefault:
+    """``channel_routing`` is the gate; the global flag must not be a
+    second one that a deployment has to remember to set.
+
+    A prod deployment whose runtime config carried no ``website:`` block
+    404'd every ``/v1/website/*`` request while Studio showed the channel
+    "Live on your site" — Studio reads the routing row it just wrote and
+    cannot see this flag.
+    """
+
+    def test_defaults_on(self):
+        from surogates.config import WebsiteSettings
+
+        assert WebsiteSettings().enabled is True
+
+    def test_env_can_still_turn_it_off(self, monkeypatch):
+        from surogates.config import WebsiteSettings
+
+        monkeypatch.setenv("SUROGATES_WEBSITE_ENABLED", "false")
+        assert WebsiteSettings().enabled is False
+
+    def test_absent_website_block_leaves_it_on(self):
+        """A config file with no ``website:`` key is the prod case."""
+        from surogates.config import Settings
+
+        assert Settings().website.enabled is True

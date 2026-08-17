@@ -559,11 +559,26 @@ class WebsiteSettings(BaseSettings):
     redeploying with a fresh value — the key only ever appears in the
     bootstrap ``Authorization`` header, so the blast radius of a leak
     is one redeploy.
+
+    ``enabled`` defaults on, for the same reason WhatsApp's does (see
+    :class:`WhatsAppChannelSettings`).  Once per-agent routing landed,
+    ``channel_routing`` became the only gate that matters: the bearer
+    publishable key is looked up as ``website:<key>`` and an absent or
+    inactive row 404s, so a deployment with no rows serves nothing
+    whether this flag is on or off.  Requiring the flag as well bought
+    no safety and cost a hand-applied ConfigMap edit per environment —
+    a step easy to forget, whose only symptom is Studio reporting the
+    channel "Live on your site" (it reads the routing row it just
+    wrote) while every ``/v1/website/*`` request 404s.
+
+    Being on costs one mounted route that rejects unknown keys.
+    ``SUROGATES_WEBSITE_ENABLED=false`` still turns it off if a
+    deployment ever needs to.
     """
 
     model_config = {"env_prefix": "SUROGATES_WEBSITE_"}
 
-    enabled: bool = False
+    enabled: bool = True
     publishable_key: str = ""
     allowed_origins: str = ""           # CSV of scheme://host[:port]
 
