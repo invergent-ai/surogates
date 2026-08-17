@@ -37,7 +37,7 @@ TEST_AGENT_ID = "default"
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def app(session_factory, redis_client, pg_url, redis_url, tmp_path):
+async def app(session_factory, redis_client, pg_url, redis_url):
     """FastAPI app wired to the test containers, mirroring test_api.py."""
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
@@ -52,10 +52,6 @@ async def app(session_factory, redis_client, pg_url, redis_url, tmp_path):
     application.state.session_store = SessionStore(session_factory, redis=redis_client)
     application.state.settings = Settings()
     application.state.settings.storage.bucket = f"test-agent-{uuid.uuid4()}"
-    # ``tenant_assets_root`` defaults to ``/data/tenant-assets``, an
-    # absolute container path that does not exist outside the image, so
-    # these tests failed on storage before reaching an assertion.
-    application.state.settings.storage.base_path = str(tmp_path / "tenant-assets")
     application.state.storage = create_backend(application.state.settings)
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key()

@@ -415,6 +415,7 @@ async def _load_and_authorize_session(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="The website channel for this agent has been turned off.",
             )
+        await _reject_key_for_another_agent(request, routing)
         agent_origins = _agent_allowed_origins(_routing_channel_config(routing))
         if agent_origins is not None:
             allowed = agent_origins
@@ -470,24 +471,36 @@ async def _resolve_website_routing(request: Request) -> dict:
         )
     routing = await cache.get(f"website:{token}")
     if not routing or not routing.get("agent_id") or not routing.get("org_id"):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Unknown or inactive website key.",
-        )
+        raise _unknown_key()
+    return routing
+
+
+def _unknown_key() -> HTTPException:
+    """The one 404 both key-rejection paths raise.
+
+    The detail string has to stay identical between "no such key" and
+    "another agent's key" or the difference becomes the enumeration
+    oracle this route refuses to offer.
+    """
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Unknown or inactive website key.",
+    )
+
+
+async def _reject_key_for_another_agent(request: Request, routing: dict) -> None:
+    """Raise unless the key's agent is the agent the request addresses.
+
+    Guards both lookup sites, so the binding holds for the life of the
+    session rather than only at bootstrap.
+    """
     addressed = await resolve_agent_id_soft(request)
     if addressed and addressed != routing["agent_id"]:
-        # Same 404 as an unknown key: telling a caller that the key is
-        # valid-but-for-another-agent is the enumeration this route
-        # already refuses to offer.
         logger.warning(
             "Website key for agent %s presented on a host addressing %s",
             routing["agent_id"], addressed,
         )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Unknown or inactive website key.",
-        )
-    return routing
+        raise _unknown_key()
 
 
 async def _enforce_website_rate_limit(
@@ -643,6 +656,9 @@ async def bootstrap_website_session(
     await _enforce_website_rate_limit(
         request, routing["org_id"], routing["agent_id"],
     )
+    # After the limiter: resolving the addressed agent can miss the slug
+    # cache and cost an ops round-trip, and that cache is unbounded.
+    await _reject_key_for_another_agent(request, routing)
 
     request_origin = _extract_origin(request)
     routing_config = _routing_channel_config(routing)

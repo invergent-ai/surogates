@@ -7,6 +7,7 @@ and provides async engine, session factory, and store fixtures.
 from __future__ import annotations
 
 import os
+import tempfile
 import uuid
 from uuid import UUID
 
@@ -33,6 +34,15 @@ from .inbox_e2e_helpers import build_inbox_test_app
 
 # Ensure JWT secret is set for all integration tests.
 os.environ.setdefault("SUROGATES_JWT_SECRET", "integration-test-secret-key-1234")
+# ``tenant_assets_root`` defaults to ``/data/tenant-assets``, an absolute
+# container path. Every fixture that builds a LocalBackend failed on the
+# filesystem before reaching an assertion, so those suites only ever ran
+# inside the image. Set once here rather than per fixture — the copy-paste
+# version reached 4 of the 9 modules that call create_backend.
+os.environ.setdefault(
+    "SUROGATES_STORAGE_BASE_PATH",
+    tempfile.mkdtemp(prefix="surogates-tenant-assets-"),
+)
 
 
 # ---------------------------------------------------------------------------

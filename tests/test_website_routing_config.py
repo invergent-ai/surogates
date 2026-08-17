@@ -12,6 +12,7 @@ from surogates.api.routes.website import (
     _agent_allowed_origins,
     _routing_channel_config,
 )
+from surogates.config import Settings, WebsiteSettings
 from surogates.channels.website_session import (
     create_website_session_token,
     decode_website_session_token,
@@ -84,19 +85,13 @@ class TestWebsiteEnabledDefault:
         # permanently, so a sibling test that loaded a config carrying
         # website.enabled=false would otherwise decide this one.
         monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
-        from surogates.config import WebsiteSettings
-
         assert WebsiteSettings().enabled is True
 
     def test_env_can_still_turn_it_off(self, monkeypatch):
-        from surogates.config import WebsiteSettings
-
         monkeypatch.setenv("SUROGATES_WEBSITE_ENABLED", "false")
         assert WebsiteSettings().enabled is False
 
     def test_absent_website_block_leaves_it_on(self, monkeypatch):
         """A config file with no ``website:`` key is the prod case."""
         monkeypatch.delenv("SUROGATES_WEBSITE_ENABLED", raising=False)
-        from surogates.config import Settings
-
         assert Settings().website.enabled is True

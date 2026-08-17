@@ -560,20 +560,13 @@ class WebsiteSettings(BaseSettings):
     bootstrap ``Authorization`` header, so the blast radius of a leak
     is one redeploy.
 
-    ``enabled`` defaults on, for the same reason WhatsApp's does (see
-    :class:`WhatsAppChannelSettings`).  Once per-agent routing landed,
-    ``channel_routing`` became the only gate that matters: the bearer
-    publishable key is looked up as ``website:<key>`` and an absent or
-    inactive row 404s, so a deployment with no rows serves nothing
-    whether this flag is on or off.  Requiring the flag as well bought
-    no safety and cost a hand-applied ConfigMap edit per environment —
-    a step easy to forget, whose only symptom is Studio reporting the
-    channel "Live on your site" (it reads the routing row it just
-    wrote) while every ``/v1/website/*`` request 404s.
-
-    Being on costs one mounted route that rejects unknown keys.
-    ``SUROGATES_WEBSITE_ENABLED=false`` still turns it off if a
-    deployment ever needs to.
+    ``enabled`` defaults on for the same reason WhatsApp's does (see
+    :class:`WhatsAppChannelSettings`) — since per-agent routing landed,
+    ``channel_routing`` is the only gate that matters, and an absent or
+    inactive row 404s either way.  The website-specific symptom of the
+    missing ConfigMap edit: Studio reported the channel "Live on your
+    site", reading the routing row it had just written, while every
+    ``/v1/website/*`` request 404'd.
     """
 
     model_config = {"env_prefix": "SUROGATES_WEBSITE_"}

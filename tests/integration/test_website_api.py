@@ -49,7 +49,7 @@ _AGENT_ID = "website-test-agent"
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def app(session_factory, redis_client, pg_url, redis_url, tmp_path):
+async def app(session_factory, redis_client, pg_url, redis_url):
     """FastAPI app wired to the test containers.
 
     The website routes resolve the deployment agent via
@@ -83,11 +83,6 @@ async def app(session_factory, redis_client, pg_url, redis_url, tmp_path):
     # configure storage at chart install time.  Tests run against the
     # local backend, so any non-empty bucket name suffices.
     settings.storage.bucket = "test-website-bucket"
-    # ``tenant_assets_root`` defaults to ``/data/tenant-assets``, an absolute
-    # container path. Left alone, every test in this file fails with
-    # PermissionError before reaching an assertion — so the suite covering
-    # the website channel silently never ran outside the image.
-    settings.storage.base_path = str(tmp_path / "tenant-assets")
     application.state.settings = settings
     application.state.storage = create_backend(settings)
     application.state.credential_vault = CredentialVault(
@@ -733,40 +728,33 @@ async def test_stream_race_recovery_streams_resumed_events(
 # ---------------------------------------------------------------------------
 
 
-async def test_bootstrap_rejects_a_key_for_another_agent(
-    app, client: AsyncClient, session_factory,
+@pytest.mark.parametrize(
+    "addressed,expected",
+    [("some-other-agent", 404), (_AGENT_ID, 201)],
+)
+async def test_bootstrap_binds_the_key_to_the_agent_it_addresses(
+    app, client: AsyncClient, session_factory, addressed, expected,
 ):
     """``channel_routing`` rows are global — keyed on (kind, identifier)
     with no deployment column — and a publishable key is public by design.
     Without this check any host serving the route would run anonymous
-    sessions on its own compute for an agent it does not host."""
+    sessions on its own compute for an agent it does not host.
+
+    The 201 case matters as much as the 404: an equality check is easy to
+    over-tighten into rejecting the normal embed, which addresses its own
+    agent on every request.
+    """
     org_id = await create_org(session_factory)
     key = configure_website(app, org_id=org_id)
 
     resp = await client.post(
         "/v1/website/sessions",
         headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
-        params={"agent_id": "some-other-agent"},
+        params={"agent_id": addressed},
     )
 
-    # Same 404 as an unknown key: "valid, but for another agent" is the
-    # enumeration this route already refuses to offer.
-    assert resp.status_code == 404, resp.text
-    assert "Unknown or inactive website key" in resp.text
-
-
-async def test_bootstrap_allows_the_key_on_its_own_agent(
-    app, client: AsyncClient, session_factory,
-):
-    """The check is an equality test, not a blanket rejection of an
-    addressed agent — the embed snippet points at the agent's own host."""
-    org_id = await create_org(session_factory)
-    key = configure_website(app, org_id=org_id)
-
-    resp = await client.post(
-        "/v1/website/sessions",
-        headers={"Authorization": f"Bearer {key}", "Origin": _DEFAULT_ORIGIN},
-        params={"agent_id": _AGENT_ID},
-    )
-
-    assert resp.status_code == 201, resp.text
+    assert resp.status_code == expected, resp.text
+    if expected == 404:
+        # Same 404 as an unknown key: "valid, but for another agent" is
+        # the enumeration this route already refuses to offer.
+        assert "Unknown or inactive website key" in resp.text
