@@ -49,7 +49,7 @@ _AGENT_ID = "website-test-agent"
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def app(session_factory, redis_client, pg_url, redis_url):
+async def app(session_factory, redis_client, pg_url, redis_url, tmp_path):
     """FastAPI app wired to the test containers.
 
     The website routes resolve the deployment agent via
@@ -83,6 +83,11 @@ async def app(session_factory, redis_client, pg_url, redis_url):
     # configure storage at chart install time.  Tests run against the
     # local backend, so any non-empty bucket name suffices.
     settings.storage.bucket = "test-website-bucket"
+    # ``tenant_assets_root`` defaults to ``/data/tenant-assets``, an absolute
+    # container path. Left alone, every test in this file fails with
+    # PermissionError before reaching an assertion — so the suite covering
+    # the website channel silently never ran outside the image.
+    settings.storage.base_path = str(tmp_path / "tenant-assets")
     application.state.settings = settings
     application.state.storage = create_backend(settings)
     application.state.credential_vault = CredentialVault(
