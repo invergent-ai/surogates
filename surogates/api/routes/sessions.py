@@ -516,6 +516,20 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     derived ``eval:<partition id>`` partition, which starts empty and is
     discarded once its row is done.
 
+    ``workspace_boundary`` and ``channel`` go the same way, unconditionally
+    and for every channel, because each is a second spelling of the same
+    capability. :func:`surogates.storage.tenant.workspace_boundary` honours a
+    pinned ``workspace_boundary`` ahead of everything else, so a client could
+    pin ``slack:c:C123`` and read or write that thread's shared workspace — or
+    pin one value across a whole evaluation run and put back the row-to-row
+    contamination the per-row workspace exists to prevent.
+    ``config["channel"]`` is what :func:`.workspace_session_shim` rebuilds a
+    session shape from, so ``{"channel": "slack", "slack_channel_id": "C1"}``
+    resolves the vision and media_gen paths to the ``public`` boundary. Both
+    are re-derived from the real channel by ``create_agent_session``
+    (``setdefault("channel", ...)`` plus ``pin_workspace_boundary``), so
+    nothing legitimate loses anything by supplying neither.
+
     The partition is per benchmark row, not per run: one row's memory must
     never be readable while another row is answered, which is why each row
     gets its own partition rather than sharing one across the whole run. The
@@ -525,6 +539,8 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
+    resolved.pop("workspace_boundary", None)
+    resolved.pop("channel", None)
     if channel != API_CHANNEL:
         return resolved
     partition_id = str(resolved.get("eval_partition_id") or "").strip()

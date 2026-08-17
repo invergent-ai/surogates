@@ -1,12 +1,19 @@
-"""The eval memory boundary is server-derived, never client-supplied."""
+"""Every partition key on the session-create route is server-owned.
+
+``memory_boundary`` was the only one stripped, so ``workspace_boundary`` and
+``channel`` — each a second spelling of the same capability — stayed
+client-forgeable.
+"""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 
 from surogates.api.routes.sessions import apply_eval_isolation
+from surogates.storage.tenant import workspace_boundary, workspace_session_shim
 
 
 def test_eval_partition_id_produces_a_namespaced_boundary():
@@ -75,3 +82,53 @@ def test_blank_eval_partition_id_is_not_a_boundary():
 def test_ordinary_config_is_untouched():
     config = apply_eval_isolation({"single_session": True}, channel="api")
     assert config == {"single_session": True}
+
+
+# ---------------------------------------------------------------------------
+# The other two server-owned keys
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("channel", ["api", "web", "studio"])
+def test_client_supplied_workspace_boundary_is_stripped(channel):
+    # ``workspace_boundary`` beats everything else in
+    # :func:`surogates.storage.tenant.workspace_boundary`, so pinning it is a
+    # way to read or write another conversation's shared workspace.
+    config = apply_eval_isolation(
+        {"workspace_boundary": "slack:c:C123"}, channel=channel,
+    )
+    assert "workspace_boundary" not in config
+
+
+@pytest.mark.parametrize("channel", ["api", "web", "studio"])
+def test_client_supplied_channel_is_stripped(channel):
+    # ``workspace_session_shim`` rebuilds a session shape out of
+    # ``config["channel"]``, so a forged value re-routes the vision and
+    # media_gen paths to another channel's boundary.
+    config = apply_eval_isolation(
+        {"channel": "slack", "slack_channel_id": "C1"}, channel=channel,
+    )
+    assert "channel" not in config
+    assert config["slack_channel_id"] == "C1"
+
+
+def test_an_eval_row_cannot_pin_a_shared_workspace():
+    # Pinning one value across a run puts back exactly the row-to-row
+    # contamination the per-row workspace exists to remove: without the
+    # strip, every row of the run would resolve to the same workspace prefix.
+    config = apply_eval_isolation(
+        {
+            "eval_partition_id": "run-1-a1b2",
+            "workspace_boundary": "eval:run-1",
+        },
+        channel="api",
+    )
+    session = SimpleNamespace(channel="api", config=config)
+    assert workspace_boundary(session) is None
+
+
+def test_a_forged_channel_cannot_reach_the_public_workspace():
+    config = apply_eval_isolation(
+        {"channel": "slack", "slack_channel_id": "C1"}, channel="api",
+    )
+    assert workspace_boundary(workspace_session_shim(config, uuid4())) is None
