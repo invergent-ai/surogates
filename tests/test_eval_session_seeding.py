@@ -166,6 +166,7 @@ def _route_fixtures(path: str, *, service_account: bool):
                 session_store=store,
                 storage=_Storage(),
                 redis=None,
+                session_factory=None,
             ),
         ),
     )
@@ -212,6 +213,70 @@ async def test_web_create_session_does_not_seed():
     )
 
     assert store.emitted == []
+
+
+@pytest.fixture(autouse=True)
+def _eval_identity_by_default(monkeypatch):
+    """Resolve any service account in this module as its org's evaluation
+    identity, unless a test overrides ``ServiceAccountStore.get_by_id``
+    itself.
+
+    Seeding now also requires the caller to be that identity (not merely
+    claim eval_partition_id), so every scenario below that expects seeding
+    to proceed needs a resolvable, matching identity behind it.  Defaulting
+    it here keeps those scenarios focused on the condition they are each
+    actually testing.
+    """
+    from surogates.api.routes import sessions as sessions_route
+    from surogates.tenant.auth.service_account import ResolvedServiceAccount
+
+    async def fake_get_by_id(self, service_account_id, org_id):
+        return ResolvedServiceAccount(
+            id=service_account_id, org_id=org_id, name=f"eval-{org_id}",
+        )
+
+    monkeypatch.setattr(
+        sessions_route.ServiceAccountStore, "get_by_id", fake_get_by_id,
+    )
+
+
+async def test_a_non_eval_identity_is_refused_even_with_a_valid_partition_id(
+    monkeypatch,
+):
+    # A service account can add eval_partition_id to its own request for
+    # free; that alone must not be enough to seed. Only the org's
+    # evaluation identity may.
+    from fastapi import HTTPException
+
+    from surogates.api.routes import sessions as sessions_route
+    from surogates.tenant.auth.service_account import ResolvedServiceAccount
+
+    store, request, tenant, agent_runtime = _route_fixtures(
+        "/v1/api/sessions", service_account=True,
+    )
+
+    async def fake_get_by_id(self, service_account_id, org_id):
+        return ResolvedServiceAccount(
+            id=service_account_id, org_id=org_id, name="some-other-account",
+        )
+
+    monkeypatch.setattr(
+        sessions_route.ServiceAccountStore, "get_by_id", fake_get_by_id,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await sessions_route.create_api_session(
+            sessions_route.CreateSessionRequest(
+                config={"eval_partition_id": "run-1-a1b2"},
+                seed_turns=[SeedTurn(role="user", content="one")],
+            ),
+            request,
+            tenant,
+            agent_runtime,
+        )
+    assert exc.value.status_code == 403
+    assert store.emitted == []
+    assert store.created == []
 
 
 async def test_api_session_seeds_only_when_it_is_an_evaluation():

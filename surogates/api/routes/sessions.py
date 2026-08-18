@@ -67,6 +67,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -563,15 +564,45 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     return resolved
 
 
-def _require_eval_seeding(body: CreateSessionRequest, *, channel: str) -> None:
-    """Refuse ``seed_turns`` on anything but an evaluation session.
+def _eval_service_account_name(org_id: UUID) -> str:
+    """The service-account name ops mints for this org's evaluation traffic.
 
-    Asks :func:`apply_eval_isolation` the same question
-    :func:`~surogates.channels.memory_boundary.is_eval_session` asks of the
-    created row, one step earlier: would this request be stamped with an
-    evaluation boundary?  Running the real stamping function keeps the two
-    answers from drifting, and surfaces a malformed ``eval_partition_id``
-    before anything is committed.
+    Mirrors ``eval_service_account_name`` in surogate-ops
+    (server/services/agent_forward.py). Kept behind one named helper so the
+    convention has a single place to change if it ever moves.
+    """
+    return f"eval-{org_id}"
+
+
+async def _require_eval_seeding(
+    body: CreateSessionRequest,
+    *,
+    channel: str,
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """Refuse ``seed_turns`` on anything but an evaluation session run by
+    the org's evaluation identity.
+
+    Two conditions, both required:
+
+    1. Asks :func:`apply_eval_isolation` the same question
+       :func:`~surogates.channels.memory_boundary.is_eval_session` asks of
+       the created row, one step earlier: would this request be stamped
+       with an evaluation boundary?  Running the real stamping function
+       keeps the two answers from drifting, and surfaces a malformed
+       ``eval_partition_id`` before anything is committed.
+    2. The caller's own service account must *be* the org's evaluation
+       identity, not merely declare ``eval_partition_id`` in its config.
+
+    This second check is NOT an authorisation boundary, and must not be
+    read as one. It stops an ordinary API integration from seeding by
+    tacking ``eval_partition_id`` onto its own request, since that config
+    key no longer proves anything about who is calling. It does NOT stop a
+    principal that can create service accounts: anyone with that ability
+    can mint one named to match ``eval-{org_id}`` and pass this check too.
+    The real fix is a capability on the service account that the account
+    cannot grant itself; tracked as bug-09 in the team's eval bug folder.
     """
     boundary = str(
         apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
@@ -581,6 +612,18 @@ def _require_eval_seeding(body: CreateSessionRequest, *, channel: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="seed_turns requires an evaluation session (set eval_partition_id).",
+        )
+
+    store = ServiceAccountStore(request.app.state.session_factory)
+    resolved = (
+        await store.get_by_id(tenant.service_account_id, tenant.org_id)
+        if tenant.service_account_id is not None
+        else None
+    )
+    if resolved is None or resolved.name != _eval_service_account_name(tenant.org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="seed_turns requires the org's evaluation identity.",
         )
 
 
@@ -768,7 +811,7 @@ async def create_api_session(
     # committed session row, a created bucket and a stamped workspace prefix
     # that nobody will ever use or clean up.
     if body.seed_turns:
-        _require_eval_seeding(body, channel=channel)
+        await _require_eval_seeding(body, channel=channel, request=request, tenant=tenant)
         _screen_seed_turns(body.seed_turns)
     session = await _create_session(
         body,
