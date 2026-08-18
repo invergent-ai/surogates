@@ -602,7 +602,7 @@ async def _require_eval_seeding(
     principal that can create service accounts: anyone with that ability
     can mint one named to match ``eval-{org_id}`` and pass this check too.
     The real fix is a capability on the service account that the account
-    cannot grant itself; tracked as bug-09 in the team's eval bug folder.
+    cannot grant itself; tracked as bug-16 in the team's eval bug folder.
     """
     boundary = str(
         apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
