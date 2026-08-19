@@ -127,15 +127,25 @@ def workspace_boundary(session: object) -> str | None:
     child) wins; otherwise fall back through ``session_memory_boundary`` so a
     managed-channel session created before the flag existed still fails closed
     to its private boundary. ``None`` keeps the per-session layout (web/Studio).
+
+    An evaluation boundary is memory-only: a row's memory partition is already
+    its own, and its workspace stays the per-session one, so a file written
+    while answering one row cannot show up while answering the next.
     """
     cfg = getattr(session, "config", None) or {}
     pinned = str(cfg.get("workspace_boundary") or "").strip()
     if pinned:
         return pinned
 
-    from surogates.channels.memory_boundary import session_memory_boundary
+    from surogates.channels.memory_boundary import (
+        is_eval_session,
+        session_memory_boundary,
+    )
 
-    return session_memory_boundary(session)
+    boundary = session_memory_boundary(session)
+    if is_eval_session(session):
+        return None
+    return boundary
 
 
 def boundary_workspace_prefix(

@@ -61,6 +61,7 @@ class ResolvedServiceAccount:
 
     id: UUID
     org_id: UUID
+    name: str
 
 
 class _TTLCache:
@@ -219,7 +220,9 @@ class ServiceAccountStore:
             if row is None:
                 return None
 
-            resolved = ResolvedServiceAccount(id=row.id, org_id=row.org_id)
+            resolved = ResolvedServiceAccount(
+                id=row.id, org_id=row.org_id, name=row.name,
+            )
 
             # Best-effort heartbeat; failures here must not deny auth.
             try:
@@ -273,7 +276,9 @@ class ServiceAccountStore:
             row = result.scalar_one_or_none()
         if row is None:
             return None
-        resolved = ResolvedServiceAccount(id=row.id, org_id=row.org_id)
+        resolved = ResolvedServiceAccount(
+            id=row.id, org_id=row.org_id, name=row.name,
+        )
         _ROW_CACHE_BY_ID.set(cache_key, resolved)
         _ROW_CACHE_BY_HASH.set(row.token_hash, resolved)
         return resolved
@@ -299,7 +304,7 @@ class ServiceAccountStore:
             ).scalar_one_or_none()
         if row is None:
             return None
-        return ResolvedServiceAccount(id=row.id, org_id=row.org_id)
+        return ResolvedServiceAccount(id=row.id, org_id=row.org_id, name=row.name)
 
     async def rotate_token_for_agent_id(
         self, *, org_id: UUID, agent_id: str, clear_revoked: bool = False,

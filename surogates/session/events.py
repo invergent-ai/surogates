@@ -5,6 +5,13 @@ from __future__ import annotations
 from enum import unique
 from enum import Enum
 
+#: Value of an event's ``synthetic`` key when the event was written into a
+#: session by ``POST /v1/api/sessions {"seed_turns": ...}`` rather than
+#: produced by the agent.  Lives beside :class:`EventType` because both the
+#: route that stamps it and the readers that must skip it need it, and
+#: neither should have to import the other.
+SEED_SYNTHETIC_MARKER = "seed"
+
 
 @unique
 class EventType(str, Enum):

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -41,6 +42,7 @@ from surogates.channels.constants import (
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
 )
+from surogates.channels.memory_boundary import EVAL_BOUNDARY_PREFIX
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -50,7 +52,7 @@ from surogates.api.routes._commerce_turn import (
     firebase_buyer_identity,
     runtime_commerce_payload,
 )
-from surogates.session.events import EventType
+from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -65,6 +67,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
+from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,27 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 
 
+#: Seeding writes straight into the event log, so it skips the prompt-
+#: injection screen every ordinary message goes through.  Bound what an
+#: evaluation can push into the model's context, mirroring the batch/length
+#: caps the prompts route already applies to its own bulk entry point.
+MAX_SEED_TURNS = 100
+MAX_SEED_CONTENT_LENGTH = 200_000
+
+
+class SeedTurn(BaseModel):
+    """One already-completed turn written into a session at creation.
+
+    Used by the evaluation facade, where a multi-turn benchmark resends its
+    whole conversation on every call. Re-running the earlier turns would give
+    the agent a history that differs from the one the grader is scoring
+    against, so the recorded exchange is written verbatim instead.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class CreateSessionRequest(BaseModel):
     system: str | None = None
     config: dict = Field(default_factory=dict)
@@ -96,6 +120,22 @@ class CreateSessionRequest(BaseModel):
     #: as an operator's.  Absent means :data:`API_CHANNEL`, which keeps
     #: every existing third-party client working unchanged.
     channel: str | None = None
+    #: A pre-written transcript to seed the session with. Honoured only by
+    #: :func:`create_api_session`, and only for an evaluation session — see
+    #: :func:`emit_seed_turns`.
+    seed_turns: list[SeedTurn] | None = Field(
+        default=None, max_length=MAX_SEED_TURNS,
+    )
+
+    @model_validator(mode="after")
+    def _cap_seed_content(self) -> CreateSessionRequest:
+        total = sum(len(turn.content) for turn in self.seed_turns or [])
+        if total > MAX_SEED_CONTENT_LENGTH:
+            raise ValueError(
+                f"seed_turns content must total at most "
+                f"{MAX_SEED_CONTENT_LENGTH} characters (got {total})."
+            )
+        return self
 
     @field_validator("channel")
     @classmethod
@@ -106,6 +146,54 @@ class CreateSessionRequest(BaseModel):
                 f"channel must be one of: {allowed} (got {v!r})"
             )
         return v
+
+
+def seed_turn_events(
+    turns: list[SeedTurn] | None,
+) -> list[tuple[EventType, dict]]:
+    """Map seeded turns onto the event shapes the runtime already stores.
+
+    An assistant turn is wrapped as ``{"message": {"role": "assistant",
+    "content": ...}}`` because that is the ``llm.response`` contract every
+    reader expects: the context replay appends ``data["message"]`` verbatim
+    into the provider's messages array, which rejects a message without a
+    ``role``.  Both roles carry :data:`SEED_SYNTHETIC_MARKER`.
+    """
+    events: list[tuple[EventType, dict]] = []
+    for turn in turns or []:
+        if turn.role == "user":
+            # Mirrors the shape SessionStore.emit_synthetic_user_message
+            # builds for a live synthetic turn. A required field added
+            # there needs adding here too.
+            events.append((
+                EventType.USER_MESSAGE,
+                {"content": turn.content, "synthetic": SEED_SYNTHETIC_MARKER},
+            ))
+        else:
+            events.append((
+                EventType.LLM_RESPONSE,
+                {
+                    "message": {"role": "assistant", "content": turn.content},
+                    "synthetic": SEED_SYNTHETIC_MARKER,
+                },
+            ))
+    return events
+
+
+async def emit_seed_turns(
+    store: SessionStore,
+    *,
+    session_id: UUID,
+    turns: list[SeedTurn] | None,
+) -> None:
+    """Write seeded turns onto a session without enqueueing it.
+
+    Deliberately no ``enqueue_session`` call: seeding records what already
+    happened, so the worker must not wake and answer the last seeded message.
+    The agent runs only when the caller sends the real turn afterwards.
+    """
+    for event_type, data in seed_turn_events(turns):
+        await store.emit_event(session_id, event_type, data)
 
 
 _ALLOWED_IMAGE_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -413,6 +501,169 @@ async def _get_session_for_tenant(
     return session
 
 
+#: Partition ids come from the facade as ``<run id>-<short unique suffix>``,
+#: one per benchmark row.  Kept deliberately narrow because the value becomes
+#: both an object-key and a filesystem-path segment.
+_EVAL_PARTITION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def apply_eval_isolation(config: dict, *, channel: str) -> dict:
+    """Return *config* with the evaluation memory boundary resolved.
+
+    The boundary is server-owned. A client-supplied ``memory_boundary`` is
+    always dropped, because a caller able to name its own boundary could read
+    or overwrite the memory of any conversation on the same agent. An
+    ``api``-channel session declaring ``eval_partition_id`` instead gets a
+    derived ``eval:<partition id>`` partition, which starts empty and is
+    discarded once its row is done.
+
+    ``workspace_boundary`` and ``channel`` go the same way, unconditionally
+    and for every channel, because each is a second spelling of the same
+    capability. :func:`surogates.storage.tenant.workspace_boundary` honours a
+    pinned ``workspace_boundary`` ahead of everything else, so a client could
+    pin ``slack:c:C123`` and read or write that thread's shared workspace — or
+    pin one value across a whole evaluation run and put back the row-to-row
+    contamination the per-row workspace exists to prevent.
+    ``config["channel"]`` is what :func:`.workspace_session_shim` rebuilds a
+    session shape from, so ``{"channel": "slack", "slack_channel_id": "C1"}``
+    resolves the vision and media_gen paths to the ``public`` boundary. Both
+    are re-derived from the real channel by ``create_agent_session``
+    (``setdefault("channel", ...)`` plus ``pin_workspace_boundary``), so
+    nothing legitimate loses anything by supplying neither.
+
+    The partition is per benchmark row, not per run: one row's memory must
+    never be readable while another row is answered, which is why each row
+    gets its own partition rather than sharing one across the whole run. The
+    facade composes the value as ``<run id>-<short unique suffix>``, so a
+    whole run's partitions still share the run id as a common prefix and can
+    be swept together later.
+    """
+    resolved = dict(config)
+    resolved.pop("memory_boundary", None)
+    resolved.pop("workspace_boundary", None)
+    resolved.pop("channel", None)
+    if channel != API_CHANNEL:
+        return resolved
+    partition_id = str(resolved.get("eval_partition_id") or "").strip()
+    if not partition_id:
+        return resolved
+    if not _EVAL_PARTITION_ID_RE.fullmatch(partition_id):
+        # The id is interpolated into memory object keys and into on-disk
+        # memory directory components, so anything outside this alphabet
+        # could walk out of the agent's asset root.  Refuse loudly: dropping
+        # the boundary silently would run the evaluation against the agent's
+        # real memory.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "eval_partition_id must be 1-64 characters of letters, "
+                "digits, '.', '_' or '-'."
+            ),
+        )
+    resolved["memory_boundary"] = f"{EVAL_BOUNDARY_PREFIX}{partition_id}"
+    return resolved
+
+
+def _eval_service_account_name(org_id: UUID) -> str:
+    """The service-account name ops mints for this org's evaluation traffic.
+
+    Mirrors ``eval_service_account_name`` in surogate-ops
+    (server/services/agent_forward.py). Kept behind one named helper so the
+    convention has a single place to change if it ever moves.
+    """
+    return f"eval-{org_id}"
+
+
+async def _require_eval_seeding(
+    body: CreateSessionRequest,
+    *,
+    channel: str,
+    request: Request,
+    tenant: TenantContext,
+) -> None:
+    """Refuse ``seed_turns`` on anything but an evaluation session run by
+    the org's evaluation identity.
+
+    Two conditions, both required:
+
+    1. Asks :func:`apply_eval_isolation` the same question
+       :func:`~surogates.channels.memory_boundary.is_eval_session` asks of
+       the created row, one step earlier: would this request be stamped
+       with an evaluation boundary?  Running the real stamping function
+       keeps the two answers from drifting, and surfaces a malformed
+       ``eval_partition_id`` before anything is committed.
+    2. The caller's own service account must *be* the org's evaluation
+       identity, not merely declare ``eval_partition_id`` in its config.
+
+    This second check is NOT an authorisation boundary, and must not be
+    read as one. It stops an ordinary API integration from seeding by
+    tacking ``eval_partition_id`` onto its own request, since that config
+    key no longer proves anything about who is calling. It does NOT stop a
+    principal that can create service accounts: anyone with that ability
+    can mint one named to match ``eval-{org_id}`` and pass this check too.
+    The real fix is a capability on the service account that the account
+    cannot grant itself; tracked as bug-16 in the team's eval bug folder.
+    """
+    boundary = str(
+        apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
+        or ""
+    )
+    if not boundary.startswith(EVAL_BOUNDARY_PREFIX):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="seed_turns requires an evaluation session (set eval_partition_id).",
+        )
+
+    store = ServiceAccountStore(request.app.state.session_factory)
+    resolved = (
+        await store.get_by_id(tenant.service_account_id, tenant.org_id)
+        if tenant.service_account_id is not None
+        else None
+    )
+    if resolved is None or resolved.name != _eval_service_account_name(tenant.org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="seed_turns requires the org's evaluation identity.",
+        )
+
+
+def _screen_seed_turns(turns: list[SeedTurn]) -> None:
+    """Run every seeded turn through the message route's injection screen.
+
+    Seeding writes straight into the event log, so without this it is a way
+    to put arbitrary text into a model's context while skipping the
+    :class:`PromptInjectionDetector` that screens every real message on this
+    route: hide the payload in a seeded turn, then send an innocuous real
+    prompt and the agent carries out the injected instruction with its full
+    tool set and the service account's credentials.  Being an evaluation
+    session is no defence — the stamp is unconditional on request, so it
+    costs one config key.
+
+    ``role`` is screened too, not just ``user``: it is a field the caller
+    supplies on the request body, not a server-verified fact, and the same
+    injection payload relabelled ``assistant`` is appended verbatim into the
+    provider's messages array by the context replay — so a role check here
+    would be trusting the attacker to self-report.  The accepted cost is
+    that a benchmark's own recorded assistant answer can, in principle, trip
+    the detector and fail the row with a 422; that is preferable to an
+    injection channel gated only on a caller-chosen label, so do not narrow
+    this back to ``user`` turns for that reason.  ``MAX_SEED_TURNS`` and
+    ``MAX_SEED_CONTENT_LENGTH`` bound what this has to scan (~36ms measured
+    for the full 200k content cap).
+    """
+    detector = _get_injection_detector()
+    for index, turn in enumerate(turns):
+        result = detector.detect(turn.content, source="api_channel")
+        if result.is_injection:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Seeded turn {index} ({turn.role}) blocked: "
+                    f"{result.explanation}"
+                ),
+            )
+
+
 async def _create_session(
     body: CreateSessionRequest,
     request: Request,
@@ -432,7 +683,7 @@ async def _create_session(
     store = _get_session_store(request)
     settings = request.app.state.settings
 
-    config = body.config.copy()
+    config = apply_eval_isolation(body.config.copy(), channel=channel)
     if body.system:
         config["system"] = body.system
 
@@ -556,7 +807,13 @@ async def create_api_session(
                 "plane's operator accounts."
             ),
         )
-    return await _create_session(
+    # Both seeding gates run BEFORE creation: rejecting afterwards leaves a
+    # committed session row, a created bucket and a stamped workspace prefix
+    # that nobody will ever use or clean up.
+    if body.seed_turns:
+        await _require_eval_seeding(body, channel=channel, request=request, tenant=tenant)
+        _screen_seed_turns(body.seed_turns)
+    session = await _create_session(
         body,
         request,
         tenant,
@@ -565,6 +822,12 @@ async def create_api_session(
         user_id=None,
         service_account_id=service_account_id,
     )
+    await emit_seed_turns(
+        _get_session_store(request),
+        session_id=session.id,
+        turns=body.seed_turns,
+    )
+    return session
 
 
 async def _resolve_pending_question(

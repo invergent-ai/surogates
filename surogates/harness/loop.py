@@ -3521,6 +3521,35 @@ class AgentHarness(
         updated.add("ask_user_question")
         return updated
 
+    def _drop_eval_excluded_tools(
+        self, tool_filter: set[str] | None, session: Session,
+    ) -> set[str] | None:
+        """Strip the tools an evaluation row could never use, LAST.
+
+        Mirrors the ``is_eval_session`` rule in
+        ``worker._filter_effective_tools``, which builds the PROMPT
+        surface; this is the LLM-visible SCHEMA surface, so the two must
+        agree or the model is told in prose that it has no
+        ``ask_user_question`` while still holding its schema.
+
+        Runs after :meth:`_ensure_always_available_tools` on purpose:
+        that method force-adds ``ask_user_question`` back onto any
+        filter without an explicit ``allowed_tools``, so subtracting
+        earlier would be undone.  No human is behind an evaluation row,
+        so a call to that tool parks the turn until the tool's own
+        30-minute deadline and the caller reports a stalled agent.
+        """
+        from surogates.channels.memory_boundary import is_eval_session
+
+        if not is_eval_session(session):
+            return tool_filter
+        names = (
+            set(self._tools.tool_names) if tool_filter is None
+            else set(tool_filter)
+        )
+        names.discard("ask_user_question")
+        return names
+
     def _apply_entitlement_exclusions(
         self, tool_filter: set[str] | None,
     ) -> set[str] | None:
@@ -3760,8 +3789,11 @@ class AgentHarness(
             )
             tool_filter = self._apply_entitlement_exclusions(tool_filter)
             tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-            return self._ensure_always_available_tools(
-                tool_filter, explicit_allowed=explicit_allowed,
+            return self._drop_eval_excluded_tools(
+                self._ensure_always_available_tools(
+                    tool_filter, explicit_allowed=explicit_allowed,
+                ),
+                session,
             )
 
         if tool_filter is not None and not explicit_allowed:
@@ -3773,8 +3805,11 @@ class AgentHarness(
         )
         tool_filter = self._apply_entitlement_exclusions(tool_filter)
         tool_filter = self._drop_native_channel_composio_tools(tool_filter, session)
-        return self._ensure_always_available_tools(
-            tool_filter, explicit_allowed=explicit_allowed,
+        return self._drop_eval_excluded_tools(
+            self._ensure_always_available_tools(
+                tool_filter, explicit_allowed=explicit_allowed,
+            ),
+            session,
         )
 
     @staticmethod

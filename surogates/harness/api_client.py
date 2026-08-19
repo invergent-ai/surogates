@@ -84,10 +84,15 @@ class HarnessAPIClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def _post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _post(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Send a POST request and return the parsed JSON response."""
         resp = await self._client.post(
-            path, json=body, params=self._merge_params(None),
+            path, json=body, params=self._merge_params(params),
         )
         resp.raise_for_status()
         return resp.json()
@@ -262,9 +267,22 @@ class HarnessAPIClient:
     # Memory
     # ------------------------------------------------------------------
 
+    def _memory_params(self) -> dict[str, Any] | None:
+        """Scope a memory call to this client's session.
+
+        The server composes the memory object key from the session's
+        boundary when it knows the session.  Omitting it is what let a
+        boundary-scoped session (managed-channel thread, evaluation row)
+        write into the agent's real per-user or org-shared memory while
+        its worker read the boundary partition.
+        """
+        if self._session_id is None:
+            return None
+        return {"session_id": self._session_id}
+
     async def get_memory(self) -> str:
         """Load current memory entries.  Returns JSON string."""
-        data = await self._get("/v1/memory")
+        data = await self._get("/v1/memory", params=self._memory_params())
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
     async def mutate_memory(
@@ -281,7 +299,9 @@ class HarnessAPIClient:
         if old_text is not None:
             body["old_text"] = old_text
         try:
-            data = await self._post("/v1/memory", body=body)
+            data = await self._post(
+                "/v1/memory", body=body, params=self._memory_params(),
+            )
             return json.dumps(data, ensure_ascii=False)
         except httpx.HTTPStatusError as exc:
             return _error_response(exc)
