@@ -155,7 +155,7 @@ async def _ensure_live_view_control(
 
 
 async def _require_session_agent(
-    request: Request, session_id: UUID, tenant: TenantContext,
+    app_state: Any, session_id: UUID, tenant: TenantContext,
 ) -> None:
     """404 a browser session belonging to an agent this token is not bound to.
 
@@ -168,11 +168,15 @@ async def _require_session_agent(
     request-supplied one. 404 rather than 403, matching the resolver's
     convention that a stranger cannot tell "exists but not yours" from
     "does not exist". Org-scoped control-plane tokens are untouched.
+
+    Takes app state rather than a ``Request`` so the live-view WebSocket
+    handler — which has a ``WebSocket``, not a request — is covered by the
+    same guard as the HTTP routes.
     """
     bound = getattr(tenant, "service_account_agent_id", None)
     if bound is None:
         return
-    store = getattr(request.app.state, "session_store", None)
+    store = getattr(app_state, "session_store", None)
     if store is None:
         return
     try:
@@ -199,7 +203,7 @@ async def get_browser_state(
     resolver = request.app.state.browser_resolver
     control = request.app.state.browser_control
 
-    await _require_session_agent(request, session_id, tenant)
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -241,7 +245,7 @@ async def post_browser_control(
             detail="Browser control dependencies are not available.",
         )
 
-    await _require_session_agent(request, session_id, tenant)
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -311,7 +315,7 @@ async def delete_session_browser(
     endpoint never reveals foreign session ids.
     """
     resolver = request.app.state.browser_resolver
-    await _require_session_agent(request, session_id, tenant)
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -370,7 +374,7 @@ async def get_browser_preview(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     resolver = request.app.state.browser_resolver
-    await _require_session_agent(request, session_id, tenant)
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -410,7 +414,7 @@ async def proxy_live_view(
 ) -> Response:
     resolver = request.app.state.browser_resolver
     control = request.app.state.browser_control
-    await _require_session_agent(request, session_id, tenant)
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -495,7 +499,13 @@ async def proxy_live_view_ws(
 
     resolver = websocket.app.state.browser_resolver
     control = websocket.app.state.browser_control
-    await _require_session_agent(request, session_id, tenant)
+    try:
+        await _require_session_agent(websocket.app.state, session_id, tenant)
+    except HTTPException:
+        # A WebSocket cannot answer with a status code; close with the same
+        # "nothing here" meaning the HTTP routes give.
+        await websocket.close(code=4404, reason="no browser")
+        return
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
