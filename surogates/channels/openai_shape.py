@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
+    "ALLOWED_IMAGE_MIMES",
     "CHUNK_OBJECT",
     "COMPLETION_OBJECT",
     "DONE_SENTINEL",
@@ -54,10 +55,10 @@ CHUNK_OBJECT = "chat.completion.chunk"
 #: raised after the first chunk has already been flushed.
 DONE_SENTINEL = "[DONE]"
 
-#: Mirrors ``surogates.api.routes.sessions._ALLOWED_IMAGE_MIMES``.  Duplicated
+#: Mirrors ``surogates.api.routes.sessions.ALLOWED_IMAGE_MIMES``.  Duplicated
 #: rather than imported because this module must stay free of route imports;
 #: the parity is asserted by the test suite.
-_ALLOWED_IMAGE_MIMES = frozenset(
+ALLOWED_IMAGE_MIMES = frozenset(
     {"image/png", "image/jpeg", "image/gif", "image/webp"}
 )
 
@@ -183,10 +184,10 @@ def _image_part(block: dict) -> ImagePart:
                 param="messages",
             )
         mime = header[5:].split(";", 1)[0].strip().lower() or "image/png"
-        if mime not in _ALLOWED_IMAGE_MIMES:
+        if mime not in ALLOWED_IMAGE_MIMES:
             raise OpenAIRequestError(
                 f"Unsupported image type: {mime}. Supported: "
-                + ", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
+                + ", ".join(sorted(ALLOWED_IMAGE_MIMES)),
                 param="messages",
             )
         return ImagePart(mime_type=mime, data=payload)

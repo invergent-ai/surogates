@@ -54,6 +54,7 @@ from surogates.channels.openai_conversation import (
     resolves_to_existing_session,
 )
 from surogates.channels.openai_shape import (
+    ALLOWED_IMAGE_MIMES,
     DONE_SENTINEL,
     ImagePart,
     OpenAIRequestError,
@@ -295,7 +296,6 @@ async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
             param="messages",
         )
 
-    resolved: list[dict[str, str]] = []
     remote = [p for p in parsed.images if p.url]
     fetched: dict[int, tuple[str, str]] = {}
     if remote:
@@ -309,20 +309,14 @@ async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
                 return_exceptions=True,
             )
         for part, result in zip(remote, results):
-            if isinstance(result, OpenAIRequestError):
-                raise result
+            # ``_fetch_image`` converts every failure into an
+            # OpenAIRequestError itself, so anything else here is a bug in
+            # this module rather than something the caller did.
             if isinstance(result, BaseException):
-                from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES
-
-                raise OpenAIRequestError(
-                    _IMAGE_FETCH_REFUSED.format(
-                        url=part.url,
-                        kinds=", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
-                    ),
-                    param="messages",
-                )
+                raise result
             fetched[id(part)] = result
 
+    resolved: list[dict[str, str]] = []
     for part in parsed.images:
         if part.url:
             mime, data = fetched[id(part)]
@@ -364,11 +358,9 @@ async def _fetch_image(
     followed — a redirect is the standard way to smuggle an internal target
     past a front-door check.
     """
-    from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES
-
     refused = OpenAIRequestError(
         _IMAGE_FETCH_REFUSED.format(
-            url=part.url, kinds=", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
+            url=part.url, kinds=", ".join(sorted(ALLOWED_IMAGE_MIMES)),
         ),
         param="messages",
     )
@@ -386,7 +378,7 @@ async def _fetch_image(
         raise refused from exc
 
     mime = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
-    if mime not in _ALLOWED_IMAGE_MIMES:
+    if mime not in ALLOWED_IMAGE_MIMES:
         raise refused
     body = response.content
     if len(body) > _MAX_IMAGE_BYTES:

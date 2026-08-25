@@ -407,7 +407,7 @@ def test_the_image_mime_allowlist_matches_the_message_route():
     """Two allowlists that drift means an image this module accepts is
     rejected one layer down, as a 422 the caller cannot act on."""
     from surogates.api.routes.sessions import _ALLOWED_IMAGE_MIMES as route_mimes
-    from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES as ours
+    from surogates.channels.openai_shape import ALLOWED_IMAGE_MIMES as ours
 
     assert set(ours) == set(route_mimes)
 
