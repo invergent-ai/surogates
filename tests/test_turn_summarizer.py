@@ -11,6 +11,7 @@ from surogates.harness.turn_summarizer import (
     TurnArtifact,
     TurnSummarizer,
     TurnSummary,
+    _normalize_caption,
     _valid_iteration_summary,
 )
 
@@ -635,3 +636,34 @@ async def test_transcript_lines_are_not_caption_shaped() -> None:
     user_block = client.chat.completions.calls[0]["messages"][1]["content"]
     assert "tool=patch" in user_block
     assert not _valid_iteration_summary(user_block)
+
+
+# ----------------------------------------------------------------------
+# Narrator-prefix normalization
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("The agent reviewed the rubric", "Reviewed the rubric"),
+        ("Agent found AMLR regulation page on EUR-Lex",
+         "Found AMLR regulation page on EUR-Lex"),
+        ("the agent read Article 5", "Read Article 5"),
+        # Nothing to strip — left exactly as written.
+        ("Reviewed the rubric", "Reviewed the rubric"),
+        ("Agents coordinate through the board", "Agents coordinate through the board"),
+        ("", ""),
+        # A bare opener with no body must not become an empty caption.
+        ("Agent", "Agent"),
+    ],
+)
+def test_normalize_caption(raw: str, expected: str) -> None:
+    assert _normalize_caption(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_summarize_iteration_strips_the_narrator_prefix() -> None:
+    assert await _summarize_with(
+        "The agent reviewed the copywriting skill guidelines",
+    ) == "Reviewed the copywriting skill guidelines"

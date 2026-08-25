@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -172,6 +173,26 @@ def _all_self_describing(tool_calls: list[dict[str, Any]]) -> bool:
     return True
 
 
+# The prompt forbids a narrator opener and the model uses one anyway in
+# 6.6% of replies. Both observed forms are followed by a past-tense verb
+# ("The agent reviewed…", "Agent found…"), never by a noun, so the
+# prefix strips cleanly.
+_NARRATOR_OPENER_RE = re.compile(r"^(?:the\s+)?agent\s+", re.IGNORECASE)
+
+
+def _normalize_caption(text: str) -> str:
+    """Drop the narrator prefix so the row reads as a caption.
+
+    "The agent reviewed the rubric" → "Reviewed the rubric". The row
+    already sits under the agent's own turn; naming it again is noise
+    that costs a third of the line's visible width.
+    """
+    stripped = _NARRATOR_OPENER_RE.sub("", text, count=1)
+    if stripped == text or not stripped:
+        return text
+    return stripped[0].upper() + stripped[1:]
+
+
 def _valid_iteration_summary(text: str) -> bool:
     """True when ``text`` is a usable one-line caption.
 
@@ -302,7 +323,7 @@ class TurnSummarizer:
         )
         if content is None:
             return None
-        text = content.strip().strip('"').rstrip(".")
+        text = _normalize_caption(content.strip().strip('"').rstrip("."))
         if not _valid_iteration_summary(text):
             logger.warning(
                 "discarding malformed iteration summary for %s: %r",
