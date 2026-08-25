@@ -9,10 +9,13 @@
 import type { AgentChatToolCallInfo } from "../types";
 import type { OrbDerivationOptions } from "./orb-state";
 
-// ``skill_view`` is deliberately absent: a skill load is the agent
-// reaching for its own instructions, and naming the skill tells the
+// ``skill_view`` is deliberately absent. A skill load is the agent
+// reaching for its own instructions, so naming the skill tells the
 // user more about the turn than any prose summary of the same call
-// could. It renders as a deterministic "Reading skill <name>" row.
+// could — it renders as a deterministic "Reading skill <name>" row
+// built by ``skillViewLabel`` in chat-thread.tsx. The harness knows
+// the same thing and skips the model caption for those iterations
+// (``_is_self_describing_iteration`` in harness/turn_summarizer.py).
 export const SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "list_files",
   "search_files",

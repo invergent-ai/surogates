@@ -425,24 +425,34 @@ async def test_summarize_turn_returns_none_on_truncated_fenced_json() -> None:
 # ----------------------------------------------------------------------
 
 
-def _patch_call() -> list[dict[str, Any]]:
+def _calls(*names: str) -> list[dict[str, Any]]:
+    """One tool call per name, ids ``c0``, ``c1``, … to match _results."""
     return [
-        {
-            "id": "c1",
-            "function": {"name": "patch", "arguments": '{"path": "a.py"}'},
-        },
+        {"id": f"c{i}", "function": {"name": n, "arguments": '{"path": "a.py"}'}}
+        for i, n in enumerate(names)
     ]
 
 
+def _results(*contents: str) -> list[dict[str, Any]]:
+    return [
+        {"tool_call_id": f"c{i}", "content": c}
+        for i, c in enumerate(contents)
+    ]
+
+
+_OK = '{"success": true, "name": "x"}'
+
+
 async def _summarize_with(content: str) -> str | None:
+    """Run one patch iteration through the summarizer stubbed to reply."""
     client = _StubClient(content)
     summarizer = _iteration_summarizer(client)
     return await summarizer.summarize_iteration(
         iteration_id="i0",
         reasoning="",
-        tool_calls=_patch_call(),
+        tool_calls=_calls("patch"),
         prior_iteration_summaries=[],
-        tool_results=[{"tool_call_id": "c1", "content": "patched"}],
+        tool_results=_results("patched"),
     )
 
 
@@ -571,20 +581,6 @@ async def test_summarize_iteration_strips_then_validates() -> None:
 # ----------------------------------------------------------------------
 
 
-def _calls(*names: str) -> list[dict[str, Any]]:
-    return [
-        {"id": f"c{i}", "function": {"name": n, "arguments": "{}"}}
-        for i, n in enumerate(names)
-    ]
-
-
-def _ok(*ids: str) -> list[dict[str, Any]]:
-    return [
-        {"tool_call_id": i, "content": '{"success": true, "name": "x"}'}
-        for i in ids
-    ]
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("names", [("skill_view",), ("skill_view", "skill_view")])
 async def test_successful_skill_loads_skip_the_model(
@@ -598,7 +594,7 @@ async def test_successful_skill_loads_skip_the_model(
         reasoning="I should load the skill first",
         tool_calls=_calls(*names),
         prior_iteration_summaries=[],
-        tool_results=_ok(*[f"c{i}" for i in range(len(names))]),
+        tool_results=_results(*([_OK] * len(names))),
     )
 
     assert result is None
@@ -607,108 +603,53 @@ async def test_successful_skill_loads_skip_the_model(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "names",
-    [("skills_list",), ("list_files",), ("search_files",), ("session_search",)],
-)
-async def test_other_discovery_tools_are_still_summarized(
-    names: tuple[str, ...],
-) -> None:
-    # Clients hide these from the condensed view, so with no caption the
-    # iteration has nothing left to draw. Only skill_view has a
-    # deterministic row to fall back to.
-    client = _StubClient("Found three invoice templates")
-    summarizer = _iteration_summarizer(client)
-
-    result = await summarizer.summarize_iteration(
-        iteration_id="i0",
-        reasoning="",
-        tool_calls=_calls(*names),
-        prior_iteration_summaries=[],
-        tool_results=_ok("c0"),
-    )
-
-    assert result == "Found three invoice templates"
-    assert len(client.chat.completions.calls) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
+    ("label", "reasoning", "calls", "results"),
     [
-        '{"success": false, "error": "Skill \'copywritting\' not found."}',
-        '{"error": "No tenant context available"}',
+        # Consumers hide these from the condensed view, so with no
+        # caption the iteration has nothing left to draw. Only
+        # skill_view has a deterministic row to fall back to.
+        ("skills_list", "", _calls("skills_list"), _results(_OK)),
+        ("list_files", "", _calls("list_files"), _results(_OK)),
+        ("search_files", "", _calls("search_files"), _results(_OK)),
+        ("session_search", "", _calls("session_search"), _results(_OK)),
+        # One call nothing can render on its own is enough: the batch
+        # is no longer self-describing.
+        ("mixed batch", "", _calls("skill_view", "web_extract"),
+         _results(_OK, "Starter 19 EUR")),
+        # A failed load is news. Consumers drop errored calls, so
+        # skipping the caption would erase the iteration outright.
+        ("failed skill load", "", _calls("skill_view"),
+         _results('{"success": false, "error": "Skill not found."}')),
+        ("skill load with no tenant", "", _calls("skill_view"),
+         _results('{"error": "No tenant context available"}')),
+        # Success cannot be confirmed with no results in hand, so the
+        # caption is produced rather than gambled away.
+        ("skill load, results not captured", "", _calls("skill_view"), []),
+        # No tool calls at all is not self-describing — there is
+        # nothing to draw, so the reasoning still needs a caption.
+        ("text-only iteration", "Weighing whether to ship behind a flag",
+         [], []),
     ],
 )
-async def test_a_failed_skill_load_is_still_summarized(failure: str) -> None:
-    # The client drops errored calls from its condensed view, so
-    # skipping the caption here would erase the iteration outright and
-    # the user would never learn the skill load failed.
-    client = _StubClient("Skill copywritting not found")
+async def test_iterations_that_still_need_a_caption(
+    label: str,
+    reasoning: str,
+    calls: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> None:
+    client = _StubClient("Loaded the grading rubric")
     summarizer = _iteration_summarizer(client)
 
     result = await summarizer.summarize_iteration(
         iteration_id="i0",
-        reasoning="",
-        tool_calls=_calls("skill_view"),
+        reasoning=reasoning,
+        tool_calls=calls,
         prior_iteration_summaries=[],
-        tool_results=[{"tool_call_id": "c0", "content": failure}],
+        tool_results=results,
     )
 
-    assert result == "Skill copywritting not found"
-    assert len(client.chat.completions.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_skill_load_without_captured_results_is_summarized() -> None:
-    # Success cannot be confirmed with no results in hand, so the
-    # caption is produced rather than gambled away.
-    client = _StubClient("Loaded the copywriting skill")
-    summarizer = _iteration_summarizer(client)
-
-    result = await summarizer.summarize_iteration(
-        iteration_id="i0",
-        reasoning="",
-        tool_calls=_calls("skill_view"),
-        prior_iteration_summaries=[],
-    )
-
-    assert result == "Loaded the copywriting skill"
-
-
-@pytest.mark.asyncio
-async def test_mixed_batch_still_summarizes() -> None:
-    # One call the client cannot render is enough: it cannot label the
-    # batch on its own, so the caption still earns its model call.
-    client = _StubClient("Fetch the pricing page after loading the skill")
-    summarizer = _iteration_summarizer(client)
-
-    result = await summarizer.summarize_iteration(
-        iteration_id="i0",
-        reasoning="",
-        tool_calls=_calls("skill_view", "web_extract"),
-        prior_iteration_summaries=[],
-        tool_results=_ok("c0", "c1"),
-    )
-
-    assert result == "Fetch the pricing page after loading the skill"
-    assert len(client.chat.completions.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_text_only_iteration_still_summarizes() -> None:
-    # No tool calls at all is not client-rendered — there is nothing for
-    # the client to draw, so the reasoning still needs a caption.
-    client = _StubClient("Weigh two rollout options")
-    summarizer = _iteration_summarizer(client)
-
-    result = await summarizer.summarize_iteration(
-        iteration_id="i0",
-        reasoning="Considering whether to ship behind a flag",
-        tool_calls=[],
-        prior_iteration_summaries=[],
-    )
-
-    assert result == "Weigh two rollout options"
+    assert result == "Loaded the grading rubric", label
+    assert len(client.chat.completions.calls) == 1, label
 
 
 @pytest.mark.asyncio
@@ -722,9 +663,9 @@ async def test_transcript_lines_are_not_caption_shaped() -> None:
     await summarizer.summarize_iteration(
         iteration_id="i0",
         reasoning="",
-        tool_calls=_patch_call(),
+        tool_calls=_calls("patch"),
         prior_iteration_summaries=[],
-        tool_results=[{"tool_call_id": "c1", "content": "patched"}],
+        tool_results=_results("patched"),
     )
 
     user_block = client.chat.completions.calls[0]["messages"][1]["content"]

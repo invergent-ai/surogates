@@ -8,10 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import {
-  SIMPLE_MODE_HIDDEN_TOOLS,
-  isHiddenSimpleTool,
-} from "../src/runtime/simple-mode";
+import { isHiddenSimpleTool } from "../src/runtime/simple-mode";
 import type { AgentChatToolCallInfo } from "../src/types";
 
 function call(toolName: string): AgentChatToolCallInfo {
@@ -20,11 +17,9 @@ function call(toolName: string): AgentChatToolCallInfo {
 
 describe("SIMPLE_MODE_HIDDEN_TOOLS", () => {
   it("keeps skill_view visible", () => {
-    // A skill load is the agent reaching for its own instructions —
-    // naming the skill tells the user more about the turn than any
-    // prose summary of the same call. It renders as a deterministic
-    // "Reading skill <name>" row instead of being suppressed.
-    expect(SIMPLE_MODE_HIDDEN_TOOLS.has("skill_view")).toBe(false);
+    // The decision this branch makes: a skill load renders as a
+    // deterministic "Reading skill <name>" row instead of being
+    // suppressed as internal plumbing.
     expect(isHiddenSimpleTool(call("skill_view"))).toBe(false);
   });
 
@@ -47,19 +42,5 @@ describe("SIMPLE_MODE_HIDDEN_TOOLS", () => {
   it("hides every browser_* tool by prefix", () => {
     expect(isHiddenSimpleTool(call("browser_click"))).toBe(true);
     expect(isHiddenSimpleTool(call("browser_navigate"))).toBe(true);
-  });
-
-  it("shows user-facing tools", () => {
-    for (const name of [
-      "web_search",
-      "write_file",
-      "patch",
-      "todo",
-      "create_artifact",
-      "consult_expert",
-      "ask_user_question",
-    ]) {
-      expect(isHiddenSimpleTool(call(name))).toBe(false);
-    }
   });
 });

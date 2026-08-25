@@ -1109,6 +1109,11 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   if (calls.length === 0) {
     return message.reasoning ? "Thought through the problem" : null;
   }
+  // Skill loads name themselves, one or many, so they never fall
+  // through to the generic "Skill × 3".
+  if (calls.every((tc) => tc.toolName === "skill_view")) {
+    return skillViewLabel(calls);
+  }
   if (calls.length === 1) {
     const tc = calls[0]!;
     return deriveSingleToolLabel(tc);
@@ -1117,7 +1122,6 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   const firstName = calls[0]!.toolName;
   const allSame = calls.every((tc) => tc.toolName === firstName);
   if (allSame) {
-    if (firstName === "skill_view") return skillViewLabel(calls);
     const human = cancelledToolLabel(firstName);
     return `${human} × ${calls.length}`;
   }
@@ -1125,30 +1129,31 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
 }
 
 /**
- * Label for one or more ``skill_view`` calls.
+ * Label for one or more ``skill_view`` calls — see
+ * SIMPLE_MODE_HIDDEN_TOOLS for why skill loads get a deterministic row.
  *
- * A skill load is the agent reaching for its own instructions, so the
- * skill's name *is* the story of the iteration — "Reading skill
- * copywriting" carries more than any prose summary of the same call,
- * and carries it deterministically, with no model in the loop. Shared
- * by the collapsed header, the expanded body row and the live shimmer
- * so the row never renames itself as the iteration completes.
+ * Shared by the collapsed header, the expanded body row and the live
+ * shimmer so the row never renames itself as the iteration completes.
  */
 function skillViewLabel(calls: ToolCallInfo[]): string {
-  const names = calls
-    .map((tc) => parseArgs<{ name?: string; skill?: string }>(tc.args))
-    .map((args) => args?.name ?? args?.skill)
+  const args = calls.map((tc) =>
+    parseArgs<{ name?: string; skill?: string; file_path?: string }>(tc.args),
+  );
+  const names = args
+    .map((a) => a?.name ?? a?.skill)
     .filter((name): name is string => typeof name === "string" && name !== "");
   // Args stream in a character at a time, so a call can be mid-flight
   // with no parseable name yet; fall back to a countable phrasing
-  // rather than rendering a half-written name.
+  // rather than rendering a half-written name. ``names.length === 0``
+  // also keeps the function total: callers reach it through an
+  // ``every`` test, which an empty list passes.
   if (names.length !== calls.length || names.length === 0) {
     return calls.length > 1
       ? `Reading ${calls.length} skills`
       : "Reading a skill";
   }
   if (calls.length === 1) {
-    const path = parseArgs<{ file_path?: string }>(calls[0]!.args)?.file_path;
+    const path = args[0]?.file_path;
     return path
       ? `Reading skill ${names[0]} · ${lastPathSegment(path)}`
       : `Reading skill ${names[0]}`;
@@ -1165,7 +1170,6 @@ function skillViewLabel(calls: ToolCallInfo[]): string {
  * still appears in the expanded body via _toolRowLabel.
  */
 function deriveSingleToolLabel(tc: ToolCallInfo): string {
-  if (tc.toolName === "skill_view") return skillViewLabel([tc]);
   const name = cancelledToolLabel(tc.toolName);
   if (_HEADER_HIDES_DETAIL.has(tc.toolName)) {
     return _HEADER_GENERIC_VERB[tc.toolName] ?? name;
@@ -1373,9 +1377,12 @@ function liveIterationLabel(message: ChatMessageType): string {
     (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
   );
   if (running.length === 0) return "Thinking…";
+  // Same wording as the finished row, so it does not rename itself.
+  if (running.every((tc) => tc.toolName === "skill_view")) {
+    return `${skillViewLabel(running)}…`;
+  }
   if (running.length === 1) {
     const tc = running[0]!;
-    if (tc.toolName === "skill_view") return `${skillViewLabel([tc])}…`;
     const name = cancelledToolLabel(tc.toolName);
     const detail = extractToolDetail(tc);
     return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
@@ -1383,7 +1390,6 @@ function liveIterationLabel(message: ChatMessageType): string {
   const firstName = running[0]!.toolName;
   const allSame = running.every((tc) => tc.toolName === firstName);
   if (allSame) {
-    if (firstName === "skill_view") return `${skillViewLabel(running)}…`;
     return `Running ${cancelledToolLabel(firstName)} × ${running.length}…`;
   }
   return `Running ${running.length} tools…`;

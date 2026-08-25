@@ -119,17 +119,6 @@ _TURN_PROMPT = (
 _VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
 
 
-# ``skill_view`` is the one tool whose arguments fully describe the
-# iteration: chat clients render it as "Reading skill <name>", which is
-# faster, free and never wrong. Summarizing such an iteration spends a
-# model call to produce a worse row, and lets a stray reply override the
-# client's own presentation of the tool.
-#
-# The other discovery tools stay summarized. Clients hide *those* from
-# the condensed view, so with no summary the iteration has nothing left
-# to draw — the caption is the only thing standing between the user and
-# a silent gap.
-_CLIENT_RENDERED_TOOLS: frozenset[str] = frozenset({"skill_view"})
 
 # Openers that mark the summary model role-playing the agent instead of
 # captioning it ("I'll load the skill…", "Let me check…"). Matched
@@ -149,50 +138,34 @@ _MARKUP_LEAK_MARKERS: tuple[str, ...] = (
 )
 
 
-def _echoes_transcript(lowered: str) -> bool:
-    """True when the reply repeats the transcript it was handed.
-
-    Matched on co-occurring field markers rather than on ``call:`` or
-    ``result:`` alone, because those words turn up in ordinary captions
-    ("Search returns no result: falls back to pypdf") while no caption
-    ever pairs ``tool=`` with ``args=``.
-    """
-    if lowered.startswith(("call:", "tools called", "[1] tool=")):
-        return True
-    if "tool=" in lowered and "args=" in lowered:
-        return True
-    return "call:" in lowered and "result:" in lowered
-
-# A caption is one short line. Anything appreciably longer is the model
-# dumping the transcript back rather than summarizing it; the render
-# surface truncates past this anyway, so a long reply is never shown in
-# full.
-_MAX_SUMMARY_WORDS: int = 30
-
-
-def _client_renders_iteration(
+def _is_self_describing_iteration(
     tool_calls: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
 ) -> bool:
-    """True when the client can label this iteration without a model.
+    """True when the iteration's arguments already say everything.
 
-    Every call must be client-rendered *and* have succeeded. A failed
-    call is dropped from the client's condensed view, so skipping the
-    caption for one would erase the iteration outright and the user
-    would never learn the call failed — the iteration prompt asks for
-    the opposite ("if a call failed, say so").
+    A successful ``skill_view`` is the only such iteration: its whole
+    content is *which skill was loaded*, which the arguments state
+    exactly. A caption can only restate that, less reliably, for the
+    price of a model call.
 
-    An empty batch is never client-rendered: a text-only iteration has
-    no tool calls to draw and still needs a caption. Neither is a batch
-    whose results were not captured, since success cannot be confirmed.
+    The qualifiers all guard against a caption that would have carried
+    real information:
+
+    * an empty batch is a text-only iteration — nothing to restate;
+    * uncaptured results cannot be confirmed successful;
+    * a *failed* load is news, and consumers that drop errored calls
+      would otherwise show nothing at all. The prompt asks for exactly
+      this ("if a call failed, say so").
     """
     if not tool_calls or not tool_results:
         return False
-    for tc in tool_calls:
-        fn = tc.get("function") or {}
-        name = fn.get("name") or tc.get("name") or ""
-        if name not in _CLIENT_RENDERED_TOOLS:
-            return False
+    names = {
+        (tc.get("function") or {}).get("name") or tc.get("name")
+        for tc in tool_calls
+    }
+    if names != {"skill_view"}:
+        return False
     return not any(_is_error_result(tr) for tr in tool_results)
 
 
@@ -211,9 +184,9 @@ def _normalize_caption(text: str) -> str:
     that costs a third of the line's visible width.
     """
     stripped = _NARRATOR_OPENER_RE.sub("", text, count=1)
-    if stripped == text or not stripped:
+    if stripped == text:
         return text
-    return stripped[0].upper() + stripped[1:]
+    return stripped[:1].upper() + stripped[1:]
 
 
 def _valid_iteration_summary(text: str) -> bool:
@@ -237,7 +210,15 @@ def _valid_iteration_summary(text: str) -> bool:
     # Typographic apostrophes are normalized so a curly "I\u2019ll load the
     # skill" is caught by the same openers as the ASCII form.
     lowered = text.lower().replace("\u2019", "'")
-    if _echoes_transcript(lowered):
+    # The reply repeating the transcript it was handed. Keyed on
+    # co-occurring field markers, because ``call:`` and ``result:`` turn
+    # up in ordinary captions ("Search returns no result: falls back to
+    # pypdf") while no caption ever pairs ``tool=`` with ``args=``.
+    if (
+        ("tool=" in lowered and "args=" in lowered)
+        or ("call:" in lowered and "result:" in lowered)
+        or lowered.startswith(("call:", "tools called"))
+    ):
         return False
     if any(marker in lowered for marker in _MARKUP_LEAK_MARKERS):
         return False
@@ -249,7 +230,10 @@ def _valid_iteration_summary(text: str) -> bool:
         return False
     if lowered.startswith(_ROLE_PLAY_OPENERS):
         return False
-    if len(text.split()) > _MAX_SUMMARY_WORDS:
+    # A caption is one short line. Anything appreciably longer is the
+    # model dumping the transcript back rather than summarizing it, and
+    # the render surface truncates past this regardless.
+    if len(text.split()) > 30:
         return False
     return True
 
@@ -310,11 +294,7 @@ class TurnSummarizer:
             return None
         if not reasoning and not tool_calls:
             return None
-        # A skill load is labelled better, and for free, by the
-        # client's deterministic renderer. Skipping the call here also
-        # stops a stray model reply from overriding the client's
-        # presentation of that tool.
-        if _client_renders_iteration(tool_calls, tool_results or []):
+        if _is_self_describing_iteration(tool_calls, tool_results or []):
             return None
 
         tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
@@ -494,7 +474,7 @@ class TurnSummarizer:
                         parts.append(p["text"])
                 results_by_id[call_id] = "\n".join(parts)
         out: list[str] = []
-        for tc in tool_calls:
+        for index, tc in enumerate(tool_calls, 1):
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or "?"
             args = fn.get("arguments") or tc.get("arguments") or ""
@@ -508,7 +488,7 @@ class TurnSummarizer:
             # a transcript line must not read like a plausible caption,
             # or the model completes the list instead of summarizing it.
             out.append(
-                f"[{len(out) + 1}] tool={name} args={args_snippet}\n"
+                f"[{index}] tool={name} args={args_snippet}\n"
                 f"    returned: {result_snippet}"
             )
         return out
