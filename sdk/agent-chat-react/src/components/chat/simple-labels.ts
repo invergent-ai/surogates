@@ -378,4 +378,3 @@ export function toolRowLabel(tc: ToolCallInfo): string {
       return cancelledToolLabel(tc.toolName);
   }
 }
-

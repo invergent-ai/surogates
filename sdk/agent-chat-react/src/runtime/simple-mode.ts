@@ -13,9 +13,10 @@ import type { OrbDerivationOptions } from "./orb-state";
 // reaching for its own instructions, so naming the skill tells the
 // user more about the turn than any prose summary of the same call
 // could — it renders as a deterministic "Reading skill <name>" row
-// built by ``skillViewLabel`` in chat-thread.tsx. The harness knows
-// the same thing and skips the model caption for those iterations
-// (``_is_self_describing_iteration`` in harness/turn_summarizer.py).
+// built by ``skillViewLabel`` in ../components/chat/simple-labels.ts.
+// The harness knows the same thing and skips the model caption for
+// those iterations (``_is_self_describing_iteration`` in
+// harness/turn_summarizer.py).
 export const SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "list_files",
   "search_files",

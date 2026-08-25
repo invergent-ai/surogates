@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
+from surogates.harness.message_utils import message_texts
 from surogates.harness.structured_output import (
     iter_json_objects,
     parse_json_object,
@@ -182,33 +183,34 @@ def _is_self_describing_iteration(
 _NARRATOR_OPENER_RE = re.compile(r"^(?:the\s+)?agent\s+", re.IGNORECASE)
 
 
+def _rejects_response_format(exc: BaseException) -> bool:
+    """True when the provider refused the request, not the network.
+
+    Only a 4xx that is not a rate limit means *this request* was
+    malformed for *this provider* — and ``response_format`` is the only
+    thing about it that varies by provider. A dropped connection, a
+    timeout or a 5xx is transient, and latching on one of those would
+    let a single blip degrade the rest of the session's captions to
+    unvalidated prose.
+    """
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 429
+
+
 def _extract_caption(content: str) -> str:
     """Pull the caption out of the model's reply.
 
-    The call asks for ``{"caption": str}`` under ``response_format``,
-    which is what makes most of the structural failures impossible: a
-    reply constrained to an object cannot *be* an echoed transcript
-    line, a bullet list or a markup dump.
+    Returns raw text rather than ``None`` on a miss: a gateway that
+    ignores ``response_format`` answers in prose, and captions
+    degrading to unvalidated prose is recoverable where every caption
+    on that deployment vanishing is not.
 
-    Gateways vary in how well they honour that, so all three shapes
-    resolve here. A conforming one returns the bare object; one that
-    ignores the constraint returns it fenced or wrapped in prose, which
-    ``parse_json_object`` already handles; one that ignores it outright
-    returns plain prose, which is used as-is. That last path is why
-    this returns text rather than ``None`` on a parse miss — captions
-    degrading to unvalidated prose is recoverable, every caption on the
-    deployment vanishing is not.
-
-    Every embedded object is scanned, not just the first: leaked
-    reasoning restates the tool arguments as an object before the real
-    answer, and stopping at the first would drop the caption and send
-    the whole reply down the prose path — where a single-line echo
-    passes validation and becomes the label.
-
-    An object *without* a usable caption field is not treated as prose:
-    the most common such reply is the echoed tool result, and its raw
-    body must never become the label. Returning it unchanged lets the
-    validator reject it on its leading brace.
+    An object *without* a usable caption field is deliberately not
+    treated as prose. The most common such reply is the echoed tool
+    result, and its raw body must never become the label — returning it
+    unchanged lets the validator reject it on its leading brace.
     """
     for parsed in iter_json_objects(content):
         caption = parsed.get("caption")
@@ -315,7 +317,7 @@ class TurnSummarizer:
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
-        # Cleared for the process the first time a provider rejects
+        # Cleared the first time this summarizer's provider rejects
         # ``response_format``; see :meth:`summarize_iteration`.
         self._iteration_json_mode = True
 
@@ -367,7 +369,8 @@ class TurnSummarizer:
         }
 
         label = f"iteration {iteration_id}"
-        if self._iteration_json_mode:
+        json_mode = self._iteration_json_mode
+        if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         try:
             content = await self._chat_completion(
@@ -375,16 +378,27 @@ class TurnSummarizer:
                 kwargs,
                 label=label,
                 timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
-                reraise=self._iteration_json_mode,
+                reraise=json_mode,
             )
-        except Exception:
+        except Exception as exc:
+            if not _rejects_response_format(exc):
+                return None
             # ``response_format`` is a request, not a guarantee, and the
             # summary slot is configured separately from the base model
             # that has always used it. A provider that rejects the
-            # parameter would otherwise silence every caption on the
-            # deployment — worse than an unvalidated one — so drop the
-            # constraint for the rest of the process and retry once.
-            # Plain prose still goes through the validator.
+            # parameter would otherwise silence every caption it serves
+            # — worse than an unvalidated one — so drop the constraint
+            # and retry once. Plain prose still goes through the
+            # validator.
+            #
+            # The latch is per-summarizer, which is per-session: the
+            # summary endpoint is resolved per tenant
+            # (build_summary_auxiliary_llm reads org overrides), so a
+            # process-wide latch would let one tenant's gateway disable
+            # JSON mode for every other tenant. If this is ever seen
+            # firing per-session in volume, the endpoint-keyed home for
+            # it is AuxiliaryLLM, which is shared by every auxiliary
+            # caller of the same provider.
             logger.warning(
                 "summary provider rejected response_format; "
                 "falling back to plain-text captions",
@@ -528,18 +542,7 @@ class TurnSummarizer:
             logger.warning("summary response had unexpected shape for %s", label)
             return None
 
-        content = getattr(message, "content", None)
-        if isinstance(content, str) and content.strip():
-            return content
-        # Reasoning-mode models (DeepSeek-R1, Qwen3 with thinking, GLM)
-        # spend the budget thinking and leave ``content`` empty with the
-        # answer in ``reasoning_content``; an empty content channel
-        # alone is not a failure. Same reason structured_output's
-        # JSON-mode fallback reads both.
-        reasoning = getattr(message, "reasoning_content", None)
-        if isinstance(reasoning, str) and reasoning.strip():
-            return reasoning
-        return None
+        return next(iter(message_texts(message)), None)
 
     @staticmethod
     def _format_tool_calls(

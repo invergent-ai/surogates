@@ -9,9 +9,35 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def message_texts(message: Any) -> Iterator[str]:
+    """Non-empty reply-text channels of ``message``, in preference order.
+
+    Providers disagree about which field carries the answer.
+    OpenAI-style gateways use ``content``; reasoning models (DeepSeek-R1,
+    Qwen3 with thinking, GLM) can spend the token budget thinking and
+    leave ``content`` empty with the answer in ``reasoning_content``;
+    OpenRouter surfaces the same thing as ``reasoning``. The SDK hands
+    some callers an object and some a plain dict.
+
+    Yields rather than returning the first hit so a caller looking for
+    structure (rather than prose) can keep scanning: a chatty
+    ``content`` must not hide an answer sitting in a later channel.
+    Callers that just want text take the first.
+    """
+    for key in ("content", "reasoning_content", "reasoning"):
+        value = (
+            message.get(key)
+            if isinstance(message, dict)
+            else getattr(message, key, None)
+        )
+        if isinstance(value, str) and value.strip():
+            yield value
 
 
 def message_to_dict(message: Any) -> dict:

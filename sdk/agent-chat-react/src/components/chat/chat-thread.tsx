@@ -1090,16 +1090,6 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
 }
 
 
-
-
-/**
- * Tools that are hidden from Simple mode. These are either pure
- * exploration ("listed the directory"), internal infrastructure
- * (browser_*, process), or scratchpad-style state changes (todo,
- * memory) that don't help the user understand what the agent
- * *did*. Users who care can switch to Expert mode to see them.
- */
-
 /**
  * The subset of an iteration's tool calls that should surface in
  * Simple mode: skips internal/infrastructure tools and any call
