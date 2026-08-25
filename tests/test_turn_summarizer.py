@@ -11,6 +11,7 @@ from surogates.harness.turn_summarizer import (
     TurnArtifact,
     TurnSummarizer,
     TurnSummary,
+    _valid_iteration_summary,
 )
 
 
@@ -410,3 +411,227 @@ async def test_summarize_turn_returns_none_on_truncated_fenced_json() -> None:
     )
 
     assert result is None
+
+
+# ----------------------------------------------------------------------
+# Malformed-reply rejection
+#
+# The cheap summary model periodically completes the prompt's transcript
+# instead of captioning it. Whatever it returns becomes the iteration's
+# user-visible label, so every structural failure shape observed in
+# production is rejected here; the caller then emits no event and the
+# chat client falls back to its deterministic tool-derived label.
+# ----------------------------------------------------------------------
+
+
+def _patch_call() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "c1",
+            "function": {"name": "patch", "arguments": '{"path": "a.py"}'},
+        },
+    ]
+
+
+async def _summarize_with(content: str) -> str | None:
+    client = _StubClient(content)
+    summarizer = _iteration_summarizer(client)
+    return await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_patch_call(),
+        prior_iteration_summaries=[],
+        tool_results=[{"tool_call_id": "c1", "content": "patched"}],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        (
+            "verbatim transcript echo",
+            'call: skill_view({"name": "copywriting"})\n'
+            '  result: {"success": true, "name": "copywriting"}',
+        ),
+        (
+            "reshaped transcript echo",
+            '[1] tool=patch args={"path": "a.py"}\n    returned: patched',
+        ),
+        (
+            "prompt header echo",
+            "Tools called (with result snippets):\ncall: patch({})",
+        ),
+        (
+            "raw json result",
+            '{"success": true, "name": "social", "description": "..."}',
+        ),
+        (
+            "json array",
+            '[{"path": "a.py"}]',
+        ),
+        (
+            "deepseek tool-call markup",
+            "I'll load the skill.\n\n<｜DSML｜tool_calls>",
+        ),
+        (
+            "xml tool-call markup",
+            '<tool_call>{"name": "patch"}</tool_call>',
+        ),
+        (
+            "fenced code block",
+            "```json\n{}\n```",
+        ),
+        (
+            "markdown bullet list",
+            "- Searched Camillo Borghese\n- Searched Alfonso Visconti",
+        ),
+        (
+            "single leading bullet",
+            "- Searched for the Borghese page",
+        ),
+        (
+            "first-person role-play",
+            "I'll start by creating the directory and making the calls",
+        ),
+        (
+            "let-me role-play",
+            "Let me check what tools are available instead",
+        ),
+        (
+            "based-on role-play",
+            "Based on the brief, I will now review the grading protocol",
+        ),
+        (
+            "multi-line prose dump",
+            "Setup repo and clone it\n\nList files in working tree",
+        ),
+        (
+            "transcript dumped past the word cap",
+            " ".join(f"word{i}" for i in range(40)),
+        ),
+    ],
+)
+async def test_summarize_iteration_rejects_malformed_reply(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) is None, label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Patch the loader to skip empty rows",
+        "Find pdftotext fails — falling back to pypdf",
+        "Reviews copywriting skill guidelines for tone and structure",
+        # An em-dash clause and a colon are ordinary caption prose and
+        # must not trip the structural markers.
+        "Cloned the repo: 3 submodules initialised",
+    ],
+)
+async def test_summarize_iteration_keeps_well_formed_reply(reply: str) -> None:
+    assert await _summarize_with(reply) == reply
+
+
+@pytest.mark.asyncio
+async def test_summarize_iteration_strips_then_validates() -> None:
+    # Quote-stripping runs first, so a quoted echo is still rejected.
+    assert await _summarize_with('"call: patch({})"') is None
+
+
+# ----------------------------------------------------------------------
+# Self-describing iterations are not summarized at all
+# ----------------------------------------------------------------------
+
+
+def _calls(*names: str) -> list[dict[str, Any]]:
+    return [
+        {"id": f"c{i}", "function": {"name": n, "arguments": "{}"}}
+        for i, n in enumerate(names)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("skill_view",),
+        ("skills_list",),
+        ("list_files",),
+        ("search_files",),
+        ("skill_view", "skill_view"),
+        ("skill_view", "search_files"),
+    ],
+)
+async def test_self_describing_iterations_skip_the_model(
+    names: tuple[str, ...],
+) -> None:
+    client = _StubClient("Reviews the copywriting skill")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="I should load the skill first",
+        tool_calls=_calls(*names),
+        prior_iteration_summaries=[],
+    )
+
+    assert result is None
+    assert client.chat.completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_still_summarizes() -> None:
+    # One non-self-describing call is enough: the client cannot label
+    # the batch on its own, so the summary still earns its model call.
+    client = _StubClient("Fetch the pricing page after loading the skill")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("skill_view", "web_extract"),
+        prior_iteration_summaries=[],
+    )
+
+    assert result == "Fetch the pricing page after loading the skill"
+    assert len(client.chat.completions.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_text_only_iteration_still_summarizes() -> None:
+    # No tool calls at all is not "self-describing" — there is nothing
+    # for the client to render, so the reasoning still needs a caption.
+    client = _StubClient("Weigh two rollout options")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="Considering whether to ship behind a flag",
+        tool_calls=[],
+        prior_iteration_summaries=[],
+    )
+
+    assert result == "Weigh two rollout options"
+
+
+@pytest.mark.asyncio
+async def test_transcript_lines_are_not_caption_shaped() -> None:
+    # The transcript the model sees must not look like a valid answer,
+    # or it completes the list instead of summarizing it. Guarded by
+    # feeding each rendered line back through the reply validator.
+    client = _StubClient("Patch the loader")
+    summarizer = _iteration_summarizer(client)
+
+    await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_patch_call(),
+        prior_iteration_summaries=[],
+        tool_results=[{"tool_call_id": "c1", "content": "patched"}],
+    )
+
+    user_block = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "tool=patch" in user_block
+    assert not _valid_iteration_summary(user_block)

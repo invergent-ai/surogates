@@ -74,7 +74,12 @@ _ITERATION_PROMPT = (
     "do different things; distinguish them by their result. If a call "
     "failed, say so (e.g. 'Find pdftotext fails — falling back to "
     "pypdf'). Be specific and concrete. No quotes, no period at the "
-    "end, no leading 'The agent', max 12 words."
+    "end, no leading 'The agent', max 12 words.\n"
+    "You are an observer writing a caption, not the agent. Never "
+    "continue the agent's work, never speak as the agent ('I will…', "
+    "'Let me…'), and never call a tool. Reply with the caption text "
+    "alone: one line, no newlines, no bullet points, no JSON, no "
+    "markup, and never repeat the transcript lines you were given."
 )
 
 _TURN_PROMPT = (
@@ -110,6 +115,95 @@ _TURN_PROMPT = (
 
 
 _VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
+
+
+# Tools whose arguments alone fully describe what happened. The chat
+# clients render these deterministically ("Reading skill copywriting"),
+# which is faster, free, and never wrong — so an iteration built only
+# from them gets no LLM summary at all. Emitting one would spend a
+# model call to produce a worse label, and would override the client's
+# own presentation policy for these tools.
+_SELF_DESCRIBING_TOOLS: frozenset[str] = frozenset({
+    "skill_view",
+    "skills_list",
+    "list_files",
+    "search_files",
+})
+
+# Openers that mark the summary model role-playing the agent instead of
+# captioning it ("I'll load the skill…", "Let me check…"). Matched
+# case-insensitively against the first words of the reply.
+_ROLE_PLAY_OPENERS: tuple[str, ...] = (
+    "i'll ", "i will ", "i am ", "i'm ", "i need ", "i should ",
+    "i can ", "i cannot ", "i've ", "i have ", "let me ", "let's ",
+    "based on ", "first, ", "next, ", "now ",
+)
+
+# Fragments that only ever appear when the reply leaks structure rather
+# than prose: the transcript scaffolding fed in as input, or a model's
+# native tool-call markup surfacing as literal text. ``｜`` (U+FF5C) is
+# the DeepSeek delimiter; ``<tool_call``/``<invoke``/``<function`` cover
+# the XML-style dialects.
+_STRUCTURAL_LEAK_MARKERS: tuple[str, ...] = (
+    "call:", "result:", "tools called", "<tool_call", "<invoke",
+    "<function", "\uff5c", "```",
+)
+
+# A caption is one short line. Anything appreciably longer is the model
+# dumping the transcript back rather than summarizing it; the render
+# surface truncates past this anyway, so a long reply is never shown in
+# full.
+_MAX_SUMMARY_WORDS: int = 30
+
+
+def _all_self_describing(tool_calls: list[dict[str, Any]]) -> bool:
+    """True when every call in the batch is client-renderable on its own.
+
+    An empty batch is *not* self-describing: a text-only iteration has
+    no tool calls to render and still needs a summary.
+    """
+    if not tool_calls:
+        return False
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or tc.get("name") or ""
+        if name not in _SELF_DESCRIBING_TOOLS:
+            return False
+    return True
+
+
+def _valid_iteration_summary(text: str) -> bool:
+    """True when ``text`` is a usable one-line caption.
+
+    The cheap summary model periodically completes the prompt's
+    transcript instead of captioning it: it echoes the ``call: … /
+    result: …`` lines verbatim, returns the raw JSON tool result, emits
+    its own tool-call markup as literal text, or continues the turn in
+    the agent's first-person voice. All of those reach the user as the
+    iteration's visible label, so they are rejected here and the caller
+    emits no event — chat clients then fall back to their deterministic
+    tool-derived label, which is what the row should have said anyway.
+    """
+    if not text:
+        return False
+    # A caption is a single line. Every observed structural failure
+    # (transcript echo, bullet list, markup dump) is multi-line.
+    if "\n" in text or "\r" in text:
+        return False
+    lowered = text.lower()
+    if any(marker in lowered for marker in _STRUCTURAL_LEAK_MARKERS):
+        return False
+    stripped = text.lstrip()
+    # A JSON/array body, or a markdown bullet, is structure not prose.
+    if stripped[:1] in {"{", "[", "#", "|"}:
+        return False
+    if stripped[:2] in {"- ", "* ", "> "}:
+        return False
+    if lowered.startswith(_ROLE_PLAY_OPENERS):
+        return False
+    if len(text.split()) > _MAX_SUMMARY_WORDS:
+        return False
+    return True
 
 
 def _is_internal_workspace_path(path: str) -> bool:
@@ -168,6 +262,12 @@ class TurnSummarizer:
             return None
         if not reasoning and not tool_calls:
             return None
+        # Discovery-only iterations are labelled better, and for free,
+        # by the client's deterministic renderer. Skipping the call
+        # here also stops a stray model reply from overriding the
+        # client's presentation policy for those tools.
+        if _all_self_describing(tool_calls):
+            return None
 
         tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
         user_block_parts: list[str] = []
@@ -203,7 +303,14 @@ class TurnSummarizer:
         if content is None:
             return None
         text = content.strip().strip('"').rstrip(".")
-        return text or None
+        if not _valid_iteration_summary(text):
+            logger.warning(
+                "discarding malformed iteration summary for %s: %r",
+                iteration_id,
+                text[:200],
+            )
+            return None
+        return text
 
     async def summarize_turn(
         self,
@@ -349,8 +456,12 @@ class TurnSummarizer:
             # Keep result snippets short — the summarizer only needs
             # enough to tell two calls apart, not the full output.
             result_snippet = result[:300] if result else "(no result captured)"
+            # Numbered and field-labelled rather than ``call: …`` —
+            # a transcript line must not read like a plausible caption,
+            # or the model completes the list instead of summarizing it.
             out.append(
-                f"call: {name}({args_snippet})\n  result: {result_snippet}"
+                f"[{len(out) + 1}] tool={name} args={args_snippet}\n"
+                f"    returned: {result_snippet}"
             )
         return out
 
