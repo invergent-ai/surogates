@@ -41,7 +41,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Sequence
 
-from surogates.channels.openai_shape import Turn, normalise_text
+from surogates.channels.openai_shape import (
+    Turn,
+    normalise_text,
+    strip_image_marker,
+)
 
 __all__ = [
     "CONVERSATION_HEADER",
@@ -208,7 +212,12 @@ def session_user_turns(events: Iterable[Any]) -> list[str]:
         marker = data.get("synthetic")
         if marker and marker != SEED_MARKER:
             continue
-        turns.append(normalise_text(data.get("content") or ""))
+        # A seeded turn may carry the "images omitted" marker; the caller's
+        # own history never does, so comparing the marked text would report a
+        # rewrite every request and re-fork the conversation forever.
+        turns.append(
+            normalise_text(strip_image_marker(str(data.get("content") or "")))
+        )
     return turns
 
 

@@ -27,11 +27,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import ipaddress
 import json
+import socket
 import logging
 import time
 import uuid
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -241,6 +244,41 @@ def _screen(text: str, *, what: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+
+def _is_public_address(host: str) -> bool:
+    """Whether *host* resolves only to public, routable addresses.
+
+    A caller-supplied ``image_url`` is fetched by the server, from inside the
+    cluster. Without this the endpoint is an SSRF primitive: a third party
+    holding a customer API key could aim it at internal services, the
+    Kubernetes API, or the cloud metadata endpoint, and read the outcome from
+    the error it gets back.
+
+    Fails closed — an unresolvable host is refused rather than attempted.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            return False
+    return True
+
+
 async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
     """Turn parsed image parts into the message route's ``images`` payload.
 
@@ -261,8 +299,10 @@ async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
     remote = [p for p in parsed.images if p.url]
     fetched: dict[int, tuple[str, str]] = {}
     if remote:
+        # No redirects: a 302 to 169.254.169.254 is how a front-door host
+        # check gets bypassed.
         async with httpx.AsyncClient(
-            timeout=_IMAGE_FETCH_TIMEOUT, follow_redirects=True,
+            timeout=_IMAGE_FETCH_TIMEOUT, follow_redirects=False,
         ) as client:
             results = await asyncio.gather(
                 *(_fetch_image(client, part) for part in remote),
@@ -272,8 +312,13 @@ async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
             if isinstance(result, OpenAIRequestError):
                 raise result
             if isinstance(result, BaseException):
+                from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES
+
                 raise OpenAIRequestError(
-                    f"Could not fetch image {part.url}: {type(result).__name__}",
+                    _IMAGE_FETCH_REFUSED.format(
+                        url=part.url,
+                        kinds=", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
+                    ),
                     param="messages",
                 )
             fetched[id(part)] = result
@@ -299,34 +344,53 @@ async def _resolve_images(parsed: ParsedChatRequest) -> list[dict[str, str]]:
     return resolved
 
 
+#: One message for every remote-fetch failure. Distinct messages (refused
+#: host vs connect error vs wrong content-type vs too large) would let a
+#: caller use this endpoint as a port and host scanner — the difference
+#: between the replies IS the scan result.
+_IMAGE_FETCH_REFUSED = (
+    "Could not fetch the image at {url}. Remote images must be publicly "
+    "reachable and one of: {kinds}."
+)
+
+
 async def _fetch_image(
     client: httpx.AsyncClient, part: ImagePart,
 ) -> tuple[str, str]:
-    """Fetch one remote image, returning ``(mime_type, base64)``."""
+    """Fetch one remote image, returning ``(mime_type, base64)``.
+
+    The URL is caller-supplied and this runs inside the cluster, so the host
+    is checked against public address space first and redirects are not
+    followed — a redirect is the standard way to smuggle an internal target
+    past a front-door check.
+    """
     from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES
+
+    refused = OpenAIRequestError(
+        _IMAGE_FETCH_REFUSED.format(
+            url=part.url, kinds=", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
+        ),
+        param="messages",
+    )
+
+    parsed = urlsplit(str(part.url))
+    if not parsed.hostname or not await asyncio.to_thread(
+        _is_public_address, parsed.hostname,
+    ):
+        raise refused
 
     try:
         response = await client.get(str(part.url))
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise OpenAIRequestError(
-            f"Could not fetch image {part.url}: {exc}", param="messages",
-        ) from exc
+        raise refused from exc
 
     mime = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
     if mime not in _ALLOWED_IMAGE_MIMES:
-        raise OpenAIRequestError(
-            f"Image at {part.url} is {mime or 'of unknown type'}; supported: "
-            + ", ".join(sorted(_ALLOWED_IMAGE_MIMES)),
-            param="messages",
-        )
+        raise refused
     body = response.content
     if len(body) > _MAX_IMAGE_BYTES:
-        raise OpenAIRequestError(
-            f"Image at {part.url} exceeds "
-            f"{_MAX_IMAGE_BYTES // 1_000_000}MB limit.",
-            param="messages",
-        )
+        raise refused
     return mime, base64.b64encode(body).decode("ascii")
 
 
@@ -338,13 +402,20 @@ async def _fetch_image(
 class _ResolvedTurn:
     """The session this request runs in, and how it got there."""
 
-    __slots__ = ("session", "action", "reason", "conversation_key")
+    __slots__ = ("session", "action", "reason", "conversation_key", "displaces")
 
-    def __init__(self, session, action: ReconcileAction, reason: str | None, key: str):
+    def __init__(
+        self, session, action: ReconcileAction, reason: str | None, key: str,
+        displaces=None,
+    ):
         self.session = session
         self.action = action
         self.reason = reason
         self.conversation_key = key
+        #: The session that held this conversation's key before a fork. It
+        #: must release the key before the new session can take it — a pinned
+        #: conversation derives the same key on both sides of a fork.
+        self.displaces = displaces
 
 
 async def _resolve_session(
@@ -422,7 +493,7 @@ async def _resolve_session(
         service_account_id=service_account_id,
         seed_turns=decision.seed_turns,
     )
-    return _ResolvedTurn(session, decision.action, decision.reason, key)
+    return _ResolvedTurn(session, decision.action, decision.reason, key, existing)
 
 
 async def _create_seeded_session(
@@ -489,34 +560,48 @@ async def _create_seeded_session(
     return session
 
 
-async def _rekey(store: SessionStore, session, *, agent_id: str, key: str) -> None:
+async def _rekey(
+    store: SessionStore,
+    session,
+    *,
+    agent_id: str,
+    key: str,
+    displaces=None,
+) -> None:
     """Point the conversation key at this session for the caller's next turn.
 
-    The key names the state a request is REPLYING to, so it advances by one
-    turn each time.  Moving it here — after the turn is accepted — is what
-    lets the next request find this session, and what makes a regenerate of
-    the previous turn miss and fork instead of duplicating a turn.
+    The key names the state a request is REPLYING to, so on a successful turn
+    it advances by one; on a failed one it stays where the caller will look on
+    a retry, so the retry ATTACHes to this session instead of asking the agent
+    the same question again.
 
-    Called once the turn has finished, not when it is accepted: while a turn
-    is running the session must stay reachable under the key the caller would
-    derive on a retry, or an SDK retrying a slow request would miss, create a
-    second session, and ask the agent the same question again.
-
-    Best-effort: a collision means another session already claimed the key
-    (a concurrent identical conversation), and the correct outcome is that
-    this one simply stops being reachable by derivation rather than that the
-    request fails after the agent has already been asked to work.
+    *displaces* is the session that currently holds *key* and must give it up
+    first — a pinned conversation (``X-Surogate-Conversation``) derives the
+    SAME key before and after a fork, so without releasing the old holder the
+    unique index refuses the move, the header keeps resolving to the stale
+    session, and every following turn forks and re-seeds a fresh one.
     """
+    target = idempotency_key_for(agent_id, key)
     try:
-        await store.set_session_idempotency_key(
-            session.id, idempotency_key_for(agent_id, key),
-        )
+        if displaces is not None and displaces.id != session.id:
+            await store.clear_session_idempotency_key(displaces.id)
+        moved = await store.set_session_idempotency_key(session.id, target)
     except Exception:
-        logger.info(
+        logger.warning(
             "Could not advance the conversation key for session %s; the next "
             "turn will fork instead of continuing",
             session.id,
             exc_info=True,
+        )
+        return
+    if not moved:
+        # Returned False, not raised: another session already holds this key.
+        # Logged at warning because the visible symptom — a conversation that
+        # silently restarts every turn — is otherwise unattributable.
+        logger.warning(
+            "Conversation key already held by another session; session %s "
+            "will not be reachable by derivation and the next turn will fork",
+            session.id,
         )
 
 
@@ -852,6 +937,7 @@ async def chat_completions(
                 include_usage=parsed.include_usage,
                 on_finished=lambda: _rekey(
                     store, session, agent_id=agent.agent_id, key=next_key,
+                    displaces=resolved.displaces,
                 ),
             ),
             media_type="text/event-stream",
@@ -871,10 +957,24 @@ async def chat_completions(
     except OpenAIRequestError as error:
         return _error_response(error)
 
-    # Advance the key before reporting the outcome, failure included: the
-    # client resends its history on the next turn either way, and a session
-    # left unkeyed by a failed turn would strand the conversation.
-    await _rekey(store, session, agent_id=agent.agent_id, key=next_key)
+    # The key advances on every completed turn, failure included.
+    #
+    # An SDK retry of a 5xx would attach instead of re-running if the key
+    # stayed where the retry looks — but only for a turn that HAS history: an
+    # opening request is never resolved to an existing session (every one in a
+    # scope derives the same key), so a first turn's retry cannot attach
+    # whatever we do here. Keeping the key back for the turns where it would
+    # help costs the conversation for all of them: the client's next request
+    # carries one more turn, derives the advanced key, and finds nothing.
+    #
+    # Re-running a FAILED turn costs one more failed turn. Stranding the
+    # conversation costs the session — its memory, workspace and browser — and
+    # does so permanently. The turn already in flight is a different case and
+    # keeps its key: see the timeout path, which deliberately does not rekey.
+    await _rekey(
+        store, session, agent_id=agent.agent_id, key=next_key,
+        displaces=resolved.displaces,
+    )
 
     if reader.failure is not None:
         return _error_response(_upstream_error(
@@ -1000,6 +1100,12 @@ async def _stream_turn(
             # backlog drops them by design) still has to reach the client, so
             # fall back to the final response event.
             content, _ = _answer_text(collected)
+            if not content and reader.paused:
+                # Same rule as the buffered path: a paused agent has a
+                # QUESTION for the caller, not an answer. Without this the
+                # identical turn returns the question with stream=false and an
+                # empty message with stream=true.
+                content = _pending_question(collected)
             if content:
                 yield sse_data(build_chunk(**frame, content=content))
 

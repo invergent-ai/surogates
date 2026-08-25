@@ -727,3 +727,49 @@ async def test_a_failed_turn_still_leaves_the_conversation_continuable(
         "the conversation could not be continued after a failed turn"
     )
     assert second.headers["x-surogate-conversation-action"] == "append"
+
+
+async def test_a_pinned_conversation_that_forks_does_not_get_stuck(
+    client, app, session_factory, api_key,
+):
+    """With the header set, the key is the same before and after a fork.
+
+    Without releasing it from the old session the unique index refuses the
+    move, the header keeps resolving to the stale session, and every turn
+    forks and re-seeds a brand-new one — memory, workspace and browser lost
+    each time, sessions created without bound.
+    """
+    pin = {**auth(api_key.token), "X-Surogate-Conversation": "stuck-check"}
+
+    task = await answer_next_turn(app, session_factory, answer="one")
+    await client.post(
+        "/v1/api/chat/completions", headers=pin,
+        json={"messages": [{"role": "user", "content": "first"}]},
+    )
+    first = await task
+
+    # A rewrite: the client sends a history the session does not have.
+    task = await answer_next_turn(app, session_factory, answer="two")
+    forked = await client.post(
+        "/v1/api/chat/completions", headers=pin,
+        json={"messages": [
+            {"role": "user", "content": "totally different"},
+            {"role": "assistant", "content": "x"},
+            {"role": "user", "content": "second"},
+        ]},
+    )
+    second = await task
+    assert forked.status_code == 200, forked.text
+
+    # The pin must now follow the NEW session, not stay on the stale one.
+    task = await answer_next_turn(app, session_factory, answer="three")
+    third_response = await client.post(
+        "/v1/api/chat/completions", headers=pin,
+        json={"messages": [{"role": "user", "content": "third"}]},
+    )
+    third = await task
+    assert third_response.status_code == 200, third_response.text
+    assert third == second, (
+        "the pinned key stayed on the stale session; every turn would fork"
+    )
+    assert third != first

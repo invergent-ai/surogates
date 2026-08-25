@@ -18,6 +18,7 @@ Two things this module deliberately does **not** do:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +31,9 @@ __all__ = [
     "OpenAIRequestError",
     "ParsedChatRequest",
     "Turn",
+    "IMAGE_MARKER_PREFIX",
+    "image_marker",
+    "strip_image_marker",
     "build_chat_response",
     "build_chunk",
     "build_error_body",
@@ -239,6 +243,21 @@ def _split_content(content: Any, *, role: str) -> tuple[str, list[ImagePart]]:
     return "".join(parts), images
 
 
+
+def _image_fingerprint(parts: list[ImagePart]) -> str:
+    """A stable stand-in for the text of an image-only turn.
+
+    Derived from what identifies each image — its inline bytes or its URL —
+    so two different image-only conversations key apart, and the same one
+    keys the same on every request.
+    """
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update((part.url or part.data or "").encode("utf-8"))
+        digest.update(b"\x00")
+    return f"[image-turn:{digest.hexdigest()[:16]}]"
+
+
 def parse_chat_request(body: dict) -> ParsedChatRequest:
     """Split a chat completion into prior turns and the turn to run.
 
@@ -308,7 +327,21 @@ def parse_chat_request(body: dict) -> ParsedChatRequest:
     # Captured BEFORE the system fold below: these are what the conversation
     # key is derived from, so a system prompt that changes every request (a
     # current timestamp, say) must not reach them.
-    key_turns = [t.content for t in turns if t.role == "user"]
+    #
+    # An image-only turn has no text at all, and a key derived from a run of
+    # empty strings is the same for every such conversation in a scope — two
+    # unrelated image conversations would resolve into one session. A stable
+    # digest of the image bytes stands in for the missing text.
+    key_turns = []
+    for index, turn in enumerate(turns):
+        if turn.role != "user":
+            continue
+        text = turn.content
+        if not text.strip():
+            parts = images_by_index.get(index) or []
+            if parts:
+                text = _image_fingerprint(parts)
+        key_turns.append(text)
 
     if system_parts:
         prefix = "\n\n".join(p for p in system_parts if p)
@@ -343,17 +376,42 @@ def parse_chat_request(body: dict) -> ParsedChatRequest:
     )
 
 
+#: Prefix of the marker :func:`seed_text_for` appends for a history image it
+#: cannot replay.  Public because the reconciler has to strip it back off: the
+#: caller's own history carries no marker, so comparing marked text against it
+#: reports a rewrite on every request and re-forks the conversation forever.
+IMAGE_MARKER_PREFIX = "[image"
+
+
+def image_marker(count: int) -> str:
+    """The marker text for *count* images dropped from a replayed turn."""
+    plural = "s" if count != 1 else ""
+    return f"{IMAGE_MARKER_PREFIX}{plural} omitted from replayed history: {count}]"
+
+
+def strip_image_marker(text: str) -> str:
+    """Remove a trailing :func:`image_marker` from *text*, if present."""
+    marker_at = text.rfind(IMAGE_MARKER_PREFIX)
+    if marker_at == -1 or not text.rstrip().endswith("]"):
+        return text
+    return text[:marker_at].rstrip()
+
+
 def seed_text_for(turn: Turn, image_count: int = 0) -> str:
     """The text written into a seeded turn, marking any dropped images.
 
     Seeding writes into the event log, which is text; a history image cannot
     be reconstructed there.  A visible marker beats a silent drop — otherwise
     a forked conversation reads as though the user never sent the picture.
+
+    The marker is machine-strippable on purpose: the reconciler removes it
+    before comparing, so a seeded turn still matches the caller's own
+    unmarked history.
     """
     count = max(int(image_count), 0)
     if not count:
         return turn.content
-    marker = f"[{count} image{'s' if count != 1 else ''} omitted from replayed history]"
+    marker = image_marker(count)
     return f"{turn.content}\n\n{marker}" if turn.content else marker
 
 

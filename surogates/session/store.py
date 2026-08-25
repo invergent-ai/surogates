@@ -729,6 +729,21 @@ class SessionStore:
                 return False
         return result.rowcount > 0
 
+    async def clear_session_idempotency_key(self, session_id: UUID) -> None:
+        """Release a session's ``idempotency_key``.
+
+        Used when a conversation key has to move to a different session: the
+        column is uniquely indexed per org, so the new holder cannot take the
+        key until the old one gives it up.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id)
+                .values(idempotency_key=None, updated_at=func.now())
+            )
+            await db.commit()
+
     async def update_session_config_key(
         self,
         session_id: UUID,

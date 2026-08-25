@@ -201,8 +201,15 @@ def test_seed_text_marks_images_it_cannot_replay():
 
     marked = seed_text_for(turn, 1)
     assert "look at this" in marked
-    assert "1 image omitted" in marked
-    assert "2 images omitted" in seed_text_for(turn, 2)
+    assert "omitted from replayed history: 1" in marked
+    assert "omitted from replayed history: 2" in seed_text_for(turn, 2)
+
+    # Machine-strippable, so the reconciler can compare a seeded turn against
+    # the caller's own unmarked history instead of re-forking every request.
+    from surogates.channels.openai_shape import strip_image_marker
+
+    assert strip_image_marker(marked) == "look at this"
+    assert strip_image_marker("no marker here") == "no marker here"
 
 
 def test_history_image_counts_are_reported_per_prior_turn():
@@ -441,3 +448,44 @@ def test_key_turns_track_the_user_turns_in_order():
     ]})
     assert parsed.key_turns == ["one", "two", "three"]
     assert parsed.key_turns[-1] == parsed.prompt
+
+
+def test_an_image_only_turn_keys_on_its_images_not_on_empty_text():
+    """Two unrelated image-only conversations must not share a key.
+
+    An image-only message flattens to empty text, so a key derived from it
+    would be identical for every such conversation in a scope and the second
+    one's follow-up would resolve into the first one's session.
+    """
+    def only(url):
+        return parse_chat_request({"messages": [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": url}}],
+        }]})
+
+    a = only("data:image/png;base64,AAAA")
+    b = only("data:image/png;base64,BBBB")
+    again = only("data:image/png;base64,AAAA")
+
+    assert a.key_turns != [""], "an image-only turn keyed on empty text"
+    assert a.key_turns != b.key_turns, "different images must key apart"
+    assert a.key_turns == again.key_turns, "the same image must key the same"
+
+
+def test_a_remote_image_only_turn_keys_on_its_url():
+    def only(url):
+        return parse_chat_request({"messages": [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": url}}],
+        }]})
+
+    assert only("https://a.test/x.png").key_turns != only(
+        "https://b.test/y.png",
+    ).key_turns
+
+
+def test_text_turns_are_unaffected_by_the_image_fingerprint():
+    parsed = parse_chat_request({"messages": [
+        _user("one"), {"role": "assistant", "content": "x"}, _user("two"),
+    ]})
+    assert parsed.key_turns == ["one", "two"]

@@ -439,3 +439,50 @@ def test_attach_tolerates_whitespace_drift_in_the_prompt():
         prompt=U2,
     )
     assert r.action is ReconcileAction.ATTACH
+
+
+def test_a_seeded_turn_with_a_dropped_image_still_matches_the_caller():
+    """The marker must not make a seeded conversation re-fork forever.
+
+    The caller's own history carries no marker, so comparing the marked text
+    against it reports a rewrite on every request — the exact quadratic
+    re-fork the seed marker exists to prevent.
+    """
+    from surogates.channels.openai_shape import seed_text_for
+
+    marked = seed_text_for(Turn("user", U1), 2)
+    assert "omitted" in marked
+
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(marked, synthetic="seed"), assistant_ev(A1)],
+    )
+    assert r.action is ReconcileAction.APPEND, (
+        f"a dropped-image marker re-forked the conversation ({r.reason})"
+    )
+
+
+def test_session_turns_strip_the_image_marker():
+    from surogates.channels.openai_shape import seed_text_for
+
+    marked = seed_text_for(Turn("user", "look"), 1)
+    assert session_user_turns([user_ev(marked, synthetic="seed")]) == ["look"]
+
+
+def test_attach_covers_a_retry_of_a_turn_with_history():
+    """Where ATTACH actually applies.
+
+    A retry can only attach to a turn that HAS history: an opening request is
+    never resolved to an existing session, so its retry always creates. The
+    route therefore advances the key on every completed turn and relies on
+    the still-running turn keeping its key for the attach case.
+    """
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(U1), assistant_ev(A1), user_ev(U2)],
+        prompt=U2,
+    )
+    assert r.action is ReconcileAction.ATTACH
+
+    # The opening-request case the rule above describes.
+    assert resolves_to_existing_session(prior_turns=[]) is False

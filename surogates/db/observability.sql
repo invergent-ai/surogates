@@ -162,8 +162,14 @@ ALTER TABLE service_accounts
 -- agent can briefly hold two such rows; promoting both would make the unique
 -- index below impossible to build and abort this whole script inside its
 -- transaction, taking the service down on the next start. The newest row wins,
--- matching what the old writer intended, and any straggler stays 'service' —
--- inert, and visible to the query beneath this block.
+-- matching what the old writer intended.
+--
+-- A straggler left at 'service' is NOT inert: every principal lookup filters
+-- on kind, so an agent whose only row stayed 'service' has no resolvable
+-- identity and its turns fail. That is why the promotion runs on every start
+-- rather than once — a row written by an old replica after this script ran is
+-- picked up by the next boot — and why the query below reports any that are
+-- still waiting.
 UPDATE service_accounts sa
    SET kind = 'agent_principal'
   FROM (
@@ -192,6 +198,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent_principal
 CREATE INDEX IF NOT EXISTS idx_service_accounts_agent
     ON service_accounts (agent_id)
     WHERE agent_id IS NOT NULL;
+
+-- Surfaces an agent whose principal never got promoted: it has an agent_id,
+-- no principal, and therefore no identity the runtime can resolve. Expected
+-- to return nothing; a row here means a pre-``kind`` writer landed after the
+-- promotion above and the next start will fix it.
+DO $$
+DECLARE stranded integer;
+BEGIN
+    SELECT count(*) INTO stranded
+      FROM service_accounts sa
+     WHERE sa.agent_id IS NOT NULL
+       AND sa.revoked_at IS NULL
+       AND NOT EXISTS (
+            SELECT 1 FROM service_accounts p
+             WHERE p.agent_id = sa.agent_id
+               AND p.kind = 'agent_principal'
+               AND p.revoked_at IS NULL
+           );
+    IF stranded > 0 THEN
+        RAISE WARNING
+            'service_accounts: % agent row(s) have no agent_principal; '
+            'those agents cannot resolve an identity until this script '
+            'runs again after the old replicas are gone', stranded;
+    END IF;
+END $$;
 
 -- ----------------------------------------------------------------------------
 -- Sessions — retrofits for the API channel.

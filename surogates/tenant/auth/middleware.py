@@ -331,17 +331,26 @@ _OPENAI_PATHS: tuple[str, ...] = (
 
 
 def _auth_error_body(path: str, detail: object) -> dict:
-    """The error envelope the caller of *path* can actually read."""
-    if any(path.startswith(p) for p in _OPENAI_PATHS):
-        return {
-            "error": {
-                "message": detail if isinstance(detail, str) else str(detail),
-                "type": "invalid_request_error",
-                "param": None,
-                "code": "invalid_api_key",
-            }
-        }
-    return {"detail": detail}
+    """The error envelope the caller of *path* can actually read.
+
+    Delegates to the channel's own builder rather than hand-rolling the
+    shape: two spellings of this envelope drift, and the drift is invisible
+    until an SDK renders an empty error message.
+    """
+    if not any(path.startswith(p) for p in _OPENAI_PATHS):
+        return {"detail": detail}
+
+    from surogates.channels.openai_shape import (
+        OpenAIRequestError,
+        build_error_body,
+    )
+
+    return build_error_body(
+        OpenAIRequestError(
+            detail if isinstance(detail, str) else str(detail),
+            code="invalid_api_key",
+        )
+    )
 
 
 async def enforce_agent_binding(request: Request, ctx: TenantContext) -> None:
@@ -561,9 +570,14 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
             ) or ""
 
         if not token:
+            # The envelope matters most here: a blank or absent key is the
+            # commonest first-run mistake, and an OpenAI SDK shown
+            # {"detail": ...} surfaces error.message as None.
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Missing authentication credentials."},
+                content=_auth_error_body(
+                    path, "Missing authentication credentials.",
+                ),
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
@@ -574,7 +588,7 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
             logger.error("session_factory not set on app.state")
             return JSONResponse(
                 status_code=500,
-                content={"detail": "Server misconfiguration."},
+                content=_auth_error_body(path, "Server misconfiguration."),
             )
 
         try:
