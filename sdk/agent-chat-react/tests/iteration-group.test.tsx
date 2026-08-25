@@ -529,6 +529,165 @@ describe("IterationGroup", () => {
     expect(dom.textContent).not.toContain("Done");
   });
 
+  // ── skill_view: a deterministic row, never a model caption ──────
+  //
+  // A skill load is the agent reaching for its own instructions, so
+  // the skill's name is the whole story of the iteration. The harness
+  // deliberately emits no summary for these iterations; the label is
+  // derived from the args so it is instant, free and never wrong.
+
+  it("labels a completed skill_view with the skill name", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "skill_view",
+          args: '{"name":"copywriting"}',
+          status: "complete",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Reading skill copywriting");
+  });
+
+  it("appends the file when skill_view opens a linked skill file", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "skill_view",
+          args: '{"name":"copywriting","file_path":"reference/tone.md"}',
+          status: "complete",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Reading skill copywriting · tone.md");
+  });
+
+  it("names every skill when one iteration loads several", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "skill_view",
+          args: '{"name":"copywriting"}',
+          status: "complete",
+        },
+        {
+          id: "c2",
+          toolName: "skill_view",
+          args: '{"name":"social"}',
+          status: "complete",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Reading skills copywriting, social");
+  });
+
+  it("falls back to a countable label when the skill name is unparseable", () => {
+    // Args stream in a character at a time; a half-written name must
+    // never reach the row.
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        { id: "c1", toolName: "skill_view", args: '{"na', status: "complete" },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Reading a skill");
+  });
+
+  it("uses the same wording for the live shimmer as for the finished row", () => {
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      status: "streaming",
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "skill_view",
+          args: '{"name":"copywriting"}',
+          status: "running",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    // "Reading skill copywriting…" while live, "Reading skill
+    // copywriting" once done — the row must not rename itself.
+    expect(dom.textContent).toContain("Reading skill copywriting");
+    expect(dom.textContent).not.toContain("Running Skill");
+  });
+
+  it("keeps skill_view out of a mixed batch's generic label", () => {
+    // skill_view is visible now, so a mixed batch counts it.
+    const message = buildMessage({
+      turnId: "t-1",
+      iterationIndex: 0,
+      toolCalls: [
+        {
+          id: "c1",
+          toolName: "skill_view",
+          args: '{"name":"copywriting"}',
+          status: "complete",
+        },
+        {
+          id: "c2",
+          toolName: "web_search",
+          args: '{"query":"dashboards"}',
+          status: "complete",
+        },
+      ],
+    });
+    const dom = mount(
+      <IterationGroup
+        message={message}
+        sessionId="s-1"
+        artifactFallbacks={{}}
+      />,
+    );
+    expect(dom.textContent).toContain("Used 2 tools");
+  });
+
   it("renders nothing when complete, no summary, no tools, no reasoning", () => {
     // Empty iteration — nothing to derive. The surrounding
     // SimpleAssistantGroup still renders any final text + the

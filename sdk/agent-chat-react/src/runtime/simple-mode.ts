@@ -9,12 +9,15 @@
 import type { AgentChatToolCallInfo } from "../types";
 import type { OrbDerivationOptions } from "./orb-state";
 
+// ``skill_view`` is deliberately absent: a skill load is the agent
+// reaching for its own instructions, and naming the skill tells the
+// user more about the turn than any prose summary of the same call
+// could. It renders as a deterministic "Reading skill <name>" row.
 export const SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   "list_files",
   "search_files",
   "session_search",
   "skills_list",
-  "skill_view",
   "skill_manage",
   "process",
   "memory",
