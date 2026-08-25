@@ -378,16 +378,23 @@ def build_checks(
         return GREEN, f"regenerate -> {action}; answered {text[:40]!r}"
 
     def edited_history_forks() -> tuple[str, str]:
-        """Editing a past turn must not leave the stale one in context."""
+        """Editing a past turn must not leave the stale one in context.
+
+        The assistant turns here are fixed, neutral text rather than the
+        agent's real replies: its reply to "the code is BLUE" repeats BLUE,
+        so replaying it in the EDITED history would give the agent a
+        legitimate reason to answer BLUE and the check would be measuring the
+        model's tie-breaking rather than whether the stale turn leaked.
+        """
         base = [{"role": "user", "content": "Remember: the code is BLUE."}]
-        first = client.chat.completions.create(model=model, messages=base)
-        base.append({"role": "assistant", "content": _text_of(first)})
+        client.chat.completions.create(model=model, messages=base)
+        base.append({"role": "assistant", "content": "OK."})
         base.append({"role": "user", "content": "What is the code?"})
         client.chat.completions.create(model=model, messages=base)
 
         edited = [
             {"role": "user", "content": "Remember: the code is GREEN."},
-            base[1],
+            {"role": "assistant", "content": "OK."},
             {"role": "user", "content": "What is the code? One word."},
         ]
         response, headers = _create_with_headers(
