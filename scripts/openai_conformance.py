@@ -83,18 +83,16 @@ def _text_of(response: Any) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
-def _header(response: Any, name: str) -> str:
-    """One response header, whatever the SDK version exposes it as."""
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        raw = getattr(response, "_raw_response", None)
-        headers = getattr(raw, "headers", None)
-    if headers is None:
-        return ""
-    try:
-        return headers.get(name) or ""
-    except Exception:
-        return ""
+def _create_with_headers(client: OpenAI, **kwargs) -> tuple[Any, dict]:
+    """Run a completion and return ``(parsed, headers)``.
+
+    The SDK's parsed ``ChatCompletion`` carries no headers at all — reading
+    ``response.headers`` silently yields nothing, which made three checks
+    report an empty conversation action as if the server had sent none.
+    ``with_raw_response`` is the only way to see them.
+    """
+    raw = client.chat.completions.with_raw_response.create(**kwargs)
+    return raw.parse(), dict(raw.headers)
 
 
 def build_checks(
@@ -365,16 +363,19 @@ def build_checks(
         client.chat.completions.create(model=model, messages=history)
 
         # Regenerate: resend the SAME array a second time.
-        regen = client.chat.completions.create(model=model, messages=history)
-        action = _header(regen, "x-surogate-conversation-action")
+        regen, headers = _create_with_headers(
+            client, model=model, messages=history,
+        )
+        action = headers.get("x-surogate-conversation-action", "")
         text = _text_of(regen)
         assert text, "regenerate produced nothing"
+        assert action, "no conversation-action header to judge by"
         if action == "append":
             return RED, (
                 "regenerate appended — the duplicated turn is now in context "
                 f"(answered {text[:40]!r})"
             )
-        return GREEN, f"regenerate -> {action or 'fork'}; answered {text[:40]!r}"
+        return GREEN, f"regenerate -> {action}; answered {text[:40]!r}"
 
     def edited_history_forks() -> tuple[str, str]:
         """Editing a past turn must not leave the stale one in context."""
@@ -389,9 +390,12 @@ def build_checks(
             base[1],
             {"role": "user", "content": "What is the code? One word."},
         ]
-        response = client.chat.completions.create(model=model, messages=edited)
+        response, headers = _create_with_headers(
+            client, model=model, messages=edited,
+        )
         text = _text_of(response).upper()
-        action = _header(response, "x-surogate-conversation-action")
+        action = headers.get("x-surogate-conversation-action", "")
+        assert action, "no conversation-action header to judge by"
         if "BLUE" in text:
             return RED, (
                 "answered with the STALE edited-away value; the rewrite "
@@ -416,9 +420,12 @@ def build_checks(
             {"role": "assistant", "content": _text_of(first)},
             {"role": "user", "content": "What word? One word."},
         ]
-        response = client.chat.completions.create(model=model, messages=follow)
-        action = _header(response, "x-surogate-conversation-action")
+        response, headers = _create_with_headers(
+            client, model=model, messages=follow,
+        )
+        action = headers.get("x-surogate-conversation-action", "")
         text = _text_of(response).upper()
+        assert action, "no conversation-action header to judge by"
         if "MERIDIAN" in text:
             return GREEN, f"continued despite a changed system prompt (action={action})"
         return RED, (
@@ -455,13 +462,16 @@ def build_checks(
         return GREEN, "each end user kept their own conversation"
 
     def session_header_is_reported() -> tuple[str, str]:
-        response = client.chat.completions.create(
-            model=model, messages=[{"role": "user", "content": "Say OK."}],
+        _, headers = _create_with_headers(
+            client, model=model,
+            messages=[{"role": "user", "content": "Say OK."}],
         )
-        session = _header(response, "x-surogate-session")
-        action = _header(response, "x-surogate-conversation-action")
+        session = headers.get("x-surogate-session", "")
+        action = headers.get("x-surogate-conversation-action", "")
         if not session:
-            return YELLOW, "no X-Surogate-Session header to correlate with"
+            return RED, "no X-Surogate-Session header to correlate a turn with"
+        if action != "create":
+            return RED, f"a first turn reported action={action!r}, expected create"
         return GREEN, f"session={session[:8]}… action={action}"
 
     def unsupported_content_refused() -> tuple[str, str]:

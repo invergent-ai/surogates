@@ -41,6 +41,8 @@ The `/v1/api` suffix is not decoration. `/v1/api/*` is the only path where an AP
 | **Usage** | real token counts, including `prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens` |
 | **Skills and tools** | every skill, tool, MCP server and browser the agent has |
 
+Images reach the agent's model exactly as they do on the web channel — the same event payload, the same replay. If the agent's model cannot accept them the turn fails upstream with something like `Unexpected item type in content`, which is a property of the configured model, not of this endpoint. The platform routes images to a vision model only when its metadata reports the main model has no vision support; a model whose metadata claims support but whose endpoint rejects image blocks fails either way, on any channel.
+
 ### What is deliberately not supported
 
 **Client-declared `tools`.** Passing `tools` or `functions` returns a `400` with code `tools_not_supported`. The agent runs its own tools inside the turn and returns the final answer; a tool call sent back to the client would wait forever for a `role: "tool"` reply nothing is listening for. The refusal is loud on purpose — silently ignoring the field would present as a hang.
@@ -62,7 +64,6 @@ Errors use the envelope OpenAI SDKs parse, not FastAPI's `{"detail": ...}`:
 | `400` | malformed request, unsupported content part, client-declared tools |
 | `401` | missing credential |
 | `403` | wrong principal kind, or a key bound to a different agent |
-| `402` | the agent's allowance is exhausted, or the buyer's package excludes API access |
 | `422` | the message tripped the prompt-injection screen |
 | `502` | the agent failed the turn, or completed without producing an answer |
 | `504` | a non-streaming turn outran its budget — retry with `stream: true` |
@@ -106,9 +107,20 @@ A key is bound to the agent it was minted for. Presenting it against another age
 
 ## Billing
 
-API turns meter exactly like every other channel. The key's owner is the billed party, and a turn draws on the agent's per-user allowance through the same authorize/settle path the web, Slack, Telegram and website channels use. Free or uncapped agents are unaffected.
+An API key is the operator's own credential for their own agent, so its turns
+bill the way all of the operator's usage does: the proxy debits the project
+wallet on each LLM call and the worker records the turn's cost. This is the
+same treatment the `studio` channel gets.
 
-`api` is a sellable channel, so an offer that restricts channels excludes API access unless it is included. A buyer whose package leaves it out gets `402 channel_not_included`.
+There is deliberately **no per-end-user allowance gate** on this channel. That
+gate answers "has this end user of the agent paid" — the web channel applies
+it to signed-in end users, and the website widget applies it on a buyer's
+behalf. An API key is neither, and gating on it would ask an operator to buy
+access to their own agent.
+
+Selling API access to a third party needs a buyer identity carried on the key,
+which nothing mints yet. Until it does, treat an API key as staff access: give
+one out and you are giving away spend on your own plan.
 
 ## Fire-and-forget submission
 
