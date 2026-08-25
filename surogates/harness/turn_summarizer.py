@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from surogates.harness.streaming_executor import _is_error_result
 from surogates.harness.structured_output import parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -118,18 +119,17 @@ _TURN_PROMPT = (
 _VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
 
 
-# Tools whose arguments alone fully describe what happened. The chat
-# clients render these deterministically ("Reading skill copywriting"),
-# which is faster, free, and never wrong — so an iteration built only
-# from them gets no LLM summary at all. Emitting one would spend a
-# model call to produce a worse label, and would override the client's
-# own presentation policy for these tools.
-_SELF_DESCRIBING_TOOLS: frozenset[str] = frozenset({
-    "skill_view",
-    "skills_list",
-    "list_files",
-    "search_files",
-})
+# ``skill_view`` is the one tool whose arguments fully describe the
+# iteration: chat clients render it as "Reading skill <name>", which is
+# faster, free and never wrong. Summarizing such an iteration spends a
+# model call to produce a worse row, and lets a stray reply override the
+# client's own presentation of the tool.
+#
+# The other discovery tools stay summarized. Clients hide *those* from
+# the condensed view, so with no summary the iteration has nothing left
+# to draw — the caption is the only thing standing between the user and
+# a silent gap.
+_CLIENT_RENDERED_TOOLS: frozenset[str] = frozenset({"skill_view"})
 
 # Openers that mark the summary model role-playing the agent instead of
 # captioning it ("I'll load the skill…", "Let me check…"). Matched
@@ -137,18 +137,31 @@ _SELF_DESCRIBING_TOOLS: frozenset[str] = frozenset({
 _ROLE_PLAY_OPENERS: tuple[str, ...] = (
     "i'll ", "i will ", "i am ", "i'm ", "i need ", "i should ",
     "i can ", "i cannot ", "i've ", "i have ", "let me ", "let's ",
-    "based on ", "first, ", "next, ", "now ",
+    "based on ", "first, ", "next, ",
 )
 
-# Fragments that only ever appear when the reply leaks structure rather
-# than prose: the transcript scaffolding fed in as input, or a model's
-# native tool-call markup surfacing as literal text. ``｜`` (U+FF5C) is
-# the DeepSeek delimiter; ``<tool_call``/``<invoke``/``<function`` cover
-# the XML-style dialects.
-_STRUCTURAL_LEAK_MARKERS: tuple[str, ...] = (
-    "call:", "result:", "tools called", "<tool_call", "<invoke",
-    "<function", "\uff5c", "```",
+# Markup that only ever appears when a model's native tool-call syntax
+# surfaces as literal text instead of being parsed. ``｜`` (U+FF5C) is
+# the DeepSeek delimiter; the angle-bracket forms cover the XML-style
+# dialects; a fence means the reply is a code block, not a caption.
+_MARKUP_LEAK_MARKERS: tuple[str, ...] = (
+    "<tool_call", "<invoke", "<function", "\uff5c", "```",
 )
+
+
+def _echoes_transcript(lowered: str) -> bool:
+    """True when the reply repeats the transcript it was handed.
+
+    Matched on co-occurring field markers rather than on ``call:`` or
+    ``result:`` alone, because those words turn up in ordinary captions
+    ("Search returns no result: falls back to pypdf") while no caption
+    ever pairs ``tool=`` with ``args=``.
+    """
+    if lowered.startswith(("call:", "tools called", "[1] tool=")):
+        return True
+    if "tool=" in lowered and "args=" in lowered:
+        return True
+    return "call:" in lowered and "result:" in lowered
 
 # A caption is one short line. Anything appreciably longer is the model
 # dumping the transcript back rather than summarizing it; the render
@@ -157,20 +170,30 @@ _STRUCTURAL_LEAK_MARKERS: tuple[str, ...] = (
 _MAX_SUMMARY_WORDS: int = 30
 
 
-def _all_self_describing(tool_calls: list[dict[str, Any]]) -> bool:
-    """True when every call in the batch is client-renderable on its own.
+def _client_renders_iteration(
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    """True when the client can label this iteration without a model.
 
-    An empty batch is *not* self-describing: a text-only iteration has
-    no tool calls to render and still needs a summary.
+    Every call must be client-rendered *and* have succeeded. A failed
+    call is dropped from the client's condensed view, so skipping the
+    caption for one would erase the iteration outright and the user
+    would never learn the call failed — the iteration prompt asks for
+    the opposite ("if a call failed, say so").
+
+    An empty batch is never client-rendered: a text-only iteration has
+    no tool calls to draw and still needs a caption. Neither is a batch
+    whose results were not captured, since success cannot be confirmed.
     """
-    if not tool_calls:
+    if not tool_calls or not tool_results:
         return False
     for tc in tool_calls:
         fn = tc.get("function") or {}
         name = fn.get("name") or tc.get("name") or ""
-        if name not in _SELF_DESCRIBING_TOOLS:
+        if name not in _CLIENT_RENDERED_TOOLS:
             return False
-    return True
+    return not any(_is_error_result(tr) for tr in tool_results)
 
 
 # The prompt forbids a narrator opener and the model uses one anyway in
@@ -211,8 +234,12 @@ def _valid_iteration_summary(text: str) -> bool:
     # (transcript echo, bullet list, markup dump) is multi-line.
     if "\n" in text or "\r" in text:
         return False
-    lowered = text.lower()
-    if any(marker in lowered for marker in _STRUCTURAL_LEAK_MARKERS):
+    # Typographic apostrophes are normalized so a curly "I\u2019ll load the
+    # skill" is caught by the same openers as the ASCII form.
+    lowered = text.lower().replace("\u2019", "'")
+    if _echoes_transcript(lowered):
+        return False
+    if any(marker in lowered for marker in _MARKUP_LEAK_MARKERS):
         return False
     stripped = text.lstrip()
     # A JSON/array body, or a markdown bullet, is structure not prose.
@@ -283,11 +310,11 @@ class TurnSummarizer:
             return None
         if not reasoning and not tool_calls:
             return None
-        # Discovery-only iterations are labelled better, and for free,
-        # by the client's deterministic renderer. Skipping the call
-        # here also stops a stray model reply from overriding the
-        # client's presentation policy for those tools.
-        if _all_self_describing(tool_calls):
+        # A skill load is labelled better, and for free, by the
+        # client's deterministic renderer. Skipping the call here also
+        # stops a stray model reply from overriding the client's
+        # presentation of that tool.
+        if _client_renders_iteration(tool_calls, tool_results or []):
             return None
 
         tool_lines = self._format_tool_calls(tool_calls, tool_results or [])

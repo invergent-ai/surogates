@@ -511,6 +511,26 @@ async def _summarize_with(content: str) -> str | None:
             "transcript dumped past the word cap",
             " ".join(f"word{i}" for i in range(40)),
         ),
+        # Typographic apostrophes are the model's default; matching only
+        # the ASCII form let every curly-quoted role-play through.
+        (
+            "role-play with a typographic apostrophe",
+            "I\u2019ll load the copywriting skill next",
+        ),
+        (
+            "let-us role-play with a typographic apostrophe",
+            "Let\u2019s review the grading protocol",
+        ),
+        # The transcript format changed in the same commit; a one-line
+        # echo of the new shape has no newline to catch it.
+        (
+            "single-line echo of the reshaped transcript",
+            'tool=patch args={"path": "a.py"} returned: patched',
+        ),
+        (
+            "single-line echo of the old transcript",
+            'call: skill_view({"name": "x"}) result: {"ok": 1}',
+        ),
     ],
 )
 async def test_summarize_iteration_rejects_malformed_reply(
@@ -529,6 +549,11 @@ async def test_summarize_iteration_rejects_malformed_reply(
         # An em-dash clause and a colon are ordinary caption prose and
         # must not trip the structural markers.
         "Cloned the repo: 3 submodules initialised",
+        # ``result:`` and ``call:`` occur in real captions; only their
+        # co-occurrence marks a transcript echo.
+        "Search returns no result: falls back to pypdf",
+        "Retry after the failed call: pdftotext is missing",
+        "Now searching the workspace for the invoice template",
     ],
 )
 async def test_summarize_iteration_keeps_well_formed_reply(reply: str) -> None:
@@ -553,19 +578,16 @@ def _calls(*names: str) -> list[dict[str, Any]]:
     ]
 
 
+def _ok(*ids: str) -> list[dict[str, Any]]:
+    return [
+        {"tool_call_id": i, "content": '{"success": true, "name": "x"}'}
+        for i in ids
+    ]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "names",
-    [
-        ("skill_view",),
-        ("skills_list",),
-        ("list_files",),
-        ("search_files",),
-        ("skill_view", "skill_view"),
-        ("skill_view", "search_files"),
-    ],
-)
-async def test_self_describing_iterations_skip_the_model(
+@pytest.mark.parametrize("names", [("skill_view",), ("skill_view", "skill_view")])
+async def test_successful_skill_loads_skip_the_model(
     names: tuple[str, ...],
 ) -> None:
     client = _StubClient("Reviews the copywriting skill")
@@ -576,6 +598,7 @@ async def test_self_describing_iterations_skip_the_model(
         reasoning="I should load the skill first",
         tool_calls=_calls(*names),
         prior_iteration_summaries=[],
+        tool_results=_ok(*[f"c{i}" for i in range(len(names))]),
     )
 
     assert result is None
@@ -583,9 +606,79 @@ async def test_self_describing_iterations_skip_the_model(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "names",
+    [("skills_list",), ("list_files",), ("search_files",), ("session_search",)],
+)
+async def test_other_discovery_tools_are_still_summarized(
+    names: tuple[str, ...],
+) -> None:
+    # Clients hide these from the condensed view, so with no caption the
+    # iteration has nothing left to draw. Only skill_view has a
+    # deterministic row to fall back to.
+    client = _StubClient("Found three invoice templates")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls(*names),
+        prior_iteration_summaries=[],
+        tool_results=_ok("c0"),
+    )
+
+    assert result == "Found three invoice templates"
+    assert len(client.chat.completions.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        '{"success": false, "error": "Skill \'copywritting\' not found."}',
+        '{"error": "No tenant context available"}',
+    ],
+)
+async def test_a_failed_skill_load_is_still_summarized(failure: str) -> None:
+    # The client drops errored calls from its condensed view, so
+    # skipping the caption here would erase the iteration outright and
+    # the user would never learn the skill load failed.
+    client = _StubClient("Skill copywritting not found")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("skill_view"),
+        prior_iteration_summaries=[],
+        tool_results=[{"tool_call_id": "c0", "content": failure}],
+    )
+
+    assert result == "Skill copywritting not found"
+    assert len(client.chat.completions.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_load_without_captured_results_is_summarized() -> None:
+    # Success cannot be confirmed with no results in hand, so the
+    # caption is produced rather than gambled away.
+    client = _StubClient("Loaded the copywriting skill")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("skill_view"),
+        prior_iteration_summaries=[],
+    )
+
+    assert result == "Loaded the copywriting skill"
+
+
+@pytest.mark.asyncio
 async def test_mixed_batch_still_summarizes() -> None:
-    # One non-self-describing call is enough: the client cannot label
-    # the batch on its own, so the summary still earns its model call.
+    # One call the client cannot render is enough: it cannot label the
+    # batch on its own, so the caption still earns its model call.
     client = _StubClient("Fetch the pricing page after loading the skill")
     summarizer = _iteration_summarizer(client)
 
@@ -594,6 +687,7 @@ async def test_mixed_batch_still_summarizes() -> None:
         reasoning="",
         tool_calls=_calls("skill_view", "web_extract"),
         prior_iteration_summaries=[],
+        tool_results=_ok("c0", "c1"),
     )
 
     assert result == "Fetch the pricing page after loading the skill"
@@ -602,8 +696,8 @@ async def test_mixed_batch_still_summarizes() -> None:
 
 @pytest.mark.asyncio
 async def test_text_only_iteration_still_summarizes() -> None:
-    # No tool calls at all is not "self-describing" — there is nothing
-    # for the client to render, so the reasoning still needs a caption.
+    # No tool calls at all is not client-rendered — there is nothing for
+    # the client to draw, so the reasoning still needs a caption.
     client = _StubClient("Weigh two rollout options")
     summarizer = _iteration_summarizer(client)
 

@@ -1125,14 +1125,6 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
 }
 
 /**
- * Header label for a single-tool iteration. Most tools surface a
- * short detail (path basename, query, URL) so the header reads
- * "Read · landing.html". Tools whose detail is structurally noisy —
- * shell commands, arbitrary code blocks, raw memory keys — drop the
- * detail entirely and use a generic verb instead; the full detail
- * still appears in the expanded body via _toolRowLabel.
- */
-/**
  * Label for one or more ``skill_view`` calls.
  *
  * A skill load is the agent reaching for its own instructions, so the
@@ -1164,6 +1156,14 @@ function skillViewLabel(calls: ToolCallInfo[]): string {
   return `Reading skills ${names.join(", ")}`;
 }
 
+/**
+ * Header label for a single-tool iteration. Most tools surface a
+ * short detail (path basename, query, URL) so the header reads
+ * "Read · landing.html". Tools whose detail is structurally noisy —
+ * shell commands, arbitrary code blocks, raw memory keys — drop the
+ * detail entirely and use a generic verb instead; the full detail
+ * still appears in the expanded body via _toolRowLabel.
+ */
 function deriveSingleToolLabel(tc: ToolCallInfo): string {
   if (tc.toolName === "skill_view") return skillViewLabel([tc]);
   const name = cancelledToolLabel(tc.toolName);
