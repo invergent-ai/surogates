@@ -403,3 +403,57 @@ async def test_the_runtime_principal_resolver_ignores_api_keys(session_factory):
 
     assert resolved is not None, "the agent lost its identity"
     assert resolved.id == principal.id
+
+
+# ---------------------------------------------------------------------------
+# what a customer-held key can reach on its own agent
+# ---------------------------------------------------------------------------
+
+async def test_a_customer_key_cannot_read_or_delete_the_operators_git_pat(
+    session_factory,
+):
+    """``/v1/api/git-credentials/*`` is reachable with any API key.
+
+    The agent binding stops it crossing to another agent, but within its own
+    agent the only thing separating a customer's key from the operator's
+    stored GitHub token is the vault's per-principal scoping. Customer keys
+    did not exist when that scoping was written, so it is pinned here.
+    """
+    from cryptography.fernet import Fernet
+
+    from surogates.tenant.credentials import CredentialVault
+
+    org_id = await create_org(session_factory)
+    store = ServiceAccountStore(session_factory)
+    operator = await store.create(org_id=org_id, name="ops-chat")
+    customer = await store.create(
+        org_id=org_id, name="customer", agent_id=f"agent-{uuid.uuid4()}",
+        kind=KIND_API_KEY,
+    )
+
+    vault = CredentialVault(session_factory, Fernet.generate_key())
+    await vault.store(
+        org_id, "git_pat", "github_pat_operator_secret",
+        service_account_id=operator.id,
+    )
+
+    # The customer's key sees nothing under its own principal...
+    assert await vault.retrieve(
+        org_id, "git_pat", service_account_id=customer.id,
+    ) is None
+    # ...and deleting from its own slot leaves the operator's intact.
+    await vault.delete(org_id, "git_pat", service_account_id=customer.id)
+    assert await vault.retrieve(
+        org_id, "git_pat", service_account_id=operator.id,
+    ) == "github_pat_operator_secret"
+
+    # Its own token is its own.
+    await vault.store(
+        org_id, "git_pat", "github_pat_customer", service_account_id=customer.id,
+    )
+    assert await vault.retrieve(
+        org_id, "git_pat", service_account_id=customer.id,
+    ) == "github_pat_customer"
+    assert await vault.retrieve(
+        org_id, "git_pat", service_account_id=operator.id,
+    ) == "github_pat_operator_secret"
