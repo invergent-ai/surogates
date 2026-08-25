@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   extractToolDetail,
+  skillViewLabel,
   toolRowLabel,
 } from "../src/components/chat/simple-labels";
 import type { ToolCallInfo } from "../src/types";
@@ -78,5 +79,42 @@ describe("the rest of the vocabulary still reads correctly", () => {
     expect(toolRowLabel(call("terminal", { command: "rm -rf ./tmp" }))).toBe(
       "Ran a command",
     );
+  });
+});
+
+describe("arguments are model output, not a contract", () => {
+  // parseArgs is a JSON.parse behind an unchecked generic, so any field
+  // can arrive as any type. A label helper must never throw: there is
+  // no ErrorBoundary in the SDK, so one bad row unmounts the thread.
+  it("survives a non-string file_path", () => {
+    expect(
+      skillViewLabel([call("skill_view", { name: "x", file_path: ["a"] })]),
+    ).toBe("Reading skill x");
+  });
+
+  it("survives a non-string pattern", () => {
+    expect(extractToolDetail(call("search_files", { pattern: 42 }))).toBe(null);
+  });
+
+  it("survives a non-string path", () => {
+    expect(toolRowLabel(call("patch", { path: { nested: true } }))).toBe(
+      "Edited a file",
+    );
+  });
+});
+
+describe("legacy target aliases", () => {
+  // The server maps {grep: content, find: files} before running the
+  // search, so the raw argument the model emitted can be either name.
+  it("treats target=find as a filename search", () => {
+    expect(
+      toolRowLabel(call("search_files", { pattern: "*.py", target: "find" })),
+    ).toBe('Looked for files named "*.py"');
+  });
+
+  it("treats target=grep as a content search", () => {
+    expect(
+      toolRowLabel(call("search_files", { pattern: "invoice", target: "grep" })),
+    ).toBe('Searched files for "invoice"');
   });
 });

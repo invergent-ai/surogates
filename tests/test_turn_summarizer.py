@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -792,3 +793,161 @@ async def test_malformed_json_replies_are_discarded(
     label: str, reply: str,
 ) -> None:
     assert await _summarize_with(reply) is None, label
+
+
+# ----------------------------------------------------------------------
+# Reply-channel and embedded-object handling
+#
+# Mirrors what structured_output's JSON-mode fallback already does, and
+# for the same reasons: leaked reasoning can restate the tool arguments
+# as an object before the real answer, and reasoning-mode models put the
+# object in a different channel than the prose.
+# ----------------------------------------------------------------------
+
+
+class _StubMessage:
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self.content = content
+        self.reasoning_content = reasoning
+
+
+class _ChannelResponse:
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self.choices = [type("Choice", (), {"message": _StubMessage(content, reasoning)})()]
+
+
+class _ChannelCompletions:
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self._content, self._reasoning = content, reasoning
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> _ChannelResponse:
+        self.calls.append(kwargs)
+        return _ChannelResponse(self._content, self._reasoning)
+
+
+class _ChannelClient:
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self.chat = type("Chat", (), {"completions": _ChannelCompletions(content, reasoning)})()
+
+
+async def _summarize_channels(content: Any, reasoning: Any = None) -> str | None:
+    summarizer = _iteration_summarizer(_ChannelClient(content, reasoning))
+    return await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_caption_survives_an_object_printed_before_it() -> None:
+    # Leaked reasoning restates the tool arguments as an object. Taking
+    # only the *first* embedded object loses the caption and drops the
+    # whole reply onto the prose path, where a single-line echo passes
+    # validation and becomes the visible label.
+    assert await _summarize_with(
+        'Tool args were {"path": "a.py"} so the caption is'
+        ' {"caption": "Patched the loader"}',
+    ) == "Patched the loader"
+
+
+@pytest.mark.asyncio
+async def test_caption_is_read_from_the_reasoning_channel() -> None:
+    # Reasoning-mode models spend the token budget thinking and leave
+    # ``content`` empty with the object in ``reasoning_content``.
+    assert await _summarize_channels(
+        "", '{"caption": "Patched the loader"}',
+    ) == "Patched the loader"
+
+
+@pytest.mark.asyncio
+async def test_content_channel_wins_when_both_are_present() -> None:
+    assert await _summarize_channels(
+        '{"caption": "From content"}', '{"caption": "From reasoning"}',
+    ) == "From content"
+
+
+@pytest.mark.asyncio
+async def test_both_channels_empty_yields_no_caption() -> None:
+    assert await _summarize_channels("   ", None) is None
+
+
+# ----------------------------------------------------------------------
+# response_format is a request, not a guarantee
+# ----------------------------------------------------------------------
+
+
+class _RejectsResponseFormat:
+    """A provider that 400s on ``response_format`` and works without it."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+        self.calls: list[dict[str, Any]] = []
+        self.chat = type("Chat", (), {"completions": self})()
+        self.completions = self
+
+    async def create(self, **kwargs: Any) -> _StubResponse:
+        self.calls.append(kwargs)
+        if "response_format" in kwargs:
+            raise ValueError("unsupported parameter: response_format")
+        return _StubResponse(self._reply)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_rejecting_json_mode_still_produces_captions() -> None:
+    # Silently losing every caption on the deployment is the one outcome
+    # worse than an unvalidated one, so the constraint is dropped and
+    # the call retried in plain-text mode.
+    client = _RejectsResponseFormat("Patched the loader")
+    summarizer = _iteration_summarizer(client)
+
+    async def run() -> str | None:
+        return await summarizer.summarize_iteration(
+            iteration_id="i0",
+            reasoning="",
+            tool_calls=_calls("patch"),
+            prior_iteration_summaries=[],
+            tool_results=_results("patched"),
+        )
+
+    assert await run() == "Patched the loader"
+    assert "response_format" in client.calls[0]
+    assert "response_format" not in client.calls[1]
+
+    # The rejection is remembered, so the next iteration does not pay
+    # for the failed attempt again.
+    assert await run() == "Patched the loader"
+    assert len(client.calls) == 3
+    assert "response_format" not in client.calls[2]
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_does_not_disable_json_mode() -> None:
+    # A slow provider is not a non-conforming one; giving up the
+    # constraint on the first timeout would lose it permanently.
+    class _Slow:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.chat = type("Chat", (), {"completions": self})()
+            self.completions = self
+
+        async def create(self, **kwargs: Any) -> _StubResponse:
+            self.calls.append(kwargs)
+            raise asyncio.TimeoutError
+
+    client = _Slow()
+    summarizer = _iteration_summarizer(client)
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    assert result is None
+    assert len(client.calls) == 1
+    assert "response_format" in client.calls[0]

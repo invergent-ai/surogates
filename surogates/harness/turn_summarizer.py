@@ -28,7 +28,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
-from surogates.harness.structured_output import parse_json_object
+from surogates.harness.structured_output import (
+    iter_json_objects,
+    parse_json_object,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +199,18 @@ def _extract_caption(content: str) -> str:
     degrading to unvalidated prose is recoverable, every caption on the
     deployment vanishing is not.
 
+    Every embedded object is scanned, not just the first: leaked
+    reasoning restates the tool arguments as an object before the real
+    answer, and stopping at the first would drop the caption and send
+    the whole reply down the prose path — where a single-line echo
+    passes validation and becomes the label.
+
     An object *without* a usable caption field is not treated as prose:
     the most common such reply is the echoed tool result, and its raw
     body must never become the label. Returning it unchanged lets the
     validator reject it on its leading brace.
     """
-    parsed = parse_json_object(content)
-    if isinstance(parsed, dict):
+    for parsed in iter_json_objects(content):
         caption = parsed.get("caption")
         if isinstance(caption, str) and caption.strip():
             return caption
@@ -307,6 +315,9 @@ class TurnSummarizer:
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
+        # Cleared for the process the first time a provider rejects
+        # ``response_format``; see :meth:`summarize_iteration`.
+        self._iteration_json_mode = True
 
     async def summarize_iteration(
         self,
@@ -353,15 +364,39 @@ class TurnSummarizer:
             "max_tokens": _MAX_ITERATION_SUMMARY_TOKENS,
             "temperature": 0.2,
             "stream": False,
-            "response_format": {"type": "json_object"},
         }
 
-        content = await self._chat_completion(
-            self._summary_client,
-            kwargs,
-            label=f"iteration {iteration_id}",
-            timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
-        )
+        label = f"iteration {iteration_id}"
+        if self._iteration_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            content = await self._chat_completion(
+                self._summary_client,
+                kwargs,
+                label=label,
+                timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
+                reraise=self._iteration_json_mode,
+            )
+        except Exception:
+            # ``response_format`` is a request, not a guarantee, and the
+            # summary slot is configured separately from the base model
+            # that has always used it. A provider that rejects the
+            # parameter would otherwise silence every caption on the
+            # deployment — worse than an unvalidated one — so drop the
+            # constraint for the rest of the process and retry once.
+            # Plain prose still goes through the validator.
+            logger.warning(
+                "summary provider rejected response_format; "
+                "falling back to plain-text captions",
+            )
+            self._iteration_json_mode = False
+            kwargs.pop("response_format", None)
+            content = await self._chat_completion(
+                self._summary_client,
+                kwargs,
+                label=label,
+                timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
+            )
         if content is None:
             return None
         caption = _extract_caption(content)
@@ -461,11 +496,17 @@ class TurnSummarizer:
         *,
         label: str,
         timeout: float,
+        reraise: bool = False,
     ) -> str | None:
         """Run a single chat completion under the given timeout.
 
         Returns the message content on success, ``None`` on any failure
         (timeout, network error, malformed response shape).
+
+        ``reraise`` propagates provider errors instead of swallowing
+        them, so a caller can tell a rejected request parameter from a
+        slow provider — a timeout never reraises, since retrying it
+        without the parameter would blame the wrong thing.
         """
         try:
             response = await asyncio.wait_for(
@@ -477,13 +518,28 @@ class TurnSummarizer:
             return None
         except Exception as exc:
             logger.warning("summary call failed for %s: %r", label, exc)
+            if reraise:
+                raise
             return None
 
         try:
-            return response.choices[0].message.content
+            message = response.choices[0].message
         except (AttributeError, IndexError, TypeError):
             logger.warning("summary response had unexpected shape for %s", label)
             return None
+
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content
+        # Reasoning-mode models (DeepSeek-R1, Qwen3 with thinking, GLM)
+        # spend the budget thinking and leave ``content`` empty with the
+        # answer in ``reasoning_content``; an empty content channel
+        # alone is not a failure. Same reason structured_output's
+        # JSON-mode fallback reads both.
+        reasoning = getattr(message, "reasoning_content", None)
+        if isinstance(reasoning, str) and reasoning.strip():
+            return reasoning
+        return None
 
     @staticmethod
     def _format_tool_calls(

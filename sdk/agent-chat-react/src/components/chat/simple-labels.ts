@@ -16,6 +16,19 @@ import { formatMcpToolLabel } from "../../lib/format";
 import { parseArgs } from "./tools/shared";
 import type { ToolCallInfo } from "../../types";
 
+/**
+ * A tool argument, only if the model actually sent a non-empty string.
+ *
+ * ``parseArgs`` is a ``JSON.parse`` behind an unchecked generic, so
+ * every field can arrive as any type — or half-written, mid-stream.
+ * Nothing here may throw: the SDK has no ErrorBoundary, so one bad row
+ * unmounts the whole thread.
+ */
+function stringField(args: Record<string, unknown> | null, key: string): string | null {
+  const value = args?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 export function cancelledToolLabel(toolName: string): string {
   const map: Record<string, string> = {
     terminal: "Command",
@@ -70,12 +83,10 @@ export function cancelledToolLabel(toolName: string): string {
  * shimmer so the row never renames itself as the iteration completes.
  */
 export function skillViewLabel(calls: ToolCallInfo[]): string {
-  const args = calls.map((tc) =>
-    parseArgs<{ name?: string; skill?: string; file_path?: string }>(tc.args),
-  );
+  const args = calls.map((tc) => parseArgs<Record<string, unknown>>(tc.args));
   const names = args
-    .map((a) => a?.name ?? a?.skill)
-    .filter((name): name is string => typeof name === "string" && name !== "");
+    .map((a) => stringField(a, "name") ?? stringField(a, "skill"))
+    .filter((name): name is string => name !== null);
   // Args stream in a character at a time, so a call can be mid-flight
   // with no parseable name yet; fall back to a countable phrasing
   // rather than rendering a half-written name. ``names.length === 0``
@@ -87,7 +98,7 @@ export function skillViewLabel(calls: ToolCallInfo[]): string {
       : "Reading a skill";
   }
   if (calls.length === 1) {
-    const path = args[0]?.file_path;
+    const path = stringField(args[0] ?? null, "file_path");
     return path
       ? `Reading skill ${names[0]} · ${lastPathSegment(path)}`
       : `Reading skill ${names[0]}`;
@@ -133,10 +144,7 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
   const args = parseArgs<Record<string, unknown>>(tc.args);
   if (!args) return null;
   // Prefer the most-meaningful arg per tool family.
-  const stringArg = (key: string): string | null => {
-    const v = args[key];
-    return typeof v === "string" && v.length > 0 ? v : null;
-  };
+  const stringArg = (key: string): string | null => stringField(args, key);
   switch (tc.toolName) {
     case "read_file":
     case "write_file":
@@ -278,9 +286,11 @@ export function toolRowLabel(tc: ToolCallInfo): string {
       if (!detail) return "Searched files";
       // ``target`` picks the axis: file *contents* (the default) or
       // file *names*. Naming the wrong one misreports what the agent
-      // actually looked at.
-      const target = parseArgs<{ target?: string }>(tc.args)?.target;
-      return target === "files"
+      // actually looked at. The server accepts "find"/"grep" as legacy
+      // aliases and maps them before searching, so the raw argument the
+      // model emitted can carry either spelling.
+      const target = stringField(parseArgs(tc.args), "target");
+      return target === "files" || target === "find"
         ? `Looked for files named "${detail}"`
         : `Searched files for "${detail}"`;
     }
