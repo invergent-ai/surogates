@@ -7,6 +7,7 @@ import time
 from fastapi import HTTPException, Request, status
 
 from surogates.session.models import Session
+from surogates.tenant.context import get_tenant
 
 
 SCHEDULED_RUN_READ_ONLY_DETAIL = "Scheduled run sessions are read-only."
@@ -56,6 +57,7 @@ async def require_session_visible(
     parameters.  An unresolvable config fails open — the primary gate
     in the sessions routes still applies.
     """
+    _require_token_binds_session_agent(session)
     if not is_multi_era_web_session(session):
         return
     if multi_session is None:
@@ -66,6 +68,33 @@ async def require_session_visible(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Session {session.id} not found.",
     )
+
+
+def _require_token_binds_session_agent(session: Session) -> None:
+    """404 a session belonging to an agent this token is not bound to.
+
+    An agent-bound API key is handed to a third party. Session-scoped routes
+    (workspace read/write, events, artifacts, board, files) authorise on the
+    session's ORG, so without this a key minted for agent A reaches agent B's
+    sessions whenever both live in the operator's org — reading transcripts
+    and writing workspace files.
+
+    Checked against the session row's own ``agent_id``, never a
+    request-supplied one, and here rather than at agent resolution because
+    these routes do not resolve an agent at all: the session id IS the
+    address. 404, not 403, matching the module's convention that a stranger
+    cannot tell "exists but not yours" from "does not exist".
+    """
+    try:
+        tenant = get_tenant()
+    except LookupError:
+        return
+    bound = getattr(tenant, "service_account_agent_id", None)
+    if bound is not None and session.agent_id and bound != session.agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session.id} not found.",
+        )
 
 
 async def _resolve_multi_session(request: Request, agent_id: str) -> bool:

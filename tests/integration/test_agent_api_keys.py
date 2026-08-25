@@ -17,7 +17,6 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from surogates.api.routes._shared import require_token_binds_agent
 from surogates.tenant.auth.service_account import (
     KIND_AGENT_PRINCIPAL,
     KIND_API_KEY,
@@ -187,20 +186,46 @@ async def test_resolution_carries_the_agent_binding_on_every_path(
 # the guard
 # ---------------------------------------------------------------------------
 
-def test_a_bound_key_is_refused_against_another_agent():
+async def _enforce(ctx, target: str | None):
+    """Drive the real middleware guard against a request naming *target*."""
+    from starlette.requests import Request
+
+    from surogates.tenant.auth.middleware import enforce_agent_binding
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/v1/api/skills",
+        # A host with no dot: slug resolution is skipped, so the fake scope
+        # needs no ``app`` on it.
+        "headers": [(b"host", b"localhost")],
+        "query_string": (
+            f"agent_id={target}".encode() if target else b""
+        ),
+    }
+    await enforce_agent_binding(Request(scope), ctx)
+
+
+async def test_a_bound_key_is_refused_against_another_agent():
     with pytest.raises(HTTPException) as exc:
-        require_token_binds_agent(_ctx(agent_id="agent-a"), "agent-b")
+        await _enforce(_ctx(agent_id="agent-a"), "agent-b")
     assert exc.value.status_code == 403
     assert "bound to a different agent" in exc.value.detail
 
 
-def test_a_bound_key_passes_against_its_own_agent():
-    require_token_binds_agent(_ctx(agent_id="agent-a"), "agent-a")
+async def test_a_bound_key_passes_against_its_own_agent():
+    await _enforce(_ctx(agent_id="agent-a"), "agent-a")
 
 
-def test_an_org_scoped_token_is_unchanged():
+async def test_an_org_scoped_token_is_unchanged():
     """The control plane's own machine identities must keep org-wide reach."""
-    require_token_binds_agent(_ctx(agent_id=None), "any-agent-at-all")
+    await _enforce(_ctx(agent_id=None), "any-agent-at-all")
+
+
+async def test_an_unresolvable_target_leaves_the_request_to_its_own_guards():
+    """Session-addressed routes name no agent; they are covered by the
+    session guard instead, against the session row's own agent."""
+    await _enforce(_ctx(agent_id="agent-a"), None)
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +372,34 @@ async def test_an_unrelated_invalidation_leaves_other_tokens_cached(
         service_account_auth_cache=ServiceAccountAuthCache(),
     )
     assert await store.get_by_token(keeper.token) is not None
+
+
+async def test_the_runtime_principal_resolver_ignores_api_keys(session_factory):
+    """The worker resolves the agent's identity on every turn.
+
+    API keys share ``(org_id, agent_id)`` with the principal and only the
+    principal is unique on that pair, so an unfiltered query finds several
+    rows and every turn dies on MultipleResultsFound — which is exactly how
+    this failed against a live agent.
+    """
+    from surogates.runtime.agent_principal import (
+        make_cached_agent_principal_resolver,
+    )
+
+    org_id = await create_org(session_factory)
+    store = ServiceAccountStore(session_factory)
+    agent_id = f"agent-{uuid.uuid4()}"
+
+    principal = await store.create(
+        org_id=org_id, name="principal", agent_id=agent_id,
+    )
+    for i in range(3):
+        await store.create(
+            org_id=org_id, name=f"key-{i}", agent_id=agent_id, kind=KIND_API_KEY,
+        )
+
+    resolver = make_cached_agent_principal_resolver(session_factory)
+    resolved = await resolver(org_id, agent_id)
+
+    assert resolved is not None, "the agent lost its identity"
+    assert resolved.id == principal.id

@@ -37,13 +37,8 @@ from uuid import UUID
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy.exc import IntegrityError
 
-from surogates.api.routes._commerce_turn import (
-    authorize_allowance_turn,
-    runtime_commerce_payload,
-)
-from surogates.api.routes._shared import require_token_binds_agent
+from surogates.api.routes._commerce_turn import runtime_commerce_payload
 from surogates.channels.constants import API_CHANNEL
 from surogates.channels.openai_conversation import (
     CONVERSATION_HEADER,
@@ -407,10 +402,17 @@ async def _resolve_session(
     ):
         return _ResolvedTurn(existing, decision.action, None, key)
 
-    # CREATE and FORK both mint a session seeded with the caller's history.
-    # A fork deliberately does NOT reuse the conversation key: the old session
-    # keeps it until this turn completes and re-keys, so a concurrent request
-    # replaying the same history still resolves deterministically.
+    # A new session is created WITHOUT a conversation key, always.
+    #
+    # The key names the state a request replies to, and an opening request
+    # replies to nothing — so every opening request in a scope derives the
+    # SAME key. Stamping it at creation made the second such request collide
+    # on the unique index, and the collision handler then joined it to the
+    # first request's session: unrelated conversations merged into one, and
+    # the agent answered each of them with all the others in context.
+    #
+    # ``_rekey`` below assigns the real key once the turn has run, which is
+    # also the point at which the key becomes unambiguous.
     session = await _create_seeded_session(
         request=request,
         store=store,
@@ -418,7 +420,6 @@ async def _resolve_session(
         agent=agent,
         parsed=parsed,
         service_account_id=service_account_id,
-        idempotency_key=None if decision.action is ReconcileAction.FORK else idem,
         seed_turns=decision.seed_turns,
     )
     return _ResolvedTurn(session, decision.action, decision.reason, key)
@@ -432,7 +433,6 @@ async def _create_seeded_session(
     agent: AgentRuntimeContext,
     parsed: ParsedChatRequest,
     service_account_id: UUID,
-    idempotency_key: str | None,
     seed_turns,
 ) -> Any:
     """Create the session and write the caller's history into it.
@@ -448,31 +448,17 @@ async def _create_seeded_session(
     if parsed.user:
         config["openai_end_user"] = parsed.user
 
-    try:
-        session = await create_agent_session(
-            store=store,
-            storage=request.app.state.storage,
-            settings=request.app.state.settings,
-            user_id=None,
-            org_id=tenant.org_id,
-            agent_id=agent.agent_id,
-            channel=API_CHANNEL,
-            config=config,
-            service_account_id=service_account_id,
-            idempotency_key=idempotency_key,
-        )
-    except IntegrityError:
-        # Two concurrent first requests on one conversation. The database is
-        # the lock; the loser reads the winner's session and continues in it
-        # rather than creating a duplicate.
-        if idempotency_key is None:
-            raise
-        existing = await store.get_session_by_idempotency_key(
-            tenant.org_id, idempotency_key,
-        )
-        if existing is None:
-            raise
-        return existing
+    session = await create_agent_session(
+        store=store,
+        storage=request.app.state.storage,
+        settings=request.app.state.settings,
+        user_id=None,
+        org_id=tenant.org_id,
+        agent_id=agent.agent_id,
+        channel=API_CHANNEL,
+        config=config,
+        service_account_id=service_account_id,
+    )
 
     for index, turn in enumerate(seed_turns):
         if turn.role == "user":
@@ -752,7 +738,6 @@ async def list_models(
     """
     try:
         _require_api_key_principal(tenant)
-        require_token_binds_agent(tenant, agent.agent_id)
     except OpenAIRequestError as error:
         return _error_response(error)
     except HTTPException as exc:
@@ -782,7 +767,6 @@ async def chat_completions(
 
     try:
         service_account_id = _require_api_key_principal(tenant)
-        require_token_binds_agent(tenant, agent.agent_id)
         parsed = parse_chat_request(body)
         _screen(parsed.prompt, what="Message")
         images = await _resolve_images(parsed)
@@ -812,28 +796,23 @@ async def chat_completions(
 
     session = resolved.session
 
-    # Billed exactly like every other channel: the API key's owner is the
-    # party whose allowance this turn draws from, the same shape the website
-    # embed uses for anonymous visitors on a buyer's site. A no-op unless the
-    # control plane projects a cap for this agent.
-    try:
-        await authorize_allowance_turn(
-            request, session, parsed.prompt,
-            end_user_id=str(service_account_id),
-            channel=API_CHANNEL,
-        )
-    except HTTPException as exc:
-        detail = exc.detail
-        message = detail.get("code") if isinstance(detail, dict) else str(detail)
-        if exc.status_code == status.HTTP_402_PAYMENT_REQUIRED:
-            return _error_response(OpenAIRequestError(
-                f"This agent's allowance is exhausted ({message}).",
-                type="insufficient_quota", code=str(message), status=402,
-            ))
-        return _error_response(_upstream_error(
-            "Access checks are temporarily unavailable; try again.",
-            code="allowance_unavailable", status_code=exc.status_code,
-        ))
+    # No per-end-user allowance gate here, deliberately.
+    #
+    # That gate answers "has this END USER of the agent paid": the sessions
+    # route applies it to ``web`` turns carrying a real ``user_id``, and the
+    # website embed applies it on a buyer's behalf. An API key is neither. It
+    # is the OPERATOR's own credential for their own agent — the same shape as
+    # the ``studio`` channel, which the platform also leaves ungated.
+    #
+    # Billing still happens, by the same route as every operator's own usage:
+    # the proxy debits the project wallet on each LLM call, and the worker
+    # records the turn's cost. Gating on a per-user allowance instead blocked
+    # every key on a monetized agent with ``402 allowance_exhausted`` — the
+    # operator being asked to buy from themselves.
+    #
+    # Selling API access to a third party needs a buyer identity on the key,
+    # which nothing mints yet; that is the follow-up, and it belongs on the
+    # commerce path with the website embed, not here.
 
     if resolved.action is ReconcileAction.ATTACH:
         # A retry of a turn already running. Read from just before the message
@@ -892,13 +871,16 @@ async def chat_completions(
     except OpenAIRequestError as error:
         return _error_response(error)
 
+    # Advance the key before reporting the outcome, failure included: the
+    # client resends its history on the next turn either way, and a session
+    # left unkeyed by a failed turn would strand the conversation.
+    await _rekey(store, session, agent_id=agent.agent_id, key=next_key)
+
     if reader.failure is not None:
         return _error_response(_upstream_error(
             f"The agent failed this turn: {reader.failure}",
             code="agent_turn_failed",
         ))
-
-    await _rekey(store, session, agent_id=agent.agent_id, key=next_key)
 
     content, reasoning = _answer_text(events)
     if not content and reader.paused:

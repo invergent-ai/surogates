@@ -204,7 +204,7 @@ async def test_a_key_bound_to_another_agent_is_refused(
         org_id=org_id, name="other", agent_id=OTHER_AGENT, kind=KIND_API_KEY,
     )
     r = await client.post(
-        "/v1/api/chat/completions",
+        f"/v1/api/chat/completions?agent_id={AGENT}",
         headers=auth(other.token),
         json={"messages": [{"role": "user", "content": "hi"}]},
     )
@@ -578,8 +578,8 @@ async def test_a_bound_key_is_refused_on_every_service_account_route(
     )
     headers = auth(other.token)
 
-    # Addressed the way a shared runtime is addressed. A dedicated agent
-    # carries its id in its own hostname instead; either way the target is
+    # Addressed the way a shared runtime is addressed; a dedicated agent
+    # carries its id in its own hostname instead. Either way the target is
     # resolved independently of the token, which is what makes the binding
     # load-bearing.
     probes = [
@@ -619,3 +619,111 @@ async def test_the_agents_own_key_still_works_on_other_api_routes(
         f"/v1/api/skills?agent_id={AGENT}", headers=auth(api_key.token),
     )
     assert response.status_code != 403, response.text
+
+
+async def test_a_bound_key_cannot_reach_another_agents_session(
+    client, app, session_factory, org_id, api_key,
+):
+    """Session routes address by session id and resolve no agent at all, so
+    the binding has to be checked against the session's own agent — otherwise
+    a customer's key reads transcripts and writes workspace files on every
+    sibling agent in the operator's org."""
+    store = SessionStore(session_factory)
+    victim = await store.create_session(
+        session_id=uuid.uuid4(), user_id=None, org_id=org_id,
+        agent_id=OTHER_AGENT, channel=API_CHANNEL, model=None, config={},
+        service_account_id=api_key.id,
+    )
+    await store.emit_event(
+        victim.id, EventType.USER_MESSAGE, {"content": "private"},
+    )
+
+    # The key is bound to AGENT; the session belongs to OTHER_AGENT.
+    r = await client.get(
+        f"/v1/api/sessions/{victim.id}/workspace/tree",
+        headers=auth(api_key.token),
+    )
+    assert r.status_code == 404, (
+        f"reached another agent's session workspace ({r.status_code})"
+    )
+
+
+async def test_a_bound_key_still_reaches_its_own_agents_session(
+    client, session_factory, org_id, api_key,
+):
+    store = SessionStore(session_factory)
+    mine = await store.create_session(
+        session_id=uuid.uuid4(), user_id=None, org_id=org_id,
+        agent_id=AGENT, channel=API_CHANNEL, model=None, config={},
+        service_account_id=api_key.id,
+    )
+    r = await client.get(
+        f"/v1/api/sessions/{mine.id}/events?after=0",
+        headers=auth(api_key.token),
+    )
+    assert r.status_code != 404, r.text
+
+
+async def test_two_unrelated_first_turns_never_share_a_session(
+    client, app, session_factory, api_key,
+):
+    """The bug this guards: an opening request replies to nothing, so every
+    opening request in a scope derives the SAME conversation key. Stamping
+    that key at creation made the second one collide on the unique index and
+    join the first request's session — unrelated conversations merged, and
+    the agent answered each with all the others in context."""
+    sessions = []
+    for prompt in ("Count from 1 to 5.", "Say: DONE", "Name one colour."):
+        task = await answer_next_turn(app, session_factory)
+        r = await client.post(
+            "/v1/api/chat/completions",
+            headers=auth(api_key.token),
+            json={"messages": [{"role": "user", "content": prompt}]},
+        )
+        assert r.status_code == 200, r.text
+        assert r.headers["x-surogate-conversation-action"] == "create"
+        sessions.append(await task)
+
+    assert len(set(sessions)) == 3, (
+        f"unrelated first turns merged into {len(set(sessions))} session(s)"
+    )
+
+    store = SessionStore(session_factory)
+    for session_id in sessions:
+        events = await store.get_events(session_id, types=[EventType.USER_MESSAGE])
+        real = [e for e in events if not (e.data or {}).get("synthetic")]
+        assert len(real) == 1, (
+            f"session {session_id} holds {len(real)} user turns; a conversation "
+            "picked up messages that were never sent to it"
+        )
+
+
+async def test_a_failed_turn_still_leaves_the_conversation_continuable(
+    client, app, session_factory, api_key,
+):
+    """A session left unkeyed by a failed turn strands the conversation: the
+    client resends its history, finds nothing, and starts over every time."""
+    task = await answer_next_turn(app, session_factory, fail="upstream blew up")
+    first = await client.post(
+        "/v1/api/chat/completions",
+        headers=auth(api_key.token),
+        json={"messages": [{"role": "user", "content": "this one fails"}]},
+    )
+    failed_session = await task
+    assert first.status_code == 502
+
+    task = await answer_next_turn(app, session_factory, answer="recovered")
+    second = await client.post(
+        "/v1/api/chat/completions",
+        headers=auth(api_key.token),
+        json={"messages": [
+            {"role": "user", "content": "this one fails"},
+            {"role": "assistant", "content": "(no answer)"},
+            {"role": "user", "content": "try again"},
+        ]},
+    )
+    assert second.status_code == 200, second.text
+    assert await task == failed_session, (
+        "the conversation could not be continued after a failed turn"
+    )
+    assert second.headers["x-surogate-conversation-action"] == "append"

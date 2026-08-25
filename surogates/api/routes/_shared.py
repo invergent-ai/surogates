@@ -65,31 +65,6 @@ def require_not_channel_principal(tenant: TenantContext) -> None:
         )
 
 
-def require_token_binds_agent(tenant: TenantContext, agent_id: str) -> None:
-    """Refuse a request whose token is bound to a *different* agent.
-
-    The agent a request targets comes from the ``Host`` header (or an explicit
-    ``?agent_id=``), resolved independently of authentication.  An org-scoped
-    service-account token therefore reaches every agent in its org — correct
-    for the control plane's own machine identities, and the historical
-    behaviour this helper deliberately leaves untouched
-    (``service_account_agent_id is None`` passes).
-
-    A customer-facing API key is different: it is minted for one agent and
-    handed to a third party, so without this check that third party can point
-    the same key at any sibling agent in the operator's org and talk to it.
-    Called by every route reachable with such a key.
-    """
-    bound = tenant.service_account_agent_id
-    if bound is not None and bound != agent_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "This API key is bound to a different agent."
-            ),
-        )
-
-
 async def resolve_agent_id(request: Request) -> str | None:
     """The request's active agent id, or ``None``.
 

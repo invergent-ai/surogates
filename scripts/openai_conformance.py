@@ -83,6 +83,20 @@ def _text_of(response: Any) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
+def _header(response: Any, name: str) -> str:
+    """One response header, whatever the SDK version exposes it as."""
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        raw = getattr(response, "_raw_response", None)
+        headers = getattr(raw, "headers", None)
+    if headers is None:
+        return ""
+    try:
+        return headers.get(name) or ""
+    except Exception:
+        return ""
+
+
 def build_checks(
     runner: Runner,
     *,
@@ -334,6 +348,138 @@ def build_checks(
             f"answered {text[:60]!r}"
         )
 
+    def regenerate_forks_not_duplicates() -> tuple[str, str]:
+        """Resending the same last turn must not answer with it twice in view.
+
+        A naive stateful mapping appends, leaving the turn in the log twice
+        with the stale answer between them; the agent then answers a question
+        it can see it already answered.
+        """
+        history = [
+            {"role": "user", "content": "Name one colour. One word."},
+        ]
+        first = client.chat.completions.create(model=model, messages=history)
+        answer = _text_of(first)
+        history.append({"role": "assistant", "content": answer})
+        history.append({"role": "user", "content": "Name a fruit. One word."})
+        client.chat.completions.create(model=model, messages=history)
+
+        # Regenerate: resend the SAME array a second time.
+        regen = client.chat.completions.create(model=model, messages=history)
+        action = _header(regen, "x-surogate-conversation-action")
+        text = _text_of(regen)
+        assert text, "regenerate produced nothing"
+        if action == "append":
+            return RED, (
+                "regenerate appended — the duplicated turn is now in context "
+                f"(answered {text[:40]!r})"
+            )
+        return GREEN, f"regenerate -> {action or 'fork'}; answered {text[:40]!r}"
+
+    def edited_history_forks() -> tuple[str, str]:
+        """Editing a past turn must not leave the stale one in context."""
+        base = [{"role": "user", "content": "Remember: the code is BLUE."}]
+        first = client.chat.completions.create(model=model, messages=base)
+        base.append({"role": "assistant", "content": _text_of(first)})
+        base.append({"role": "user", "content": "What is the code?"})
+        client.chat.completions.create(model=model, messages=base)
+
+        edited = [
+            {"role": "user", "content": "Remember: the code is GREEN."},
+            base[1],
+            {"role": "user", "content": "What is the code? One word."},
+        ]
+        response = client.chat.completions.create(model=model, messages=edited)
+        text = _text_of(response).upper()
+        action = _header(response, "x-surogate-conversation-action")
+        if "BLUE" in text:
+            return RED, (
+                "answered with the STALE edited-away value; the rewrite "
+                f"leaked into context (action={action})"
+            )
+        return GREEN, f"action={action}; answered {text[:40]!r} (no stale value)"
+
+    def system_prompt_churn_keeps_the_conversation() -> tuple[str, str]:
+        """Clients inject a live timestamp in the system prompt every request.
+
+        If that reaches the conversation key, every turn re-keys and starts a
+        fresh session — the agent looks amnesiac for no visible reason.
+        """
+        msgs = [
+            {"role": "system", "content": "You are helpful. Time is 09:00:01."},
+            {"role": "user", "content": "Remember the word MERIDIAN. Say OK."},
+        ]
+        first = client.chat.completions.create(model=model, messages=msgs)
+        follow = [
+            {"role": "system", "content": "You are helpful. Time is 09:04:37."},
+            msgs[1],
+            {"role": "assistant", "content": _text_of(first)},
+            {"role": "user", "content": "What word? One word."},
+        ]
+        response = client.chat.completions.create(model=model, messages=follow)
+        action = _header(response, "x-surogate-conversation-action")
+        text = _text_of(response).upper()
+        if "MERIDIAN" in text:
+            return GREEN, f"continued despite a changed system prompt (action={action})"
+        return RED, (
+            f"lost the conversation when the system prompt changed "
+            f"(action={action}, answered {text[:40]!r})"
+        )
+
+    def two_end_users_stay_separate() -> tuple[str, str]:
+        """The collision that scoping the key exists to prevent."""
+        secrets_by_user = {"alice": "ALPHA", "bob": "BRAVO"}
+        for who, secret in secrets_by_user.items():
+            client.chat.completions.create(
+                model=model, user=who,
+                messages=[{"role": "user",
+                           "content": f"Remember the word {secret}. Say OK."}],
+            )
+        leaked = []
+        for who, secret in secrets_by_user.items():
+            response = client.chat.completions.create(
+                model=model, user=who,
+                messages=[
+                    {"role": "user",
+                     "content": f"Remember the word {secret}. Say OK."},
+                    {"role": "assistant", "content": "OK"},
+                    {"role": "user", "content": "What word? One word."},
+                ],
+            )
+            text = _text_of(response).upper()
+            other = next(v for k, v in secrets_by_user.items() if k != who)
+            if other in text:
+                leaked.append(f"{who} saw {other}")
+        if leaked:
+            return RED, "cross-user leak: " + "; ".join(leaked)
+        return GREEN, "each end user kept their own conversation"
+
+    def session_header_is_reported() -> tuple[str, str]:
+        response = client.chat.completions.create(
+            model=model, messages=[{"role": "user", "content": "Say OK."}],
+        )
+        session = _header(response, "x-surogate-session")
+        action = _header(response, "x-surogate-conversation-action")
+        if not session:
+            return YELLOW, "no X-Surogate-Session header to correlate with"
+        return GREEN, f"session={session[:8]}… action={action}"
+
+    def unsupported_content_refused() -> tuple[str, str]:
+        try:
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": "data:image/tiff;base64,QUJD"}},
+                ]}],
+            )
+        except APIStatusError as exc:
+            if exc.status_code != 400:
+                return RED, f"got {exc.status_code}, expected 400"
+            body = exc.response.json()
+            return GREEN, f"400 {(body.get('error') or {}).get('message','')[:60]!r}"
+        return RED, "an unsupported image type was accepted"
+
     def long_turn() -> tuple[str, str]:
         if skip_slow:
             return SKIP, "--skip-slow"
@@ -373,7 +519,13 @@ def build_checks(
         ("10 wrong-agent key refused", wrong_agent_key),
         ("11 revoked key refused", revoked),
         ("12 pinned conversation", explicit_conversation),
-        ("13 long turn stays one response", long_turn),
+        ("13 regenerate forks", regenerate_forks_not_duplicates),
+        ("14 edited history forks", edited_history_forks),
+        ("15 system-prompt churn keeps session", system_prompt_churn_keeps_the_conversation),
+        ("16 two end users stay separate", two_end_users_stay_separate),
+        ("17 session headers reported", session_header_is_reported),
+        ("18 unsupported image refused", unsupported_content_refused),
+        ("19 long turn stays one response", long_turn),
     ]:
         runner.check(name, fn)
 

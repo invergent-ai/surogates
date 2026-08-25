@@ -185,7 +185,6 @@ async def get_current_tenant(
         tenant_assets_root,
         path=request.url.path,
     )
-    await enforce_agent_binding(request, ctx)
     set_tenant(ctx)
     return ctx
 
@@ -322,24 +321,50 @@ async def _tenant_context_from_token(
     return ctx
 
 
+#: Paths whose clients are OpenAI SDKs.  Those SDKs read ``error.message`` and
+#: surface ``None`` for anything else, so an auth refusal shaped as FastAPI's
+#: ``{"detail": ...}`` reaches the developer as an empty string.
+_OPENAI_PATHS: tuple[str, ...] = (
+    "/v1/api/chat/completions",
+    "/v1/api/models",
+)
+
+
+def _auth_error_body(path: str, detail: object) -> dict:
+    """The error envelope the caller of *path* can actually read."""
+    if any(path.startswith(p) for p in _OPENAI_PATHS):
+        return {
+            "error": {
+                "message": detail if isinstance(detail, str) else str(detail),
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "invalid_api_key",
+            }
+        }
+    return {"detail": detail}
+
+
 async def enforce_agent_binding(request: Request, ctx: TenantContext) -> None:
     """Refuse an agent-bound token aimed at a different agent.
 
     A service-account token used to be a platform-internal credential, always
-    org-scoped, so "any agent in the org" was the right reach.  A customer
-    API key is handed to a third party and bound to ONE agent — and because
-    the target agent is resolved from the ``Host`` header, independently of
+    org-scoped, so "any agent in the org" was the right reach.  A customer API
+    key is handed to a third party and bound to ONE agent — and because the
+    target agent is resolved from the ``Host`` header, independently of
     authentication, nothing else stops that third party pointing the same key
     at a sibling agent and driving its sessions, workspace and prompts.
 
-    Enforced here rather than per-route so it covers EVERY ``/v1/api/*``
-    endpoint a key can reach, not only the ones written with it in mind.
-    Org-scoped tokens (``service_account_agent_id is None``) are untouched.
+    Enforced in the middleware rather than at a route dependency because
+    several routers are mounted at BOTH ``/v1`` and ``/v1/api``: their
+    handlers declare paths like ``/skills``, so a per-dependency check leaves
+    every one of them uncovered while looking complete.  Here the guard sees
+    the request whatever its path.
 
-    When no agent can be resolved at all there is nothing to compare, and the
-    routes that need one raise their own 400 through
-    ``agent_runtime_context_dep``; a deployed agent always resolves from its
-    own hostname, so this is not a bypass in production.
+    Session-addressed routes (``/v1/api/sessions/{id}/...``) resolve no agent
+    at all, so they are covered instead by
+    :mod:`surogates.api.session_guards`, against the session row's own agent.
+
+    Org-scoped tokens (``service_account_agent_id is None``) are untouched.
     """
     bound = ctx.service_account_agent_id
     if bound is None:
@@ -562,7 +587,7 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
         except HTTPException as exc:
             return JSONResponse(
                 status_code=exc.status_code,
-                content={"detail": exc.detail},
+                content=_auth_error_body(path, exc.detail),
                 headers=exc.headers or {},
             )
 
@@ -571,7 +596,7 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
         except HTTPException as exc:
             return JSONResponse(
                 status_code=exc.status_code,
-                content={"detail": exc.detail},
+                content=_auth_error_body(path, exc.detail),
             )
         set_tenant(ctx)
 

@@ -119,8 +119,8 @@ async def test_d1_partial_unique_index_caps_agent_at_one_service_account(
 async def test_d2_token_binding_is_now_carried_to_the_auth_layer(session_factory):
     """Originally RED: the auth view dropped ``agent_id`` entirely, so a key
     minted for agent A authenticated against agent B. Now GREEN — the binding
-    survives resolution and ``require_token_binds_agent`` enforces it."""
-    from surogates.api.routes._shared import require_token_binds_agent
+    survives resolution and ``enforce_agent_binding`` enforces it."""
+    from surogates.tenant.auth.middleware import enforce_agent_binding
     from surogates.tenant.auth.service_account import KIND_API_KEY
 
     org_id = await create_org(session_factory)
@@ -139,9 +139,18 @@ async def test_d2_token_binding_is_now_carried_to_the_auth_layer(session_factory
         service_account_id=resolved.id,
         service_account_agent_id=resolved.agent_id,
     )
-    require_token_binds_agent(ctx, "agent-a")
+    from starlette.requests import Request
+
+    def _req(target: str):
+        return Request({
+            "type": "http", "method": "GET", "path": "/v1/api/skills",
+            "headers": [(b"host", b"localhost")],
+            "query_string": f"agent_id={target}".encode(),
+        })
+
+    await enforce_agent_binding(_req("agent-a"), ctx)
     with pytest.raises(HTTPException) as exc:
-        require_token_binds_agent(ctx, "agent-b")
+        await enforce_agent_binding(_req("agent-b"), ctx)
     assert exc.value.status_code == 403
 
     org_scoped = await store.get_by_token(

@@ -83,7 +83,7 @@ class TenantContext:
     #: which is correct for the control plane's own machine identities
     #: (ops-chat, evaluation, synthetic pipelines).  A customer-facing API key
     #: for the OpenAI channel carries the agent it was minted for, and
-    #: :func:`~surogates.api.routes._shared.require_token_binds_agent` refuses
+    #: :func:`~surogates.tenant.auth.middleware.enforce_agent_binding` refuses
     #: the request when that does not match the agent resolved from the
     #: ``Host`` header — which is the only thing standing between one
     #: customer's key and every other agent in the same org.
