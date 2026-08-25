@@ -99,6 +99,14 @@ Prevent it in one of two ways:
 
 An explicit conversation id also lets you keep no transcript of your own: send just the latest message with the header, and the agent supplies the history.
 
+### A system prompt that changes every request
+
+A `system` message is folded as a prefix onto the first user turn — that is how a caller's instruction reaches an agent that already has its own system prompt. The folded text is what gets stored, so if your system message carries something that changes every request (a current timestamp is the common case) the stored transcript never matches what you resend, and each turn forks a fresh session.
+
+The answers stay correct, because a fork is seeded with the history you sent. What is lost is the session itself: its memory, workspace and any live browser are left behind every turn, and each turn pays to re-seed.
+
+Send `X-Surogate-Conversation` and none of this applies — the conversation is pinned by id and the content stops mattering. Or keep the volatile part out of the system message.
+
 ## Authentication
 
 Keys are minted per agent from **Studio → the agent → Channels → Web → Manage**. The raw token is shown exactly once; only a SHA-256 digest is stored and the plaintext cannot be recovered. Revoking takes effect immediately on the replica serving the next request and within a minute across the rest.

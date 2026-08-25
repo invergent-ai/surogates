@@ -426,11 +426,21 @@ def build_checks(
         action = headers.get("x-surogate-conversation-action", "")
         text = _text_of(response).upper()
         assert action, "no conversation-action header to judge by"
-        if "MERIDIAN" in text:
-            return GREEN, f"continued despite a changed system prompt (action={action})"
-        return RED, (
-            f"lost the conversation when the system prompt changed "
-            f"(action={action}, answered {text[:40]!r})"
+        if "MERIDIAN" not in text:
+            return RED, (
+                f"lost the conversation when the system prompt changed "
+                f"(action={action}, answered {text[:40]!r})"
+            )
+        if action == "append":
+            return GREEN, "continued in place despite a changed system prompt"
+        # It answered correctly only because a fork re-seeds the history. The
+        # answer is right; the SESSION is not continued, so its memory,
+        # workspace and browser are left behind on every turn.
+        return YELLOW, (
+            f"answered correctly but action={action}: a system prompt that "
+            "changes every request is folded into the stored user turn, so "
+            "the transcript never matches and the session is re-forked each "
+            "turn. Send X-Surogate-Conversation to keep one session."
         )
 
     def two_end_users_stay_separate() -> tuple[str, str]:
