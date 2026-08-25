@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LIVE_VIEW_TOKEN_COOKIE",
+    "enforce_agent_binding",
     "authenticate_websocket_tenant",
     "get_current_tenant",
     "setup_auth_middleware",
@@ -184,6 +185,7 @@ async def get_current_tenant(
         tenant_assets_root,
         path=request.url.path,
     )
+    await enforce_agent_binding(request, ctx)
     set_tenant(ctx)
     return ctx
 
@@ -318,6 +320,38 @@ async def _tenant_context_from_token(
         asset_root=asset_root,
     )
     return ctx
+
+
+async def enforce_agent_binding(request: Request, ctx: TenantContext) -> None:
+    """Refuse an agent-bound token aimed at a different agent.
+
+    A service-account token used to be a platform-internal credential, always
+    org-scoped, so "any agent in the org" was the right reach.  A customer
+    API key is handed to a third party and bound to ONE agent — and because
+    the target agent is resolved from the ``Host`` header, independently of
+    authentication, nothing else stops that third party pointing the same key
+    at a sibling agent and driving its sessions, workspace and prompts.
+
+    Enforced here rather than per-route so it covers EVERY ``/v1/api/*``
+    endpoint a key can reach, not only the ones written with it in mind.
+    Org-scoped tokens (``service_account_agent_id is None``) are untouched.
+
+    When no agent can be resolved at all there is nothing to compare, and the
+    routes that need one raise their own 400 through
+    ``agent_runtime_context_dep``; a deployed agent always resolves from its
+    own hostname, so this is not a bypass in production.
+    """
+    bound = ctx.service_account_agent_id
+    if bound is None:
+        return
+    from surogates.runtime.resolver import resolve_agent_id_soft
+
+    target = await resolve_agent_id_soft(request)
+    if target is not None and target != bound:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API key is bound to a different agent.",
+        )
 
 
 async def _build_service_account_context(
@@ -530,6 +564,14 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
                 status_code=exc.status_code,
                 content={"detail": exc.detail},
                 headers=exc.headers or {},
+            )
+
+        try:
+            await enforce_agent_binding(request, ctx)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
             )
         set_tenant(ctx)
 

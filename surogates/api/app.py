@@ -193,6 +193,8 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     """
     import asyncio
 
+    from surogates.tenant.auth.service_account import ServiceAccountAuthCache
+
     from surogates.runtime import (
         ChannelRoutingCache,
         FileBundleCache,
@@ -310,6 +312,9 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             channel_routing_cache=channel_routing_cache,
             system_bundle_cache=system_bundle_cache,
             mate_settings_cache=mate_settings_cache,
+            # So a key revoked in the control plane stops authenticating on
+            # this replica at once, rather than at its 60s cache TTL.
+            service_account_auth_cache=ServiceAccountAuthCache(),
         ),
         name="surogates-runtime-invalidator",
     )

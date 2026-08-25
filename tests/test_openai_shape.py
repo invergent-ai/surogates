@@ -196,15 +196,32 @@ def test_images_are_taken_from_the_turn_being_run_only():
 
 
 def test_seed_text_marks_images_it_cannot_replay():
-    from surogates.channels.openai_shape import ImagePart
-
     turn = Turn("user", "look at this")
-    plain = seed_text_for(turn)
-    assert plain == "look at this"
+    assert seed_text_for(turn) == "look at this"
 
-    marked = seed_text_for(turn, [ImagePart(mime_type="image/png", data="AA")])
+    marked = seed_text_for(turn, 1)
     assert "look at this" in marked
     assert "1 image omitted" in marked
+    assert "2 images omitted" in seed_text_for(turn, 2)
+
+
+def test_history_image_counts_are_reported_per_prior_turn():
+    """Without this the count is unreachable and history images vanish with
+    no marker — the exact silent drop seed_text_for exists to prevent."""
+    parsed = parse_chat_request({"messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BB"}},
+        ]},
+        {"role": "assistant", "content": "ok"},
+        _user("and now?"),
+    ]})
+    assert parsed.prior_image_counts == [2, 0]
+    assert len(parsed.prior_image_counts) == len(parsed.prior_turns)
+    assert seed_text_for(parsed.prior_turns[0], parsed.prior_image_counts[0]) != (
+        parsed.prior_turns[0].content
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -386,3 +403,41 @@ def test_the_image_mime_allowlist_matches_the_message_route():
     from surogates.channels.openai_shape import _ALLOWED_IMAGE_MIMES as ours
 
     assert set(ours) == set(route_mimes)
+
+
+def test_the_key_turns_are_free_of_the_folded_system_prompt():
+    """Clients inject a system prompt carrying the current date and time.
+
+    Folding that into the first user turn and then keying on the result
+    changes the key every request, so the conversation never resolves and
+    each turn starts a fresh session.
+    """
+    def parse(system: str):
+        return parse_chat_request({"messages": [
+            {"role": "system", "content": system},
+            _user("q1"),
+            {"role": "assistant", "content": "a1"},
+            _user("q2"),
+        ]})
+
+    monday = parse("You are helpful. Today is Monday 09:00.")
+    tuesday = parse("You are helpful. Today is Tuesday 17:42.")
+
+    assert monday.key_turns == ["q1", "q2"]
+    assert monday.key_turns == tuesday.key_turns, (
+        "a changing system prompt must not reach the conversation key"
+    )
+    # ...while the agent still receives the instruction.
+    assert monday.prior_turns[0].content.startswith("You are helpful.")
+
+
+def test_key_turns_track_the_user_turns_in_order():
+    parsed = parse_chat_request({"messages": [
+        _user("one"),
+        {"role": "assistant", "content": "x"},
+        _user("two"),
+        {"role": "assistant", "content": "y"},
+        _user("three"),
+    ]})
+    assert parsed.key_turns == ["one", "two", "three"]
+    assert parsed.key_turns[-1] == parsed.prompt

@@ -556,3 +556,66 @@ async def test_streaming_without_include_usage_omits_the_usage_frame(
     ]
     assert not any("usage" in f for f in frames)
     assert raw.rstrip().endswith("[DONE]")
+
+
+# ---------------------------------------------------------------------------
+# the binding covers every route a key can reach, not just the OpenAI ones
+# ---------------------------------------------------------------------------
+
+async def test_a_bound_key_is_refused_on_every_service_account_route(
+    client, session_factory, org_id,
+):
+    """The whole point of binding a key to an agent.
+
+    A key handed to a third party must not reach a sibling agent through ANY
+    ``/v1/api/*`` endpoint — sessions, prompts, skills, workspace. Enforcing
+    it only on the OpenAI routes would leave the rest of the surface open,
+    which is how the binding was first written.
+    """
+    other = await ServiceAccountStore(session_factory).create(
+        org_id=org_id, name="bound-elsewhere", agent_id=OTHER_AGENT,
+        kind=KIND_API_KEY,
+    )
+    headers = auth(other.token)
+
+    # Addressed the way a shared runtime is addressed. A dedicated agent
+    # carries its id in its own hostname instead; either way the target is
+    # resolved independently of the token, which is what makes the binding
+    # load-bearing.
+    probes = [
+        ("GET", f"/v1/api/skills?agent_id={AGENT}", None),
+        ("POST", f"/v1/api/sessions?agent_id={AGENT}", {"config": {}}),
+        ("POST", f"/v1/api/prompts?agent_id={AGENT}", {"prompt": "hello"}),
+        ("GET", f"/v1/api/models?agent_id={AGENT}", None),
+        ("POST", f"/v1/api/chat/completions?agent_id={AGENT}",
+         {"messages": [{"role": "user", "content": "hi"}]}),
+    ]
+    for method, path, body in probes:
+        response = await client.request(method, path, headers=headers, json=body)
+        assert response.status_code == 403, (
+            f"{method} {path} answered {response.status_code}, not 403 — a key "
+            f"bound to {OTHER_AGENT} reached {AGENT}"
+        )
+
+
+async def test_an_org_scoped_token_keeps_its_org_wide_reach(
+    client, session_factory, org_id,
+):
+    """The control plane's own machine identities must not regress: ops-chat,
+    evaluation and synthetic pipelines are org-scoped by design."""
+    org_scoped = await ServiceAccountStore(session_factory).create(
+        org_id=org_id, name="ops-chat-like",
+    )
+    response = await client.get(
+        f"/v1/api/skills?agent_id={AGENT}", headers=auth(org_scoped.token),
+    )
+    assert response.status_code != 403, response.text
+
+
+async def test_the_agents_own_key_still_works_on_other_api_routes(
+    client, api_key,
+):
+    response = await client.get(
+        f"/v1/api/skills?agent_id={AGENT}", headers=auth(api_key.token),
+    )
+    assert response.status_code != 403, response.text

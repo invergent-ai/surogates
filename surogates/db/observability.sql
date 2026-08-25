@@ -156,9 +156,28 @@ ALTER TABLE service_accounts
 -- construction, an agent principal — nothing else could write that column.
 -- Settles to a no-op after the first run: every writer now sets ``kind``
 -- explicitly, so no later row can match both halves of this predicate.
-UPDATE service_accounts
+--
+-- Promotes at most ONE row per agent. During a rolling deploy a replica still
+-- running pre-``kind`` code inserts a principal with the column default, so an
+-- agent can briefly hold two such rows; promoting both would make the unique
+-- index below impossible to build and abort this whole script inside its
+-- transaction, taking the service down on the next start. The newest row wins,
+-- matching what the old writer intended, and any straggler stays 'service' —
+-- inert, and visible to the query beneath this block.
+UPDATE service_accounts sa
    SET kind = 'agent_principal'
- WHERE agent_id IS NOT NULL AND kind = 'service';
+  FROM (
+        SELECT DISTINCT ON (agent_id) id
+          FROM service_accounts
+         WHERE agent_id IS NOT NULL AND kind = 'service'
+         ORDER BY agent_id, created_at DESC, id DESC
+       ) newest
+ WHERE sa.id = newest.id
+   AND NOT EXISTS (
+        SELECT 1 FROM service_accounts other
+         WHERE other.agent_id = sa.agent_id
+           AND other.kind = 'agent_principal'
+       );
 
 -- The old index capped an agent at ONE service account, which made a second
 -- API key impossible.  Replaced by a narrower predicate that constrains only

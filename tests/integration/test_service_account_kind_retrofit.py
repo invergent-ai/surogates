@@ -217,3 +217,49 @@ async def test_after_the_retrofit_a_second_api_key_inserts(retrofit_engine):
                 conn, org_id=org_id, name="principal-2", agent_id=agent_id,
                 kind=KIND_AGENT_PRINCIPAL,
             )
+
+
+async def test_two_pre_kind_principals_for_one_agent_do_not_break_the_script(
+    retrofit_engine,
+):
+    """A rolling deploy can leave an agent holding two pre-``kind`` rows.
+
+    A replica still running the old code writes ``agent_id`` with the column
+    default, which the new partial index does not constrain. Promoting BOTH
+    would make the unique index impossible to build and abort the whole
+    script inside its transaction — taking the service down on next start.
+    """
+    org_id = uuid.uuid4()
+    agent_id = f"agent-{uuid.uuid4()}"
+
+    async with retrofit_engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO orgs (id, name) VALUES (:id, :n)"),
+            {"id": org_id, "n": f"race-{org_id}"},
+        )
+        # Both written by pre-``kind`` code: agent_id set, kind at its default.
+        await _insert(conn, org_id=org_id, name="old", agent_id=agent_id)
+        await _insert(conn, org_id=org_id, name="new", agent_id=agent_id)
+
+    # Must not raise.
+    async with retrofit_engine.begin() as conn:
+        await apply_observability_ddl(conn)
+
+    async with retrofit_engine.begin() as conn:
+        kinds = sorted(
+            r[0] for r in (await conn.execute(text(
+                "SELECT kind FROM service_accounts WHERE agent_id = :a"
+            ), {"a": agent_id})).all()
+        )
+        indexes = await _indexes(conn)
+
+    assert kinds.count(KIND_AGENT_PRINCIPAL) == 1, (
+        f"exactly one row may be promoted, got {kinds}"
+    )
+    assert "uq_service_accounts_agent_principal" in indexes, (
+        "the unique index must still build"
+    )
+
+    # Replaying stays a no-op.
+    async with retrofit_engine.begin() as conn:
+        await apply_observability_ddl(conn)

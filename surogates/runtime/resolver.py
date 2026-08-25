@@ -184,6 +184,34 @@ async def resolve_agent_id_soft(request: Request) -> str | None:
     return None
 
 
+def _require_token_binds_agent(agent_id: str) -> None:
+    """403 when the caller's token is bound to a different agent.
+
+    A service-account token was historically always org-scoped, so "any agent
+    in the org" was correct. A customer API key is handed to a third party and
+    bound to one agent; because the target agent comes from the ``Host``
+    header, independently of authentication, nothing else stops that third
+    party aiming the same key at a sibling agent.
+
+    Reads the principal from the context-var the auth layer set rather than
+    taking it as an argument, so no route can forget to pass it.
+    """
+    from surogates.tenant.context import get_tenant
+
+    try:
+        tenant = get_tenant()
+    except LookupError:
+        # No authenticated principal in this task — public/unauthenticated
+        # paths resolve agents too, and they have no token to bind.
+        return
+    bound = getattr(tenant, "service_account_agent_id", None)
+    if bound is not None and bound != agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail="This API key is bound to a different agent.",
+        )
+
+
 async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
     """Resolve the per-request :class:`AgentRuntimeContext`.
 
@@ -209,6 +237,13 @@ async def agent_runtime_context_dep(request: Request) -> AgentRuntimeContext:
     agent_id = await resolve_agent_id_soft(request)
     if not agent_id:
         raise HTTPException(400, "no agent_id in request")
+
+    # An agent-bound API key may only drive the agent it was minted for.
+    # Enforced HERE, where agent identity is established, so it covers every
+    # route that resolves an agent and cannot disagree with the id the route
+    # then acts on — a check placed anywhere else compares a separately
+    # resolved agent and drifts. Org-scoped tokens are untouched.
+    _require_token_binds_agent(agent_id)
 
     cache = request.app.state.runtime_config_cache
     # Two attempts: an immediate retry covers a transient control-plane

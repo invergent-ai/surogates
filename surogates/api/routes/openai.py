@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import time
 import uuid
@@ -50,6 +51,7 @@ from surogates.channels.openai_conversation import (
     ReconcileAction,
     conversation_key,
     idempotency_key_for,
+    normalise_explicit_id,
     reconcile,
     resolves_to_existing_session,
 )
@@ -120,15 +122,25 @@ _TERMINAL_EVENTS = {
     EventType.SESSION_PAUSE.value,
 }
 
-#: Maps a terminal session event onto an OpenAI ``finish_reason``.  ``stop`` is
-#: the only one that means "the agent answered"; the rest are reported honestly
-#: so a client can tell a truncated turn from a finished one.
+#: Maps a terminal session event onto an OpenAI ``finish_reason``.
+#:
+#: Only ``session.complete`` means "the agent answered". The others are real
+#: outcomes a client must be able to tell apart from a finished turn, and the
+#: OpenAI vocabulary has no word for them — ``content_filter`` is the closest
+#: honest signal for a turn the platform stopped, and it is what clients
+#: already render as "this did not finish normally".
 _FINISH_REASONS = {
     EventType.SESSION_COMPLETE.value: "stop",
-    EventType.SESSION_FAIL.value: "stop",
-    EventType.SESSION_STOPPED.value: "stop",
-    EventType.SESSION_PAUSE.value: "stop",
+    EventType.SESSION_FAIL.value: "content_filter",
+    EventType.SESSION_STOPPED.value: "content_filter",
+    EventType.SESSION_PAUSE.value: "content_filter",
 }
+
+#: A paused session is the agent waiting on ``ask_user_question`` — it has a
+#: question for the caller, not an answer. The API channel cannot render an
+#: interactive prompt, so the question is surfaced as the turn's content
+#: rather than reported as an empty completion.
+_PAUSE_EVENT = EventType.SESSION_PAUSE.value
 
 
 # ---------------------------------------------------------------------------
@@ -354,9 +366,11 @@ async def _resolve_session(
     scope = ConversationScope(
         service_account_id=str(service_account_id), end_user=parsed.user,
     )
-    prior_user_turns = [t.content for t in parsed.prior_turns if t.role == "user"]
+    # ``key_turns`` is the caller's own user text, before any system message
+    # was folded into the first turn — a client that injects a live timestamp
+    # would otherwise re-key on every request and never continue a session.
     key = conversation_key(
-        prior_user_turns, scope=scope, explicit_id=explicit_id,
+        parsed.key_turns[:-1], scope=scope, explicit_id=explicit_id,
     )
     idem = idempotency_key_for(agent.agent_id, key)
 
@@ -384,9 +398,13 @@ async def _resolve_session(
         prior_turns=parsed.prior_turns,
         session_events=events,
         pinned=explicit_id is not None,
+        prompt=parsed.prompt,
     )
 
-    if decision.action is ReconcileAction.APPEND and existing is not None:
+    if (
+        decision.action in (ReconcileAction.APPEND, ReconcileAction.ATTACH)
+        and existing is not None
+    ):
         return _ResolvedTurn(existing, decision.action, None, key)
 
     # CREATE and FORK both mint a session seeded with the caller's history.
@@ -456,12 +474,22 @@ async def _create_seeded_session(
             raise
         return existing
 
-    for turn in seed_turns:
+    for index, turn in enumerate(seed_turns):
         if turn.role == "user":
+            # ``prior_image_counts`` is aligned with the caller's history, and
+            # the seeds ARE that history, so the index carries over.
+            image_count = (
+                parsed.prior_image_counts[index]
+                if index < len(parsed.prior_image_counts)
+                else 0
+            )
             await store.emit_event(
                 session.id,
                 EventType.USER_MESSAGE,
-                {"content": seed_text_for(turn), "synthetic": "seed"},
+                {
+                    "content": seed_text_for(turn, image_count),
+                    "synthetic": "seed",
+                },
             )
         else:
             await store.emit_event(
@@ -482,6 +510,11 @@ async def _rekey(store: SessionStore, session, *, agent_id: str, key: str) -> No
     turn each time.  Moving it here — after the turn is accepted — is what
     lets the next request find this session, and what makes a regenerate of
     the previous turn miss and fork instead of duplicating a turn.
+
+    Called once the turn has finished, not when it is accepted: while a turn
+    is running the session must stay reachable under the key the caller would
+    derive on a retry, or an SDK retrying a slow request would miss, create a
+    second session, and ask the agent the same question again.
 
     Best-effort: a collision means another session already claimed the key
     (a concurrent identical conversation), and the correct outcome is that
@@ -504,6 +537,21 @@ async def _rekey(store: SessionStore, session, *, agent_id: str, key: str) -> No
 # ---------------------------------------------------------------------------
 # running a turn
 # ---------------------------------------------------------------------------
+
+
+
+async def _cursor_before_last_user_message(
+    store: SessionStore, session_id: UUID,
+) -> int:
+    """The event id just before the session's most recent user message.
+
+    Used when attaching to a turn already in flight: reading from here
+    replays that turn from its start, so a retry sees the same answer the
+    first attempt is producing.
+    """
+    events = await store.get_events(session_id, types=[EventType.USER_MESSAGE])
+    real = [e for e in events if not (e.data or {}).get("synthetic")]
+    return (real[-1].id - 1) if real else 0
 
 
 async def _start_turn(
@@ -547,6 +595,7 @@ class _TurnReader:
         self._cursor = after
         self.finished = False
         self.finish_reason = "stop"
+        self.paused = False
         self.usage: dict[str, Any] = {}
         self.failure: str | None = None
 
@@ -562,12 +611,45 @@ class _TurnReader:
                 self.finished = True
                 self.finish_reason = _FINISH_REASONS.get(event.type, "stop")
                 data = event.data or {}
+                self.paused = event.type == _PAUSE_EVENT
                 if event.type == EventType.SESSION_COMPLETE.value:
                     self.usage = usage_from_cost_summary(data.get("cost_summary"))
                 elif event.type == EventType.SESSION_FAIL.value:
                     self.failure = str(data.get("error") or "the agent failed the turn")
                 break
         return out
+
+
+
+def _pending_question(events: list[Any]) -> str:
+    """The question the agent paused on, as plain text.
+
+    ``ask_user_question`` reaches interactive channels as a rendered prompt.
+    The API channel has none, so the question is returned as the turn's
+    content and the caller answers it with their next message.
+    """
+    for event in reversed(events):
+        if event.type != EventType.TOOL_CALL.value:
+            continue
+        data = event.data or {}
+        if data.get("name") != "ask_user_question":
+            continue
+        arguments = data.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            continue
+        question = str(arguments.get("question") or "").strip()
+        if question:
+            options = arguments.get("options")
+            if isinstance(options, list) and options:
+                rendered = "\n".join(f"- {o}" for o in options)
+                return f"{question}\n\n{rendered}"
+            return question
+    return ""
 
 
 def _answer_text(events: list[Any]) -> tuple[str, str]:
@@ -612,6 +694,7 @@ async def _wait_for_answer(
     collected: list[Any] = []
     deadline = time.monotonic() + budget
     pubsub = None
+    pubsub_healthy = True
     if redis is not None:
         try:
             pubsub = redis.pubsub()
@@ -631,14 +714,17 @@ async def _wait_for_answer(
                     code="agent_turn_timeout",
                     status_code=504,
                 )
-            if pubsub is not None:
+            if pubsub is not None and pubsub_healthy:
                 try:
                     await pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=_POLL_INTERVAL,
                     )
                     continue
                 except Exception:
-                    pubsub = None
+                    # Fall back to polling, but keep the handle so ``finally``
+                    # can still close it — rebinding it to None here leaked
+                    # the connection for the process lifetime.
+                    pubsub_healthy = False
             await asyncio.sleep(_POLL_INTERVAL)
     finally:
         if pubsub is not None:
@@ -710,7 +796,10 @@ async def chat_completions(
 
     store = _store(request)
     model = await _model_name(request, agent)
-    explicit_id = request.headers.get(CONVERSATION_HEADER)
+    # Normalised here so "pinned" and the key are decided by one answer: a
+    # blank or over-long header falls back to derived keying, and treating it
+    # as pinned anyway would reconcile against a key it did not produce.
+    explicit_id = normalise_explicit_id(request.headers.get(CONVERSATION_HEADER))
 
     try:
         resolved = await _resolve_session(
@@ -746,20 +835,24 @@ async def chat_completions(
             code="allowance_unavailable", status_code=exc.status_code,
         ))
 
-    after = await _start_turn(
-        request=request, store=store, session=session,
-        parsed=parsed, images=images,
-    )
+    if resolved.action is ReconcileAction.ATTACH:
+        # A retry of a turn already running. Read from just before the message
+        # the first attempt emitted, so this response carries the same answer
+        # rather than asking the agent the same question twice.
+        after = await _cursor_before_last_user_message(store, session.id)
+    else:
+        after = await _start_turn(
+            request=request, store=store, session=session,
+            parsed=parsed, images=images,
+        )
 
     next_key = conversation_key(
-        [t.content for t in parsed.prior_turns if t.role == "user"] + [parsed.prompt],
+        parsed.key_turns,
         scope=ConversationScope(
             service_account_id=str(service_account_id), end_user=parsed.user,
         ),
         explicit_id=explicit_id,
     )
-    await _rekey(store, session, agent_id=agent.agent_id, key=next_key)
-
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     reader = _TurnReader(store, session.id, after)
@@ -778,6 +871,9 @@ async def chat_completions(
                 reader=reader, redis=redis, session_id=session.id,
                 completion_id=completion_id, model=model, created=created,
                 include_usage=parsed.include_usage,
+                on_finished=lambda: _rekey(
+                    store, session, agent_id=agent.agent_id, key=next_key,
+                ),
             ),
             media_type="text/event-stream",
             headers={
@@ -802,7 +898,14 @@ async def chat_completions(
             code="agent_turn_failed",
         ))
 
+    await _rekey(store, session, agent_id=agent.agent_id, key=next_key)
+
     content, reasoning = _answer_text(events)
+    if not content and reader.paused:
+        # The agent is blocked on ask_user_question. This channel cannot
+        # render an interactive prompt, so its question IS the turn's answer;
+        # reporting "no answer" would hide a question the caller can act on.
+        content = _pending_question(events)
     if not content:
         # Never a 200 with an empty string: a caller cannot tell that from a
         # deliberate empty answer, and would record it as the agent's reply.
@@ -834,6 +937,7 @@ async def _stream_turn(
     model: str,
     created: int,
     include_usage: bool,
+    on_finished: Any = None,
 ) -> AsyncIterator[str]:
     """Translate the session's event stream into OpenAI chunks.
 
@@ -856,6 +960,7 @@ async def _stream_turn(
         except Exception:
             pubsub = None
 
+    pubsub_healthy = True
     deadline = time.monotonic() + STREAMING_BUDGET_SECONDS
     last_emit = time.monotonic()
     finish_reason = "stop"
@@ -887,13 +992,14 @@ async def _stream_turn(
                 finish_reason = "length"
                 break
 
-            if pubsub is not None:
+            if pubsub is not None and pubsub_healthy:
                 try:
                     await pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=_POLL_INTERVAL,
                     )
                 except Exception:
-                    pubsub = None
+                    # Keep the handle for ``finally``; only stop using it.
+                    pubsub_healthy = False
             else:
                 await asyncio.sleep(_POLL_INTERVAL)
 
@@ -903,6 +1009,9 @@ async def _stream_turn(
             if time.monotonic() - last_emit >= _KEEPALIVE_INTERVAL:
                 last_emit = time.monotonic()
                 yield ": keepalive\n\n"
+
+        if on_finished is not None:
+            await on_finished()
 
         if not emitted_any:
             # A turn whose visible text never arrived as deltas (a replayed
@@ -921,6 +1030,13 @@ async def _stream_turn(
         yield sse_data(build_final_chunk(**frame, finish_reason=finish_reason))
         if include_usage:
             yield sse_data(build_usage_chunk(**frame, usage=reader.usage))
+        # ``[DONE]`` is yielded on the normal path only. Yielding it from a
+        # ``finally`` looks tidier but breaks on disconnect: Starlette closes
+        # the generator with ``GeneratorExit`` (a BaseException, so it slips
+        # past ``except Exception``), the ``finally`` yields into a closing
+        # generator, and every dropped connection logs
+        # "async generator ignored GeneratorExit".
+        yield sse_data(DONE_SENTINEL)
     except asyncio.CancelledError:
         # The client hung up. The agent keeps working — a disconnect can be
         # transient, and the turn's result stays readable in the session.
@@ -930,11 +1046,11 @@ async def _stream_turn(
         raise
     except Exception:
         logger.exception("OpenAI stream failed for session %s", session_id)
-        yield sse_data(build_final_chunk(**frame, finish_reason="stop"))
+        yield sse_data(build_final_chunk(**frame, finish_reason="content_filter"))
+        yield sse_data(DONE_SENTINEL)
     finally:
         if pubsub is not None:
             try:
                 await pubsub.aclose()
             except Exception:
                 logger.debug("pubsub close failed", exc_info=True)
-        yield sse_data(DONE_SENTINEL)

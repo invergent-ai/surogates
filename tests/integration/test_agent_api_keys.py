@@ -275,3 +275,75 @@ async def test_revoking_is_scoped_to_the_agent_and_spares_the_principal(
     assert await store.revoke_api_key_for_agent(
         service_account_id=key_a.id, org_id=org_id, agent_id=agent_a,
     ) is False
+
+
+# ---------------------------------------------------------------------------
+# cross-process revocation
+# ---------------------------------------------------------------------------
+
+async def test_a_revocation_elsewhere_evicts_this_processes_auth_cache(
+    session_factory,
+):
+    """Revocation happens in the control plane, against the database.
+
+    A runtime replica caches resolved tokens in memory, so without a
+    cross-process eviction the revoked key keeps authenticating here until
+    its TTL expires — "Revoke" would be a promise the platform does not keep.
+    """
+    from surogates.runtime.invalidator import handle_invalidation_message
+    from surogates.tenant.auth.service_account import ServiceAccountAuthCache
+
+    org_id = await create_org(session_factory)
+    store = ServiceAccountStore(session_factory)
+    agent_id = f"agent-{uuid.uuid4()}"
+    issued = await store.create(
+        org_id=org_id, name="k", agent_id=agent_id, kind=KIND_API_KEY,
+    )
+
+    # Warm the cache the way a real request would.
+    assert await store.get_by_token(issued.token) is not None
+
+    # Revoke straight against the database, bypassing this process entirely —
+    # exactly what the control plane does.
+    from sqlalchemy import text as sql_text
+
+    async with session_factory() as db:
+        await db.execute(
+            sql_text(
+                "UPDATE service_accounts SET revoked_at = now() WHERE id = :i"
+            ),
+            {"i": issued.id},
+        )
+        await db.commit()
+
+    # Still cached: this is the window the invalidation closes.
+    assert await store.get_by_token(issued.token) is not None
+
+    handle_invalidation_message(
+        channel=f"service_account_revoked:{issued.id}",
+        payload=b"",
+        service_account_auth_cache=ServiceAccountAuthCache(),
+    )
+
+    assert await store.get_by_token(issued.token) is None, (
+        "the revoked token must stop resolving once the invalidation lands"
+    )
+
+
+async def test_an_unrelated_invalidation_leaves_other_tokens_cached(
+    session_factory,
+):
+    from surogates.runtime.invalidator import handle_invalidation_message
+    from surogates.tenant.auth.service_account import ServiceAccountAuthCache
+
+    org_id = await create_org(session_factory)
+    store = ServiceAccountStore(session_factory)
+    keeper = await store.create(org_id=org_id, name="keeper")
+    assert await store.get_by_token(keeper.token) is not None
+
+    handle_invalidation_message(
+        channel=f"service_account_revoked:{uuid.uuid4()}",
+        payload=b"",
+        service_account_auth_cache=ServiceAccountAuthCache(),
+    )
+    assert await store.get_by_token(keeper.token) is not None

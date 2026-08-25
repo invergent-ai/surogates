@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 __all__ = [
     "CHUNK_OBJECT",
@@ -116,7 +116,21 @@ class ParsedChatRequest:
 
     prior_turns: list[Turn]
     prompt: str
+    #: The user turns exactly as the caller wrote them, before any system
+    #: message was folded in — the values a conversation key is derived from.
+    #:
+    #: Clients routinely inject a system prompt carrying the current date and
+    #: time (Open WebUI and LibreChat both do). Folding that into the first
+    #: user turn and then hashing the result changes the key on every request,
+    #: so the conversation never resolves and each turn starts a fresh
+    #: session. Assistant text is excluded from the key for exactly this
+    #: reason; system text needs the same treatment.
+    key_turns: list[str] = field(default_factory=list)
     images: list[ImagePart] = field(default_factory=list)
+    #: How many images each entry of ``prior_turns`` carried, index-aligned.
+    #: A seeded transcript is text, so a history image cannot be replayed —
+    #: this is what lets the seed say so instead of dropping it in silence.
+    prior_image_counts: list[int] = field(default_factory=list)
     stream: bool = False
     include_usage: bool = False
     model: str | None = None
@@ -291,6 +305,11 @@ def parse_chat_request(body: dict) -> ParsedChatRequest:
             "the last message must be a user message", param="messages",
         )
 
+    # Captured BEFORE the system fold below: these are what the conversation
+    # key is derived from, so a system prompt that changes every request (a
+    # current timestamp, say) must not reach them.
+    key_turns = [t.content for t in turns if t.role == "user"]
+
     if system_parts:
         prefix = "\n\n".join(p for p in system_parts if p)
         if prefix:
@@ -312,7 +331,11 @@ def parse_chat_request(body: dict) -> ParsedChatRequest:
     return ParsedChatRequest(
         prior_turns=turns[:-1],
         prompt=turns[-1].content,
+        key_turns=key_turns,
         images=images_by_index.get(len(turns) - 1, []),
+        prior_image_counts=[
+            len(images_by_index.get(i, [])) for i in range(len(turns) - 1)
+        ],
         stream=bool(body.get("stream")),
         include_usage=include_usage,
         model=str(body["model"]) if body.get("model") else None,
@@ -320,14 +343,14 @@ def parse_chat_request(body: dict) -> ParsedChatRequest:
     )
 
 
-def seed_text_for(turn: Turn, images: Iterable[ImagePart] = ()) -> str:
+def seed_text_for(turn: Turn, image_count: int = 0) -> str:
     """The text written into a seeded turn, marking any dropped images.
 
     Seeding writes into the event log, which is text; a history image cannot
     be reconstructed there.  A visible marker beats a silent drop — otherwise
     a forked conversation reads as though the user never sent the picture.
     """
-    count = len(list(images))
+    count = max(int(image_count), 0)
     if not count:
         return turn.content
     marker = f"[{count} image{'s' if count != 1 else ''} omitted from replayed history]"

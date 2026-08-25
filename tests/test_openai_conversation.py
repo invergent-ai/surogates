@@ -143,19 +143,41 @@ def test_the_key_windows_long_conversations_without_erroring():
 # reading a session's user turns
 # ---------------------------------------------------------------------------
 
-def test_only_real_user_turns_count():
-    """A synthetic turn is not something the caller sent; counting it would
-    make every following request look like a rewrite."""
+def test_agent_generated_turns_do_not_count():
+    """A turn the agent wrote for itself is not something the caller sent;
+    counting it would make every following request look like a rewrite."""
     events = [
         user_ev(U1),
         assistant_ev(A1),
         ev("tool.call", {"name": "web_search"}),
         ev("tool.result", {"content": "..."}),
         user_ev("outcome kickoff", synthetic="outcome_kickoff"),
-        user_ev("seeded", synthetic="seed"),
+        user_ev("ambient", synthetic="ambient_tick"),
         user_ev(U2),
     ]
     assert session_user_turns(events) == [U1, U2]
+
+
+def test_seeded_turns_do_count_because_they_are_the_callers_history():
+    """The opposite rule for the opposite marker: a seed is what the caller
+    said elsewhere, replayed. Skipping it strands a forked session."""
+    events = [
+        user_ev(U1, synthetic="seed"),
+        ev("llm.response", {
+            "message": {"role": "assistant", "content": A1}, "synthetic": "seed",
+        }),
+        user_ev(U2),
+    ]
+    assert session_user_turns(events) == [U1, U2]
+
+
+def test_the_seed_marker_matches_the_one_the_runtime_stamps():
+    """Two spellings of this value would strand every forked session."""
+    from surogates.session.events import SEED_SYNTHETIC_MARKER
+
+    from surogates.channels.openai_conversation import SEED_MARKER
+
+    assert SEED_MARKER == SEED_SYNTHETIC_MARKER
 
 
 def test_session_turns_are_normalised_like_the_caller_side():
@@ -344,3 +366,76 @@ def test_an_unpinned_conversation_with_no_history_still_forks():
     )
     assert r.action is ReconcileAction.FORK
     assert r.reason == "client_dropped_history"
+
+
+def test_the_turn_after_a_fork_appends_instead_of_forking_again():
+    """A forked session seeds the caller's history as synthetic events.
+
+    If those seeds are invisible to the transcript comparison, the session can
+    never match the caller again: every following request re-forks and
+    re-seeds the whole conversation, losing the memory, workspace and browser
+    the session exists to carry, and growing quadratically in seeded events.
+    """
+    # The fork wrote [u1, a1] as seeds and then ran U2 for real.
+    session_after_fork = [
+        user_ev(U1, synthetic="seed"),
+        ev("llm.response", {
+            "message": {"role": "assistant", "content": A1}, "synthetic": "seed",
+        }),
+        user_ev(U2),
+        assistant_ev(A2),
+    ]
+    # The client now sends the whole conversation plus one new turn.
+    r = reconcile(
+        prior_turns=turns(
+            ("user", U1), ("assistant", A1), ("user", U2), ("assistant", A2),
+        ),
+        session_events=session_after_fork,
+    )
+    assert r.action is ReconcileAction.APPEND, (
+        f"forked session re-forked with reason {r.reason!r}"
+    )
+
+
+def test_a_retry_of_a_turn_in_flight_attaches_instead_of_duplicating():
+    """An OpenAI SDK retries a timed-out request with an identical body.
+
+    The slow turns most likely to time out are exactly the ones a duplicate
+    costs the most: double work, double billing, two divergent answers.
+    """
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(U1), assistant_ev(A1), user_ev(U2)],
+        prompt=U2,
+    )
+    assert r.action is ReconcileAction.ATTACH
+    assert r.seed_turns == []
+
+
+def test_attach_needs_the_prompt_to_match_exactly():
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(U1), assistant_ev(A1), user_ev(U2)],
+        prompt="a different question",
+    )
+    assert r.action is not ReconcileAction.ATTACH
+
+
+def test_without_a_prompt_the_in_flight_case_is_still_a_fork():
+    """Callers that do not pass ``prompt`` keep the old behaviour."""
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(U1), assistant_ev(A1), user_ev(U2)],
+    )
+    assert r.action is ReconcileAction.FORK
+
+
+def test_attach_tolerates_whitespace_drift_in_the_prompt():
+    r = reconcile(
+        prior_turns=turns(("user", U1), ("assistant", A1)),
+        session_events=[user_ev(U2)] if False else [
+            user_ev(U1), assistant_ev(A1), user_ev(f"  {U2}\n"),
+        ],
+        prompt=U2,
+    )
+    assert r.action is ReconcileAction.ATTACH

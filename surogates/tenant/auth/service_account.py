@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "KIND_AGENT_PRINCIPAL",
+    "ServiceAccountAuthCache",
+    "invalidate_service_account",
     "KIND_API_KEY",
     "KIND_SERVICE",
     "TOKEN_PREFIX",
@@ -82,6 +84,12 @@ class ResolvedServiceAccount:
     name: str
     agent_id: str | None = None
     kind: str = KIND_SERVICE
+    #: The digest this token is cached under.  Carried so a revocation
+    #: arriving by id (from another process) can evict the by-HASH entry too
+    #: — that is the one the auth path actually reads, so evicting only the
+    #: by-id entry would leave the revoked token working until its TTL.
+    #: Not a secret: it is already this cache's key, and it is a digest.
+    token_hash: str | None = None
 
 
 class _TTLCache:
@@ -135,6 +143,37 @@ def _reset_caches() -> None:
     _ROW_CACHE_BY_ID.clear()
 
 
+def invalidate_service_account(service_account_id: str) -> None:
+    """Evict one service account from this process's auth caches.
+
+    Revocation happens in the control plane, which reaches the database
+    directly and cannot touch a runtime replica's in-memory caches. Without a
+    cross-process eviction a revoked key keeps authenticating on every replica
+    until its TTL expires — so "Revoke" would be a promise the platform does
+    not keep for up to a minute.
+
+    Evicts the by-hash entry as well as the by-id one: by-hash is what the
+    auth path reads.
+    """
+    cached = _ROW_CACHE_BY_ID.get(str(service_account_id))
+    if cached is not None and cached.token_hash:
+        _ROW_CACHE_BY_HASH.invalidate(cached.token_hash)
+    _ROW_CACHE_BY_ID.invalidate(str(service_account_id))
+
+
+class ServiceAccountAuthCache:
+    """Adapter giving the runtime invalidator the ``.invalidate`` shape.
+
+    The auth caches are module-level singletons rather than an injected
+    object, so this thin wrapper is what the pub/sub dispatcher holds.
+    """
+
+    __slots__ = ()
+
+    def invalidate(self, identifier: str) -> None:
+        invalidate_service_account(identifier)
+
+
 def is_service_account_token(token: str) -> bool:
     """Return True when *token* carries the service-account prefix."""
     return token.startswith(TOKEN_PREFIX)
@@ -164,6 +203,7 @@ def _resolved(row: ServiceAccount) -> ResolvedServiceAccount:
         name=row.name,
         agent_id=row.agent_id,
         kind=row.kind or KIND_SERVICE,
+        token_hash=row.token_hash,
     )
 
 
