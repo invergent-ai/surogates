@@ -37,7 +37,10 @@ logger = logging.getLogger(__name__)
 _ITERATION_SUMMARY_TIMEOUT_SECONDS: float = 10.0
 _TURN_SUMMARY_TIMEOUT_SECONDS: float = 30.0
 
-_MAX_ITERATION_SUMMARY_TOKENS: int = 64
+# The ``{"caption": …}`` wrapper costs tokens the caption used to have
+# to itself, and a reply truncated mid-object parses to nothing at all
+# where a truncated string was still usable.
+_MAX_ITERATION_SUMMARY_TOKENS: int = 96
 _MAX_TURN_SUMMARY_TOKENS: int = 512
 
 TurnArtifactKind = Literal["file", "artifact"]
@@ -79,9 +82,9 @@ _ITERATION_PROMPT = (
     "end, no leading 'The agent', max 12 words.\n"
     "You are an observer writing a caption, not the agent. Never "
     "continue the agent's work, never speak as the agent ('I will…', "
-    "'Let me…'), and never call a tool. Reply with the caption text "
-    "alone: one line, no newlines, no bullet points, no JSON, no "
-    "markup, and never repeat the transcript lines you were given."
+    "'Let me…'), and never call a tool, and never repeat the "
+    "transcript lines you were given.\n"
+    'Return ONLY a JSON object: {"caption": "<the one line>"}.'
 )
 
 _TURN_PROMPT = (
@@ -174,6 +177,36 @@ def _is_self_describing_iteration(
 # ("The agent reviewed…", "Agent found…"), never by a noun, so the
 # prefix strips cleanly.
 _NARRATOR_OPENER_RE = re.compile(r"^(?:the\s+)?agent\s+", re.IGNORECASE)
+
+
+def _extract_caption(content: str) -> str:
+    """Pull the caption out of the model's reply.
+
+    The call asks for ``{"caption": str}`` under ``response_format``,
+    which is what makes most of the structural failures impossible: a
+    reply constrained to an object cannot *be* an echoed transcript
+    line, a bullet list or a markup dump.
+
+    Gateways vary in how well they honour that, so all three shapes
+    resolve here. A conforming one returns the bare object; one that
+    ignores the constraint returns it fenced or wrapped in prose, which
+    ``parse_json_object`` already handles; one that ignores it outright
+    returns plain prose, which is used as-is. That last path is why
+    this returns text rather than ``None`` on a parse miss — captions
+    degrading to unvalidated prose is recoverable, every caption on the
+    deployment vanishing is not.
+
+    An object *without* a usable caption field is not treated as prose:
+    the most common such reply is the echoed tool result, and its raw
+    body must never become the label. Returning it unchanged lets the
+    validator reject it on its leading brace.
+    """
+    parsed = parse_json_object(content)
+    if isinstance(parsed, dict):
+        caption = parsed.get("caption")
+        if isinstance(caption, str) and caption.strip():
+            return caption
+    return content
 
 
 def _normalize_caption(text: str) -> str:
@@ -320,6 +353,7 @@ class TurnSummarizer:
             "max_tokens": _MAX_ITERATION_SUMMARY_TOKENS,
             "temperature": 0.2,
             "stream": False,
+            "response_format": {"type": "json_object"},
         }
 
         content = await self._chat_completion(
@@ -330,7 +364,8 @@ class TurnSummarizer:
         )
         if content is None:
             return None
-        text = _normalize_caption(content.strip().strip('"').rstrip("."))
+        caption = _extract_caption(content)
+        text = _normalize_caption(caption.strip().strip('"').rstrip("."))
         if not _valid_iteration_summary(text):
             logger.warning(
                 "discarding malformed iteration summary for %s: %r",

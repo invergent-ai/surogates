@@ -702,3 +702,93 @@ async def test_summarize_iteration_strips_the_narrator_prefix() -> None:
     assert await _summarize_with(
         "The agent reviewed the copywriting skill guidelines",
     ) == "Reviewed the copywriting skill guidelines"
+
+
+# ----------------------------------------------------------------------
+# JSON-mode captions
+#
+# The iteration call asks for ``{"caption": str}`` under
+# ``response_format``, the same mechanism ``summarize_turn`` already
+# uses. A conforming gateway cannot echo the transcript, leak tool-call
+# markup, or return a bullet list — the reply has to be an object. A
+# gateway that ignores the constraint still returns prose, which is
+# used as-is so captions degrade rather than disappear.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_iteration_call_asks_for_a_json_object() -> None:
+    client = _StubClient('{"caption": "Patched the loader"}')
+    summarizer = _iteration_summarizer(client)
+
+    await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    kwargs = client.chat.completions.calls[0]
+    assert kwargs["response_format"] == {"type": "json_object"}
+    # The wrapper costs tokens the caption used to have to itself; a
+    # reply truncated mid-object parses to nothing at all.
+    assert kwargs["max_tokens"] >= 96
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        ("bare object", '{"caption": "Patched the loader"}'),
+        (
+            "fenced object — gateways that ignore response_format",
+            '```json\n{"caption": "Patched the loader"}\n```',
+        ),
+        (
+            "object with surrounding prose",
+            'Here you go: {"caption": "Patched the loader"}',
+        ),
+        ("quoted caption value", '{"caption": "\\"Patched the loader\\""}'),
+        ("trailing period", '{"caption": "Patched the loader."}'),
+        # A gateway that ignores response_format outright still returns
+        # a usable caption; losing those would be worse than the echoes
+        # this whole guard exists to stop.
+        ("plain prose fallback", "Patched the loader"),
+    ],
+)
+async def test_caption_is_extracted_from_the_reply(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) == "Patched the loader", label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        # The echoed tool result is itself a JSON object, so it parses —
+        # but it carries no caption field, and the raw body must not
+        # become the label either.
+        (
+            "echoed tool result",
+            '{"success": true, "name": "social", "description": "..."}',
+        ),
+        ("caption is not a string", '{"caption": {"text": "hi"}}'),
+        ("caption is empty", '{"caption": "   "}'),
+        # Structure inside the caption field still has to be rejected:
+        # response_format constrains the envelope, not the contents.
+        (
+            "transcript echoed inside the caption",
+            '{"caption": "call: patch({}) result: patched"}',
+        ),
+        (
+            "role-play inside the caption",
+            '{"caption": "I\\u2019ll patch the loader next"}',
+        ),
+    ],
+)
+async def test_malformed_json_replies_are_discarded(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) is None, label
