@@ -703,6 +703,7 @@ def create_app() -> FastAPI:
         inbox,
         memory,
         missions,
+        openai,
         prompts,
         scheduled_work,
         sessions,
@@ -788,6 +789,10 @@ def create_app() -> FastAPI:
     )
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
+    # OpenAI-compatible facade. Mounted at /v1 so its own "/api/..." paths
+    # land on /v1/api/chat/completions -- inside the service-account path
+    # prefix, which is the only place a surg_sk_ token is accepted.
+    app.include_router(openai.router, prefix="/v1", tags=["openai"])
     # Service-account callers (ops's Work-chat forwarding path mints
     # bare ``surg_sk_`` tokens; the auth middleware only allows those
     # on ``/v1/api/*`` routes — see

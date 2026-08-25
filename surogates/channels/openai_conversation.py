@@ -209,12 +209,14 @@ def reconcile(
     *,
     prior_turns: Sequence[Turn],
     session_events: Iterable[Any] | None,
+    pinned: bool = False,
 ) -> Reconciliation:
     """Decide how this request relates to the session it resolved to.
 
     *prior_turns* is the caller's history excluding the turn being run;
     *session_events* is the resolved session's event log, or ``None`` when no
-    session was found.
+    session was found.  *pinned* means the client named the conversation with
+    an explicit id rather than having one derived from its messages.
 
     The comparison is over user turns only, for the same reason the key is:
     assistant text is the client's to re-render, and tool turns exist only on
@@ -227,6 +229,14 @@ def reconcile(
         return Reconciliation(
             action=ReconcileAction.CREATE, seed_turns=list(prior_turns),
         )
+
+    if pinned and not caller:
+        # A named conversation with no history attached is a client that
+        # keeps no transcript of its own and expects the server to hold it —
+        # the whole point of sending the header.  Treating the absent history
+        # as "the client dropped everything" would fork a fresh session on
+        # every single turn.
+        return Reconciliation(action=ReconcileAction.APPEND, seed_turns=[])
 
     existing = session_user_turns(session_events)
 

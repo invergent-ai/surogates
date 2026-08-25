@@ -312,3 +312,35 @@ def test_every_fork_names_a_reason(reason):
 def test_an_empty_session_with_caller_history_forks_rather_than_appending():
     r = reconcile(prior_turns=turns(("user", U1), ("assistant", A1)), session_events=[])
     assert r.action is ReconcileAction.FORK
+
+
+def test_a_pinned_conversation_with_no_history_appends():
+    """A client that sends the header and keeps no transcript of its own is
+    relying on the server to hold one. Reading the absent history as 'the
+    client dropped everything' would fork a fresh session every turn."""
+    r = reconcile(
+        prior_turns=[],
+        session_events=[user_ev(U1), assistant_ev(A1)],
+        pinned=True,
+    )
+    assert r.action is ReconcileAction.APPEND
+
+
+def test_a_pinned_conversation_still_forks_on_a_real_rewrite():
+    """Naming the conversation does not license replacing its history."""
+    r = reconcile(
+        prior_turns=turns(("user", "something else entirely")),
+        session_events=[user_ev(U1), assistant_ev(A1)],
+        pinned=True,
+    )
+    assert r.action is ReconcileAction.FORK
+
+
+def test_an_unpinned_conversation_with_no_history_still_forks():
+    """Without the header the same shape means the client trimmed context."""
+    r = reconcile(
+        prior_turns=[],
+        session_events=[user_ev(U1), assistant_ev(A1)],
+    )
+    assert r.action is ReconcileAction.FORK
+    assert r.reason == "client_dropped_history"
