@@ -140,13 +140,37 @@ CREATE INDEX IF NOT EXISTS idx_service_accounts_org
     ON service_accounts (org_id);
 
 -- Per-agent principal: ``agent_id`` links a service account to its owning ops
--- Agent (a different database — logical reference, not a FK).  The partial
--- unique index keeps it one service account per agent.  Retrofit for existing
--- databases; ``create_all`` covers fresh ones.
+-- Agent (a different database — logical reference, not a FK).  Retrofit for
+-- existing databases; ``create_all`` covers fresh ones.
 ALTER TABLE service_accounts
     ADD COLUMN IF NOT EXISTS agent_id text;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent
+-- ``kind`` splits the agent's own machine identity from the operator-minted
+-- API keys of the OpenAI-compatible channel, which share this table and its
+-- auth path but obey opposite cardinality rules.  See the ``ServiceAccount``
+-- model docstring for the vocabulary.
+ALTER TABLE service_accounts
+    ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'service';
+
+-- Every row that carried an ``agent_id`` before ``kind`` existed was, by
+-- construction, an agent principal — nothing else could write that column.
+-- Settles to a no-op after the first run: every writer now sets ``kind``
+-- explicitly, so no later row can match both halves of this predicate.
+UPDATE service_accounts
+   SET kind = 'agent_principal'
+ WHERE agent_id IS NOT NULL AND kind = 'service';
+
+-- The old index capped an agent at ONE service account, which made a second
+-- API key impossible.  Replaced by a narrower predicate that constrains only
+-- the principal.  Dropped by name: on a fresh database ``create_all`` has
+-- already built the replacement, so this is a no-op there.
+DROP INDEX IF EXISTS uq_service_accounts_agent;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent_principal
+    ON service_accounts (agent_id)
+    WHERE agent_id IS NOT NULL AND kind = 'agent_principal';
+
+CREATE INDEX IF NOT EXISTS idx_service_accounts_agent
     ON service_accounts (agent_id)
     WHERE agent_id IS NOT NULL;
 

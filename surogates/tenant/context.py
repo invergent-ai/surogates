@@ -77,6 +77,17 @@ class TenantContext:
     asset_root: str  # path to tenant's asset directory
     service_account_id: UUID | None = None
     session_scope_id: UUID | None = None
+    #: The agent a service-account token is bound to, when it is bound at all.
+    #:
+    #: ``None`` means org-scoped: the token may drive any agent in its org,
+    #: which is correct for the control plane's own machine identities
+    #: (ops-chat, evaluation, synthetic pipelines).  A customer-facing API key
+    #: for the OpenAI channel carries the agent it was minted for, and
+    #: :func:`~surogates.api.routes._shared.require_token_binds_agent` refuses
+    #: the request when that does not match the agent resolved from the
+    #: ``Host`` header — which is the only thing standing between one
+    #: customer's key and every other agent in the same org.
+    service_account_agent_id: str | None = None
 
     def covers_session(self, session_id: UUID) -> bool:
         """Return True when this context is allowed to act on *session_id*.

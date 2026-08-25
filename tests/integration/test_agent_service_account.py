@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 
 from surogates.db.models import ServiceAccount
 from surogates.tenant.auth.service_account import (
+    KIND_AGENT_PRINCIPAL,
+    KIND_API_KEY,
     ServiceAccountStore,
     _reset_caches,
     hash_token,
@@ -18,26 +20,49 @@ from .conftest import create_org
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-def _sa(org_id, *, agent_id=None, suffix=""):
+def _sa(org_id, *, agent_id=None, suffix="", kind=None):
     return ServiceAccount(
         org_id=org_id,
         name=f"agent:{agent_id or 'none'}{suffix}",
         token_hash=uuid.uuid4().hex,
         token_prefix="surg_sk_aaaaaaaa",
         agent_id=agent_id,
+        **({"kind": kind} if kind is not None else {}),
     )
 
 
 async def test_agent_id_partial_unique_rejects_duplicate(session_factory):
+    """One PRINCIPAL per agent.
+
+    Scoped to ``kind='agent_principal'`` since API keys were introduced: the
+    index deliberately no longer constrains every row that carries an
+    ``agent_id``, or an agent could hold only one API key. The complementary
+    case — many API keys on the same agent — is pinned below.
+    """
     org = await create_org(session_factory)
     agent_id = str(uuid.uuid4())
     async with session_factory() as db:
-        db.add(_sa(org, agent_id=agent_id))
+        db.add(_sa(org, agent_id=agent_id, kind=KIND_AGENT_PRINCIPAL))
         await db.commit()
     with pytest.raises(IntegrityError):
         async with session_factory() as db:
-            db.add(_sa(org, agent_id=agent_id, suffix="-dup"))
+            db.add(_sa(
+                org, agent_id=agent_id, suffix="-dup", kind=KIND_AGENT_PRINCIPAL,
+            ))
             await db.commit()
+
+
+async def test_agent_id_partial_unique_does_not_constrain_api_keys(
+    session_factory,
+):
+    """The other half of the same index: API keys are unbounded per agent."""
+    org = await create_org(session_factory)
+    agent_id = str(uuid.uuid4())
+    async with session_factory() as db:
+        db.add(_sa(org, agent_id=agent_id, kind=KIND_AGENT_PRINCIPAL))
+        db.add(_sa(org, agent_id=agent_id, suffix="-k1", kind=KIND_API_KEY))
+        db.add(_sa(org, agent_id=agent_id, suffix="-k2", kind=KIND_API_KEY))
+        await db.commit()
 
 
 async def test_null_agent_id_allows_many(session_factory):

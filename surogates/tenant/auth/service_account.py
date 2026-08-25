@@ -34,6 +34,9 @@ from surogates.db.models import ServiceAccount
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "KIND_AGENT_PRINCIPAL",
+    "KIND_API_KEY",
+    "KIND_SERVICE",
     "TOKEN_PREFIX",
     "IssuedServiceAccount",
     "ResolvedServiceAccount",
@@ -43,6 +46,15 @@ __all__ = [
     "is_service_account_token",
 ]
 
+
+#: The machine identity an agent acts as.  Exactly one per agent — see the
+#: ``uq_service_accounts_agent_principal`` partial unique index.
+KIND_AGENT_PRINCIPAL = "agent_principal"
+#: A customer-facing key for the OpenAI-compatible API channel.  Many per
+#: agent; minted and revoked by the agent's operator.
+KIND_API_KEY = "api_key"
+#: An ordinary org-scoped account with no agent binding.
+KIND_SERVICE = "service"
 
 TOKEN_PREFIX = "surg_sk_"
 _DISPLAY_PREFIX_LEN = len(TOKEN_PREFIX) + 8
@@ -57,11 +69,19 @@ class ResolvedServiceAccount:
 
     Returning this lightweight view — instead of the SQLAlchemy
     ``ServiceAccount`` ORM row — lets a cache hit skip the DB entirely.
+
+    ``agent_id`` is load-bearing for authorization, not decoration: the agent
+    a request targets is resolved independently from the ``Host`` header, so
+    without carrying the token's own binding here the auth layer cannot tell
+    that a key minted for agent A is being replayed against agent B.  ``None``
+    means org-scoped (the historical behaviour: any agent in the org).
     """
 
     id: UUID
     org_id: UUID
     name: str
+    agent_id: str | None = None
+    kind: str = KIND_SERVICE
 
 
 class _TTLCache:
@@ -130,6 +150,23 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _resolved(row: ServiceAccount) -> ResolvedServiceAccount:
+    """Project an ORM row onto the cached auth view.
+
+    One projection so a field added to :class:`ResolvedServiceAccount` cannot
+    be populated on some lookup paths and silently defaulted on others — an
+    ``agent_id`` that is ``None`` only because ``get_by_id`` forgot to copy it
+    would turn an agent-bound key back into an org-wide one.
+    """
+    return ResolvedServiceAccount(
+        id=row.id,
+        org_id=row.org_id,
+        name=row.name,
+        agent_id=row.agent_id,
+        kind=row.kind or KIND_SERVICE,
+    )
+
+
 @dataclass(frozen=True)
 class IssuedServiceAccount:
     """A service account freshly created by :meth:`ServiceAccountStore.create`.
@@ -146,6 +183,7 @@ class IssuedServiceAccount:
     token_prefix: str
     created_at: datetime
     agent_id: str | None = None
+    kind: str = KIND_SERVICE
 
 
 class ServiceAccountStore:
@@ -160,9 +198,25 @@ class ServiceAccountStore:
         self._sf = session_factory
 
     async def create(
-        self, *, org_id: UUID, name: str, agent_id: str | None = None,
+        self,
+        *,
+        org_id: UUID,
+        name: str,
+        agent_id: str | None = None,
+        kind: str | None = None,
     ) -> IssuedServiceAccount:
-        """Issue a new service account and return its raw token exactly once."""
+        """Issue a new service account and return its raw token exactly once.
+
+        ``kind`` defaults to the historical meaning of the arguments so every
+        existing caller keeps its behaviour: an ``agent_id`` used to be
+        provable evidence of an agent principal, because nothing else could
+        write that column.  Callers minting an API key for the OpenAI channel
+        must pass :data:`KIND_API_KEY` explicitly — otherwise the second key
+        for an agent collides with the principal's unique index.
+        """
+        resolved_kind = kind or (
+            KIND_AGENT_PRINCIPAL if agent_id is not None else KIND_SERVICE
+        )
         token = generate_token()
         row = ServiceAccount(
             org_id=org_id,
@@ -170,6 +224,7 @@ class ServiceAccountStore:
             token_hash=hash_token(token),
             token_prefix=token[:_DISPLAY_PREFIX_LEN],
             agent_id=agent_id,
+            kind=resolved_kind,
         )
         async with self._sf() as db:
             db.add(row)
@@ -183,6 +238,7 @@ class ServiceAccountStore:
             token_prefix=row.token_prefix,
             created_at=row.created_at,
             agent_id=row.agent_id,
+            kind=row.kind,
         )
 
     async def get_by_token(self, token: str) -> ResolvedServiceAccount | None:
@@ -220,9 +276,7 @@ class ServiceAccountStore:
             if row is None:
                 return None
 
-            resolved = ResolvedServiceAccount(
-                id=row.id, org_id=row.org_id, name=row.name,
-            )
+            resolved = _resolved(row)
 
             # Best-effort heartbeat; failures here must not deny auth.
             try:
@@ -276,9 +330,7 @@ class ServiceAccountStore:
             row = result.scalar_one_or_none()
         if row is None:
             return None
-        resolved = ResolvedServiceAccount(
-            id=row.id, org_id=row.org_id, name=row.name,
-        )
+        resolved = _resolved(row)
         _ROW_CACHE_BY_ID.set(cache_key, resolved)
         _ROW_CACHE_BY_HASH.set(row.token_hash, resolved)
         return resolved
@@ -291,6 +343,12 @@ class ServiceAccountStore:
         Returns ``None`` when the agent has no service account or it is
         revoked.  Not cached by agent_id (low-frequency provisioning path);
         the token/id caches still front the hot auth path.
+
+        Restricted to :data:`KIND_AGENT_PRINCIPAL`.  The agent's own API keys
+        share ``(org_id, agent_id)`` with its principal, and only the
+        principal is unique on that pair — without the kind filter this
+        returns an arbitrary row and the control plane can hand an operator's
+        customer-facing key to the runtime as the agent's machine identity.
         """
         async with self._sf() as db:
             row = (
@@ -298,13 +356,14 @@ class ServiceAccountStore:
                     select(ServiceAccount).where(
                         ServiceAccount.org_id == org_id,
                         ServiceAccount.agent_id == agent_id,
+                        ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
                         ServiceAccount.revoked_at.is_(None),
                     )
                 )
             ).scalar_one_or_none()
         if row is None:
             return None
-        return ResolvedServiceAccount(id=row.id, org_id=row.org_id, name=row.name)
+        return _resolved(row)
 
     async def rotate_token_for_agent_id(
         self, *, org_id: UUID, agent_id: str, clear_revoked: bool = False,
@@ -312,7 +371,8 @@ class ServiceAccountStore:
         """Mint a fresh token for the existing agent service-account row.
 
         Recovers a usable principal when the vaulted token was lost without
-        creating a second row (which the unique ``agent_id`` index forbids).
+        creating a second row (which ``uq_service_accounts_agent_principal``
+        forbids).
         Returns the new raw token exactly once, or ``None`` when no row exists
         for ``(org_id, agent_id)``.  ``clear_revoked=True`` also lifts an
         existing ``revoked_at`` (an explicit re-activation; rotation alone
@@ -328,6 +388,10 @@ class ServiceAccountStore:
                     select(ServiceAccount).where(
                         ServiceAccount.org_id == org_id,
                         ServiceAccount.agent_id == agent_id,
+                        # Same reason as ``get_by_agent_id``: rotating an
+                        # operator's API key as if it were the principal
+                        # would silently break a live integration.
+                        ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
                     ).with_for_update()
                 )
             ).scalar_one_or_none()
@@ -362,6 +426,67 @@ class ServiceAccountStore:
                 .order_by(ServiceAccount.created_at.desc())
             )
             return list(result.scalars().all())
+
+    async def list_api_keys_for_agent(
+        self, org_id: UUID, agent_id: str, *, include_revoked: bool = False,
+    ) -> list[ServiceAccount]:
+        """Return one agent's OpenAI-channel API keys, newest first.
+
+        Deliberately narrower than :meth:`list_for_org`: the operator-facing
+        key list must never show the agent's own principal, which the control
+        plane owns and whose token is vaulted, not user-held.  Revoked keys
+        are excluded by default so the Studio list shows live credentials;
+        ``include_revoked`` is for an audit view.
+        """
+        stmt = select(ServiceAccount).where(
+            ServiceAccount.org_id == org_id,
+            ServiceAccount.agent_id == agent_id,
+            ServiceAccount.kind == KIND_API_KEY,
+        )
+        if not include_revoked:
+            stmt = stmt.where(ServiceAccount.revoked_at.is_(None))
+        async with self._sf() as db:
+            result = await db.execute(
+                stmt.order_by(ServiceAccount.created_at.desc())
+            )
+            return list(result.scalars().all())
+
+    async def revoke_api_key_for_agent(
+        self, *, service_account_id: UUID, org_id: UUID, agent_id: str,
+    ) -> bool:
+        """Revoke one API key, refusing anything that is not this agent's.
+
+        The agent is part of the WHERE clause rather than checked afterwards:
+        an operator authorized for agent A must not be able to revoke agent
+        B's key by guessing its id, and the ``kind`` clause additionally stops
+        a crafted id from revoking the agent's own principal — which would
+        take the agent off the air until the control plane re-provisioned it.
+
+        Returns False when the row does not exist, belongs elsewhere, is the
+        principal, or was already revoked.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                update(ServiceAccount)
+                .where(
+                    ServiceAccount.id == service_account_id,
+                    ServiceAccount.org_id == org_id,
+                    ServiceAccount.agent_id == agent_id,
+                    ServiceAccount.kind == KIND_API_KEY,
+                    ServiceAccount.revoked_at.is_(None),
+                )
+                .values(revoked_at=func.now())
+                .returning(ServiceAccount.token_hash)
+            )
+            token_hash = result.scalar_one_or_none()
+            await db.commit()
+
+        if token_hash is None:
+            return False
+
+        _ROW_CACHE_BY_ID.invalidate(str(service_account_id))
+        _ROW_CACHE_BY_HASH.invalidate(token_hash)
+        return True
 
     async def revoke(self, *, service_account_id: UUID, org_id: UUID) -> bool:
         """Mark a service account as revoked.

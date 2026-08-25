@@ -349,6 +349,7 @@ async def _build_service_account_context(
         permissions=frozenset(),
         asset_root=f"{tenant_assets_root}/{sa.org_id}",
         service_account_id=sa.id,
+        service_account_agent_id=sa.agent_id,
     )
 
 
@@ -462,6 +463,7 @@ async def _build_service_account_session_context(
         asset_root=asset_root,
         service_account_id=sa.id,
         session_scope_id=session_id,
+        service_account_agent_id=sa.agent_id,
     )
 
 
