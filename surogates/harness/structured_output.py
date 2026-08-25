@@ -9,6 +9,8 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
+from surogates.harness.message_utils import message_texts
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
@@ -210,23 +212,16 @@ async def _try_openai_json_mode(
         return None
     message = getattr(response.choices[0], "message", None)
 
-    # Reasoning-mode models (DeepSeek-R1, Qwen3 with thinking on, GLM 5.1
-    # with enable_thinking=True) often put visible text in
-    # ``message.content`` and the JSON we asked for in
-    # ``message.reasoning_content`` -- empty content alone isn't a failure
-    # if the JSON is sitting in the reasoning channel.  Both channels are
-    # tried, and within each, every embedded object -- leaked reasoning
-    # can contain draft objects before the real answer, and the schema
-    # is the only reliable way to tell them apart.
-    for attr in ("content", "reasoning_content"):
-        for parsed in iter_json_objects(getattr(message, attr, None)):
+    # Every reply channel is tried (see ``message_texts``), and within
+    # each, every embedded object -- leaked reasoning can contain draft
+    # objects before the real answer, and the schema is the only
+    # reliable way to tell them apart.
+    for text in message_texts(message):
+        for parsed in iter_json_objects(text):
             try:
                 return output_model.model_validate(parsed)
             except Exception as exc:
-                logger.debug(
-                    "JSON-mode fallback validation failed on %s: %s",
-                    attr, exc,
-                )
+                logger.debug("JSON-mode fallback validation failed: %s", exc)
     return None
 
 

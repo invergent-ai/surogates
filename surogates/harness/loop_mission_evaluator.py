@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from surogates.harness.message_utils import message_texts
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.session.events import EventType
 
@@ -325,20 +326,7 @@ def _build_mission_judge(
             raise MissionJudgeParseError(
                 f"judge returned an unexpected shape: {exc}",
             ) from exc
-        if isinstance(message, dict):
-            raw = (
-                message.get("content")
-                or message.get("reasoning_content")
-                or message.get("reasoning")
-                or ""
-            )
-        else:
-            raw = (
-                getattr(message, "content", None)
-                or getattr(message, "reasoning_content", None)
-                or getattr(message, "reasoning", None)
-                or ""
-            )
+        raw = next(iter(message_texts(message)), "")
         if not raw or not str(raw).strip():
             raise MissionJudgeParseError("judge returned empty content")
         try:

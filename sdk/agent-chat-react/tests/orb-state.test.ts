@@ -62,6 +62,8 @@ describe("toolOrbState", () => {
       "search_files",
       "list_files",
       "research_memory",
+      "skill_view",
+      "skills_list",
     ]) {
       expect(toolOrbState(name)).toBe("searching");
     }

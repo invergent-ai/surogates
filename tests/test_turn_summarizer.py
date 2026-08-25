@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,41 +12,43 @@ from surogates.harness.turn_summarizer import (
     TurnArtifact,
     TurnSummarizer,
     TurnSummary,
+    _normalize_caption,
+    _valid_iteration_summary,
 )
 
 
 @dataclass
 class _StubResponse:
-    content: str
+    content: Any
+    reasoning: Any = None
 
     @property
     def choices(self):
-        return [
-            type(
-                "Choice", (),
-                {"message": type("Msg", (), {"content": self.content})()},
-            )()
-        ]
+        message = type(
+            "Msg", (),
+            {"content": self.content, "reasoning_content": self.reasoning},
+        )()
+        return [type("Choice", (), {"message": message})()]
 
 
 class _StubChatCompletions:
-    def __init__(self, content: str) -> None:
-        self._content = content
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self._content, self._reasoning = content, reasoning
         self.calls: list[dict[str, Any]] = []
 
     async def create(self, **kwargs: Any) -> _StubResponse:
         self.calls.append(kwargs)
-        return _StubResponse(self._content)
+        return _StubResponse(self._content, self._reasoning)
 
 
 class _StubChat:
-    def __init__(self, content: str) -> None:
-        self.completions = _StubChatCompletions(content)
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self.completions = _StubChatCompletions(content, reasoning)
 
 
 class _StubClient:
-    def __init__(self, content: str) -> None:
-        self.chat = _StubChat(content)
+    def __init__(self, content: Any, reasoning: Any = None) -> None:
+        self.chat = _StubChat(content, reasoning)
 
 
 def _iteration_summarizer(client: Any, model: str = "m") -> TurnSummarizer:
@@ -410,3 +413,571 @@ async def test_summarize_turn_returns_none_on_truncated_fenced_json() -> None:
     )
 
     assert result is None
+
+
+# ----------------------------------------------------------------------
+# Malformed-reply rejection
+#
+# The cheap summary model periodically completes the prompt's transcript
+# instead of captioning it. Whatever it returns becomes the iteration's
+# user-visible label, so every structural failure shape observed in
+# production is rejected here; the caller then emits no event and the
+# chat client falls back to its deterministic tool-derived label.
+# ----------------------------------------------------------------------
+
+
+def _calls(*names: str) -> list[dict[str, Any]]:
+    """One tool call per name, ids ``c0``, ``c1``, … to match _results."""
+    return [
+        {"id": f"c{i}", "function": {"name": n, "arguments": '{"path": "a.py"}'}}
+        for i, n in enumerate(names)
+    ]
+
+
+def _results(*contents: str) -> list[dict[str, Any]]:
+    return [
+        {"tool_call_id": f"c{i}", "content": c}
+        for i, c in enumerate(contents)
+    ]
+
+
+_OK = '{"success": true, "name": "x"}'
+
+
+async def _summarize_with(content: Any, reasoning: Any = None) -> str | None:
+    """Run one patch iteration through the summarizer stubbed to reply."""
+    client = _StubClient(content, reasoning)
+    summarizer = _iteration_summarizer(client)
+    return await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        (
+            "verbatim transcript echo",
+            'call: skill_view({"name": "copywriting"})\n'
+            '  result: {"success": true, "name": "copywriting"}',
+        ),
+        (
+            "reshaped transcript echo",
+            '[1] tool=patch args={"path": "a.py"}\n    returned: patched',
+        ),
+        (
+            "prompt header echo",
+            "Tools called (with result snippets):\ncall: patch({})",
+        ),
+        (
+            "raw json result",
+            '{"success": true, "name": "social", "description": "..."}',
+        ),
+        (
+            "json array",
+            '[{"path": "a.py"}]',
+        ),
+        (
+            "deepseek tool-call markup",
+            "I'll load the skill.\n\n<｜DSML｜tool_calls>",
+        ),
+        (
+            "xml tool-call markup",
+            '<tool_call>{"name": "patch"}</tool_call>',
+        ),
+        (
+            "fenced code block",
+            "```json\n{}\n```",
+        ),
+        (
+            "markdown bullet list",
+            "- Searched Camillo Borghese\n- Searched Alfonso Visconti",
+        ),
+        (
+            "single leading bullet",
+            "- Searched for the Borghese page",
+        ),
+        (
+            "first-person role-play",
+            "I'll start by creating the directory and making the calls",
+        ),
+        (
+            "let-me role-play",
+            "Let me check what tools are available instead",
+        ),
+        (
+            "based-on role-play",
+            "Based on the brief, I will now review the grading protocol",
+        ),
+        (
+            "multi-line prose dump",
+            "Setup repo and clone it\n\nList files in working tree",
+        ),
+        (
+            "transcript dumped past the word cap",
+            " ".join(f"word{i}" for i in range(40)),
+        ),
+        # Typographic apostrophes are the model's default; matching only
+        # the ASCII form let every curly-quoted role-play through.
+        (
+            "role-play with a typographic apostrophe",
+            "I\u2019ll load the copywriting skill next",
+        ),
+        (
+            "let-us role-play with a typographic apostrophe",
+            "Let\u2019s review the grading protocol",
+        ),
+        # The transcript format changed in the same commit; a one-line
+        # echo of the new shape has no newline to catch it.
+        (
+            "single-line echo of the reshaped transcript",
+            'tool=patch args={"path": "a.py"} returned: patched',
+        ),
+        (
+            "single-line echo of the old transcript",
+            'call: skill_view({"name": "x"}) result: {"ok": 1}',
+        ),
+    ],
+)
+async def test_summarize_iteration_rejects_malformed_reply(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) is None, label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Patch the loader to skip empty rows",
+        "Find pdftotext fails — falling back to pypdf",
+        "Reviews copywriting skill guidelines for tone and structure",
+        # An em-dash clause and a colon are ordinary caption prose and
+        # must not trip the structural markers.
+        "Cloned the repo: 3 submodules initialised",
+        # ``result:`` and ``call:`` occur in real captions; only their
+        # co-occurrence marks a transcript echo.
+        "Search returns no result: falls back to pypdf",
+        "Retry after the failed call: pdftotext is missing",
+        "Now searching the workspace for the invoice template",
+    ],
+)
+async def test_summarize_iteration_keeps_well_formed_reply(reply: str) -> None:
+    assert await _summarize_with(reply) == reply
+
+
+@pytest.mark.asyncio
+async def test_summarize_iteration_strips_then_validates() -> None:
+    # Quote-stripping runs first, so a quoted echo is still rejected.
+    assert await _summarize_with('"call: patch({})"') is None
+
+
+# ----------------------------------------------------------------------
+# Self-describing iterations are not summarized at all
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("names", [("skill_view",), ("skill_view", "skill_view")])
+async def test_successful_skill_loads_skip_the_model(
+    names: tuple[str, ...],
+) -> None:
+    client = _StubClient("Reviews the copywriting skill")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="I should load the skill first",
+        tool_calls=_calls(*names),
+        prior_iteration_summaries=[],
+        tool_results=_results(*([_OK] * len(names))),
+    )
+
+    assert result is None
+    assert client.chat.completions.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reasoning", "calls", "results"),
+    [
+        # Consumers hide these from the condensed view, so with no
+        # caption the iteration has nothing left to draw. Only
+        # skill_view has a deterministic row to fall back to.
+        ("skills_list", "", _calls("skills_list"), _results(_OK)),
+        ("list_files", "", _calls("list_files"), _results(_OK)),
+        ("search_files", "", _calls("search_files"), _results(_OK)),
+        ("session_search", "", _calls("session_search"), _results(_OK)),
+        # One call nothing can render on its own is enough: the batch
+        # is no longer self-describing.
+        ("mixed batch", "", _calls("skill_view", "web_extract"),
+         _results(_OK, "Starter 19 EUR")),
+        # A failed load is news. Consumers drop errored calls, so
+        # skipping the caption would erase the iteration outright.
+        ("failed skill load", "", _calls("skill_view"),
+         _results('{"success": false, "error": "Skill not found."}')),
+        ("skill load with no tenant", "", _calls("skill_view"),
+         _results('{"error": "No tenant context available"}')),
+        # Success cannot be confirmed with no results in hand, so the
+        # caption is produced rather than gambled away.
+        ("skill load, results not captured", "", _calls("skill_view"), []),
+        # No tool calls at all is not self-describing — there is
+        # nothing to draw, so the reasoning still needs a caption.
+        ("text-only iteration", "Weighing whether to ship behind a flag",
+         [], []),
+    ],
+)
+async def test_iterations_that_still_need_a_caption(
+    label: str,
+    reasoning: str,
+    calls: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> None:
+    client = _StubClient("Loaded the grading rubric")
+    summarizer = _iteration_summarizer(client)
+
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning=reasoning,
+        tool_calls=calls,
+        prior_iteration_summaries=[],
+        tool_results=results,
+    )
+
+    assert result == "Loaded the grading rubric", label
+    assert len(client.chat.completions.calls) == 1, label
+
+
+@pytest.mark.asyncio
+async def test_transcript_lines_are_not_caption_shaped() -> None:
+    # The transcript the model sees must not look like a valid answer,
+    # or it completes the list instead of summarizing it. Guarded by
+    # feeding each rendered line back through the reply validator.
+    client = _StubClient("Patch the loader")
+    summarizer = _iteration_summarizer(client)
+
+    await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    user_block = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "tool=patch" in user_block
+    assert not _valid_iteration_summary(user_block)
+
+
+# ----------------------------------------------------------------------
+# Narrator-prefix normalization
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("The agent reviewed the rubric", "Reviewed the rubric"),
+        ("Agent found AMLR regulation page on EUR-Lex",
+         "Found AMLR regulation page on EUR-Lex"),
+        ("the agent read Article 5", "Read Article 5"),
+        # Nothing to strip — left exactly as written.
+        ("Reviewed the rubric", "Reviewed the rubric"),
+        ("Agents coordinate through the board", "Agents coordinate through the board"),
+        ("", ""),
+        # A bare opener with no body must not become an empty caption.
+        ("Agent", "Agent"),
+    ],
+)
+def test_normalize_caption(raw: str, expected: str) -> None:
+    assert _normalize_caption(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_summarize_iteration_strips_the_narrator_prefix() -> None:
+    assert await _summarize_with(
+        "The agent reviewed the copywriting skill guidelines",
+    ) == "Reviewed the copywriting skill guidelines"
+
+
+# ----------------------------------------------------------------------
+# JSON-mode captions
+#
+# The iteration call asks for ``{"caption": str}`` under
+# ``response_format``, the same mechanism ``summarize_turn`` already
+# uses. A conforming gateway cannot echo the transcript, leak tool-call
+# markup, or return a bullet list — the reply has to be an object. A
+# gateway that ignores the constraint still returns prose, which is
+# used as-is so captions degrade rather than disappear.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_iteration_call_asks_for_a_json_object() -> None:
+    client = _StubClient('{"caption": "Patched the loader"}')
+    summarizer = _iteration_summarizer(client)
+
+    await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    kwargs = client.chat.completions.calls[0]
+    assert kwargs["response_format"] == {"type": "json_object"}
+    # The wrapper costs tokens the caption used to have to itself; a
+    # reply truncated mid-object parses to nothing at all.
+    assert kwargs["max_tokens"] >= 96
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        ("bare object", '{"caption": "Patched the loader"}'),
+        (
+            "fenced object — gateways that ignore response_format",
+            '```json\n{"caption": "Patched the loader"}\n```',
+        ),
+        (
+            "object with surrounding prose",
+            'Here you go: {"caption": "Patched the loader"}',
+        ),
+        ("quoted caption value", '{"caption": "\\"Patched the loader\\""}'),
+        ("trailing period", '{"caption": "Patched the loader."}'),
+        # A gateway that ignores response_format outright still returns
+        # a usable caption; losing those would be worse than the echoes
+        # this whole guard exists to stop.
+        ("plain prose fallback", "Patched the loader"),
+    ],
+)
+async def test_caption_is_extracted_from_the_reply(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) == "Patched the loader", label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "reply"),
+    [
+        # The echoed tool result is itself a JSON object, so it parses —
+        # but it carries no caption field, and the raw body must not
+        # become the label either.
+        (
+            "echoed tool result",
+            '{"success": true, "name": "social", "description": "..."}',
+        ),
+        ("caption is not a string", '{"caption": {"text": "hi"}}'),
+        ("caption is empty", '{"caption": "   "}'),
+        # Structure inside the caption field still has to be rejected:
+        # response_format constrains the envelope, not the contents.
+        (
+            "transcript echoed inside the caption",
+            '{"caption": "call: patch({}) result: patched"}',
+        ),
+        (
+            "role-play inside the caption",
+            '{"caption": "I\\u2019ll patch the loader next"}',
+        ),
+    ],
+)
+async def test_malformed_json_replies_are_discarded(
+    label: str, reply: str,
+) -> None:
+    assert await _summarize_with(reply) is None, label
+
+
+# ----------------------------------------------------------------------
+# Reply-channel and embedded-object handling
+#
+# Mirrors what structured_output's JSON-mode fallback already does, and
+# for the same reasons: leaked reasoning can restate the tool arguments
+# as an object before the real answer, and reasoning-mode models put the
+# object in a different channel than the prose.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_caption_survives_an_object_printed_before_it() -> None:
+    # Leaked reasoning restates the tool arguments as an object. Taking
+    # only the *first* embedded object loses the caption and drops the
+    # whole reply onto the prose path, where a single-line echo passes
+    # validation and becomes the visible label.
+    assert await _summarize_with(
+        'Tool args were {"path": "a.py"} so the caption is'
+        ' {"caption": "Patched the loader"}',
+    ) == "Patched the loader"
+
+
+@pytest.mark.asyncio
+async def test_caption_is_read_from_the_reasoning_channel() -> None:
+    # Reasoning-mode models spend the token budget thinking and leave
+    # ``content`` empty with the object in ``reasoning_content``.
+    assert await _summarize_with(
+        "", '{"caption": "Patched the loader"}',
+    ) == "Patched the loader"
+
+
+@pytest.mark.asyncio
+async def test_content_channel_wins_when_both_are_present() -> None:
+    assert await _summarize_with(
+        '{"caption": "From content"}', '{"caption": "From reasoning"}',
+    ) == "From content"
+
+
+@pytest.mark.asyncio
+async def test_both_channels_empty_yields_no_caption() -> None:
+    assert await _summarize_with("   ", None) is None
+
+
+# ----------------------------------------------------------------------
+# response_format is a request, not a guarantee
+# ----------------------------------------------------------------------
+
+
+class _RejectsResponseFormat:
+    """A provider that 400s on ``response_format`` and works without it.
+
+    The 400 is the whole signal: it is what separates "this request is
+    malformed for this provider" from a blip. Real SDK errors carry it
+    as ``status_code``.
+    """
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+        self.calls: list[dict[str, Any]] = []
+        self.chat = type("Chat", (), {"completions": self})()
+
+    async def create(self, **kwargs: Any) -> _StubResponse:
+        self.calls.append(kwargs)
+        if "response_format" in kwargs:
+            raise type(
+                "BadRequestError", (Exception,), {"status_code": 400},
+            )("unsupported parameter: response_format")
+        return _StubResponse(self._reply)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_rejecting_json_mode_still_produces_captions() -> None:
+    # Silently losing every caption on the deployment is the one outcome
+    # worse than an unvalidated one, so the constraint is dropped and
+    # the call retried in plain-text mode.
+    client = _RejectsResponseFormat("Patched the loader")
+    summarizer = _iteration_summarizer(client)
+
+    async def run() -> str | None:
+        return await summarizer.summarize_iteration(
+            iteration_id="i0",
+            reasoning="",
+            tool_calls=_calls("patch"),
+            prior_iteration_summaries=[],
+            tool_results=_results("patched"),
+        )
+
+    assert await run() == "Patched the loader"
+    assert "response_format" in client.calls[0]
+    assert "response_format" not in client.calls[1]
+
+    # The rejection is remembered, so the next iteration does not pay
+    # for the failed attempt again.
+    assert await run() == "Patched the loader"
+    assert len(client.calls) == 3
+    assert "response_format" not in client.calls[2]
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_does_not_disable_json_mode() -> None:
+    # A slow provider is not a non-conforming one; giving up the
+    # constraint on the first timeout would lose it permanently.
+    class _Slow:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        async def create(self, **kwargs: Any) -> _StubResponse:
+            self.calls.append(kwargs)
+            raise asyncio.TimeoutError
+
+    client = _Slow()
+    summarizer = _iteration_summarizer(client)
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    assert result is None
+    assert len(client.calls) == 1
+    assert "response_format" in client.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_a_transient_error_does_not_disable_json_mode() -> None:
+    # A dropped connection is not a rejected parameter. Latching on any
+    # exception would let one network blip degrade a whole session's
+    # captions to unvalidated prose.
+    class _Flaky:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        async def create(self, **kwargs: Any) -> _StubResponse:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise ConnectionError("connection reset by peer")
+            return _StubResponse('{"caption": "Patched the loader"}')
+
+    client = _Flaky()
+    summarizer = _iteration_summarizer(client)
+
+    async def run() -> str | None:
+        return await summarizer.summarize_iteration(
+            iteration_id="i0",
+            reasoning="",
+            tool_calls=_calls("patch"),
+            prior_iteration_summaries=[],
+            tool_results=_results("patched"),
+        )
+
+    assert await run() is None
+    assert await run() == "Patched the loader"
+    # Still asking for the object: the blip cost one call, not the mode.
+    assert all("response_format" in c for c in client.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [500, 502, 429])
+async def test_server_errors_and_rate_limits_do_not_disable_json_mode(
+    status: int,
+) -> None:
+    class _Failing:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.chat = type("Chat", (), {"completions": self})()
+
+        async def create(self, **kwargs: Any) -> _StubResponse:
+            self.calls.append(kwargs)
+            raise type("ApiError", (Exception,), {"status_code": status})()
+
+    client = _Failing()
+    summarizer = _iteration_summarizer(client)
+    result = await summarizer.summarize_iteration(
+        iteration_id="i0",
+        reasoning="",
+        tool_calls=_calls("patch"),
+        prior_iteration_summaries=[],
+        tool_results=_results("patched"),
+    )
+
+    assert result is None
+    assert len(client.calls) == 1

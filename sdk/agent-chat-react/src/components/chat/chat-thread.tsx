@@ -53,6 +53,13 @@ import {
 } from "./tools/ask-user-question-tool";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import { statusColorClass, effectiveStatus, toolErrorSummary, parseArgs } from "./tools/shared";
+import {
+  cancelledToolLabel,
+  deriveSingleToolLabel,
+  extractToolDetail,
+  skillViewLabel,
+  toolRowLabel,
+} from "./simple-labels";
 import { ChatMessage } from "./chat-message";
 import { renderInlineMarkdown } from "./inline-markdown";
 import { ChatComposer } from "./chat-composer";
@@ -61,7 +68,6 @@ import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
-import { formatMcpToolLabel } from "../../lib/format";
 import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
@@ -695,51 +701,6 @@ function OrphanSystemMarker({
 
 // ── Cancelled tool row (parallel-batch sibling-error cancellation) ──
 
-function cancelledToolLabel(toolName: string): string {
-  const map: Record<string, string> = {
-    terminal: "Command",
-    execute_code: "Execute code",
-    read_file: "Read",
-    write_file: "Write",
-    patch: "Patch",
-    search_files: "Search files",
-    list_files: "List files",
-    web_search: "Web search",
-    web_extract: "Web fetch",
-    web_crawl: "Web crawl",
-    session_search: "Session search",
-    memory: "Memory",
-    todo: "Todo",
-    skills_list: "Skills",
-    skill_view: "Skill",
-    consult_expert: "Expert",
-    delegate_task: "Delegate task",
-    ask_user_question: "Ask User Question",
-    process: "Process",
-    create_artifact: "Create artifact",
-    run_coding_agent: "Coding agent",
-    code_run: "Coding agent",
-    // ``Research memory`` reads as a noun ("memory of research") and
-    // makes the shimmer awkward ("Running Research memory…").  The
-    // one-liner renderer shows just ``Research`` as the label, so
-    // mirror that here so the live shimmer matches the row that
-    // replaces it on completion.
-    research_memory: "Research",
-    research_outline: "Research",
-    generate_image: "image generation",
-    generate_video: "video generation",
-    // Arbor research-mission tools (the /auto-research coordinator loop).
-    idea_tree: "Idea tree",
-    dispatch_experiments: "Dispatch experiments",
-    merge_experiment: "Merge experiment",
-
-  };
-  if (map[toolName]) return map[toolName];
-  // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
-  // than the raw prefixed name (matches the Expert-mode MCP renderer).
-  if (toolName.startsWith("mcp__")) return formatMcpToolLabel(toolName);
-  return toolName;
-}
 
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
   return (
@@ -1109,6 +1070,11 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   if (calls.length === 0) {
     return message.reasoning ? "Thought through the problem" : null;
   }
+  // Skill loads name themselves, one or many, so they never fall
+  // through to the generic "Skill × 3".
+  if (calls.every((tc) => tc.toolName === "skill_view")) {
+    return skillViewLabel(calls);
+  }
   if (calls.length === 1) {
     const tc = calls[0]!;
     return deriveSingleToolLabel(tc);
@@ -1123,171 +1089,6 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   return `Used ${calls.length} tools`;
 }
 
-/**
- * Header label for a single-tool iteration. Most tools surface a
- * short detail (path basename, query, URL) so the header reads
- * "Read · landing.html". Tools whose detail is structurally noisy —
- * shell commands, arbitrary code blocks, raw memory keys — drop the
- * detail entirely and use a generic verb instead; the full detail
- * still appears in the expanded body via _toolRowLabel.
- */
-function deriveSingleToolLabel(tc: ToolCallInfo): string {
-  const name = cancelledToolLabel(tc.toolName);
-  if (_HEADER_HIDES_DETAIL.has(tc.toolName)) {
-    return _HEADER_GENERIC_VERB[tc.toolName] ?? name;
-  }
-  const detail = extractToolDetail(tc);
-  return detail ? `${name} · ${detail}` : name;
-}
-
-const _HEADER_HIDES_DETAIL: ReadonlySet<string> = new Set([
-  "terminal",
-  "execute_code",
-  "memory",
-]);
-
-const _HEADER_GENERIC_VERB: Record<string, string> = {
-  terminal: "Ran a command",
-  execute_code: "Executed code",
-  memory: "Updated memory",
-};
-
-/**
- * Pull a short, human-readable detail string from a tool call's
- * arguments. Defensive against unparseable / partial JSON during
- * streaming.
- */
-function extractToolDetail(tc: ToolCallInfo): string | null {
-  const args = parseArgs<Record<string, unknown>>(tc.args);
-  if (!args) return null;
-  // Prefer the most-meaningful arg per tool family.
-  const stringArg = (key: string): string | null => {
-    const v = args[key];
-    return typeof v === "string" && v.length > 0 ? v : null;
-  };
-  switch (tc.toolName) {
-    case "read_file":
-    case "write_file":
-    case "patch":
-    case "list_files":
-    case "search_files": {
-      const path = stringArg("path") ?? stringArg("file_path");
-      return path ? lastPathSegment(path) : null;
-    }
-    case "terminal": {
-      const cmd = stringArg("command");
-      return cmd ? truncate(cmd, 40) : null;
-    }
-    case "execute_code": {
-      const code = stringArg("code");
-      return code ? truncate(code.split("\n")[0] ?? "", 40) : null;
-    }
-    case "web_search":
-    case "web_crawl":
-      return stringArg("query");
-    case "web_extract": {
-      const url = stringArg("url");
-      if (!url) return null;
-      // Hostname is much more readable in a one-line chip than the
-      // full URL; falls back to the raw value for unparseable inputs
-      // (file://, data:, etc.).
-      try {
-        return new URL(url).hostname.replace(/^www\./, "");
-      } catch {
-        return truncate(url, 40);
-      }
-    }
-    case "skill_view":
-    case "skill_manage":
-      return stringArg("name") ?? stringArg("skill");
-    case "create_artifact":
-    case "consult_expert":
-    case "delegate_task":
-      return stringArg("name") ?? stringArg("task") ?? stringArg("title");
-    case "run_coding_agent":
-    case "code_run": {
-      const prompt = stringArg("prompt");
-      return prompt ? truncate(prompt, 60) : null;
-    }
-    case "idea_tree":
-      // The action ("add", "view", "report", …) is the meaningful verb;
-      // the header reads "Idea tree · report".
-      return stringArg("action");
-    case "dispatch_experiments": {
-      const keys = args.node_keys;
-      if (Array.isArray(keys) && keys.length > 0) {
-        return truncate(keys.map((k) => String(k)).join(", "), 40);
-      }
-      return stringArg("action");
-    }
-    case "merge_experiment":
-      return stringArg("node_key") ?? stringArg("action");
-    case "memory":
-      return stringArg("action") ?? stringArg("key");
-    case "research_memory": {
-      // ``add`` carries url+title; ``retrieve`` carries query; ``list``
-      // carries nothing useful.  The Simple-mode row prefers a human
-      // anchor over the raw action verb.
-      const action = stringArg("action");
-      if (action === "add") {
-        const title = stringArg("title");
-        if (title) return truncate(title, 60);
-        const url = stringArg("url");
-        if (url) {
-          try {
-            return new URL(url).hostname.replace(/^www\./, "");
-          } catch {
-            return truncate(url, 40);
-          }
-        }
-        return null;
-      }
-      if (action === "retrieve") {
-        return stringArg("query");
-      }
-      return action;
-    }
-    case "research_outline": {
-      const action = stringArg("action");
-      if (action === "set") {
-        // Count level-2+ markdown headings in the outline so the row
-        // surfaces "set outline (10 sections)" rather than the bare
-        // tool name.  Mirrors ``outline_sections`` on the Python side.
-        const outline = stringArg("outline");
-        if (outline) {
-          const sections = outline
-            .split(/\r?\n/)
-            .filter((line) => /^#{2,6}\s+\S/.test(line)).length;
-          if (sections > 0) {
-            return `${sections} ${sections === 1 ? "section" : "sections"}`;
-          }
-        }
-        return "outline";
-      }
-      return action;
-    }
-    default:
-      return null;
-  }
-}
-
-function lastPathSegment(path: string): string {
-  const cleaned = path.replace(/\/+$/, "");
-  const idx = cleaned.lastIndexOf("/");
-  return idx >= 0 ? cleaned.slice(idx + 1) : cleaned;
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
-
-/**
- * Tools that are hidden from Simple mode. These are either pure
- * exploration ("listed the directory"), internal infrastructure
- * (browser_*, process), or scratchpad-style state changes (todo,
- * memory) that don't help the user understand what the agent
- * *did*. Users who care can switch to Expert mode to see them.
- */
 
 /**
  * The subset of an iteration's tool calls that should surface in
@@ -1339,6 +1140,10 @@ function liveIterationLabel(message: ChatMessageType): string {
     (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
   );
   if (running.length === 0) return "Thinking…";
+  // Same wording as the finished row, so it does not rename itself.
+  if (running.every((tc) => tc.toolName === "skill_view")) {
+    return `${skillViewLabel(running)}…`;
+  }
   if (running.length === 1) {
     const tc = running[0]!;
     const name = cancelledToolLabel(tc.toolName);
@@ -1390,108 +1195,6 @@ function _toolRowIcon(toolName: string): LucideIcon {
   return _TOOL_ROW_ICON[toolName] ?? WrenchIcon;
 }
 
-/**
- * Verb-first prose line for a tool call ("Edited landing.html",
- * "Read the frontend-design skill"). Falls back to the human tool
- * name when we can't extract a useful detail from the args.
- */
-function _toolRowLabel(tc: ToolCallInfo): string {
-  const detail = extractToolDetail(tc);
-  switch (tc.toolName) {
-    case "read_file":
-      return detail ? `Read ${detail}` : "Read a file";
-    case "write_file":
-      return detail ? `Wrote ${detail}` : "Wrote a file";
-    case "patch":
-      return detail ? `Edited ${detail}` : "Edited a file";
-    case "list_files":
-      return detail ? `Listed ${detail}` : "Listed files";
-    case "search_files":
-      return detail ? `Searched files for "${detail}"` : "Searched files";
-    case "terminal":
-      // Raw shell commands carry too much noise (paths, escapes,
-      // chained pipes) to read well even as a body row. The Expert
-      // view has the full block with output if the user needs it.
-      return "Ran a command";
-    case "execute_code":
-      return "Executed code";
-    case "web_search":
-      return detail ? `Searched the web for "${detail}"` : "Searched the web";
-    case "web_crawl":
-      return detail ? `Crawled "${detail}"` : "Crawled the web";
-    case "web_extract":
-      return detail ? `Fetched ${detail}` : "Fetched a page";
-    case "session_search":
-      return detail ? `Searched session for "${detail}"` : "Searched session";
-    case "skill_view":
-      return detail ? `Read the ${detail} skill` : "Read a skill";
-    case "skills_list":
-      return "Listed available skills";
-    case "skill_manage":
-      return detail ? `Updated skill ${detail}` : "Managed skills";
-    case "consult_expert":
-      return detail ? `Consulted ${detail} expert` : "Consulted an expert";
-    case "delegate_task":
-      return detail ? `Delegated: ${detail}` : "Delegated a task";
-    case "create_artifact":
-      return detail ? `Created artifact "${detail}"` : "Created an artifact";
-    case "memory":
-      return detail ? `Memory ${detail}` : "Updated memory";
-    case "todo":
-      return detail ? `Todo ${detail}` : "Updated todo list";
-    case "run_coding_agent":
-    case "code_run": {
-      const a = parseArgs<{ agent?: string; provider?: string }>(tc.args);
-      const agent =
-        a?.agent ??
-        (a?.provider === "openai"
-          ? "codex"
-          : a?.provider === "anthropic"
-            ? "claude"
-            : undefined);
-      const name =
-        agent === "codex"
-          ? "Codex"
-          : agent === "claude"
-            ? "Claude Code"
-            : "coding agent";
-      return detail ? `${name}: ${detail}` : `Ran ${name}`;
-    }
-    case "research_memory": {
-      // ``detail`` already encodes the action's anchor (title /
-      // hostname for add, query for retrieve, raw verb otherwise);
-      // wrap it in the verb-first prose the rest of the row family
-      // uses.
-      const args = parseArgs<{ action?: string }>(tc.args);
-      const action = args?.action;
-      if (action === "add") {
-        return detail ? `Stored source "${detail}"` : "Stored a source";
-      }
-      if (action === "retrieve") {
-        return detail
-          ? `Retrieved sources for "${detail}"`
-          : "Retrieved sources";
-      }
-      if (action === "list") {
-        return "Listed sources";
-      }
-      return "Updated research memory";
-    }
-    case "research_outline": {
-      const args = parseArgs<{ action?: string }>(tc.args);
-      const action = args?.action;
-      if (action === "set") {
-        return detail ? `Updated outline (${detail})` : "Updated outline";
-      }
-      if (action === "get") {
-        return "Read outline";
-      }
-      return "Touched outline";
-    }
-    default:
-      return cancelledToolLabel(tc.toolName);
-  }
-}
 
 interface SimpleDetailRowProps {
   icon: LucideIcon;
@@ -1626,7 +1329,7 @@ function IterationExpanded({
         }
         return (
           <SimpleDetailRow key={tc.id} icon={_toolRowIcon(tc.toolName)}>
-            <span>{_toolRowLabel(tc)}</span>
+            <span>{toolRowLabel(tc)}</span>
           </SimpleDetailRow>
         );
       })}

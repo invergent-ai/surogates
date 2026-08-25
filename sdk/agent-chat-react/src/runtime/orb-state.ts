@@ -48,6 +48,8 @@ const TOOL_ORB_STATES: Readonly<Record<string, OrbState>> = {
   kb_read_page: "searching",
   search_files: "searching",
   list_files: "searching",
+  skill_view: "searching",
+  skills_list: "searching",
   research_memory: "searching",
   fetch_channel_messages: "searching",
   fetch_channel_file: "searching",

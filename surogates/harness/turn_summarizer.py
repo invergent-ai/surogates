@@ -23,10 +23,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from surogates.harness.structured_output import parse_json_object
+from surogates.harness.streaming_executor import _is_error_result
+from surogates.harness.message_utils import message_texts
+from surogates.harness.structured_output import (
+    iter_json_objects,
+    parse_json_object,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +41,10 @@ logger = logging.getLogger(__name__)
 _ITERATION_SUMMARY_TIMEOUT_SECONDS: float = 10.0
 _TURN_SUMMARY_TIMEOUT_SECONDS: float = 30.0
 
-_MAX_ITERATION_SUMMARY_TOKENS: int = 64
+# The ``{"caption": …}`` wrapper costs tokens the caption used to have
+# to itself, and a reply truncated mid-object parses to nothing at all
+# where a truncated string was still usable.
+_MAX_ITERATION_SUMMARY_TOKENS: int = 96
 _MAX_TURN_SUMMARY_TOKENS: int = 512
 
 TurnArtifactKind = Literal["file", "artifact"]
@@ -74,7 +83,12 @@ _ITERATION_PROMPT = (
     "do different things; distinguish them by their result. If a call "
     "failed, say so (e.g. 'Find pdftotext fails — falling back to "
     "pypdf'). Be specific and concrete. No quotes, no period at the "
-    "end, no leading 'The agent', max 12 words."
+    "end, no leading 'The agent', max 12 words.\n"
+    "You are an observer writing a caption, not the agent. Never "
+    "continue the agent's work, never speak as the agent ('I will…', "
+    "'Let me…'), and never call a tool, and never repeat the "
+    "transcript lines you were given.\n"
+    'Return ONLY a JSON object: {"caption": "<the one line>"}.'
 )
 
 _TURN_PROMPT = (
@@ -110,6 +124,161 @@ _TURN_PROMPT = (
 
 
 _VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
+
+
+
+# Openers that mark the summary model role-playing the agent instead of
+# captioning it ("I'll load the skill…", "Let me check…"). Matched
+# case-insensitively against the first words of the reply.
+_ROLE_PLAY_OPENERS: tuple[str, ...] = (
+    "i'll ", "i will ", "i am ", "i'm ", "i need ", "i should ",
+    "i can ", "i cannot ", "i've ", "i have ", "let me ", "let's ",
+    "based on ", "first, ", "next, ",
+)
+
+# Markup that only ever appears when a model's native tool-call syntax
+# surfaces as literal text instead of being parsed. ``｜`` (U+FF5C) is
+# the DeepSeek delimiter; the angle-bracket forms cover the XML-style
+# dialects; a fence means the reply is a code block, not a caption.
+_MARKUP_LEAK_MARKERS: tuple[str, ...] = (
+    "<tool_call", "<invoke", "<function", "\uff5c", "```",
+)
+
+
+def _is_self_describing_iteration(
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> bool:
+    """True when the iteration's arguments already say everything.
+
+    A successful ``skill_view`` is the only such iteration: its whole
+    content is *which skill was loaded*, which the arguments state
+    exactly. A caption can only restate that, less reliably, for the
+    price of a model call.
+
+    The qualifiers all guard against a caption that would have carried
+    real information:
+
+    * an empty batch is a text-only iteration — nothing to restate;
+    * uncaptured results cannot be confirmed successful;
+    * a *failed* load is news, and consumers that drop errored calls
+      would otherwise show nothing at all. The prompt asks for exactly
+      this ("if a call failed, say so").
+    """
+    if not tool_calls or not tool_results:
+        return False
+    names = {
+        (tc.get("function") or {}).get("name") or tc.get("name")
+        for tc in tool_calls
+    }
+    if names != {"skill_view"}:
+        return False
+    return not any(_is_error_result(tr) for tr in tool_results)
+
+
+# The prompt forbids a narrator opener and the model uses one anyway in
+# 6.6% of replies. Both observed forms are followed by a past-tense verb
+# ("The agent reviewed…", "Agent found…"), never by a noun, so the
+# prefix strips cleanly.
+_NARRATOR_OPENER_RE = re.compile(r"^(?:the\s+)?agent\s+", re.IGNORECASE)
+
+
+def _rejects_response_format(exc: BaseException) -> bool:
+    """True when the provider refused the request, not the network.
+
+    Only a 4xx that is not a rate limit means *this request* was
+    malformed for *this provider* — and ``response_format`` is the only
+    thing about it that varies by provider. A dropped connection, a
+    timeout or a 5xx is transient, and latching on one of those would
+    let a single blip degrade the rest of the session's captions to
+    unvalidated prose.
+    """
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500 and status != 429
+
+
+def _extract_caption(content: str) -> str:
+    """Pull the caption out of the model's reply.
+
+    Returns raw text rather than ``None`` on a miss: a gateway that
+    ignores ``response_format`` answers in prose, and captions
+    degrading to unvalidated prose is recoverable where every caption
+    on that deployment vanishing is not.
+
+    An object *without* a usable caption field is deliberately not
+    treated as prose. The most common such reply is the echoed tool
+    result, and its raw body must never become the label — returning it
+    unchanged lets the validator reject it on its leading brace.
+    """
+    for parsed in iter_json_objects(content):
+        caption = parsed.get("caption")
+        if isinstance(caption, str) and caption.strip():
+            return caption
+    return content
+
+
+def _normalize_caption(text: str) -> str:
+    """Drop the narrator prefix so the row reads as a caption.
+
+    "The agent reviewed the rubric" → "Reviewed the rubric". The row
+    already sits under the agent's own turn; naming it again is noise
+    that costs a third of the line's visible width.
+    """
+    stripped = _NARRATOR_OPENER_RE.sub("", text, count=1)
+    if stripped == text:
+        return text
+    return stripped[:1].upper() + stripped[1:]
+
+
+def _valid_iteration_summary(text: str) -> bool:
+    """True when ``text`` is a usable one-line caption.
+
+    The cheap summary model periodically completes the prompt's
+    transcript instead of captioning it: it echoes the ``call: … /
+    result: …`` lines verbatim, returns the raw JSON tool result, emits
+    its own tool-call markup as literal text, or continues the turn in
+    the agent's first-person voice. All of those reach the user as the
+    iteration's visible label, so they are rejected here and the caller
+    emits no event — chat clients then fall back to their deterministic
+    tool-derived label, which is what the row should have said anyway.
+    """
+    if not text:
+        return False
+    # A caption is a single line. Every observed structural failure
+    # (transcript echo, bullet list, markup dump) is multi-line.
+    if "\n" in text or "\r" in text:
+        return False
+    # Typographic apostrophes are normalized so a curly "I\u2019ll load the
+    # skill" is caught by the same openers as the ASCII form.
+    lowered = text.lower().replace("\u2019", "'")
+    # The reply repeating the transcript it was handed. Keyed on
+    # co-occurring field markers, because ``call:`` and ``result:`` turn
+    # up in ordinary captions ("Search returns no result: falls back to
+    # pypdf") while no caption ever pairs ``tool=`` with ``args=``.
+    if (
+        ("tool=" in lowered and "args=" in lowered)
+        or ("call:" in lowered and "result:" in lowered)
+        or lowered.startswith(("call:", "tools called"))
+    ):
+        return False
+    if any(marker in lowered for marker in _MARKUP_LEAK_MARKERS):
+        return False
+    stripped = text.lstrip()
+    # A JSON/array body, or a markdown bullet, is structure not prose.
+    if stripped[:1] in {"{", "[", "#", "|"}:
+        return False
+    if stripped[:2] in {"- ", "* ", "> "}:
+        return False
+    if lowered.startswith(_ROLE_PLAY_OPENERS):
+        return False
+    # A caption is one short line. Anything appreciably longer is the
+    # model dumping the transcript back rather than summarizing it, and
+    # the render surface truncates past this regardless.
+    if len(text.split()) > 30:
+        return False
+    return True
 
 
 def _is_internal_workspace_path(path: str) -> bool:
@@ -148,6 +317,9 @@ class TurnSummarizer:
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
+        # Cleared the first time this summarizer's provider rejects
+        # ``response_format``; see :meth:`summarize_iteration`.
+        self._iteration_json_mode = True
 
     async def summarize_iteration(
         self,
@@ -167,6 +339,8 @@ class TurnSummarizer:
         if self._summary_client is None or not self._summary_model:
             return None
         if not reasoning and not tool_calls:
+            return None
+        if _is_self_describing_iteration(tool_calls, tool_results or []):
             return None
 
         tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
@@ -194,16 +368,61 @@ class TurnSummarizer:
             "stream": False,
         }
 
-        content = await self._chat_completion(
-            self._summary_client,
-            kwargs,
-            label=f"iteration {iteration_id}",
-            timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
-        )
+        label = f"iteration {iteration_id}"
+        json_mode = self._iteration_json_mode
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            content = await self._chat_completion(
+                self._summary_client,
+                kwargs,
+                label=label,
+                timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
+                reraise=json_mode,
+            )
+        except Exception as exc:
+            if not _rejects_response_format(exc):
+                return None
+            # ``response_format`` is a request, not a guarantee, and the
+            # summary slot is configured separately from the base model
+            # that has always used it. A provider that rejects the
+            # parameter would otherwise silence every caption it serves
+            # — worse than an unvalidated one — so drop the constraint
+            # and retry once. Plain prose still goes through the
+            # validator.
+            #
+            # The latch is per-summarizer, which is per-session: the
+            # summary endpoint is resolved per tenant
+            # (build_summary_auxiliary_llm reads org overrides), so a
+            # process-wide latch would let one tenant's gateway disable
+            # JSON mode for every other tenant. If this is ever seen
+            # firing per-session in volume, the endpoint-keyed home for
+            # it is AuxiliaryLLM, which is shared by every auxiliary
+            # caller of the same provider.
+            logger.warning(
+                "summary provider rejected response_format; "
+                "falling back to plain-text captions",
+            )
+            self._iteration_json_mode = False
+            kwargs.pop("response_format", None)
+            content = await self._chat_completion(
+                self._summary_client,
+                kwargs,
+                label=label,
+                timeout=_ITERATION_SUMMARY_TIMEOUT_SECONDS,
+            )
         if content is None:
             return None
-        text = content.strip().strip('"').rstrip(".")
-        return text or None
+        caption = _extract_caption(content)
+        text = _normalize_caption(caption.strip().strip('"').rstrip("."))
+        if not _valid_iteration_summary(text):
+            logger.warning(
+                "discarding malformed iteration summary for %s: %r",
+                iteration_id,
+                text[:200],
+            )
+            return None
+        return text
 
     async def summarize_turn(
         self,
@@ -291,11 +510,17 @@ class TurnSummarizer:
         *,
         label: str,
         timeout: float,
+        reraise: bool = False,
     ) -> str | None:
         """Run a single chat completion under the given timeout.
 
         Returns the message content on success, ``None`` on any failure
         (timeout, network error, malformed response shape).
+
+        ``reraise`` propagates provider errors instead of swallowing
+        them, so a caller can tell a rejected request parameter from a
+        slow provider — a timeout never reraises, since retrying it
+        without the parameter would blame the wrong thing.
         """
         try:
             response = await asyncio.wait_for(
@@ -307,13 +532,17 @@ class TurnSummarizer:
             return None
         except Exception as exc:
             logger.warning("summary call failed for %s: %r", label, exc)
+            if reraise:
+                raise
             return None
 
         try:
-            return response.choices[0].message.content
+            message = response.choices[0].message
         except (AttributeError, IndexError, TypeError):
             logger.warning("summary response had unexpected shape for %s", label)
             return None
+
+        return next(iter(message_texts(message)), None)
 
     @staticmethod
     def _format_tool_calls(
@@ -339,7 +568,7 @@ class TurnSummarizer:
                         parts.append(p["text"])
                 results_by_id[call_id] = "\n".join(parts)
         out: list[str] = []
-        for tc in tool_calls:
+        for index, tc in enumerate(tool_calls, 1):
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or "?"
             args = fn.get("arguments") or tc.get("arguments") or ""
@@ -349,8 +578,12 @@ class TurnSummarizer:
             # Keep result snippets short — the summarizer only needs
             # enough to tell two calls apart, not the full output.
             result_snippet = result[:300] if result else "(no result captured)"
+            # Numbered and field-labelled rather than ``call: …`` —
+            # a transcript line must not read like a plausible caption,
+            # or the model completes the list instead of summarizing it.
             out.append(
-                f"call: {name}({args_snippet})\n  result: {result_snippet}"
+                f"[{index}] tool={name} args={args_snippet}\n"
+                f"    returned: {result_snippet}"
             )
         return out
 

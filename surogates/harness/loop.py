@@ -39,6 +39,7 @@ from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
     coerce_message_content,
     make_skipped_tool_result,
+    message_texts,
 )
 from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
@@ -3444,21 +3445,7 @@ class AgentHarness(
 
     @staticmethod
     def _extract_chat_message_content(response: Any) -> str:
-        choice = response.choices[0]
-        message = choice.message
-        if isinstance(message, dict):
-            return str(
-                message.get("content")
-                or message.get("reasoning_content")
-                or message.get("reasoning")
-                or ""
-            )
-        return str(
-            getattr(message, "content", None)
-            or getattr(message, "reasoning_content", None)
-            or getattr(message, "reasoning", None)
-            or ""
-        )
+        return next(iter(message_texts(response.choices[0].message)), "")
 
     @staticmethod
     def _parse_json_object(content: str) -> dict[str, Any]:
