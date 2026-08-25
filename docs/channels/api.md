@@ -1,38 +1,118 @@
 # API Channel
 
-The API channel is a programmatic, fire-and-forget interface for non-interactive clients -- synthetic data generation pipelines, batch evaluation jobs, and any other workload that submits prompts from outside the web or messaging channels. Authentication is by org-scoped API key ("service-account token"); no user identity is involved.
+The API channel is how software talks to an agent. It has two shapes:
 
-The API channel is not a chat interface -- it accepts a prompt, creates a session, queues it for the worker, and returns the session identifier. Results are read directly from the `events` and `sessions` database tables.
+- **OpenAI-compatible chat completions** — point any OpenAI client or SDK at the agent and it works. This is the surface most integrations want.
+- **Fire-and-forget prompt submission** — for pipelines that submit thousands of prompts and sweep results out of the database later.
 
-## When to use it
+Both authenticate with the same API key and run against the same agent. Neither is a lesser agent: a request runs the full thing, with its skills, tools, memory, workspace, and browser.
 
-| Use case | Example |
+## OpenAI-compatible endpoint
+
+Point the client at the agent's own URL plus `/v1/api`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://profesor-romana-o6eskd.cloud.surogate.ai/v1/api",
+    api_key="surg_sk_...",
+)
+
+response = client.chat.completions.create(
+    model="profesor-romana-o6eskd",
+    messages=[{"role": "user", "content": "Care e capitala României?"}],
+)
+print(response.choices[0].message.content)
+```
+
+`GET /v1/api/models` advertises the agent as a single model, named after its slug — the same name that appears in its hostname. Use it to check the endpoint is reachable before sending traffic.
+
+The `/v1/api` suffix is not decoration. `/v1/api/*` is the only path where an API key is accepted, so the `/chat/completions` an OpenAI client appends lands inside the existing auth boundary.
+
+### What works
+
+| | |
 |---|---|
-| Synthetic training-data generation | A pipeline iterates over dataset rows, submits each prompt as a session, and later sweeps the `events` table for `llm.response` rows to harvest completions. |
-| Automated evaluations | A scorer submits thousands of prompts in parallel and reads `events.data` for downstream metrics. |
-| Scheduled bulk work | A cron job dispatches org-wide prompt runs. |
+| **Text** | `chat.completions.create(...)` |
+| **Streaming** | `stream=True` — content arrives as `chat.completion.chunk` deltas, terminated by `[DONE]` |
+| **Reasoning** | streamed as `delta.reasoning_content`, and present as `message.reasoning_content` on a buffered response |
+| **Images** | `image_url` content parts, either a `data:` URL or an `http(s)` URL the server fetches |
+| **Usage** | real token counts, including `prompt_tokens_details.cached_tokens` and `completion_tokens_details.reasoning_tokens` |
+| **Skills and tools** | every skill, tool, MCP server and browser the agent has |
 
-Do **not** use the API channel for interactive experiences -- use the [web channel](web.md) instead, which streams tokens and tool calls live over SSE.
+### What is deliberately not supported
+
+**Client-declared `tools`.** Passing `tools` or `functions` returns a `400` with code `tools_not_supported`. The agent runs its own tools inside the turn and returns the final answer; a tool call sent back to the client would wait forever for a `role: "tool"` reply nothing is listening for. The refusal is loud on purpose — silently ignoring the field would present as a hang.
+
+**Sampling parameters.** `temperature`, `top_p`, `max_tokens`, `seed` and friends are accepted and ignored. An agent resolves its own model and generation settings; honouring the caller's would serve something other than the configured agent.
+
+**The agent's intermediate tool calls** never appear as OpenAI `tool_calls`, for the same reason.
+
+### Errors
+
+Errors use the envelope OpenAI SDKs parse, not FastAPI's `{"detail": ...}`:
+
+```json
+{"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": "tools_not_supported"}}
+```
+
+| Status | Meaning |
+|---|---|
+| `400` | malformed request, unsupported content part, client-declared tools |
+| `401` | missing credential |
+| `403` | wrong principal kind, or a key bound to a different agent |
+| `402` | the agent's allowance is exhausted, or the buyer's package excludes API access |
+| `422` | the message tripped the prompt-injection screen |
+| `502` | the agent failed the turn, or completed without producing an answer |
+| `504` | a non-streaming turn outran its budget — retry with `stream: true` |
+
+A failed or empty turn is always an error, never a `200` carrying an empty string: a caller cannot tell that from a deliberate empty answer and would record it as the agent's reply.
+
+## Conversations
+
+Chat completions are stateless — the client resends the whole `messages` array each call. An agent is not: a session carries memory, a workspace, a live browser. So the endpoint keeps one session per conversation and appends to it, which is what makes a follow-up cheap and gives the agent everything it had last turn.
+
+Send the history as you normally would and the conversation continues in place. Two response headers tell you what happened:
+
+| Header | Meaning |
+|---|---|
+| `X-Surogate-Session` | the session this turn ran in |
+| `X-Surogate-Conversation-Action` | `create`, `append`, or `fork` |
+| `X-Surogate-Conversation-Fork-Reason` | why, when the action was `fork` |
+
+### Rewriting history forks
+
+Appending is only sound while the client appends. Regenerate, edit the last message, branch, or trim your own context, and the session would otherwise accumulate the debris — the stale question *and* its answer stay in the agent's context, and it answers with them still in view.
+
+So each request is reconciled against the session's transcript. A clean prefix appends; anything else forks a fresh session seeded with the history you actually sent. That is normal traffic, not an error — it is what makes "regenerate" behave the way a user expects.
+
+### Serving several end users behind one key
+
+A conversation is identified by the caller's own user turns, scoped to the API key. If **one key serves several of your end users**, two of them holding character-identical conversations would resolve to the same session, and each would see the other's turns.
+
+Prevent it in one of two ways:
+
+- pass a distinct `user` on every request (standard OpenAI field), or
+- set `X-Surogate-Conversation: <your conversation id>` — collision-free, and the recommended integration for anything multi-tenant.
+
+An explicit conversation id also lets you keep no transcript of your own: send just the latest message with the header, and the agent supplies the history.
 
 ## Authentication
 
-The client presents an API key in the `Authorization: Bearer` header. API keys have the prefix `surg_sk_` and are issued to an org by an admin:
+Keys are minted per agent from **Studio → the agent → Channels → Web → Manage**. The raw token is shown exactly once; only a SHA-256 digest is stored and the plaintext cannot be recovered. Revoking takes effect immediately on the replica serving the next request and within a minute across the rest.
 
-```
-POST /v1/admin/service-accounts
-Authorization: Bearer <admin-jwt>
+A key is bound to the agent it was minted for. Presenting it against another agent — even one in the same organisation — returns `403`. Keys carry no user identity and no permissions; they cannot reach admin, auth, or any other `/v1/` route.
 
-{
-  "org_id": "00000000-...",
-  "name": "dataset-gen-v1"
-}
-```
+## Billing
 
-The raw token is returned **exactly once** in the response body (`token`). Store it immediately -- the server keeps only a SHA-256 hash and cannot recover the plaintext. List and revoke endpoints live under the same `/v1/admin/service-accounts` prefix.
+API turns meter exactly like every other channel. The key's owner is the billed party, and a turn draws on the agent's per-user allowance through the same authorize/settle path the web, Slack, Telegram and website channels use. Free or uncapped agents are unaffected.
 
-API keys may only authenticate requests to routes under `/v1/api/*`. Presenting one anywhere else returns 403. Conversely, the `/v1/api/*` routes reject interactive JWTs so the two principal types stay cleanly separated.
+`api` is a sellable channel, so an offer that restricts channels excludes API access unless it is included. A buyer whose package leaves it out gets `402 channel_not_included`.
 
-## Submitting a prompt
+## Fire-and-forget submission
+
+For batch pipelines that do not want a response at all:
 
 ```
 POST /v1/api/prompts
@@ -41,76 +121,39 @@ Authorization: Bearer surg_sk_...
 {
   "prompt": "Write a haiku about distributed systems.",
   "idempotency_key": "dataset-42/row-1337",
-  "metadata": {
-    "dataset_id": "ds_123",
-    "row_index": 1337,
-    "experiment": "baseline-v3"
-  }
+  "metadata": {"dataset_id": "ds_123", "row_index": 1337}
 }
 ```
 
-Response (`202 Accepted`):
+Returns `202` with a `session_id`. The worker processes it asynchronously and the pipeline reads results from the database. `idempotency_key` is scoped per org: two requests carrying the same key resolve to the same session, so retries under timeouts are safe. Anything in `metadata` lands on `sessions.config['pipeline_metadata']`, so results join back to the source dataset without a side table.
 
-```json
-{
-  "session_id": "8f...",
-  "event_id": 42,
-  "deduplicated": false
-}
-```
+`POST /v1/api/prompts:batch` accepts up to 100 prompts in one round-trip, each processed independently, response order matching input order.
 
-The worker picks the session off the Redis queue and processes it asynchronously. The pipeline owns the returned `session_id` and uses it to read results from the database.
-
-### Idempotency
-
-`idempotency_key` is an optional client-supplied string scoped per org. Two requests from the same org with the same key resolve to the **same** session:
-
-- first call -> `deduplicated: false`, new session created
-- second call -> `deduplicated: true`, original `session_id` returned, no new work queued
-
-Use this to make pipeline retries safe under timeouts or restarts. Keys from different orgs do not collide.
-
-### Metadata passthrough
-
-Anything in `metadata` is persisted onto `sessions.config['pipeline_metadata']`. The pipeline joins results back to its source dataset by querying for sessions with specific metadata values -- no side-table required.
-
-## Submitting a batch
-
-```
-POST /v1/api/prompts:batch
-Authorization: Bearer surg_sk_...
-
-{
-  "prompts": [
-    {"prompt": "...", "idempotency_key": "row-1", "metadata": {"i": 1}},
-    {"prompt": "...", "idempotency_key": "row-2", "metadata": {"i": 2}}
-  ]
-}
-```
-
-Each entry is accepted independently. The response preserves input order so callers can zip results back to their input rows. Up to 100 prompts per request.
-
-## Reading results
-
-Each submitted prompt becomes a session (`channel='api'`). The pipeline reads:
+### Reading results
 
 | Signal | Source |
 |---|---|
-| Final LLM answer | `events` rows with `type = 'llm.response'` for the session |
-| Tool calls / tool results | `events` rows with `type IN ('tool.call', 'tool.result')` |
-| Completion status | `sessions.status` (`active`, `idle`, `completed`, `failed`) |
+| Final answer | `events` rows with `type = 'llm.response'` |
+| Tool calls / results | `events` rows with `type IN ('tool.call', 'tool.result')` |
+| Completion status | `sessions.status` |
 | Cost / token usage | `sessions.input_tokens`, `sessions.output_tokens`, `sessions.estimated_cost_usd` |
 | Pipeline metadata | `sessions.config->'pipeline_metadata'` |
 
-The `v_session_messages` view returns conversation-shaped events in training-data format; the `v_response_feedback` and `v_tool_invocations` views expose related signals. See [docs/audit/views.md](../audit/views.md) for the full catalog.
-
-## Recording judge feedback
-
-Pipelines that run an automated judge over their outputs record the judge's grade by `POST /v1/api/sessions/{session_id}/events/{event_id}/feedback`, authenticated with the same service-account token. The endpoint accepts binary `rating` (required), a numeric `score`, per-axis `criteria`, and a free-form `rationale`. The stored event carries `source: "judge"` so downstream training-data selection can weight judge feedback independently from human thumbs. See [Appendix B: Feedback (API Channel)](../appendices/api-reference.md#feedback-api-channel) for the full schema and idempotency semantics.
+The `v_session_messages` view returns conversation-shaped events in training-data format. See [docs/audit/views.md](../audit/views.md) for the full catalog.
 
 ## Interaction with other subsystems
 
-- **Training data**: API sessions participate in `TrainingDataCollector` exports on the same footing as every other channel -- successful expert delegations and skill invocations from pipeline-submitted prompts are eligible for expert training, evaluation, or prompt/config improvement.
-- **Idle reset**: the session-reset CronJob resets API sessions in place without running the memory-flush agent -- service accounts have no per-user memory.
+- **Training data**: API sessions participate in `TrainingDataCollector` exports on the same footing as every other channel.
+- **Idle reset**: the session-reset CronJob resets API sessions in place without running the memory-flush agent — service accounts have no per-user memory.
 - **Memory**: API sessions use the org-shared memory directory, not user-scoped memory.
-- **Permissions**: API keys carry no permissions; access is scoped entirely by org membership. They cannot reach admin, auth, or any other `/v1/` routes.
+- **Inbox**: API sessions raise no inbox items. There is no conversation a person opens to clear one.
+
+## Verifying an integration
+
+`scripts/openai_conformance.py` drives a live agent through the whole surface with the real OpenAI SDK — models list, multi-turn memory, streaming, reasoning, images, long turns, and the auth refusals — and prints a pass/fail table:
+
+```bash
+python scripts/openai_conformance.py \
+    --base-url https://profesor-romana-o6eskd.cloud.surogate.ai/v1/api \
+    --api-key surg_sk_...
+```
