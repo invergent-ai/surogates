@@ -10,11 +10,13 @@ Layered as:
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from surogates.tools.builtin import file_ops as file_ops_module
 from surogates.tools.builtin.file_ops import _read_file_handler
 from tests.tools.fixtures.build_documents import (
     build_minimal_docx,
@@ -403,3 +405,60 @@ def test_read_file_description_mentions_native_document_handling() -> None:
     # Negative guard: the old "Cannot read images or binary files" wording
     # would tell the LLM to avoid the tool for these inputs.
     assert "cannot read images" not in desc
+
+
+# ---------------------------------------------------------------------------
+# Parse backend selection inside a daemonic process
+# ---------------------------------------------------------------------------
+
+
+def _probe_use_subprocess_parse(conn) -> None:
+    """Report the daemon flag and backend choice from a forked child."""
+    from surogates.tools.builtin import file_ops
+
+    # tests/conftest.py forces the env opt-out on, which would make the
+    # predicate return False for the wrong reason.  Force it back so the
+    # daemon guard is the only thing under test.
+    file_ops._USE_SUBPROCESS_PARSE = True
+    try:
+        conn.send(
+            {
+                "daemon": multiprocessing.current_process().daemon,
+                "use_subprocess": file_ops._use_subprocess_parse(),
+            }
+        )
+    finally:
+        conn.close()
+
+
+def test_parse_uses_thread_inside_daemonic_process(monkeypatch) -> None:
+    """A daemon child must not reach for the pool.
+
+    The sandbox tool executor forks a daemon child per ``/execute``, and a
+    daemonic process cannot fork children -- building the pool there raises
+    ``AssertionError: daemonic processes are not allowed to have children``
+    and every PDF/docx/xlsx/pptx read fails.
+    """
+    ctx = multiprocessing.get_context("fork")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_probe_use_subprocess_parse, args=(child_conn,), daemon=True,
+    )
+    proc.start()
+    child_conn.close()
+    try:
+        assert parent_conn.poll(30), "daemon child produced no result"
+        result = parent_conn.recv()
+    finally:
+        parent_conn.close()
+        proc.join(10)
+        if proc.is_alive():
+            proc.kill()
+
+    assert result["daemon"] is True, "child was not daemonic; test is vacuous"
+    assert result["use_subprocess"] is False
+
+    # Same flag, non-daemonic process: the pool is still the default, so
+    # the assertion above pins the daemon guard rather than a constant.
+    monkeypatch.setattr(file_ops_module, "_USE_SUBPROCESS_PARSE", True)
+    assert file_ops_module._use_subprocess_parse() is True

@@ -520,3 +520,62 @@ class TestRedisLockIsUsedWhenProvided:
 
         assert len(recorded_keys) == 1
         assert recorded_keys[0] == f"surogates:skill-stage:{session_id}:k"
+
+
+class TestDbBackedSkillStaging:
+    """A DB-backed skill whose files live in the tenant bucket must stage.
+
+    The loader labels project/org DB skills ``org_db`` (and per-user ones
+    ``user_db``) -- never ``org``.  Matching source constants here meant a
+    DB row carrying a ``hub_ref``, with a real ``references/`` tree in the
+    tenant bucket, silently skipped staging: ``.skills/{name}/`` never
+    appeared in the workspace while SKILL.md kept telling the model to read
+    from it.
+    """
+
+    async def _stage(self, backend: LocalBackend, org_id, source: str):
+        from surogates.api.routes.skills import _stage_skill_for_session
+
+        class _Skill:
+            name = "posthog-analytics"
+
+        _Skill.source = source
+
+        class _Tenant:
+            pass
+
+        _Tenant.org_id = org_id
+        _Tenant.user_id = None
+
+        return await _stage_skill_for_session(
+            request=_MockRequest(backend),  # type: ignore[arg-type]
+            tenant=_Tenant(),  # type: ignore[arg-type]
+            skill_def=_Skill(),
+            session_id=uuid4(),
+            linked_files=["references/daily-report.md"],
+        )
+
+    @pytest.mark.parametrize("source", ["org_db", "user_db", "org"])
+    async def test_db_backed_skill_with_bucket_files_is_staged(
+        self, tmp_path: Path, source: str,
+    ):
+        backend = LocalBackend(base_path=str(tmp_path / "storage"))
+        await backend.create_bucket(STORAGE_BUCKET)
+        org_id = uuid4()
+        prefix = f"tenants/{org_id}/shared/skills/posthog-analytics"
+        await backend.write_text(STORAGE_BUCKET, f"{prefix}/SKILL.md", "body")
+        await backend.write_text(
+            STORAGE_BUCKET, f"{prefix}/references/daily-report.md", "# daily",
+        )
+
+        staged = await self._stage(backend, org_id, source)
+        assert staged is not None, f"source={source} was not staged"
+        assert staged.endswith("/.skills/posthog-analytics/")
+
+    async def test_content_only_db_skill_still_stages_nothing(
+        self, tmp_path: Path,
+    ):
+        """No bucket tree -> None, the correct answer for a content-only row."""
+        backend = LocalBackend(base_path=str(tmp_path / "storage"))
+        await backend.create_bucket(STORAGE_BUCKET)
+        assert await self._stage(backend, uuid4(), "org_db") is None

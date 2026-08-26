@@ -16,6 +16,7 @@ import difflib
 import errno
 import json
 import logging
+import multiprocessing
 import os
 import re
 import shutil
@@ -65,6 +66,25 @@ _USE_SUBPROCESS_PARSE: bool = (
 )
 _parse_pool: ProcessPoolExecutor | None = None
 _parse_pool_lock = threading.Lock()
+
+
+def _use_subprocess_parse() -> bool:
+    """Whether to parse in the pool rather than a thread.
+
+    A daemonic process may not fork children, so building the pool there
+    raises ``AssertionError: daemonic processes are not allowed to have
+    children`` and every document read fails.  That is exactly where
+    ``read_file`` runs in production: the sandbox tool executor forks a
+    daemon child per ``/execute`` (see
+    :func:`surogates.sandbox.executor_server.execute_in_child`), which
+    already gives the process isolation the pool exists to provide — so
+    the thread path is both the only option and the right one.
+
+    Checked per call, not at import: the executor daemon imports this
+    module at boot to warm the registry, *before* it forks, so an
+    import-time check would always read the non-daemon parent.
+    """
+    return _USE_SUBPROCESS_PARSE and not multiprocessing.current_process().daemon
 
 
 def _get_parse_pool() -> ProcessPoolExecutor:
@@ -323,7 +343,7 @@ async def _parse_document_to_text(path: Path) -> str:
     may still complete the parse in the background — that's fine, the
     result is just discarded.
     """
-    if _USE_SUBPROCESS_PARSE:
+    if _use_subprocess_parse():
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(
             _get_parse_pool(), _convert_to_text_sync, path,
@@ -331,9 +351,9 @@ async def _parse_document_to_text(path: Path) -> str:
         awaitable: asyncio.Future | asyncio.Task = asyncio.shield(future)
         on_timeout_cancel = future
     else:
-        # Thread-based fallback (tests, or explicit opt-out).  GIL
-        # contention is acceptable here because the test environment
-        # isn't on the critical liveness-probe path.
+        # Thread-based fallback: the sandbox executor's daemon child
+        # (where GIL contention can't reach the serving loop — it is a
+        # separate process), tests, or an explicit opt-out.
         awaitable = asyncio.create_task(
             asyncio.to_thread(_convert_to_text_sync, path),
         )
