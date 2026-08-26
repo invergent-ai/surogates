@@ -271,11 +271,7 @@ async def _stage_skill_for_session(
     directory (i.e. it came from the bundle's ``skills/{name}/`` tree),
     we stage from the bundle instead of failing.
     """
-    from surogates.tools.loader import (
-        SKILL_SOURCE_ORG,
-        SKILL_SOURCE_PLATFORM,
-        SKILL_SOURCE_USER,
-    )
+    from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 
     if not has_stageable_assets(linked_files):
         return None
@@ -296,21 +292,23 @@ async def _stage_skill_for_session(
             bundle=bundle,
         )
 
-    if skill_def.source in (SKILL_SOURCE_USER, SKILL_SOURCE_ORG):
-        ts = _get_tenant_storage(request, tenant)
-        existing = await ts.skill_exists(skill_def.name)
-        if not existing:
-            return None
-        return await stager.stage_from_object_store(
-            session_id=session_id,
-            skill_name=skill_def.name,
-            source_bucket=request.app.state.settings.storage.bucket,
-            source_prefix=existing["key_prefix"],
-        )
-
-    # DB-backed skills have no linked files beyond what is in the content
-    # column itself, so there is nothing to stage.
-    return None
+    # Everything else is tenant-bucket-backed.  Resolve by asking the
+    # bucket rather than by matching a source constant: the loader emits
+    # ``org_db``/``user_db`` for DB-backed skills, never ``org``, so the
+    # old membership test was unreachable and a DB row carrying a
+    # ``hub_ref`` (a project skill with references/ and templates/) never
+    # got staged.  A skill with nothing in the bucket returns None here,
+    # which is the correct answer for a content-only DB row.
+    ts = _get_tenant_storage(request, tenant)
+    existing = await ts.skill_exists(skill_def.name)
+    if not existing:
+        return None
+    return await stager.stage_from_object_store(
+        session_id=session_id,
+        skill_name=skill_def.name,
+        source_bucket=request.app.state.settings.storage.bucket,
+        source_prefix=existing["key_prefix"],
+    )
 
 
 def _parse_frontmatter(content: str, fallback_name: str) -> dict[str, Any]:
@@ -536,7 +534,7 @@ async def view_skill(
     preamble is prepended to ``content`` so the LLM can resolve relative
     paths (``scripts/foo.py``) against the staged directory.
     """
-    from surogates.tools.loader import SKILL_SOURCE_PLATFORM, SKILL_SOURCE_USER
+    from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 
     loader = _resource_loader(request)
     session_factory = request.app.state.session_factory
@@ -574,14 +572,21 @@ async def view_skill(
     if skill_def.is_expert:
         _populate_expert_detail(detail, skill=skill_def)
 
-    # Populate linked_files from the skill's source layer.
-    if skill_def.source == SKILL_SOURCE_USER:
+    # Populate linked_files from the skill's source layer.  Everything
+    # that is not bundle-backed lives in the tenant bucket, so mirror
+    # ``read_skill_file``: special-case ``platform`` and fall through for
+    # every other source.  Matching source constants here instead used to
+    # miss the DB-backed layers -- the loader emits ``org_db``/``user_db``,
+    # never ``org``, so a project skill with a ``hub_ref`` reported no
+    # linked files, skipped staging entirely, and left the model reading
+    # a ``.skills/{name}/`` tree that was never materialised.
+    if skill_def.source != SKILL_SOURCE_PLATFORM:
         ts = _get_tenant_storage(request, tenant)
         existing = await ts.skill_exists(name)
         if existing:
             files = await ts.list_skill_files(existing["key_prefix"])
             detail.linked_files = [f for f in files if f != "SKILL.md"]
-    elif skill_def.source == SKILL_SOURCE_PLATFORM and bundle is not None:
+    elif bundle is not None:
         # Bundle-backed platform skill: enumerate the bundle's
         # ``skills/{name}/`` prefix.  SKILL.md is excluded so the list
         # contains only the auxiliary files that get auto-staged.
