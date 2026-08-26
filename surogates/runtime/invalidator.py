@@ -73,6 +73,11 @@ _CHANNEL_ROUTING: tuple[tuple[str, str], ...] = (
     # resolver cache keys on that same NUL-joined string, so the suffix passes
     # through verbatim.
     ("agent_principal_changed:", "agent_principal_cache"),
+    # A service-account token was revoked.  ops publishes
+    # ``service_account_revoked:<service_account_id>``; the auth cache adapter
+    # keys on that id and drops both its by-id and by-hash entries, so a
+    # revoked customer API key stops working here at once rather than at TTL.
+    ("service_account_revoked:", "service_account_auth_cache"),
     # global system-skills bundle bumped.  The ops
     # `surogate-ops seed-builtin-skills` CLI publishes
     # ``system_skills_changed:<new_tag>`` after a successful
@@ -114,6 +119,7 @@ def handle_invalidation_message(
     mate_settings_cache: Any = None,
     channel_identity_cache: Any = None,
     agent_principal_cache: Any = None,
+    service_account_auth_cache: Any = None,
 ) -> None:
     """Drop a single cache entry if the channel matches.
 
@@ -134,6 +140,7 @@ def handle_invalidation_message(
         "mate_settings_cache": mate_settings_cache,
         "channel_identity_cache": channel_identity_cache,
         "agent_principal_cache": agent_principal_cache,
+        "service_account_auth_cache": service_account_auth_cache,
     }
     for prefix, cache_kwarg in _CHANNEL_ROUTING:
         if channel.startswith(prefix):
@@ -162,6 +169,7 @@ async def run_invalidator(
     mate_settings_cache: Any = None,
     channel_identity_cache: Any = None,
     agent_principal_cache: Any = None,
+    service_account_auth_cache: Any = None,
 ) -> None:
     """Long-running listener for runtime-config / firebase / slug invalidations.
 

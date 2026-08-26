@@ -154,6 +154,39 @@ async def _ensure_live_view_control(
         )
 
 
+async def _require_session_agent(
+    app_state: Any, session_id: UUID, tenant: TenantContext,
+) -> None:
+    """404 a browser session belonging to an agent this token is not bound to.
+
+    These routes authorise on the session's ORG alone, so without this a
+    customer API key minted for one agent can take control of, screenshot and
+    tear down a SIBLING agent's live browser in the same org — the operator's
+    other agents driving their own logged-in sessions.
+
+    Checked against the session row's own ``agent_id``, never a
+    request-supplied one. 404 rather than 403, matching the resolver's
+    convention that a stranger cannot tell "exists but not yours" from
+    "does not exist". Org-scoped control-plane tokens are untouched.
+
+    Takes app state rather than a ``Request`` so the live-view WebSocket
+    handler — which has a ``WebSocket``, not a request — is covered by the
+    same guard as the HTTP routes.
+    """
+    bound = getattr(tenant, "service_account_agent_id", None)
+    if bound is None:
+        return
+    store = getattr(app_state, "session_store", None)
+    if store is None:
+        return
+    try:
+        session = await store.get_session(session_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="No browser for session")
+    if session.agent_id and session.agent_id != bound:
+        raise HTTPException(status_code=404, detail="No browser for session")
+
+
 @router.get(
     "/api/sessions/{session_id}/browser/state",
     response_model=BrowserStateResponse,
@@ -170,6 +203,7 @@ async def get_browser_state(
     resolver = request.app.state.browser_resolver
     control = request.app.state.browser_control
 
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -211,6 +245,7 @@ async def post_browser_control(
             detail="Browser control dependencies are not available.",
         )
 
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -280,6 +315,7 @@ async def delete_session_browser(
     endpoint never reveals foreign session ids.
     """
     resolver = request.app.state.browser_resolver
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -338,6 +374,7 @@ async def get_browser_preview(
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> Response:
     resolver = request.app.state.browser_resolver
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -377,6 +414,7 @@ async def proxy_live_view(
 ) -> Response:
     resolver = request.app.state.browser_resolver
     control = request.app.state.browser_control
+    await _require_session_agent(request.app.state, session_id, tenant)
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),
@@ -461,6 +499,13 @@ async def proxy_live_view_ws(
 
     resolver = websocket.app.state.browser_resolver
     control = websocket.app.state.browser_control
+    try:
+        await _require_session_agent(websocket.app.state, session_id, tenant)
+    except HTTPException:
+        # A WebSocket cannot answer with a status code; close with the same
+        # "nothing here" meaning the HTTP routes give.
+        await websocket.close(code=4404, reason="no browser")
+        return
     resolved = await resolver.resolve(
         str(session_id),
         expected_org_id=str(tenant.org_id),

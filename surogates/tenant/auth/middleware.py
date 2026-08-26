@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "LIVE_VIEW_TOKEN_COOKIE",
+    "enforce_agent_binding",
     "authenticate_websocket_tenant",
     "get_current_tenant",
     "setup_auth_middleware",
@@ -320,6 +321,73 @@ async def _tenant_context_from_token(
     return ctx
 
 
+#: Paths whose clients are OpenAI SDKs.  Those SDKs read ``error.message`` and
+#: surface ``None`` for anything else, so an auth refusal shaped as FastAPI's
+#: ``{"detail": ...}`` reaches the developer as an empty string.
+_OPENAI_PATHS: tuple[str, ...] = (
+    "/v1/api/chat/completions",
+    "/v1/api/models",
+)
+
+
+def _auth_error_body(path: str, detail: object) -> dict:
+    """The error envelope the caller of *path* can actually read.
+
+    Delegates to the channel's own builder rather than hand-rolling the
+    shape: two spellings of this envelope drift, and the drift is invisible
+    until an SDK renders an empty error message.
+    """
+    if not any(path.startswith(p) for p in _OPENAI_PATHS):
+        return {"detail": detail}
+
+    from surogates.channels.openai_shape import (
+        OpenAIRequestError,
+        build_error_body,
+    )
+
+    return build_error_body(
+        OpenAIRequestError(
+            detail if isinstance(detail, str) else str(detail),
+            code="invalid_api_key",
+        )
+    )
+
+
+async def enforce_agent_binding(request: Request, ctx: TenantContext) -> None:
+    """Refuse an agent-bound token aimed at a different agent.
+
+    A service-account token used to be a platform-internal credential, always
+    org-scoped, so "any agent in the org" was the right reach.  A customer API
+    key is handed to a third party and bound to ONE agent — and because the
+    target agent is resolved from the ``Host`` header, independently of
+    authentication, nothing else stops that third party pointing the same key
+    at a sibling agent and driving its sessions, workspace and prompts.
+
+    Enforced in the middleware rather than at a route dependency because
+    several routers are mounted at BOTH ``/v1`` and ``/v1/api``: their
+    handlers declare paths like ``/skills``, so a per-dependency check leaves
+    every one of them uncovered while looking complete.  Here the guard sees
+    the request whatever its path.
+
+    Session-addressed routes (``/v1/api/sessions/{id}/...``) resolve no agent
+    at all, so they are covered instead by
+    :mod:`surogates.api.session_guards`, against the session row's own agent.
+
+    Org-scoped tokens (``service_account_agent_id is None``) are untouched.
+    """
+    bound = ctx.service_account_agent_id
+    if bound is None:
+        return
+    from surogates.runtime.resolver import resolve_agent_id_soft
+
+    target = await resolve_agent_id_soft(request)
+    if target is not None and target != bound:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This API key is bound to a different agent.",
+        )
+
+
 async def _build_service_account_context(
     session_factory: async_sessionmaker,
     raw_token: str,
@@ -349,6 +417,7 @@ async def _build_service_account_context(
         permissions=frozenset(),
         asset_root=f"{tenant_assets_root}/{sa.org_id}",
         service_account_id=sa.id,
+        service_account_agent_id=sa.agent_id,
     )
 
 
@@ -462,6 +531,7 @@ async def _build_service_account_session_context(
         asset_root=asset_root,
         service_account_id=sa.id,
         session_scope_id=session_id,
+        service_account_agent_id=sa.agent_id,
     )
 
 
@@ -500,9 +570,14 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
             ) or ""
 
         if not token:
+            # The envelope matters most here: a blank or absent key is the
+            # commonest first-run mistake, and an OpenAI SDK shown
+            # {"detail": ...} surfaces error.message as None.
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Missing authentication credentials."},
+                content=_auth_error_body(
+                    path, "Missing authentication credentials.",
+                ),
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
@@ -513,7 +588,7 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
             logger.error("session_factory not set on app.state")
             return JSONResponse(
                 status_code=500,
-                content={"detail": "Server misconfiguration."},
+                content=_auth_error_body(path, "Server misconfiguration."),
             )
 
         try:
@@ -526,8 +601,16 @@ def setup_auth_middleware(app: FastAPI, settings: Settings) -> None:
         except HTTPException as exc:
             return JSONResponse(
                 status_code=exc.status_code,
-                content={"detail": exc.detail},
+                content=_auth_error_body(path, exc.detail),
                 headers=exc.headers or {},
+            )
+
+        try:
+            await enforce_agent_binding(request, ctx)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=_auth_error_body(path, exc.detail),
             )
         set_tenant(ctx)
 

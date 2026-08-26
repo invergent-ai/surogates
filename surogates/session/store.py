@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_, tuple_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -699,6 +700,49 @@ class SessionStore:
 
             if not result.rowcount:
                 raise SessionNotFoundError(f"session {session_id} not found")
+
+    async def set_session_idempotency_key(
+        self, session_id: UUID, key: str,
+    ) -> bool:
+        """Move a session's ``idempotency_key``, or report the collision.
+
+        Used by the OpenAI channel, where the key names the conversation state
+        a request is replying to and therefore advances by one turn each time.
+
+        Returns False — rather than raising — when another session in the org
+        already holds *key*.  That happens when two identical conversations run
+        under one API key with no ``user`` to tell them apart, and the correct
+        outcome is that this session stops being reachable by derivation, not
+        that a turn the agent has already been asked to run fails.  The caller
+        logs it; the next request forks into a fresh session.
+        """
+        async with self._sf() as db:
+            try:
+                result = await db.execute(
+                    update(SessionRow)
+                    .where(SessionRow.id == session_id)
+                    .values(idempotency_key=key, updated_at=func.now())
+                )
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                return False
+        return result.rowcount > 0
+
+    async def clear_session_idempotency_key(self, session_id: UUID) -> None:
+        """Release a session's ``idempotency_key``.
+
+        Used when a conversation key has to move to a different session: the
+        column is uniquely indexed per org, so the new holder cannot take the
+        key until the old one gives it up.
+        """
+        async with self._sf() as db:
+            await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id)
+                .values(idempotency_key=None, updated_at=func.now())
+            )
+            await db.commit()
 
     async def update_session_config_key(
         self,

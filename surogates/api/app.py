@@ -193,6 +193,8 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     """
     import asyncio
 
+    from surogates.tenant.auth.service_account import ServiceAccountAuthCache
+
     from surogates.runtime import (
         ChannelRoutingCache,
         FileBundleCache,
@@ -310,6 +312,9 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
             channel_routing_cache=channel_routing_cache,
             system_bundle_cache=system_bundle_cache,
             mate_settings_cache=mate_settings_cache,
+            # So a key revoked in the control plane stops authenticating on
+            # this replica at once, rather than at its 60s cache TTL.
+            service_account_auth_cache=ServiceAccountAuthCache(),
         ),
         name="surogates-runtime-invalidator",
     )
@@ -703,6 +708,7 @@ def create_app() -> FastAPI:
         inbox,
         memory,
         missions,
+        openai,
         prompts,
         scheduled_work,
         sessions,
@@ -788,6 +794,10 @@ def create_app() -> FastAPI:
     )
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
+    # OpenAI-compatible facade. Mounted at /v1 so its own "/api/..." paths
+    # land on /v1/api/chat/completions -- inside the service-account path
+    # prefix, which is the only place a surg_sk_ token is accepted.
+    app.include_router(openai.router, prefix="/v1", tags=["openai"])
     # Service-account callers (ops's Work-chat forwarding path mints
     # bare ``surg_sk_`` tokens; the auth middleware only allows those
     # on ``/v1/api/*`` routes — see

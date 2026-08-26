@@ -140,15 +140,89 @@ CREATE INDEX IF NOT EXISTS idx_service_accounts_org
     ON service_accounts (org_id);
 
 -- Per-agent principal: ``agent_id`` links a service account to its owning ops
--- Agent (a different database — logical reference, not a FK).  The partial
--- unique index keeps it one service account per agent.  Retrofit for existing
--- databases; ``create_all`` covers fresh ones.
+-- Agent (a different database — logical reference, not a FK).  Retrofit for
+-- existing databases; ``create_all`` covers fresh ones.
 ALTER TABLE service_accounts
     ADD COLUMN IF NOT EXISTS agent_id text;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent
+-- ``kind`` splits the agent's own machine identity from the operator-minted
+-- API keys of the OpenAI-compatible channel, which share this table and its
+-- auth path but obey opposite cardinality rules.  See the ``ServiceAccount``
+-- model docstring for the vocabulary.
+ALTER TABLE service_accounts
+    ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'service';
+
+-- Every row that carried an ``agent_id`` before ``kind`` existed was, by
+-- construction, an agent principal — nothing else could write that column.
+-- Settles to a no-op after the first run: every writer now sets ``kind``
+-- explicitly, so no later row can match both halves of this predicate.
+--
+-- Promotes at most ONE row per agent. During a rolling deploy a replica still
+-- running pre-``kind`` code inserts a principal with the column default, so an
+-- agent can briefly hold two such rows; promoting both would make the unique
+-- index below impossible to build and abort this whole script inside its
+-- transaction, taking the service down on the next start. The newest row wins,
+-- matching what the old writer intended.
+--
+-- A straggler left at 'service' is NOT inert: every principal lookup filters
+-- on kind, so an agent whose only row stayed 'service' has no resolvable
+-- identity and its turns fail. That is why the promotion runs on every start
+-- rather than once — a row written by an old replica after this script ran is
+-- picked up by the next boot — and why the query below reports any that are
+-- still waiting.
+UPDATE service_accounts sa
+   SET kind = 'agent_principal'
+  FROM (
+        SELECT DISTINCT ON (agent_id) id
+          FROM service_accounts
+         WHERE agent_id IS NOT NULL AND kind = 'service'
+         ORDER BY agent_id, created_at DESC, id DESC
+       ) newest
+ WHERE sa.id = newest.id
+   AND NOT EXISTS (
+        SELECT 1 FROM service_accounts other
+         WHERE other.agent_id = sa.agent_id
+           AND other.kind = 'agent_principal'
+       );
+
+-- The old index capped an agent at ONE service account, which made a second
+-- API key impossible.  Replaced by a narrower predicate that constrains only
+-- the principal.  Dropped by name: on a fresh database ``create_all`` has
+-- already built the replacement, so this is a no-op there.
+DROP INDEX IF EXISTS uq_service_accounts_agent;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_service_accounts_agent_principal
+    ON service_accounts (agent_id)
+    WHERE agent_id IS NOT NULL AND kind = 'agent_principal';
+
+CREATE INDEX IF NOT EXISTS idx_service_accounts_agent
     ON service_accounts (agent_id)
     WHERE agent_id IS NOT NULL;
+
+-- Surfaces an agent whose principal never got promoted: it has an agent_id,
+-- no principal, and therefore no identity the runtime can resolve. Expected
+-- to return nothing; a row here means a pre-``kind`` writer landed after the
+-- promotion above and the next start will fix it.
+DO $$
+DECLARE stranded integer;
+BEGIN
+    SELECT count(*) INTO stranded
+      FROM service_accounts sa
+     WHERE sa.agent_id IS NOT NULL
+       AND sa.revoked_at IS NULL
+       AND NOT EXISTS (
+            SELECT 1 FROM service_accounts p
+             WHERE p.agent_id = sa.agent_id
+               AND p.kind = 'agent_principal'
+               AND p.revoked_at IS NULL
+           );
+    IF stranded > 0 THEN
+        RAISE WARNING
+            'service_accounts: % agent row(s) have no agent_principal; '
+            'those agents cannot resolve an identity until this script '
+            'runs again after the old replicas are gone', stranded;
+    END IF;
+END $$;
 
 -- ----------------------------------------------------------------------------
 -- Sessions — retrofits for the API channel.

@@ -957,15 +957,42 @@ class ServiceAccount(Base):
     Synthetic data pipelines and other non-interactive clients authenticate
     with a bearer token issued from this table.  The raw token is returned
     once on creation and only a SHA-256 hash is persisted.
+
+    ``kind`` separates two populations that share this table because they
+    share an auth path, but obey opposite cardinality rules:
+
+    * ``agent_principal`` — the machine identity an agent *acts as*.  Exactly
+      one per agent, enforced by ``uq_service_accounts_agent_principal``.
+      Provisioned by the control plane, never surfaced to an end user.
+    * ``api_key`` — a customer-facing key for the OpenAI-compatible API
+      channel.  Many per agent, minted and revoked by the agent's operator.
+    * ``service`` — an ordinary org-scoped account with no agent binding
+      (synthetic-data pipelines, ops-chat, evaluation identities).
+
+    Without this split the partial unique index below caps an agent at one
+    token, which makes "create a second API key" impossible.
     """
 
     __tablename__ = "service_accounts"
     __table_args__ = (
         Index("idx_service_accounts_org", "org_id"),
+        # One *principal* per agent — API keys are deliberately outside the
+        # predicate so an agent can carry as many of them as its operator
+        # mints.  Renamed from ``uq_service_accounts_agent`` when ``kind``
+        # was introduced; ``observability.sql`` drops the old name.
         Index(
-            "uq_service_accounts_agent",
+            "uq_service_accounts_agent_principal",
             "agent_id",
             unique=True,
+            postgresql_where=text(
+                "agent_id IS NOT NULL AND kind = 'agent_principal'"
+            ),
+        ),
+        # Listing an agent's API keys is a per-agent read; the org index
+        # above does not serve it once an org owns many agents.
+        Index(
+            "idx_service_accounts_agent",
+            "agent_id",
             postgresql_where=text("agent_id IS NOT NULL"),
         ),
     )
@@ -988,10 +1015,17 @@ class ServiceAccount(Base):
     last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     # Logical reference to the ops ``Agent.id`` (a different database, so no
-    # FK).  Set when this service account is the agent's own principal; NULL for
-    # ordinary org-scoped service accounts.  The partial unique index above
-    # keeps it one-SA-per-agent.
+    # FK).  Set both for the agent's own principal and for the operator-minted
+    # API keys bound to it; NULL for ordinary org-scoped service accounts.
+    # ``kind`` decides which, and the partial unique index above keeps the
+    # *principal* one-per-agent while leaving API keys unbounded.
     agent_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # See the class docstring: ``agent_principal`` | ``api_key`` | ``service``.
+    # Plain text rather than an enum so adding a population needs no DDL —
+    # this table has no Alembic, only the retrofits in ``observability.sql``.
+    kind: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'service'"), default="service",
+    )
 
     # Relationships
     org: Mapped[Org] = relationship(
