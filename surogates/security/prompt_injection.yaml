@@ -1,0 +1,110 @@
+# Prompt-injection detection rules (OWASP LLM01 / ASI01).
+#
+# The detector ships sample rules and warns that they are not production
+# configuration. This file is that configuration: it keeps every default
+# rule except the markdown delimiters, which are formatting rather than
+# attacks.
+#
+# Why the delimiter list is shorter than the default:
+#
+#   ^-{3,}\s*$    a horizontal rule, or YAML frontmatter
+#   ^#{3,}\s*$    a bare "###" heading line
+#   ^```\s*$      the closing fence of a code block
+#
+# Those matched ordinary prose. A user pasting a fenced code block was
+# refused at 70% confidence as a "delimiter_attack" -- which is most
+# technical conversations. The `/code` command already carried an
+# exemption for exactly this reason; the rule was the problem, not the
+# path.
+#
+# What stays are chat-template control tokens. Those have no legitimate
+# reason to appear in a user message and are a real injection vector:
+# they try to close the current turn and open a forged system turn.
+
+detection_patterns:
+  direct_override:
+    - 'ignore\s+(all\s+)?previous\s+instructions'
+    - 'you\s+are\s+now\b'
+    - 'new\s+role\s*:'
+    - 'forget\s+(everything|all|your)\b'
+    - 'disregard\s+(all\s+)?(above|prior|previous)\b'
+    - 'override\s+(previous\s+)?instructions'
+    - 'do\s+not\s+follow\s+(your|the)\s+(previous\s+)?instructions'
+
+  # Chat-template control tokens only -- see the note above.
+  delimiter:
+    - 'END\s+SYSTEM'
+    - 'BEGIN\s+USER'
+    - '<\|im_start\|>'
+    - '<\|im_end\|>'
+    - '\[INST\]'
+    - '<<SYS>>'
+    - '<\|system\|>'
+    - '<\|user\|>'
+    - '<\|assistant\|>'
+    # Anthropic / Llama turn markers, absent from the sample rules.
+    - '<\|eot_id\|>'
+    - '<\|start_header_id\|>'
+    - '<\|end_header_id\|>'
+
+  role_play:
+    - 'pretend\s+you\s+are'
+    - 'act\s+as\s+if\s+you\s+have\s+no\s+restrictions'
+    - '\bjailbreak\b'
+    - '\bDAN\s+mode\b'
+    - 'developer\s+mode\s+override'
+    - 'bypass\s+(all\s+)?(safety|content)\s+(filters?|restrictions?)'
+    - 'you\s+have\s+no\s+(limitations?|restrictions?|rules?)'
+
+  context_manipulation:
+    - 'the\s+above\s+instructions\s+are\s+wrong'
+    - 'actually\s+your\s+real\s+instructions\s+are'
+    - 'the\s+developer\s+told\s+me\s+to\s+tell\s+you'
+    - 'secret\s+password\s+is'
+    - 'your\s+true\s+purpose\s+is'
+    - 'the\s+real\s+system\s+prompt\s+is'
+
+  multi_turn:
+    - 'as\s+I\s+mentioned\s+before.*you\s+agreed\s+to'
+    - 'you\s+already\s+said\s+yes'
+    - 'continuing\s+from\s+where\s+you\s+unlocked'
+    - 'you\s+previously\s+confirmed'
+    - 'we\s+already\s+established\s+that\s+you\s+can'
+
+  encoding:
+    - '\\x[0-9a-fA-F]{2}(?:\\x[0-9a-fA-F]{2}){3,}'
+    - '\\u[0-9a-fA-F]{4}(?:\\u[0-9a-fA-F]{4}){3,}'
+    - '\brot13\b'
+    - '\bbase64\s*decode\b'
+    - '\bhex\s*decode\b'
+
+  # Raised from the sample rules' 20 characters. At 20 this matched any
+  # long token -- a git SHA, a UUID without dashes, a minified line --
+  # and the decoded payload then had to be checked on every one.
+  base64_pattern: '[A-Za-z0-9+/]{40,}={0,2}'
+
+suspicious_decoded_keywords:
+  - ignore
+  - override
+  - system
+  - password
+  - secret
+  - admin
+  - root
+  - exec
+  - eval
+  - 'import os'
+
+sensitivity_thresholds:
+  strict: 0.3
+  balanced: 0.5
+  permissive: 0.7
+
+sensitivity_min_threat:
+  strict: low
+  balanced: low
+  permissive: high
+
+disclaimer: >-
+  Pattern-based screening. It catches known injection shapes, not novel
+  ones, and is a layer rather than a boundary.

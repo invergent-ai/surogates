@@ -241,7 +241,7 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/session_search"))
         # Advisor timing is model-driven, so the only lever on when it
         # fires is this guidance. Without it the executor under-calls.
-        if "advisor" in self._available_tools:
+        if "consult_expert" in self._available_tools:
             parts.append(self._prompts.get("guidance/advisor"))
         # Skills guidance loads whenever the agent can either view or manage
         # skills. The body covers both invocation (skill_view) and maintenance
@@ -485,6 +485,13 @@ class PromptBuilder:
         if not active:
             return ""
 
+        # Domain experts first, the advisor last: a specialist beats a
+        # generalist on its own subject, and the model picks largely by
+        # reading order. The advisor is the fallback when nothing fits.
+        from surogates.tools.builtin.advisor_expert import is_advisor_expert
+
+        active = sorted(active, key=is_advisor_expert)
+
         lines: list[str] = []
         for expert in active:
             safe_desc = self._sanitise(
@@ -508,7 +515,11 @@ class PromptBuilder:
             "query-shaped questions or a code reviewer for inspecting a "
             "file. Do NOT use `delegate_task` for this — that tool spawns "
             "sub-agents for multi-step work in a fresh session; experts "
-            "are single-shot specialists.\n\n"
+            "are single-shot specialists.\n"
+            "Prefer a domain expert whenever one covers the subject. "
+            "Consult `advisor` only when none of them does — it is a "
+            "generalist reviewer, so a specialist will beat it on its "
+            "own ground.\n\n"
             + "\n".join(lines)
         )
 

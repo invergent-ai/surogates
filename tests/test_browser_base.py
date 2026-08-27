@@ -72,7 +72,14 @@ def test_llm_settings_do_not_expose_generation_defaults(monkeypatch) -> None:
     assert not hasattr(s, "max_tokens")
 
 
-def test_llm_settings_advisor_defaults(monkeypatch) -> None:
+def test_llm_settings_carries_no_advisor_knobs(monkeypatch) -> None:
+    """The advisor is an expert now; nothing about it is settings-level.
+
+    Its model comes from its own skill definition (the Pro sentinel, which
+    the proxy resolves), and its budget is the expert loop's iteration
+    cap. The ``llm_advisor`` runtime slot survives only as the Pro client
+    for ``try_activate_pro_fallback``, which is a different feature.
+    """
     for key in list(os.environ):
         if key.startswith("SUROGATES_LLM_ADVISOR_"):
             monkeypatch.delenv(key, raising=False)
@@ -80,22 +87,12 @@ def test_llm_settings_advisor_defaults(monkeypatch) -> None:
     from surogates.config import LLMSettings
 
     s = LLMSettings()
-    # Upstream selection lives in the per-agent llm_advisor slot, not
-    # settings — only the per-turn budgets are configurable here.
-    for dead in ("advisor_enabled", "advisor_model",
-                 "advisor_base_url", "advisor_api_key"):
+    for dead in (
+        "advisor_enabled", "advisor_model", "advisor_base_url",
+        "advisor_api_key", "advisor_max_calls_per_turn", "advisor_max_tokens",
+    ):
         assert not hasattr(s, dead), dead
-    assert s.advisor_max_calls_per_turn == 2
-    assert s.advisor_max_tokens == 700
 
-
-def test_llm_settings_advisor_env_override(monkeypatch) -> None:
-    monkeypatch.setenv("SUROGATES_LLM_ADVISOR_MAX_CALLS_PER_TURN", "3")
-
-    from surogates.config import LLMSettings
-
-    s = LLMSettings()
-    assert s.advisor_max_calls_per_turn == 3
 
 
 def test_browser_status_values() -> None:

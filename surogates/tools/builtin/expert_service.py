@@ -99,6 +99,7 @@ class ExpertConsultationService:
         expert: SkillDef,
         task: str,
         context: str | None = None,
+        client: Any | None = None,
     ) -> ExpertConsultationResult:
         """Consult *expert* and return a structured result.
 
@@ -109,7 +110,10 @@ class ExpertConsultationService:
         """
         await self._emit_delegation(expert=expert, task=task)
 
-        if not expert.expert_endpoint:
+        # A caller-supplied client already knows where to go, so the
+        # endpoint requirement applies only to experts that must dial an
+        # upstream of their own.
+        if client is None and not expert.expert_endpoint:
             error = f"Expert '{expert.name}' has no endpoint configured."
             await self._record_failure(expert, error)
             return ExpertConsultationResult(
@@ -120,8 +124,15 @@ class ExpertConsultationService:
             )
 
         try:
-            api_key = await resolve_expert_api_key(
-                self._credential_vault, self._tenant, expert,
+            # Only an expert dialling its own upstream needs a credential
+            # looked up; a platform built-in rides the session's client,
+            # which is already authenticated.
+            api_key = (
+                None
+                if client is not None
+                else await resolve_expert_api_key(
+                    self._credential_vault, self._tenant, expert,
+                )
             )
             result, iterations_used = await run_expert_loop(
                 expert=expert,
@@ -133,6 +144,7 @@ class ExpertConsultationService:
                 session_id=self._session_id,
                 session_store=self._session_store,
                 api_key=api_key,
+                client=client,
             )
             await record_expert_outcome(
                 session_store=self._session_store,

@@ -98,6 +98,10 @@ class SkillDetail(BaseModel):
     name: str
     description: str
     type: str = "skill"
+    # Platform built-in (the advisor). The consult path reads this to
+    # tell the built-in from a tenant expert of the same name, which
+    # decides whether it rides the session's client.
+    builtin: bool = False
     content: str
     category: str | None = None
     tags: list[str] | None = None
@@ -561,6 +565,7 @@ async def view_skill(
 
     detail = SkillDetail(
         name=skill_def.name,
+        builtin=bool(getattr(skill_def, "builtin", False)),
         description=skill_def.description,
         type=skill_def.type,
         content=skill_def.content,

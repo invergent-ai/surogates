@@ -90,6 +90,19 @@ _EXPERT_FRONTMATTER_MAP: dict[str, str] = {
 }
 
 
+def _advisor_layer() -> list["SkillDef"]:
+    """The built-in advisor expert, as the last merge layer.
+
+    Last because ``_merge`` keeps the final entry for a name: a
+    tenant-authored expert called "advisor" must not shadow the platform
+    one, or a user could silently redirect every advisor consult to a
+    model of their choosing.
+    """
+    from surogates.tools.builtin.advisor_expert import build_advisor_expert
+
+    return [build_advisor_expert()]
+
+
 @dataclass(slots=True)
 class SkillDef:
     """A loaded skill definition.
@@ -324,12 +337,17 @@ class ResourceLoader:
             else:
                 user_db = []
             return self._apply_overrides(
-                self._merge(platform, user_files, org_db, user_db), overrides,
+                self._merge(
+                    platform, user_files, org_db, user_db, _advisor_layer(),
+                ),
+                overrides,
             )
 
         # Fallback for the tests / paths that don't pass a session: just
         # the bundle + user-file merge.
-        return self._apply_overrides(self._merge(platform, user_files), overrides)
+        return self._apply_overrides(
+            self._merge(platform, user_files, _advisor_layer()), overrides,
+        )
 
     # ------------------------------------------------------------------
     # Conditional skill filtering

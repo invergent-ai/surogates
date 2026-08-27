@@ -188,6 +188,7 @@ async def expand_slash_skill(
     session_store: Any | None = None,
     sandbox_pool: Any | None = None,
     credential_vault: Any | None = None,
+    llm_client: Any | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Try to expand a ``/<name> args...`` user message.
 
@@ -235,6 +236,7 @@ async def expand_slash_skill(
             session_store=session_store,
             sandbox_pool=sandbox_pool,
             credential_vault=credential_vault,
+            llm_client=llm_client,
         )
 
     return await _expand_skill(
@@ -313,6 +315,7 @@ async def _expand_expert(
     session_store: Any | None,
     sandbox_pool: Any | None,
     credential_vault: Any | None = None,
+    llm_client: Any | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Run the expert mini-loop and inline the deliverable.
 
@@ -336,7 +339,15 @@ async def _expand_expert(
             sandbox_pool=sandbox_pool,
             credential_vault=credential_vault,
         )
-        outcome = await service.consult(expert=expert, task=args)
+        # The built-in advisor rides the session's client -- its tier
+        # comes from the model sentinel, not from an endpoint of its own.
+        from surogates.tools.builtin.advisor_expert import is_advisor_expert
+
+        outcome = await service.consult(
+            expert=expert,
+            task=args,
+            client=llm_client if is_advisor_expert(expert) else None,
+        )
     except Exception:
         logger.exception(
             "Expert consultation failed for /%s; passing through verbatim",

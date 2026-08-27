@@ -934,6 +934,42 @@ async def send_message(
             source=injection_source,
         )
         if injection_result.is_injection:
+            # Record the block on the session before refusing. A 422 is
+            # seen only by whoever made the call, and a rejected message
+            # leaves no user.message behind -- so without this the
+            # session shows an unexplained gap, and an operator auditing
+            # for attacks sees nothing at all.
+            await store.emit_event(
+                session_id,
+                EventType.SECURITY_INJECTION_BLOCKED,
+                {
+                    "source": injection_source,
+                    "explanation": injection_result.explanation,
+                    # ``threat_level`` and ``injection_type`` are both
+                    # enums; store their values or emit_event raises and
+                    # turns a clean 422 into a 500.
+                    "threat_level": getattr(
+                        getattr(injection_result, "threat_level", None),
+                        "value",
+                        None,
+                    ),
+                    "confidence": getattr(
+                        injection_result, "confidence", None,
+                    ),
+                    "injection_type": getattr(
+                        getattr(injection_result, "injection_type", None),
+                        "value",
+                        None,
+                    ),
+                    "matched_patterns": [
+                        str(m) for m in
+                        (getattr(injection_result, "matched_patterns", None) or [])
+                    ][:10],
+                    # The rejected text is the evidence; cap it so a
+                    # large paste cannot bloat the event log.
+                    "content_preview": (body.content or "")[:2000],
+                },
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(f"Message blocked: {injection_result.explanation}"),
