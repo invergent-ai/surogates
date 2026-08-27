@@ -548,6 +548,73 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Whiteboard canvas")).not.toBeNull();
   });
 
+  async function moveOver(el: HTMLElement, tool: string) {
+    await act(async () => {
+      byLabel(el, tool)?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    sharedCalls = [];
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 300, clientY: 200, bubbles: true,
+        }),
+      );
+    });
+    return canvas;
+  }
+
+  it("shows a ring under the eraser so its size is visible", async () => {
+    // The eraser strokes white on a white canvas, so without the ring
+    // there is nothing to show where it is or how much it will take.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await moveOver(el, "Eraser");
+    expect(sharedCalls.some((c) => c[0] === "arc")).toBe(true);
+  });
+
+  it("draws the ring with a border, not a bare outline", async () => {
+    // Two strokes, dark over light, so the edge reads on blank paper
+    // and on dark ink alike.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await moveOver(el, "Eraser");
+    const afterArc = sharedCalls.slice(
+      sharedCalls.findIndex((c) => c[0] === "arc"),
+    );
+    expect(afterArc.filter((c) => c[0] === "stroke").length).toBeGreaterThan(1);
+  });
+
+  it("shows no ring for the pen", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await moveOver(el, "Pen");
+    expect(sharedCalls.some((c) => c[0] === "arc")).toBe(false);
+  });
+
+  it("drops the ring when the pointer leaves the canvas", async () => {
+    // Otherwise it stays frozen wherever the pointer left.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    const canvas = await moveOver(el, "Eraser");
+    sharedCalls = [];
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerleave", { bubbles: true }));
+    });
+    expect(sharedCalls.some((c) => c[0] === "arc")).toBe(false);
+  });
+
   it("disables the controls when disabled", async () => {
     const { adapter } = makeAdapter();
     const el = await render(

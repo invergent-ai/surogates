@@ -73,6 +73,9 @@ const MAX_HISTORY = 30;
 const INITIAL_VIEW: View = { x: -400, y: -300, zoom: 1 };
 
 /** Default size for user-typed text. The agent picks its own. */
+/** The eraser is chunkier than the pen at the same width setting. */
+const ERASER_SCALE = 4;
+
 const TEXT_FONT_SIZE = 24;
 const TEXT_MAX_WIDTH = 320;
 
@@ -131,6 +134,9 @@ export function AgentWhiteboard({
   // pointerup, so one gesture is one undo step rather than one per
   // pointer sample.
   const dragFrom = useRef<{ x: number; y: number } | null>(null);
+  // Pointer position in logical space, for the eraser ring. A ref, not
+  // state: it changes on every pointer sample and must not re-render.
+  const cursorRef = useRef<{ x: number; y: number } | null>(null);
   const resize = useRef<{
     anchor: { x: number; y: number };
     start: { x: number; y: number };
@@ -308,6 +314,25 @@ export function AgentWhiteboard({
 
     // The in-progress stroke is not in the document yet, so paint it on
     // top rather than committing a partial object every sample.
+    // The eraser ring. Without it the tool is invisible: its stroke is
+    // white on a white canvas, so there is nothing to show where it is
+    // or how much it will take. Two rings — dark over light — so the
+    // outline reads on both blank paper and dark ink.
+    if (tool === "eraser" && cursorRef.current) {
+      const r = (width * ERASER_SCALE) / 2;
+      const px = 1 / (view.zoom * dpr);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cursorRef.current.x, cursorRef.current.y, r, 0, Math.PI * 2);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3 * px;
+      ctx.stroke();
+      ctx.strokeStyle = "#111827";
+      ctx.lineWidth = px;
+      ctx.stroke();
+      ctx.restore();
+    }
+
     const live = strokeRef.current?.points;
     if (live && live.length >= 4) {
       // Logical coordinates under the transform renderDoc left set, so
@@ -318,7 +343,7 @@ export function AgentWhiteboard({
         ctx.lineTo(live[i], live[i + 1]);
       }
       ctx.strokeStyle = tool === "eraser" ? "#ffffff" : color;
-      ctx.lineWidth = tool === "eraser" ? width * 4 : width;
+      ctx.lineWidth = tool === "eraser" ? width * ERASER_SCALE : width;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.stroke();
@@ -418,7 +443,7 @@ export function AgentWhiteboard({
       // out at paint time via its own object kind.
       const builder = new StrokeBuilder(
         tool === "eraser" ? "#ffffff" : color,
-        tool === "eraser" ? width * 4 : width,
+        tool === "eraser" ? width * ERASER_SCALE : width,
       );
       builder.begin(logical);
       strokeRef.current = builder;
@@ -429,6 +454,13 @@ export function AgentWhiteboard({
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (tool === "eraser") {
+        // Follow the pointer even when no button is down: the ring has
+        // to show what the eraser would take before it takes it.
+        cursorRef.current = screenToLogical(localPoint(e), view);
+        if (!strokeRef.current) paint();
+      }
+
       if (panFrom.current) {
         // The delta is computed here, not inside the updater. React runs
         // a state updater at render time — and twice under StrictMode —
@@ -488,7 +520,7 @@ export function AgentWhiteboard({
       }
       paint();
     },
-    [localPoint, size, view, noteDirty, paint, marquee],
+    [localPoint, size, view, noteDirty, paint, marquee, tool],
   );
 
   const onPointerUp = useCallback(() => {
@@ -536,7 +568,7 @@ export function AgentWhiteboard({
             kind: "erase",
             mode: "path",
             points: chunkPairs((stroke as { pts: number[] }).pts),
-            size: width * 4,
+            size: width * ERASER_SCALE,
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
@@ -709,6 +741,14 @@ export function AgentWhiteboard({
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
+            onPointerLeave={() => {
+              // Otherwise the ring stays frozen wherever the pointer
+              // left the canvas.
+              if (cursorRef.current) {
+                cursorRef.current = null;
+                paint();
+              }
+            }}
             onWheel={onWheel}
           />
 
