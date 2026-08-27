@@ -204,6 +204,13 @@ _MAX_ATTACHMENTS_PER_MESSAGE = 10
 _MAX_ATTACHMENT_BYTES = 50_000_000  # 50 MB per file
 _MAX_ATTACHMENTS_TOTAL_BYTES = 200_000_000  # 200 MB total per message
 
+# ``metadata`` is deliberately free-form, but the whiteboard block is
+# client-authored canvas geometry that lands verbatim in the event log
+# and is re-read on every subsequent turn.  Uncapped it is an unbounded
+# write into a table nothing prunes.  A realistic turn (geometry plus a
+# 64-cell hotspot grid) is well under a kilobyte.
+_MAX_WHITEBOARD_METADATA_BYTES = 65_536
+
 
 class ImageBlock(BaseModel):
     """A single image attachment on a user message."""
@@ -311,6 +318,33 @@ class SendMessageRequest(BaseModel):
                 item.pop("inlined_render_kind", None)
                 item.pop("inline_skip_reason", None)
         return values
+
+    @model_validator(mode="after")
+    def _cap_whiteboard_metadata(self) -> "SendMessageRequest":
+        """Bound the whiteboard block of ``metadata``.
+
+        Scoped to that one key on purpose: the rest of ``metadata`` is an
+        open contract other callers already depend on, and widening the
+        cap to all of it would be a behaviour change for them.
+        """
+        import json as _json
+
+        if not isinstance(self.metadata, dict):
+            return self
+        payload = self.metadata.get("whiteboard")
+        if payload is None:
+            return self
+        if not isinstance(payload, dict):
+            raise ValueError("metadata.whiteboard must be an object.")
+        size = len(
+            _json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+        if size > _MAX_WHITEBOARD_METADATA_BYTES:
+            raise ValueError(
+                f"metadata.whiteboard is {size} bytes, over the "
+                f"{_MAX_WHITEBOARD_METADATA_BYTES}-byte limit."
+            )
+        return self
 
     @field_validator("images")
     @classmethod
