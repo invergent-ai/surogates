@@ -65,6 +65,13 @@ export async function loadDoc(
         version: 1,
         objects: parsed.objects,
         lastEventId: Number(parsed.lastEventId) || 0,
+        // A board saved before deletions were tracked has no list; its
+        // surviving origins are the best record of what it consumed.
+        // Without the seed, every object the agent drew comes back on
+        // the first load after this change.
+        folded: Array.isArray(parsed.folded)
+          ? parsed.folded
+          : parsed.objects.map((o) => o.origin),
       };
     }
   } catch {

@@ -217,3 +217,41 @@ describe("folding tool calls", () => {
     expect(doc.objects[1].selected).toBe(true);
   });
 });
+
+describe("deleting an agent's object", () => {
+  const call = message("m1", "whiteboard_draw", { commands: [text] });
+
+  it("does not resurrect it on the next fold", () => {
+    // The seen-set used to be derived from surviving object origins, so
+    // deleting an object erased the only record that its tool call had
+    // been consumed — and the next load drew it again.
+    const folded = foldToolCalls(emptyDoc(), [call]);
+    expect(folded.objects).toHaveLength(1);
+
+    const afterDelete = { ...folded, objects: [] };
+    expect(foldToolCalls(afterDelete, [call]).objects).toHaveLength(0);
+  });
+
+  it("records the consumed call on the document", () => {
+    // Persisted, or the record dies with the page and the object comes
+    // back on refresh.
+    expect(foldToolCalls(emptyDoc(), [call]).folded).toContain("m1");
+  });
+
+  it("still applies a genuinely new call after a deletion", () => {
+    const folded = foldToolCalls(emptyDoc(), [call]);
+    const afterDelete = { ...folded, objects: [] };
+    const next = foldToolCalls(afterDelete, [
+      call,
+      message("m2", "whiteboard_draw", { commands: [text] }),
+    ]);
+    expect(next.objects).toHaveLength(1);
+    expect(next.folded).toEqual(["m1", "m2"]);
+  });
+
+  it("keeps the record for a call whose commands were all invalid", () => {
+    // Otherwise the dead call is retried on every single load.
+    const bad = message("m9", "whiteboard_draw", { commands: [{ tool: "no" }] });
+    expect(foldToolCalls(emptyDoc(), [bad]).folded).toContain("m9");
+  });
+});

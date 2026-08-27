@@ -79,10 +79,19 @@ export interface WbDoc {
    * calls newer than this after loading the saved document.
    */
   lastEventId: number;
+  /**
+   * Ids of the `whiteboard_draw` calls already applied.
+   *
+   * Kept explicitly rather than derived from the surviving objects'
+   * origins: deleting an object would otherwise erase the only record
+   * that its call had been consumed, and the next load would draw it
+   * again. A deletion has to outlive the thing deleted.
+   */
+  folded: string[];
 }
 
 export function emptyDoc(): WbDoc {
-  return { version: 1, objects: [], lastEventId: 0 };
+  return { version: 1, objects: [], lastEventId: 0, folded: [] };
 }
 
 let localCounter = 0;
@@ -194,6 +203,7 @@ export function applyCommands(
     return { ...doc, lastEventId: nextEventId };
   }
   return {
+    ...doc,
     version: 1,
     objects: [
       ...doc.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
@@ -213,13 +223,17 @@ export function foldToolCalls(
   doc: WbDoc,
   messages: AgentChatMessage[],
 ): WbDoc {
-  const seen = new Set(doc.objects.map((o) => o.origin));
+  const seen = new Set(doc.folded);
+  const newlyFolded: string[] = [];
   let next = doc;
   for (const message of messages) {
     for (const call of message.toolCalls ?? []) {
       if (call.toolName !== DRAW_TOOL) continue;
       if (seen.has(call.id)) continue;
       seen.add(call.id);
+      // Recorded even when the payload turns out to be unusable, or the
+      // dead call is retried on every load for the life of the session.
+      newlyFolded.push(call.id);
       let parsed: unknown;
       try {
         parsed = JSON.parse(call.args);
@@ -231,7 +245,8 @@ export function foldToolCalls(
       next = applyCommands(next, commands, next.lastEventId, call.id);
     }
   }
-  return next;
+  if (newlyFolded.length === 0) return next;
+  return { ...next, folded: [...next.folded, ...newlyFolded] };
 }
 
 // ---------------------------------------------------------------------

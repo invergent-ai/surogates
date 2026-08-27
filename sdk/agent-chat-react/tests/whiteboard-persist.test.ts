@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyCommands, emptyDoc } from "@/components/whiteboard/doc";
+import {
+  applyCommands,
+  emptyDoc,
+  foldToolCalls,
+} from "@/components/whiteboard/doc";
 import {
   CANVAS_DIR,
   CANVAS_PATH,
@@ -66,7 +70,9 @@ describe("loading", () => {
   });
 
   it("does not replay a call already folded into the file", async () => {
-    const saved = applyCommands(emptyDoc(), [text], 5, "already");
+    // Built the way agent objects really arrive — through foldToolCalls,
+    // which is what records the call as consumed.
+    const saved = foldToolCalls(emptyDoc(), [drawMessage("already", [text])]);
     const doc = await loadDoc(adapterWith(saved), "s1", [
       drawMessage("already", [text]),
     ]);
@@ -175,5 +181,40 @@ describe("adopting a freshly created session", () => {
 
   it("does not reload when there is no session to load", () => {
     expect(shouldReloadCanvas("s1", null)).toBe(false);
+  });
+});
+
+describe("remembering what was consumed", () => {
+  it("round-trips the folded list", async () => {
+    const upload = vi.fn();
+    const doc = { ...applyCommands(emptyDoc(), [text], 3), folded: ["m1"] };
+    await saveDoc(adapterWith(null, upload), "s1", doc);
+    const file = upload.mock.calls[0][0].file as File;
+    expect(JSON.parse(await file.text()).folded).toEqual(["m1"]);
+  });
+
+  it("does not resurrect a deleted object across a reload", () => {
+    // The whole point: the record of a consumed call must outlive the
+    // object it produced.
+    const saved = { version: 1, objects: [], lastEventId: 0, folded: ["m1"] };
+    const doc = foldToolCalls(saved as never, [drawMessage("m1", [text])]);
+    expect(doc.objects).toHaveLength(0);
+  });
+
+  it("seeds the list from origins for a board saved before this existed", async () => {
+    // Otherwise every object the agent ever drew reappears on the first
+    // load after the upgrade.
+    const legacy = {
+      version: 1,
+      lastEventId: 0,
+      objects: [{
+        id: "o1", origin: "m1", selected: false, kind: "text",
+        x: 0, y: 0, text: "hi", fontSize: 20, maxWidth: 100, lineHeight: 1.35,
+      }],
+    };
+    const doc = await loadDoc(adapterWith(legacy), "s1", [
+      drawMessage("m1", [text]),
+    ]);
+    expect(doc.objects).toHaveLength(1);
   });
 });
