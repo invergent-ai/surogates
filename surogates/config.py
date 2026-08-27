@@ -338,12 +338,11 @@ class LLMSettings(BaseSettings):
     vision_base_url: str = ""  # optional auxiliary endpoint for vision model
     vision_api_key: str = ""  # optional auxiliary API key for vision model
 
-    # The advisor's client and model come from the per-agent
-    # ``llm_advisor`` runtime-config slot (ops emits it for base-tier
-    # agents and it resolves to the platform Pro tier); only the two
-    # per-turn budgets below are read from these settings.
-    advisor_max_calls_per_turn: int = 2  # hard cap for hidden advisor calls
-    advisor_max_tokens: int = 700  # requested advisor output budget
+    # The ``llm_advisor`` runtime-config slot survives as the Pro-tier
+    # client for :func:`try_activate_pro_fallback` -- the escalation on
+    # repeated empty upstream responses. The advisor *consult* no longer
+    # reads it: the advisor is an ordinary expert whose ``model:
+    # surogate-pro`` the proxy resolves on any route.
 
     image_model: str = ""  # image-generation model, e.g. "google/gemini-2.5-flash-image" (empty disables generate_image)
     image_base_url: str = ""  # optional auxiliary endpoint for image generation

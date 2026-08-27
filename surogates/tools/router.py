@@ -63,10 +63,6 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "ask_user_question": ToolLocation.HARNESS,
     "delegate_task": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,
-    # Advisor consult — the handler calls back into the harness loop via
-    # the injected ``advisor_consult`` callable, which holds the live
-    # transcript and the pro-tier client. Neither exists in a sandbox pod.
-    "advisor": ToolLocation.HARNESS,
     "run_coding_agent": ToolLocation.HARNESS,
     "github": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,

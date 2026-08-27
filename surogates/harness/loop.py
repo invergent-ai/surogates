@@ -159,12 +159,12 @@ from surogates.harness.loop_user_action import (
     _USER_ACTION_RESCUE_SYSTEM,
     _generate_user_action_rescue_structured,
 )
+from surogates.tools.builtin.advisor_expert import build_expert_transcript
 from surogates.harness.loop_vision import (
     _prepare_messages_for_model_vision_support,
 )
 
 
-from surogates.harness.loop_advisor import AdvisorMixin
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
@@ -326,7 +326,6 @@ def _slash_command_name(content: str | None) -> str | None:
 
 
 class AgentHarness(
-    AdvisorMixin,
     BoardMixin,
     ArborHarvestMixin,
     ContextReplayMixin,
@@ -384,8 +383,6 @@ class AgentHarness(
         vision_model: str = "",
         advisor_client: AsyncOpenAI | None = None,
         advisor_model: str = "",
-        advisor_max_calls_per_turn: int = 2,
-        advisor_max_tokens: int = 700,
         media_gen: Any | None = None,
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
@@ -503,11 +500,8 @@ class AgentHarness(
         self._vision_model: str = vision_model or ""
         self._advisor_client: AsyncOpenAI | None = advisor_client
         self._advisor_model: str = advisor_model or ""
-        self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
         # Guidance produced by the background advisor task, flushed into
         # ``messages`` only at iteration boundaries (see AdvisorMixin).
-        self._advisor_calls_this_turn = 0
-        self._advisor_max_tokens = max(1, int(advisor_max_tokens))
 
         # Per-session media-generation wiring (image client + video
         # endpoint), passed opaquely down the executor kwarg chain to
@@ -1497,24 +1491,19 @@ class AgentHarness(
         # --- Memory prefetch (one-shot before loop; snapshotted per session) ---
         memory_context = await self._prefetch_memory(session.id)
 
-        # Advisor budget is per user turn; the executor spends it by
-        # calling the ``advisor`` tool when it wants a second opinion.
-        self._advisor_calls_this_turn = 0
+        def expert_transcript() -> str:
+            """Render this turn's transcript for an expert that reads it.
 
-        async def advisor_consult(*, category: str, task: str) -> str | None:
-            """Bind the ``advisor`` tool to this turn's transcript.
+            Domain experts are handed an explicit ``task`` and ``context``
+            by the caller. The advisor is the exception: it reviews the
+            work so far, so it needs the conversation rather than a
+            restatement of it.
 
             A closure rather than ``functools.partial`` so it reads
             ``messages`` at call time -- compaction rebinds that name
             mid-loop, and a partial would pin the pre-compaction list.
             """
-            return await self.consult_advisor(
-                session=session,
-                messages=messages,
-                system_prompt=system_prompt,
-                category=category,
-                task=task,
-            )
+            return build_expert_transcript(messages)
 
         # NOTE: view-context and attachments notes are folded into each
         # user message's content during :meth:`_rebuild_messages`, so the
@@ -1800,7 +1789,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
-                    advisor_consult=advisor_consult,
+                    expert_transcript=expert_transcript,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2579,7 +2568,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
-                    advisor_consult=advisor_consult,
+                    expert_transcript=expert_transcript,
                 )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
@@ -3719,16 +3708,6 @@ class AgentHarness(
             else:
                 tool_filter = set(tool_filter)
             tool_filter.discard("run_coding_agent")
-
-        # No pro-tier client configured means every advisor call would come
-        # back "unavailable". Hide the tool rather than let the executor
-        # spend a call discovering that.
-        if not self._advisor_available() or self._advisor_max_calls_per_turn < 1:
-            if tool_filter is None:
-                tool_filter = set(self._tools.tool_names)
-            else:
-                tool_filter = set(tool_filter)
-            tool_filter.discard("advisor")
 
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.

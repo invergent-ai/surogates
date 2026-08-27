@@ -382,141 +382,56 @@ class TestConsultExpertSchemaDescription:
         assert "specialty" in desc
 
 
-class TestSkillsListExpertMetadata:
-    """skills_list returns enough metadata to identify and address active experts."""
+class TestSkillsListHidesExperts:
+    """``skills_list`` is a catalog of skills, and an expert is not one.
+
+    An expert's SKILL.md is that model's system prompt. Listing experts
+    here invited the executor to ``skill_view`` one and do the work
+    itself on the cheap model -- indistinguishable from a successful
+    consult. Experts are reachable through "Available Experts" +
+    ``consult_expert``, and ``/<expert>`` for the human.
+    """
 
     @pytest.mark.asyncio
-    async def test_handler_includes_expert_fields(self, monkeypatch):
-        import json
-        from types import SimpleNamespace
-        from uuid import uuid4
-
+    async def test_handler_omits_experts_active_or_not(self, monkeypatch):
         from surogates.tools.builtin.skills import _skills_list_handler
-        from surogates.tools.loader import SkillDef
+        from surogates.tools.loader import (
+            EXPERT_STATUS_ACTIVE, EXPERT_STATUS_DRAFT, SkillDef,
+        )
 
-        active = SkillDef(
-            name="sql_writer",
-            description="Writes SQL",
-            content="body",
-            source="org",
-            type="expert",
-            expert_status="active",
-            expert_model="qwen2.5-coder-7b",
-            expert_endpoint="http://expert:8000/v1",
-            trigger="SQL queries, database schemas",
-        )
-        plain = SkillDef(
-            name="code_review",
-            description="Reviews code",
-            content="body",
-            source="org",
-            type="skill",
-            trigger="code review",
-        )
+        def _expert(name, status):
+            return SkillDef(
+                name=name, description="d", content="c", source="org_db",
+                type="expert", expert_status=status,
+            )
+
+        skills = [
+            SkillDef(name="code_review", description="d", content="c",
+                     source="org_db"),
+            _expert("sql_writer", EXPERT_STATUS_ACTIVE),
+            _expert("half_baked", EXPERT_STATUS_DRAFT),
+        ]
 
         async def fake_loader(tenant, **kwargs):
-            return [active, plain]
+            return skills
 
         monkeypatch.setattr(
             "surogates.tools.builtin.skills._load_all_skills", fake_loader,
         )
 
-        tenant = SimpleNamespace(org_id=uuid4())
-        out = await _skills_list_handler({}, tenant=tenant)
-        payload = json.loads(out)
+        out = json.loads(await _skills_list_handler(
+            {}, tenant=SimpleNamespace(org_id=uuid4()),
+        ))
+        names = [s["name"] for s in out["skills"]]
+        assert names == ["code_review"]
 
-        by_name = {s["name"]: s for s in payload["skills"]}
-        assert by_name["sql_writer"]["type"] == "expert"
-        assert by_name["sql_writer"]["trigger"] == "SQL queries, database schemas"
-        assert by_name["sql_writer"]["expert_status"] == "active"
-        assert by_name["sql_writer"]["expert_model"] == "qwen2.5-coder-7b"
-        assert by_name["sql_writer"]["expert_endpoint"] == "http://expert:8000/v1"
-        assert by_name["code_review"]["type"] == "skill"
-        # Regular skills do not get expert_* keys.
-        assert "expert_status" not in by_name["code_review"]
-        assert "expert_model" not in by_name["code_review"]
-
-    def test_schema_description_directs_to_consult_expert(self):
+    def test_schema_points_experts_at_consult_expert(self):
         from surogates.tools.builtin.skills import SKILLS_LIST_SCHEMA
 
         desc = SKILLS_LIST_SCHEMA.description
-        assert "type: expert" in desc or "type=expert" in desc.replace(": ", "=")
         assert "consult_expert" in desc
+        assert "not listed here" in desc
 
-    @pytest.mark.asyncio
-    async def test_handler_hides_inactive_experts(self, monkeypatch):
-        """draft / collecting / retired experts must not appear in the catalog.
-
-        The slash dispatcher only routes active experts to the
-        mini-loop; inactive ones would fall through to ``skill_view``
-        and inline their system prompt as a skill body, which is the
-        wrong UX.  The ``# Available Experts`` system-prompt section
-        and ``consult_expert``'s active-expert resolver already enforce
-        the same invariant; this test keeps the catalog tool aligned.
-        """
-        import json
-        from types import SimpleNamespace
-        from uuid import uuid4
-
-        from surogates.tools.builtin.skills import _skills_list_handler
-        from surogates.tools.loader import SkillDef
-
-        active = SkillDef(
-            name="sql_writer",
-            description="Writes SQL",
-            content="body",
-            source="org",
-            type="expert",
-            expert_status="active",
-            expert_endpoint="http://expert:8000/v1",
-        )
-        draft = SkillDef(
-            name="draft_specialist",
-            description="Not yet active",
-            content="body",
-            source="org",
-            type="expert",
-            expert_status="draft",
-        )
-        retired = SkillDef(
-            name="retired_specialist",
-            description="Decommissioned",
-            content="body",
-            source="org",
-            type="expert",
-            expert_status="retired",
-        )
-        regular = SkillDef(
-            name="code_review",
-            description="Reviews code",
-            content="body",
-            source="org",
-            type="skill",
-        )
-
-        async def fake_loader(tenant, **kwargs):
-            return [active, draft, retired, regular]
-
-        monkeypatch.setattr(
-            "surogates.tools.builtin.skills._load_all_skills", fake_loader,
-        )
-
-        tenant = SimpleNamespace(org_id=uuid4())
-        out = await _skills_list_handler({}, tenant=tenant)
-        payload = json.loads(out)
-
-        names = [s["name"] for s in payload["skills"]]
-        assert "sql_writer" in names
-        assert "code_review" in names
-        assert "draft_specialist" not in names
-        assert "retired_specialist" not in names
-        # `count` mirrors the visible list, not the underlying catalog.
-        assert payload["count"] == 2
-
-
-# =========================================================================
-# consult_expert handler
-# =========================================================================
 
 
 class TestConsultExpertHandler:

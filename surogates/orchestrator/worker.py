@@ -2097,8 +2097,6 @@ async def run_worker(settings: Settings) -> None:
             advisor_model=(
                 advisor_slot.model if advisor_slot is not None else ""
             ),
-            advisor_max_calls_per_turn=settings.llm.advisor_max_calls_per_turn,
-            advisor_max_tokens=settings.llm.advisor_max_tokens,
             media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with

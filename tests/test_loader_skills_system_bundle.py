@@ -85,7 +85,7 @@ async def test_load_skills_from_bundle_root_prefix_empty() -> None:
         bundle, source=SKILL_SOURCE_PLATFORM, root_prefix="",
     )
 
-    assert sorted(s.name for s in skills) == [
+    assert sorted(s.name for s in skills if not s.is_expert) == [
         "brainstorming",
         "executing-plans",
     ]
@@ -110,7 +110,7 @@ async def test_load_skills_from_bundle_root_prefix_default_is_skills() -> None:
         bundle, source=SKILL_SOURCE_PLATFORM,
     )
 
-    assert sorted(s.name for s in skills) == ["bar", "foo"]
+    assert sorted(s.name for s in skills if not s.is_expert) == ["bar", "foo"]
 
 
 @pytest.mark.asyncio
@@ -130,7 +130,7 @@ async def test_load_skills_from_bundle_handles_nested_path() -> None:
         bundle, source=SKILL_SOURCE_PLATFORM,
     )
 
-    assert [s.name for s in skills] == ["foo"]
+    assert [s.name for s in skills if not s.is_expert] == ["foo"]
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_load_skills_from_bundle_swallows_list_exception() -> None:
     skills = await loader._load_skills_from_bundle(
         _BrokenBundle(), source=SKILL_SOURCE_PLATFORM, root_prefix="",
     )
-    assert skills == []
+    assert [s for s in skills if not s.is_expert] == []
 
 
 @pytest.mark.asyncio
@@ -171,7 +171,7 @@ async def test_load_skills_from_bundle_skips_directory_marker() -> None:
         bundle, source=SKILL_SOURCE_PLATFORM,
     )
 
-    assert [s.name for s in skills] == ["foo"]
+    assert [s.name for s in skills if not s.is_expert] == ["foo"]
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ async def test_load_skills_system_bundle_only() -> None:
         system_bundle=system,
     )
 
-    assert [s.name for s in skills] == ["brainstorming"]
+    assert [s.name for s in skills if not s.is_expert] == ["brainstorming"]
     assert all(s.source == SKILL_SOURCE_PLATFORM for s in skills)
 
 
@@ -299,7 +299,7 @@ async def test_load_skills_per_agent_only() -> None:
         system_bundle=None,
     )
 
-    assert [s.name for s in skills] == ["foo"]
+    assert [s.name for s in skills if not s.is_expert] == ["foo"]
 
 
 @pytest.mark.asyncio
@@ -317,7 +317,7 @@ async def test_load_skills_no_bundles_returns_empty() -> None:
         system_bundle=None,
     )
 
-    assert skills == []
+    assert [s for s in skills if not s.is_expert] == []
 
 
 @pytest.mark.asyncio
@@ -337,4 +337,4 @@ async def test_load_skills_system_bundle_kwarg_is_keyword_only_default_none() ->
         _tenant(), db_session=None, bundle=per_agent,
     )
 
-    assert [s.name for s in skills] == ["foo"]
+    assert [s.name for s in skills if not s.is_expert] == ["foo"]

@@ -139,6 +139,24 @@ async def _consult_expert_handler(
             "available_experts": available,
         })
 
+    # The advisor reviews the work so far rather than answering a
+    # self-contained question, so it reads the conversation instead of a
+    # restatement of it. Domain experts keep the explicit task/context
+    # contract -- handing every expert the transcript would multiply the
+    # cost of every consult on a long session.
+    from surogates.tools.builtin.advisor_expert import is_advisor_expert
+
+    if is_advisor_expert(expert):
+        transcript_of = kwargs.get("expert_transcript")
+        if transcript_of is not None:
+            transcript = transcript_of()
+            if transcript:
+                context = (
+                    f"{context}\n\n## Conversation so far\n{transcript}"
+                    if context
+                    else f"## Conversation so far\n{transcript}"
+                )
+
     service = ExpertConsultationService(
         tenant=tenant,
         session_id=session_id,

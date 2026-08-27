@@ -288,24 +288,6 @@ class ContextReplayMixin:
                         iteration_open = False
                         _flush_deferred()
 
-            elif etype == EventType.ADVISOR_RESULT.value and event.data.get("content"):
-                rendered_advisor = {
-                    "role": "user",
-                    "content": self._format_advisor_context(
-                        category=event.data.get("category", "advisor"),
-                        content=str(event.data.get("content") or ""),
-                    ),
-                }
-                # The consult runs concurrently with the executor, so
-                # its event can land while an LLM iteration is open
-                # (between the tool_calls response and its results).
-                # Defer to the iteration's close — exactly like mid-turn
-                # user messages — so replay never splits a tool pair.
-                if iteration_open:
-                    deferred_advisors.append(rendered_advisor)
-                else:
-                    messages.append(rendered_advisor)
-
             elif (
                 etype == EventType.BOARD_UPDATE.value
                 and event.data.get("content")

@@ -740,7 +740,7 @@ async def execute_tool_calls(
     bundle: Any | None = None,
     turn_gate: Any | None = None,
     platform_client: Any | None = None,
-    advisor_consult: Any | None = None,
+    expert_transcript: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls, choosing parallel vs sequential.
 
@@ -798,7 +798,7 @@ async def execute_tool_calls(
             bundle=bundle,
             turn_gate=turn_gate,
             platform_client=platform_client,
-        advisor_consult=advisor_consult,
+        expert_transcript=expert_transcript,
         )
     return await execute_tool_calls_sequential(
         tool_calls,
@@ -833,7 +833,7 @@ async def execute_tool_calls(
         bundle=bundle,
         turn_gate=turn_gate,
         platform_client=platform_client,
-        advisor_consult=advisor_consult,
+        expert_transcript=expert_transcript,
     )
 
 
@@ -871,7 +871,7 @@ async def execute_tool_calls_sequential(
     bundle: Any | None = None,
     turn_gate: Any | None = None,
     platform_client: Any | None = None,
-    advisor_consult: Any | None = None,
+    expert_transcript: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls one at a time, emitting events for each."""
     results: list[dict] = []
@@ -930,7 +930,7 @@ async def execute_tool_calls_sequential(
             bundle=bundle,
             turn_gate=turn_gate,
             platform_client=platform_client,
-        advisor_consult=advisor_consult,
+        expert_transcript=expert_transcript,
         )
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
@@ -985,7 +985,7 @@ async def execute_tool_calls_concurrent(
     bundle: Any | None = None,
     turn_gate: Any | None = None,
     platform_client: Any | None = None,
-    advisor_consult: Any | None = None,
+    expert_transcript: Any | None = None,
 ) -> list[dict]:
     """Execute tool calls concurrently using asyncio.gather.
 
@@ -1051,7 +1051,7 @@ async def execute_tool_calls_concurrent(
                 bundle=bundle,
                 turn_gate=turn_gate,
                 platform_client=platform_client,
-        advisor_consult=advisor_consult,
+        expert_transcript=expert_transcript,
             )
 
     # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
@@ -1158,7 +1158,7 @@ async def execute_single_tool(
     bundle: Any | None = None,
     turn_gate: Any | None = None,
     platform_client: Any | None = None,
-    advisor_consult: Any | None = None,
+    expert_transcript: Any | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
@@ -1577,7 +1577,7 @@ async def execute_single_tool(
                 bundle=bundle,
                 turn_gate=turn_gate,
                 platform_client=platform_client,
-        advisor_consult=advisor_consult,
+        expert_transcript=expert_transcript,
             )
     except KeyError:
         tool_failed = True
