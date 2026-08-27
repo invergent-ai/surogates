@@ -5,12 +5,13 @@ import {
   MousePointer2,
   Pen,
   Redo2,
+  Type,
   Undo2,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 
-export type WbTool = "pen" | "eraser" | "select" | "pan";
+export type WbTool = "pen" | "eraser" | "text" | "select" | "pan";
 
 export const INK_COLORS = [
   "#111827",
@@ -25,6 +26,7 @@ export const INK_WIDTHS = [2, 4, 8, 16] as const;
 const TOOLS: { id: WbTool; label: string; Icon: typeof Pen }[] = [
   { id: "pen", label: "Pen", Icon: Pen },
   { id: "eraser", label: "Eraser", Icon: Eraser },
+  { id: "text", label: "Text", Icon: Type },
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];

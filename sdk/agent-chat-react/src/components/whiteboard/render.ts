@@ -76,6 +76,46 @@ export function oppositeCorner(
   };
 }
 
+/** Whether two rectangles overlap at all. */
+function intersects(a: DrawBounds, b: DrawBounds): boolean {
+  return (
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+  );
+}
+
+/**
+ * Ids of every object touching *rect*.
+ *
+ * Intersection rather than containment: a marquee that only selects
+ * fully-enclosed objects misses the long stroke you dragged across,
+ * which is usually the thing you meant.
+ */
+export function objectsInRect(
+  doc: WbDoc,
+  rect: DrawBounds,
+  services: RenderServices,
+): string[] {
+  const ids: string[] = [];
+  for (const obj of doc.objects) {
+    const b = objectBounds(obj, services);
+    if (b && intersects(b, rect)) ids.push(obj.id);
+  }
+  return ids;
+}
+
+/** Normalise a drag between two corners into a positive-extent rect. */
+export function rectFromCorners(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): DrawBounds {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    w: Math.abs(b.x - a.x),
+    h: Math.abs(b.y - a.y),
+  };
+}
+
 /** Union of every selected object's bounds, or null. */
 export function selectionBounds(
   doc: WbDoc,

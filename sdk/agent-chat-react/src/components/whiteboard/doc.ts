@@ -346,6 +346,28 @@ export function scaleObject(
   }
 }
 
+/** A user-authored text object placed at *pt*. */
+export function makeTextObject(
+  pt: { x: number; y: number },
+  text: string,
+  fontSize: number,
+  maxWidth: number,
+): WbObject {
+  localCounter += 1;
+  return {
+    id: `local:text${localCounter}`,
+    origin: "local",
+    selected: false,
+    kind: "text",
+    x: pt.x,
+    y: pt.y,
+    text,
+    fontSize,
+    maxWidth,
+    lineHeight: DEFAULT_LINE_HEIGHT,
+  };
+}
+
 /** Apply *edit* to every selected object, leaving the rest alone. */
 export function mapSelected(
   doc: WbDoc,

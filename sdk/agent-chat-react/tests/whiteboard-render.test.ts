@@ -246,3 +246,47 @@ describe("hitTest", () => {
     expect(hitTest(emptyDoc(), { x: 0, y: 0 }, measure)).toBeNull();
   });
 });
+
+describe("marquee selection", () => {
+  it("normalises a drag made in any direction", async () => {
+    const { rectFromCorners } = await import("@/components/whiteboard/render");
+    // Dragging up-and-left must produce the same rect as down-and-right.
+    expect(rectFromCorners({ x: 100, y: 100 }, { x: 20, y: 40 }))
+      .toEqual({ x: 20, y: 40, w: 80, h: 60 });
+  });
+
+  it("selects an object the marquee crosses", async () => {
+    const { objectsInRect } = await import("@/components/whiteboard/render");
+    const doc = applyCommands(emptyDoc(), [text], 1);
+    expect(objectsInRect(doc, { x: 0, y: 0, w: 50, h: 50 }, measure))
+      .toHaveLength(1);
+  });
+
+  it("selects a long stroke it only clips, not just enclosed ones", async () => {
+    // Containment-only would miss the stroke you dragged across, which
+    // is usually the thing you meant to grab.
+    const { objectsInRect } = await import("@/components/whiteboard/render");
+    const doc = emptyDoc();
+    doc.objects.push(ink({ pts: [0, 0, 5000, 0] } as Partial<WbObject>));
+    expect(objectsInRect(doc, { x: 100, y: -10, w: 50, h: 20 }, measure))
+      .toHaveLength(1);
+  });
+
+  it("ignores objects outside the marquee", async () => {
+    const { objectsInRect } = await import("@/components/whiteboard/render");
+    const doc = applyCommands(emptyDoc(), [text], 1);
+    expect(objectsInRect(doc, { x: 9000, y: 9000, w: 50, h: 50 }, measure))
+      .toHaveLength(0);
+  });
+
+  it("never selects an erase object", async () => {
+    const { objectsInRect } = await import("@/components/whiteboard/render");
+    const doc = emptyDoc();
+    doc.objects.push({
+      id: "e1", origin: "local", selected: false, kind: "erase",
+      mode: "rect", x: 0, y: 0, w: 100, h: 100,
+    } as WbObject);
+    expect(objectsInRect(doc, { x: 0, y: 0, w: 100, h: 100 }, measure))
+      .toHaveLength(0);
+  });
+});

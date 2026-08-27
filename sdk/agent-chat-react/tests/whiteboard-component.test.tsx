@@ -282,6 +282,124 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Undo")).toHaveProperty("disabled", false);
   });
 
+  it("offers a text tool", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    expect(byLabel(el, "Text")).not.toBeNull();
+  });
+
+  async function typeOnBoard(el: HTMLElement, body: string) {
+    await act(async () => {
+      byLabel(el, "Text")?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 200, clientY: 200, bubbles: true,
+        }),
+      );
+    });
+    const box = byLabel(el, "Text") as HTMLTextAreaElement | null;
+    const area = el.querySelector("textarea");
+    if (!area) throw new Error("text editor did not open");
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        globalThis.HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(area, body);
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      area.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter", ctrlKey: true, bubbles: true,
+        }),
+      );
+    });
+    return box;
+  }
+
+  it("opens an editor when the text tool is used", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Text")?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 200, clientY: 200, bubbles: true,
+        }),
+      );
+    });
+    expect(el.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("sends typed text as transcription ground truth", async () => {
+    // The model must read the exact characters rather than transcribing
+    // its own rendering of them back out of the atlas.
+    const { adapter, sendMessage } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await typeOnBoard(el, "integral of x squared");
+    await act(async () => {
+      byLabel(el, "Ask")?.click();
+    });
+    const payload = sendMessage.mock.calls[0][0] as unknown as {
+      metadata?: { whiteboard?: { typedInput?: string } };
+    };
+    expect(payload.metadata?.whiteboard?.typedInput)
+      .toBe("integral of x squared");
+  });
+
+  it("omits typedInput when nothing was typed", async () => {
+    // typedInput is transcription ground truth for THIS turn's input;
+    // an empty string would tell the model the user typed nothing at a
+    // position, which is different from not typing.
+    const { adapter, sendMessage } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Ask")?.click();
+    });
+    const payload = sendMessage.mock.calls[0][0] as unknown as {
+      metadata?: { whiteboard?: Record<string, unknown> };
+    };
+    expect(payload.metadata?.whiteboard).not.toHaveProperty("typedInput");
+  });
+
+  it("blocks a second Ask while the turn is still running", async () => {
+    // The board has no queue: a second atlas mid-turn would describe a
+    // canvas the agent has not answered yet.
+    const { adapter, sendMessage } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Ask")?.click();
+    });
+    expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
+    await act(async () => {
+      byLabel(el, "Ask")?.click();
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
   it("disables the controls when disabled", async () => {
     const { adapter } = makeAdapter();
     const el = await render(

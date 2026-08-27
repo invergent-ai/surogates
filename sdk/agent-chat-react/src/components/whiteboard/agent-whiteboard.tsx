@@ -24,6 +24,7 @@ import {
   type WbObject,
   emptyDoc,
   foldToolCalls,
+  makeTextObject,
   mapSelected,
   scaleObject,
   translateObject,
@@ -46,10 +47,14 @@ import {
   handleAt,
   hitTest,
   objectBounds,
+  objectsInRect,
   oppositeCorner,
+  rectFromCorners,
   renderDoc,
   selectionBounds,
 } from "./render";
+import { ArtifactBlock } from "../chat/artifacts/artifact-block";
+import type { AgentChatArtifactKind } from "../../types";
 import { INK_COLORS, INK_WIDTHS, type WbTool, ToolRail } from "./tool-rail";
 
 export type { WbTool };
@@ -62,6 +67,10 @@ const MAX_HISTORY = 30;
  *  infinite, so there is no corner to start from and no reason to
  *  prefer one direction. */
 const INITIAL_VIEW: View = { x: -400, y: -300, zoom: 1 };
+
+/** Default size for user-typed text. The agent picks its own. */
+const TEXT_FONT_SIZE = 24;
+const TEXT_MAX_WIDTH = 320;
 
 export interface AgentWhiteboardProps {
   adapter: AgentChatAdapter;
@@ -91,6 +100,12 @@ export function AgentWhiteboard({
   const [color, setColor] = useState<string>(INK_COLORS[0]);
   const [width, setWidth] = useState<number>(INK_WIDTHS[1]);
   const [question, setQuestion] = useState("");
+  // An open text editor, positioned in logical space. Null when closed.
+  const [editor, setEditor] = useState<{ x: number; y: number } | null>(null);
+  const [editorText, setEditorText] = useState("");
+  const [marquee, setMarquee] = useState<
+    { from: { x: number; y: number }; to: { x: number; y: number } } | null
+  >(null);
   const [showTranscript, setShowTranscript] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -120,6 +135,10 @@ export function AgentWhiteboard({
   // step back to this, not to the last pointer sample.
   const gestureBaseline = useRef<WbDoc | null>(null);
   const hotspotsRef = useRef<{ x: number; y: number }[]>([]);
+  // Text the user typed since the last Ask. Sent verbatim as
+  // transcription ground truth so the model never has to read its own
+  // rendering of it back out of the atlas.
+  const typedRef = useRef<string[]>([]);
   const dirtyRef = useRef<Rect | null>(null);
 
   const repaintRef = useRef<() => void>(() => undefined);
@@ -248,6 +267,26 @@ export function AgentWhiteboard({
     renderDoc(ctx, doc, view, size, services);
     ctx.restore();
 
+    // The marquee is interface, not content: painted here in screen
+    // space and never written to the document, so it can never reach
+    // the atlas and be mistaken for something the user drew.
+    if (marquee) {
+      const a = logicalToScreen(marquee.from, view);
+      const b = logicalToScreen(marquee.to, view);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.save();
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(
+        Math.min(a.x, b.x),
+        Math.min(a.y, b.y),
+        Math.abs(b.x - a.x),
+        Math.abs(b.y - a.y),
+      );
+      ctx.restore();
+    }
+
     // The in-progress stroke is not in the document yet, so paint it on
     // top rather than committing a partial object every sample.
     const live = strokeRef.current?.points;
@@ -266,7 +305,7 @@ export function AgentWhiteboard({
       ctx.lineJoin = "round";
       ctx.stroke();
     }
-  }, [doc, view, size, services, color, width]);
+  }, [doc, view, size, services, color, width, marquee]);
 
   repaintRef.current = paint;
 
@@ -310,6 +349,12 @@ export function AgentWhiteboard({
         panFrom.current = screen;
         return;
       }
+      if (tool === "text") {
+        setEditor(logical);
+        setEditorText("");
+        return;
+      }
+
       if (tool === "select") {
         // A corner handle on the existing selection starts a resize;
         // check it before hit-testing, or grabbing a handle that sits
@@ -345,6 +390,9 @@ export function AgentWhiteboard({
         if (hit) {
           gestureBaseline.current = doc;
           dragFrom.current = logical;
+        } else {
+          // Empty canvas: start a marquee rather than doing nothing.
+          setMarquee({ from: logical, to: logical });
         }
         return;
       }
@@ -374,6 +422,13 @@ export function AgentWhiteboard({
         panFrom.current = screen;
         return;
       }
+      if (marquee) {
+        setMarquee((m) =>
+          m ? { ...m, to: screenToLogical(localPoint(e), view) } : m,
+        );
+        return;
+      }
+
       if (resize.current) {
         const { anchor, start } = resize.current;
         const now = screenToLogical(localPoint(e), view);
@@ -409,11 +464,29 @@ export function AgentWhiteboard({
       }
       paint();
     },
-    [localPoint, size, view, noteDirty, paint],
+    [localPoint, size, view, noteDirty, paint, marquee],
   );
 
   const onPointerUp = useCallback(() => {
     panFrom.current = null;
+
+    if (marquee) {
+      const rect = rectFromCorners(marquee.from, marquee.to);
+      setMarquee(null);
+      // A click with no drag is a deselect, not a zero-area marquee.
+      const ids =
+        rect.w < 2 && rect.h < 2
+          ? []
+          : objectsInRect(doc, rect, services);
+      commit((prev) => ({
+        ...prev,
+        objects: prev.objects.map((o) => ({
+          ...o,
+          selected: ids.includes(o.id),
+        })),
+      }));
+      return;
+    }
     // A gesture that edited the selection has already mutated the doc;
     // snapshot it now so undo steps back over the whole drag rather
     // than one pointer sample.
@@ -443,7 +516,7 @@ export function AgentWhiteboard({
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
-  }, [tool, width, commit, pushHistory]);
+  }, [tool, width, commit, pushHistory, marquee, doc, services]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -455,6 +528,26 @@ export function AgentWhiteboard({
     },
     [],
   );
+
+  /** Commit the open text editor onto the board. */
+  const commitEditor = useCallback(() => {
+    const at = editor;
+    const body = editorText.trim();
+    setEditor(null);
+    setEditorText("");
+    if (!at || !body) return;
+    // Recorded verbatim so the model reads the exact characters rather
+    // than transcribing its own rendering of them out of the atlas.
+    typedRef.current.push(body);
+    noteDirty(at);
+    commit((prev) => ({
+      ...prev,
+      objects: [
+        ...prev.objects,
+        makeTextObject(at, body, TEXT_FONT_SIZE, TEXT_MAX_WIDTH),
+      ],
+    }));
+  }, [editor, editorText, commit, noteDirty]);
 
   const fitToContent = useCallback(() => {
     setView(zoomToFit(contentBounds(doc, services), size));
@@ -494,6 +587,9 @@ export function AgentWhiteboard({
       const atlas = buildAtlas(doc, plan, services);
       const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
       const extras: AtlasExtras = { mode };
+      if (typedRef.current.length > 0) {
+        extras.typedInput = typedRef.current.join("\n\n");
+      }
       const selected = doc.objects.find((o) => o.selected);
       if (selected) {
         const b = objectBounds(selected, services);
@@ -504,6 +600,7 @@ export function AgentWhiteboard({
       // user draws while the agent is thinking belongs to the next turn.
       hotspotsRef.current = [];
       dirtyRef.current = null;
+      typedRef.current = [];
       const text = question;
       setQuestion("");
 
@@ -524,6 +621,33 @@ export function AgentWhiteboard({
   const artifacts = doc.objects.filter(
     (o): o is Extract<WbObject, { kind: "artifact" }> => o.kind === "artifact",
   );
+
+  // Artifact name/kind/version live on the artifact.created system
+  // message, not on the placement command — the model places by id and
+  // the metadata arrives on its own event.
+  const artifactMeta = useMemo(() => {
+    const byId = new Map<
+      string,
+      { name: string; kind: AgentChatArtifactKind; version: number }
+    >();
+    for (const m of runtime.messages) {
+      const meta = m.systemMeta as
+        | {
+            artifact_id?: string;
+            name?: string;
+            kind?: AgentChatArtifactKind;
+            version?: number;
+          }
+        | undefined;
+      if (m.systemKind !== "artifact" || !meta?.artifact_id) continue;
+      byId.set(meta.artifact_id, {
+        name: meta.name ?? "Artifact",
+        kind: (meta.kind ?? "markdown") as AgentChatArtifactKind,
+        version: Number(meta.version ?? 1),
+      });
+    }
+    return byId;
+  }, [runtime.messages]);
 
   const busy = runtime.isRunning || disabled;
 
@@ -569,20 +693,60 @@ export function AgentWhiteboard({
               their place, which is what reaches the atlas. */}
           {artifacts.map((a) => {
             const tl = logicalToScreen({ x: a.x, y: a.y }, view);
+            const meta = artifactMeta.get(a.artifactId);
             return (
               <div
                 key={a.id}
                 data-artifact-id={a.artifactId}
-                className="pointer-events-auto absolute overflow-hidden rounded border bg-background"
+                className="pointer-events-auto absolute overflow-auto rounded border bg-background"
                 style={{
                   left: tl.x,
                   top: tl.y,
                   width: a.w * view.zoom,
                   height: a.h * view.zoom,
                 }}
-              />
+              >
+                {meta && sessionId ? (
+                  <ArtifactBlock
+                    sessionId={sessionId}
+                    artifactId={a.artifactId}
+                    name={meta.name}
+                    kind={meta.kind}
+                    version={a.version ?? meta.version}
+                  />
+                ) : null}
+              </div>
             );
           })}
+
+          {/* The text editor is a DOM overlay rather than canvas text:
+              it needs a real caret, IME and selection, none of which a
+              canvas provides. */}
+          {editor ? (
+            <textarea
+              autoFocus
+              aria-label="Text"
+              className="absolute rounded border bg-background p-1 text-sm shadow"
+              style={{
+                left: logicalToScreen(editor, view).x,
+                top: logicalToScreen(editor, view).y,
+                width: TEXT_MAX_WIDTH * view.zoom,
+              }}
+              value={editorText}
+              onChange={(e) => setEditorText(e.target.value)}
+              onBlur={commitEditor}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEditor(null);
+                  setEditorText("");
+                } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  commitEditor();
+                }
+              }}
+            />
+          ) : null}
         </div>
       </div>
 
