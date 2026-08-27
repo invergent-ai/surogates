@@ -294,6 +294,7 @@ class SessionStore:
         user_id: UUID,
         agent_id: str,
         channel: str,
+        surface: str | None = None,
     ) -> Session | None:
         """Return the user's canonical single-session conversation, if any.
 
@@ -307,6 +308,12 @@ class SessionStore:
         session).  There is no unique constraint enforcing one row —
         callers treat this as get-before-create and accept the benign
         race of two near-simultaneous first messages.
+
+        ``surface`` scopes the reuse: a session's surface is fixed at
+        creation and decides which tools the harness loads, so handing a
+        whiteboard request back a chat session produces a canvas the
+        agent can never draw on.  "One dedicated conversation" therefore
+        means one per surface, not one in total.
         """
         async with self._sf() as db:
             result = await db.execute(
@@ -319,6 +326,9 @@ class SessionStore:
                     SessionRow.parent_id.is_(None),
                     SessionRow.status.in_(REUSABLE_SESSION_STATUSES),
                     _SINGLE_SESSION_MARKER,
+                    SessionRow.config["surface"].astext.is_(None)
+                    if surface is None
+                    else SessionRow.config["surface"].astext == surface,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(1)

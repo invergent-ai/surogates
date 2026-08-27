@@ -160,3 +160,19 @@ def test_an_older_ops_payload_leaves_the_board_off():
     assert build_agent_runtime_context(
         _runtime_payload(),
     ).whiteboard_enabled is False
+
+
+def test_reuse_lookup_accepts_a_surface_scope():
+    """Single-session reuse must not cross surfaces.
+
+    A session's surface is fixed at creation and decides which tools the
+    harness loads, so handing a whiteboard request back the operator's
+    chat session produces a board the agent can never draw on.
+    """
+    import inspect
+
+    from surogates.session.store import SessionStore
+
+    sig = inspect.signature(SessionStore.get_reusable_channel_session)
+    assert "surface" in sig.parameters
+    assert sig.parameters["surface"].default is None

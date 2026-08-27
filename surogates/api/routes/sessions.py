@@ -37,7 +37,7 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
-from surogates.whiteboard.session import surface_rejection
+from surogates.whiteboard.session import SURFACE_KEY, surface_rejection
 from surogates.channels.constants import (
     API_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
@@ -792,6 +792,10 @@ async def create_session(
             user_id=tenant.user_id,
             agent_id=agent_runtime.agent_id,
             channel="web",
+            # Scoped to the requested surface: a session's surface is
+            # fixed at creation, so reusing a chat session for a board
+            # request yields a canvas the agent can never draw on.
+            surface=body.config.get(SURFACE_KEY),
         )
         if existing is not None:
             response.status_code = status.HTTP_200_OK

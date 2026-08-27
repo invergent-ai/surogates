@@ -137,6 +137,9 @@ async def test_single_session_returns_existing_web_session_with_200():
             "user_id": user_id,
             "agent_id": "support-bot",
             "channel": "web",
+            # Plain chat: no surface requested, so only a surface-less
+            # session qualifies. Reuse never crosses surfaces.
+            "surface": None,
         }
     ]
 
