@@ -129,6 +129,29 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+    def _spawn_background(self, coro, *, name: str) -> None:
+        """Run *coro* detached, but still inside the end-of-turn drain.
+
+        Registering it in ``_background_tasks`` is the point: the work
+        stops delaying SESSION_COMPLETE, yet the worker still waits for
+        it (bounded) before releasing the lease, so a detached teardown
+        cannot outlive the wake that started it.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _destroy_sandbox_quietly(
+        self, sandbox_id: str | None, session_id: str,
+    ) -> None:
+        """Delete a detached sandbox; never raise into the drain."""
+        try:
+            await self._sandbox_pool.destroy_released(sandbox_id, session_id)
+        except Exception:
+            logger.debug(
+                "Sandbox cleanup failed for %s", session_id, exc_info=True,
+            )
+
     async def _drain_background_tasks(self, session_id: UUID) -> None:
         """Wait for fire-and-forget background tasks to finish before lease release.
 
@@ -723,12 +746,33 @@ class ArtifactCompletionMixin:
         ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
         sees the recap in the same event stream as the closing message.
         """
-        # Destroy the sandbox pod for this session.
+        # Detach the sandbox now, delete the pod after.
+        #
+        # Deleting a pod is a round trip to the cluster, and it used to sit
+        # between the agent's last word and SESSION_COMPLETE -- so the user
+        # watched a busy indicator through it. Measured over a month of
+        # production sessions: with neither a sandbox nor a turn summary the
+        # tail is 0.24s at p50, and sessions that used a sandbox reach 32s at
+        # p90. Nothing downstream reads the teardown, and a leaked pod is
+        # already reclaimed on worker shutdown.
+        #
+        # Detaching stays synchronous because it is in-memory and it carries
+        # the ordering that matters: once the mapping is gone, no later turn
+        # can resolve this session to a pod that is about to disappear.
         if self._sandbox_pool is not None:
             try:
-                await self._sandbox_pool.destroy_for_session(str(session.id))
+                sandbox_id = await self._sandbox_pool.release_for_session(
+                    str(session.id),
+                )
             except Exception:
-                logger.debug("Sandbox cleanup failed for %s", session.id, exc_info=True)
+                logger.debug(
+                    "Sandbox detach failed for %s", session.id, exc_info=True,
+                )
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                    name=f"sandbox-teardown-{session.id}",
+                )
 
         # The browser is intentionally NOT torn down here. A turn end is
         # not a session end: an agent driving a multi-step browser flow
