@@ -2858,8 +2858,8 @@ git commit -m "feat(whiteboard): render canvas objects"
 - Consumes: `View` (Task 12), `WbObject`, `CANVAS_SIZE` (Task 11).
 - Produces:
   - `screenToLogical(pt: {x,y}, view: View): {x,y}` and `logicalToScreen(pt, view)`
-  - `class StrokeBuilder` with `begin(pt, pressure)`, `extend(pt, pressure)`, `finish(): WbObject | null`
-  - `strokePointsFromEvent(event: PointerEvent): {x,y,pressure}[]` — uses `getCoalescedEvents()` when available
+  - `class StrokeBuilder` with `begin(pt)`, `extend(pt)`, `finish(): WbObject | null`
+  - `strokePointsFromEvent(event: PointerEvent): {x,y}[]` — uses `getCoalescedEvents()` when available
   - `clampView(view: View, size: {w,h}): View`
   - `zoomAt(view: View, screenPt: {x,y}, factor: number): View`
 
@@ -2954,17 +2954,6 @@ describe("stroke building", () => {
     expect(new StrokeBuilder("#111", 4).finish()).toBeNull();
   });
 
-  it("scales width by mean pressure", () => {
-    const light = new StrokeBuilder("#111", 10);
-    light.begin({ x: 0, y: 0 }, 0.1);
-    light.extend({ x: 10, y: 0 }, 0.1);
-    const heavy = new StrokeBuilder("#111", 10);
-    heavy.begin({ x: 0, y: 0 }, 1);
-    heavy.extend({ x: 10, y: 0 }, 1);
-    expect((heavy.finish() as { width: number }).width)
-      .toBeGreaterThan((light.finish() as { width: number }).width);
-  });
-
   it("clamps points to the canvas", () => {
     const b = new StrokeBuilder("#111", 4);
     b.begin({ x: -50, y: -50 }, 0.5);
@@ -2978,10 +2967,10 @@ describe("stroke building", () => {
 describe("coalesced pointer samples", () => {
   it("uses getCoalescedEvents when the browser provides it", () => {
     const event = {
-      clientX: 30, clientY: 40, pressure: 0.9,
+      clientX: 30, clientY: 40,
       getCoalescedEvents: () => [
-        { clientX: 10, clientY: 20, pressure: 0.5 },
-        { clientX: 20, clientY: 30, pressure: 0.7 },
+        { clientX: 10, clientY: 20 },
+        { clientX: 20, clientY: 30 },
       ],
     } as unknown as PointerEvent;
     expect(strokePointsFromEvent(event)).toHaveLength(2);
@@ -2989,21 +2978,13 @@ describe("coalesced pointer samples", () => {
 
   it("falls back to the event itself", () => {
     const event = {
-      clientX: 30, clientY: 40, pressure: 0.9,
+      clientX: 30, clientY: 40,
     } as unknown as PointerEvent;
     const pts = strokePointsFromEvent(event);
     expect(pts).toHaveLength(1);
     expect(pts[0]).toMatchObject({ x: 30, y: 40 });
   });
 
-  it("substitutes a default pressure for a mouse", () => {
-    // A mouse reports pressure 0 while the button is down; treating that
-    // literally makes every mouse stroke invisible.
-    const event = {
-      clientX: 1, clientY: 2, pressure: 0,
-    } as unknown as PointerEvent;
-    expect(strokePointsFromEvent(event)[0].pressure).toBeGreaterThan(0);
-  });
 });
 ```
 
@@ -3029,13 +3010,15 @@ Required behaviour, all covered by the test above:
   does not move.
 - `clampView(view, size)` keeps `x` and `y` in `[0, CANVAS_SIZE]`.
 - `strokePointsFromEvent(event)` returns `event.getCoalescedEvents()`
-  mapped to `{x, y, pressure}` when the method exists, else a single
-  sample from the event. Pressure `0` (mouse) becomes `0.5`.
-- `StrokeBuilder(color, baseWidth)` accumulates points, clamps each to
+  mapped to `{x, y}` when the method exists, else a single
+- `StrokeBuilder(color, width)` accumulates points, clamps each to
   `[0, CANVAS_SIZE]`, and `finish()` returns `null` for fewer than two
-  points, otherwise an `ink` object with `width` scaled by mean pressure
-  (`baseWidth * (0.5 + meanPressure)`), rounded and clamped to the same
-  `2..200` range `draw.js` uses.
+  points, otherwise an `ink` object at the caller's chosen width.
+
+  No pressure: the model reads a PNG, so stroke dynamics cannot change
+  what it transcribes, and only a stylus reports pressure at all. Scaling
+  by *mean* pressure would give one width per stroke, which is what the
+  width control already does.
 
 - [ ] **Step 4: Run test to verify it passes**
 
