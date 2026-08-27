@@ -16,6 +16,10 @@ from surogates.harness.loop_artifacts import (
     _coerce_tool_args,
     _derive_artifact_name,
 )
+from surogates.harness.delivery_manifest import (
+    check_terminal_claim,
+    reconcile,
+)
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
 from surogates.harness.loop_messages import (
     _as_aware_utc,
@@ -213,6 +217,7 @@ class ArtifactCompletionMixin:
         session_id: UUID,
         turn_id: str,
         user_message: str,
+        final_message: str = "",
     ) -> None:
         """Drain pending iteration summaries, then emit TURN_SUMMARY.
 
@@ -267,20 +272,38 @@ class ArtifactCompletionMixin:
             str((getattr(e, "data", None) or {}).get("summary") or "")
             for e in ordered
         ]
-        candidate_artifacts = await self._collect_candidate_artifacts(
-            session_id=session_id, turn_id=turn_id,
+        candidate_artifacts, entries_by_path = (
+            await self._collect_candidate_artifacts(
+                session_id=session_id, turn_id=turn_id,
+            )
         )
 
+        # Which candidates are real deliverables is now decided against
+        # the workspace rather than by asking a model to pick. A file
+        # that is present-but-empty or present-but-older-than-this-turn
+        # is not a delivery, however convincing it looks in a prompt.
+        manifest = reconcile(
+            candidate_artifacts,
+            entries_by_path=entries_by_path,
+            turn_start=self._turn_started_at,
+        )
+        manifest = check_terminal_claim(manifest, final_message)
+        if manifest.rejected:
+            logger.info(
+                "Turn %s: dropped %d candidate(s) the workspace does not "
+                "support: %s",
+                turn_id, len(manifest.rejected),
+                ", ".join(f"{r.ref}({r.reason})" for r in manifest.rejected),
+            )
+
         try:
-            # Outer backstop sits above the summarizer's own 30s
-            # timeout — the turn summary runs on the base model, which
-            # is slower than the cheap auxiliary.
+            # Outer backstop sits above the summarizer's own timeout.
             result = await asyncio.wait_for(
                 self._turn_summarizer.summarize_turn(
                     turn_id=turn_id,
                     user_message=user_message,
                     iteration_summaries=iteration_summaries,
-                    candidate_artifacts=candidate_artifacts,
+                    artifacts=manifest.delivered,
                 ),
                 timeout=35.0,
             )
@@ -302,6 +325,24 @@ class ArtifactCompletionMixin:
                 {
                     "turn_id": turn_id,
                     "recap": result.recap,
+                    # Advisory, and only ever set when the turn delivered
+                    # nothing at all: the closing message claimed a file
+                    # that was never written. Surfaced rather than acted
+                    # on -- wrongly telling someone their work failed is
+                    # worse than saying nothing.
+                    **(
+                        {"unsupported_claim": manifest.unsupported_claim}
+                        if manifest.unsupported_claim
+                        else {}
+                    ),
+                    **(
+                        {"rejected": [
+                            {"ref": r.ref, "reason": r.reason}
+                            for r in manifest.rejected
+                        ]}
+                        if manifest.rejected
+                        else {}
+                    ),
                     "artifacts": [
                         {"kind": a.kind, "label": a.label, "ref": a.ref}
                         for a in result.artifacts
@@ -318,8 +359,13 @@ class ArtifactCompletionMixin:
         *,
         session_id: UUID,
         turn_id: str,
-    ) -> list[Any]:
+    ) -> tuple[list[Any], dict[str, dict[str, Any]]]:
         """Pull downloadable artifact candidates emitted during this turn.
+
+        Returns the candidates and the workspace listing they were
+        checked against -- reconciliation needs size and mtime for
+        candidates that came from tool calls, not only for the ones the
+        scan found.
 
         Returns a list of ``TurnArtifact`` instances from
         :mod:`surogates.harness.turn_summarizer` — workspace files and
@@ -425,18 +471,20 @@ class ArtifactCompletionMixin:
         # tool-call stream. Deduped against the paths already added
         # via write_file/patch so the same file isn't listed twice.
         try:
-            workspace_candidates = await self._scan_workspace_for_new_files(
-                session_id=session_id,
-                already_seen_paths={
-                    a.ref for a in out if a.kind == "file"
-                },
+            workspace_candidates, entries_by_path = (
+                await self._scan_workspace_for_new_files(
+                    session_id=session_id,
+                    already_seen_paths={
+                        a.ref for a in out if a.kind == "file"
+                    },
+                )
             )
         except Exception:
             logger.debug(
                 "Workspace mtime scan failed for %s",
                 session_id, exc_info=True,
             )
-            workspace_candidates = []
+            workspace_candidates, entries_by_path = [], {}
         out.extend(workspace_candidates)
 
         # Flag intermediate scripts: a file the agent wrote and then
@@ -463,7 +511,7 @@ class ArtifactCompletionMixin:
                 ))
             else:
                 annotated.append(art)
-        return annotated
+        return annotated, entries_by_path
 
     async def _scan_workspace_for_new_files(
         self,
@@ -487,15 +535,15 @@ class ArtifactCompletionMixin:
 
         storage = self._storage
         if storage is None or self._turn_started_at is None:
-            return []
+            return [], {}
 
         try:
             session = await self._store.get_session(session_id)
         except Exception:
-            return []
+            return [], {}
         bucket = (session.config or {}).get("storage_bucket")
         if not bucket:
-            return []
+            return [], {}
         root_id = (
             (session.config or {}).get("sandbox_root_session_id")
             or str(session.id)
@@ -509,9 +557,14 @@ class ArtifactCompletionMixin:
                 "Workspace list_entries failed for bucket %r prefix %r",
                 bucket, prefix, exc_info=True,
             )
-            return []
+            return [], {}
 
         out: list[TurnArtifact] = []
+        # Keyed by workspace-relative path and returned alongside the
+        # candidates: reconciliation needs size/mtime for candidates that
+        # came from tool calls too, and this listing is the only place
+        # they are observable without a per-file HEAD.
+        entries_by_path: dict[str, dict[str, Any]] = {}
         turn_start = self._turn_started_at
         for entry in entries:
             key = entry["key"]
@@ -521,12 +574,15 @@ class ArtifactCompletionMixin:
             if _is_internal_workspace_path(rel):
                 continue
             modified = _coerce_modified_to_datetime(entry.get("modified"))
+            entries_by_path[rel] = {
+                "size": entry.get("size"), "modified": modified,
+            }
             if modified is None or modified < turn_start:
                 continue
             out.append(
                 TurnArtifact(kind="file", label=rel, ref=rel),
             )
-        return out
+        return out, entries_by_path
 
     async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
         """Return the direct-UI parent that should receive this loop run result.
@@ -773,6 +829,9 @@ class ArtifactCompletionMixin:
                     user_message=user_message
                     if user_message is not None
                     else _latest_user_message_text(messages),
+                    # The closing message is the only place a delivery
+                    # claim with nothing behind it can be seen.
+                    final_message=_last_assistant_message_excerpt(messages),
                 )
             except Exception:
                 logger.exception(

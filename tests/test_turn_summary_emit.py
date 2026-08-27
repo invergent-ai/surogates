@@ -202,16 +202,16 @@ async def test_drain_passes_iteration_summaries_and_candidates(
     # downloadable — the summary card only presents downloadable
     # artifacts) and the .agents/ write (internal agent state) are
     # dropped.
-    candidate_kinds = [a.kind for a in call["candidate_artifacts"]]
+    candidate_kinds = [a.kind for a in call["artifacts"]]
     assert "file" in candidate_kinds
     assert "url" not in candidate_kinds
-    assert all(a.label != "x.md" for a in call["candidate_artifacts"])
+    assert all(a.label != "x.md" for a in call["artifacts"])
     assert all(
-        "example.com" not in a.ref for a in call["candidate_artifacts"]
+        "example.com" not in a.ref for a in call["artifacts"]
     )
     assert all(
         not a.ref.startswith(".agents/")
-        for a in call["candidate_artifacts"]
+        for a in call["artifacts"]
     )
 
 
@@ -379,7 +379,7 @@ async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> N
     harness._storage = _FakeStorage()
     harness._turn_started_at = turn_start
 
-    candidates = await harness._collect_candidate_artifacts(
+    candidates, entries_by_path = await harness._collect_candidate_artifacts(
         session_id=fake_session.id, turn_id="turn-X",
     )
 
@@ -388,6 +388,13 @@ async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> N
     # The post-turn-start file appears; the pre-turn-start file doesn't.
     assert any("Summary.docx" in r for r in refs)
     assert all("old.txt" not in r for r in refs)
+
+    # The listing comes back too: reconciliation needs size and mtime for
+    # candidates that came from tool calls, which the scan never sees.
+    assert entries_by_path, "listing not returned alongside the candidates"
+    assert all(
+        "size" in e and "modified" in e for e in entries_by_path.values()
+    )
 
 
 @pytest.mark.asyncio
