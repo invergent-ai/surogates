@@ -523,3 +523,44 @@ async def test_complete_session_skips_drain_for_research_session(
     emit_types = [c.args[1] for c in store.emit_event.await_args_list]
     assert EventType.TURN_SUMMARY not in emit_types
     assert EventType.SESSION_COMPLETE in emit_types
+
+
+@pytest.mark.asyncio
+async def test_collect_candidate_artifacts_skips_directory_markers() -> None:
+    """A directory is not a deliverable, whatever size the backend reports.
+
+    Object stores list directories as keys ending in "/". A real run put
+    ``__pycache__/`` in front of reconciliation, where it survived only
+    because its size happened to be zero.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    fake_session = SimpleNamespace(
+        id=uuid4(), config={"storage_bucket": "bucket-1"},
+    )
+    store.get_session = AsyncMock(return_value=fake_session)
+    turn_start = datetime.now(timezone.utc)
+
+    class _FakeStorage:
+        async def list_entries(self, _bucket, prefix=""):
+            return [
+                {"key": "out.csv", "modified": turn_start + timedelta(seconds=5),
+                 "size": 120},
+                # Non-zero size on purpose: the old code only dropped these
+                # for being empty.
+                {"key": "__pycache__/", "modified": turn_start + timedelta(seconds=5),
+                 "size": 4096},
+            ]
+
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._storage = _FakeStorage()
+    harness._turn_started_at = turn_start
+
+    candidates, _entries = await harness._collect_candidate_artifacts(
+        session_id=fake_session.id, turn_id="turn-D",
+    )
+    refs = [c.ref for c in candidates]
+    assert any("out.csv" in r for r in refs)
+    assert all(not r.endswith("/") for r in refs), refs

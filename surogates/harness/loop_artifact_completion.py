@@ -590,6 +590,12 @@ class ArtifactCompletionMixin:
             rel = key[len(prefix):] if key.startswith(prefix) else key
             if not rel or rel in already_seen_paths:
                 continue
+            # Directory markers are not downloadable. Object stores list
+            # them as zero-byte keys ending in "/", so they only ever got
+            # dropped for being empty -- a backend that reports a size
+            # for them would have put __pycache__/ on the download card.
+            if rel.endswith("/"):
+                continue
             if _is_internal_workspace_path(rel):
                 continue
             modified = _coerce_modified_to_datetime(entry.get("modified"))
