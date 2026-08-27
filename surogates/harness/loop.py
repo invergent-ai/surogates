@@ -1232,6 +1232,7 @@ class AgentHarness(
                     session_factory=self._session_factory,
                     session_config=session.config,
                     session_store=self._store,
+                    llm_client=self._llm,
                     sandbox_pool=self._sandbox_pool,
                     credential_vault=self._credential_vault,
                 )

@@ -530,7 +530,7 @@ class TestConsultExpertHandler:
             def __init__(self, **kwargs):
                 captured["init"] = kwargs
 
-            async def consult(self, *, expert, task, context=None):
+            async def consult(self, *, expert, task, context=None, client=None):
                 captured["expert"] = expert
                 captured["task"] = task
                 return ExpertConsultationResult(

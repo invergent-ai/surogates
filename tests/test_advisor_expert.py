@@ -145,3 +145,79 @@ class TestExpertOrdering:
         section = builder._available_experts_section()
         assert section.index("sql-tuner") < section.index("**advisor**")
         assert "Prefer a domain expert" in section
+
+
+class TestAdvisorNeedsNoEndpoint:
+    """The whole point: a platform expert declares a model, not a URL.
+
+    ``ExpertConsultationService`` rejects an expert with no endpoint,
+    because a tenant expert dials an arbitrary upstream and must say
+    where. The advisor rides the session's client instead -- its tier
+    comes from the model sentinel, which the proxy resolves. Without
+    this the consult fails with "Expert 'advisor' has no endpoint
+    configured", which is exactly what shipped first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_consult_succeeds_with_a_supplied_client(self):
+        from unittest.mock import AsyncMock
+        from types import SimpleNamespace
+        from surogates.tools.builtin.expert_service import (
+            ExpertConsultationService,
+        )
+
+        advisor = build_advisor_expert()
+        assert advisor.expert_endpoint is None  # the precondition
+
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+            create=AsyncMock(return_value=SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="Ship the smaller fix first.",
+                        tool_calls=None,
+                    ),
+                    finish_reason="stop",
+                )],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+            )),
+        )))
+
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=None, user_id=None),
+            session_id=__import__("uuid").uuid4(),
+            tool_registry=SimpleNamespace(get_schemas=lambda names=None: []),
+            session_store=AsyncMock(),
+        )
+        result = await service.consult(
+            expert=advisor, task="what next?", client=client,
+        )
+
+        assert result.success, result.error
+        assert "Ship the smaller fix first." in result.content
+        # It asked for the Pro tier by name; the proxy does the routing.
+        sent = client.chat.completions.create.await_args.kwargs
+        assert sent["model"] == ADVISOR_MODEL_SENTINEL
+
+    @pytest.mark.asyncio
+    async def test_tenant_expert_without_an_endpoint_still_fails(self):
+        """The requirement stays for experts that dial their own upstream."""
+        from unittest.mock import AsyncMock
+        from types import SimpleNamespace
+        from surogates.tools.loader import EXPERT_STATUS_ACTIVE, SkillDef
+        from surogates.tools.builtin.expert_service import (
+            ExpertConsultationService,
+        )
+
+        rogue = SkillDef(
+            name="sql", description="d", content="c", source="org_db",
+            type="expert", expert_status=EXPERT_STATUS_ACTIVE,
+        )
+        service = ExpertConsultationService(
+            tenant=SimpleNamespace(org_id=None, user_id=None),
+            session_id=__import__("uuid").uuid4(),
+            tool_registry=SimpleNamespace(get_schemas=lambda names=None: []),
+            session_store=AsyncMock(),
+        )
+        result = await service.consult(expert=rogue, task="x")
+        assert not result.success
+        assert "no endpoint configured" in result.error

@@ -146,7 +146,17 @@ async def _consult_expert_handler(
     # cost of every consult on a long session.
     from surogates.tools.builtin.advisor_expert import is_advisor_expert
 
+    platform_client = None
     if is_advisor_expert(expert):
+        # The advisor runs on the session's own LLM route; its tier comes
+        # from ``model: surogate-pro``, which the proxy resolves. Without
+        # this it would need an endpoint and a credential of its own,
+        # which is the bespoke wiring it exists to be free of.
+        platform_client = kwargs.get("llm_client")
+        if platform_client is None:
+            return json.dumps({
+                "error": "No LLM client available for the advisor.",
+            })
         transcript_of = kwargs.get("expert_transcript")
         if transcript_of is not None:
             transcript = transcript_of()
@@ -170,6 +180,7 @@ async def _consult_expert_handler(
         expert=expert,
         task=task,
         context=context,
+        client=platform_client,
     )
     return result.content
 
@@ -256,6 +267,7 @@ def _skill_def_from_detail(detail: dict[str, Any]) -> SkillDef | None:
         description=detail.get("description") or "",
         content=detail.get("content") or "",
         source=detail.get("source") or "platform",
+        builtin=bool(detail.get("builtin")),
         type=detail.get("type") or "skill",
         category=detail.get("category"),
         trigger=detail.get("trigger"),
