@@ -615,6 +615,62 @@ describe("AgentWhiteboard", () => {
     expect(sharedCalls.some((c) => c[0] === "arc")).toBe(false);
   });
 
+  it("keeps focus on the text editor it just opened", async () => {
+    // The browser focuses the canvas on the click following pointerdown,
+    // which blurs the textarea — and blur commits, so the editor opened
+    // and vanished within one gesture. Preventing the default keeps the
+    // focus where it was just put.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Text")?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    let captured = false;
+    canvas.setPointerCapture = () => {
+      captured = true;
+    };
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    const event = new PointerEvent("pointerdown", {
+      clientX: 200, clientY: 200, bubbles: true, cancelable: true,
+    });
+    await act(async () => {
+      canvas.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    // The text tool never drags, so holding the pointer would only stop
+    // the editor behaving like an ordinary input.
+    expect(captured).toBe(false);
+    expect(el.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("still captures the pointer for tools that drag", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    let captured = false;
+    canvas.setPointerCapture = () => {
+      captured = true;
+    };
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 200, clientY: 200, bubbles: true,
+        }),
+      );
+    });
+    expect(captured).toBe(true);
+  });
+
   it("disables the controls when disabled", async () => {
     const { adapter } = makeAdapter();
     const el = await render(

@@ -384,17 +384,26 @@ export function AgentWhiteboard({
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (disabled) return;
-      e.currentTarget.setPointerCapture(e.pointerId);
       const screen = localPoint(e);
       const logical = screenToLogical(screen, view);
 
-      if (tool === "pan") {
-        panFrom.current = screen;
-        return;
-      }
       if (tool === "text") {
+        // No pointer capture and no default action. The browser focuses
+        // the canvas on the click that follows this pointerdown, which
+        // blurs the textarea we are about to mount — and blur commits,
+        // so the editor opened and closed within one gesture.
+        e.preventDefault();
         setEditor(logical);
         setEditorText("");
+        return;
+      }
+
+      // Every other tool drags, so it wants the pointer for the whole
+      // gesture even if it leaves the canvas.
+      e.currentTarget.setPointerCapture(e.pointerId);
+
+      if (tool === "pan") {
+        panFrom.current = screen;
         return;
       }
 
