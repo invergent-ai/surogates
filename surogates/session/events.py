@@ -195,6 +195,13 @@ class EventType(str, Enum):
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
 
+    # A user message the prompt-injection detector refused. Recorded on
+    # the session so a block is visible in the timeline rather than
+    # existing only as a 422 the caller may discard -- the operator
+    # needs to see that an attack was detected, and the user needs to
+    # see why their message never arrived.
+    SECURITY_INJECTION_BLOCKED = "security.injection_blocked"
+
     # AI-disclosure audit trail (EU AI Act Art. 50): the disclosure was
     # delivered on a channel / acknowledged by the end-user.  Persisted
     # in the event log so deployers can evidence compliance per session.
