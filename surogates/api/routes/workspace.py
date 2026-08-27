@@ -117,10 +117,27 @@ _SKIP_DIRS = frozenset({
 # internal state through the file-browser panel.
 _RESERVED_PREFIXES: tuple[str, ...] = ("_artifacts/",)
 
+# Prefixes hidden from the workspace tree but still readable and writable
+# by their owning client.  The whiteboard canvas is the case this exists
+# for: the browser client is its sole writer (see the whiteboard design
+# doc's "Persistence: single writer"), so blocking access would break the
+# feature -- but surfacing a canvas.json in the file browser invites a
+# delete that silently destroys the user's ink, which the event-log tail
+# cannot rebuild.
+_HIDDEN_PREFIXES: tuple[str, ...] = ("_whiteboard/",)
+
 
 def _is_reserved(key: str) -> bool:
     """Return True if ``key`` points into a reserved internal prefix."""
     return any(key.startswith(p) for p in _RESERVED_PREFIXES)
+
+
+def _is_hidden(key: str) -> bool:
+    """Return True if ``key`` should be kept out of the workspace tree.
+
+    Reserved prefixes are hidden too: blocked implies invisible.
+    """
+    return _is_reserved(key) or any(key.startswith(p) for p in _HIDDEN_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +409,7 @@ async def get_workspace_tree(
     relative_keys = [_strip_session_prefix(session, root_id, k) for k in keys]
     # Drop keys living under reserved prefixes (artifact storage) so
     # internal server-side files don't leak into the workspace browser.
-    visible_keys = [k for k in relative_keys if k and not _is_reserved(k)]
+    visible_keys = [k for k in relative_keys if k and not _is_hidden(k)]
     entries = _build_tree(visible_keys)
     truncated = len(visible_keys) >= _MAX_ENTRIES
 
