@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
 from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
-from surogates.whiteboard.session import is_whiteboard_session
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -1129,9 +1128,11 @@ class AgentHarness(
             # attaches a fresh render of the board, and each render is a
             # superset of the one before it, so every snapshot but the
             # newest is dead weight that would dominate the window within
-            # a dozen turns.
-            if is_whiteboard_session(session):
-                messages = prune_superseded_canvas_images(messages)
+            # a dozen turns.  Self-selecting: it only touches messages
+            # carrying the canvas note, so an ordinary session that never
+            # drew is untouched and an uploaded screenshot in a session
+            # that did is left alone.
+            messages = prune_superseded_canvas_images(messages)
 
             # 7. Compress context if needed.
             messages = await self._engineer_context(
@@ -1655,8 +1656,8 @@ class AgentHarness(
             # the two speeds alternate freely within one conversation.
             tool_filter = _whiteboard_sketch_filter(
                 tool_filter,
-                session,
                 _latest_whiteboard_metadata(all_events),
+                has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
             )
 
             # user_reports exposes other end-users' data — its schema is
@@ -1698,7 +1699,9 @@ class AgentHarness(
                     or (getattr(session, "config", None) or {}).get(
                         "scheduled_dynamic_loop")
                 ),
-                is_whiteboard=is_whiteboard_session(session),
+                # The same fact that decided the prompt's whiteboard
+                # contract, so prose and schema cannot disagree.
+                is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
             )
 
             # Build the message list: system → prefill → memory → conversation.
@@ -4454,8 +4457,9 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
 
 def _whiteboard_sketch_filter(
     tool_filter: set[str] | None,
-    session: Any,
     metadata: Any,
+    *,
+    has_whiteboard: bool,
 ) -> set[str] | None:
     """Narrow a whiteboard turn to one model round-trip in sketch mode.
 
@@ -4479,9 +4483,26 @@ def _whiteboard_sketch_filter(
     ones already live -- the entitlement exclusions applied downstream.
     """
     from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
-    from surogates.whiteboard.session import MODE_DEEP, turn_mode
+    from surogates.whiteboard.session import (
+        MODE_DEEP,
+        is_whiteboard_turn,
+        turn_mode,
+    )
 
-    if not is_whiteboard_session(session):
+    # Keyed on the turn, not the session: the board is a view mode, so an
+    # ordinary message turn on a board-enabled agent must keep its full
+    # catalogue.  ``turn_mode`` alone would not do -- it answers
+    # ``sketch`` for a turn with no whiteboard block at all, which would
+    # narrow every chat turn to a single drawing tool.
+    if not is_whiteboard_turn(metadata):
+        return tool_filter
+    # ...and only for an agent that actually has the tool.  Narrowing to
+    # a tool the agent lacks empties the schema list, and
+    # ``drop_unusable_tools`` refuses to return nothing -- so the drop it
+    # just made would be undone and the capability handed out anyway.
+    # A canvas turn to an agent without the board is an ordinary turn
+    # that happens to carry an image.
+    if not has_whiteboard:
         return tool_filter
     if turn_mode(metadata) == MODE_DEEP:
         return tool_filter

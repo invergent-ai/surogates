@@ -33,7 +33,6 @@ from surogates.runtime.governance import (
     build_governance_gate,
 )
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
-from surogates.whiteboard.session import is_whiteboard_session
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -217,6 +216,9 @@ def _filter_effective_tools(
     tenant: TenantContext,
     session: Any,
     use_api_for_harness_tools: bool,
+    # Defaults to the safe answer, matching ``drop_unusable_tools``: an
+    # unknown board capability must never hand out the drawing tool.
+    whiteboard_enabled: bool = False,
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -303,12 +305,18 @@ def _filter_effective_tools(
     else:
         result |= BOARD_SELF_TOOLS
 
-    # whiteboard_draw is the canvas surface's write path: meaningless on
-    # a message-thread session, and mandatory on a whiteboard one. Same
-    # force-add idiom as the board self-tools above -- a whiteboard
-    # session that cannot draw is not a whiteboard, whatever a
-    # restrictive AgentDef allowlist says.
-    if is_whiteboard_session(session):
+    # whiteboard_draw follows the agent's board capability, not the
+    # session: the canvas is a view mode the user flips into on any
+    # session, so the tool has to be there before the first stroke is
+    # ever sent. Same force-add idiom as the board self-tools above --
+    # an agent whose operator switched the board on can always draw,
+    # whatever a restrictive AgentDef allowlist says.
+    #
+    # This is the PROMPT surface; the model-visible SCHEMAS are gated in
+    # ``loop.py`` off the same ``available_tools`` set this produces, so
+    # the two cannot drift. What varies per *turn* is only the speed --
+    # see ``_whiteboard_sketch_filter``.
+    if whiteboard_enabled:
         result |= WHITEBOARD_TOOL_NAMES
     else:
         result -= WHITEBOARD_TOOL_NAMES
@@ -1955,6 +1963,7 @@ async def run_worker(settings: Settings) -> None:
             tenant=tenant,
             session=session,
             use_api_for_harness_tools=settings.worker.use_api_for_harness_tools,
+            whiteboard_enabled=ctx.whiteboard_enabled,
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding

@@ -22,17 +22,23 @@ MODE_SKETCH = "sketch"
 MODE_DEEP = "deep"
 
 
-def is_whiteboard_session(session: Any) -> bool:
-    """Whether *session* is a whiteboard surface.
+#: First line of the geometry note attached to every whiteboard turn.
+#: Doubles as the marker that identifies a canvas message during replay:
+#: the canvas arrives as an ordinary image attachment, so without it the
+#: pruner cannot tell one from a screenshot the user uploaded.
+CANVAS_NOTE_HEADER = "The user is working on a whiteboard canvas."
 
-    ``getattr`` with a ``None`` guard: several harnesses build partial
-    session objects that skip ``__init__``, and a missing config means
-    "not a whiteboard", not a programming error.
+
+def is_whiteboard_turn(metadata: Any) -> bool:
+    """Whether *this turn* was sent from the canvas.
+
+    The board is a view mode, not a session type: the same session
+    alternates freely between message turns and canvas turns, so the
+    question can only be answered per turn.  Presence of the metadata
+    block is the answer -- the client attaches it exactly when it
+    attaches a canvas render.
     """
-    config = getattr(session, "config", None)
-    if not isinstance(config, dict):
-        return False
-    return config.get(SURFACE_KEY) == SURFACE_VALUE
+    return whiteboard_metadata(metadata) is not None
 
 
 def whiteboard_metadata(metadata: Any) -> dict[str, Any] | None:
@@ -58,11 +64,13 @@ def surface_rejection(
 ) -> str | None:
     """Reject a session config asking for a surface the agent lacks.
 
-    ``config.surface`` arrives from the client, and the harness force-adds
-    ``whiteboard_draw`` for a whiteboard session *past* any AgentDef
-    allowlist -- so without this an ordinary caller can hand themselves
-    the canvas toolset on an agent whose operator switched the board off.
-    That makes the surface a capability escalation, not a preference.
+    The surface no longer decides the tool set -- the agent's board
+    capability does, because the canvas is a view mode the user can
+    reach from any session.  What is left is a plain input check on a
+    client-supplied value: an unimplemented surface is a request the
+    server cannot honour, and asking for a board on an agent that has
+    none is better answered with a 403 than with a canvas that silently
+    never draws.
 
     Returns an error message, or ``None`` when the config is acceptable.
     Pure so it can be tested without a request; the route turns a

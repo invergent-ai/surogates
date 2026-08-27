@@ -1,9 +1,9 @@
 """The harness half of the whiteboard surface, composed.
 
 Each piece has its own unit test; this asserts they agree with each
-other on one session -- the tool catalogue, the system prompt, the
-rendered user message and the replay pruning all keying off the same
-``config.surface`` stamp.
+other -- the tool catalogue and system prompt keying off the agent's
+board capability, the rendered user message and the replay pruning off
+the turn's own canvas metadata.
 
 Deliberately not under ``tests/integration``: that package's conftest
 spins up real Postgres and Redis containers via testcontainers, and
@@ -27,9 +27,6 @@ from surogates.session.events import EventType
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
-
-WHITEBOARD_CONFIG = {"surface": "whiteboard"}
-PLAIN_CONFIG: dict = {}
 
 CATALOGUE = {"whiteboard_draw", "create_artifact", "web_search", "memory"}
 
@@ -70,56 +67,73 @@ def _turn_events(mode):
     )]
 
 
-def _effective_tools(config):
-    """The tool set as both surfaces agree on it, for one session."""
-    session = _session(config)
+def _effective_tools(*, whiteboard_enabled):
+    """The tool set as both surfaces independently compute it."""
     prompt_surface = _filter_effective_tools(
         tools=set(CATALOGUE),
         tenant=SimpleNamespace(org_id="o", user_id="u", service_account_id=None),
-        session=session,
+        session=_session({}),
         use_api_for_harness_tools=True,
+        whiteboard_enabled=whiteboard_enabled,
     )
+    # What the harness passes to ``drop_unusable_tools``: the flag the
+    # prompt builder derived from the very set above.
+    has_whiteboard = PromptBuilder(
+        _tenant(), session=_session({}), available_tools=prompt_surface,
+    ).has_whiteboard
     schema_surface = {
         s["function"]["name"]
         for s in drop_unusable_tools(
             [{"function": {"name": n}} for n in sorted(CATALOGUE)],
             has_kbs=True, has_channel=True, is_scheduled=True,
-            is_whiteboard=config.get("surface") == "whiteboard",
+            is_whiteboard=has_whiteboard,
         )
     }
     return prompt_surface, schema_surface
 
 
-# --- 1. the tool reaches a whiteboard session ------------------------
+# --- 1. the tool follows the agent capability ------------------------
 
-def test_a_whiteboard_session_gets_the_draw_tool_on_both_surfaces():
-    prompt_surface, schema_surface = _effective_tools(WHITEBOARD_CONFIG)
+def test_a_board_enabled_agent_gets_the_draw_tool_on_both_surfaces():
+    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=True)
     assert "whiteboard_draw" in prompt_surface
     assert "whiteboard_draw" in schema_surface
 
 
-def test_a_plain_session_gets_it_on_neither_surface():
-    prompt_surface, schema_surface = _effective_tools(PLAIN_CONFIG)
+def test_an_agent_without_the_board_gets_it_on_neither_surface():
+    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=False)
     assert "whiteboard_draw" not in prompt_surface
     assert "whiteboard_draw" not in schema_surface
+
+
+def test_an_ordinary_chat_session_still_gets_the_tool():
+    """The board is a view mode, not a session type.
+
+    Gating on ``config.surface`` meant flipping the composer to
+    Whiteboard on an existing chat session showed a canvas the agent
+    could not draw on.
+    """
+    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=True)
+    assert "whiteboard_draw" in prompt_surface
+    assert "whiteboard_draw" in schema_surface
 
 
 # --- 2/3. the two speeds ---------------------------------------------
 
 def test_a_sketch_turn_leaves_exactly_one_tool():
-    session = _session(WHITEBOARD_CONFIG)
     narrowed = _whiteboard_sketch_filter(
-        set(CATALOGUE), session,
+        set(CATALOGUE),
         _latest_whiteboard_metadata(_turn_events("sketch")),
+        has_whiteboard=True,
     )
     assert narrowed == {"whiteboard_draw"}
 
 
 def test_a_deep_turn_keeps_the_full_catalogue():
-    session = _session(WHITEBOARD_CONFIG)
     narrowed = _whiteboard_sketch_filter(
-        set(CATALOGUE), session,
+        set(CATALOGUE),
         _latest_whiteboard_metadata(_turn_events("deep")),
+        has_whiteboard=True,
     )
     assert narrowed == CATALOGUE
     # place_artifact is only useful once create_artifact has run, so the
@@ -127,33 +141,39 @@ def test_a_deep_turn_keeps_the_full_catalogue():
     assert "create_artifact" in narrowed
 
 
-def test_a_plain_session_is_never_narrowed():
+def test_a_message_turn_on_a_board_enabled_agent_is_never_narrowed():
+    # The same session alternates between canvas turns and chat turns.
+    # A chat turn narrowed to whiteboard_draw would leave the agent
+    # unable to answer anything.
+    plain = [SimpleNamespace(
+        type=EventType.USER_MESSAGE.value,
+        data={"content": "what is this", "metadata": {}},
+    )]
     narrowed = _whiteboard_sketch_filter(
-        set(CATALOGUE), _session(PLAIN_CONFIG),
-        _latest_whiteboard_metadata(_turn_events("sketch")),
+        set(CATALOGUE), _latest_whiteboard_metadata(plain),
+        has_whiteboard=True,
     )
     assert narrowed == CATALOGUE
 
 
 # --- 4. the system prompt --------------------------------------------
 
-def _prompt(config):
+def _prompt(tools):
     return PromptBuilder(
-        _tenant(),
-        session=_session(config),
-        available_tools={"whiteboard_draw"},
+        _tenant(), session=_session({}), available_tools=tools,
     ).build()
 
 
 def test_the_whiteboard_prompt_carries_the_canvas_contract():
-    prompt = _prompt(WHITEBOARD_CONFIG)
+    prompt = _prompt({"whiteboard_draw"})
     assert "Whiteboard canvas" in prompt
     assert "sourceRect" in prompt
     assert "infinite" in prompt
 
 
-def test_a_plain_prompt_does_not():
-    assert "Whiteboard canvas" not in _prompt(PLAIN_CONFIG)
+def test_an_agent_without_the_tool_gets_no_canvas_contract():
+    # Prose and schema are decided by one fact: no tool, no contract.
+    assert "Whiteboard canvas" not in _prompt({"web_search"})
 
 
 # --- 5. the rendered user message ------------------------------------
@@ -195,6 +215,51 @@ def test_a_multi_turn_board_replays_exactly_one_canvas_image():
     ]
     assert len(images) == 1
     assert "AAA3" in images[0]["image_url"]["url"]
+
+
+def test_an_uploaded_image_is_never_pruned_as_a_stale_canvas():
+    """The board shares a session with ordinary chat.
+
+    Canvas renders are cumulative and safe to collapse; an image the
+    user dragged in is not, and nothing supersedes it. Matching every
+    image would silently replace the user's own attachment with a
+    placeholder in any session that had also drawn.
+    """
+    upload = build_user_message_dict({
+        "content": "and what about this screenshot",
+        "images": [{"data": "UPLOAD", "mime_type": "image/png"}],
+    })
+    board = build_user_message_dict({
+        "content": "turn 1",
+        "metadata": _atlas_metadata("sketch"),
+        "images": [{"data": "AAA1", "mime_type": "image/png"}],
+    })
+    later = build_user_message_dict({
+        "content": "turn 2",
+        "metadata": _atlas_metadata("sketch"),
+        "images": [{"data": "AAA2", "mime_type": "image/png"}],
+    })
+
+    urls = [
+        part["image_url"]["url"]
+        for message in prune_superseded_canvas_images([board, upload, later])
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert any("UPLOAD" in url for url in urls)
+    assert not any("AAA1" in url for url in urls)
+    assert any("AAA2" in url for url in urls)
+
+
+def test_a_session_that_never_drew_is_untouched():
+    uploads = [
+        build_user_message_dict({
+            "content": f"image {n}",
+            "images": [{"data": f"IMG{n}", "mime_type": "image/png"}],
+        })
+        for n in (1, 2, 3)
+    ]
+    assert prune_superseded_canvas_images(uploads) == uploads
 
 
 # --- 7. the canvas really is unbounded -------------------------------

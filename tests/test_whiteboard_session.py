@@ -2,35 +2,38 @@
 from types import SimpleNamespace
 
 from surogates.whiteboard.session import (
-    is_whiteboard_session,
+    is_whiteboard_turn,
     turn_mode,
     whiteboard_metadata,
 )
 
 
-def _session(config=None):
-    return SimpleNamespace(config=config or {}, channel="web")
+def test_a_turn_carrying_canvas_metadata_is_a_whiteboard_turn():
+    assert is_whiteboard_turn({"whiteboard": {"mode": "sketch"}}) is True
 
 
-def test_plain_session_is_not_a_whiteboard():
-    assert is_whiteboard_session(_session()) is False
+def test_a_turn_with_an_empty_canvas_block_still_counts():
+    # The block is what the client attaches alongside the render; an
+    # empty one still means "this came from the board".
+    assert is_whiteboard_turn({"whiteboard": {}}) is True
 
 
-def test_surface_stamp_marks_a_whiteboard():
-    assert is_whiteboard_session(_session({"surface": "whiteboard"})) is True
+def test_an_ordinary_message_turn_is_not_a_whiteboard_turn():
+    # The board is a view mode, so this is the common case on a
+    # board-enabled agent -- and getting it wrong narrows a plain chat
+    # turn to a single drawing tool.
+    assert is_whiteboard_turn({}) is False
+    assert is_whiteboard_turn({"view_context": {}}) is False
 
 
-def test_another_surface_is_not_a_whiteboard():
-    assert is_whiteboard_session(_session({"surface": "browser"})) is False
+def test_absent_metadata_is_not_a_whiteboard_turn():
+    assert is_whiteboard_turn(None) is False
 
 
-def test_missing_config_attribute_is_tolerated():
-    # Several test harnesses build partial session objects.
-    assert is_whiteboard_session(SimpleNamespace()) is False
-
-
-def test_none_config_is_tolerated():
-    assert is_whiteboard_session(SimpleNamespace(config=None)) is False
+def test_a_non_dict_block_is_not_a_whiteboard_turn():
+    # Client-supplied: a malformed block must not be read as consent.
+    assert is_whiteboard_turn({"whiteboard": "nonsense"}) is False
+    assert is_whiteboard_turn("nonsense") is False
 
 
 def test_turn_mode_defaults_to_sketch():
@@ -94,8 +97,10 @@ def test_a_whiteboard_surface_is_allowed_when_the_agent_has_one():
 
 
 def test_a_whiteboard_surface_is_refused_when_the_agent_has_none():
-    # Without this the caller hands themselves whiteboard_draw, which the
-    # worker force-adds past any AgentDef allowlist.
+    # The surface no longer confers the tool -- the agent capability
+    # does -- but asking for a board on an agent that has none is still
+    # a request the server cannot honour, and a 403 here beats a canvas
+    # that silently never draws.
     err = surface_rejection({"surface": "whiteboard"}, whiteboard_enabled=False)
     assert err is not None
     assert "whiteboard" in err
@@ -165,9 +170,9 @@ def test_an_older_ops_payload_leaves_the_board_off():
 def test_reuse_lookup_accepts_a_surface_scope():
     """Single-session reuse must not cross surfaces.
 
-    A session's surface is fixed at creation and decides which tools the
-    harness loads, so handing a whiteboard request back the operator's
-    chat session produces a board the agent can never draw on.
+    The standalone board route asks for a session by surface so that
+    reopening it resumes the board rather than adopting whichever chat
+    session the reuse lookup happened to return.
     """
     import inspect
 

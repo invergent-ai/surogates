@@ -24,7 +24,6 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
-from surogates.whiteboard.session import is_whiteboard_session
 
 if TYPE_CHECKING:
     from surogates.memory.manager import MemoryManager
@@ -160,6 +159,10 @@ class PromptBuilder:
         # so the LLM can pass kb_id to kb_list_pages / kb_read_page.
         self._available_kbs: list[dict] = list(available_kbs or [])
         self.has_kbs: bool = bool(self._available_kbs)
+        # Read back by the harness to gate the whiteboard_draw SCHEMA, so
+        # the prose contract below and the model-visible tool are decided
+        # by one fact instead of two that can disagree.
+        self.has_whiteboard: bool = "whiteboard_draw" in self._available_tools
         # Cached rendered "# Available Sub-Agents" block.  The catalog
         # is immutable per builder and every description flows through
         # the regex injection scanner, so rendering once and reusing
@@ -818,11 +821,14 @@ class PromptBuilder:
                     "\n" + self._prompts.get("guidance/artifact_in_channel")
                 )
 
-        # The whiteboard surface needs its own reading and layout
-        # contract: the model is looking at an image of a canvas and
-        # answering with coordinates on it, which no other surface asks
-        # of it.  Appended last so it wins over the generic guidance.
-        if is_whiteboard_session(self._session):
+        # The whiteboard needs its own reading and layout contract: the
+        # model is looking at an image of a canvas and answering with
+        # coordinates on it, which no other surface asks of it.  Keyed on
+        # the tool rather than the turn: the system prompt is built once
+        # per wake and cached, and a board-enabled agent can be handed a
+        # canvas at any point in a session.  Appended last so it wins
+        # over the generic guidance.
+        if self.has_whiteboard:
             parts.append("\n" + self._prompts.get("guidance/whiteboard"))
 
         return "\n".join(parts)

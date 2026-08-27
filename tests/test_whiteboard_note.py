@@ -93,11 +93,20 @@ def test_the_note_reaches_the_replayed_user_message():
 
 # --- replay pruning ---------------------------------------------------
 
-def _turn(n):
+def _turn(n, note=True):
+    """One replayed turn.
+
+    ``note`` mirrors what really distinguishes the two kinds of image in
+    a history: a canvas render always ships with the geometry note, an
+    image the user dragged in never does.
+    """
+    from surogates.whiteboard.session import CANVAS_NOTE_HEADER
+
+    text = f"{CANVAS_NOTE_HEADER}\nturn {n}" if note else f"turn {n}"
     return {
         "role": "user",
         "content": [
-            {"type": "text", "text": f"turn {n}"},
+            {"type": "text", "text": text},
             {"type": "image_url",
              "image_url": {"url": f"data:image/png;base64,AAA{n}"}},
         ],
@@ -135,6 +144,13 @@ def test_replay_leaves_an_image_free_history_alone():
     assert prune_superseded_canvas_images(messages) == messages
 
 
+def test_replay_leaves_images_that_are_not_canvas_renders_alone():
+    # The board is a view mode, so a session that drew can also hold
+    # images the user uploaded. Nothing supersedes those.
+    messages = [_turn(1, note=False), _turn(2, note=False)]
+    assert prune_superseded_canvas_images(messages) == messages
+
+
 def test_pruning_preserves_the_surrounding_text():
     pruned = prune_superseded_canvas_images([_turn(1), _turn(2)])
     texts = [
@@ -143,7 +159,8 @@ def test_pruning_preserves_the_surrounding_text():
         for part in message["content"]
         if part.get("type") == "text"
     ]
-    assert "turn 1" in texts and "turn 2" in texts
+    blob = "\n".join(texts)
+    assert "turn 1" in blob and "turn 2" in blob
 
 
 def test_pruning_does_not_mutate_the_input():

@@ -10,16 +10,18 @@ from surogates.whiteboard.commands import (
     validate_commands,
 )
 from surogates.whiteboard.session import (
+    CANVAS_NOTE_HEADER,
     MODE_DEEP,
     MODE_SKETCH,
     SURFACE_KEY,
     SURFACE_VALUE,
-    is_whiteboard_session,
+    is_whiteboard_turn,
     turn_mode,
     whiteboard_metadata,
 )
 
 __all__ = [
+    "CANVAS_NOTE_HEADER",
     "COORD_LIMIT",
     "MAX_COMMANDS",
     "MODE_DEEP",
@@ -27,7 +29,7 @@ __all__ = [
     "SURFACE_KEY",
     "SURFACE_VALUE",
     "WHITEBOARD_TOOLS",
-    "is_whiteboard_session",
+    "is_whiteboard_turn",
     "turn_mode",
     "validate_commands",
     "whiteboard_metadata",

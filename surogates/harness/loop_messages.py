@@ -60,7 +60,10 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     function of client-supplied data: a malformed block degrades to a
     shorter note or ``None`` and never raises into the turn.
     """
-    from surogates.whiteboard.session import whiteboard_metadata
+    from surogates.whiteboard.session import (
+        CANVAS_NOTE_HEADER,
+        whiteboard_metadata,
+    )
 
     payload = whiteboard_metadata(metadata)
     if payload is None:
@@ -77,7 +80,9 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
         except (KeyError, TypeError):
             return None
 
-    lines: list[str] = ["The user is working on a whiteboard canvas."]
+    # The header is shared with the replay pruner, which uses it to tell
+    # a canvas render from an image the user uploaded.
+    lines: list[str] = [CANVAS_NOTE_HEADER]
 
     source = _rect(payload.get("sourceRect"))
     scale = payload.get("imageScale")

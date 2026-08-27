@@ -1,5 +1,5 @@
-"""The whiteboard guidance fragment exists, is loadable, and only lands
-on whiteboard sessions."""
+"""The whiteboard guidance fragment exists, is loadable, and lands only
+on agents that actually have the drawing tool."""
 import pytest
 
 from surogates.harness.prompt_library import PromptLibrary
@@ -82,21 +82,32 @@ def _session(config):
     )
 
 
-def _build(config):
+def _build(tools):
     return PromptBuilder(
-        _tenant(),
-        session=_session(config),
-        available_tools={"whiteboard_draw"},
+        _tenant(), session=_session({}), available_tools=tools,
     ).build()
 
 
-def test_a_whiteboard_session_gets_the_fragment():
-    assert "Whiteboard canvas" in _build({"surface": "whiteboard"})
+def test_an_agent_with_the_tool_gets_the_fragment():
+    assert "Whiteboard canvas" in _build({"whiteboard_draw"})
 
 
-def test_a_plain_session_does_not_get_the_fragment():
-    assert "Whiteboard canvas" not in _build({})
+def test_an_agent_without_the_tool_does_not():
+    assert "Whiteboard canvas" not in _build({"web_search"})
+    assert "Whiteboard canvas" not in _build(set())
 
 
-def test_another_surface_does_not_get_the_fragment():
-    assert "Whiteboard canvas" not in _build({"surface": "browser"})
+def test_the_fragment_does_not_depend_on_the_session_config():
+    """Keyed on the tool, not the session.
+
+    The board is a view mode: a board-enabled agent can be handed a
+    canvas at any point in an ordinary chat session, and the system
+    prompt is built once per wake. Keying on ``config.surface`` meant
+    the contract was missing exactly when the user first drew.
+    """
+    prompt = PromptBuilder(
+        _tenant(),
+        session=_session({"surface": "browser"}),
+        available_tools={"whiteboard_draw"},
+    ).build()
+    assert "Whiteboard canvas" in prompt

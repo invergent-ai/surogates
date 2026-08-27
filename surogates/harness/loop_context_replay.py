@@ -493,12 +493,29 @@ def prune_superseded_canvas_images(
     ``keep_last`` fixed at 1 -- unlike browser state there is no case for
     holding two, because the older one is a strict subset.
 
+    Only images in a message that carries the canvas note are eligible.
+    The board is a view mode rather than a session type, so a session
+    that drew can also hold screenshots the user uploaded -- and those
+    are not superseded by anything. Matching every image instead would
+    silently replace the user's own attachments with a placeholder.
+
     Returns a new list; the input is never mutated.
     """
+    from surogates.whiteboard.session import CANVAS_NOTE_HEADER
+
+    def _is_canvas_message(message: dict) -> bool:
+        return any(
+            isinstance(part, dict)
+            and part.get("type") == "text"
+            and CANVAS_NOTE_HEADER in str(part.get("text") or "")
+            for part in message["content"]
+        )
+
     image_positions = [
         (m_idx, p_idx)
         for m_idx, message in enumerate(messages)
         if isinstance(message.get("content"), list)
+        and _is_canvas_message(message)
         for p_idx, part in enumerate(message["content"])
         if isinstance(part, dict) and part.get("type") == "image_url"
     ]

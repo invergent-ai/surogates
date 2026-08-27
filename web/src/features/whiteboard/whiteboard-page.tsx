@@ -33,6 +33,12 @@ export function WhiteboardPage() {
     [navigate],
   );
 
+  // The session-less route; the board creates a new session on its
+  // first Ask.
+  const onNewBoard = useCallback(() => {
+    navigate({ to: "/whiteboard" }).catch(() => undefined);
+  }, [navigate]);
+
   return (
     <AppShell>
       <div className="h-full w-full">
@@ -40,6 +46,7 @@ export function WhiteboardPage() {
           adapter={whiteboardChatAdapter}
           sessionId={params.sessionId ?? null}
           onSessionChange={onSessionChange}
+          onNewBoard={onNewBoard}
         />
       </div>
     </AppShell>

@@ -1,9 +1,14 @@
-"""whiteboard_draw is visible iff the session is a whiteboard surface.
+"""whiteboard_draw is visible iff the agent has the board capability.
 
 Both surfaces are asserted here on purpose: the prompt surface
 (worker._filter_effective_tools) and the schema surface
 (harness.tool_schemas.drop_unusable_tools) have to agree, and they live
 in different modules with no shared call site.
+
+Keyed on the agent capability rather than the session: the board is a
+view mode the user flips into on any session, so the tool has to be
+there before the first stroke is sent. What varies per *turn* is only
+the speed -- see ``test_whiteboard_turn_mode``.
 """
 from types import SimpleNamespace
 
@@ -30,35 +35,49 @@ def _names(schemas):
     return {s["function"]["name"] for s in schemas}
 
 
-# --- prompt surface ---------------------------------------------------
-
-def test_prompt_surface_strips_the_tool_off_a_plain_session():
-    result = _filter_effective_tools(
-        tools={"whiteboard_draw", "memory"},
+def _prompt_surface(*, whiteboard_enabled, tools=("whiteboard_draw", "memory")):
+    return _filter_effective_tools(
+        tools=set(tools),
         tenant=_tenant(),
         session=_session(),
         use_api_for_harness_tools=True,
+        whiteboard_enabled=whiteboard_enabled,
     )
+
+
+# --- prompt surface ---------------------------------------------------
+
+def test_prompt_surface_strips_the_tool_when_the_board_is_off():
+    result = _prompt_surface(whiteboard_enabled=False)
     assert "whiteboard_draw" not in result
     assert "memory" in result
 
 
-def test_prompt_surface_force_adds_the_tool_on_a_whiteboard():
+def test_prompt_surface_force_adds_the_tool_when_the_board_is_on():
     # Force-added even under a restrictive AgentDef allowlist, matching
-    # the worker_* / board self-tool idiom: a whiteboard session with no
-    # way to draw is not a whiteboard.
+    # the worker_* / board self-tool idiom: an agent whose operator
+    # switched the board on can always draw.
+    result = _prompt_surface(whiteboard_enabled=True, tools=("memory",))
+    assert "whiteboard_draw" in result
+
+
+def test_the_capability_does_not_depend_on_the_session_config():
+    # The regression this replaces: gating on ``config.surface`` meant
+    # flipping to the board view on an ordinary chat session produced a
+    # canvas the agent could not draw on.
     result = _filter_effective_tools(
         tools={"memory"},
         tenant=_tenant(),
-        session=_session(config={"surface": "whiteboard"}),
+        session=_session(config={}),
         use_api_for_harness_tools=True,
+        whiteboard_enabled=True,
     )
     assert "whiteboard_draw" in result
 
 
 # --- schema surface ---------------------------------------------------
 
-def test_schema_surface_drops_the_tool_off_a_plain_session():
+def test_schema_surface_drops_the_tool_when_the_board_is_off():
     kept = drop_unusable_tools(
         _schemas("whiteboard_draw", "memory"),
         has_kbs=True, has_channel=True, is_scheduled=True,
@@ -67,7 +86,7 @@ def test_schema_surface_drops_the_tool_off_a_plain_session():
     assert _names(kept) == {"memory"}
 
 
-def test_schema_surface_keeps_the_tool_on_a_whiteboard():
+def test_schema_surface_keeps_the_tool_when_the_board_is_on():
     kept = drop_unusable_tools(
         _schemas("whiteboard_draw", "memory"),
         has_kbs=True, has_channel=True, is_scheduled=True,
@@ -88,8 +107,8 @@ def test_schema_surface_never_returns_an_empty_list():
 
 
 def test_schema_surface_defaults_to_dropping_the_tool():
-    # The new keyword is optional so existing callers keep compiling;
-    # the default must be the safe one (drop), not the permissive one.
+    # The keyword is optional so existing callers keep compiling; the
+    # default must be the safe one (drop), not the permissive one.
     kept = drop_unusable_tools(
         _schemas("whiteboard_draw", "memory"),
         has_kbs=True, has_channel=True, is_scheduled=True,
@@ -99,29 +118,60 @@ def test_schema_surface_defaults_to_dropping_the_tool():
 
 # --- the two surfaces agree ------------------------------------------
 
-def test_both_surfaces_agree_on_a_plain_session():
-    session = _session()
-    prompt = _filter_effective_tools(
-        tools={"whiteboard_draw", "memory"},
-        tenant=_tenant(), session=session, use_api_for_harness_tools=True,
-    )
+def _both(whiteboard_enabled):
+    """The tool set as each surface independently computes it."""
+    prompt = _prompt_surface(whiteboard_enabled=whiteboard_enabled)
+    # The harness reads ``has_whiteboard`` off the prompt builder it was
+    # handed, which is built from exactly this set -- that shared fact is
+    # what stops the two surfaces drifting.
+    has_whiteboard = "whiteboard_draw" in prompt
     schema = _names(drop_unusable_tools(
         _schemas("whiteboard_draw", "memory"),
         has_kbs=True, has_channel=True, is_scheduled=True,
-        is_whiteboard=False,
+        is_whiteboard=has_whiteboard,
     ))
-    assert ("whiteboard_draw" in prompt) == ("whiteboard_draw" in schema)
+    return prompt, schema
 
 
-def test_both_surfaces_agree_on_a_whiteboard_session():
-    session = _session(config={"surface": "whiteboard"})
-    prompt = _filter_effective_tools(
-        tools={"whiteboard_draw", "memory"},
-        tenant=_tenant(), session=session, use_api_for_harness_tools=True,
-    )
-    schema = _names(drop_unusable_tools(
-        _schemas("whiteboard_draw", "memory"),
-        has_kbs=True, has_channel=True, is_scheduled=True,
-        is_whiteboard=True,
-    ))
+def test_both_surfaces_agree_when_the_board_is_off():
+    prompt, schema = _both(False)
     assert ("whiteboard_draw" in prompt) == ("whiteboard_draw" in schema)
+    assert "whiteboard_draw" not in schema
+
+
+def test_both_surfaces_agree_when_the_board_is_on():
+    prompt, schema = _both(True)
+    assert ("whiteboard_draw" in prompt) == ("whiteboard_draw" in schema)
+    assert "whiteboard_draw" in schema
+
+
+def test_the_prompt_builder_derives_the_flag_the_harness_reads():
+    """The join between the two surfaces.
+
+    ``loop.py`` passes ``self._prompt.has_whiteboard`` into
+    ``drop_unusable_tools``. Derived from ``available_tools`` -- the very
+    set the prompt surface produced -- so the prose contract and the
+    model-visible schema are decided by one fact instead of two that can
+    disagree, which is how the old ``config.surface`` gate drifted.
+    """
+    from uuid import uuid4
+
+    from surogates.harness.prompt import PromptBuilder
+    from surogates.tenant.context import TenantContext
+
+    def _builder(tools):
+        return PromptBuilder(
+            TenantContext(
+                org_id=uuid4(),
+                user_id=uuid4(),
+                org_config={"default_model": "gpt-4o"},
+                user_preferences={},
+                permissions=frozenset(),
+                asset_root="/tmp/test_assets",
+            ),
+            session=_session(),
+            available_tools=tools,
+        )
+
+    assert _builder({"whiteboard_draw", "memory"}).has_whiteboard is True
+    assert _builder({"memory"}).has_whiteboard is False

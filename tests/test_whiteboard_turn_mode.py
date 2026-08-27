@@ -5,11 +5,6 @@ from types import SimpleNamespace
 from surogates.harness.loop import _whiteboard_sketch_filter
 
 
-def _session(surface="whiteboard"):
-    config = {"surface": surface} if surface else {}
-    return SimpleNamespace(config=config, channel="web")
-
-
 def _meta(mode):
     return {"whiteboard": {"mode": mode}}
 
@@ -17,18 +12,25 @@ def _meta(mode):
 ALL = {"whiteboard_draw", "web_search", "terminal", "create_artifact"}
 
 
+def _wb(tool_filter, metadata, has_whiteboard=True):
+    """The filter as the loop calls it, for a board-enabled agent."""
+    return _whiteboard_sketch_filter(
+        tool_filter, metadata, has_whiteboard=has_whiteboard,
+    )
+
+
 def test_sketch_narrows_to_the_draw_tool():
-    assert _whiteboard_sketch_filter(ALL, _session(), _meta("sketch")) == {
+    assert _wb(ALL, _meta("sketch")) == {
         "whiteboard_draw",
     }
 
 
 def test_deep_leaves_the_filter_untouched():
-    assert _whiteboard_sketch_filter(ALL, _session(), _meta("deep")) == ALL
+    assert _wb(ALL, _meta("deep")) == ALL
 
 
-def test_absent_mode_defaults_to_sketch():
-    assert _whiteboard_sketch_filter(ALL, _session(), None) == {
+def test_a_canvas_turn_with_no_mode_defaults_to_sketch():
+    assert _wb(ALL, {"whiteboard": {}}) == {
         "whiteboard_draw",
     }
 
@@ -36,35 +38,50 @@ def test_absent_mode_defaults_to_sketch():
 def test_an_unknown_mode_falls_back_to_sketch():
     # ``mode`` is client-supplied: an unrecognised string must never
     # promote a turn to the full catalogue.
-    assert _whiteboard_sketch_filter(ALL, _session(), _meta("unlimited")) == {
+    assert _wb(ALL, _meta("unlimited")) == {
         "whiteboard_draw",
     }
 
 
-def test_a_non_whiteboard_session_is_untouched():
-    assert _whiteboard_sketch_filter(
-        ALL, _session(surface=None), _meta("sketch"),
-    ) == ALL
+def test_an_ordinary_message_turn_is_untouched():
+    # The board is a view mode, so a board-enabled agent takes plain chat
+    # turns too. Keying on ``turn_mode`` alone would answer "sketch" for
+    # a turn carrying no canvas block at all and narrow every one of
+    # them to a single drawing tool.
+    assert _wb(ALL, None) == ALL
+    assert _wb(ALL, {}) == ALL
+    assert _wb(ALL, {"view_context": {}}) == ALL
+
+
+def test_a_malformed_canvas_block_is_untouched():
+    # Client-supplied: a broken block must fall out of the board path
+    # entirely rather than narrowing the turn.
+    assert _wb(ALL, {"whiteboard": "nonsense"}) == ALL
+
+
+def test_an_agent_without_the_board_is_never_narrowed():
+    # Narrowing to a tool the agent lacks empties the schema list, and
+    # ``drop_unusable_tools`` refuses to return nothing -- so the drop it
+    # made would be undone and whiteboard_draw handed out anyway.
+    assert _wb(ALL, _meta("sketch"), has_whiteboard=False) == ALL
 
 
 def test_a_none_filter_on_sketch_materialises_to_the_draw_tool():
     # ``None`` is the "no filter applied" contract. On a sketch turn it
     # must still narrow, or sketch mode silently ships every tool.
-    assert _whiteboard_sketch_filter(None, _session(), _meta("sketch")) == {
+    assert _wb(None, _meta("sketch")) == {
         "whiteboard_draw",
     }
 
 
 def test_a_none_filter_on_deep_stays_none():
-    assert _whiteboard_sketch_filter(None, _session(), _meta("deep")) is None
+    assert _wb(None, _meta("deep")) is None
 
 
 def test_sketch_keeps_the_draw_tool_even_if_the_filter_omitted_it():
     # The prompt-surface filter force-adds whiteboard_draw on a
     # whiteboard session; the schema surface must not then remove it.
-    assert _whiteboard_sketch_filter(
-        {"web_search"}, _session(), _meta("sketch"),
-    ) == {"whiteboard_draw"}
+    assert _wb({"web_search"}, _meta("sketch")) == {"whiteboard_draw"}
 
 
 def test_the_returned_set_is_a_copy():
@@ -73,7 +90,7 @@ def test_the_returned_set_is_a_copy():
     # turn's subtraction corrupt every later turn.
     from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 
-    result = _whiteboard_sketch_filter(ALL, _session(), _meta("sketch"))
+    result = _wb(ALL, _meta("sketch"))
     result.discard("whiteboard_draw")
     assert "whiteboard_draw" in WHITEBOARD_TOOL_NAMES
 
