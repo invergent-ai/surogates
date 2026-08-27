@@ -704,6 +704,56 @@ describe("AgentWhiteboard", () => {
     expect(onSessionChange).toHaveBeenCalledWith("board");
   });
 
+  it("loads the canvas of a board it resumed", async () => {
+    // The resume path reaches the loader as `null -> id`, the same shape
+    // as adopting a session the board just created -- where loading is
+    // exactly wrong. Conflating them showed a resumed board holding
+    // nothing but the agent's replayed objects, and the next debounced
+    // save wrote that back over the user's strokes.
+    const onSessionChange = vi.fn();
+    const { adapter } = makeAdapter({
+      listSessions: vi.fn(async () => ({
+        sessions: [{
+          id: "board", status: "active", config: { surface: "whiteboard" },
+        }],
+        total: 1,
+      })),
+    });
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(
+        <AgentWhiteboard
+          adapter={adapter}
+          agentId="a1"
+          sessionId={null}
+          onSessionChange={onSessionChange}
+        />,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onSessionChange).toHaveBeenCalledWith("board");
+
+    // The host routes to the session it was handed.
+    await act(async () => {
+      root!.render(
+        <AgentWhiteboard
+          adapter={adapter}
+          agentId="a1"
+          sessionId="board"
+          onSessionChange={onSessionChange}
+        />,
+      );
+    });
+    const calls = (adapter.getWorkspaceFile as unknown as {
+      mock: { calls: { sessionId: string }[][] };
+    }).mock.calls;
+    expect(calls.map((c) => c[0].sessionId)).toContain("board");
+  });
+
   it("does not resume when the route already names a session", async () => {
     const onSessionChange = vi.fn();
     const { adapter } = makeAdapter();

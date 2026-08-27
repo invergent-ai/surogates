@@ -229,11 +229,20 @@ export function WhiteboardSurface({
   // until one exists. Without resuming, leaving the board and coming
   // back lands on a blank canvas and silently starts a new one, with no
   // route back to what was drawn.
+  // A session this board adopted by resuming rather than by creating.
+  // Both reach the loader below as `null -> id`, but only the created
+  // one carries strokes that predate the session and would be destroyed
+  // by a load.
+  const resumedSession = useRef<string | null>(null);
+
   useEffect(() => {
     if (sessionId || wantFresh || !onSessionChange) return;
     let cancelled = false;
     void latestBoardSession(adapter, agentId).then((id) => {
-      if (!cancelled && id) onSessionChange(id);
+      if (!cancelled && id) {
+        resumedSession.current = id;
+        onSessionChange(id);
+      }
     });
     return () => {
       cancelled = true;
@@ -252,7 +261,11 @@ export function WhiteboardSurface({
     const previous = loadedSession.current;
     loadedSession.current = sessionId;
 
-    if (!shouldReloadCanvas(previous, sessionId)) {
+    if (
+      !shouldReloadCanvas(previous, sessionId, {
+        resumed: resumedSession.current === sessionId,
+      })
+    ) {
       // Clearing only on a real change: `null -> id` is this board
       // adopting the session its own first Ask created, and everything
       // drawn before that question is still the live document.

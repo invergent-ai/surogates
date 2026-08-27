@@ -169,6 +169,19 @@ describe("adopting a freshly created session", () => {
     expect(shouldReloadCanvas(null, "s1")).toBe(false);
   });
 
+  it("reloads when the board resumed an existing session", () => {
+    // The same null -> id shape, opposite meaning: arriving on the
+    // session-less route and adopting the newest board. Its canvas is
+    // only on disk, so skipping the load shows a board holding nothing
+    // but the agent's replayed objects -- the user's strokes vanish,
+    // and the next debounce writes that back over them.
+    expect(shouldReloadCanvas(null, "s1", { resumed: true })).toBe(true);
+  });
+
+  it("still keeps a freshly created session when resumed is false", () => {
+    expect(shouldReloadCanvas(null, "s1", { resumed: false })).toBe(false);
+  });
+
   it("reloads when switching between two existing sessions", () => {
     expect(shouldReloadCanvas("s1", "s2")).toBe(true);
   });

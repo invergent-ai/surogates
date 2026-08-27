@@ -156,23 +156,33 @@ export function useDebouncedSave(
  * Whether a session-id change should reload the canvas from the
  * workspace.
  *
- * The `null -> id` case is the one that matters: it means the board just
- * created its own session on the first Ask. Nothing was saved while the
- * id was null (`useDebouncedSave` skips it), so reloading there fetches
- * a canvas that does not exist yet and replaces everything drawn before
- * the first question with an empty board — and the next debounce then
- * writes that empty board out, making the loss permanent.
- *
  * `undefined` is a cold mount, which must load.
+ *
+ * `null -> id` is two different events wearing the same shape, and
+ * getting them confused loses a board either way:
+ *
+ * - The board **created** this session on its first Ask. Nothing was
+ *   saved while the id was null (`useDebouncedSave` skips it), so
+ *   loading fetches a canvas that does not exist yet and replaces
+ *   everything drawn before the first question with an empty board.
+ * - The board **resumed** it, arriving on a session-less route and
+ *   adopting the newest existing board. That canvas belongs to an
+ *   earlier visit and is only on disk, so *not* loading shows a board
+ *   holding nothing but whatever the fold replays out of the event log
+ *   — the agent's objects, never the user's strokes.
+ *
+ * Either way the next debounce writes the wrong document back, which is
+ * what makes the loss permanent. Only the caller knows which happened,
+ * so it says so via *resumed*.
  */
 export function shouldReloadCanvas(
   previous: string | null | undefined,
   next: string | null,
+  opts: { resumed?: boolean } = {},
 ): boolean {
   if (!next) return false;
   if (previous === next) return false;
-  // Adopting the session this board just created: keep what is on screen.
-  if (previous === null) return false;
+  if (previous === null) return opts.resumed === true;
   return true;
 }
 
