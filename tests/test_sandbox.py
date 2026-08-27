@@ -312,3 +312,102 @@ async def test_pool_destroy_for_session_without_backend_reap_is_noop():
     pool = SandboxPool(backend)
     # Backend has no destroy_for_session — must not raise.
     await pool.destroy_for_session("root-1")
+
+
+class TestReleaseThenDestroy:
+    """Detaching is fast and ordered; deleting the pod is neither.
+
+    Pod deletion is a round trip to the cluster and used to sit between
+    the agent's last word and SESSION_COMPLETE, so the user watched a
+    busy indicator through it. Splitting the two lets the slow half move
+    off that path without loosening the guarantee that matters: once a
+    session is released, no later turn can resolve it to a pod that is
+    about to disappear.
+    """
+
+    @pytest.mark.asyncio
+    async def test_release_detaches_before_the_pod_is_gone(self):
+        backend = ProcessSandbox()
+        pool = SandboxPool(backend)
+        sandbox_id = await pool.ensure("session-r1", SandboxSpec())
+
+        released = await pool.release_for_session("session-r1")
+        assert released == sandbox_id
+
+        # Detached: a call for this session can no longer reach it, even
+        # though the sandbox itself still exists.
+        with pytest.raises(ValueError):
+            await pool.execute("session-r1", "terminal", "{}")
+        assert await backend.status(sandbox_id) == "running"
+
+        await pool.destroy_released(released, "session-r1")
+        assert await backend.status(sandbox_id) != "running"
+
+    @pytest.mark.asyncio
+    async def test_ensure_after_release_provisions_a_fresh_sandbox(self):
+        """The race the ordering exists to prevent.
+
+        A turn starting while the previous teardown is still in flight
+        must get its own sandbox, never the one being deleted.
+        """
+        backend = ProcessSandbox()
+        pool = SandboxPool(backend)
+        first = await pool.ensure("session-r2", SandboxSpec())
+        released = await pool.release_for_session("session-r2")
+
+        second = await pool.ensure("session-r2", SandboxSpec())
+        assert second != first, "reused a sandbox that was being torn down"
+
+        await pool.destroy_released(released, "session-r2")
+        # Tearing down the old one must not disturb the live one.
+        assert await backend.status(second) == "running"
+        await pool.destroy_for_session("session-r2")
+
+    @pytest.mark.asyncio
+    async def test_destroy_for_session_still_works_end_to_end(self):
+        """Other callers (shutdown, destroy_all) keep the combined form."""
+        backend = ProcessSandbox()
+        pool = SandboxPool(backend)
+        sandbox_id = await pool.ensure("session-r3", SandboxSpec())
+        await pool.destroy_for_session("session-r3")
+        assert await backend.status(sandbox_id) != "running"
+        with pytest.raises(ValueError):
+            await pool.execute("session-r3", "terminal", "{}")
+
+
+class TestCompletionDoesNotWaitForTeardown:
+    """SESSION_COMPLETE must not sit behind a pod deletion.
+
+    Measured over a month of production sessions: with neither a sandbox
+    nor a turn summary the gap from the agent's last response to
+    SESSION_COMPLETE is 0.24s at p50; sessions that used a sandbox reach
+    32s at p90. The pod delete was on that path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_pod_delete_does_not_delay_release(self):
+        import time
+
+        class _SlowBackend(ProcessSandbox):
+            destroyed = False
+
+            async def destroy(self, sandbox_id):  # noqa: D102
+                await asyncio.sleep(0.6)
+                _SlowBackend.destroyed = True
+                return await super().destroy(sandbox_id)
+
+        backend = _SlowBackend()
+        pool = SandboxPool(backend)
+        await pool.ensure("session-slow", SandboxSpec())
+
+        # The half that stays on the critical path.
+        t0 = time.monotonic()
+        released = await pool.release_for_session("session-slow")
+        detach_s = time.monotonic() - t0
+
+        assert detach_s < 0.1, f"detach took {detach_s:.2f}s -- it is on the hot path"
+        assert not _SlowBackend.destroyed, "pod deleted during detach"
+
+        # And the slow half still completes when awaited (the drain).
+        await pool.destroy_released(released, "session-slow")
+        assert _SlowBackend.destroyed
