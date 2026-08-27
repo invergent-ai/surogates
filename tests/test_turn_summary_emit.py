@@ -202,16 +202,16 @@ async def test_drain_passes_iteration_summaries_and_candidates(
     # downloadable — the summary card only presents downloadable
     # artifacts) and the .agents/ write (internal agent state) are
     # dropped.
-    candidate_kinds = [a.kind for a in call["candidate_artifacts"]]
+    candidate_kinds = [a.kind for a in call["artifacts"]]
     assert "file" in candidate_kinds
     assert "url" not in candidate_kinds
-    assert all(a.label != "x.md" for a in call["candidate_artifacts"])
+    assert all(a.label != "x.md" for a in call["artifacts"])
     assert all(
-        "example.com" not in a.ref for a in call["candidate_artifacts"]
+        "example.com" not in a.ref for a in call["artifacts"]
     )
     assert all(
         not a.ref.startswith(".agents/")
-        for a in call["candidate_artifacts"]
+        for a in call["artifacts"]
     )
 
 
@@ -379,7 +379,7 @@ async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> N
     harness._storage = _FakeStorage()
     harness._turn_started_at = turn_start
 
-    candidates = await harness._collect_candidate_artifacts(
+    candidates, entries_by_path = await harness._collect_candidate_artifacts(
         session_id=fake_session.id, turn_id="turn-X",
     )
 
@@ -388,6 +388,13 @@ async def test_collect_candidate_artifacts_includes_workspace_mtime_files() -> N
     # The post-turn-start file appears; the pre-turn-start file doesn't.
     assert any("Summary.docx" in r for r in refs)
     assert all("old.txt" not in r for r in refs)
+
+    # The listing comes back too: reconciliation needs size and mtime for
+    # candidates that came from tool calls, which the scan never sees.
+    assert entries_by_path, "listing not returned alongside the candidates"
+    assert all(
+        "size" in e and "modified" in e for e in entries_by_path.values()
+    )
 
 
 @pytest.mark.asyncio
@@ -516,3 +523,44 @@ async def test_complete_session_skips_drain_for_research_session(
     emit_types = [c.args[1] for c in store.emit_event.await_args_list]
     assert EventType.TURN_SUMMARY not in emit_types
     assert EventType.SESSION_COMPLETE in emit_types
+
+
+@pytest.mark.asyncio
+async def test_collect_candidate_artifacts_skips_directory_markers() -> None:
+    """A directory is not a deliverable, whatever size the backend reports.
+
+    Object stores list directories as keys ending in "/". A real run put
+    ``__pycache__/`` in front of reconciliation, where it survived only
+    because its size happened to be zero.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    fake_session = SimpleNamespace(
+        id=uuid4(), config={"storage_bucket": "bucket-1"},
+    )
+    store.get_session = AsyncMock(return_value=fake_session)
+    turn_start = datetime.now(timezone.utc)
+
+    class _FakeStorage:
+        async def list_entries(self, _bucket, prefix=""):
+            return [
+                {"key": "out.csv", "modified": turn_start + timedelta(seconds=5),
+                 "size": 120},
+                # Non-zero size on purpose: the old code only dropped these
+                # for being empty.
+                {"key": "__pycache__/", "modified": turn_start + timedelta(seconds=5),
+                 "size": 4096},
+            ]
+
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._storage = _FakeStorage()
+    harness._turn_started_at = turn_start
+
+    candidates, _entries = await harness._collect_candidate_artifacts(
+        session_id=fake_session.id, turn_id="turn-D",
+    )
+    refs = [c.ref for c in candidates]
+    assert any("out.csv" in r for r in refs)
+    assert all(not r.endswith("/") for r in refs), refs

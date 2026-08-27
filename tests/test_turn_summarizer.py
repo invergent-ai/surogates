@@ -169,64 +169,6 @@ async def test_summarize_iteration_returns_none_on_client_exception() -> None:
     )
     assert result is None
 
-
-@pytest.mark.asyncio
-async def test_summarize_turn_returns_recap_and_downloadable_artifacts() -> None:
-    # The model echoing a url-kind entry must not survive parsing —
-    # the summary card only presents downloadable artifacts.
-    payload = (
-        '{"recap": "Reworked the hero around brain/hands.",'
-        ' "artifacts": ['
-        '   {"kind": "file", "label": "landing.html", "ref": "landing.html"},'
-        '   {"kind": "url", "label": "example.com", "ref": "https://example.com"}'
-        ' ]}'
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client, "base-model")
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="please update the hero",
-        iteration_summaries=["Rework hero paragraph"],
-        candidate_artifacts=[
-            TurnArtifact(kind="file", label="landing.html", ref="landing.html"),
-        ],
-    )
-
-    assert isinstance(result, TurnSummary)
-    assert result.recap.startswith("Reworked the hero")
-    assert len(result.artifacts) == 1
-    assert result.artifacts[0].kind == "file"
-    assert result.artifacts[0].label == "landing.html"
-    # The turn summary runs on the base model, not the cheap one.
-    assert client.chat.completions.calls[0]["model"] == "base-model"
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_drops_web_urls_smuggled_as_files() -> None:
-    payload = (
-        '{"recap": "Fetched the paper.",'
-        ' "artifacts": ['
-        '   {"kind": "file", "label": "paper", "ref": "https://example.com/p.pdf"},'
-        '   {"kind": "file", "label": "report.pdf", "ref": "report.pdf"}'
-        ' ]}'
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="x",
-        iteration_summaries=["s"],
-        candidate_artifacts=[
-            TurnArtifact(kind="file", label="report.pdf", ref="report.pdf"),
-        ],
-    )
-
-    assert result is not None
-    assert [a.ref for a in result.artifacts] == ["report.pdf"]
-
-
 @pytest.mark.asyncio
 async def test_summarize_iteration_skipped_without_summary_model() -> None:
     """No cheap summary model configured: iteration summaries are
@@ -243,47 +185,6 @@ async def test_summarize_iteration_skipped_without_summary_model() -> None:
     assert result is None
     assert base.chat.completions.calls == []
 
-
-@pytest.mark.asyncio
-async def test_summarize_turn_drops_unknown_artifact_kinds() -> None:
-    payload = (
-        '{"recap": "Did stuff.",'
-        ' "artifacts": ['
-        '   {"kind": "file", "label": "good.txt", "ref": "good.txt"},'
-        '   {"kind": "weirdo", "label": "bad", "ref": "bad"}'
-        ' ]}'
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="x",
-        iteration_summaries=["s"],
-        candidate_artifacts=[
-            TurnArtifact(kind="file", label="good.txt", ref="good.txt"),
-        ],
-    )
-
-    assert result is not None
-    assert len(result.artifacts) == 1
-    assert result.artifacts[0].kind == "file"
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_returns_none_on_invalid_json() -> None:
-    client = _StubClient("not JSON at all")
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="hi",
-        iteration_summaries=["s"],
-        candidate_artifacts=[],
-    )
-    assert result is None
-
-
 @pytest.mark.asyncio
 async def test_summarize_turn_returns_none_when_inputs_empty() -> None:
     client = _StubClient("noise")
@@ -293,138 +194,11 @@ async def test_summarize_turn_returns_none_when_inputs_empty() -> None:
         turn_id="t1",
         user_message="hi",
         iteration_summaries=[],
-        candidate_artifacts=[],
+        artifacts=[],
     )
     assert result is None
     # Skip the model call entirely when there's nothing to summarize.
     assert client.chat.completions.calls == []
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_returns_none_when_recap_and_artifacts_empty() -> None:
-    """LLM returned a structurally-valid response but empty fields."""
-    client = _StubClient('{"recap": "", "artifacts": []}')
-    summarizer = _turn_summarizer(client)
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="x",
-        iteration_summaries=["s"],
-        candidate_artifacts=[],
-    )
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_drops_internal_workspace_paths() -> None:
-    """Even if the model echoes an internal path (e.g. the
-    /product-marketing skill's .agents/ context file), it must not
-    reach the user-visible download card."""
-    payload = (
-        '{"recap": "Built the marketing context.",'
-        ' "artifacts": ['
-        '   {"kind": "file", "label": ".agents/product-marketing.md",'
-        '    "ref": ".agents/product-marketing.md"}'
-        ' ]}'
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="create a marketing document",
-        iteration_summaries=["Write product marketing context"],
-        candidate_artifacts=[
-            TurnArtifact(kind="file", label="x", ref="x"),
-        ],
-    )
-
-    # recap survives; the internal file does not.
-    assert result is not None
-    assert result.artifacts == []
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_parses_markdown_fenced_json() -> None:
-    # The exact failure shape that silenced recaps in production:
-    # Claude via an OpenAI-compatible gateway ignores
-    # response_format=json_object and wraps the object in a ```json
-    # fence. The recap must still land.
-    payload = (
-        "```json\n"
-        '{\n  "recap": "Quizzed the user on 5 Greek verbs and updated '
-        'the progress tracker.",\n  "artifacts": []\n}\n'
-        "```"
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="help me practice greek verbs",
-        iteration_summaries=["Quiz user on verbs"],
-        candidate_artifacts=[],
-    )
-
-    assert isinstance(result, TurnSummary)
-    assert result.recap.startswith("Quizzed the user")
-    assert result.artifacts == []
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_parses_json_with_surrounding_prose() -> None:
-    payload = (
-        "Here is the summary you asked for:\n"
-        "```json\n"
-        '{"recap": "Built the report.", "artifacts": '
-        '[{"kind": "file", "label": "report.pdf", "ref": "report.pdf"}]}\n'
-        "```\n"
-        "Let me know if you need anything else."
-    )
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="make me a report",
-        iteration_summaries=["Write report"],
-        candidate_artifacts=[
-            TurnArtifact(kind="file", label="report.pdf", ref="report.pdf"),
-        ],
-    )
-
-    assert isinstance(result, TurnSummary)
-    assert result.recap == "Built the report."
-    assert [a.ref for a in result.artifacts] == ["report.pdf"]
-
-
-@pytest.mark.asyncio
-async def test_summarize_turn_returns_none_on_truncated_fenced_json() -> None:
-    # A max_tokens cutoff mid-object stays unparseable — no recap
-    # beats a silently wrong one.
-    payload = '```json\n{"recap": "The agent loaded the PostHog analytics'
-    client = _StubClient(payload)
-    summarizer = _turn_summarizer(client)
-
-    result = await summarizer.summarize_turn(
-        turn_id="t1",
-        user_message="stats please",
-        iteration_summaries=["Run queries"],
-        candidate_artifacts=[],
-    )
-
-    assert result is None
-
-
-# ----------------------------------------------------------------------
-# Malformed-reply rejection
-#
-# The cheap summary model periodically completes the prompt's transcript
-# instead of captioning it. Whatever it returns becomes the iteration's
-# user-visible label, so every structural failure shape observed in
-# production is rejected here; the caller then emits no event and the
-# chat client falls back to its deterministic tool-derived label.
-# ----------------------------------------------------------------------
-
 
 def _calls(*names: str) -> list[dict[str, Any]]:
     """One tool call per name, ids ``c0``, ``c1``, … to match _results."""
@@ -981,3 +755,140 @@ async def test_server_errors_and_rate_limits_do_not_disable_json_mode(
 
     assert result is None
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_writes_prose_on_the_cheap_model() -> None:
+    """Curation moved out, so this call is prose -- and prose is what the
+    cheap auxiliary is for. It ran on the base model only because it also
+    had to pick the user's deliverable out of intermediate files."""
+    base = _StubClient("base recap")
+    summary = _StubClient("Built the report and saved it.")
+    summarizer = TurnSummarizer(
+        base_client=base, base_model="base-model",
+        summary_client=summary, summary_model="cheap-model",
+    )
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1",
+        user_message="make me a report",
+        iteration_summaries=["wrote the report"],
+        artifacts=[TurnArtifact("file", "report.pdf", "report.pdf")],
+    )
+
+    assert result is not None
+    assert result.recap == "Built the report and saved it."
+    # Artifacts pass through untouched -- already decided by the manifest.
+    assert [a.ref for a in result.artifacts] == ["report.pdf"]
+    assert base.chat.completions.calls == [], "still hitting the base model"
+    assert summary.chat.completions.calls[0]["model"] == "cheap-model"
+
+
+@pytest.mark.asyncio
+async def test_summarize_turn_falls_back_to_base_without_a_summary_model() -> None:
+    """No auxiliary configured must mean a recap on the base model, not
+    no recap."""
+    base = _StubClient("Did the thing.")
+    summarizer = TurnSummarizer(base_client=base, base_model="base-model")
+
+    result = await summarizer.summarize_turn(
+        turn_id="t1", user_message="do it",
+        iteration_summaries=["did it"], artifacts=[],
+    )
+
+    assert result is not None and result.recap == "Did the thing."
+    assert base.chat.completions.calls[0]["model"] == "base-model"
+
+
+class TestPickDeliverables:
+    """The one curation rule that is not bookkeeping.
+
+    "Is this a real file this turn produced" is answerable from the
+    workspace. "Is this what the user wanted" is a question about the
+    request, so it is asked -- but only when it is actually a question.
+    """
+
+    @staticmethod
+    def _files(*refs):
+        return [TurnArtifact("file", r, r) for r in refs]
+
+    @pytest.mark.asyncio
+    async def test_single_file_skips_the_call_entirely(self):
+        """The common turn must not pay for a choice with one option."""
+        client = _StubClient("report.pdf")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="make a report",
+            artifacts=self._files("report.pdf"),
+        )
+        assert [a.ref for a in out] == ["report.pdf"]
+        assert client.chat.completions.calls == []
+
+    @pytest.mark.asyncio
+    async def test_narrows_several_files_to_the_one_asked_for(self):
+        client = _StubClient("slides.pptx")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="make me a deck",
+            artifacts=self._files("slides.pptx", "chart1.png", "data.csv"),
+        )
+        assert [a.ref for a in out] == ["slides.pptx"]
+        assert client.chat.completions.calls[0]["model"] == "cheap"
+
+    @pytest.mark.asyncio
+    async def test_artifacts_are_never_dropped_by_the_pick(self):
+        """Only files are being chosen between; artifacts pass through."""
+        client = _StubClient("a.md")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up",
+            artifacts=[*self._files("a.md", "b.md"),
+                       TurnArtifact("artifact", "chart", "art-1")],
+        )
+        assert [a.ref for a in out] == ["a.md", "art-1"]
+
+    @pytest.mark.asyncio
+    async def test_invented_paths_cannot_reach_the_card(self):
+        """The reply is intersected with what was offered, not trusted."""
+        client = _StubClient("totally-made-up.pdf")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        offered = self._files("a.md", "b.md")
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up", artifacts=offered,
+        )
+        # Nothing matched -> keep everything, invent nothing.
+        assert [a.ref for a in out] == ["a.md", "b.md"]
+
+    @pytest.mark.asyncio
+    async def test_failure_keeps_every_file(self):
+        """Fail open: an extra card entry beats losing the user's work."""
+        class _Boom:
+            class chat:
+                class completions:
+                    calls: list = []
+
+                    @staticmethod
+                    async def create(**_kw):
+                        raise RuntimeError("provider down")
+
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=_Boom(), summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up",
+            artifacts=self._files("a.md", "b.md"),
+        )
+        assert [a.ref for a in out] == ["a.md", "b.md"]
