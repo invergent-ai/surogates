@@ -174,6 +174,7 @@ from surogates.harness.loop_context_replay import (
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
+    prune_superseded_canvas_images,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -1123,6 +1124,14 @@ class AgentHarness(
             # recent few with a short placeholder cuts input tokens on long
             # browser sessions and lowers how often compaction fires.
             messages = self._compressor.prune_stale_browser_states(messages)
+
+            # 6c. Drop superseded canvas snapshots.  A whiteboard turn
+            # attaches a fresh render of the board, and each render is a
+            # superset of the one before it, so every snapshot but the
+            # newest is dead weight that would dominate the window within
+            # a dozen turns.
+            if is_whiteboard_session(session):
+                messages = prune_superseded_canvas_images(messages)
 
             # 7. Compress context if needed.
             messages = await self._engineer_context(

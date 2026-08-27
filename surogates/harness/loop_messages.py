@@ -52,6 +52,75 @@ def _initial_system_message(system_prompt: str, browser_pause_notice: str | None
     }
 
 
+def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
+    """Render the canvas geometry note for one whiteboard turn.
+
+    The model is looking at a cropped image of a much larger canvas and
+    must answer in *canvas* coordinates, so it needs the mapping. Pure
+    function of client-supplied data: a malformed block degrades to a
+    shorter note or ``None`` and never raises into the turn.
+    """
+    from surogates.whiteboard.session import whiteboard_metadata
+
+    payload = whiteboard_metadata(metadata)
+    if payload is None:
+        return None
+
+    def _rect(value: Any) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        try:
+            return (
+                f"x={value['x']}, y={value['y']}, "
+                f"w={value['w']}, h={value['h']}"
+            )
+        except (KeyError, TypeError):
+            return None
+
+    lines: list[str] = ["The user is working on a whiteboard canvas."]
+
+    source = _rect(payload.get("sourceRect"))
+    scale = payload.get("imageScale")
+    if source and isinstance(scale, (int, float)):
+        lines.append(
+            f"The attached image covers canvas rectangle sourceRect "
+            f"({source}) at imageScale={scale}. Convert with "
+            f"imageX=(globalX-sourceRect.x)*imageScale."
+        )
+
+    latest = _rect(payload.get("latestInput"))
+    if latest:
+        lines.append(
+            f"latestInput ({latest}) is the authoritative attention "
+            f"region for this turn."
+        )
+
+    hotspots = payload.get("hotspots")
+    if isinstance(hotspots, list) and hotspots:
+        lines.append(
+            f"The pen trajectory covers {len(hotspots)} hotspot cell(s), "
+            f"ordered oldest to newest: {hotspots}."
+        )
+
+    selection = _rect(payload.get("selection"))
+    if selection:
+        lines.append(
+            f"The user lassoed a selection ({selection}). Treat it as the "
+            f"exclusive context for this turn."
+        )
+
+    typed = payload.get("typedInput")
+    if isinstance(typed, str) and typed.strip():
+        lines.append(
+            f"The user typed this text exactly (authoritative, do not "
+            f"re-transcribe it from pixels):\n{typed.strip()}"
+        )
+
+    # One line means we recovered nothing beyond the header, which is
+    # not worth spending a note on.
+    return "\n".join(lines) if len(lines) > 1 else None
+
+
 def _view_context_note_from_metadata(metadata: Any) -> str | None:
     """Pure helper: render the view-context note from a metadata dict.
 

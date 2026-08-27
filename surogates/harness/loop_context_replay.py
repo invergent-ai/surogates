@@ -11,7 +11,10 @@ from surogates.harness.loop_attachments import (
     _attachments_note_from_data,
     _render_inlined_attachments,
 )
-from surogates.harness.loop_messages import _view_context_note_from_metadata
+from surogates.harness.loop_messages import (
+    _view_context_note_from_metadata,
+    _whiteboard_note_from_metadata,
+)
 from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
@@ -72,6 +75,9 @@ def build_user_message_dict(
     view_note = _view_context_note_from_metadata(event_data.get("metadata"))
     if view_note:
         note_parts.append(view_note)
+    whiteboard_note = _whiteboard_note_from_metadata(event_data.get("metadata"))
+    if whiteboard_note:
+        note_parts.append(whiteboard_note)
     attachments_note = _attachments_note_from_data(event_data)
     if attachments_note:
         note_parts.append(attachments_note)
@@ -465,3 +471,54 @@ class ContextReplayMixin:
             )
         self._system_prompt_cache.set(session.id, prompt)
         return prompt
+
+
+_PRUNED_CANVAS_PLACEHOLDER = (
+    "[Earlier canvas snapshot pruned — it is fully contained in the "
+    "current one.]"
+)
+
+
+def prune_superseded_canvas_images(
+    messages: list[dict],
+) -> list[dict]:
+    """Keep only the newest canvas image in a whiteboard replay.
+
+    Canvas snapshots are cumulative: snapshot N renders everything
+    snapshot N-1 did plus whatever has been added since. Replaying all of
+    them is pure waste, and on a long board it would dominate the context
+    window within a dozen turns.
+
+    Same shape as ``ContextManager.prune_stale_browser_states``, with
+    ``keep_last`` fixed at 1 -- unlike browser state there is no case for
+    holding two, because the older one is a strict subset.
+
+    Returns a new list; the input is never mutated.
+    """
+    image_positions = [
+        (m_idx, p_idx)
+        for m_idx, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        for p_idx, part in enumerate(message["content"])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    if len(image_positions) <= 1:
+        return messages
+
+    superseded = set(image_positions[:-1])
+    pruned: list[dict] = []
+    for m_idx, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            pruned.append(message)
+            continue
+        pruned.append({
+            **message,
+            "content": [
+                {"type": "text", "text": _PRUNED_CANVAS_PLACEHOLDER}
+                if (m_idx, p_idx) in superseded
+                else part
+                for p_idx, part in enumerate(content)
+            ],
+        })
+    return pruned
