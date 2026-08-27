@@ -278,29 +278,30 @@ export function AgentWhiteboard({
       canvas.width = size.w * dpr;
       canvas.height = size.h * dpr;
     }
+    // One transform for everything: renderDoc folds the ratio in and
+    // leaves it set, so the live stroke and the marquee below paint in
+    // the same logical space the committed objects did. Anything drawn
+    // in a different space jumps the moment it is committed.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.w, size.h);
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    renderDoc(ctx, doc, view, size, services);
-    ctx.restore();
+    renderDoc(ctx, doc, view, size, services, dpr);
 
     // The marquee is interface, not content: painted here in screen
     // space and never written to the document, so it can never reach
     // the atlas and be mistaken for something the user drew.
     if (marquee) {
-      const a = logicalToScreen(marquee.from, view);
-      const b = logicalToScreen(marquee.to, view);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Logical space, like everything else. Line width is divided by
+      // the scale so the outline stays one screen pixel at any zoom.
+      const px = 1 / (view.zoom * dpr);
       ctx.save();
-      ctx.setLineDash([4, 3]);
+      ctx.setLineDash([4 * px, 3 * px]);
       ctx.strokeStyle = "#2563eb";
-      ctx.lineWidth = 1;
+      ctx.lineWidth = px;
       ctx.strokeRect(
-        Math.min(a.x, b.x),
-        Math.min(a.y, b.y),
-        Math.abs(b.x - a.x),
-        Math.abs(b.y - a.y),
+        Math.min(marquee.from.x, marquee.to.x),
+        Math.min(marquee.from.y, marquee.to.y),
+        Math.abs(marquee.to.x - marquee.from.x),
+        Math.abs(marquee.to.y - marquee.from.y),
       );
       ctx.restore();
     }
@@ -309,21 +310,20 @@ export function AgentWhiteboard({
     // top rather than committing a partial object every sample.
     const live = strokeRef.current?.points;
     if (live && live.length >= 4) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Logical coordinates under the transform renderDoc left set, so
+      // the preview sits exactly where the committed stroke will.
       ctx.beginPath();
-      const p0 = logicalToScreen({ x: live[0], y: live[1] }, view);
-      ctx.moveTo(p0.x, p0.y);
+      ctx.moveTo(live[0], live[1]);
       for (let i = 2; i + 1 < live.length; i += 2) {
-        const p = logicalToScreen({ x: live[i], y: live[i + 1] }, view);
-        ctx.lineTo(p.x, p.y);
+        ctx.lineTo(live[i], live[i + 1]);
       }
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width * view.zoom;
+      ctx.strokeStyle = tool === "eraser" ? "#ffffff" : color;
+      ctx.lineWidth = tool === "eraser" ? width * 4 : width;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.stroke();
     }
-  }, [doc, view, size, services, color, width, marquee]);
+  }, [doc, view, size, services, color, width, marquee, tool]);
 
   repaintRef.current = paint;
 
@@ -430,20 +430,26 @@ export function AgentWhiteboard({
   const onPointerMove = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (panFrom.current) {
+        // The delta is computed here, not inside the updater. React runs
+        // a state updater at render time — and twice under StrictMode —
+        // by which point this ref has been reassigned to `screen` (delta
+        // zero, so the board never moves) or nulled by pointerup (a null
+        // deref). An updater must close over values, never over a ref it
+        // is about to mutate.
         const screen = localPoint(e);
-        setView((v) =>
-          panBy(v, {
-            x: screen.x - panFrom.current!.x,
-            y: screen.y - panFrom.current!.y,
-          }),
-        );
+        const from = panFrom.current;
         panFrom.current = screen;
+        setView((v) =>
+          panBy(v, { x: screen.x - from.x, y: screen.y - from.y }),
+        );
         return;
       }
       if (marquee) {
-        setMarquee((m) =>
-          m ? { ...m, to: screenToLogical(localPoint(e), view) } : m,
-        );
+        // Same rule: resolve the pointer position now. Reading the event
+        // inside the updater defers it to render time, when the event
+        // may no longer be current.
+        const to = screenToLogical(localPoint(e), view);
+        setMarquee((m) => (m ? { ...m, to } : m));
         return;
       }
 

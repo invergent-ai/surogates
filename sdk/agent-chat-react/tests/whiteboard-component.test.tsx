@@ -23,12 +23,48 @@ const recordingContext = () =>
     },
   }) as unknown as CanvasRenderingContext2D;
 
+let sharedCalls: unknown[][] = [];
+
 function stubCanvas() {
-  HTMLCanvasElement.prototype.getContext = (() =>
-    recordingContext()) as unknown as HTMLCanvasElement["getContext"];
+  HTMLCanvasElement.prototype.getContext = (() => {
+    const ctx = recordingContext();
+    // Route every draw through one recorder so a test can read back the
+    // view transform the component actually painted with.
+    (ctx as unknown as { calls: unknown[][] }).calls = sharedCalls;
+    return new Proxy(ctx as object, {
+      get(target, property) {
+        if (property === "calls") return sharedCalls;
+        const value = Reflect.get(target, property);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          sharedCalls.push([property, ...args]);
+          return value(...args);
+        };
+      },
+    });
+  }) as unknown as HTMLCanvasElement["getContext"];
   HTMLCanvasElement.prototype.toDataURL = () => "data:image/png;base64,AAAA";
 }
 stubCanvas();
+
+/** The x/y translation of the most recent view transform painted. */
+function lastViewTranslation(): { x: number; y: number } | null {
+  for (let i = sharedCalls.length - 1; i >= 0; i--) {
+    const call = sharedCalls[i];
+    if (call[0] === "setTransform" && call.length === 7) {
+      return { x: call[5] as number, y: call[6] as number };
+    }
+  }
+  return null;
+}
+
+// The canvas repaints inside requestAnimationFrame, which act() does not
+// flush. Run it synchronously so a test can read back what was painted.
+globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+  cb(0);
+  return 0;
+}) as typeof requestAnimationFrame;
+globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
 
 if (typeof globalThis.ResizeObserver === "undefined") {
   globalThis.ResizeObserver = class {
@@ -432,6 +468,84 @@ describe("AgentWhiteboard", () => {
       mock: { calls: { sessionId: string }[][] };
     }).mock.calls;
     expect(calls.map((c) => c[0].sessionId)).toEqual(["s1", "s2"]);
+  });
+
+  it("pans the board when dragging with the hand tool", async () => {
+    // Regression: the setView updater read panFrom.current lazily, so
+    // React ran it after the ref had been reassigned — delta zero, board
+    // never moved — or after pointerup had nulled it, throwing on .x.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Pan")?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    // The mount paint is the baseline. pointerdown only sets a ref, so
+    // it triggers no repaint of its own.
+    const before = lastViewTranslation();
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 400, clientY: 300, bubbles: true,
+        }),
+      );
+    });
+
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 500, clientY: 360, bubbles: true,
+        }),
+      );
+    });
+    const after = lastViewTranslation();
+
+    expect(before).not.toBeNull();
+    expect(after).not.toBeNull();
+    // Dragging right/down reveals content up/left, so the translation
+    // moves with the drag.
+    expect(after!.x).not.toBe(before!.x);
+    expect(after!.y).not.toBe(before!.y);
+  });
+
+  it("does not throw when a pan continues past pointerup", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Pan")?.click();
+    });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 400, clientY: 300, bubbles: true,
+        }),
+      );
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 450, clientY: 330, bubbles: true,
+        }),
+      );
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 500, clientY: 360, bubbles: true,
+        }),
+      );
+    });
+    expect(byLabel(el, "Whiteboard canvas")).not.toBeNull();
   });
 
   it("disables the controls when disabled", async () => {

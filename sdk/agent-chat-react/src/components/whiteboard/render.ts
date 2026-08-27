@@ -419,15 +419,19 @@ export function renderDoc(
   view: View,
   size: ViewportSize,
   services: RenderServices,
+  /**
+   * Device pixel ratio, folded into the view transform.
+   *
+   * It has to be folded in rather than applied around this call:
+   * `setTransform` is absolute, so it discards any `scale()` the caller
+   * set beforehand. Painting the committed objects without the ratio
+   * while previewing the in-progress stroke with it puts the two in
+   * different spaces, and the stroke jumps on release.
+   */
+  dpr = 1,
 ): void {
-  ctx.setTransform(
-    view.zoom,
-    0,
-    0,
-    view.zoom,
-    -view.x * view.zoom,
-    -view.y * view.zoom,
-  );
+  const s = view.zoom * dpr;
+  ctx.setTransform(s, 0, 0, s, -view.x * s, -view.y * s);
   ctx.clearRect(view.x, view.y, size.w / view.zoom, size.h / view.zoom);
 
   for (const obj of doc.objects) {

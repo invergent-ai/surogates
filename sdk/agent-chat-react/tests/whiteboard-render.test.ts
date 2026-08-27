@@ -290,3 +290,40 @@ describe("marquee selection", () => {
       .toHaveLength(0);
   });
 });
+
+describe("device pixel ratio", () => {
+  function transformOf(ctx: { calls: unknown[][] }) {
+    const call = ctx.calls.find((c) => c[0] === "setTransform");
+    return call ? (call.slice(1) as number[]) : null;
+  }
+
+  it("folds the ratio into the view transform", () => {
+    // setTransform is absolute, so a caller's scale(dpr, dpr) before
+    // this call is discarded. Painting committed objects without the
+    // ratio while previewing the in-progress stroke with it puts the
+    // two in different spaces, and the stroke jumps on release.
+    const ctx = recordingContext();
+    renderDoc(ctx, emptyDoc(), { x: 0, y: 0, zoom: 1 }, size, measure, 2);
+    expect(transformOf(ctx)?.slice(0, 4)).toEqual([2, 0, 0, 2]);
+  });
+
+  it("multiplies zoom by the ratio", () => {
+    const ctx = recordingContext();
+    renderDoc(ctx, emptyDoc(), { x: 0, y: 0, zoom: 1.5 }, size, measure, 2);
+    expect(transformOf(ctx)?.[0]).toBe(3);
+  });
+
+  it("scales the view origin by the same factor", () => {
+    // A translation left un-scaled puts the content at the right size
+    // in the wrong place.
+    const ctx = recordingContext();
+    renderDoc(ctx, emptyDoc(), { x: 100, y: 50, zoom: 1 }, size, measure, 2);
+    expect(transformOf(ctx)?.slice(4)).toEqual([-200, -100]);
+  });
+
+  it("defaults to 1 so an unaware caller is unchanged", () => {
+    const ctx = recordingContext();
+    renderDoc(ctx, emptyDoc(), { x: 10, y: 20, zoom: 1 }, size, measure);
+    expect(transformOf(ctx)).toEqual([1, 0, 0, 1, -10, -20]);
+  });
+});
