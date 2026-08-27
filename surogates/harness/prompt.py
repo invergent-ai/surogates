@@ -24,6 +24,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
+from surogates.whiteboard.session import is_whiteboard_session
 
 if TYPE_CHECKING:
     from surogates.memory.manager import MemoryManager
@@ -816,6 +817,13 @@ class PromptBuilder:
                 parts.append(
                     "\n" + self._prompts.get("guidance/artifact_in_channel")
                 )
+
+        # The whiteboard surface needs its own reading and layout
+        # contract: the model is looking at an image of a canvas and
+        # answering with coordinates on it, which no other surface asks
+        # of it.  Appended last so it wins over the generic guidance.
+        if is_whiteboard_session(self._session):
+            parts.append("\n" + self._prompts.get("guidance/whiteboard"))
 
         return "\n".join(parts)
 
