@@ -58,7 +58,7 @@ def _atlas_metadata(mode):
         "imageScale": 0.5,
         "latestInput": {"x": 1200, "y": 2100, "w": 300, "h": 200},
         "hotspots": [[3, 4], [3, 5]],
-        "canvasSize": 20000,
+        "infinite": True,
         "mode": mode,
     }}
 
@@ -149,7 +149,7 @@ def test_the_whiteboard_prompt_carries_the_canvas_contract():
     prompt = _prompt(WHITEBOARD_CONFIG)
     assert "Whiteboard canvas" in prompt
     assert "sourceRect" in prompt
-    assert "20000" in prompt
+    assert "infinite" in prompt
 
 
 def test_a_plain_prompt_does_not():
@@ -197,7 +197,41 @@ def test_a_multi_turn_board_replays_exactly_one_canvas_image():
     assert "AAA3" in images[0]["image_url"]["url"]
 
 
-# --- 7. a real command list survives the tool ------------------------
+# --- 7. the canvas really is unbounded -------------------------------
+
+def test_a_command_list_in_negative_space_is_accepted():
+    """The origin is arbitrary: a board drawn up and to the left of it is
+    ordinary, not an error."""
+    import asyncio
+
+    runtime = ToolRuntime(ToolRegistry())
+    runtime.register_builtins()
+    result = asyncio.run(runtime.dispatch("whiteboard_draw", {
+        "commands": [
+            {"tool": "write_text", "x": -4200, "y": -9100, "text": "5",
+             "fontSize": 32, "maxWidth": 300},
+            {"tool": "draw", "origin": [-4200, -9000],
+             "types": ["circle"], "items": [[0, 0, 40]]},
+        ],
+    }))
+    assert not result.startswith("Error:")
+
+
+def test_the_note_renders_negative_geometry():
+    msg = build_user_message_dict({
+        "content": "what is this",
+        "metadata": {"whiteboard": {
+            "sourceRect": {"x": -9000, "y": -7000, "w": 1600, "h": 1200},
+            "imageScale": 0.5,
+            "latestInput": {"x": -8800, "y": -6900, "w": 300, "h": 200},
+            "mode": "sketch",
+        }},
+    })
+    assert "-9000" in msg["content"]
+    assert "-8800" in msg["content"]
+
+
+# --- 8. a real command list survives the tool ------------------------
 
 def test_a_valid_command_list_is_accepted_by_the_registered_tool():
     import asyncio

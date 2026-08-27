@@ -1,6 +1,7 @@
 import {
   Eraser,
   Hand,
+  Maximize2,
   MousePointer2,
   Pen,
   Redo2,
@@ -39,6 +40,9 @@ export interface ToolRailProps {
   canRedo: boolean;
   onUndo(): void;
   onRedo(): void;
+  /** Frame all content. The only reliable way home on an infinite
+   *  canvas: pan far enough and no edge stops you. */
+  onFit(): void;
   disabled?: boolean;
 }
 
@@ -53,6 +57,7 @@ export function ToolRail({
   canRedo,
   onUndo,
   onRedo,
+  onFit,
   disabled,
 }: ToolRailProps) {
   return (
@@ -118,6 +123,17 @@ export function ToolRail({
       ))}
 
       <div className="my-1 h-px bg-border" />
+
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        aria-label="Fit to content"
+        disabled={disabled}
+        onClick={onFit}
+      >
+        <Maximize2 className="size-4" />
+      </Button>
 
       <Button
         type="button"

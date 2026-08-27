@@ -14,8 +14,11 @@ def test_the_fragment_loads():
     assert body.strip()
 
 
-def test_the_fragment_states_the_canvas_size():
-    assert "20000" in _library().get("guidance/whiteboard")
+def test_the_fragment_says_the_canvas_is_infinite():
+    body = _library().get("guidance/whiteboard")
+    assert "infinite" in body
+    # An edge or a fixed size would be a lie the model plans against.
+    assert "20000" not in body
 
 
 def test_the_fragment_names_the_tool():
@@ -33,9 +36,12 @@ def test_the_fragment_carries_the_ported_rules(rule):
     assert rule in _library().get("guidance/whiteboard")
 
 
-def test_the_fragment_credits_penecho():
-    body = _library().get("guidance/whiteboard")
-    assert "PenEcho" in body
+def test_the_fragment_credits_penecho_without_spending_tokens():
+    # Attribution belongs in the frontmatter, which PromptLibrary strips
+    # from the body: the model gains nothing from reading it, and every
+    # token in this fragment is paid on every whiteboard turn.
+    assert "PenEcho" in _library().metadata("guidance/whiteboard")["source"]
+    assert "PenEcho" not in _library().get("guidance/whiteboard")
 
 
 def test_the_fragment_has_frontmatter():

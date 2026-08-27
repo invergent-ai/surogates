@@ -11,7 +11,7 @@
  * `surogates/harness/loop_messages.py`. Renaming one silently shortens
  * the note the model sees rather than failing.
  */
-import { CANVAS_SIZE, type WbDoc } from "./doc";
+import type { WbDoc } from "./doc";
 import { objectBounds, renderDoc } from "./render";
 import type { RenderServices, View, ViewportSize } from "./render";
 
@@ -84,8 +84,8 @@ function viewportRect(view: View, size: ViewportSize): Rect {
  * Choose the capture rectangle and its image scale.
  *
  * Priority: the latest input if there is one, else all content, else the
- * current viewport. Whatever is chosen is padded, floored to a minimum
- * span and clamped inside the canvas.
+ * current viewport. Whatever is chosen is padded and floored to a
+ * minimum span. Nothing is clamped: the canvas has no edges.
  */
 export function planAtlas(
   doc: WbDoc,
@@ -104,11 +104,14 @@ export function planAtlas(
   const spanW = Math.max(base.w * (1 + CAPTURE_MARGIN * 2), MIN_CAPTURE_SPAN);
   const spanH = Math.max(base.h * (1 + CAPTURE_MARGIN * 2), MIN_CAPTURE_SPAN);
 
-  const w = Math.min(spanW, CANVAS_SIZE);
-  const h = Math.min(spanH, CANVAS_SIZE);
-  const x = clamp(cx - w / 2, 0, CANVAS_SIZE - w);
-  const y = clamp(cy - h / 2, 0, CANVAS_SIZE - h);
-  const sourceRect: Rect = { x, y, w, h };
+  // No clamp into a canvas rectangle: the canvas has no edges, so the
+  // capture is simply centred on what it needs to cover.
+  const sourceRect: Rect = {
+    x: cx - spanW / 2,
+    y: cy - spanH / 2,
+    w: spanW,
+    h: spanH,
+  };
 
   // Math.min(1, ...) is what stops upscaling: a small capture is sent at
   // native size rather than blown up into wasted vision tokens.
@@ -231,7 +234,7 @@ export function atlasMetadata(
     sourceRect: plan.sourceRect,
     imageScale: plan.imageScale,
     viewport: plan.viewport,
-    canvasSize: CANVAS_SIZE,
+    infinite: true,
     mode: extras.mode === "deep" ? "deep" : "sketch",
   };
   if (latest) meta.latestInput = latest;

@@ -1,8 +1,13 @@
 import type { AgentChatMessage } from "../../types";
 import { normalize as normalizeDraw } from "./draw";
 
-/** Logical canvas edge. Must match surogates/whiteboard/commands.py. */
-export const CANVAS_SIZE = 20_000;
+/**
+ * The canvas is infinite: no edges, an arbitrary origin, and freely
+ * negative coordinates. This is only a sanity bound so a malformed
+ * command cannot place an object somewhere no viewport can reach.
+ * Must match `COORD_LIMIT` in surogates/whiteboard/commands.py.
+ */
+export const COORD_LIMIT = 1_000_000;
 
 /** Default text line-height multiplier when the model omits one. */
 const DEFAULT_LINE_HEIGHT = 1.35;
@@ -117,7 +122,7 @@ function toObject(
       // The draw normalizer is authoritative for geometry: if it
       // rejects the command the renderer would produce nothing, so drop
       // it here rather than carry an object that can never paint.
-      if (normalizeDraw(cmd, CANVAS_SIZE) === null) return null;
+      if (normalizeDraw(cmd, COORD_LIMIT) === null) return null;
       return {
         ...base,
         kind: "draw",

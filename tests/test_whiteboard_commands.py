@@ -9,7 +9,7 @@ vendored ``draw.js`` remains authoritative for rendering geometry.
 import pytest
 
 from surogates.whiteboard.commands import (
-    CANVAS_SIZE,
+    COORD_LIMIT,
     MAX_COMMANDS,
     validate_commands,
 )
@@ -46,13 +46,31 @@ def test_rejects_a_missing_tool_key():
     assert "tool" in (validate_commands([{"x": 1, "y": 2}]) or "")
 
 
-def test_rejects_coordinates_outside_the_canvas():
-    err = validate_commands([_text(x=CANVAS_SIZE + 1)])
-    assert "canvas" in (err or "").lower()
+def test_rejects_coordinates_beyond_the_sanity_bound():
+    err = validate_commands([_text(x=COORD_LIMIT + 1)])
+    assert "coordinate range" in (err or "")
 
 
-def test_rejects_negative_coordinates():
-    assert validate_commands([_text(y=-1)]) is not None
+def test_accepts_negative_coordinates():
+    # The canvas is infinite and the origin is arbitrary, so content
+    # spreads in every direction.
+    assert validate_commands([_text(x=-5000, y=-9000)]) is None
+
+
+def test_rejects_a_negative_size():
+    # Infinite in extent, but a negative width still renders nothing.
+    assert "positive size" in (validate_commands([_text(maxWidth=-1)]) or "")
+
+
+def test_rejects_a_zero_size():
+    assert "positive size" in (validate_commands([_text(maxWidth=0)]) or "")
+
+
+def test_accepts_a_draw_at_negative_origin():
+    assert validate_commands([{
+        "tool": "draw", "origin": [-4000, -300],
+        "types": ["rect"], "items": [[0, 0, 50, 50]],
+    }]) is None
 
 
 def test_rejects_write_text_without_maxwidth():
@@ -83,6 +101,13 @@ def test_draw_rejects_too_many_items():
         "types": ["rect"] * 65, "items": [[0, 0, 1, 1]] * 65,
     }])
     assert "64" in (err or "")
+
+
+def test_erase_accepts_negative_path_points():
+    assert validate_commands([{
+        "tool": "erase", "mode": "path",
+        "points": [[-10, -10], [-5, -5]], "size": 20,
+    }]) is None
 
 
 def test_draw_rejects_too_many_total_values():

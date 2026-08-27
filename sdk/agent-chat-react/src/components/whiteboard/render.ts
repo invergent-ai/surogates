@@ -3,7 +3,7 @@ import {
   normalize as normalizeDraw,
   render as renderDraw,
 } from "./draw";
-import { CANVAS_SIZE, type WbDoc, type WbObject } from "./doc";
+import { COORD_LIMIT, type WbDoc, type WbObject } from "./doc";
 import type { RasterFormula } from "./formula";
 
 export interface View {
@@ -97,7 +97,7 @@ export function objectBounds(
       // The draw normalizer already accounts for curve extrema,
       // stroke padding and arrowheads — exactly the computation not
       // worth rewriting.
-      const normalized = normalizeDraw(drawCommandOf(obj), CANVAS_SIZE);
+      const normalized = normalizeDraw(drawCommandOf(obj), COORD_LIMIT);
       return normalized ? normalized._draw.bounds : null;
     }
     case "text": {

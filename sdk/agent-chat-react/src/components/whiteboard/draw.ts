@@ -334,7 +334,7 @@ function indexSet(value: unknown, count: number): Set<number> | null {
  */
 export function normalize(
   command: unknown,
-  canvasSize = 20_000,
+  coordLimit = 1_000_000,
 ): NormalizedDraw | null {
   const cmd = command as DrawCommand | null;
   if (
@@ -342,7 +342,7 @@ export function normalize(
     typeof cmd !== "object" ||
     !Array.isArray(cmd.origin) ||
     cmd.origin.length !== 2 ||
-    !cmd.origin.every((v) => isInt(v, 0, canvasSize))
+    !cmd.origin.every((v) => isInt(v, -coordLimit, coordLimit))
   ) {
     return null;
   }
@@ -381,7 +381,7 @@ export function normalize(
     if (
       !TYPES.has(type as never) ||
       !Array.isArray(item) ||
-      !item.every((v) => isInt(v, -canvasSize, canvasSize))
+      !item.every((v) => isInt(v, -coordLimit, coordLimit))
     ) {
       return null;
     }
@@ -424,8 +424,8 @@ export function normalize(
     } else if (type === "rect") {
       if (
         item.length !== 4 ||
-        !isInt(item[2], 1, canvasSize) ||
-        !isInt(item[3], 1, canvasSize) ||
+        !isInt(item[2], 1, coordLimit) ||
+        !isInt(item[3], 1, coordLimit) ||
         p.closed ||
         p.arrow
       ) {
@@ -441,8 +441,8 @@ export function normalize(
       const wantsLength = type === "ellipse" ? 4 : 3;
       if (
         item.length !== wantsLength ||
-        !isInt(item[2], 1, canvasSize) ||
-        (type === "ellipse" && !isInt(item[3], 1, canvasSize)) ||
+        !isInt(item[2], 1, coordLimit) ||
+        (type === "ellipse" && !isInt(item[3], 1, coordLimit)) ||
         p.closed ||
         p.arrow
       ) {
@@ -457,8 +457,8 @@ export function normalize(
     } else {
       if (
         item.length !== 6 ||
-        !isInt(item[2], 1, canvasSize) ||
-        !isInt(item[3], 1, canvasSize) ||
+        !isInt(item[2], 1, coordLimit) ||
+        !isInt(item[3], 1, coordLimit) ||
         !isInt(item[4], -3600, 3600) ||
         !isInt(item[5], -3600, 3600) ||
         item[5] === 0 ||
@@ -496,10 +496,10 @@ export function normalize(
   }
 
   if (
-    bounds.left < 0 ||
-    bounds.top < 0 ||
-    bounds.right > canvasSize ||
-    bounds.bottom > canvasSize
+    bounds.left < -coordLimit ||
+    bounds.top < -coordLimit ||
+    bounds.right > coordLimit ||
+    bounds.bottom > coordLimit
   ) {
     return null;
   }
@@ -507,10 +507,10 @@ export function normalize(
   // Half the stroke sits outside the path, plus a little slack for the
   // round join, or a thick outline clips at the raster edge.
   const pad = Math.ceil(width / 2 + 4);
-  const x = Math.max(0, Math.floor(bounds.left - pad));
-  const y = Math.max(0, Math.floor(bounds.top - pad));
-  const right = Math.min(canvasSize, Math.ceil(bounds.right + pad));
-  const bottom = Math.min(canvasSize, Math.ceil(bounds.bottom + pad));
+  const x = Math.floor(bounds.left - pad);
+  const y = Math.floor(bounds.top - pad);
+  const right = Math.ceil(bounds.right + pad);
+  const bottom = Math.ceil(bounds.bottom + pad);
 
   return {
     tool: "draw",

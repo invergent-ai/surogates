@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { CANVAS_SIZE } from "@/components/whiteboard/doc";
 import {
   MAX_ZOOM,
   MIN_ZOOM,
   StrokeBuilder,
-  clampView,
   logicalToScreen,
   panBy,
   screenToLogical,
   strokePointsFromEvent,
   zoomAt,
+  zoomFactorFromWheel,
+  zoomToFit,
 } from "@/components/whiteboard/input";
 
 describe("coordinate mapping", () => {
@@ -94,32 +94,109 @@ describe("pan", () => {
   });
 });
 
-describe("view clamping", () => {
-  it("keeps the viewport inside the canvas", () => {
-    const clamped = clampView(
-      { x: -5000, y: -5000, zoom: 1 },
-      { w: 800, h: 600 },
-    );
-    expect(clamped.x).toBeGreaterThanOrEqual(0);
-    expect(clamped.y).toBeGreaterThanOrEqual(0);
+describe("the canvas has no edges", () => {
+  it("pans arbitrarily far into negative space", () => {
+    // Figma-style: there is no origin corner and nothing to bump into.
+    let view = { x: 0, y: 0, zoom: 1 };
+    for (let i = 0; i < 100; i++) {
+      view = panBy(view, { x: 500, y: 500 });
+    }
+    expect(view.x).toBeLessThan(-40_000);
+    expect(view.y).toBeLessThan(-40_000);
   });
 
-  it("stops the viewport past the far edge", () => {
-    const clamped = clampView(
-      { x: CANVAS_SIZE + 1000, y: 0, zoom: 1 },
-      { w: 800, h: 600 },
-    );
-    expect(clamped.x).toBeLessThanOrEqual(CANVAS_SIZE);
+  it("pans arbitrarily far into positive space", () => {
+    let view = { x: 0, y: 0, zoom: 1 };
+    for (let i = 0; i < 100; i++) {
+      view = panBy(view, { x: -500, y: -500 });
+    }
+    expect(view.x).toBeGreaterThan(40_000);
   });
 
-  it("leaves an in-bounds view untouched", () => {
-    const view = { x: 100, y: 200, zoom: 1.5 };
-    expect(clampView(view, { w: 800, h: 600 })).toEqual(view);
+  it("keeps a stroke drawn at negative coordinates intact", () => {
+    const b = new StrokeBuilder("#111", 4);
+    b.begin({ x: -5000, y: -9000 });
+    b.extend({ x: -4990, y: -8990 });
+    expect((b.finish() as { pts: number[] }).pts)
+      .toEqual([-5000, -9000, -4990, -8990]);
   });
 
-  it("preserves zoom", () => {
-    expect(clampView({ x: -10, y: -10, zoom: 2.5 }, { w: 800, h: 600 }).zoom)
-      .toBe(2.5);
+  it("drops a non-finite point rather than poisoning the bounds", () => {
+    const b = new StrokeBuilder("#111", 4);
+    b.begin({ x: 0, y: 0 });
+    b.extend({ x: Number.NaN, y: 5 });
+    b.extend({ x: Number.POSITIVE_INFINITY, y: 5 });
+    b.extend({ x: 10, y: 5 });
+    expect((b.finish() as { pts: number[] }).pts).toEqual([0, 0, 10, 5]);
+  });
+});
+
+describe("wheel zoom", () => {
+  it("zooms in on a negative delta", () => {
+    expect(zoomFactorFromWheel(-100)).toBeGreaterThan(1);
+  });
+
+  it("zooms out on a positive delta", () => {
+    expect(zoomFactorFromWheel(100)).toBeLessThan(1);
+  });
+
+  it("is a no-op at zero", () => {
+    expect(zoomFactorFromWheel(0)).toBeCloseTo(1, 6);
+  });
+
+  it("is symmetric, so a scroll and its reverse cancel", () => {
+    expect(zoomFactorFromWheel(120) * zoomFactorFromWheel(-120))
+      .toBeCloseTo(1, 6);
+  });
+
+  it("scales smoothly rather than in fixed steps", () => {
+    // A trackpad emits many small deltas; a fixed 1.1x per event would
+    // make it wildly over-sensitive next to a notched wheel.
+    const small = zoomFactorFromWheel(-4);
+    const large = zoomFactorFromWheel(-120);
+    expect(small).toBeLessThan(large);
+    expect(small).toBeGreaterThan(1);
+  });
+});
+
+describe("zoom to fit", () => {
+  const size = { w: 800, h: 600 };
+
+  it("frames the content", () => {
+    const bounds = { x: 1000, y: 1000, w: 400, h: 300 };
+    const view = zoomToFit(bounds, size);
+    const centre = screenToLogical({ x: size.w / 2, y: size.h / 2 }, view);
+    expect(centre.x).toBeCloseTo(bounds.x + bounds.w / 2, 4);
+    expect(centre.y).toBeCloseTo(bounds.y + bounds.h / 2, 4);
+  });
+
+  it("frames content in negative space too", () => {
+    const bounds = { x: -9000, y: -7000, w: 400, h: 300 };
+    const view = zoomToFit(bounds, size);
+    const centre = screenToLogical({ x: size.w / 2, y: size.h / 2 }, view);
+    expect(centre.x).toBeCloseTo(bounds.x + bounds.w / 2, 4);
+  });
+
+  it("zooms out for content larger than the viewport", () => {
+    expect(zoomToFit({ x: 0, y: 0, w: 8000, h: 6000 }, size).zoom)
+      .toBeLessThan(1);
+  });
+
+  it("respects the zoom floor for absurdly large content", () => {
+    expect(zoomToFit({ x: 0, y: 0, w: 5e7, h: 5e7 }, size).zoom)
+      .toBeGreaterThanOrEqual(MIN_ZOOM);
+  });
+
+  it("returns a sane view for an empty board", () => {
+    const view = zoomToFit(null, size);
+    expect(view.zoom).toBe(1);
+    const centre = screenToLogical({ x: size.w / 2, y: size.h / 2 }, view);
+    expect(centre.x).toBeCloseTo(0, 4);
+    expect(centre.y).toBeCloseTo(0, 4);
+  });
+
+  it("returns a sane view for zero-area content", () => {
+    expect(zoomToFit({ x: 5, y: 5, w: 0, h: 0 }, size).zoom).toBe(1);
   });
 });
 
@@ -150,15 +227,6 @@ describe("stroke building", () => {
 
   it("discards a stroke that never began", () => {
     expect(new StrokeBuilder("#111", 4).finish()).toBeNull();
-  });
-
-  it("clamps points to the canvas", () => {
-    const b = new StrokeBuilder("#111", 4);
-    b.begin({ x: -50, y: -50 });
-    b.extend({ x: CANVAS_SIZE + 50, y: 10 });
-    const pts = (b.finish() as { pts: number[] }).pts;
-    expect(Math.min(...pts)).toBeGreaterThanOrEqual(0);
-    expect(Math.max(...pts)).toBeLessThanOrEqual(CANVAS_SIZE);
   });
 
   it("drops a duplicate consecutive point", () => {

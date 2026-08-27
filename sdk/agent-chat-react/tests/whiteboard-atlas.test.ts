@@ -8,7 +8,7 @@ import {
   mapHotspots,
   planAtlas,
 } from "@/components/whiteboard/atlas";
-import { CANVAS_SIZE, applyCommands, emptyDoc } from "@/components/whiteboard/doc";
+import { applyCommands, emptyDoc } from "@/components/whiteboard/doc";
 
 const viewport = { w: 800, h: 600 };
 const view = { x: 0, y: 0, zoom: 1 };
@@ -98,15 +98,17 @@ describe("atlas planning", () => {
     expect(imageSize.h).toBeGreaterThan(0);
   });
 
-  it("stays inside the canvas", () => {
+  it("captures negative regions without clamping them away", () => {
+    // The canvas has no edges: a board drawn up and to the left of the
+    // origin is ordinary, and clamping to 0 would crop it out entirely.
+    const latest = { x: -8000, y: -6000, w: 400, h: 300 };
     const { sourceRect } = planAtlas(
-      emptyDoc(),
-      { x: CANVAS_SIZE - 10, y: CANVAS_SIZE - 10, w: 100, h: 100 },
-      view, viewport, services,
+      emptyDoc(), latest, view, viewport, services,
     );
-    expect(sourceRect.x).toBeGreaterThanOrEqual(0);
-    expect(sourceRect.x + sourceRect.w).toBeLessThanOrEqual(CANVAS_SIZE);
-    expect(sourceRect.y + sourceRect.h).toBeLessThanOrEqual(CANVAS_SIZE);
+    expect(sourceRect.x).toBeLessThanOrEqual(latest.x);
+    expect(sourceRect.y).toBeLessThanOrEqual(latest.y);
+    expect(sourceRect.x + sourceRect.w)
+      .toBeGreaterThanOrEqual(latest.x + latest.w);
   });
 
   it("pads a tiny latest input so the model gets surrounding context", () => {
@@ -183,7 +185,7 @@ describe("atlas metadata", () => {
     expect(meta).toHaveProperty("sourceRect");
     expect(meta).toHaveProperty("imageScale");
     expect(meta).toHaveProperty("latestInput");
-    expect(meta).toHaveProperty("canvasSize");
+    expect(meta).toHaveProperty("infinite");
     expect(meta).toHaveProperty("viewport");
   });
 

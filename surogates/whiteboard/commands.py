@@ -13,9 +13,13 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Logical canvas edge.  Every command coordinate is a global logical
-#: coordinate in ``[0, CANVAS_SIZE]``.
-CANVAS_SIZE = 20_000
+#: The canvas is infinite: it has no edges, the origin is the middle of
+#: nowhere in particular, and coordinates are freely negative.  This is
+#: only a sanity bound, so a malformed or hallucinated 1e300 is rejected
+#: instead of being placed somewhere no viewport can ever reach.  Nothing
+#: about the surface changes at this value; it is not a wall the user can
+#: hit by panning.
+COORD_LIMIT = 1_000_000
 
 #: Commands per ``whiteboard_draw`` call.
 MAX_COMMANDS = 16
@@ -41,16 +45,30 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "place_artifact": ("artifact_id", "x", "y", "w", "h"),
 }
 
-#: Keys whose value must be a coordinate inside the canvas.
-_COORD_KEYS = frozenset({"x", "y", "w", "h", "maxWidth"})
+#: Keys holding a position.  Freely negative: the origin is arbitrary.
+_POSITION_KEYS = frozenset({"x", "y"})
+
+#: Keys holding an extent.  A negative width is meaningless however
+#: infinite the canvas is, and silently renders nothing.
+_SIZE_KEYS = frozenset({"w", "h", "maxWidth"})
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _in_canvas(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and 0 <= value <= CANVAS_SIZE
-    )
+    """Whether *value* is a plausible canvas position.
+
+    Negative is ordinary on an infinite canvas -- the origin is arbitrary
+    and content spreads in every direction.
+    """
+    return _is_number(value) and -COORD_LIMIT <= value <= COORD_LIMIT
+
+
+def _is_extent(value: Any) -> bool:
+    """Whether *value* is a plausible width or height."""
+    return _is_number(value) and 0 < value <= COORD_LIMIT
 
 
 def _is_int(value: Any, lo: int, hi: int) -> bool:
@@ -68,7 +86,10 @@ def _validate_draw(cmd: dict[str, Any], idx: int) -> str | None:
         and len(origin) == 2
         and all(_in_canvas(v) for v in origin)
     ):
-        return f"command[{idx}] draw: origin must be [x, y] inside the canvas."
+        return (
+            f"command[{idx}] draw: origin must be [x, y] within "
+            f"+/-{COORD_LIMIT}."
+        )
 
     types, items = cmd.get("types"), cmd.get("items")
     if not isinstance(types, list) or not isinstance(items, list):
@@ -98,10 +119,10 @@ def _validate_draw(cmd: dict[str, Any], idx: int) -> str | None:
             return f"command[{idx}] draw: item {i} must be a non-empty array."
         # Item coordinates are offsets from origin, so they may be
         # negative; the magnitude bound is what matters.
-        if not all(_is_int(v, -CANVAS_SIZE, CANVAS_SIZE) for v in item):
+        if not all(_is_int(v, -COORD_LIMIT, COORD_LIMIT) for v in item):
             return (
                 f"command[{idx}] draw: item {i} values must be integers "
-                f"within +/-{CANVAS_SIZE}."
+                f"within +/-{COORD_LIMIT}."
             )
         total_values += len(item)
         if total_values > MAX_DRAW_VALUES:
@@ -141,7 +162,7 @@ def _validate_erase(cmd: dict[str, Any], idx: int) -> str | None:
         ):
             return (
                 f"command[{idx}] erase mode=path requires points as a "
-                f"non-empty array of [x, y] pairs inside the canvas."
+                f"non-empty array of [x, y] pairs."
             )
         return None
     return (
@@ -182,11 +203,17 @@ def validate_commands(commands: Any) -> str | None:
                 f"field(s): {', '.join(missing)}."
             )
 
-        for key in _COORD_KEYS & cmd.keys():
+        for key in _POSITION_KEYS & cmd.keys():
             if not _in_canvas(cmd[key]):
                 return (
                     f"command[{idx}] ({tool}): {key}={cmd[key]!r} is "
-                    f"outside the {CANVAS_SIZE}x{CANVAS_SIZE} canvas."
+                    f"outside the +/-{COORD_LIMIT} coordinate range."
+                )
+        for key in _SIZE_KEYS & cmd.keys():
+            if not _is_extent(cmd[key]):
+                return (
+                    f"command[{idx}] ({tool}): {key}={cmd[key]!r} must be "
+                    f"a positive size no larger than {COORD_LIMIT}."
                 )
 
         if tool == "draw":

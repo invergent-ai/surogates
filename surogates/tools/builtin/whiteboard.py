@@ -15,7 +15,7 @@ from typing import Any
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.whiteboard.commands import (
-    CANVAS_SIZE,
+    COORD_LIMIT,
     MAX_COMMANDS,
     validate_commands,
 )
@@ -25,9 +25,10 @@ logger = logging.getLogger(__name__)
 WHITEBOARD_TOOL_NAMES: frozenset[str] = frozenset({"whiteboard_draw"})
 
 _DESCRIPTION = (
-    "Draw on the shared whiteboard canvas. Every coordinate is a global "
-    f"logical coordinate on a {CANVAS_SIZE}x{CANVAS_SIZE} canvas -- never "
-    "an image coordinate. Use the geometry in the turn's canvas note to "
+    "Draw on the shared whiteboard canvas. The canvas is infinite: there "
+    "are no edges, the origin is arbitrary, and coordinates are freely "
+    "negative. Every coordinate is a global canvas coordinate -- never an "
+    "image coordinate. Use the geometry in the turn's canvas note to "
     "convert.\n\n"
     "Commands:\n"
     "- write_text {tool,x,y,text,fontSize,maxWidth,lineHeight?} -- prose. "

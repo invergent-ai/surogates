@@ -1,8 +1,13 @@
-import { CANVAS_SIZE, type WbObject } from "./doc";
+import type { WbObject } from "./doc";
 import type { View, ViewportSize } from "./render";
 
-export const MIN_ZOOM = 0.05;
-export const MAX_ZOOM = 8;
+// open-pencil's range. Wide on purpose: on an infinite canvas the only
+// way to see a whole sprawling board is to zoom right out.
+export const MIN_ZOOM = 0.02;
+export const MAX_ZOOM = 256;
+
+/** Wheel-delta divisor for exponential zoom. Larger = gentler. */
+const ZOOM_DIVISOR = 300;
 
 export interface Point {
   x: number;
@@ -63,11 +68,43 @@ export function panBy(view: View, deltaScreen: Point): View {
   };
 }
 
-/** Keep the view origin inside the canvas. */
-export function clampView(view: View, _size: ViewportSize): View {
-  const x = clamp(view.x, 0, CANVAS_SIZE);
-  const y = clamp(view.y, 0, CANVAS_SIZE);
-  return x === view.x && y === view.y ? view : { ...view, x, y };
+/**
+ * Exponential zoom factor from a wheel delta.
+ *
+ * Exponential, not a fixed step: wheel deltas vary by three orders of
+ * magnitude between a notched mouse wheel and a trackpad's pixel-precise
+ * scroll, and a fixed 1.1x per event makes the trackpad unusable.
+ * open-pencil's formula.
+ */
+export function zoomFactorFromWheel(delta: number): number {
+  return Math.exp(-delta / ZOOM_DIVISOR);
+}
+
+/**
+ * Fit *bounds* into the viewport, with margin.
+ *
+ * An infinite canvas needs a way home: pan far enough and there is no
+ * edge to stop you, so "zoom to fit" is the only reliable route back to
+ * the content. Returns the identity view when there is nothing to fit.
+ */
+export function zoomToFit(
+  bounds: { x: number; y: number; w: number; h: number } | null,
+  size: ViewportSize,
+  padding = 80,
+): View {
+  if (!bounds || bounds.w <= 0 || bounds.h <= 0) {
+    return { x: -size.w / 2, y: -size.h / 2, zoom: 1 };
+  }
+  const zoom = clamp(
+    Math.min(size.w / (bounds.w + padding * 2), size.h / (bounds.h + padding * 2)),
+    MIN_ZOOM,
+    MAX_ZOOM,
+  );
+  return {
+    zoom,
+    x: bounds.x + bounds.w / 2 - size.w / 2 / zoom,
+    y: bounds.y + bounds.h / 2 - size.h / 2 / zoom,
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -135,8 +172,12 @@ export class StrokeBuilder {
   }
 
   private push(pt: Point): void {
-    const x = clamp(pt.x, 0, CANVAS_SIZE);
-    const y = clamp(pt.y, 0, CANVAS_SIZE);
+    // No clamping to a canvas rectangle: there isn't one. Only guard
+    // against a non-finite coordinate, which would poison every bounds
+    // computation downstream.
+    if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+    const x = pt.x;
+    const y = pt.y;
     // A held stylus emits the same coordinate repeatedly; keeping the
     // duplicates bloats the stroke and the saved document for no gain.
     const n = this.pts.length;

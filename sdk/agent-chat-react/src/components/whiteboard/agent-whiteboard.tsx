@@ -15,11 +15,11 @@ import {
   type Rect,
   atlasMetadata,
   buildAtlas,
+  contentBounds,
   mapHotspots,
   planAtlas,
 } from "./atlas";
 import {
-  CANVAS_SIZE,
   type WbDoc,
   type WbObject,
   emptyDoc,
@@ -28,12 +28,13 @@ import {
 import { FormulaCache } from "./formula";
 import {
   StrokeBuilder,
-  clampView,
   logicalToScreen,
   panBy,
   screenToLogical,
   strokePointsFromEvent,
   zoomAt,
+  zoomFactorFromWheel,
+  zoomToFit,
 } from "./input";
 import { loadDoc, useDebouncedSave } from "./persist";
 import {
@@ -51,13 +52,10 @@ export type { WbTool };
  *  costs memory nobody spends. */
 const MAX_HISTORY = 30;
 
-/** Where a fresh board opens — the middle of the canvas, so there is
- *  room to pan in every direction. */
-const INITIAL_VIEW: View = {
-  x: CANVAS_SIZE / 2 - 400,
-  y: CANVAS_SIZE / 2 - 300,
-  zoom: 1,
-};
+/** Where a fresh board opens: the origin, centred. The canvas is
+ *  infinite, so there is no corner to start from and no reason to
+ *  prefer one direction. */
+const INITIAL_VIEW: View = { x: -400, y: -300, zoom: 1 };
 
 export interface AgentWhiteboardProps {
   adapter: AgentChatAdapter;
@@ -316,13 +314,10 @@ export function AgentWhiteboard({
       if (panFrom.current) {
         const screen = localPoint(e);
         setView((v) =>
-          clampView(
-            panBy(v, {
-              x: screen.x - panFrom.current!.x,
-              y: screen.y - panFrom.current!.y,
-            }),
-            size,
-          ),
+          panBy(v, {
+            x: screen.x - panFrom.current!.x,
+            y: screen.y - panFrom.current!.y,
+          }),
         );
         panFrom.current = screen;
         return;
@@ -369,12 +364,14 @@ export function AgentWhiteboard({
         x: e.clientX - (canvasRef.current?.getBoundingClientRect().left ?? 0),
         y: e.clientY - (canvasRef.current?.getBoundingClientRect().top ?? 0),
       };
-      setView((v) =>
-        clampView(zoomAt(v, screen, e.deltaY < 0 ? 1.1 : 1 / 1.1), size),
-      );
+      setView((v) => zoomAt(v, screen, zoomFactorFromWheel(e.deltaY)));
     },
-    [size],
+    [],
   );
+
+  const fitToContent = useCallback(() => {
+    setView(zoomToFit(contentBounds(doc, services), size));
+  }, [doc, services, size]);
 
   // ------------------------------------------------------------------
   // Keyboard
@@ -458,6 +455,7 @@ export function AgentWhiteboard({
             canRedo={redoStack.current.length > 0}
             onUndo={undo}
             onRedo={redo}
+            onFit={fitToContent}
             disabled={disabled}
             key={historyTick}
           />

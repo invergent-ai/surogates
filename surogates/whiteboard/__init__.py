@@ -4,7 +4,7 @@ Spec: docs/superpowers/specs/2026-08-27-whiteboard-canvas-chat-design.md
 """
 
 from surogates.whiteboard.commands import (
-    CANVAS_SIZE,
+    COORD_LIMIT,
     MAX_COMMANDS,
     WHITEBOARD_TOOLS,
     validate_commands,
@@ -20,7 +20,7 @@ from surogates.whiteboard.session import (
 )
 
 __all__ = [
-    "CANVAS_SIZE",
+    "COORD_LIMIT",
     "MAX_COMMANDS",
     "MODE_DEEP",
     "MODE_SKETCH",

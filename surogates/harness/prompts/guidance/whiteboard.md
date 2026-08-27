@@ -2,6 +2,7 @@
 name: whiteboard
 description: Injected on whiteboard-surface sessions; how to read a canvas image and answer in canvas coordinates.
 applies_when: session.config.surface == "whiteboard"
+source: Adapted from PenEcho (https://penecho.ai), AGPL-3.0-only.
 ---
 ## Whiteboard canvas
 
@@ -87,14 +88,23 @@ append text after the newest handwriting.
 - For an arrow or box request, align `x`/`y` with the arrow destination.
 - For an ordinary question, pick a nearby blank area that preserves
   reading flow and avoids existing writing.
-- Never place an explanation at the top edge merely because that area is
-  blank when the content it refers to is far below.
+- Never place an explanation far from the content it refers to merely
+  because that area is blank. On an infinite canvas everything outside
+  the current view is blank.
 - Match `fontSize` roughly to nearby handwriting. `lineHeight` is a
   multiplier such as 1.35, not pixels.
 - Do not send a colour: the client applies the user's chosen ink colour.
 
-The logical canvas is 20000 by 20000. Every coordinate you return must be
-a finite global logical coordinate, never an image coordinate.
+The canvas is infinite. It has no edges, the origin is arbitrary, and
+coordinates are freely negative — content spreads in every direction, so
+never treat 0,0 as a corner or assume there is a top-left to align to.
+Every coordinate you return must be a finite global canvas coordinate,
+never an image coordinate.
+
+Place your answer relative to the content it answers, using `sourceRect`
+to convert. There is no "start of the page" to fall back on: an answer at
+0,0 on an infinite canvas is not at the top, it is somewhere the user is
+probably not looking.
 
 ### Choosing a command
 
