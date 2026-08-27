@@ -400,6 +400,40 @@ describe("AgentWhiteboard", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not reload the canvas when it adopts its own new session", async () => {
+    // The board draws before it has a session; the first Ask creates one
+    // and sessionId flips null -> id. Reloading there fetches a canvas
+    // that does not exist yet and wipes everything drawn so far.
+    const { adapter } = makeAdapter();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<AgentWhiteboard adapter={adapter} sessionId={null} />);
+    });
+    await act(async () => {
+      root!.render(<AgentWhiteboard adapter={adapter} sessionId="s1" />);
+    });
+    expect(adapter.getWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it("does reload when switching to a different existing session", async () => {
+    const { adapter } = makeAdapter();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(<AgentWhiteboard adapter={adapter} sessionId="s1" />);
+    });
+    await act(async () => {
+      root!.render(<AgentWhiteboard adapter={adapter} sessionId="s2" />);
+    });
+    const calls = (adapter.getWorkspaceFile as unknown as {
+      mock: { calls: { sessionId: string }[][] };
+    }).mock.calls;
+    expect(calls.map((c) => c[0].sessionId)).toEqual(["s1", "s2"]);
+  });
+
   it("disables the controls when disabled", async () => {
     const { adapter } = makeAdapter();
     const el = await render(

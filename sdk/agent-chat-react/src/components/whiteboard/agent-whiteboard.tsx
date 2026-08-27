@@ -40,7 +40,11 @@ import {
   zoomFactorFromWheel,
   zoomToFit,
 } from "./input";
-import { loadDoc, useDebouncedSave } from "./persist";
+import {
+  loadDoc,
+  shouldReloadCanvas,
+  useDebouncedSave,
+} from "./persist";
 import {
   type RenderServices,
   type View,
@@ -165,15 +169,29 @@ export function AgentWhiteboard({
   // Document lifecycle
   // ------------------------------------------------------------------
 
+  // The session this board is currently showing. Compared against the
+  // incoming prop so adopting a just-created session is distinguishable
+  // from switching to a different one.
+  const loadedSession = useRef<string | null | undefined>(undefined);
+
   useEffect(() => {
-    if (!sessionId) {
-      setDoc(emptyDoc());
+    const previous = loadedSession.current;
+    loadedSession.current = sessionId;
+
+    if (!shouldReloadCanvas(previous, sessionId)) {
+      // Clearing only on a real change: `null -> id` is this board
+      // adopting the session its own first Ask created, and everything
+      // drawn before that question is still the live document.
+      if (!sessionId && previous) setDoc(emptyDoc());
       return;
     }
+
     let cancelled = false;
-    void loadDoc(adapter, sessionId, runtime.messages).then((loaded) => {
-      if (!cancelled) setDoc(loaded);
-    });
+    void loadDoc(adapter, sessionId as string, runtime.messages).then(
+      (loaded) => {
+        if (!cancelled) setDoc(loaded);
+      },
+    );
     return () => {
       cancelled = true;
     };

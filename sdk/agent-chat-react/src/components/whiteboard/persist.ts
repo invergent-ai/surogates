@@ -122,10 +122,15 @@ export function useDebouncedSave(
     if (!sessionId) return;
     // The first render carries the freshly-loaded document; saving it
     // straight back would be a pointless round-trip on every open.
-    if (!dirty.current) {
+    //
+    // Except when the board drew before it had a session: that document
+    // has never been persisted, so skipping its save loses exactly the
+    // strokes the user made before their first question.
+    if (!dirty.current && latest.current.objects.length === 0) {
       dirty.current = true;
       return;
     }
+    dirty.current = true;
     const timer = setTimeout(() => {
       void saveDoc(adapter, sessionId, latest.current);
     }, delayMs);
@@ -138,4 +143,28 @@ export function useDebouncedSave(
       void saveDoc(adapter, sessionId, latest.current);
     };
   }, [adapter, sessionId]);
+}
+
+/**
+ * Whether a session-id change should reload the canvas from the
+ * workspace.
+ *
+ * The `null -> id` case is the one that matters: it means the board just
+ * created its own session on the first Ask. Nothing was saved while the
+ * id was null (`useDebouncedSave` skips it), so reloading there fetches
+ * a canvas that does not exist yet and replaces everything drawn before
+ * the first question with an empty board — and the next debounce then
+ * writes that empty board out, making the loss permanent.
+ *
+ * `undefined` is a cold mount, which must load.
+ */
+export function shouldReloadCanvas(
+  previous: string | null | undefined,
+  next: string | null,
+): boolean {
+  if (!next) return false;
+  if (previous === next) return false;
+  // Adopting the session this board just created: keep what is on screen.
+  if (previous === null) return false;
+  return true;
 }

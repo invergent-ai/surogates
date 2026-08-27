@@ -5,6 +5,7 @@ import {
   CANVAS_PATH,
   loadDoc,
   saveDoc,
+  shouldReloadCanvas,
 } from "@/components/whiteboard/persist";
 import type { AgentChatAdapter, AgentChatMessage } from "@/types";
 
@@ -148,5 +149,31 @@ describe("saving", () => {
     });
     await expect(saveDoc(adapterWith(null, upload), "s1", emptyDoc()))
       .resolves.toBeUndefined();
+  });
+});
+
+describe("adopting a freshly created session", () => {
+  it("does not reload when the board just created its own session", () => {
+    // null -> id means the first Ask created the session. Nothing was
+    // saved while sessionId was null (useDebouncedSave skips it), so a
+    // reload here fetches an empty canvas and wipes everything drawn
+    // before the first question.
+    expect(shouldReloadCanvas(null, "s1")).toBe(false);
+  });
+
+  it("reloads when switching between two existing sessions", () => {
+    expect(shouldReloadCanvas("s1", "s2")).toBe(true);
+  });
+
+  it("loads on a cold open of an existing session", () => {
+    expect(shouldReloadCanvas(undefined, "s1")).toBe(true);
+  });
+
+  it("does not reload when the session is unchanged", () => {
+    expect(shouldReloadCanvas("s1", "s1")).toBe(false);
+  });
+
+  it("does not reload when there is no session to load", () => {
+    expect(shouldReloadCanvas("s1", null)).toBe(false);
   });
 });
