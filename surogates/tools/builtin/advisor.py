@@ -20,21 +20,15 @@ import json
 import logging
 from typing import Any
 
+from surogates.harness.expert_routing import HARD_TASK_CATEGORIES
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
 
-#: Categories the advisor prompt understands. Kept as a closed set so
-#: ``advisor.*`` events stay groupable across the classifier-era history.
-_CATEGORIES = [
-    "planning",
-    "problem_solving",
-    "coding",
-    "debugging",
-    "data_reasoning",
-    "math",
-    "terminal",
-]
+#: Categories the advisor prompt understands. Shared with the retired
+#: classifier's vocabulary so ``advisor.*`` events stay groupable across
+#: the change.
+_CATEGORIES = sorted(HARD_TASK_CATEGORIES)
 
 _ADVISOR_SCHEMA = ToolSchema(
     name="advisor",
