@@ -49,3 +49,37 @@ def turn_mode(metadata: Any) -> str:
     if payload is None:
         return MODE_SKETCH
     return MODE_DEEP if payload.get("mode") == MODE_DEEP else MODE_SKETCH
+
+
+def surface_rejection(
+    config: Any,
+    *,
+    whiteboard_enabled: bool,
+) -> str | None:
+    """Reject a session config asking for a surface the agent lacks.
+
+    ``config.surface`` arrives from the client, and the harness force-adds
+    ``whiteboard_draw`` for a whiteboard session *past* any AgentDef
+    allowlist -- so without this an ordinary caller can hand themselves
+    the canvas toolset on an agent whose operator switched the board off.
+    That makes the surface a capability escalation, not a preference.
+
+    Returns an error message, or ``None`` when the config is acceptable.
+    Pure so it can be tested without a request; the route turns a
+    non-``None`` result into a 403.
+    """
+    if not isinstance(config, dict):
+        return None
+    surface = config.get(SURFACE_KEY)
+    if surface is None:
+        return None
+    if surface != SURFACE_VALUE:
+        return (
+            f"Unknown session surface {surface!r}. "
+            f"Valid surfaces: {SURFACE_VALUE}."
+        )
+    if not whiteboard_enabled:
+        return (
+            "This agent does not have the whiteboard capability enabled."
+        )
+    return None

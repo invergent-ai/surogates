@@ -37,6 +37,7 @@ from surogates.api.session_guards import (
     require_session_visible,
     require_user_writable_session,
 )
+from surogates.whiteboard.session import surface_rejection
 from surogates.channels.constants import (
     API_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
@@ -707,15 +708,29 @@ async def _create_session(
     channel: str,
     user_id: UUID | None,
     service_account_id: UUID | None,
+    whiteboard_enabled: bool = False,
 ) -> Session:
     """Create a chat session for either the web or service-account channel.
 
     ``agent_id`` is supplied by the caller (resolved per-request via
     :func:`surogates.runtime.agent_runtime_context_dep`) so this
     helper is independent of process-wide ``settings.agent_id``.
+
+    Both create routes funnel through here, so the surface capability is
+    screened here too -- gating in one of them would leave the other as
+    an open door.
     """
     store = _get_session_store(request)
     settings = request.app.state.settings
+
+    # ``config.surface`` decides whether the harness force-adds the
+    # whiteboard toolset, past any AgentDef allowlist. It arrives from
+    # the client, so it is a capability request, not a preference.
+    rejection = surface_rejection(
+        body.config, whiteboard_enabled=whiteboard_enabled,
+    )
+    if rejection:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=rejection)
 
     config = apply_eval_isolation(body.config.copy(), channel=channel)
     if body.system:
@@ -792,6 +807,7 @@ async def create_session(
         channel="web",
         user_id=tenant.user_id,
         service_account_id=None,
+        whiteboard_enabled=agent_runtime.whiteboard_enabled,
     )
 
 
@@ -855,6 +871,7 @@ async def create_api_session(
         channel=channel,
         user_id=None,
         service_account_id=service_account_id,
+        whiteboard_enabled=agent_runtime.whiteboard_enabled,
     )
     await emit_seed_turns(
         _get_session_store(request),
