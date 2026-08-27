@@ -233,3 +233,126 @@ export function foldToolCalls(
   }
   return next;
 }
+
+// ---------------------------------------------------------------------
+// Geometry edits
+//
+// The agent's output arrives as the active selection, which is what
+// replaces PenEcho's unconfirmed-draft layer — but only if the selection
+// can actually be moved and resized. These are the operations behind
+// that promise.
+// ---------------------------------------------------------------------
+
+/** Shift one object by a logical delta. */
+export function translateObject(
+  obj: WbObject,
+  dx: number,
+  dy: number,
+): WbObject {
+  switch (obj.kind) {
+    case "ink":
+      return {
+        ...obj,
+        pts: obj.pts.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)),
+      };
+    case "draw":
+      // Item coordinates are offsets from origin, so moving the origin
+      // moves the whole primitive set and nothing else has to change.
+      return { ...obj, origin_: [obj.origin_[0] + dx, obj.origin_[1] + dy] };
+    case "text":
+    case "formula":
+    case "artifact":
+      return { ...obj, x: obj.x + dx, y: obj.y + dy };
+    case "erase":
+      return {
+        ...obj,
+        x: obj.x === undefined ? undefined : obj.x + dx,
+        y: obj.y === undefined ? undefined : obj.y + dy,
+        points: obj.points?.map(([x, y]) => [x + dx, y + dy]),
+      };
+  }
+}
+
+/**
+ * Scale one object about *anchor* by independent x/y factors.
+ *
+ * Kinds with an intrinsic type size scale that instead of their box:
+ * a formula has no meaningful width to stretch, and text reflows by
+ * wrap width rather than distorting its glyphs.
+ */
+export function scaleObject(
+  obj: WbObject,
+  sx: number,
+  sy: number,
+  anchor: { x: number; y: number },
+): WbObject {
+  const px = (v: number) => anchor.x + (v - anchor.x) * sx;
+  const py = (v: number) => anchor.y + (v - anchor.y) * sy;
+  // Type scales uniformly: stretching glyphs on one axis looks broken
+  // and is never what dragging a corner is asking for.
+  const uniform = Math.max(0.05, Math.min(sx, sy));
+
+  switch (obj.kind) {
+    case "ink":
+      return {
+        ...obj,
+        pts: obj.pts.map((v, i) => (i % 2 === 0 ? px(v) : py(v))),
+        width: Math.max(1, obj.width * uniform),
+      };
+    case "draw":
+      return {
+        ...obj,
+        origin_: [px(obj.origin_[0]), py(obj.origin_[1])],
+        items: obj.items.map((item) =>
+          // Offsets scale in place; they are relative to the origin,
+          // which has already moved.
+          item.map((v, i) => Math.round(v * (i % 2 === 0 ? sx : sy))),
+        ),
+      };
+    case "text":
+      return {
+        ...obj,
+        x: px(obj.x),
+        y: py(obj.y),
+        // Width is the wrap width, so it takes the horizontal factor;
+        // the glyphs themselves scale uniformly.
+        maxWidth: Math.max(16, obj.maxWidth * sx),
+        fontSize: Math.max(4, obj.fontSize * uniform),
+      };
+    case "formula":
+      return {
+        ...obj,
+        x: px(obj.x),
+        y: py(obj.y),
+        fontSize: Math.max(4, obj.fontSize * uniform),
+      };
+    case "artifact":
+      return {
+        ...obj,
+        x: px(obj.x),
+        y: py(obj.y),
+        w: Math.max(16, obj.w * sx),
+        h: Math.max(16, obj.h * sy),
+      };
+    case "erase":
+      return {
+        ...obj,
+        x: obj.x === undefined ? undefined : px(obj.x),
+        y: obj.y === undefined ? undefined : py(obj.y),
+        w: obj.w === undefined ? undefined : obj.w * sx,
+        h: obj.h === undefined ? undefined : obj.h * sy,
+        points: obj.points?.map(([x, y]) => [px(x), py(y)]),
+      };
+  }
+}
+
+/** Apply *edit* to every selected object, leaving the rest alone. */
+export function mapSelected(
+  doc: WbDoc,
+  edit: (obj: WbObject) => WbObject,
+): WbDoc {
+  return {
+    ...doc,
+    objects: doc.objects.map((o) => (o.selected ? edit(o) : o)),
+  };
+}

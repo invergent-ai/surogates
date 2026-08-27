@@ -24,6 +24,9 @@ import {
   type WbObject,
   emptyDoc,
   foldToolCalls,
+  mapSelected,
+  scaleObject,
+  translateObject,
 } from "./doc";
 import { FormulaCache } from "./formula";
 import {
@@ -40,9 +43,12 @@ import { loadDoc, useDebouncedSave } from "./persist";
 import {
   type RenderServices,
   type View,
+  handleAt,
   hitTest,
   objectBounds,
+  oppositeCorner,
   renderDoc,
+  selectionBounds,
 } from "./render";
 import { INK_COLORS, INK_WIDTHS, type WbTool, ToolRail } from "./tool-rail";
 
@@ -102,6 +108,17 @@ export function AgentWhiteboard({
   // re-render the tree.
   const strokeRef = useRef<StrokeBuilder | null>(null);
   const panFrom = useRef<{ x: number; y: number } | null>(null);
+  // Live drag / resize of the selection. Held in refs and committed on
+  // pointerup, so one gesture is one undo step rather than one per
+  // pointer sample.
+  const dragFrom = useRef<{ x: number; y: number } | null>(null);
+  const resize = useRef<{
+    anchor: { x: number; y: number };
+    start: { x: number; y: number };
+  } | null>(null);
+  // The document as it stood before the current gesture. Undo has to
+  // step back to this, not to the last pointer sample.
+  const gestureBaseline = useRef<WbDoc | null>(null);
   const hotspotsRef = useRef<{ x: number; y: number }[]>([]);
   const dirtyRef = useRef<Rect | null>(null);
 
@@ -156,15 +173,23 @@ export function AgentWhiteboard({
   // History
   // ------------------------------------------------------------------
 
-  const commit = useCallback((next: (prev: WbDoc) => WbDoc) => {
-    setDoc((prev) => {
-      undoStack.current.push(prev);
-      if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
-      redoStack.current = [];
-      setHistoryTick((t) => t + 1);
-      return next(prev);
-    });
+  /** Record *snapshot* as the state undo should return to. */
+  const pushHistory = useCallback((snapshot: WbDoc) => {
+    undoStack.current.push(snapshot);
+    if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
+    redoStack.current = [];
+    setHistoryTick((t) => t + 1);
   }, []);
+
+  const commit = useCallback(
+    (next: (prev: WbDoc) => WbDoc) => {
+      setDoc((prev) => {
+        pushHistory(prev);
+        return next(prev);
+      });
+    },
+    [pushHistory],
+  );
 
   const undo = useCallback(() => {
     setDoc((prev) => {
@@ -286,7 +311,30 @@ export function AgentWhiteboard({
         return;
       }
       if (tool === "select") {
+        // A corner handle on the existing selection starts a resize;
+        // check it before hit-testing, or grabbing a handle that sits
+        // over another object selects that object instead.
+        const selBounds = selectionBounds(doc, services);
+        const grabbed = selBounds
+          ? handleAt(selBounds, logical, view.zoom)
+          : null;
+        if (selBounds && grabbed) {
+          gestureBaseline.current = doc;
+          resize.current = {
+            anchor: oppositeCorner(selBounds, grabbed),
+            start: logical,
+          };
+          return;
+        }
+
         const hit = hitTest(doc, logical, services);
+        if (hit?.selected) {
+          // Already selected: this is the start of a move, not a
+          // re-select, so leave the selection alone.
+          gestureBaseline.current = doc;
+          dragFrom.current = logical;
+          return;
+        }
         commit((prev) => ({
           ...prev,
           objects: prev.objects.map((o) => ({
@@ -294,6 +342,10 @@ export function AgentWhiteboard({
             selected: hit ? o.id === hit.id : false,
           })),
         }));
+        if (hit) {
+          gestureBaseline.current = doc;
+          dragFrom.current = logical;
+        }
         return;
       }
       // pen and eraser both lay down a stroke; the eraser's is composited
@@ -322,6 +374,28 @@ export function AgentWhiteboard({
         panFrom.current = screen;
         return;
       }
+      if (resize.current) {
+        const { anchor, start } = resize.current;
+        const now = screenToLogical(localPoint(e), view);
+        const spanX = start.x - anchor.x;
+        const spanY = start.y - anchor.y;
+        // Degenerate spans would divide by zero; leave that axis alone.
+        const sx = Math.abs(spanX) < 1e-6 ? 1 : (now.x - anchor.x) / spanX;
+        const sy = Math.abs(spanY) < 1e-6 ? 1 : (now.y - anchor.y) / spanY;
+        setDoc((d) => mapSelected(d, (o) => scaleObject(o, sx, sy, anchor)));
+        resize.current = { anchor, start: now };
+        return;
+      }
+
+      if (dragFrom.current) {
+        const now = screenToLogical(localPoint(e), view);
+        const dx = now.x - dragFrom.current.x;
+        const dy = now.y - dragFrom.current.y;
+        setDoc((d) => mapSelected(d, (o) => translateObject(o, dx, dy)));
+        dragFrom.current = now;
+        return;
+      }
+
       const builder = strokeRef.current;
       if (!builder) return;
       const rect = canvasRef.current?.getBoundingClientRect();
@@ -340,6 +414,19 @@ export function AgentWhiteboard({
 
   const onPointerUp = useCallback(() => {
     panFrom.current = null;
+    // A gesture that edited the selection has already mutated the doc;
+    // snapshot it now so undo steps back over the whole drag rather
+    // than one pointer sample.
+    if (dragFrom.current || resize.current) {
+      dragFrom.current = null;
+      resize.current = null;
+      const baseline = gestureBaseline.current;
+      gestureBaseline.current = null;
+      // One gesture is one undo step: the drag already mutated the doc
+      // live, so all that is left is to record where it started.
+      if (baseline) pushHistory(baseline);
+      return;
+    }
     const builder = strokeRef.current;
     strokeRef.current = null;
     if (!builder) return;
@@ -356,7 +443,7 @@ export function AgentWhiteboard({
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
-  }, [tool, width, commit]);
+  }, [tool, width, commit, pushHistory]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {

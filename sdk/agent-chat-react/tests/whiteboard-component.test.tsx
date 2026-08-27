@@ -220,6 +220,68 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Whiteboard canvas")).not.toBeNull();
   });
 
+  it("offers fit-to-content, the only way home on an infinite canvas", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    expect(byLabel(el, "Fit to content")).not.toBeNull();
+  });
+
+  it("records a completed drag as one undo step", async () => {
+    // The agent's output arrives selected precisely so a mis-placed
+    // answer can be dragged off the user's work. Undo becoming
+    // available is the observable proof the gesture reached the
+    // document -- and that it is ONE step, not one per pointer sample.
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => ({
+        path: "_whiteboard/canvas.json",
+        content: JSON.stringify({
+          version: 1,
+          lastEventId: 0,
+          objects: [{
+            id: "t1", origin: "evt1", selected: true, kind: "text",
+            x: 100, y: 100, text: "hi", fontSize: 32,
+            maxWidth: 300, lineHeight: 1.35,
+          }],
+        }),
+        size: 1,
+        encoding: "utf-8" as const,
+        truncated: false,
+      })),
+    });
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      byLabel(el, "Select")?.click();
+    });
+    expect(byLabel(el, "Undo")).toHaveProperty("disabled", true);
+
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    // The object sits at logical 100,100; the initial view origin is
+    // -400,-300 at zoom 1, so it is on screen at 500,400.
+    await act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 500, clientY: 400, bubbles: true,
+        }),
+      );
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 560, clientY: 430, bubbles: true,
+        }),
+      );
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+
+    expect(byLabel(el, "Undo")).toHaveProperty("disabled", false);
+  });
+
   it("disables the controls when disabled", async () => {
     const { adapter } = makeAdapter();
     const el = await render(

@@ -38,7 +38,65 @@ const SELECTION_COLOR = "#2563eb";
 const ARTIFACT_FRAME_COLOR = "#94a3b8";
 
 const SELECTION_PAD = 6;
-const HANDLE_SIZE = 8;
+export const HANDLE_SIZE = 8;
+
+/**
+ * Which resize handle, if any, sits under *pt*.
+ *
+ * Screen-space slop scaled back into logical units, so the grab target
+ * stays a constant size on screen however far you have zoomed out —
+ * otherwise the handles become unhittable at low zoom.
+ */
+export function handleAt(
+  bounds: DrawBounds,
+  pt: { x: number; y: number },
+  zoom: number,
+): "nw" | "ne" | "sw" | "se" | null {
+  const r = (HANDLE_SIZE / zoom) * 1.5;
+  const corners = [
+    ["nw", bounds.x, bounds.y],
+    ["ne", bounds.x + bounds.w, bounds.y],
+    ["sw", bounds.x, bounds.y + bounds.h],
+    ["se", bounds.x + bounds.w, bounds.y + bounds.h],
+  ] as const;
+  for (const [name, cx, cy] of corners) {
+    if (Math.abs(pt.x - cx) <= r && Math.abs(pt.y - cy) <= r) return name;
+  }
+  return null;
+}
+
+/** The corner opposite *handle*, which stays put during a resize. */
+export function oppositeCorner(
+  bounds: DrawBounds,
+  handle: "nw" | "ne" | "sw" | "se",
+): { x: number; y: number } {
+  return {
+    x: handle === "nw" || handle === "sw" ? bounds.x + bounds.w : bounds.x,
+    y: handle === "nw" || handle === "ne" ? bounds.y + bounds.h : bounds.y,
+  };
+}
+
+/** Union of every selected object's bounds, or null. */
+export function selectionBounds(
+  doc: WbDoc,
+  services: RenderServices,
+): DrawBounds | null {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const obj of doc.objects) {
+    if (!obj.selected) continue;
+    const b = objectBounds(obj, services);
+    if (!b) continue;
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.w);
+    maxY = Math.max(maxY, b.y + b.h);
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
 
 // ---------------------------------------------------------------------
 // Bounds
