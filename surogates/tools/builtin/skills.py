@@ -60,9 +60,9 @@ SKILLS_LIST_SCHEMA = ToolSchema(
     name="skills_list",
     description=(
         "List available skills (name + description). Use skill_view(name) "
-        "to load full content. Entries with type: expert are specialist "
-        "models; consult active experts via consult_expert(expert, task) "
-        "rather than skill_view."
+        "to load full content. Experts are not skills and are not listed "
+        "here -- see \"Available Experts\" in your instructions and reach "
+        "one via consult_expert(expert, task)."
     ),
     parameters={
         "type": "object",
@@ -251,16 +251,14 @@ async def _skills_list_handler(
     for s in skills:
         if category_filter and s.category != category_filter:
             continue
-        # Inactive experts (draft / collecting / retired) are hidden
-        # from this catalog.  The slash dispatcher would otherwise fall
-        # through to ``skill_view`` and inline the expert's system
-        # prompt as if it were a regular skill body — confusing UX.
-        # ``# Available Experts`` in the system prompt and the
-        # ``consult_expert`` tool already filter to active-only via
-        # ``get_active_experts``; this keeps the catalog tool aligned.
-        if getattr(s, "is_expert", False) and not getattr(
-            s, "is_active_expert", False,
-        ):
+        # Experts are not skills you read -- they are models you
+        # consult, and their SKILL.md is the *expert's* system prompt.
+        # Listing them here invited the executor to ``skill_view`` one
+        # and do the work itself on the cheap model, which looks like a
+        # successful consult and silently isn't. They are reachable via
+        # ``# Available Experts`` + ``consult_expert``, and ``/<expert>``
+        # for the human.
+        if getattr(s, "is_expert", False):
             continue
         entry: dict[str, Any] = {
             "name": s.name,
@@ -343,6 +341,31 @@ def _build_skill_response(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _expert_refusal(name: str) -> str:
+    """Refuse to hand an expert's own instructions to the executor.
+
+    A skill is text you read and act on; an expert is a model you
+    consult, and its SKILL.md *is* that model's system prompt. Serving
+    it here let the executor read a specialist's instructions and do the
+    work itself on the cheap model -- which looks exactly like a
+    successful consult and silently is not. For the built-in advisor it
+    would defeat the feature outright.
+    """
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                f"'{name}' is an expert, not a skill. Its instructions are "
+                f"its own system prompt and are not readable."
+            ),
+            "hint": (
+                f"Consult it instead: consult_expert(expert=\"{name}\", "
+                f"task=...)"
+            ),
+        },
+        ensure_ascii=False,
+    )
+
 async def _skill_view_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -369,7 +392,16 @@ async def _skill_view_handler(
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
-        return await api_client.view_skill(name, file_path)
+        raw = await api_client.view_skill(name, file_path)
+        # The API serves experts too -- the Studio UI renders them. Filter
+        # on the way back rather than at the route, so the human surface
+        # keeps working while the executor cannot read one.
+        try:
+            if json.loads(raw).get("type") == "expert":
+                return _expert_refusal(name)
+        except (ValueError, AttributeError):
+            pass
+        return raw
 
     tenant = kwargs.get("tenant")
     if tenant is None:
@@ -383,6 +415,9 @@ async def _skill_view_handler(
         if s.name == name:
             matching_skill = s
             break
+
+    if matching_skill is not None and getattr(matching_skill, "is_expert", False):
+        return _expert_refusal(name)
 
     if matching_skill is None:
         available = [s.name for s in skills[:20]]

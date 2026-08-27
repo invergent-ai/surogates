@@ -139,12 +139,6 @@ class EventType(str, Enum):
     EXPERT_ENDORSE = "expert.endorse"     # thumbs-up
     EXPERT_OVERRIDE = "expert.override"   # thumbs-down
 
-    # Hidden harness advisor. The executor never sees an advisor tool; these
-    # events audit the auxiliary guidance pass and provider usage.
-    ADVISOR_REQUEST = "advisor.request"
-    ADVISOR_RESULT = "advisor.result"
-    ADVISOR_FAILURE = "advisor.failure"
-
     # Worker coordination (coordinator mode)
     WORKER_SPAWNED = "worker.spawned"
     WORKER_COMPLETE = "worker.complete"
@@ -200,6 +194,13 @@ class EventType(str, Enum):
     # Governance
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
+
+    # A user message the prompt-injection detector refused. Recorded on
+    # the session so a block is visible in the timeline rather than
+    # existing only as a 422 the caller may discard -- the operator
+    # needs to see that an attack was detected, and the user needs to
+    # see why their message never arrived.
+    SECURITY_INJECTION_BLOCKED = "security.injection_blocked"
 
     # AI-disclosure audit trail (EU AI Act Art. 50): the disclosure was
     # delivered on a channel / acknowledged by the end-user.  Persisted

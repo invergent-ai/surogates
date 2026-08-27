@@ -69,7 +69,7 @@ include = ["surogates*"]
 # installed package location (site-packages/surogates/web/dist).
 # Prompt fragments (markdown + YAML frontmatter) are read from the
 # installed package path by surogates.harness.prompt_library.
-surogates = ["web/dist/**/*", "harness/prompts/**/*.md"]
+surogates = ["web/dist/**/*", "harness/prompts/**/*.md", "security/*.yaml"]
 
 [tool.setuptools_scm]
 fallback_version = "0.0.0"

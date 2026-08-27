@@ -238,11 +238,23 @@ class WorkerSettings(BaseSettings):
     poll_timeout: int = 5
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
-    # Emit iteration.summary / turn.summary events from the harness so
-    # the Simple chat view can render one-line iteration summaries and
-    # per-turn artifact recaps. Off disables the summarizer entirely;
-    # older SDK versions ignore the events when this is on.
+    # Per-iteration one-liners, written on the cheap summary model while
+    # the turn is still running. They land during the turn rather than
+    # after it, so they cost the tail little -- and they are what the
+    # Simple chat view renders as the agent works.
     emit_turn_summaries: bool = True
+    # The per-turn recap: one to three sentences written AFTER the agent
+    # has stopped talking, and therefore squarely between its last word
+    # and session.complete. Measured at 14.6s p50 on turns that ran one,
+    # against a 0.24s baseline, which is why it is off.
+    #
+    # Off does NOT disable the download card. Which files a turn
+    # delivered is decided from the workspace, not by a model, so
+    # turn.summary is still emitted with its artifacts -- just with an
+    # empty recap. The agent is asked to name its deliverable in its own
+    # closing message instead (working principle 16), which costs
+    # nothing and lands where the user is already looking.
+    emit_turn_recap: bool = False
     # When False, service-account ``skill_overrides`` on prompt submissions
     # are ignored by the API and worker-local skill resolution.
     skill_overrides_enabled: bool = True
@@ -338,12 +350,11 @@ class LLMSettings(BaseSettings):
     vision_base_url: str = ""  # optional auxiliary endpoint for vision model
     vision_api_key: str = ""  # optional auxiliary API key for vision model
 
-    # The advisor's client and model come from the per-agent
-    # ``llm_advisor`` runtime-config slot (ops emits it for base-tier
-    # agents and it resolves to the platform Pro tier); only the two
-    # per-turn budgets below are read from these settings.
-    advisor_max_calls_per_turn: int = 2  # hard cap for hidden advisor calls
-    advisor_max_tokens: int = 700  # requested advisor output budget
+    # The ``llm_advisor`` runtime-config slot survives as the Pro-tier
+    # client for :func:`try_activate_pro_fallback` -- the escalation on
+    # repeated empty upstream responses. The advisor *consult* no longer
+    # reads it: the advisor is an ordinary expert whose ``model:
+    # surogate-pro`` the proxy resolves on any route.
 
     image_model: str = ""  # image-generation model, e.g. "google/gemini-2.5-flash-image" (empty disables generate_image)
     image_base_url: str = ""  # optional auxiliary endpoint for image generation

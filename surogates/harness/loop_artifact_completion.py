@@ -16,6 +16,10 @@ from surogates.harness.loop_artifacts import (
     _coerce_tool_args,
     _derive_artifact_name,
 )
+from surogates.harness.delivery_manifest import (
+    check_terminal_claim,
+    reconcile,
+)
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
 from surogates.harness.loop_messages import (
     _as_aware_utc,
@@ -129,6 +133,29 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+    def _spawn_background(self, coro, *, name: str) -> None:
+        """Run *coro* detached, but still inside the end-of-turn drain.
+
+        Registering it in ``_background_tasks`` is the point: the work
+        stops delaying SESSION_COMPLETE, yet the worker still waits for
+        it (bounded) before releasing the lease, so a detached teardown
+        cannot outlive the wake that started it.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _destroy_sandbox_quietly(
+        self, sandbox_id: str | None, session_id: str,
+    ) -> None:
+        """Delete a detached sandbox; never raise into the drain."""
+        try:
+            await self._sandbox_pool.destroy_released(sandbox_id, session_id)
+        except Exception:
+            logger.debug(
+                "Sandbox cleanup failed for %s", session_id, exc_info=True,
+            )
+
     async def _drain_background_tasks(self, session_id: UUID) -> None:
         """Wait for fire-and-forget background tasks to finish before lease release.
 
@@ -213,6 +240,7 @@ class ArtifactCompletionMixin:
         session_id: UUID,
         turn_id: str,
         user_message: str,
+        final_message: str = "",
     ) -> None:
         """Drain pending iteration summaries, then emit TURN_SUMMARY.
 
@@ -222,9 +250,8 @@ class ArtifactCompletionMixin:
         falls back to the per-iteration view when TURN_SUMMARY is
         missing.
         """
-        if self._turn_summarizer is None:
-            return
-
+        # No early return on a missing summarizer: the manifest needs no
+        # model, so the download card outlives the recap.
         pending = list(self._pending_iteration_summary_tasks.values())
         if pending:
             try:
@@ -267,32 +294,80 @@ class ArtifactCompletionMixin:
             str((getattr(e, "data", None) or {}).get("summary") or "")
             for e in ordered
         ]
-        candidate_artifacts = await self._collect_candidate_artifacts(
-            session_id=session_id, turn_id=turn_id,
+        candidate_artifacts, entries_by_path = (
+            await self._collect_candidate_artifacts(
+                session_id=session_id, turn_id=turn_id,
+            )
         )
 
-        try:
-            # Outer backstop sits above the summarizer's own 30s
-            # timeout — the turn summary runs on the base model, which
-            # is slower than the cheap auxiliary.
-            result = await asyncio.wait_for(
-                self._turn_summarizer.summarize_turn(
-                    turn_id=turn_id,
-                    user_message=user_message,
-                    iteration_summaries=iteration_summaries,
-                    candidate_artifacts=candidate_artifacts,
-                ),
-                timeout=35.0,
+        # Which candidates are real deliverables is now decided against
+        # the workspace rather than by asking a model to pick. A file
+        # that is present-but-empty or present-but-older-than-this-turn
+        # is not a delivery, however convincing it looks in a prompt.
+        manifest = reconcile(
+            candidate_artifacts,
+            entries_by_path=entries_by_path,
+            turn_start=self._turn_started_at,
+        )
+        manifest = check_terminal_claim(manifest, final_message)
+        if manifest.rejected:
+            logger.info(
+                "Turn %s: dropped %d candidate(s) the workspace does not "
+                "support: %s",
+                turn_id, len(manifest.rejected),
+                ", ".join(f"{r.ref}({r.reason})" for r in manifest.rejected),
             )
-        except asyncio.TimeoutError:
-            logger.warning("turn summary call timed out for %s", turn_id)
-            return
-        except Exception:
-            logger.warning(
-                "turn summary call failed for %s", turn_id, exc_info=True,
-            )
-            return
-        if result is None:
+
+        delivered = manifest.delivered
+        recap = ""
+
+        if self._turn_summarizer is not None:
+            # One question the workspace cannot answer: which of several
+            # real files the user actually asked for. Only asked when
+            # more than one survives -- the common single-file turn never
+            # makes the call.
+            try:
+                delivered = await asyncio.wait_for(
+                    self._turn_summarizer.pick_deliverables(
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        artifacts=manifest.delivered,
+                    ),
+                    timeout=35.0,
+                )
+            except Exception:
+                # Fail open: an extra entry beats a missing one.
+                logger.debug(
+                    "deliverable pick failed for %s", turn_id, exc_info=True,
+                )
+
+            try:
+                # Outer backstop sits above the summarizer's own timeout.
+                result = await asyncio.wait_for(
+                    self._turn_summarizer.summarize_turn(
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        iteration_summaries=iteration_summaries,
+                        artifacts=delivered,
+                    ),
+                    timeout=35.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("turn summary call timed out for %s", turn_id)
+                result = None
+            except Exception:
+                logger.warning(
+                    "turn summary call failed for %s", turn_id, exc_info=True,
+                )
+                result = None
+            if result is not None:
+                recap = result.recap
+                delivered = result.artifacts
+
+        # With recaps off there is nothing to say but still something to
+        # show, so a turn that produced nothing emits nothing rather than
+        # an empty card.
+        if not recap and not delivered and not manifest.unsupported_claim:
             return
 
         try:
@@ -301,10 +376,28 @@ class ArtifactCompletionMixin:
                 EventType.TURN_SUMMARY,
                 {
                     "turn_id": turn_id,
-                    "recap": result.recap,
+                    "recap": recap,
+                    # Advisory, and only ever set when the turn delivered
+                    # nothing at all: the closing message claimed a file
+                    # that was never written. Surfaced rather than acted
+                    # on -- wrongly telling someone their work failed is
+                    # worse than saying nothing.
+                    **(
+                        {"unsupported_claim": manifest.unsupported_claim}
+                        if manifest.unsupported_claim
+                        else {}
+                    ),
+                    **(
+                        {"rejected": [
+                            {"ref": r.ref, "reason": r.reason}
+                            for r in manifest.rejected
+                        ]}
+                        if manifest.rejected
+                        else {}
+                    ),
                     "artifacts": [
                         {"kind": a.kind, "label": a.label, "ref": a.ref}
-                        for a in result.artifacts
+                        for a in delivered
                     ],
                 },
             )
@@ -318,8 +411,13 @@ class ArtifactCompletionMixin:
         *,
         session_id: UUID,
         turn_id: str,
-    ) -> list[Any]:
+    ) -> tuple[list[Any], dict[str, dict[str, Any]]]:
         """Pull downloadable artifact candidates emitted during this turn.
+
+        Returns the candidates and the workspace listing they were
+        checked against -- reconciliation needs size and mtime for
+        candidates that came from tool calls, not only for the ones the
+        scan found.
 
         Returns a list of ``TurnArtifact`` instances from
         :mod:`surogates.harness.turn_summarizer` — workspace files and
@@ -425,18 +523,20 @@ class ArtifactCompletionMixin:
         # tool-call stream. Deduped against the paths already added
         # via write_file/patch so the same file isn't listed twice.
         try:
-            workspace_candidates = await self._scan_workspace_for_new_files(
-                session_id=session_id,
-                already_seen_paths={
-                    a.ref for a in out if a.kind == "file"
-                },
+            workspace_candidates, entries_by_path = (
+                await self._scan_workspace_for_new_files(
+                    session_id=session_id,
+                    already_seen_paths={
+                        a.ref for a in out if a.kind == "file"
+                    },
+                )
             )
         except Exception:
             logger.debug(
                 "Workspace mtime scan failed for %s",
                 session_id, exc_info=True,
             )
-            workspace_candidates = []
+            workspace_candidates, entries_by_path = [], {}
         out.extend(workspace_candidates)
 
         # Flag intermediate scripts: a file the agent wrote and then
@@ -463,7 +563,7 @@ class ArtifactCompletionMixin:
                 ))
             else:
                 annotated.append(art)
-        return annotated
+        return annotated, entries_by_path
 
     async def _scan_workspace_for_new_files(
         self,
@@ -487,15 +587,15 @@ class ArtifactCompletionMixin:
 
         storage = self._storage
         if storage is None or self._turn_started_at is None:
-            return []
+            return [], {}
 
         try:
             session = await self._store.get_session(session_id)
         except Exception:
-            return []
+            return [], {}
         bucket = (session.config or {}).get("storage_bucket")
         if not bucket:
-            return []
+            return [], {}
         root_id = (
             (session.config or {}).get("sandbox_root_session_id")
             or str(session.id)
@@ -509,24 +609,38 @@ class ArtifactCompletionMixin:
                 "Workspace list_entries failed for bucket %r prefix %r",
                 bucket, prefix, exc_info=True,
             )
-            return []
+            return [], {}
 
         out: list[TurnArtifact] = []
+        # Keyed by workspace-relative path and returned alongside the
+        # candidates: reconciliation needs size/mtime for candidates that
+        # came from tool calls too, and this listing is the only place
+        # they are observable without a per-file HEAD.
+        entries_by_path: dict[str, dict[str, Any]] = {}
         turn_start = self._turn_started_at
         for entry in entries:
             key = entry["key"]
             rel = key[len(prefix):] if key.startswith(prefix) else key
             if not rel or rel in already_seen_paths:
                 continue
+            # Directory markers are not downloadable. Object stores list
+            # them as zero-byte keys ending in "/", so they only ever got
+            # dropped for being empty -- a backend that reports a size
+            # for them would have put __pycache__/ on the download card.
+            if rel.endswith("/"):
+                continue
             if _is_internal_workspace_path(rel):
                 continue
             modified = _coerce_modified_to_datetime(entry.get("modified"))
+            entries_by_path[rel] = {
+                "size": entry.get("size"), "modified": modified,
+            }
             if modified is None or modified < turn_start:
                 continue
             out.append(
                 TurnArtifact(kind="file", label=rel, ref=rel),
             )
-        return out
+        return out, entries_by_path
 
     async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
         """Return the direct-UI parent that should receive this loop run result.
@@ -723,12 +837,33 @@ class ArtifactCompletionMixin:
         ``TURN_SUMMARY`` event before ``SESSION_COMPLETE`` so the SDK
         sees the recap in the same event stream as the closing message.
         """
-        # Destroy the sandbox pod for this session.
+        # Detach the sandbox now, delete the pod after.
+        #
+        # Deleting a pod is a round trip to the cluster, and it used to sit
+        # between the agent's last word and SESSION_COMPLETE -- so the user
+        # watched a busy indicator through it. Measured over a month of
+        # production sessions: with neither a sandbox nor a turn summary the
+        # tail is 0.24s at p50, and sessions that used a sandbox reach 32s at
+        # p90. Nothing downstream reads the teardown, and a leaked pod is
+        # already reclaimed on worker shutdown.
+        #
+        # Detaching stays synchronous because it is in-memory and it carries
+        # the ordering that matters: once the mapping is gone, no later turn
+        # can resolve this session to a pod that is about to disappear.
         if self._sandbox_pool is not None:
             try:
-                await self._sandbox_pool.destroy_for_session(str(session.id))
+                sandbox_id = await self._sandbox_pool.release_for_session(
+                    str(session.id),
+                )
             except Exception:
-                logger.debug("Sandbox cleanup failed for %s", session.id, exc_info=True)
+                logger.debug(
+                    "Sandbox detach failed for %s", session.id, exc_info=True,
+                )
+            else:
+                self._spawn_background(
+                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                    name=f"sandbox-teardown-{session.id}",
+                )
 
         # The browser is intentionally NOT torn down here. A turn end is
         # not a session end: an agent driving a multi-step browser flow
@@ -760,9 +895,11 @@ class ArtifactCompletionMixin:
             config.get("active_mission_id")
             or config.get("active_research_run_id")
         )
+        # Not gated on the summarizer: deciding what was delivered is
+        # bookkeeping now, so the download card survives with recaps
+        # turned off. Only the recap itself needs a model.
         if (
             turn_id is not None
-            and self._turn_summarizer is not None
             and reason in {"stop", "done", "complete", "completed"}
             and not is_orchestrated_session
         ):
@@ -773,6 +910,9 @@ class ArtifactCompletionMixin:
                     user_message=user_message
                     if user_message is not None
                     else _latest_user_message_text(messages),
+                    # The closing message is the only place a delivery
+                    # claim with nothing behind it can be seen.
+                    final_message=_last_assistant_message_excerpt(messages),
                 )
             except Exception:
                 logger.exception(

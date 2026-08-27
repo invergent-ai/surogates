@@ -139,6 +139,34 @@ async def _consult_expert_handler(
             "available_experts": available,
         })
 
+    # The advisor reviews the work so far rather than answering a
+    # self-contained question, so it reads the conversation instead of a
+    # restatement of it. Domain experts keep the explicit task/context
+    # contract -- handing every expert the transcript would multiply the
+    # cost of every consult on a long session.
+    from surogates.tools.builtin.advisor_expert import is_advisor_expert
+
+    platform_client = None
+    if is_advisor_expert(expert):
+        # The advisor runs on the session's own LLM route; its tier comes
+        # from ``model: surogate-pro``, which the proxy resolves. Without
+        # this it would need an endpoint and a credential of its own,
+        # which is the bespoke wiring it exists to be free of.
+        platform_client = kwargs.get("llm_client")
+        if platform_client is None:
+            return json.dumps({
+                "error": "No LLM client available for the advisor.",
+            })
+        transcript_of = kwargs.get("expert_transcript")
+        if transcript_of is not None:
+            transcript = transcript_of()
+            if transcript:
+                context = (
+                    f"{context}\n\n## Conversation so far\n{transcript}"
+                    if context
+                    else f"## Conversation so far\n{transcript}"
+                )
+
     service = ExpertConsultationService(
         tenant=tenant,
         session_id=session_id,
@@ -152,6 +180,7 @@ async def _consult_expert_handler(
         expert=expert,
         task=task,
         context=context,
+        client=platform_client,
     )
     return result.content
 
@@ -238,6 +267,7 @@ def _skill_def_from_detail(detail: dict[str, Any]) -> SkillDef | None:
         description=detail.get("description") or "",
         content=detail.get("content") or "",
         source=detail.get("source") or "platform",
+        builtin=bool(detail.get("builtin")),
         type=detail.get("type") or "skill",
         category=detail.get("category"),
         trigger=detail.get("trigger"),

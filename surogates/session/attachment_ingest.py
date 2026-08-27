@@ -47,13 +47,43 @@ def safe_display_name(name: str, *, max_len: int = 100) -> str:
 
 _injection_detector = None
 
+#: Detection rules shipped with the harness. Constructing the detector
+#: without a config falls back to sample rules the package itself warns
+#: are not production configuration -- and those flagged a markdown code
+#: fence as a delimiter attack, refusing any message with a fenced code
+#: block.
+_INJECTION_CONFIG_PATH = (
+    Path(__file__).resolve().parent.parent / "security" / "prompt_injection.yaml"
+)
+
 
 def get_injection_detector():
-    """Return the process-wide PromptInjectionDetector, created on first call."""
+    """Return the process-wide PromptInjectionDetector, created on first call.
+
+    Falls back to the package defaults only if the bundled rules cannot
+    be read -- screening with sample rules beats not screening at all,
+    but it is loud about it, because the difference is a code paste
+    being refused as an attack.
+    """
     global _injection_detector
     if _injection_detector is None:
-        from agent_os.prompt_injection import PromptInjectionDetector
-        _injection_detector = PromptInjectionDetector()
+        from agent_os.prompt_injection import (
+            PromptInjectionDetector,
+            load_prompt_injection_config,
+        )
+        try:
+            config = load_prompt_injection_config(str(_INJECTION_CONFIG_PATH))
+            _injection_detector = PromptInjectionDetector(
+                injection_config=config,
+            )
+        except Exception:
+            logger.warning(
+                "Falling back to sample injection rules; %s could not be "
+                "loaded. Expect false positives on fenced code blocks.",
+                _INJECTION_CONFIG_PATH,
+                exc_info=True,
+            )
+            _injection_detector = PromptInjectionDetector()
     return _injection_detector
 
 # ---------------------------------------------------------------------------

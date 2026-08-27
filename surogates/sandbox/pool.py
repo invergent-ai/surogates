@@ -127,6 +127,45 @@ class SandboxPool:
             )
         return await self._backend.execute(sandbox_id, name, input)
 
+    async def release_for_session(self, session_id: str) -> str | None:
+        """Detach the sandbox from *session_id*, returning its id.
+
+        In-memory only, so it is fast enough to stay on a latency-
+        sensitive path. Callers that then destroy the returned sandbox in
+        the background get the ordering that matters: once this returns,
+        no later turn can resolve the session to a pod that is about to
+        disappear.
+        """
+        lock = await self._session_lock(session_id)
+        async with lock:
+            self._specs.pop(session_id, None)
+            return self._mapping.pop(session_id, None)
+
+    async def destroy_released(
+        self, sandbox_id: str | None, session_id: str,
+    ) -> None:
+        """Tear down a sandbox already detached by :meth:`release_for_session`.
+
+        This is the slow half -- deleting a pod is a round trip to the
+        cluster -- and it no longer needs the session lock, because the
+        mapping is gone and nothing can resolve to this sandbox any more.
+        """
+        if sandbox_id is not None:
+            await self._backend.destroy(sandbox_id)
+            logger.info(
+                "Destroyed sandbox %s for session %s", sandbox_id, session_id,
+            )
+
+        # Optional backend-level reap (label-based), independent of the
+        # mapping above.
+        backend_reap = getattr(self._backend, "destroy_for_session", None)
+        if backend_reap is not None:
+            await backend_reap(session_id)
+
+        # Clean up the per-session lock to prevent unbounded growth.
+        async with self._global_lock:
+            self._locks.pop(session_id, None)
+
     async def destroy_for_session(self, session_id: str) -> None:
         """Destroy the sandbox for *session_id* and remove the mapping.
 
@@ -135,27 +174,8 @@ class SandboxPool:
         when this pool has no in-memory mapping (e.g. after a worker
         restart).
         """
-        lock = await self._session_lock(session_id)
-        async with lock:
-            sandbox_id = self._mapping.pop(session_id, None)
-            self._specs.pop(session_id, None)
-            if sandbox_id is not None:
-                await self._backend.destroy(sandbox_id)
-                logger.info(
-                    "Destroyed sandbox %s for session %s",
-                    sandbox_id,
-                    session_id,
-                )
-
-            # Optional backend-level reap (label-based), independent of the
-            # mapping above.
-            backend_reap = getattr(self._backend, "destroy_for_session", None)
-            if backend_reap is not None:
-                await backend_reap(session_id)
-
-        # Clean up the per-session lock to prevent unbounded growth.
-        async with self._global_lock:
-            self._locks.pop(session_id, None)
+        sandbox_id = await self.release_for_session(session_id)
+        await self.destroy_released(sandbox_id, session_id)
 
     async def destroy_all(self) -> None:
         """Tear down every sandbox managed by this pool.

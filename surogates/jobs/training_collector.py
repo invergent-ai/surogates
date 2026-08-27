@@ -172,6 +172,15 @@ class TrainingDataCollector:
         examples: list[TrainingExample] = []
         overridden_experts: set[str] = set()
 
+        # Platform built-ins are not trainable. The advisor is an expert
+        # like any other now, so its consults land in this pipeline --
+        # but it is a platform capability, its transcripts carry the
+        # whole conversation, and nobody should be fine-tuning on them.
+        from surogates.tools.builtin.advisor_expert import ADVISOR_EXPERT_NAME
+
+        if expert_name == ADVISOR_EXPERT_NAME:
+            return []
+
         # First pass: find which experts were overridden in this session.
         for event in events:
             if event.type == EventType.EXPERT_OVERRIDE.value:

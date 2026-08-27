@@ -66,6 +66,7 @@ async def run_expert_loop(
     session_id: UUID,
     session_store: Any | None = None,
     api_key: str | None = None,
+    client: Any | None = None,
 ) -> tuple[str, int]:
     """Run a scoped agent loop using the expert's configured model.
 
@@ -126,11 +127,18 @@ async def run_expert_loop(
     # absolutize against the server origin or the request 404s.
     from surogates.config import load_settings
 
-    server_base_url = getattr(load_settings(), "platform_api_url", None)
-    client = AsyncOpenAI(
-        base_url=_absolute_endpoint(expert.expert_endpoint, server_base_url),
-        api_key=api_key or _resolve_api_key(tenant, expert),
-    )
+    # A platform built-in (the advisor) runs on the session's own LLM
+    # route and is handed that client: its tier comes from the model
+    # sentinel, which the proxy resolves. Only tenant experts point at an
+    # arbitrary upstream and need an endpoint plus a credential of their
+    # own.
+    owns_client = client is None
+    if client is None:
+        server_base_url = getattr(load_settings(), "platform_api_url", None)
+        client = AsyncOpenAI(
+            base_url=_absolute_endpoint(expert.expert_endpoint, server_base_url),
+            api_key=api_key or _resolve_api_key(tenant, expert),
+        )
 
     gen_kwargs, gen_extra = _generation_kwargs(expert.expert_generation)
 
@@ -209,7 +217,11 @@ async def run_expert_loop(
         raise ExpertBudgetExceeded(expert.name, expert.expert_max_iterations)
 
     finally:
-        await client.close()
+        # Close only what this call opened. A supplied client belongs to
+        # the session -- closing it would take the main turn's LLM
+        # connection down with the consult.
+        if owns_client:
+            await client.close()
 
 
 def _absolute_endpoint(endpoint: str, llm_base_url: str | None) -> str:

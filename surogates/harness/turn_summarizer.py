@@ -91,39 +91,26 @@ _ITERATION_PROMPT = (
     'Return ONLY a JSON object: {"caption": "<the one line>"}.'
 )
 
-_TURN_PROMPT = (
-    "You are reviewing a completed agent turn. Return ONLY a JSON "
-    "object with two fields:\n"
-    "  recap: 1-3 short sentences in plain prose, no markdown, "
-    "summarizing what the agent accomplished\n"
-    "  artifacts: the downloadable deliverable(s) that satisfy what "
-    "the user asked for. Re-read the user request first and work "
-    "backwards from it: what file(s) did the user actually ask to "
-    "receive? List those and nothing else — usually a single file. "
-    "This list becomes the user-visible download card, so an "
-    "intermediate file here is worse than a missing one.\n"
-    "    KEEP only the final deliverable matching the request: asked "
-    "for a presentation -> the .pptx; a report -> the .pdf/.docx/.md; "
-    "a dataset -> the .csv/.xlsx; an image/video -> that media file; "
-    "a created artifact -> that artifact.\n"
-    "    DROP everything intermediate: scripts the agent wrote and "
-    "ran itself (executed_by_terminal=true is almost always "
-    "scaffolding), source-code files (.py, .sh, .js, .ts) unless the "
-    "user explicitly asked for code, assets generated only to be "
-    "embedded in the final deliverable (e.g. chart images rendered "
-    "for a .pptx), scratch files, downloads the agent fetched as "
-    "inputs, debugging output, and internal agent state (anything "
-    "under a hidden directory like .agents/ is context for future "
-    "turns, not a deliverable).\n"
-    "  Each artifact is "
-    '{"kind": "file|artifact", "label": str, "ref": str} — copy '
-    "kind and ref verbatim from the matching candidate. Return an "
-    "empty artifacts list when no candidate is a real deliverable "
-    "for this user request."
+_PICK_PROMPT = (
+    "The agent produced several files for one request. Name the ones the "
+    "user actually asked to receive -- usually one.\n"
+    "Work backwards from the request: a presentation means the .pptx, a "
+    "report means the .pdf/.docx/.md, a dataset means the .csv/.xlsx. "
+    "Leave out anything made along the way: source files unless code was "
+    "what was asked for, images rendered only to be embedded in a "
+    "document, scratch and debug output.\n"
+    "Reply with one path per line, copied exactly, and nothing else. If "
+    "every file looks like part of the answer, list them all."
 )
 
 
-_VALID_KINDS: frozenset[str] = frozenset({"file", "artifact"})
+_TURN_PROMPT = (
+    "You are reviewing a completed agent turn. Reply with 1-3 short "
+    "sentences of plain prose, no markdown, summarizing what the agent "
+    "accomplished for the user. Do not list files -- the deliverables "
+    "are decided elsewhere and shown separately. Reply with the "
+    "sentences only, no preamble and no JSON."
+)
 
 
 
@@ -312,11 +299,17 @@ class TurnSummarizer:
         base_model: str,
         summary_client: Any | None = None,
         summary_model: str = "",
+        recap_enabled: bool = True,
     ) -> None:
         self._base_client = base_client
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
+        # Iteration one-liners and the end-of-turn recap are separately
+        # controlled: the one-liners are written while the turn runs, the
+        # recap only after the agent has stopped talking, where it sits
+        # between the last word and session.complete.
+        self._recap_enabled = recap_enabled
         # Cleared the first time this summarizer's provider rejects
         # ``response_format``; see :meth:`summarize_iteration`.
         self._iteration_json_mode = True
@@ -424,80 +417,143 @@ class TurnSummarizer:
             return None
         return text
 
+    async def pick_deliverables(
+        self,
+        *,
+        turn_id: str,
+        user_message: str,
+        artifacts: list[TurnArtifact],
+    ) -> list[TurnArtifact]:
+        """Narrow several surviving files to the ones actually asked for.
+
+        The deterministic filters answer "is this a real file this turn
+        produced". They cannot answer "is this what the user wanted" --
+        that is a question about the request, not the workspace, and it
+        is the one rule from the retired curation prompt that does not
+        reduce to bookkeeping.
+
+        So it is asked, but only when it is actually a question: with one
+        surviving file there is nothing to choose between, and the common
+        turn skips the call entirely.
+
+        Fails open. A timeout, a refusal, or an unrecognisable reply
+        returns everything -- showing an extra file costs a cluttered
+        card, dropping a real one costs the user their work.
+        """
+        files = [a for a in artifacts if a.kind == "file"]
+        if len(files) < 2:
+            return artifacts
+
+        client = self._summary_client or self._base_client
+        model = self._summary_model or self._base_model
+        listing = "\n".join(a.ref for a in files)
+
+        content = await self._chat_completion(
+            client,
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _PICK_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Request: {user_message[:1000]}\n\n"
+                            f"Files:\n{listing}"
+                        ),
+                    },
+                ],
+                "max_tokens": 200,
+                "temperature": 0,
+                "stream": False,
+            },
+            label=f"pick {turn_id}",
+            timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
+        )
+        if not content:
+            return artifacts
+
+        # Intersect with what we offered rather than trusting the reply:
+        # a model that invents a path cannot add one to the card, and a
+        # reply that matches nothing falls through to "keep everything".
+        offered = {a.ref: a for a in files}
+        chosen = [
+            offered[line]
+            for line in (ln.strip().strip("-* `") for ln in content.splitlines())
+            if line in offered
+        ]
+        if not chosen:
+            logger.debug(
+                "deliverable pick for %s matched no candidate: %r",
+                turn_id, content[:200],
+            )
+            return artifacts
+
+        keep = {a.ref for a in chosen}
+        return [a for a in artifacts if a.kind != "file" or a.ref in keep]
+
     async def summarize_turn(
         self,
         *,
         turn_id: str,
         user_message: str,
         iteration_summaries: list[str],
-        candidate_artifacts: list[TurnArtifact],
+        artifacts: list[TurnArtifact],
     ) -> TurnSummary | None:
-        """Summarize a whole assistant turn into recap + artifact list.
+        """Write the turn's recap. ``artifacts`` are already decided.
 
-        Returns ``None`` when the turn has nothing worth summarizing, the
-        model returns invalid JSON, or the recap and artifact list both
-        end up empty after filtering.
+        Curation used to happen here: every touched file went into the
+        prompt and the base model picked the user's deliverable. That is
+        now reconciled against the workspace (see
+        :mod:`surogates.harness.delivery_manifest`), so this call only
+        writes prose -- which is what the cheap summary model is for, and
+        it is the reason the call no longer runs on the base model.
+
+        Returns ``None`` when the turn has nothing worth summarizing or
+        the model returns nothing usable.
         """
-        if not iteration_summaries and not candidate_artifacts:
+        if not self._recap_enabled:
+            return None
+        if not iteration_summaries and not artifacts:
             return None
 
-        cand_lines = "\n".join(
-            f"- kind={a.kind} label={a.label!r} ref={a.ref!r}"
-            + (
-                " executed_by_terminal=true"
-                if (a.meta or {}).get("executed_by_terminal")
-                else ""
-            )
-            for a in candidate_artifacts
-        )
         user_block_parts: list[str] = [f"User asked: {user_message[:1000]}"]
         if iteration_summaries:
             user_block_parts.append(
                 "Iteration summaries:\n"
                 + "\n".join(f"- {s}" for s in iteration_summaries)
             )
-        if cand_lines:
-            user_block_parts.append(f"Candidate artifacts:\n{cand_lines}")
+        if artifacts:
+            user_block_parts.append(
+                "Delivered:\n"
+                + "\n".join(f"- {a.label}" for a in artifacts)
+            )
         user_block = "\n\n".join(user_block_parts)
 
-        kwargs: dict[str, Any] = {
-            "model": self._base_model,
-            "messages": [
-                {"role": "system", "content": _TURN_PROMPT},
-                {"role": "user", "content": user_block},
-            ],
-            "max_tokens": _MAX_TURN_SUMMARY_TOKENS,
-            "temperature": 0.3,
-            "stream": False,
-            "response_format": {"type": "json_object"},
-        }
+        # Prose only, so the cheap auxiliary is enough. Falling back to
+        # the base model keeps recaps working where no summary model is
+        # configured, rather than dropping them.
+        client = self._summary_client or self._base_client
+        model = self._summary_model or self._base_model
 
         content = await self._chat_completion(
-            self._base_client,
-            kwargs,
+            client,
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _TURN_PROMPT},
+                    {"role": "user", "content": user_block},
+                ],
+                "max_tokens": _MAX_TURN_SUMMARY_TOKENS,
+                "temperature": 0.3,
+                "stream": False,
+            },
             label=f"turn {turn_id}",
             timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
         )
-        if not content:
-            return None
-
-        # Fence-tolerant: gateways that ignore ``response_format``
-        # return the object wrapped in ```json fences — a strict parse
-        # here once silenced recaps entirely.
-        parsed = parse_json_object(content)
-        if parsed is None:
-            logger.warning(
-                "turn summary returned no JSON object for %s: %r",
-                turn_id,
-                content[:200],
-            )
-            return None
-
-        recap = str(parsed.get("recap") or "").strip()
-        artifacts = self._parse_artifacts(parsed.get("artifacts"))
+        recap = (content or "").strip()
         if not recap and not artifacts:
             return None
-        return TurnSummary(recap=recap, artifacts=artifacts)
+        return TurnSummary(recap=recap, artifacts=list(artifacts))
 
     # ------------------------------------------------------------------
     # Internals
@@ -585,34 +641,4 @@ class TurnSummarizer:
                 f"[{index}] tool={name} args={args_snippet}\n"
                 f"    returned: {result_snippet}"
             )
-        return out
-
-    @staticmethod
-    def _parse_artifacts(raw: Any) -> list[TurnArtifact]:
-        if not isinstance(raw, list):
-            return []
-        out: list[TurnArtifact] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            kind = item.get("kind")
-            label = item.get("label")
-            ref = item.get("ref")
-            if kind not in _VALID_KINDS:
-                continue
-            if not isinstance(label, str) or not isinstance(ref, str):
-                continue
-            if not label or not ref:
-                continue
-            # The summary card only presents downloadable artifacts.
-            # The LLM occasionally smuggles a web URL through as
-            # kind=file; an absolute URL is not downloadable from the
-            # workspace, so drop it rather than render a dead entry.
-            if ref.startswith(("http://", "https://")):
-                continue
-            # Candidates are pre-filtered, but the model can still
-            # invent refs — never let internal paths reach the card.
-            if kind == "file" and _is_internal_workspace_path(ref):
-                continue
-            out.append(TurnArtifact(kind=kind, label=label, ref=ref))
         return out

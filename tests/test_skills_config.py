@@ -118,8 +118,10 @@ async def test_api_list_skills_surfaces_bundle_attached_skill():
         tenant=_make_tenant(),
     )
 
-    assert response.total == 1
-    assert response.skills[0].name == "configured-skill"
+    # The built-in advisor expert is always loaded, so assert on the
+    # skill under test rather than an exact total.
+    names = [s.name for s in response.skills]
+    assert "configured-skill" in names
 
 
 @pytest.mark.asyncio
