@@ -564,3 +564,74 @@ async def test_collect_candidate_artifacts_skips_directory_markers() -> None:
     refs = [c.ref for c in candidates]
     assert any("out.csv" in r for r in refs)
     assert all(not r.endswith("/") for r in refs), refs
+
+
+@pytest.mark.asyncio
+async def test_artifacts_still_emitted_without_a_summarizer() -> None:
+    """Recaps off must not take the download card with them.
+
+    Which files a turn delivered is decided from the workspace now, so it
+    survives without a model. Before the manifest, turning summaries off
+    also dropped the artifacts -- and the SDK's fallback cannot see files
+    written indirectly (a script run through the terminal), which is the
+    common shape for a generated deliverable.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    fake_session = SimpleNamespace(
+        id=uuid4(), config={"storage_bucket": "bucket-1"},
+    )
+    store.get_session = AsyncMock(return_value=fake_session)
+    turn_start = datetime.now(timezone.utc)
+
+    class _FakeStorage:
+        async def list_entries(self, _bucket, prefix=""):
+            return [{
+                "key": "fibonacci.csv",
+                "modified": turn_start + timedelta(seconds=5),
+                "size": 240,
+            }]
+
+    # No summarizer: recaps are off.
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._storage = _FakeStorage()
+    harness._turn_started_at = turn_start
+
+    await harness._drain_and_emit_turn_summary(
+        session_id=fake_session.id,
+        turn_id="turn-N",
+        user_message="give me the fibonacci csv",
+        final_message="Saved it to fibonacci.csv.",
+    )
+
+    emitted = [
+        c.args for c in store.emit_event.await_args_list
+        if c.args[1] == EventType.TURN_SUMMARY
+    ]
+    assert emitted, "no turn.summary emitted with recaps off"
+    payload = emitted[0][2]
+    assert payload["recap"] == "", "a recap appeared with no summarizer"
+    assert [a["ref"] for a in payload["artifacts"]] == ["fibonacci.csv"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_emitted_when_a_turn_produced_nothing() -> None:
+    """No recap and no files means no card, rather than an empty one."""
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[])
+    store.get_session = AsyncMock(return_value=SimpleNamespace(
+        id=uuid4(), config={},
+    ))
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+
+    await harness._drain_and_emit_turn_summary(
+        session_id=uuid4(), turn_id="turn-E",
+        user_message="what is 2+2", final_message="4.",
+    )
+
+    assert not [
+        c for c in store.emit_event.await_args_list
+        if c.args[1] == EventType.TURN_SUMMARY
+    ]

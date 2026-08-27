@@ -299,11 +299,17 @@ class TurnSummarizer:
         base_model: str,
         summary_client: Any | None = None,
         summary_model: str = "",
+        recap_enabled: bool = True,
     ) -> None:
         self._base_client = base_client
         self._base_model = base_model
         self._summary_client = summary_client
         self._summary_model = summary_model
+        # Iteration one-liners and the end-of-turn recap are separately
+        # controlled: the one-liners are written while the turn runs, the
+        # recap only after the agent has stopped talking, where it sits
+        # between the last word and session.complete.
+        self._recap_enabled = recap_enabled
         # Cleared the first time this summarizer's provider rejects
         # ``response_format``; see :meth:`summarize_iteration`.
         self._iteration_json_mode = True
@@ -505,6 +511,8 @@ class TurnSummarizer:
         Returns ``None`` when the turn has nothing worth summarizing or
         the model returns nothing usable.
         """
+        if not self._recap_enabled:
+            return None
         if not iteration_summaries and not artifacts:
             return None
 

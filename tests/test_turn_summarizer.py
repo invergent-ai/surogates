@@ -892,3 +892,34 @@ class TestPickDeliverables:
             artifacts=self._files("a.md", "b.md"),
         )
         assert [a.ref for a in out] == ["a.md", "b.md"]
+
+
+@pytest.mark.asyncio
+async def test_recap_disabled_makes_no_call_but_keeps_iterations() -> None:
+    """The two switches are independent.
+
+    Iteration one-liners are written while the turn runs; the recap only
+    after the agent has stopped, which is why it is the one turned off.
+    """
+    summary = _StubClient("one-liner")
+    s = TurnSummarizer(
+        base_client=_StubClient("x"), base_model="base",
+        summary_client=summary, summary_model="cheap",
+        recap_enabled=False,
+    )
+
+    assert await s.summarize_turn(
+        turn_id="t", user_message="do it",
+        iteration_summaries=["did it"],
+        artifacts=[TurnArtifact("file", "a.md", "a.md")],
+    ) is None
+    assert summary.chat.completions.calls == [], "recap called while disabled"
+
+    # The per-iteration path is untouched by the recap switch.
+    line = await s.summarize_iteration(
+        iteration_id="i1", reasoning="thinking",
+        tool_calls=[{"function": {"name": "write_file", "arguments": "{}"}}],
+        prior_iteration_summaries=[],
+    )
+    assert line == "one-liner"
+    assert summary.chat.completions.calls, "iteration one-liner was suppressed"

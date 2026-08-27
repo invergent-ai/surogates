@@ -250,9 +250,8 @@ class ArtifactCompletionMixin:
         falls back to the per-iteration view when TURN_SUMMARY is
         missing.
         """
-        if self._turn_summarizer is None:
-            return
-
+        # No early return on a missing summarizer: the manifest needs no
+        # model, so the download card outlives the recap.
         pending = list(self._pending_iteration_summary_tasks.values())
         if pending:
             try:
@@ -319,45 +318,56 @@ class ArtifactCompletionMixin:
                 ", ".join(f"{r.ref}({r.reason})" for r in manifest.rejected),
             )
 
-        # One question the workspace cannot answer: which of several real
-        # files the user actually asked for. Only asked when more than one
-        # survives -- the common single-file turn never makes the call.
         delivered = manifest.delivered
-        try:
-            delivered = await asyncio.wait_for(
-                self._turn_summarizer.pick_deliverables(
-                    turn_id=turn_id,
-                    user_message=user_message,
-                    artifacts=manifest.delivered,
-                ),
-                timeout=35.0,
-            )
-        except Exception:
-            # Fail open: an extra entry on the card beats a missing one.
-            logger.debug(
-                "deliverable pick failed for %s", turn_id, exc_info=True,
-            )
+        recap = ""
 
-        try:
-            # Outer backstop sits above the summarizer's own timeout.
-            result = await asyncio.wait_for(
-                self._turn_summarizer.summarize_turn(
-                    turn_id=turn_id,
-                    user_message=user_message,
-                    iteration_summaries=iteration_summaries,
-                    artifacts=delivered,
-                ),
-                timeout=35.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("turn summary call timed out for %s", turn_id)
-            return
-        except Exception:
-            logger.warning(
-                "turn summary call failed for %s", turn_id, exc_info=True,
-            )
-            return
-        if result is None:
+        if self._turn_summarizer is not None:
+            # One question the workspace cannot answer: which of several
+            # real files the user actually asked for. Only asked when
+            # more than one survives -- the common single-file turn never
+            # makes the call.
+            try:
+                delivered = await asyncio.wait_for(
+                    self._turn_summarizer.pick_deliverables(
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        artifacts=manifest.delivered,
+                    ),
+                    timeout=35.0,
+                )
+            except Exception:
+                # Fail open: an extra entry beats a missing one.
+                logger.debug(
+                    "deliverable pick failed for %s", turn_id, exc_info=True,
+                )
+
+            try:
+                # Outer backstop sits above the summarizer's own timeout.
+                result = await asyncio.wait_for(
+                    self._turn_summarizer.summarize_turn(
+                        turn_id=turn_id,
+                        user_message=user_message,
+                        iteration_summaries=iteration_summaries,
+                        artifacts=delivered,
+                    ),
+                    timeout=35.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("turn summary call timed out for %s", turn_id)
+                result = None
+            except Exception:
+                logger.warning(
+                    "turn summary call failed for %s", turn_id, exc_info=True,
+                )
+                result = None
+            if result is not None:
+                recap = result.recap
+                delivered = result.artifacts
+
+        # With recaps off there is nothing to say but still something to
+        # show, so a turn that produced nothing emits nothing rather than
+        # an empty card.
+        if not recap and not delivered and not manifest.unsupported_claim:
             return
 
         try:
@@ -366,7 +376,7 @@ class ArtifactCompletionMixin:
                 EventType.TURN_SUMMARY,
                 {
                     "turn_id": turn_id,
-                    "recap": result.recap,
+                    "recap": recap,
                     # Advisory, and only ever set when the turn delivered
                     # nothing at all: the closing message claimed a file
                     # that was never written. Surfaced rather than acted
@@ -387,7 +397,7 @@ class ArtifactCompletionMixin:
                     ),
                     "artifacts": [
                         {"kind": a.kind, "label": a.label, "ref": a.ref}
-                        for a in result.artifacts
+                        for a in delivered
                     ],
                 },
             )
@@ -885,9 +895,11 @@ class ArtifactCompletionMixin:
             config.get("active_mission_id")
             or config.get("active_research_run_id")
         )
+        # Not gated on the summarizer: deciding what was delivered is
+        # bookkeeping now, so the download card survives with recaps
+        # turned off. Only the recap itself needs a model.
         if (
             turn_id is not None
-            and self._turn_summarizer is not None
             and reason in {"stop", "done", "complete", "completed"}
             and not is_orchestrated_session
         ):
