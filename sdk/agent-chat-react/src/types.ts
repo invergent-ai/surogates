@@ -606,7 +606,15 @@ export interface AgentChatState {
   researchSources: AgentChatResearchSource[];
 }
 
-export type AgentChatViewMode = "simple" | "expert";
+/**
+ * How the conversation is shown.
+ *
+ * `whiteboard` is a *view* of the same session, not a different kind of
+ * session: the agent gets the draw tool on any turn sent from the
+ * canvas, so switching here never leaves you on a board the agent
+ * cannot draw on.
+ */
+export type AgentChatViewMode = "simple" | "expert" | "whiteboard";
 
 export type AgentChatArtifactKind =
   | "markdown"

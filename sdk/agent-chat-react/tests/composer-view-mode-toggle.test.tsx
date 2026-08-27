@@ -73,7 +73,7 @@ describe("Composer view-mode toggle", () => {
       .toBeNull();
   });
 
-  it("renders both Simple and Advanced segments when onViewModeChange is supplied", () => {
+  it("renders every view segment when onViewModeChange is supplied", () => {
     const dom = mount(
       <ChatComposer
         onSend={sendFn}
@@ -86,17 +86,19 @@ describe("Composer view-mode toggle", () => {
     const group = dom.querySelector("[role='group'][aria-label='Chat view mode']");
     expect(group).not.toBeNull();
     const buttons = group!.querySelectorAll("button");
-    expect(buttons.length).toBe(2);
+    expect(buttons.length).toBe(3);
     // The accessible name is the same at every width; the icon (phone) and
     // the word (cursor) are two renderings of it, and both are in the DOM
     // with only a media query deciding which one shows.
     expect(Array.from(buttons).map((b) => b.getAttribute("aria-label"))).toEqual([
       "Simple view",
       "Advanced view",
+      "Whiteboard view",
     ]);
     expect(Array.from(buttons).map((b) => b.textContent?.trim())).toEqual([
       "Simple",
       "Advanced",
+      "Whiteboard",
     ]);
     for (const button of buttons) {
       const word = button.querySelector("span");

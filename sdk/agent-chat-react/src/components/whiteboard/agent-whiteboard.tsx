@@ -8,7 +8,11 @@ import {
 } from "react";
 import { cn } from "../../lib/utils";
 import { useAgentChatRuntime } from "../../runtime/use-agent-chat-runtime";
-import type { AgentChatAdapter } from "../../types";
+import type {
+  AgentChatAdapter,
+  AgentChatRuntimeApi,
+  AgentChatViewMode,
+} from "../../types";
 import { Button } from "../ui/button";
 import {
   type AtlasExtras,
@@ -41,6 +45,7 @@ import {
   zoomToFit,
 } from "./input";
 import {
+  latestBoardSession,
   loadDoc,
   shouldReloadCanvas,
   useDebouncedSave,
@@ -79,27 +84,69 @@ const ERASER_SCALE = 4;
 const TEXT_FONT_SIZE = 24;
 const TEXT_MAX_WIDTH = 320;
 
+/** Mirrors the composer's segments so the two switches read alike. */
+const VIEW_MODE_LABELS: Record<AgentChatViewMode, string> = {
+  simple: "Simple",
+  expert: "Advanced",
+  whiteboard: "Whiteboard",
+};
+
 export interface AgentWhiteboardProps {
   adapter: AgentChatAdapter;
   agentId?: string;
   sessionId: string | null;
   onSessionChange?: (sessionId: string) => void;
+  /**
+   * Navigate to a session-less board. Without it "New board" cannot
+   * clear the session id, which only the host's router owns.
+   */
+  onNewBoard?: () => void;
   disabled?: boolean;
+  /**
+   * View-mode switch, when the board is hosted inside `AgentChat`. The
+   * control lives in the chat composer, so without it here the board is
+   * a room with no door back.
+   */
+  viewMode?: AgentChatViewMode;
+  onViewModeChange?: (mode: AgentChatViewMode) => void;
 }
 
-export function AgentWhiteboard({
+/**
+ * The board over an existing runtime.
+ *
+ * Split from the standalone export so `AgentChat` can host it on the
+ * runtime it already has: two `useAgentChatRuntime` calls for one
+ * session would open two event streams and double every applied event.
+ */
+export interface WhiteboardSurfaceProps
+  extends Omit<AgentWhiteboardProps, "adapter" | "agentId"> {
+  adapter: AgentChatAdapter;
+  agentId?: string;
+  runtime: AgentChatRuntimeApi;
+}
+
+/** The board, standalone: owns its runtime. */
+export function AgentWhiteboard(props: AgentWhiteboardProps) {
+  const runtime = useAgentChatRuntime({
+    adapter: props.adapter,
+    agentId: props.agentId,
+    sessionId: props.sessionId,
+    onSessionChange: props.onSessionChange,
+  });
+  return <WhiteboardSurface {...props} runtime={runtime} />;
+}
+
+export function WhiteboardSurface({
   adapter,
   agentId,
   sessionId,
   onSessionChange,
+  onNewBoard,
   disabled,
-}: AgentWhiteboardProps) {
-  const runtime = useAgentChatRuntime({
-    adapter,
-    agentId,
-    sessionId,
-    onSessionChange,
-  });
+  viewMode,
+  onViewModeChange,
+  runtime,
+}: WhiteboardSurfaceProps) {
 
   const [doc, setDoc] = useState<WbDoc>(emptyDoc);
   const [view, setView] = useState<View>(INITIAL_VIEW);
@@ -114,6 +161,9 @@ export function AgentWhiteboard({
     { from: { x: number; y: number }; to: { x: number; y: number } } | null
   >(null);
   const [showTranscript, setShowTranscript] = useState(false);
+  // Set by "New board" so the resume effect does not immediately pull
+  // the user back into the board they just left.
+  const [wantFresh, setWantFresh] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -175,12 +225,30 @@ export function AgentWhiteboard({
   // Document lifecycle
   // ------------------------------------------------------------------
 
+  // A board lives in a session, and this route carries no session id
+  // until one exists. Without resuming, leaving the board and coming
+  // back lands on a blank canvas and silently starts a new one, with no
+  // route back to what was drawn.
+  useEffect(() => {
+    if (sessionId || wantFresh || !onSessionChange) return;
+    let cancelled = false;
+    void latestBoardSession(adapter, agentId).then((id) => {
+      if (!cancelled && id) onSessionChange(id);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [adapter, agentId, sessionId, wantFresh, onSessionChange]);
+
   // The session this board is currently showing. Compared against the
   // incoming prop so adopting a just-created session is distinguishable
   // from switching to a different one.
   const loadedSession = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
+    // Once a session exists again the "fresh" intent is spent; without
+    // clearing it, every later return to the board starts blank.
+    if (sessionId && wantFresh) setWantFresh(false);
     const previous = loadedSession.current;
     loadedSession.current = sessionId;
 
@@ -856,6 +924,41 @@ export function AgentWhiteboard({
           <Brain className="size-4" />
           Think harder
         </Button>
+        {onNewBoard ? (
+          <Button
+            type="button"
+            variant="ghost"
+            aria-label="New board"
+            disabled={busy}
+            onClick={() => {
+              setWantFresh(true);
+              onNewBoard();
+            }}
+          >
+            New board
+          </Button>
+        ) : null}
+        {viewMode && onViewModeChange ? (
+          <div className="flex items-center rounded-full border p-0.5">
+            {(["simple", "expert", "whiteboard"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-label={`${VIEW_MODE_LABELS[mode]} view`}
+                aria-pressed={viewMode === mode}
+                className={cn(
+                  "rounded-full px-3 py-1 text-xs",
+                  viewMode === mode
+                    ? "bg-background font-medium shadow-sm"
+                    : "text-muted-foreground",
+                )}
+                onClick={() => onViewModeChange(mode)}
+              >
+                {VIEW_MODE_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <Button
           type="button"
           variant="ghost"

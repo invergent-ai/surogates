@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { BrowserPane } from "./components/browser/browser-pane";
 import { ChatThread } from "./components/chat/chat-thread";
+import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { WorkspacePanel } from "./components/workspace/workspace-panel";
 import { cn } from "./lib/utils";
@@ -299,6 +300,21 @@ export function AgentChat({
                 : "md:relative md:flex-1",
             )}
           >
+            {runtime.viewMode === "whiteboard" ? (
+              // The board replaces the transcript, on the same runtime
+              // and the same session: switching view must not change
+              // which conversation you are in.
+              <WhiteboardSurface
+                adapter={adapter}
+                agentId={agentId}
+                sessionId={sessionId}
+                onSessionChange={onSessionChange}
+                disabled={effectiveDisabled}
+                runtime={runtime}
+                viewMode={runtime.viewMode}
+                onViewModeChange={runtime.setViewMode}
+              />
+            ) : (
             <ChatThread
               sessionId={sessionId}
               messages={runtime.messages}
@@ -340,6 +356,7 @@ export function AgentChat({
               agentId={agentId}
               onOpenIntegrations={onOpenIntegrations}
             />
+            )}
           </div>
           {rightStackVisible && (
             <div

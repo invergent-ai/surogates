@@ -86,6 +86,7 @@ function makeAdapter(overrides: Partial<AgentChatAdapter> = {}) {
       throw new Error("404");
     }),
     uploadWorkspaceFile: vi.fn(async () => ({ path: "p", size: 1 })),
+    listSessions: vi.fn(async () => ({ sessions: [], total: 0 })),
     listEvents: vi.fn(async () => ({ events: [], nextCursor: 0 })),
     pollEvents: vi.fn(async () => ({ events: [], hasMore: false })),
     openEventStream: vi.fn(() => ({
@@ -669,6 +670,106 @@ describe("AgentWhiteboard", () => {
       );
     });
     expect(captured).toBe(true);
+  });
+
+  it("resumes the most recent board when the route carries no session", async () => {
+    // Leaving the board and coming back landed on a blank canvas and
+    // silently started a new session, with no route back to what was
+    // drawn.
+    const onSessionChange = vi.fn();
+    const { adapter } = makeAdapter({
+      listSessions: vi.fn(async () => ({
+        sessions: [
+          { id: "chat", status: "active", config: {} },
+          {
+            id: "board", status: "active",
+            config: { surface: "whiteboard" },
+            updatedAt: "2026-06-01T00:00:00Z",
+          },
+        ],
+        total: 2,
+      })),
+    });
+    await render(
+      <AgentWhiteboard
+        adapter={adapter}
+        agentId="a1"
+        sessionId={null}
+        onSessionChange={onSessionChange}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onSessionChange).toHaveBeenCalledWith("board");
+  });
+
+  it("does not resume when the route already names a session", async () => {
+    const onSessionChange = vi.fn();
+    const { adapter } = makeAdapter();
+    await render(
+      <AgentWhiteboard
+        adapter={adapter}
+        agentId="a1"
+        sessionId="s1"
+        onSessionChange={onSessionChange}
+      />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(onSessionChange).not.toHaveBeenCalled();
+  });
+
+  it("offers New board only when the host can navigate to one", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    expect(byLabel(el, "New board")).toBeNull();
+  });
+
+  it("does not resume after New board is pressed", async () => {
+    // Otherwise the resume effect pulls the user straight back into the
+    // board they just chose to leave.
+    const onSessionChange = vi.fn();
+    const onNewBoard = vi.fn();
+    const { adapter } = makeAdapter({
+      listSessions: vi.fn(async () => ({
+        sessions: [{
+          id: "board", status: "active", config: { surface: "whiteboard" },
+        }],
+        total: 1,
+      })),
+    });
+    const el = await render(
+      <AgentWhiteboard
+        adapter={adapter}
+        agentId="a1"
+        sessionId="s1"
+        onSessionChange={onSessionChange}
+        onNewBoard={onNewBoard}
+      />,
+    );
+    await act(async () => {
+      byLabel(el, "New board")?.click();
+    });
+    expect(onNewBoard).toHaveBeenCalled();
+
+    // The host now routes to the session-less board.
+    await act(async () => {
+      root!.render(
+        <AgentWhiteboard
+          adapter={adapter}
+          agentId="a1"
+          sessionId={null}
+          onSessionChange={onSessionChange}
+          onNewBoard={onNewBoard}
+        />,
+      );
+      await Promise.resolve();
+    });
+    expect(onSessionChange).not.toHaveBeenCalled();
   });
 
   it("disables the controls when disabled", async () => {

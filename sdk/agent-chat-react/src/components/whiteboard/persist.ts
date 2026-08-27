@@ -175,3 +175,44 @@ export function shouldReloadCanvas(
   if (previous === null) return false;
   return true;
 }
+
+/**
+ * The most recent resumable board for this agent, or `null`.
+ *
+ * A board lives in a session, and the whiteboard route carries no
+ * session id until one exists — so without this, leaving the board and
+ * coming back lands on a blank canvas and silently starts a new one,
+ * with no route back to what you drew.
+ *
+ * Sorted here rather than trusting the adapter: `listSessions` makes no
+ * ordering promise, and resuming the wrong board is worse than resuming
+ * none.
+ */
+export async function latestBoardSession(
+  adapter: AgentChatAdapter,
+  agentId: string | undefined,
+): Promise<string | null> {
+  try {
+    const page = await adapter.listSessions({ agentId, limit: 50 });
+    const boards = page.sessions
+      .filter(
+        (s) =>
+          (s.config as { surface?: string } | undefined)?.surface ===
+            "whiteboard" &&
+          // A failed session cannot be woken; archived is a deliberate
+          // close, and resuming it would undo that choice.
+          s.status !== "failed" &&
+          s.status !== "archived",
+      )
+      .sort((a, b) =>
+        String(b.updatedAt ?? b.createdAt ?? "").localeCompare(
+          String(a.updatedAt ?? a.createdAt ?? ""),
+        ),
+      );
+    return boards[0]?.id ?? null;
+  } catch {
+    // Resuming is a convenience; failing to list must not stop the user
+    // opening a fresh board.
+    return null;
+  }
+}

@@ -7,6 +7,7 @@ import {
 import {
   CANVAS_DIR,
   CANVAS_PATH,
+  latestBoardSession,
   loadDoc,
   saveDoc,
   shouldReloadCanvas,
@@ -216,5 +217,57 @@ describe("remembering what was consumed", () => {
       drawMessage("m1", [text]),
     ]);
     expect(doc.objects).toHaveLength(1);
+  });
+});
+
+describe("resuming a board", () => {
+  function listing(sessions: unknown[]) {
+    return {
+      listSessions: vi.fn(async () => ({ sessions, total: sessions.length })),
+    } as unknown as AgentChatAdapter;
+  }
+
+  const board = (id: string, over: Record<string, unknown> = {}) => ({
+    id, status: "active", config: { surface: "whiteboard" },
+    updatedAt: "2026-01-01T00:00:00Z", ...over,
+  });
+
+  it("returns the newest board", async () => {
+    const adapter = listing([
+      board("old", { updatedAt: "2026-01-01T00:00:00Z" }),
+      board("new", { updatedAt: "2026-06-01T00:00:00Z" }),
+    ]);
+    expect(await latestBoardSession(adapter, "a1")).toBe("new");
+  });
+
+  it("ignores chat sessions", async () => {
+    const adapter = listing([{ id: "c1", status: "active", config: {} }]);
+    expect(await latestBoardSession(adapter, "a1")).toBeNull();
+  });
+
+  it("ignores a failed board", async () => {
+    // It cannot be woken, so resuming it strands the user.
+    const adapter = listing([board("f1", { status: "failed" })]);
+    expect(await latestBoardSession(adapter, "a1")).toBeNull();
+  });
+
+  it("ignores an archived board", async () => {
+    // Archiving is a deliberate close; resuming would undo it.
+    const adapter = listing([board("a1", { status: "archived" })]);
+    expect(await latestBoardSession(adapter, "a1")).toBeNull();
+  });
+
+  it("returns null when there are none", async () => {
+    expect(await latestBoardSession(listing([]), "a1")).toBeNull();
+  });
+
+  it("survives a failing list", async () => {
+    // Resuming is a convenience; it must not block opening a board.
+    const adapter = {
+      listSessions: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    } as unknown as AgentChatAdapter;
+    await expect(latestBoardSession(adapter, "a1")).resolves.toBeNull();
   });
 });

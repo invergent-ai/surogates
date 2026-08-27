@@ -99,6 +99,7 @@ import type {
   AgentChatPendingAttachment,
   AgentChatResearchSource,
   AgentChatTurnArtifactRef,
+  AgentChatViewMode,
   ChatMessage as ChatMessageType,
   RetryIndicator,
   ToolCallInfo,
@@ -153,7 +154,7 @@ interface ChatThreadProps {
   // in B9 to gate the actual render path. When omitted, the composer
   // hides the toggle and the thread defaults to Simple internally.
   viewMode?: "simple" | "expert";
-  onViewModeChange?: (mode: "simple" | "expert") => void;
+  onViewModeChange?: (mode: AgentChatViewMode) => void;
 
   // When true, the composer's slash menu includes ``/deep-research``.
   // Forwarded as-is to ChatComposer.

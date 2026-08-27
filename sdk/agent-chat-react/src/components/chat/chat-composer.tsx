@@ -17,6 +17,7 @@ import {
   HardDriveIcon,
   IdCardIcon,
   ListTreeIcon,
+  PenLineIcon,
   MessageSquareIcon,
   PaperclipIcon,
   PlusIcon,
@@ -32,6 +33,7 @@ import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
   AgentChatSlashCommand,
+  AgentChatViewMode,
   TokenUsage,
 } from "../../types";
 import { useAgentChatAdapterContext } from "../../adapter-context";
@@ -85,7 +87,7 @@ type SlashCommand = AgentChatSlashCommand;
 const TOOLS_ITEM_CLASS =
   "gap-3 rounded-md px-3 py-2 pointer-coarse:min-h-11 pointer-coarse:text-[15px]";
 
-// The two halves of the view-mode switch, in the order they are shown.
+// The view-mode switch, in the order the segments are shown.
 const VIEW_MODE_SEGMENTS = [
   {
     mode: "simple" as const,
@@ -98,6 +100,12 @@ const VIEW_MODE_SEGMENTS = [
     label: "Advanced",
     icon: ListTreeIcon,
     tooltip: "Advanced — every step the agent took",
+  },
+  {
+    mode: "whiteboard" as const,
+    label: "Whiteboard",
+    icon: PenLineIcon,
+    tooltip: "Whiteboard — sketch with it on a shared canvas",
   },
 ];
 
@@ -181,8 +189,8 @@ interface ChatComposerProps {
   // ── Simple/Expert view-mode toggle ───────────────────────────────
   // Optional. When ``onViewModeChange`` is provided, a two-segment
   // Simple/Expert toggle is rendered in the tools row.
-  viewMode?: "simple" | "expert";
-  onViewModeChange?: (mode: "simple" | "expert") => void;
+  viewMode?: AgentChatViewMode;
+  onViewModeChange?: (mode: AgentChatViewMode) => void;
 
   // ── Per-agent capabilities ───────────────────────────────────────
   // When true, the composer surfaces the ``/deep-research`` slash

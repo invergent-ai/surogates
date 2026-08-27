@@ -1,7 +1,11 @@
 export { AgentChat } from "./agent-chat";
-export { AgentWhiteboard } from "./components/whiteboard/agent-whiteboard";
+export {
+  AgentWhiteboard,
+  WhiteboardSurface,
+} from "./components/whiteboard/agent-whiteboard";
 export type {
   AgentWhiteboardProps,
+  WhiteboardSurfaceProps,
   WbTool,
 } from "./components/whiteboard/agent-whiteboard";
 export type { WbDoc, WbObject } from "./components/whiteboard/doc";
