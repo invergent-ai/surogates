@@ -296,6 +296,25 @@ class ArtifactCompletionMixin:
                 ", ".join(f"{r.ref}({r.reason})" for r in manifest.rejected),
             )
 
+        # One question the workspace cannot answer: which of several real
+        # files the user actually asked for. Only asked when more than one
+        # survives -- the common single-file turn never makes the call.
+        delivered = manifest.delivered
+        try:
+            delivered = await asyncio.wait_for(
+                self._turn_summarizer.pick_deliverables(
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    artifacts=manifest.delivered,
+                ),
+                timeout=35.0,
+            )
+        except Exception:
+            # Fail open: an extra entry on the card beats a missing one.
+            logger.debug(
+                "deliverable pick failed for %s", turn_id, exc_info=True,
+            )
+
         try:
             # Outer backstop sits above the summarizer's own timeout.
             result = await asyncio.wait_for(
@@ -303,7 +322,7 @@ class ArtifactCompletionMixin:
                     turn_id=turn_id,
                     user_message=user_message,
                     iteration_summaries=iteration_summaries,
-                    artifacts=manifest.delivered,
+                    artifacts=delivered,
                 ),
                 timeout=35.0,
             )

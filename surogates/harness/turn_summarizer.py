@@ -91,6 +91,19 @@ _ITERATION_PROMPT = (
     'Return ONLY a JSON object: {"caption": "<the one line>"}.'
 )
 
+_PICK_PROMPT = (
+    "The agent produced several files for one request. Name the ones the "
+    "user actually asked to receive -- usually one.\n"
+    "Work backwards from the request: a presentation means the .pptx, a "
+    "report means the .pdf/.docx/.md, a dataset means the .csv/.xlsx. "
+    "Leave out anything made along the way: source files unless code was "
+    "what was asked for, images rendered only to be embedded in a "
+    "document, scratch and debug output.\n"
+    "Reply with one path per line, copied exactly, and nothing else. If "
+    "every file looks like part of the answer, list them all."
+)
+
+
 _TURN_PROMPT = (
     "You are reviewing a completed agent turn. Reply with 1-3 short "
     "sentences of plain prose, no markdown, summarizing what the agent "
@@ -397,6 +410,80 @@ class TurnSummarizer:
             )
             return None
         return text
+
+    async def pick_deliverables(
+        self,
+        *,
+        turn_id: str,
+        user_message: str,
+        artifacts: list[TurnArtifact],
+    ) -> list[TurnArtifact]:
+        """Narrow several surviving files to the ones actually asked for.
+
+        The deterministic filters answer "is this a real file this turn
+        produced". They cannot answer "is this what the user wanted" --
+        that is a question about the request, not the workspace, and it
+        is the one rule from the retired curation prompt that does not
+        reduce to bookkeeping.
+
+        So it is asked, but only when it is actually a question: with one
+        surviving file there is nothing to choose between, and the common
+        turn skips the call entirely.
+
+        Fails open. A timeout, a refusal, or an unrecognisable reply
+        returns everything -- showing an extra file costs a cluttered
+        card, dropping a real one costs the user their work.
+        """
+        files = [a for a in artifacts if a.kind == "file"]
+        if len(files) < 2:
+            return artifacts
+
+        client = self._summary_client or self._base_client
+        model = self._summary_model or self._base_model
+        listing = "\n".join(a.ref for a in files)
+
+        content = await self._chat_completion(
+            client,
+            {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _PICK_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Request: {user_message[:1000]}\n\n"
+                            f"Files:\n{listing}"
+                        ),
+                    },
+                ],
+                "max_tokens": 200,
+                "temperature": 0,
+                "stream": False,
+            },
+            label=f"pick {turn_id}",
+            timeout=_TURN_SUMMARY_TIMEOUT_SECONDS,
+        )
+        if not content:
+            return artifacts
+
+        # Intersect with what we offered rather than trusting the reply:
+        # a model that invents a path cannot add one to the card, and a
+        # reply that matches nothing falls through to "keep everything".
+        offered = {a.ref: a for a in files}
+        chosen = [
+            offered[line]
+            for line in (ln.strip().strip("-* `") for ln in content.splitlines())
+            if line in offered
+        ]
+        if not chosen:
+            logger.debug(
+                "deliverable pick for %s matched no candidate: %r",
+                turn_id, content[:200],
+            )
+            return artifacts
+
+        keep = {a.ref for a in chosen}
+        return [a for a in artifacts if a.kind != "file" or a.ref in keep]
 
     async def summarize_turn(
         self,

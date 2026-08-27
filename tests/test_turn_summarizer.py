@@ -798,3 +798,97 @@ async def test_summarize_turn_falls_back_to_base_without_a_summary_model() -> No
 
     assert result is not None and result.recap == "Did the thing."
     assert base.chat.completions.calls[0]["model"] == "base-model"
+
+
+class TestPickDeliverables:
+    """The one curation rule that is not bookkeeping.
+
+    "Is this a real file this turn produced" is answerable from the
+    workspace. "Is this what the user wanted" is a question about the
+    request, so it is asked -- but only when it is actually a question.
+    """
+
+    @staticmethod
+    def _files(*refs):
+        return [TurnArtifact("file", r, r) for r in refs]
+
+    @pytest.mark.asyncio
+    async def test_single_file_skips_the_call_entirely(self):
+        """The common turn must not pay for a choice with one option."""
+        client = _StubClient("report.pdf")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="make a report",
+            artifacts=self._files("report.pdf"),
+        )
+        assert [a.ref for a in out] == ["report.pdf"]
+        assert client.chat.completions.calls == []
+
+    @pytest.mark.asyncio
+    async def test_narrows_several_files_to_the_one_asked_for(self):
+        client = _StubClient("slides.pptx")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="make me a deck",
+            artifacts=self._files("slides.pptx", "chart1.png", "data.csv"),
+        )
+        assert [a.ref for a in out] == ["slides.pptx"]
+        assert client.chat.completions.calls[0]["model"] == "cheap"
+
+    @pytest.mark.asyncio
+    async def test_artifacts_are_never_dropped_by_the_pick(self):
+        """Only files are being chosen between; artifacts pass through."""
+        client = _StubClient("a.md")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up",
+            artifacts=[*self._files("a.md", "b.md"),
+                       TurnArtifact("artifact", "chart", "art-1")],
+        )
+        assert [a.ref for a in out] == ["a.md", "art-1"]
+
+    @pytest.mark.asyncio
+    async def test_invented_paths_cannot_reach_the_card(self):
+        """The reply is intersected with what was offered, not trusted."""
+        client = _StubClient("totally-made-up.pdf")
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=client, summary_model="cheap",
+        )
+        offered = self._files("a.md", "b.md")
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up", artifacts=offered,
+        )
+        # Nothing matched -> keep everything, invent nothing.
+        assert [a.ref for a in out] == ["a.md", "b.md"]
+
+    @pytest.mark.asyncio
+    async def test_failure_keeps_every_file(self):
+        """Fail open: an extra card entry beats losing the user's work."""
+        class _Boom:
+            class chat:
+                class completions:
+                    calls: list = []
+
+                    @staticmethod
+                    async def create(**_kw):
+                        raise RuntimeError("provider down")
+
+        s = TurnSummarizer(
+            base_client=_StubClient("x"), base_model="base",
+            summary_client=_Boom(), summary_model="cheap",
+        )
+        out = await s.pick_deliverables(
+            turn_id="t", user_message="write it up",
+            artifacts=self._files("a.md", "b.md"),
+        )
+        assert [a.ref for a in out] == ["a.md", "b.md"]
