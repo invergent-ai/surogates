@@ -68,6 +68,10 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "todo": ToolLocation.HARNESS,
     "process": ToolLocation.HARNESS,
     "create_artifact": ToolLocation.HARNESS,
+    # Whiteboard canvas — validation only, but it must not route to the
+    # sandbox: an unlisted tool falls back there and dies as
+    # "Unknown tool".
+    "whiteboard_draw": ToolLocation.HARNESS,
     "cron_create": ToolLocation.HARNESS,
     "cron_delete": ToolLocation.HARNESS,
     "cron_list": ToolLocation.HARNESS,

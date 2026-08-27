@@ -73,6 +73,7 @@ class ToolRuntime:
             user_reports,
             vision,
             web_search,
+            whiteboard,
         )
         from surogates.board import tools as board_tools
         from surogates.tasks import tools as task_tools
@@ -109,6 +110,7 @@ class ToolRuntime:
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)
             channel_messages,  # fetch_channel_messages (read recent channel messages)
+            whiteboard,  # whiteboard_draw (canvas chat surface)
         ]
 
         for mod in modules:
