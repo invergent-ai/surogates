@@ -1,20 +1,26 @@
-"""Hidden advisor helpers for AgentHarness.
+"""Advisor helpers for AgentHarness.
 
-The advisor is a stronger model (the platform's Pro tier) consulted
-before hard executor work so its strategy can shape the cheaper
-executor's plan. Three invariants keep it correct:
+The advisor is a stronger model (the platform's Pro tier) the executor
+consults mid-task through the ``advisor`` tool. Timing is **model
+driven**: the executor calls the tool when it is about to commit to an
+approach, when it is stuck, or before declaring the task done — the
+harness never decides on its behalf.
 
-* Guidance is **buffered**, never appended to the live ``messages`` list
-  from the background task — the loop flushes the buffer at iteration
-  boundaries, so guidance can never split an assistant ``tool_calls``
-  message from its tool results.
-* Consults happen only on an **LLM classifier** verdict. The regex
-  fallback both over-fires on English keywords and never fires on
-  non-English text, so it is not a good enough signal to spend a
-  pro-tier call on.
-* Injected guidance is tagged (``_advisor`` + a recognizable prefix) so
-  later wakes never mistake it for the human's message and ask the
-  advisor to advise on its own output.
+An earlier design classified every user turn with a cheap LLM call and
+blocked the first request on the verdict. Measured over three months of
+production traffic, that gate ran on 1,983 interactive turns, fired the
+advisor on 113, and delivered guidance early enough to shape the first
+iteration 14 times — while adding seconds of latency to every turn in
+between. A rule-based gate is also the opposite of the documented
+pattern, where the executor calls the advisor as a tool.
+
+Two invariants remain:
+
+* Guidance returns to the executor as a **tool result**, so it can never
+  split an assistant ``tool_calls`` message from its tool results.
+* Durable ``ADVISOR_RESULT`` events replay into later wakes tagged
+  (``_advisor`` + a recognizable prefix) so a subsequent turn never
+  mistakes past guidance for the human's message.
 """
 
 from __future__ import annotations
@@ -23,11 +29,6 @@ import asyncio
 import logging
 from typing import Any
 
-from surogates.harness.auxiliary_client import AuxiliaryLLM
-from surogates.harness.expert_routing import (
-    classify_hard_task_async,
-    is_advisor_guidance_message,
-)
 from surogates.harness.loop_vision import _collapse_text_parts, _extract_response_text
 from surogates.session.events import EventType
 
@@ -40,102 +41,10 @@ _ADVISOR_TASK_CHARS = 4000
 
 
 class AdvisorMixin:
-    async def _maybe_consult_required_advisor(
-        self,
-        session: Session,
-        messages: list[dict],
-        all_events: list[Event],
-        system_prompt: str = "",
-        consulted_categories: set[str] | None = None,
-    ) -> bool:
-        """Ask the hidden advisor for guidance before hard executor work.
-
-        Returns True when guidance was produced and buffered. The caller
-        (the iteration loop) flushes ``self._pending_advisor_messages``
-        at the next safe boundary.
-        """
-        consulted_categories = consulted_categories if consulted_categories is not None else set()
-        last_user = self._last_user_message(messages)
-        if last_user is None:
-            return False
-        if not self._advisor_available():
-            return False
-
-        user_content = self._message_text(last_user)
-        # Prefer the session's summary client: it is resolved from the
-        # agent's runtime config, so it points at a billed per-agent
-        # proxy route and runs on the cheap summary model. The
-        # settings-level fallback inside the classifier depends on
-        # ``llm.base_url`` serving chat completions, which it does not
-        # when that URL is the proxy root.
-        classifier_aux: AuxiliaryLLM | None = None
-        if self._summary_client is not None and self._summary_model:
-            classifier_aux = AuxiliaryLLM(
-                client=self._summary_client, model=self._summary_model,
-            )
-        classification = await classify_hard_task_async(
-            messages,
-            tenant=self._tenant,
-            aux=classifier_aux,
-        )
-        if not classification.required or classification.category is None:
-            return False
-        if classification.source != "llm":
-            # Regex verdicts are too noisy to spend a pro-tier consult
-            # on — and their false negatives (non-English) mean the
-            # advisor would fire on keyword luck, not task difficulty.
-            logger.debug(
-                "Session %s: skipping advisor consult on non-LLM "
-                "classifier verdict (%s/%s)",
-                session.id, classification.source, classification.category,
-            )
-            return False
-
-        if (
-            classification.category in consulted_categories
-            or classification.category in self._advisor_categories_after_latest_user(
-                all_events,
-            )
-        ):
-            return False
-
-        result = await self._consult_advisor_for_category(
-            session=session,
-            messages=messages,
-            system_prompt=system_prompt,
-            category=classification.category,
-            task=user_content,
-            consulted_categories=consulted_categories,
-        )
-        if not result:
-            return False
-
-        # Buffer — the loop flushes at an iteration boundary. Appending
-        # here (from a background task) could land between an assistant
-        # tool_calls message and its tool results, an ordering strict
-        # providers reject.
-        self._pending_advisor_messages.append({
-            "role": "user",
-            "_advisor": True,
-            "content": self._format_advisor_context(
-                category=classification.category,
-                content=result,
-            ),
-        })
-        return True
-
     def _advisor_available(self) -> bool:
         return self._advisor_client is not None and bool(self._advisor_model)
 
-    def _flush_pending_advisor_messages(self, messages: list[dict]) -> bool:
-        """Move buffered guidance into ``messages`` at a safe boundary."""
-        if not self._pending_advisor_messages:
-            return False
-        messages.extend(self._pending_advisor_messages)
-        self._pending_advisor_messages = []
-        return True
-
-    async def _consult_advisor_for_category(
+    async def consult_advisor(
         self,
         *,
         session: Session,
@@ -143,16 +52,26 @@ class AdvisorMixin:
         system_prompt: str,
         category: str,
         task: str,
-        consulted_categories: set[str],
     ) -> str | None:
+        """Run one advisor consult and return its guidance.
+
+        Called from the ``advisor`` tool handler, so the executor decides
+        the timing. Returns ``None`` when the advisor is not configured
+        or the per-turn budget is spent; the handler turns that into a
+        result the executor can act on.
+
+        The budget counts *calls*, not distinct categories. The old
+        classifier path deduped by category to stop itself re-firing;
+        with the executor choosing, the documented pattern is two to
+        three calls per task (before committing to an approach, and
+        before declaring done), which a category dedup would block.
+        """
         if not self._advisor_available():
             return None
-        if len(consulted_categories) >= self._advisor_max_calls_per_turn:
-            return None
-        if category in consulted_categories:
+        if self._advisor_calls_this_turn >= self._advisor_max_calls_per_turn:
             return None
 
-        consulted_categories.add(category)
+        self._advisor_calls_this_turn += 1
         await self._emit_advisor_request(session, category)
 
         try:
@@ -197,8 +116,8 @@ class AdvisorMixin:
             return content
         except asyncio.CancelledError:
             # Drain-timeout cancellation. Record a terminal event so the
-            # cross-wake dedup sees this category as attempted — the
-            # upstream call likely completed (and billed) anyway.
+            # consult is visible in the timeline — the upstream call
+            # likely completed (and billed) anyway.
             try:
                 await asyncio.shield(self._store.emit_event(
                     session.id,
@@ -303,45 +222,6 @@ class AdvisorMixin:
         if not isinstance(content, str):
             content = str(content)
         return content[:_ADVISOR_TASK_CHARS]
-
-    @staticmethod
-    def _last_user_message(messages: list[dict]) -> dict | None:
-        for msg in reversed(messages):
-            if msg.get("role") != "user":
-                continue
-            # Advisor guidance rides the user role for provider
-            # compatibility but is harness output — treating it as "the
-            # user's message" would make the advisor advise on itself.
-            if is_advisor_guidance_message(msg):
-                continue
-            return msg
-        return None
-
-    @staticmethod
-    def _advisor_categories_after_latest_user(events: list[Event]) -> set[str]:
-        latest_user_event_id = 0
-        for event in events:
-            if event.type != EventType.USER_MESSAGE.value or event.id is None:
-                continue
-            # Synthetic nudges (mission kickoffs, deep-research nudges)
-            # are USER_MESSAGE events too; they are not a new human turn
-            # and must not reset the advisor dedup window — the replay
-            # builder makes the same distinction.
-            if (event.data or {}).get("synthetic"):
-                continue
-            latest_user_event_id = max(latest_user_event_id, event.id)
-        categories: set[str] = set()
-        for event in events:
-            if event.id is None or event.id <= latest_user_event_id:
-                continue
-            if event.type in {
-                EventType.ADVISOR_RESULT.value,
-                EventType.ADVISOR_FAILURE.value,
-            }:
-                category = event.data.get("category")
-                if category:
-                    categories.add(str(category))
-        return categories
 
     @staticmethod
     def _build_advisor_context(messages: list[dict]) -> str:

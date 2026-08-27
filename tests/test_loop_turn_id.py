@@ -361,77 +361,16 @@ async def test_request_final_summary_stamps_turn_id(
 
 
 @pytest.mark.asyncio
-async def test_advisor_preflight_is_bounded(
+async def test_advisor_never_delays_the_first_llm_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pre-loop advisor wait is bounded, never unbounded.
+    """A configured advisor must not sit between the user and the first token.
 
-    The loop blocks briefly before iteration 1 so guidance can shape the
-    executor's plan — but a hung classifier/consult must not hang the
-    turn. With the preflight timeout patched tiny and an advisor that
-    never resolves, the loop must proceed and finish while the advisor
-    task is still pending.
-    """
-    store = AsyncMock()
-    store.emit_event = AsyncMock(side_effect=range(100, 200))
-    store.get_events = AsyncMock(return_value=[])
-
-    harness = _make_loop_harness(session_store=store)
-    # Enable the preflight wait path.
-    harness._advisor_client = AsyncMock()
-    harness._advisor_model = "advisor-model"
-    monkeypatch.setattr(
-        "surogates.harness.loop._ADVISOR_PREFLIGHT_TIMEOUT_SECONDS", 0.05,
-    )
-
-    advisor_started = asyncio.Event()
-    advisor_can_finish = asyncio.Event()
-
-    async def hanging_advisor(*args: Any, **kwargs: Any) -> bool:
-        advisor_started.set()
-        await advisor_can_finish.wait()
-        harness._pending_advisor_messages.append({
-            "role": "user",
-            "_advisor": True,
-            "content": "[Advisor guidance: coding]\nbuffered-by-test",
-        })
-        return True
-
-    harness._maybe_consult_required_advisor = hanging_advisor
-
-    await asyncio.wait_for(
-        _drive_run_loop(
-            harness=harness,
-            responses=[
-                (
-                    {"role": "assistant", "content": "Done.", "tool_calls": None},
-                    {"model": "test-model", "finish_reason": "stop",
-                     "input_tokens": 1, "output_tokens": 2},
-                ),
-            ],
-            monkeypatch=monkeypatch,
-        ),
-        timeout=5.0,
-    )
-
-    await asyncio.sleep(0)
-    assert advisor_started.is_set(), \
-        "advisor coroutine was never scheduled or never started"
-    # The loop finished with the consult still pending — bounded wait.
-    pending = [t for t in harness._background_tasks if not t.done()]
-    assert pending, "expected the hung advisor task to still be pending"
-    advisor_can_finish.set()
-    await asyncio.gather(*pending, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_fast_advisor_guidance_reaches_the_first_llm_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Guidance produced within the preflight window shapes iteration 1.
-
-    This is the advisor's whole contract — advice that only ever landed
-    after the first request would steer a plan already in motion.
+    The harness used to block the first request on a classifier verdict
+    for up to 20s. Measured in production, that gate ran on 1,983
+    interactive turns and shaped the first iteration on 14 of them. The
+    advisor is now a tool the executor calls, so an advisor that never
+    responds must cost the first request exactly nothing.
     """
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 200))
@@ -441,22 +380,18 @@ async def test_fast_advisor_guidance_reaches_the_first_llm_request(
     harness._advisor_client = AsyncMock()
     harness._advisor_model = "advisor-model"
 
-    async def fast_advisor(*args: Any, **kwargs: Any) -> bool:
-        harness._pending_advisor_messages.append({
-            "role": "user",
-            "_advisor": True,
-            "content": "[Advisor guidance: coding]\nuse-a-heap",
-        })
-        return True
+    advisor_called = asyncio.Event()
 
-    harness._maybe_consult_required_advisor = fast_advisor
+    async def hanging_advisor(*_a: Any, **_kw: Any) -> None:
+        advisor_called.set()
+        await asyncio.Event().wait()  # never returns
 
-    captured_first_request: list[list[dict]] = []
+    harness._advisor_client.chat.completions.create = hanging_advisor
+
+    first_request_at: list[float] = []
 
     async def capturing_call_llm(**kwargs: Any) -> tuple[dict, dict]:
-        if not captured_first_request:
-            create_kwargs = kwargs.get("create_kwargs") or {}
-            captured_first_request.append(list(create_kwargs.get("messages") or []))
+        first_request_at.append(asyncio.get_running_loop().time())
         return (
             {"role": "assistant", "content": "Done.", "tool_calls": None},
             {"model": "test-model", "finish_reason": "stop",
@@ -469,6 +404,7 @@ async def test_fast_advisor_guidance_reaches_the_first_llm_request(
 
     session = _make_session()
     lease = SimpleNamespace(lease_token=uuid4())
+    started = asyncio.get_running_loop().time()
     await asyncio.wait_for(
         harness._run_loop(
             session,
@@ -480,13 +416,9 @@ async def test_fast_advisor_guidance_reaches_the_first_llm_request(
         timeout=5.0,
     )
 
-    assert captured_first_request, "no LLM request captured"
-    first = captured_first_request[0]
-    guidance = [
-        m for m in first
-        if isinstance(m.get("content"), str)
-        and m["content"].startswith("[Advisor guidance:")
-    ]
-    assert guidance, "guidance did not reach the first LLM request"
-    # The internal marker never leaks to the provider payload.
-    assert all("_advisor" not in m for m in first)
+    assert first_request_at, "no LLM request captured"
+    # Generous bound: the point is that no advisor round trip is awaited
+    # here, not that the harness is fast.
+    assert first_request_at[0] - started < 1.0
+    # Nothing consulted the advisor on the harness's own initiative.
+    assert not advisor_called.is_set()

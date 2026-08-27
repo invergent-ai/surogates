@@ -239,6 +239,10 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/memory"))
         if "session_search" in self._available_tools:
             parts.append(self._prompts.get("guidance/session_search"))
+        # Advisor timing is model-driven, so the only lever on when it
+        # fires is this guidance. Without it the executor under-calls.
+        if "advisor" in self._available_tools:
+            parts.append(self._prompts.get("guidance/advisor"))
         # Skills guidance loads whenever the agent can either view or manage
         # skills. The body covers both invocation (skill_view) and maintenance
         # (skill_manage); the few maintenance sentences are cheap enough that
