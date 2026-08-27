@@ -10,13 +10,11 @@ transcript.
 consult it instead — a specialist beats a generalist on its own ground. The
 advisor is for when none of them fits.
 
-Consult BEFORE substantive work — before you write, before you commit to an
-interpretation, before you build on an assumption. A plan reviewed after it is
-written is a plan you will defend rather than change.
-
-If the task needs orientation first (finding files, fetching a source, seeing
-what is there), do that first, then consult. Orientation is not substantive
-work; writing, editing, and declaring an answer are.
+Consult the advisor BEFORE substantive work — before writing, before
+committing to an interpretation, before building on an assumption. If the
+task needs orientation first (finding files, fetching a source, seeing what is
+there), do that first, then consult. Orientation is not substantive work;
+writing, editing, and declaring an answer are.
 
 Also consult it:
 

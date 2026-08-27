@@ -817,38 +817,7 @@ class PromptBuilder:
                     "\n" + self._prompts.get("guidance/artifact_in_channel")
                 )
 
-        # Last line of the prompt, for the same reason the artifact hint
-        # sits here: the mid-prompt guidance fragment competes with
-        # everything after it, and in practice the executor read it and
-        # still committed to an approach without consulting. A directive
-        # the model sees immediately before generating carries further
-        # than six kilobytes in the middle.
-        footer = self._expert_footer()
-        if footer:
-            parts.append("\n" + footer)
-
         return "\n".join(parts)
-
-    def _expert_footer(self) -> str:
-        """One-line consult reminder, placed last in the prompt."""
-        if "consult_expert" not in self._available_tools:
-            return ""
-        from surogates.tools.builtin.expert import get_active_experts
-        from surogates.tools.loader import SkillDef
-
-        if not get_active_experts(
-            [s for s in self.skills if isinstance(s, SkillDef)]
-        ):
-            return ""
-        return (
-            "## Before you commit\n"
-            "About to choose between approaches, start writing, or say a "
-            "task is done? Consult an expert FIRST — `consult_expert`. "
-            "Prefer a domain expert from the list above; use `advisor` "
-            "when none of them covers the subject. Consult before you "
-            "write the answer, not after: advice on a decision you have "
-            "already made is worth little."
-        )
 
     def _kb_section(self) -> str:
         """Render attached knowledge bases as a system prompt block.
