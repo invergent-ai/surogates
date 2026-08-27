@@ -64,3 +64,17 @@ def test_whiteboard_metadata_extracts_the_payload():
 def test_whiteboard_metadata_returns_none_when_absent():
     assert whiteboard_metadata({"view_context": {}}) is None
     assert whiteboard_metadata(None) is None
+
+
+def test_the_runtime_capability_defaults_to_off():
+    """The consuming half of the ops runtime-config contract.
+
+    A payload predating this field describes an agent that never had a
+    board, so the default must be off. Asserted here rather than in ops:
+    ops resolves surogates from its own pinned wheel, so the same check
+    there would test whichever build happens to be installed.
+    """
+    from surogates.runtime.context import AgentRuntimeContext
+
+    field = AgentRuntimeContext.__dataclass_fields__["whiteboard_enabled"]
+    assert field.default is False
