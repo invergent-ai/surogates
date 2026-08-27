@@ -732,10 +732,17 @@ async def test_find_orphaned_sessions(session_store, session_factory):
 
     # Orphan: active, no lease, no events inside the stale window.  We
     # backdate updated_at so the threshold test can use a small value.
+    #
+    # A day rather than the 120s the other rows use: the unscoped assertion
+    # at the end of this test competes for find_orphaned_sessions' oldest-
+    # first LIMIT with every active session left behind by earlier tests in
+    # this session-scoped database, and the integration suite as a whole
+    # creates well over that limit.  Backdating past the leftovers keeps the
+    # assertion about this test's own rows.
     orphan = await session_store.create_session(
         user_id=user_id, org_id=org_id, agent_id="agent-a",
     )
-    await _backdate(session_factory, orphan.id, seconds=120)
+    await _backdate(session_factory, orphan.id, seconds=86_400)
 
     # Not an orphan: has a live lease (healthy worker).
     healthy = await session_store.create_session(
@@ -771,7 +778,7 @@ async def test_find_orphaned_sessions(session_store, session_factory):
     other_orphan = await session_store.create_session(
         user_id=user_id, org_id=org_id, agent_id="agent-b",
     )
-    await _backdate(session_factory, other_orphan.id, seconds=120)
+    await _backdate(session_factory, other_orphan.id, seconds=86_400)
     found_a = await session_store.find_orphaned_sessions(
         stale_seconds=60, agent_id="agent-a",
     )
