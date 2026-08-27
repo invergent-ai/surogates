@@ -17,6 +17,7 @@ import type {
   AgentChatViewMode,
 } from "./types";
 import type { ChatComposerError } from "./components/chat/chat-composer";
+import { isBoardSession } from "./components/whiteboard/persist";
 
 export interface AgentChatProps {
   adapter: AgentChatAdapter;
@@ -66,11 +67,9 @@ export interface AgentChatProps {
   /**
    * Whether this agent may draw on a canvas.
    *
-   * Gates the composer's Whiteboard segment. Off by default and off for
-   * most agents, so without the gate the board is a dead end: the user
-   * draws, and the agent answers in text because the harness hands out
-   * `whiteboard_draw` on this same capability. Like `deepResearchEnabled`,
-   * the host owns the gate.
+   * One half of the gate on the composer's Whiteboard segment; the other
+   * is the session having been created as a board. Like
+   * `deepResearchEnabled`, the host owns this half.
    */
   whiteboardEnabled?: boolean;
   /**
@@ -169,13 +168,18 @@ export function AgentChat({
     setShowWorkspace(runtime.viewMode === "expert");
   }, [runtime.viewMode]);
   const readOnly = readOnlyReasonForSession(runtime.session);
-  // An operator can switch the board off while a viewer's stored
-  // preference still says "whiteboard". Fall back to the transcript
-  // rather than rendering a board the agent cannot draw on -- the
-  // composer segment is gone by then, so it would be a room with the
-  // door bricked up.
+  // The canvas view is offered only on a session that was created as a
+  // board: the harness loads ``whiteboard_draw`` on the same stamp, so
+  // anywhere else the segment would open a canvas the agent cannot draw
+  // on. The agent capability is checked too, so revoking the board takes
+  // it away from boards that already exist.
+  const boardAvailable = whiteboardEnabled && isBoardSession(runtime.session);
+
+  // A stored preference outlives both of those, and by then the segment
+  // is gone -- the board would be a room with the door bricked up, so
+  // fall back to the transcript.
   const viewMode: AgentChatViewMode =
-    runtime.viewMode === "whiteboard" && !whiteboardEnabled
+    runtime.viewMode === "whiteboard" && !boardAvailable
       ? "simple"
       : runtime.viewMode;
 
@@ -369,7 +373,7 @@ export function AgentChat({
               deepResearchEnabled={deepResearchEnabled}
               researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
-              whiteboardEnabled={whiteboardEnabled}
+              whiteboardEnabled={boardAvailable}
               loopsEnabled={loopsEnabled}
               missionsEnabled={missionsEnabled}
               goalsEnabled={goalsEnabled}

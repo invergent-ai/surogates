@@ -33,6 +33,7 @@ from surogates.runtime.governance import (
     build_governance_gate,
 )
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
+from surogates.whiteboard.session import is_whiteboard_session
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -305,18 +306,22 @@ def _filter_effective_tools(
     else:
         result |= BOARD_SELF_TOOLS
 
-    # whiteboard_draw follows the agent's board capability, not the
-    # session: the canvas is a view mode the user flips into on any
-    # session, so the tool has to be there before the first stroke is
-    # ever sent. Same force-add idiom as the board self-tools above --
-    # an agent whose operator switched the board on can always draw,
-    # whatever a restrictive AgentDef allowlist says.
+    # whiteboard_draw is the canvas surface's write path: meaningless on
+    # a message-thread session, and mandatory on a whiteboard one. Same
+    # force-add idiom as the board self-tools above -- a whiteboard
+    # session that cannot draw is not a whiteboard, whatever a
+    # restrictive AgentDef allowlist says.
+    #
+    # The agent capability is checked as well as the stamp: the surface
+    # is fixed at creation, so an operator revoking the board has to be
+    # able to take it away from boards that already exist.
     #
     # This is the PROMPT surface; the model-visible SCHEMAS are gated in
     # ``loop.py`` off the same ``available_tools`` set this produces, so
     # the two cannot drift. What varies per *turn* is only the speed --
-    # see ``_whiteboard_sketch_filter``.
-    if whiteboard_enabled:
+    # see ``_whiteboard_sketch_filter``: a board session also has a
+    # transcript view the user can type an ordinary message into.
+    if whiteboard_enabled and is_whiteboard_session(session):
         result |= WHITEBOARD_TOOL_NAMES
     else:
         result -= WHITEBOARD_TOOL_NAMES

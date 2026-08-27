@@ -1,14 +1,15 @@
-"""whiteboard_draw is visible iff the agent has the board capability.
+"""whiteboard_draw is visible iff this is a board session on an agent
+that has the board capability.
 
 Both surfaces are asserted here on purpose: the prompt surface
 (worker._filter_effective_tools) and the schema surface
 (harness.tool_schemas.drop_unusable_tools) have to agree, and they live
 in different modules with no shared call site.
 
-Keyed on the agent capability rather than the session: the board is a
-view mode the user flips into on any session, so the tool has to be
-there before the first stroke is sent. What varies per *turn* is only
-the speed -- see ``test_whiteboard_turn_mode``.
+Two conditions, not one. The stamp is fixed at creation, so the agent
+capability has to be checked as well or revoking the board would leave
+every board that already exists still drawing. What varies per *turn* is
+only the speed -- see ``test_whiteboard_turn_mode``.
 """
 from types import SimpleNamespace
 
@@ -35,11 +36,16 @@ def _names(schemas):
     return {s["function"]["name"] for s in schemas}
 
 
-def _prompt_surface(*, whiteboard_enabled, tools=("whiteboard_draw", "memory")):
+BOARD = {"surface": "whiteboard"}
+
+
+def _prompt_surface(
+    *, whiteboard_enabled, config=None, tools=("whiteboard_draw", "memory"),
+):
     return _filter_effective_tools(
         tools=set(tools),
         tenant=_tenant(),
-        session=_session(),
+        session=_session(config=BOARD if config is None else config),
         use_api_for_harness_tools=True,
         whiteboard_enabled=whiteboard_enabled,
     )
@@ -47,32 +53,25 @@ def _prompt_surface(*, whiteboard_enabled, tools=("whiteboard_draw", "memory")):
 
 # --- prompt surface ---------------------------------------------------
 
-def test_prompt_surface_strips_the_tool_when_the_board_is_off():
-    result = _prompt_surface(whiteboard_enabled=False)
+def test_prompt_surface_strips_the_tool_from_a_plain_session():
+    result = _prompt_surface(whiteboard_enabled=True, config={})
     assert "whiteboard_draw" not in result
     assert "memory" in result
 
 
-def test_prompt_surface_force_adds_the_tool_when_the_board_is_on():
+def test_prompt_surface_force_adds_the_tool_on_a_board_session():
     # Force-added even under a restrictive AgentDef allowlist, matching
-    # the worker_* / board self-tool idiom: an agent whose operator
-    # switched the board on can always draw.
+    # the worker_* / board self-tool idiom: a whiteboard session that
+    # cannot draw is not a whiteboard.
     result = _prompt_surface(whiteboard_enabled=True, tools=("memory",))
     assert "whiteboard_draw" in result
 
 
-def test_the_capability_does_not_depend_on_the_session_config():
-    # The regression this replaces: gating on ``config.surface`` meant
-    # flipping to the board view on an ordinary chat session produced a
-    # canvas the agent could not draw on.
-    result = _filter_effective_tools(
-        tools={"memory"},
-        tenant=_tenant(),
-        session=_session(config={}),
-        use_api_for_harness_tools=True,
-        whiteboard_enabled=True,
-    )
-    assert "whiteboard_draw" in result
+def test_a_board_session_loses_the_tool_when_the_capability_is_revoked():
+    # The stamp is fixed at creation, so this is the only way an operator
+    # can take the board away from a session that already has one.
+    result = _prompt_surface(whiteboard_enabled=False)
+    assert "whiteboard_draw" not in result
 
 
 # --- schema surface ---------------------------------------------------

@@ -2,10 +2,36 @@
 from types import SimpleNamespace
 
 from surogates.whiteboard.session import (
+    is_whiteboard_session,
     is_whiteboard_turn,
     turn_mode,
     whiteboard_metadata,
 )
+
+
+def _session(config=None):
+    return SimpleNamespace(config=config or {}, channel="web")
+
+
+def test_plain_session_is_not_a_whiteboard():
+    assert is_whiteboard_session(_session()) is False
+
+
+def test_surface_stamp_marks_a_whiteboard():
+    assert is_whiteboard_session(_session({"surface": "whiteboard"})) is True
+
+
+def test_another_surface_is_not_a_whiteboard():
+    assert is_whiteboard_session(_session({"surface": "browser"})) is False
+
+
+def test_missing_config_attribute_is_tolerated():
+    # Several test harnesses build partial session objects.
+    assert is_whiteboard_session(SimpleNamespace()) is False
+
+
+def test_none_config_is_tolerated():
+    assert is_whiteboard_session(SimpleNamespace(config=None)) is False
 
 
 def test_a_turn_carrying_canvas_metadata_is_a_whiteboard_turn():
@@ -18,10 +44,9 @@ def test_a_turn_with_an_empty_canvas_block_still_counts():
     assert is_whiteboard_turn({"whiteboard": {}}) is True
 
 
-def test_an_ordinary_message_turn_is_not_a_whiteboard_turn():
-    # The board is a view mode, so this is the common case on a
-    # board-enabled agent -- and getting it wrong narrows a plain chat
-    # turn to a single drawing tool.
+def test_a_typed_message_is_not_a_whiteboard_turn():
+    # A board session also has a transcript view the user can type into
+    # -- getting this wrong narrows that turn to a single drawing tool.
     assert is_whiteboard_turn({}) is False
     assert is_whiteboard_turn({"view_context": {}}) is False
 

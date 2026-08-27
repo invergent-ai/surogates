@@ -1,9 +1,9 @@
 """The harness half of the whiteboard surface, composed.
 
 Each piece has its own unit test; this asserts they agree with each
-other -- the tool catalogue and system prompt keying off the agent's
-board capability, the rendered user message and the replay pruning off
-the turn's own canvas metadata.
+other -- the tool catalogue and system prompt keying off the session's
+``config.surface`` stamp, the turn's speed and the rendered user message
+off the turn's own canvas metadata.
 
 Deliberately not under ``tests/integration``: that package's conftest
 spins up real Postgres and Redis containers via testcontainers, and
@@ -27,6 +27,9 @@ from surogates.session.events import EventType
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
+
+BOARD = {"surface": "whiteboard"}
+PLAIN: dict = {}
 
 CATALOGUE = {"whiteboard_draw", "create_artifact", "web_search", "memory"}
 
@@ -67,19 +70,19 @@ def _turn_events(mode):
     )]
 
 
-def _effective_tools(*, whiteboard_enabled):
+def _effective_tools(config, *, whiteboard_enabled=True):
     """The tool set as both surfaces independently compute it."""
     prompt_surface = _filter_effective_tools(
         tools=set(CATALOGUE),
         tenant=SimpleNamespace(org_id="o", user_id="u", service_account_id=None),
-        session=_session({}),
+        session=_session(config),
         use_api_for_harness_tools=True,
         whiteboard_enabled=whiteboard_enabled,
     )
     # What the harness passes to ``drop_unusable_tools``: the flag the
     # prompt builder derived from the very set above.
     has_whiteboard = PromptBuilder(
-        _tenant(), session=_session({}), available_tools=prompt_surface,
+        _tenant(), session=_session(config), available_tools=prompt_surface,
     ).has_whiteboard
     schema_surface = {
         s["function"]["name"]
@@ -92,30 +95,26 @@ def _effective_tools(*, whiteboard_enabled):
     return prompt_surface, schema_surface
 
 
-# --- 1. the tool follows the agent capability ------------------------
+# --- 1. the tool reaches a board session -----------------------------
 
-def test_a_board_enabled_agent_gets_the_draw_tool_on_both_surfaces():
-    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=True)
+def test_a_board_session_gets_the_draw_tool_on_both_surfaces():
+    prompt_surface, schema_surface = _effective_tools(BOARD)
     assert "whiteboard_draw" in prompt_surface
     assert "whiteboard_draw" in schema_surface
 
 
-def test_an_agent_without_the_board_gets_it_on_neither_surface():
-    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=False)
+def test_a_plain_session_gets_it_on_neither_surface():
+    prompt_surface, schema_surface = _effective_tools(PLAIN)
     assert "whiteboard_draw" not in prompt_surface
     assert "whiteboard_draw" not in schema_surface
 
 
-def test_an_ordinary_chat_session_still_gets_the_tool():
-    """The board is a view mode, not a session type.
-
-    Gating on ``config.surface`` meant flipping the composer to
-    Whiteboard on an existing chat session showed a canvas the agent
-    could not draw on.
-    """
-    prompt_surface, schema_surface = _effective_tools(whiteboard_enabled=True)
-    assert "whiteboard_draw" in prompt_surface
-    assert "whiteboard_draw" in schema_surface
+def test_revoking_the_capability_takes_it_off_an_existing_board():
+    prompt_surface, schema_surface = _effective_tools(
+        BOARD, whiteboard_enabled=False,
+    )
+    assert "whiteboard_draw" not in prompt_surface
+    assert "whiteboard_draw" not in schema_surface
 
 
 # --- 2/3. the two speeds ---------------------------------------------
@@ -141,10 +140,10 @@ def test_a_deep_turn_keeps_the_full_catalogue():
     assert "create_artifact" in narrowed
 
 
-def test_a_message_turn_on_a_board_enabled_agent_is_never_narrowed():
-    # The same session alternates between canvas turns and chat turns.
-    # A chat turn narrowed to whiteboard_draw would leave the agent
-    # unable to answer anything.
+def test_a_typed_message_in_a_board_session_is_never_narrowed():
+    # A board session also has a transcript view the user can type into.
+    # Narrowing that turn to whiteboard_draw would leave the agent unable
+    # to answer anything.
     plain = [SimpleNamespace(
         type=EventType.USER_MESSAGE.value,
         data={"content": "what is this", "metadata": {}},
@@ -164,7 +163,7 @@ def _prompt(tools):
     ).build()
 
 
-def test_the_whiteboard_prompt_carries_the_canvas_contract():
+def test_a_board_session_prompt_carries_the_canvas_contract():
     prompt = _prompt({"whiteboard_draw"})
     assert "Whiteboard canvas" in prompt
     assert "sourceRect" in prompt

@@ -7,6 +7,7 @@ import {
 import {
   CANVAS_DIR,
   CANVAS_PATH,
+  isBoardSession,
   latestBoardSession,
   loadDoc,
   saveDoc,
@@ -269,5 +270,28 @@ describe("resuming a board", () => {
       }),
     } as unknown as AgentChatAdapter;
     await expect(latestBoardSession(adapter, "a1")).resolves.toBeNull();
+  });
+});
+
+describe("recognising a board session", () => {
+  it("accepts a session stamped as a whiteboard", () => {
+    expect(isBoardSession({ config: { surface: "whiteboard" } })).toBe(true);
+  });
+
+  it("rejects an ordinary chat session", () => {
+    // The regression: the canvas view was offered on every session of a
+    // board-enabled agent, so flipping to it on a chat thread opened a
+    // canvas the harness had loaded no drawing tool for.
+    expect(isBoardSession({ config: {} })).toBe(false);
+    expect(isBoardSession({})).toBe(false);
+  });
+
+  it("rejects another surface", () => {
+    expect(isBoardSession({ config: { surface: "browser" } })).toBe(false);
+  });
+
+  it("rejects a session that has not loaded yet", () => {
+    expect(isBoardSession(null)).toBe(false);
+    expect(isBoardSession(undefined)).toBe(false);
   });
 });

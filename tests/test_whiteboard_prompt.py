@@ -97,13 +97,12 @@ def test_an_agent_without_the_tool_does_not():
     assert "Whiteboard canvas" not in _build(set())
 
 
-def test_the_fragment_does_not_depend_on_the_session_config():
-    """Keyed on the tool, not the session.
+def test_the_fragment_is_keyed_on_the_tool_not_the_session():
+    """One fact decides prose and schema.
 
-    The board is a view mode: a board-enabled agent can be handed a
-    canvas at any point in an ordinary chat session, and the system
-    prompt is built once per wake. Keying on ``config.surface`` meant
-    the contract was missing exactly when the user first drew.
+    The session gate lives upstream, in the worker's ``available_tools``:
+    keying the fragment on the tool means the prompt cannot promise a
+    contract the model has no schema for, whichever way that gate goes.
     """
     prompt = PromptBuilder(
         _tenant(),

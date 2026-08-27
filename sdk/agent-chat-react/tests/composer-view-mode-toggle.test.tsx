@@ -110,10 +110,11 @@ describe("Composer view-mode toggle", () => {
     }
   });
 
-  it("hides the whiteboard segment when the agent has no board", () => {
-    // The default. A board the agent cannot draw on is a dead end: the
-    // harness hands out whiteboard_draw on this same capability, so the
-    // user would draw and get a text answer back.
+  it("hides the whiteboard segment by default", () => {
+    // Offered only on a session created as a board, on an agent that
+    // still has the capability -- the harness loads whiteboard_draw on
+    // exactly those two facts, so anywhere else the segment would open a
+    // canvas the agent cannot draw on.
     const dom = mount(
       <ChatComposer
         onSend={sendFn}

@@ -177,6 +177,23 @@ export function shouldReloadCanvas(
 }
 
 /**
+ * Whether *session* was created as a whiteboard.
+ *
+ * The surface is stamped at creation and never changes, so it is what
+ * decides whether the canvas view is offered at all: the harness loads
+ * `whiteboard_draw` on the same stamp, and offering the view anywhere
+ * else shows a canvas the agent cannot draw on.
+ */
+export function isBoardSession(
+  session: { config?: unknown } | null | undefined,
+): boolean {
+  return (
+    (session?.config as { surface?: string } | undefined)?.surface ===
+    "whiteboard"
+  );
+}
+
+/**
  * The most recent resumable board for this agent, or `null`.
  *
  * A board lives in a session, and the whiteboard route carries no
@@ -197,8 +214,7 @@ export async function latestBoardSession(
     const boards = page.sessions
       .filter(
         (s) =>
-          (s.config as { surface?: string } | undefined)?.surface ===
-            "whiteboard" &&
+          isBoardSession(s) &&
           // A failed session cannot be woken; archived is a deliberate
           // close, and resuming it would undo that choice.
           s.status !== "failed" &&

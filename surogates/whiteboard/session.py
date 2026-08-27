@@ -29,14 +29,32 @@ MODE_DEEP = "deep"
 CANVAS_NOTE_HEADER = "The user is working on a whiteboard canvas."
 
 
+def is_whiteboard_session(session: Any) -> bool:
+    """Whether *session* was created as a whiteboard.
+
+    The surface is stamped at creation and never changes, so this is the
+    question that decides whether the canvas tool and its prompt
+    contract are loaded at all.
+
+    ``getattr`` with a ``None`` guard: several harnesses build partial
+    session objects that skip ``__init__``, and a missing config means
+    "not a whiteboard", not a programming error.
+    """
+    config = getattr(session, "config", None)
+    if not isinstance(config, dict):
+        return False
+    return config.get(SURFACE_KEY) == SURFACE_VALUE
+
+
 def is_whiteboard_turn(metadata: Any) -> bool:
     """Whether *this turn* was sent from the canvas.
 
-    The board is a view mode, not a session type: the same session
-    alternates freely between message turns and canvas turns, so the
-    question can only be answered per turn.  Presence of the metadata
-    block is the answer -- the client attaches it exactly when it
-    attaches a canvas render.
+    A board session has more than one view: the user can read the
+    transcript and type an ordinary message into it, which must keep the
+    full tool catalogue rather than being narrowed to a drawing.  So the
+    *speed* is a per-turn question even though the *capability* is a
+    per-session one.  Presence of the metadata block is the answer --
+    the client attaches it exactly when it attaches a canvas render.
     """
     return whiteboard_metadata(metadata) is not None
 
@@ -64,13 +82,11 @@ def surface_rejection(
 ) -> str | None:
     """Reject a session config asking for a surface the agent lacks.
 
-    The surface no longer decides the tool set -- the agent's board
-    capability does, because the canvas is a view mode the user can
-    reach from any session.  What is left is a plain input check on a
-    client-supplied value: an unimplemented surface is a request the
-    server cannot honour, and asking for a board on an agent that has
-    none is better answered with a 403 than with a canvas that silently
-    never draws.
+    ``config.surface`` arrives from the client and the worker force-adds
+    ``whiteboard_draw`` for a whiteboard session *past* any AgentDef
+    allowlist -- so without this an ordinary caller can hand themselves
+    the canvas toolset on an agent whose operator switched the board off.
+    That makes the surface a capability escalation, not a preference.
 
     Returns an error message, or ``None`` when the config is acceptable.
     Pure so it can be tested without a request; the route turns a
