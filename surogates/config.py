@@ -238,17 +238,23 @@ class WorkerSettings(BaseSettings):
     poll_timeout: int = 5
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
-    # Have the harness write per-iteration and per-turn recaps with an
-    # LLM. Off by default: the recap cost more than it was worth, sitting
-    # between the agent's last word and session.complete (measured p50
-    # 14.6s on turns that ran one). The agent is prompted to say what it
-    # produced in its own closing message instead, which costs nothing.
+    # Per-iteration one-liners, written on the cheap summary model while
+    # the turn is still running. They land during the turn rather than
+    # after it, so they cost the tail little -- and they are what the
+    # Simple chat view renders as the agent works.
+    emit_turn_summaries: bool = True
+    # The per-turn recap: one to three sentences written AFTER the agent
+    # has stopped talking, and therefore squarely between its last word
+    # and session.complete. Measured at 14.6s p50 on turns that ran one,
+    # against a 0.24s baseline, which is why it is off.
     #
     # Off does NOT disable the download card. Which files a turn
     # delivered is decided from the workspace, not by a model, so
     # turn.summary is still emitted with its artifacts -- just with an
-    # empty recap.
-    emit_turn_summaries: bool = False
+    # empty recap. The agent is asked to name its deliverable in its own
+    # closing message instead (working principle 16), which costs
+    # nothing and lands where the user is already looking.
+    emit_turn_recap: bool = False
     # When False, service-account ``skill_overrides`` on prompt submissions
     # are ignored by the API and worker-local skill resolution.
     skill_overrides_enabled: bool = True

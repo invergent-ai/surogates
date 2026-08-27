@@ -2049,6 +2049,7 @@ async def run_worker(settings: Settings) -> None:
                 summary_model=(
                     summary_slot.model if summary_slot is not None else ""
                 ),
+                recap_enabled=settings.worker.emit_turn_recap,
             )
         else:
             turn_summarizer = None
