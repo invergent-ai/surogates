@@ -48,6 +48,7 @@ class ToolRuntime:
         #   both tempts the LLM to retry the same logic via a different
         #   tool when one fails (observed with sandbox-provisioning errors).
         from surogates.tools.builtin import (
+            advisor,
             artifact,
             ask_user_question,
             browser,
@@ -93,6 +94,7 @@ class ToolRuntime:
             loop_control,
             delegate,
             expert,
+            advisor,  # advisor (executor-initiated consult of a stronger model)
             terminal,  # also registers the 'process' tool
             session_search,
             user_reports,  # operator-only Users-page reports (owner-scoped)

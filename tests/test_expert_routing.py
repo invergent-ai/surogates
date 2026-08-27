@@ -9,6 +9,7 @@ preflight.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -62,40 +63,6 @@ def _harness() -> AgentHarness:
     )
 
 
-class TestHardTaskClassification:
-    def test_routes_coding(self):
-        from surogates.harness.expert_routing import classify_hard_task
-
-        result = classify_hard_task("Fix this Python traceback in app.py")
-
-        assert result.required is True
-        assert result.category == "debugging"
-
-    def test_routes_terminal(self):
-        from surogates.harness.expert_routing import classify_hard_task
-
-        result = classify_hard_task("Run pytest and then inspect the failing test")
-
-        assert result.required is True
-        assert result.category == "terminal"
-
-    def test_routes_math(self):
-        from surogates.harness.expert_routing import classify_hard_task
-
-        result = classify_hard_task("Solve 3x + 7 = 22 and explain each step")
-
-        assert result.required is True
-        assert result.category == "math"
-
-    def test_skips_generic_chat(self):
-        from surogates.harness.expert_routing import classify_hard_task
-
-        result = classify_hard_task("Thanks, that helps")
-
-        assert result.required is False
-        assert result.category is None
-
-
 class TestDeadHelpersRemoved:
     """Auto-router helpers must be gone — the design dropped auto-routing.
 
@@ -118,6 +85,18 @@ class TestDeadHelpersRemoved:
 
         assert not hasattr(expert_routing, "classify_tool_calls")
 
+    def test_hard_task_classifier_removed(self):
+        """The advisor gate is model-driven; nothing classifies turns."""
+        from surogates.harness import expert_routing
+
+        for name in (
+            "classify_hard_task",
+            "classify_hard_task_async",
+            "HardTaskClassification",
+            "is_advisor_guidance_message",
+        ):
+            assert not hasattr(expert_routing, name), name
+
     def test_trigger_helpers_removed(self):
         from surogates.harness import expert_routing
 
@@ -125,74 +104,53 @@ class TestDeadHelpersRemoved:
         assert not hasattr(expert_routing, "_trigger_match_score")
 
 
-class TestHarnessAdvisorPreflight:
-    """The consult contract: LLM-verdict-gated, buffered, deduped.
+class TestAdvisorTool:
+    """The consult contract: model-driven timing, per-turn budget.
 
-    ``classify_hard_task_async`` is patched to an LLM verdict because
-    the advisor no longer consults on regex fallbacks — a keyword net
-    that over-fires in English and never fires elsewhere is not a good
-    enough signal for a pro-tier call.
+    The harness no longer classifies turns or blocks the first request on
+    a verdict -- the executor calls the ``advisor`` tool when it wants a
+    second opinion, and the guidance comes back as that tool's result.
     """
 
     @staticmethod
-    def _llm_verdict(category="coding"):
-        from surogates.harness.expert_routing import HardTaskClassification
-
-        async def _classify(*_a, **_kw):
-            return HardTaskClassification(
-                True, category, reason="llm", source="llm",
-            )
-
-        return _classify
-
-    @pytest.mark.asyncio
-    async def test_hard_task_buffers_advisor_guidance(self, monkeypatch):
-        from surogates.harness import loop_advisor
-
-        harness = _harness()
-        session = _session()
-        monkeypatch.setattr(
-            loop_advisor, "classify_hard_task_async", self._llm_verdict(),
-        )
-        messages = [{"role": "user", "content": "Write a Python function to parse CSV"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-        ]
+    def _advisor_reply(harness, content="Use csv.DictReader.", tokens=(11, 4)):
         harness._advisor_client.chat.completions.create = AsyncMock(
             return_value=SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        message=SimpleNamespace(content="Use csv.DictReader."),
+                        message=SimpleNamespace(content=content),
                         finish_reason="stop",
                     )
                 ],
-                usage=SimpleNamespace(prompt_tokens=11, completion_tokens=4),
+                usage=SimpleNamespace(
+                    prompt_tokens=tokens[0], completion_tokens=tokens[1],
+                ),
                 model="advisor-model",
             )
         )
 
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
+    @pytest.mark.asyncio
+    async def test_consult_returns_guidance_and_emits_result(self):
+        harness = _harness()
+        session = _session()
+        harness._advisor_calls_this_turn = 0
+        self._advisor_reply(harness)
+        messages = [{"role": "user", "content": "Parse this CSV"}]
+
+        guidance = await harness.consult_advisor(
+            session=session,
+            messages=messages,
+            system_prompt="system prompt",
+            category="coding",
+            task="parsing a CSV",
         )
 
-        assert consulted is True
-        # Guidance is BUFFERED, never appended to the live list from the
-        # background task — a mid-tool-execution append could split an
-        # assistant tool_calls message from its results.
+        assert guidance == "Use csv.DictReader."
+        # Guidance reaches the executor as a tool result, so it must NOT
+        # be appended to the live message list -- an append mid-tool-
+        # execution could split an assistant tool_calls message from its
+        # results.
         assert len(messages) == 1
-        assert len(harness._pending_advisor_messages) == 1
-        pending = harness._pending_advisor_messages[0]
-        assert pending["role"] == "user"
-        assert pending["_advisor"] is True
-        assert "[Advisor guidance: coding]" in pending["content"]
-        assert "Use csv.DictReader." in pending["content"]
-
-        # The loop flushes at an iteration boundary.
-        flushed = harness._flush_pending_advisor_messages(messages)
-        assert flushed is True
-        assert messages[-1] is pending
-        assert harness._pending_advisor_messages == []
-
         harness._store.emit_event.assert_any_await(
             session.id,
             EventType.ADVISOR_RESULT,
@@ -207,290 +165,92 @@ class TestHarnessAdvisorPreflight:
         )
 
     @pytest.mark.asyncio
-    async def test_regex_verdict_does_not_consult(self):
+    async def test_budget_counts_calls_not_categories(self):
+        """Two consults in the same category are allowed within budget.
+
+        The classifier-era dedup was per category, which would block the
+        documented pattern of consulting before committing to an approach
+        and again before declaring done.
+        """
         harness = _harness()
         session = _session()
-        # No summary client on the mock harness → the LLM classifier is
-        # unavailable → regex fallback → no consult, no pro-tier spend.
-        messages = [{"role": "user", "content": "Write a Python function to parse CSV"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-        ]
+        harness._advisor_max_calls_per_turn = 2
+        harness._advisor_calls_this_turn = 0
+        self._advisor_reply(harness)
 
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
-        )
+        async def _consult():
+            return await harness.consult_advisor(
+                session=session, messages=[], system_prompt="",
+                category="coding", task="same category twice",
+            )
 
-        assert consulted is False
-        harness._advisor_client.chat.completions.create.assert_not_called()
+        assert await _consult() == "Use csv.DictReader."
+        assert await _consult() == "Use csv.DictReader."
+        # Third exceeds the per-turn budget.
+        assert await _consult() is None
+        assert harness._advisor_client.chat.completions.create.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_recovery_skips_duplicate_advisor_guidance(self, monkeypatch):
-        from surogates.harness import loop_advisor
-
+    async def test_failure_emits_event_and_returns_none(self):
         harness = _harness()
         session = _session()
-        monkeypatch.setattr(
-            loop_advisor, "classify_hard_task_async", self._llm_verdict(),
-        )
-        messages = [{"role": "user", "content": "Write a Python function"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-            Event(
-                id=2,
-                session_id=session.id,
-                type=EventType.ADVISOR_RESULT.value,
-                data={"model": "advisor-model", "category": "coding"},
-            ),
-        ]
-
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
-        )
-
-        assert consulted is False
-        harness._advisor_client.chat.completions.create.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_recovery_skips_duplicate_advisor_failure(self, monkeypatch):
-        from surogates.harness import loop_advisor
-
-        harness = _harness()
-        session = _session()
-        monkeypatch.setattr(
-            loop_advisor, "classify_hard_task_async", self._llm_verdict("math"),
-        )
-        messages = [{"role": "user", "content": "Solve 3x + 7 = 22"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-            Event(
-                id=2,
-                session_id=session.id,
-                type=EventType.ADVISOR_FAILURE.value,
-                data={"model": "advisor-model", "category": "math"},
-            ),
-        ]
-
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
-        )
-
-        assert consulted is False
-        harness._advisor_client.chat.completions.create.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_synthetic_user_events_do_not_reset_dedup(self, monkeypatch):
-        """A mission kickoff / nudge is not a new human turn."""
-        from surogates.harness import loop_advisor
-
-        harness = _harness()
-        session = _session()
-        monkeypatch.setattr(
-            loop_advisor, "classify_hard_task_async", self._llm_verdict(),
-        )
-        messages = [{"role": "user", "content": "Write a Python function"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-            Event(
-                id=2,
-                session_id=session.id,
-                type=EventType.ADVISOR_RESULT.value,
-                data={"model": "advisor-model", "category": "coding"},
-            ),
-            Event(
-                id=3,
-                session_id=session.id,
-                type=EventType.USER_MESSAGE.value,
-                data={"content": "nudge", "synthetic": "mission_kickoff"},
-            ),
-        ]
-
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
-        )
-
-        assert consulted is False
-        harness._advisor_client.chat.completions.create.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_advisor_failure_allows_default_model(self, monkeypatch):
-        from surogates.harness import loop_advisor
-
-        harness = _harness()
-        session = _session()
-        monkeypatch.setattr(
-            loop_advisor, "classify_hard_task_async", self._llm_verdict("math"),
-        )
-        messages = [{"role": "user", "content": "Solve 3x + 7 = 22"}]
-        events = [
-            Event(id=1, session_id=session.id, type=EventType.USER_MESSAGE.value, data={"content": messages[0]["content"]}),
-        ]
+        harness._advisor_calls_this_turn = 0
         harness._advisor_client.chat.completions.create = AsyncMock(
-            side_effect=RuntimeError("advisor unavailable")
+            side_effect=RuntimeError("upstream exploded"),
         )
 
-        consulted = await harness._maybe_consult_required_advisor(
-            session, messages, events, "system prompt",
+        result = await harness.consult_advisor(
+            session=session, messages=[], system_prompt="",
+            category="planning", task="anything",
         )
 
-        assert consulted is False
-        assert len(messages) == 1
-        assert harness._pending_advisor_messages == []
+        assert result is None
         harness._store.emit_event.assert_any_await(
             session.id,
             EventType.ADVISOR_FAILURE,
             {
                 "model": "advisor-model",
-                "category": "math",
-                "error": "advisor unavailable",
+                "category": "planning",
+                "error": "upstream exploded",
             },
         )
 
     @pytest.mark.asyncio
-    async def test_guidance_is_not_mistaken_for_the_users_message(self, monkeypatch):
-        """On a later wake the latest user must be the human, not the advisor."""
-        from surogates.harness import loop_advisor
+    async def test_handler_reports_unavailable_without_raising(self):
+        """A spent budget must read as "carry on", not as a tool error."""
+        from surogates.tools.builtin.advisor import _advisor_handler
 
-        harness = _harness()
-        session = _session()
-        seen: dict = {}
+        async def _no_guidance(**_kw):
+            return None
 
-        async def _classify(msgs, **_kw):
-            from surogates.harness.expert_routing import (
-                HardTaskClassification,
-                _build_classifier_payload,
-            )
-            seen["latest_user"], _, _ = _build_classifier_payload(msgs)
-            return HardTaskClassification(False)
+        out = json.loads(await _advisor_handler(
+            {"category": "coding", "task": "x"}, advisor_consult=_no_guidance,
+        ))
+        assert out["status"] == "unavailable"
+        assert out["guidance"] is None
 
-        monkeypatch.setattr(loop_advisor, "classify_hard_task_async", _classify)
-        messages = [
-            {"role": "user", "content": "Fix the parser bug"},
-            {"role": "assistant", "content": "Looking."},
-            {
-                "role": "user",
-                "content": "[Advisor guidance: debugging]\nCheck the delimiter.",
-            },
-        ]
-        await harness._maybe_consult_required_advisor(
-            session, messages, [], "system prompt",
-        )
-        assert seen["latest_user"] == "Fix the parser bug"
+        # No advisor plumbed at all (advisor-less session).
+        out = json.loads(await _advisor_handler({"category": "coding", "task": "x"}))
+        assert "error" in out
+
+    def test_advisor_tool_routes_to_the_harness(self):
+        """Unlisted tools default to the sandbox executor and fail there.
+
+        The handler calls back into the loop through ``advisor_consult``,
+        which does not exist in a sandbox pod.
+        """
+        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+        assert TOOL_LOCATIONS["advisor"] is ToolLocation.HARNESS
+
+    def test_classifier_preflight_is_gone(self):
+        from surogates.harness import loop, loop_advisor
+
+        assert not hasattr(loop_advisor.AdvisorMixin, "_maybe_consult_required_advisor")
+        assert not hasattr(loop_advisor.AdvisorMixin, "_flush_pending_advisor_messages")
+        assert not hasattr(loop, "_ADVISOR_PREFLIGHT_TIMEOUT_SECONDS")
 
     def test_harness_has_no_hard_tool_advisor_hook(self):
         from surogates.harness.loop import AgentHarness
 
         assert not hasattr(AgentHarness, "_maybe_consult_for_tool_calls")
-
-
-class TestClassifierClientInjection:
-    """The classifier must use the caller's per-session client when given.
-
-    Its ``settings.llm``-derived fallback depends on ``llm.base_url``
-    serving chat completions. In the shared-runtime deployment that URL
-    is the proxy root, which serves only ``/proxy/services/...`` — so the
-    fallback 404s and the classifier silently degrades to regex. Passing
-    the session's summary client (a real, billed per-agent route) is what
-    keeps the LLM path working.
-    """
-
-    @pytest.mark.asyncio
-    async def test_injected_aux_is_used_and_settings_fallback_not_built(
-        self, monkeypatch,
-    ):
-        from surogates.harness import expert_routing
-        from surogates.harness.auxiliary_client import AuxiliaryLLM
-
-        expert_routing._classifier_cache._store.clear()
-
-        def _boom(*_a, **_kw):  # pragma: no cover - must not be reached
-            raise AssertionError(
-                "settings fallback was built despite an injected client",
-            )
-
-        monkeypatch.setattr(expert_routing, "build_base_auxiliary_llm", _boom)
-
-        captured: dict = {}
-
-        async def fake_generate(**kwargs):
-            captured.update(kwargs)
-            return expert_routing.HardTaskJudgment(
-                required=True, category="coding",
-            )
-
-        monkeypatch.setattr(
-            expert_routing, "generate_structured", fake_generate,
-        )
-
-        aux = AuxiliaryLLM(client=MagicMock(), model="cheap-summary-model")
-        result = await expert_routing.classify_hard_task_async(
-            [{"role": "user", "content": "refactor the auth module for aux test"}],
-            aux=aux,
-        )
-
-        assert result.required is True
-        assert captured["model"] == "cheap-summary-model"
-        assert captured["llm_client"] is aux.client
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_settings_client_when_none_injected(
-        self, monkeypatch,
-    ):
-        from surogates.harness import expert_routing
-        from surogates.harness.auxiliary_client import AuxiliaryLLM
-
-        expert_routing._classifier_cache._store.clear()
-        built = MagicMock()
-        monkeypatch.setattr(
-            expert_routing, "build_base_auxiliary_llm",
-            lambda *_a, **_kw: AuxiliaryLLM(client=built, model="base-model"),
-        )
-        monkeypatch.setattr(expert_routing, "load_settings", lambda: object())
-
-        captured: dict = {}
-
-        async def fake_generate(**kwargs):
-            captured.update(kwargs)
-            return expert_routing.HardTaskJudgment(required=False, category=None)
-
-        monkeypatch.setattr(
-            expert_routing, "generate_structured", fake_generate,
-        )
-
-        await expert_routing.classify_hard_task_async(
-            [{"role": "user", "content": "hello there fallback test"}],
-        )
-        assert captured["llm_client"] is built
-
-    @pytest.mark.asyncio
-    async def test_request_failure_is_logged_at_warning_not_debug(
-        self, monkeypatch, caplog,
-    ):
-        """A 404 from a misconfigured endpoint must not vanish."""
-        import logging
-
-        from surogates.harness import expert_routing
-        from surogates.harness.auxiliary_client import AuxiliaryLLM
-
-        expert_routing._classifier_cache._store.clear()
-
-        async def boom(**_kwargs):
-            raise RuntimeError("404 page not found")
-
-        monkeypatch.setattr(
-            expert_routing, "generate_structured", boom,
-        )
-
-        aux = AuxiliaryLLM(client=MagicMock(), model="m")
-        with caplog.at_level(logging.WARNING, logger="surogates.harness.expert_routing"):
-            result = await expert_routing.classify_hard_task_async(
-                [{"role": "user", "content": "do something hard warn test"}],
-                aux=aux,
-            )
-        # Still degrades gracefully...
-        assert result is not None
-        # ...but no longer silently.
-        assert any(
-            "falling back to the regex classifier" in r.message
-            for r in caplog.records
-        )

@@ -114,7 +114,6 @@ from surogates.harness.loop_attachments import (
     _render_inlined_attachments,  # noqa: F401
 )
 from surogates.harness.loop_constants import (
-    _ADVISOR_PREFLIGHT_TIMEOUT_SECONDS,
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
@@ -507,7 +506,7 @@ class AgentHarness(
         self._advisor_max_calls_per_turn = max(0, int(advisor_max_calls_per_turn))
         # Guidance produced by the background advisor task, flushed into
         # ``messages`` only at iteration boundaries (see AdvisorMixin).
-        self._pending_advisor_messages: list[dict] = []
+        self._advisor_calls_this_turn = 0
         self._advisor_max_tokens = max(1, int(advisor_max_tokens))
 
         # Per-session media-generation wiring (image client + video
@@ -1498,9 +1497,24 @@ class AgentHarness(
         # --- Memory prefetch (one-shot before loop; snapshotted per session) ---
         memory_context = await self._prefetch_memory(session.id)
 
-        consulted_advisor_categories = self._advisor_categories_after_latest_user(
-            all_events or [],
-        )
+        # Advisor budget is per user turn; the executor spends it by
+        # calling the ``advisor`` tool when it wants a second opinion.
+        self._advisor_calls_this_turn = 0
+
+        async def advisor_consult(*, category: str, task: str) -> str | None:
+            """Bind the ``advisor`` tool to this turn's transcript.
+
+            A closure rather than ``functools.partial`` so it reads
+            ``messages`` at call time -- compaction rebinds that name
+            mid-loop, and a partial would pin the pre-compaction list.
+            """
+            return await self.consult_advisor(
+                session=session,
+                messages=messages,
+                system_prompt=system_prompt,
+                category=category,
+                task=task,
+            )
 
         # NOTE: view-context and attachments notes are folded into each
         # user message's content during :meth:`_rebuild_messages`, so the
@@ -1509,40 +1523,6 @@ class AgentHarness(
         # turns -- earlier versions inserted both notes ephemerally
         # before the latest user message, which broke the cache the
         # moment a new user turn shifted the insertion point.
-
-        # --- Hidden advisor guidance for hard tasks (one-shot before loop) ---
-        # The advisor exists to shape the executor's PLAN, and the plan
-        # is formed in iteration 1 — so the loop blocks here for a
-        # bounded window to let the classifier (fast, summary model)
-        # and, when the task is hard, the pro-tier consult finish
-        # before the first LLM request. Easy turns clear the wait in
-        # classifier latency (~1-2 s, verdict "not hard"). On timeout
-        # the consult keeps running detached; its guidance is buffered
-        # and flushed at the next iteration boundary, and if the turn
-        # ends first the durable ADVISOR_RESULT event re-enters context
-        # on the next wake via replay. The task never mutates
-        # ``messages`` directly — a mid-tool-execution append could
-        # split an assistant tool_calls message from its results.
-        self._pending_advisor_messages = []
-        advisor_task = asyncio.create_task(
-            self._maybe_consult_required_advisor(
-                session,
-                messages,
-                all_events or [],
-                system_prompt,
-                consulted_advisor_categories,
-            ),
-            name=f"advisor-{session.id}",
-        )
-        self._background_tasks.add(advisor_task)
-        advisor_task.add_done_callback(self._background_tasks.discard)
-        if self._advisor_available():
-            # asyncio.wait (not wait_for): a timeout must leave the
-            # consult running, not cancel it.
-            await asyncio.wait(
-                {advisor_task}, timeout=_ADVISOR_PREFLIGHT_TIMEOUT_SECONDS,
-            )
-            self._flush_pending_advisor_messages(messages)
 
         # --- User turn tracking for memory nudge ---
         self._user_turn_count += 1
@@ -1572,14 +1552,6 @@ class AgentHarness(
             if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga)
                 return
-
-            # --- Late advisor guidance ---
-            # The preflight wait may have timed out with the consult
-            # still running; flush anything it buffered since the last
-            # boundary. This is the ONLY place (besides the preflight)
-            # where guidance enters ``messages``, which is what keeps it
-            # from splitting a tool_calls/tool-result pair.
-            self._flush_pending_advisor_messages(messages)
 
             # --- Mid-turn steering ---
             # Fold in any real user messages that arrived since the last
@@ -1828,6 +1800,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
+                    advisor_consult=advisor_consult,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2606,6 +2579,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
+                    advisor_consult=advisor_consult,
                 )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
@@ -3745,6 +3719,16 @@ class AgentHarness(
             else:
                 tool_filter = set(tool_filter)
             tool_filter.discard("run_coding_agent")
+
+        # No pro-tier client configured means every advisor call would come
+        # back "unavailable". Hide the tool rather than let the executor
+        # spend a call discovering that.
+        if not self._advisor_available() or self._advisor_max_calls_per_turn < 1:
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            else:
+                tool_filter = set(tool_filter)
+            tool_filter.discard("advisor")
 
         # Any session running as one iteration of a schedule (``/loop`` or
         # cron_create-spawned) must not be able to create new schedules.
