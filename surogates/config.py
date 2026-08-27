@@ -238,11 +238,17 @@ class WorkerSettings(BaseSettings):
     poll_timeout: int = 5
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
-    # Emit iteration.summary / turn.summary events from the harness so
-    # the Simple chat view can render one-line iteration summaries and
-    # per-turn artifact recaps. Off disables the summarizer entirely;
-    # older SDK versions ignore the events when this is on.
-    emit_turn_summaries: bool = True
+    # Have the harness write per-iteration and per-turn recaps with an
+    # LLM. Off by default: the recap cost more than it was worth, sitting
+    # between the agent's last word and session.complete (measured p50
+    # 14.6s on turns that ran one). The agent is prompted to say what it
+    # produced in its own closing message instead, which costs nothing.
+    #
+    # Off does NOT disable the download card. Which files a turn
+    # delivered is decided from the workspace, not by a model, so
+    # turn.summary is still emitted with its artifacts -- just with an
+    # empty recap.
+    emit_turn_summaries: bool = False
     # When False, service-account ``skill_overrides`` on prompt submissions
     # are ignored by the API and worker-local skill resolution.
     skill_overrides_enabled: bool = True
