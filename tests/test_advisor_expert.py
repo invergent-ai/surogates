@@ -221,3 +221,45 @@ class TestAdvisorNeedsNoEndpoint:
         result = await service.consult(expert=rogue, task="x")
         assert not result.success
         assert "no endpoint configured" in result.error
+
+
+class TestConsultFooter:
+    """A consult reminder in last position, not only mid-prompt.
+
+    The mid-prompt guidance fragment renders (6KB, imperative wording)
+    and the executor still answered a three-way architecture question in
+    one iteration without consulting anything. The harness already
+    places late-landing directives at the end for the same reason -- see
+    the artifact-in-channel hint -- so the reminder goes there too.
+    """
+
+    @staticmethod
+    def _builder(skills, tools):
+        from types import SimpleNamespace
+        from surogates.harness.prompt import PromptBuilder
+
+        return PromptBuilder(
+            SimpleNamespace(org_id=None, user_id=None, org_config={},
+                            user_preferences={}, asset_root="/tmp"),
+            skills=skills, available_tools=tools,
+        )
+
+    def test_footer_is_the_last_thing_in_the_prompt(self):
+        b = self._builder([build_advisor_expert()], {"consult_expert"})
+        prompt = b.build()
+        assert "## Before you commit" in prompt
+        tail = prompt[prompt.index("## Before you commit"):]
+        # Nothing may follow it -- that is the whole point of the placement.
+        assert "\n# " not in tail
+
+    def test_no_footer_without_the_tool(self):
+        b = self._builder([build_advisor_expert()], set())
+        assert b._expert_footer() == ""
+
+    def test_no_footer_without_any_active_expert(self):
+        from surogates.tools.loader import SkillDef
+
+        plain = SkillDef(name="s", description="d", content="c",
+                         source="org_db")
+        b = self._builder([plain], {"consult_expert"})
+        assert b._expert_footer() == ""
