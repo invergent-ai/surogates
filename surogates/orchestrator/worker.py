@@ -32,6 +32,8 @@ from surogates.runtime.governance import (
     WORKER_SELF_TOOLS,
     build_governance_gate,
 )
+from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
+from surogates.whiteboard.session import is_whiteboard_session
 from surogates.harness.prompt_library import default_library as default_prompt_library
 from surogates.health import infrastructure_readiness, start_health_server
 from surogates.browser.control import BrowserControlStore
@@ -300,6 +302,16 @@ def _filter_effective_tools(
         result -= BOARD_SELF_TOOLS
     else:
         result |= BOARD_SELF_TOOLS
+
+    # whiteboard_draw is the canvas surface's write path: meaningless on
+    # a message-thread session, and mandatory on a whiteboard one. Same
+    # force-add idiom as the board self-tools above -- a whiteboard
+    # session that cannot draw is not a whiteboard, whatever a
+    # restrictive AgentDef allowlist says.
+    if is_whiteboard_session(session):
+        result |= WHITEBOARD_TOOL_NAMES
+    else:
+        result -= WHITEBOARD_TOOL_NAMES
 
     # idea_tree / dispatch_experiments / merge_experiment are the research
     # coordinator's deterministic spine. They are present only while a

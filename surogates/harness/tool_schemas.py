@@ -63,6 +63,9 @@ _CHANNEL_TOOLS: frozenset[str] = frozenset({
 _CRON_TOOLS: frozenset[str] = frozenset({
     "cron_create", "cron_list", "cron_delete",
 })
+_WHITEBOARD_TOOLS: frozenset[str] = frozenset({
+    "whiteboard_draw",
+})
 
 
 def drop_unusable_tools(
@@ -71,6 +74,7 @@ def drop_unusable_tools(
     has_kbs: bool,
     has_channel: bool,
     is_scheduled: bool,
+    is_whiteboard: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -90,6 +94,8 @@ def drop_unusable_tools(
         drop |= _CHANNEL_TOOLS
     if not is_scheduled:
         drop |= _CRON_TOOLS
+    if not is_whiteboard:
+        drop |= _WHITEBOARD_TOOLS
     if not drop:
         return schemas
 

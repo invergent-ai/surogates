@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
 from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
+from surogates.whiteboard.session import is_whiteboard_session
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -1676,6 +1677,7 @@ class AgentHarness(
                     or (getattr(session, "config", None) or {}).get(
                         "scheduled_dynamic_loop")
                 ),
+                is_whiteboard=is_whiteboard_session(session),
             )
 
             # Build the message list: system → prefill → memory → conversation.
