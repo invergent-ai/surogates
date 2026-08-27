@@ -51,8 +51,9 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
   },
 
   async createSession(input) {
+    const { surface } = input as { surface?: "whiteboard" };
     return toAgentChatSession(
-      await sessionsApi.createSession({ system: input.system }),
+      await sessionsApi.createSession({ system: input.system, surface }),
     );
   },
 

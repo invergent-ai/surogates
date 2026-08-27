@@ -14,6 +14,10 @@ import { Route as inboxRoute } from "./routes/inbox";
 import { Route as integrationsRoute } from "./routes/integrations";
 import { Route as codingAgentsRoute } from "./routes/coding-agents";
 import { missionDetailRoute, missionsRoute } from "./routes/missions";
+import {
+  whiteboardRoute,
+  whiteboardSessionRoute,
+} from "./routes/whiteboard";
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -27,6 +31,7 @@ const routeTree = rootRoute.addChildren([
   codingAgentsRoute,
   missionsRoute.addChildren([missionDetailRoute]),
   chatRoute.addChildren([chatSessionRoute]),
+  whiteboardRoute.addChildren([whiteboardSessionRoute]),
 ]);
 
 export const router = createRouter({ routeTree });

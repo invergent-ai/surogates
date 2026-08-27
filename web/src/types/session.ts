@@ -25,6 +25,12 @@ export interface SessionCreateRequest {
   system?: string;
   /** Saved browser profile to attach; sent as ``config.browser.profile_id``. */
   browserProfileId?: string;
+  /**
+   * Chat surface, sent as ``config.surface``. The harness reads it at wake
+   * to pick the tool set and guidance, and session config is not editable
+   * afterwards -- so it has to be stamped here, at creation.
+   */
+  surface?: "whiteboard";
 }
 
 export interface SessionEvent {

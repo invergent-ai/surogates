@@ -56,13 +56,15 @@ export async function getSession(sessionId: string): Promise<Session> {
 export async function createSession(
   body: SessionCreateRequest,
 ): Promise<Session> {
-  const { browserProfileId, ...rest } = body;
+  const { browserProfileId, surface, ...rest } = body;
   // The harness reads ``config.browser.profile_id`` to inject the saved login
-  // state when it provisions the session's browser.
+  // state when it provisions the session's browser, and ``config.surface``
+  // to select the whiteboard canvas over the message thread.
   const payload: Record<string, unknown> = { ...rest };
-  if (browserProfileId) {
-    payload.config = { browser: { profile_id: browserProfileId } };
-  }
+  const config: Record<string, unknown> = {};
+  if (browserProfileId) config.browser = { profile_id: browserProfileId };
+  if (surface) config.surface = surface;
+  if (Object.keys(config).length > 0) payload.config = config;
   const response = await authFetch("/api/v1/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
