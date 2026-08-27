@@ -165,6 +165,7 @@ interface ChatThreadProps {
   // When true, the composer's slash menu includes the ``/code`` commands.
   // Forwarded as-is to ChatComposer.
   codeAgentsEnabled?: boolean;
+  whiteboardEnabled?: boolean;
   // Slash-command capability group. Forwarded as-is to ChatComposer:
   // these gate the always-on lightweight builtins (default shown).
   loopsEnabled?: boolean;
@@ -1913,6 +1914,7 @@ export function ChatThread({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  whiteboardEnabled = false,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -2045,6 +2047,7 @@ export function ChatThread({
         deepResearchEnabled={deepResearchEnabled}
         researchEnabled={researchEnabled}
         codeAgentsEnabled={codeAgentsEnabled}
+        whiteboardEnabled={whiteboardEnabled}
         loopsEnabled={loopsEnabled}
         missionsEnabled={missionsEnabled}
         goalsEnabled={goalsEnabled}

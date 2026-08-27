@@ -81,6 +81,7 @@ describe("Composer view-mode toggle", () => {
         isRunning={false}
         viewMode="simple"
         onViewModeChange={vi.fn()}
+        whiteboardEnabled
       />,
     );
     const group = dom.querySelector("[role='group'][aria-label='Chat view mode']");
@@ -107,6 +108,26 @@ describe("Composer view-mode toggle", () => {
       expect(word?.className).toContain("md:inline");
       expect(icon?.getAttribute("class")).toContain("md:hidden");
     }
+  });
+
+  it("hides the whiteboard segment when the agent has no board", () => {
+    // The default. A board the agent cannot draw on is a dead end: the
+    // harness hands out whiteboard_draw on this same capability, so the
+    // user would draw and get a text answer back.
+    const dom = mount(
+      <ChatComposer
+        onSend={sendFn}
+        onStop={stopFn}
+        isRunning={false}
+        viewMode="simple"
+        onViewModeChange={vi.fn()}
+      />,
+    );
+    const group = dom.querySelector("[role='group'][aria-label='Chat view mode']")!;
+    const labels = Array.from(group.querySelectorAll("button")).map((b) =>
+      b.getAttribute("aria-label"),
+    );
+    expect(labels).toEqual(["Simple view", "Advanced view"]);
   });
 
   it("keeps the segments pill-shaped — no squared inner edges", () => {

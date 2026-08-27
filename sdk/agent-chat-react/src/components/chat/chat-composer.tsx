@@ -209,6 +209,7 @@ interface ChatComposerProps {
   // in its builtin menu. Gated like ``deepResearchEnabled`` because the
   // host owns the capability.
   codeAgentsEnabled?: boolean;
+  whiteboardEnabled?: boolean;
   // ── Slash-command capability group (per-agent) ───────────────────
   // These gate the always-on lightweight builtins; unlike the opt-in
   // flags above they default to shown (``!== false``) so a host that
@@ -415,6 +416,7 @@ function ChatComposerInner({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  whiteboardEnabled = false,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -831,7 +833,10 @@ function ChatComposerInner({
       aria-label="Chat view mode"
       className="flex shrink-0 items-center gap-0.5 rounded-full bg-muted/60 p-0.5"
     >
-      {VIEW_MODE_SEGMENTS.map(({ mode, label, icon: Icon, tooltip }) => {
+      {VIEW_MODE_SEGMENTS.filter(
+        // A board the agent cannot draw on is a dead end, not a view.
+        ({ mode }) => mode !== "whiteboard" || whiteboardEnabled,
+      ).map(({ mode, label, icon: Icon, tooltip }) => {
         const selected = viewMode === mode;
         return (
           <PromptInputButton

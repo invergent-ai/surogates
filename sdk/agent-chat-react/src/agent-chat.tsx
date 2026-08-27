@@ -14,6 +14,7 @@ import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
   AgentChatMessage,
+  AgentChatViewMode,
 } from "./types";
 import type { ChatComposerError } from "./components/chat/chat-composer";
 
@@ -62,6 +63,16 @@ export interface AgentChatProps {
    * Like `deepResearchEnabled`, the host owns the capability gate.
    */
   codeAgentsEnabled?: boolean;
+  /**
+   * Whether this agent may draw on a canvas.
+   *
+   * Gates the composer's Whiteboard segment. Off by default and off for
+   * most agents, so without the gate the board is a dead end: the user
+   * draws, and the agent answers in text because the harness hands out
+   * `whiteboard_draw` on this same capability. Like `deepResearchEnabled`,
+   * the host owns the gate.
+   */
+  whiteboardEnabled?: boolean;
   /**
    * Slash-command capability group (per-agent). These gate the always-on
    * lightweight builtins and default to shown when omitted, so a host that
@@ -117,6 +128,7 @@ export function AgentChat({
   deepResearchEnabled = false,
   researchEnabled = false,
   codeAgentsEnabled = false,
+  whiteboardEnabled = false,
   loopsEnabled = true,
   missionsEnabled = true,
   goalsEnabled = true,
@@ -157,6 +169,16 @@ export function AgentChat({
     setShowWorkspace(runtime.viewMode === "expert");
   }, [runtime.viewMode]);
   const readOnly = readOnlyReasonForSession(runtime.session);
+  // An operator can switch the board off while a viewer's stored
+  // preference still says "whiteboard". Fall back to the transcript
+  // rather than rendering a board the agent cannot draw on -- the
+  // composer segment is gone by then, so it would be a room with the
+  // door bricked up.
+  const viewMode: AgentChatViewMode =
+    runtime.viewMode === "whiteboard" && !whiteboardEnabled
+      ? "simple"
+      : runtime.viewMode;
+
   const effectiveDisabled = disabled || readOnly.readOnly;
   const disabledReason = readOnly.reason;
   // The TurnSummaryCard renders an LLM-generated recap of the just-
@@ -300,7 +322,7 @@ export function AgentChat({
                 : "md:relative md:flex-1",
             )}
           >
-            {runtime.viewMode === "whiteboard" ? (
+            {viewMode === "whiteboard" ? (
               // The board replaces the transcript, on the same runtime
               // and the same session: switching view must not change
               // which conversation you are in.
@@ -342,11 +364,12 @@ export function AgentChat({
               onToggleWorkspace={handleToggleWorkspace}
               canShowBrowser={browserAvailable}
               canShowWorkspace={workspaceAvailable}
-              viewMode={runtime.viewMode}
+              viewMode={viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
               researchEnabled={researchEnabled}
               codeAgentsEnabled={codeAgentsEnabled}
+              whiteboardEnabled={whiteboardEnabled}
               loopsEnabled={loopsEnabled}
               missionsEnabled={missionsEnabled}
               goalsEnabled={goalsEnabled}
