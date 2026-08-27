@@ -263,19 +263,28 @@ full turn.
 
 The `mode` field on the turn selects between:
 
-* `sketch` — the tool filter narrows to `{whiteboard_draw}` and the turn
-  runs on the base tier sentinel. One model round-trip, so ink gets
-  answered at something close to PenEcho's latency.
-* `deep` — the full tool catalogue and the pro tier sentinel. The agent
-  can search, compute, call `create_artifact`, then draw.
+* `sketch` — the tool filter narrows to `{whiteboard_draw}`. One model
+  round-trip, so ink gets answered at something close to PenEcho's
+  latency.
+* `deep` — the full tool catalogue. The agent can search, compute, call
+  `create_artifact`, then draw.
 
-Both tiers resolve through the proxy's model sentinels, so this selects
-a tier and never a literal model id.
+**Only the tool catalogue varies.** Both speeds run on the session's
+configured model. The speeds are a *latency* control, not an entitlement
+one, and must not be pinned to the base/pro tiers or otherwise made to
+depend on the caller's plan — that would turn "think harder" into a
+paywall on what reads as a plain UI affordance, and it would make the
+same button behave differently for two users looking at the same board.
+Plan-based limits stay where every other one already lives: the
+entitlement exclusions applied downstream of this filter.
 
-`_tool_filter_for_session` is already evaluated per turn inside the loop
-(`harness/loop.py:1638`); it gains the turn's mode as an argument.
-`/deep-research` is the existing precedent for a user-triggered per-turn
-escalation.
+This also keeps the mechanism honest about where the latency actually
+comes from. A sketch turn is fast because it is one round-trip, not
+because it runs on a smaller model.
+
+The filter is applied at the `_tool_filter_for_session` call site inside
+the loop, which is already evaluated per turn. `/deep-research` is the
+existing precedent for a user-triggered per-turn escalation.
 
 This is the one place the design adds a hook to the harness loop rather
 than reusing one. It is confined to reading a single enum off the

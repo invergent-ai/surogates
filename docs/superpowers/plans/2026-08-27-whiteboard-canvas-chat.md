@@ -531,7 +531,7 @@ def test_turn_mode_reads_deep():
 def test_turn_mode_rejects_an_unknown_value():
     # An unrecognised mode must fall back to the cheap path, never the
     # expensive one -- an attacker-controlled string must not be able to
-    # promote a turn to the full tool catalogue and the pro tier.
+    # promote a turn to the full tool catalogue.
     assert turn_mode({"whiteboard": {"mode": "unlimited"}}) == "sketch"
 
 

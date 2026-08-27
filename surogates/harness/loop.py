@@ -4471,14 +4471,12 @@ def _whiteboard_sketch_filter(
 
     Only the tool catalogue varies, which is where the latency actually
     sits -- a sketch turn is one round-trip, a deep turn is many.  Both
-    speeds run on the session's configured model.
-
-    ponytail: no per-turn tier pin.  Running sketch on the base tier and
-    deep on pro would need a per-turn client swap, because the pro tier
-    is a different endpoint rather than a different model name, and the
-    only slot holding it (``llm_advisor``) is deliberately unset in
-    production.  Revisit when a first-class pro-tier sentinel exists in
-    the runtime config; do not hardcode a model id here.
+    speeds run on the session's configured model, deliberately: the two
+    speeds are a latency control, not an entitlement one.  They must not
+    be pinned to the base/pro tiers or otherwise made to depend on the
+    caller's plan, or "think harder" becomes a paywall on a button that
+    reads as a UI affordance.  Plan-based limits belong where the other
+    ones already live -- the entitlement exclusions applied downstream.
     """
     from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
     from surogates.whiteboard.session import MODE_DEEP, turn_mode
