@@ -1647,6 +1647,18 @@ class AgentHarness(
             # - Sessions with explicit allowed_tools get exactly those.
             tool_filter = self._tool_filter_for_session(session)
 
+            # A whiteboard turn picks its own speed.  ``sketch`` -- the
+            # default -- leaves the model exactly one tool so it draws in
+            # a single round-trip; ``deep`` is the user explicitly asking
+            # for work before the drawing and keeps the full catalogue.
+            # Read from the turn's own user message, not the session row:
+            # the two speeds alternate freely within one conversation.
+            tool_filter = _whiteboard_sketch_filter(
+                tool_filter,
+                session,
+                _latest_whiteboard_metadata(all_events),
+            )
+
             # user_reports exposes other end-users' data — its schema is
             # only offered to operator (Studio ops-chat) sessions.  The
             # cheap config-only owner-scope check suffices here because
@@ -3667,7 +3679,12 @@ class AgentHarness(
         return result
 
     def _tool_filter_for_session(self, session: Session) -> set[str] | None:
-        """Return the tool allow-list for a session."""
+        """Return the tool allow-list for a session.
+
+        Session-scoped only.  A whiteboard turn additionally narrows this
+        per turn -- see :func:`_whiteboard_sketch_filter`, applied at the
+        call site so this method keeps one shape for every caller.
+        """
         config = session.config or {}
         explicit_allowed = bool(config.get("allowed_tools"))
 
@@ -4415,3 +4432,62 @@ class AgentHarness(
                 exc_info=True,
             )
 
+
+
+def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
+    """Return the newest ``user.message`` event's metadata, or ``None``.
+
+    The turn's mode rides on the message that started it, so the loop has
+    to look back at the event log rather than at the session row.  Walks
+    backwards and stops at the first user message: anything older belongs
+    to a turn that has already been answered.
+    """
+    for event in reversed(events or []):
+        event_type = getattr(event, "type", None)
+        type_value = getattr(event_type, "value", event_type)
+        if type_value != EventType.USER_MESSAGE.value:
+            continue
+        data = getattr(event, "data", None)
+        return data.get("metadata") if isinstance(data, dict) else None
+    return None
+
+
+def _whiteboard_sketch_filter(
+    tool_filter: set[str] | None,
+    session: Any,
+    metadata: Any,
+) -> set[str] | None:
+    """Narrow a whiteboard turn to one model round-trip in sketch mode.
+
+    A whiteboard turn has two speeds.  ``sketch`` answers ink directly:
+    the model gets exactly one tool, so it draws and stops, which is what
+    keeps the interaction close to the latency of writing on paper.
+    ``deep`` is the user asking for real work first -- search, compute,
+    build an artifact -- and restores the full catalogue.
+
+    ``mode`` arrives from the client, so anything that is not exactly
+    ``deep`` resolves to ``sketch``: an unrecognised string must never be
+    able to promote a turn to the full tool catalogue.
+
+    Only the tool catalogue varies, which is where the latency actually
+    sits -- a sketch turn is one round-trip, a deep turn is many.  Both
+    speeds run on the session's configured model.
+
+    ponytail: no per-turn tier pin.  Running sketch on the base tier and
+    deep on pro would need a per-turn client swap, because the pro tier
+    is a different endpoint rather than a different model name, and the
+    only slot holding it (``llm_advisor``) is deliberately unset in
+    production.  Revisit when a first-class pro-tier sentinel exists in
+    the runtime config; do not hardcode a model id here.
+    """
+    from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
+    from surogates.whiteboard.session import MODE_DEEP, turn_mode
+
+    if not is_whiteboard_session(session):
+        return tool_filter
+    if turn_mode(metadata) == MODE_DEEP:
+        return tool_filter
+    # A fresh set every call: downstream stages mutate the filter, and
+    # handing back the frozen module constant's contents by reference
+    # would let one turn's subtraction leak into the next.
+    return set(WHITEBOARD_TOOL_NAMES)
