@@ -1,0 +1,569 @@
+import { Brain, Send } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { cn } from "../../lib/utils";
+import { useAgentChatRuntime } from "../../runtime/use-agent-chat-runtime";
+import type { AgentChatAdapter } from "../../types";
+import { Button } from "../ui/button";
+import {
+  type AtlasExtras,
+  type Rect,
+  atlasMetadata,
+  buildAtlas,
+  mapHotspots,
+  planAtlas,
+} from "./atlas";
+import {
+  CANVAS_SIZE,
+  type WbDoc,
+  type WbObject,
+  emptyDoc,
+  foldToolCalls,
+} from "./doc";
+import { FormulaCache } from "./formula";
+import {
+  StrokeBuilder,
+  clampView,
+  logicalToScreen,
+  panBy,
+  screenToLogical,
+  strokePointsFromEvent,
+  zoomAt,
+} from "./input";
+import { loadDoc, useDebouncedSave } from "./persist";
+import {
+  type RenderServices,
+  type View,
+  hitTest,
+  objectBounds,
+  renderDoc,
+} from "./render";
+import { INK_COLORS, INK_WIDTHS, type WbTool, ToolRail } from "./tool-rail";
+
+export type { WbTool };
+
+/** Undo depth. PenEcho's MAX_HISTORY, and for the same reason: deeper
+ *  costs memory nobody spends. */
+const MAX_HISTORY = 30;
+
+/** Where a fresh board opens — the middle of the canvas, so there is
+ *  room to pan in every direction. */
+const INITIAL_VIEW: View = {
+  x: CANVAS_SIZE / 2 - 400,
+  y: CANVAS_SIZE / 2 - 300,
+  zoom: 1,
+};
+
+export interface AgentWhiteboardProps {
+  adapter: AgentChatAdapter;
+  agentId?: string;
+  sessionId: string | null;
+  onSessionChange?: (sessionId: string) => void;
+  disabled?: boolean;
+}
+
+export function AgentWhiteboard({
+  adapter,
+  agentId,
+  sessionId,
+  onSessionChange,
+  disabled,
+}: AgentWhiteboardProps) {
+  const runtime = useAgentChatRuntime({
+    adapter,
+    agentId,
+    sessionId,
+    onSessionChange,
+  });
+
+  const [doc, setDoc] = useState<WbDoc>(emptyDoc);
+  const [view, setView] = useState<View>(INITIAL_VIEW);
+  const [tool, setTool] = useState<WbTool>("pen");
+  const [color, setColor] = useState<string>(INK_COLORS[0]);
+  const [width, setWidth] = useState<number>(INK_WIDTHS[1]);
+  const [question, setQuestion] = useState("");
+  const [showTranscript, setShowTranscript] = useState(false);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [size, setSize] = useState({ w: 800, h: 600 });
+
+  // Undo/redo stacks of whole documents. Cheap because objects are
+  // shared structurally — only the array wrapper is copied.
+  const undoStack = useRef<WbDoc[]>([]);
+  const redoStack = useRef<WbDoc[]>([]);
+  const [historyTick, setHistoryTick] = useState(0);
+
+  // Input captured since the last Ask: what the model is told to attend
+  // to. Refs, not state — they change per pointer sample and must not
+  // re-render the tree.
+  const strokeRef = useRef<StrokeBuilder | null>(null);
+  const panFrom = useRef<{ x: number; y: number } | null>(null);
+  const hotspotsRef = useRef<{ x: number; y: number }[]>([]);
+  const dirtyRef = useRef<Rect | null>(null);
+
+  const repaintRef = useRef<() => void>(() => undefined);
+  const formulaCache = useMemo(
+    () => new FormulaCache(() => repaintRef.current()),
+    [],
+  );
+
+  const services = useMemo<RenderServices>(
+    () => ({
+      formula: (latex, fontSize) => formulaCache.measure(latex, fontSize),
+      formulaImage: (latex, fontSize) => formulaCache.get(latex, fontSize),
+      createCanvas: (w, h) => {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        return c;
+      },
+    }),
+    [formulaCache],
+  );
+
+  // ------------------------------------------------------------------
+  // Document lifecycle
+  // ------------------------------------------------------------------
+
+  useEffect(() => {
+    if (!sessionId) {
+      setDoc(emptyDoc());
+      return;
+    }
+    let cancelled = false;
+    void loadDoc(adapter, sessionId, runtime.messages).then((loaded) => {
+      if (!cancelled) setDoc(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Deliberately not depending on runtime.messages: this is the load
+    // for a session change, and the fold effect below keeps it current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter, sessionId]);
+
+  useEffect(() => {
+    setDoc((d) => foldToolCalls(d, runtime.messages));
+  }, [runtime.messages]);
+
+  useDebouncedSave(adapter, sessionId, doc);
+
+  // ------------------------------------------------------------------
+  // History
+  // ------------------------------------------------------------------
+
+  const commit = useCallback((next: (prev: WbDoc) => WbDoc) => {
+    setDoc((prev) => {
+      undoStack.current.push(prev);
+      if (undoStack.current.length > MAX_HISTORY) undoStack.current.shift();
+      redoStack.current = [];
+      setHistoryTick((t) => t + 1);
+      return next(prev);
+    });
+  }, []);
+
+  const undo = useCallback(() => {
+    setDoc((prev) => {
+      const previous = undoStack.current.pop();
+      if (!previous) return prev;
+      redoStack.current.push(prev);
+      setHistoryTick((t) => t + 1);
+      return previous;
+    });
+  }, []);
+
+  const redo = useCallback(() => {
+    setDoc((prev) => {
+      const next = redoStack.current.pop();
+      if (!next) return prev;
+      undoStack.current.push(prev);
+      setHistoryTick((t) => t + 1);
+      return next;
+    });
+  }, []);
+
+  const deleteSelected = useCallback(() => {
+    commit((prev) => ({
+      ...prev,
+      objects: prev.objects.filter((o) => !o.selected),
+    }));
+  }, [commit]);
+
+  // ------------------------------------------------------------------
+  // Sizing and painting
+  // ------------------------------------------------------------------
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      setSize({ w: el.clientWidth || 800, h: el.clientHeight || 600 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const paint = useCallback(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const dpr = globalThis.devicePixelRatio || 1;
+    if (canvas.width !== size.w * dpr || canvas.height !== size.h * dpr) {
+      canvas.width = size.w * dpr;
+      canvas.height = size.h * dpr;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.w, size.h);
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    renderDoc(ctx, doc, view, size, services);
+    ctx.restore();
+
+    // The in-progress stroke is not in the document yet, so paint it on
+    // top rather than committing a partial object every sample.
+    const live = strokeRef.current?.points;
+    if (live && live.length >= 4) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.beginPath();
+      const p0 = logicalToScreen({ x: live[0], y: live[1] }, view);
+      ctx.moveTo(p0.x, p0.y);
+      for (let i = 2; i + 1 < live.length; i += 2) {
+        const p = logicalToScreen({ x: live[i], y: live[i + 1] }, view);
+        ctx.lineTo(p.x, p.y);
+      }
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width * view.zoom;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+    }
+  }, [doc, view, size, services, color, width]);
+
+  repaintRef.current = paint;
+
+  // Repaint only when something changed. A permanent rAF loop would burn
+  // a laptop battery on a board nobody is touching.
+  useEffect(() => {
+    const id = requestAnimationFrame(paint);
+    return () => cancelAnimationFrame(id);
+  }, [paint]);
+
+  // ------------------------------------------------------------------
+  // Pointer input
+  // ------------------------------------------------------------------
+
+  const noteDirty = useCallback((pt: { x: number; y: number }) => {
+    hotspotsRef.current.push(pt);
+    const d = dirtyRef.current;
+    dirtyRef.current = d
+      ? {
+          x: Math.min(d.x, pt.x),
+          y: Math.min(d.y, pt.y),
+          w: Math.max(d.x + d.w, pt.x) - Math.min(d.x, pt.x),
+          h: Math.max(d.y + d.h, pt.y) - Math.min(d.y, pt.y),
+        }
+      : { x: pt.x, y: pt.y, w: 1, h: 1 };
+  }, []);
+
+  const localPoint = useCallback((e: React.PointerEvent) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return { x: e.clientX - (rect?.left ?? 0), y: e.clientY - (rect?.top ?? 0) };
+  }, []);
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (disabled) return;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      const screen = localPoint(e);
+      const logical = screenToLogical(screen, view);
+
+      if (tool === "pan") {
+        panFrom.current = screen;
+        return;
+      }
+      if (tool === "select") {
+        const hit = hitTest(doc, logical, services);
+        commit((prev) => ({
+          ...prev,
+          objects: prev.objects.map((o) => ({
+            ...o,
+            selected: hit ? o.id === hit.id : false,
+          })),
+        }));
+        return;
+      }
+      // pen and eraser both lay down a stroke; the eraser's is composited
+      // out at paint time via its own object kind.
+      const builder = new StrokeBuilder(
+        tool === "eraser" ? "#ffffff" : color,
+        tool === "eraser" ? width * 4 : width,
+      );
+      builder.begin(logical);
+      strokeRef.current = builder;
+      noteDirty(logical);
+    },
+    [disabled, localPoint, view, tool, doc, services, commit, color, width, noteDirty],
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (panFrom.current) {
+        const screen = localPoint(e);
+        setView((v) =>
+          clampView(
+            panBy(v, {
+              x: screen.x - panFrom.current!.x,
+              y: screen.y - panFrom.current!.y,
+            }),
+            size,
+          ),
+        );
+        panFrom.current = screen;
+        return;
+      }
+      const builder = strokeRef.current;
+      if (!builder) return;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      for (const p of strokePointsFromEvent(e.nativeEvent)) {
+        const logical = screenToLogical(
+          { x: p.x - (rect?.left ?? 0), y: p.y - (rect?.top ?? 0) },
+          view,
+        );
+        builder.extend(logical);
+        noteDirty(logical);
+      }
+      paint();
+    },
+    [localPoint, size, view, noteDirty, paint],
+  );
+
+  const onPointerUp = useCallback(() => {
+    panFrom.current = null;
+    const builder = strokeRef.current;
+    strokeRef.current = null;
+    if (!builder) return;
+    const stroke = builder.finish();
+    if (!stroke) return;
+    const object: WbObject =
+      tool === "eraser"
+        ? ({
+            ...stroke,
+            kind: "erase",
+            mode: "path",
+            points: chunkPairs((stroke as { pts: number[] }).pts),
+            size: width * 4,
+          } as unknown as WbObject)
+        : stroke;
+    commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
+  }, [tool, width, commit]);
+
+  const onWheel = useCallback(
+    (e: React.WheelEvent<HTMLCanvasElement>) => {
+      const screen = {
+        x: e.clientX - (canvasRef.current?.getBoundingClientRect().left ?? 0),
+        y: e.clientY - (canvasRef.current?.getBoundingClientRect().top ?? 0),
+      };
+      setView((v) =>
+        clampView(zoomAt(v, screen, e.deltaY < 0 ? 1.1 : 1 / 1.1), size),
+      );
+    },
+    [size],
+  );
+
+  // ------------------------------------------------------------------
+  // Keyboard
+  // ------------------------------------------------------------------
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteSelected();
+      }
+    };
+    globalThis.addEventListener("keydown", onKey);
+    return () => globalThis.removeEventListener("keydown", onKey);
+  }, [undo, redo, deleteSelected]);
+
+  // ------------------------------------------------------------------
+  // Ask
+  // ------------------------------------------------------------------
+
+  const ask = useCallback(
+    async (mode: "sketch" | "deep") => {
+      if (!canvasRef.current) return;
+      const latest = dirtyRef.current;
+      const plan = planAtlas(doc, latest, view, size, services);
+      const atlas = buildAtlas(doc, plan, services);
+      const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
+      const extras: AtlasExtras = { mode };
+      const selected = doc.objects.find((o) => o.selected);
+      if (selected) {
+        const b = objectBounds(selected, services);
+        if (b) extras.selection = b;
+      }
+
+      // Clear the attention accumulators before awaiting: whatever the
+      // user draws while the agent is thinking belongs to the next turn.
+      hotspotsRef.current = [];
+      dirtyRef.current = null;
+      const text = question;
+      setQuestion("");
+
+      await runtime.send(
+        text,
+        [{ data: atlas.toDataURL("image/png"), mimeType: "image/png" }],
+        undefined,
+        { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
+      );
+    },
+    [doc, view, size, services, question, runtime],
+  );
+
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
+
+  const artifacts = doc.objects.filter(
+    (o): o is Extract<WbObject, { kind: "artifact" }> => o.kind === "artifact",
+  );
+
+  const busy = runtime.isRunning || disabled;
+
+  return (
+    <div className="flex h-full w-full flex-col">
+      <div className="relative flex min-h-0 flex-1">
+        <div className="absolute left-2 top-2 z-10">
+          <ToolRail
+            tool={tool}
+            onToolChange={setTool}
+            color={color}
+            onColorChange={setColor}
+            width={width}
+            onWidthChange={setWidth}
+            canUndo={undoStack.current.length > 0}
+            canRedo={redoStack.current.length > 0}
+            onUndo={undo}
+            onRedo={redo}
+            disabled={disabled}
+            key={historyTick}
+          />
+        </div>
+
+        <div ref={wrapRef} className="relative min-h-0 flex-1 overflow-hidden">
+          <canvas
+            ref={canvasRef}
+            aria-label="Whiteboard canvas"
+            className={cn(
+              "h-full w-full touch-none bg-white",
+              tool === "pan" ? "cursor-grab" : "cursor-crosshair",
+            )}
+            style={{ width: size.w, height: size.h }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+            onWheel={onWheel}
+          />
+
+          {/* A canvas cannot host an iframe, so artifacts render as
+              positioned DOM above it. The canvas carries a frame in
+              their place, which is what reaches the atlas. */}
+          {artifacts.map((a) => {
+            const tl = logicalToScreen({ x: a.x, y: a.y }, view);
+            return (
+              <div
+                key={a.id}
+                data-artifact-id={a.artifactId}
+                className="pointer-events-auto absolute overflow-hidden rounded border bg-background"
+                style={{
+                  left: tl.x,
+                  top: tl.y,
+                  width: a.w * view.zoom,
+                  height: a.h * view.zoom,
+                }}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 border-t p-2">
+        <input
+          className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm"
+          placeholder="Ask about the board (optional)"
+          value={question}
+          disabled={busy}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void ask("sketch");
+            }
+          }}
+        />
+        <Button
+          type="button"
+          disabled={busy}
+          aria-label="Ask"
+          onClick={() => void ask("sketch")}
+        >
+          <Send className="size-4" />
+          Ask
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          aria-label="Think harder"
+          onClick={() => void ask("deep")}
+        >
+          <Brain className="size-4" />
+          Think harder
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          aria-label="Toggle transcript"
+          aria-expanded={showTranscript}
+          onClick={() => setShowTranscript((v) => !v)}
+        >
+          Transcript
+        </Button>
+      </div>
+
+      {showTranscript && (
+        <div className="max-h-64 overflow-auto border-t p-2 text-sm">
+          {runtime.messages.map((m) => (
+            <div key={m.id} className="py-1">
+              <span className="mr-2 text-xs uppercase text-muted-foreground">
+                {m.role}
+              </span>
+              <span className="whitespace-pre-wrap">{m.content}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Flat [x,y,x,y,...] -> [[x,y],[x,y],...] for the erase path shape. */
+function chunkPairs(flat: number[]): number[][] {
+  const pairs: number[][] = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) pairs.push([flat[i], flat[i + 1]]);
+  return pairs;
+}

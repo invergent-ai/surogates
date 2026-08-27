@@ -1,4 +1,10 @@
 export { AgentChat } from "./agent-chat";
+export { AgentWhiteboard } from "./components/whiteboard/agent-whiteboard";
+export type {
+  AgentWhiteboardProps,
+  WbTool,
+} from "./components/whiteboard/agent-whiteboard";
+export type { WbDoc, WbObject } from "./components/whiteboard/doc";
 export {
   AgentChatAdapterProvider,
   useAgentChatAdapterContext,

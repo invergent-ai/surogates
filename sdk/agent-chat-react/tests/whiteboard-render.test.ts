@@ -189,7 +189,7 @@ describe("objectBounds", () => {
     expect(thick!.h).toBeGreaterThan(thin!.h);
   });
 
-  it("computes bounds for a draw object from the vendored normalizer", () => {
+  it("computes bounds for a draw object from the draw normalizer", () => {
     const [obj] = applyCommands(emptyDoc(), [{
       tool: "draw", origin: [100, 100],
       types: ["rect"], items: [[0, 0, 50, 50]],

@@ -1,5 +1,5 @@
 import type { AgentChatMessage } from "../../types";
-import { DRAW } from "../../vendor/penecho";
+import { normalize as normalizeDraw } from "./draw";
 
 /** Logical canvas edge. Must match surogates/whiteboard/commands.py. */
 export const CANVAS_SIZE = 20_000;
@@ -114,10 +114,10 @@ function toObject(
         fontSize: Number(cmd.fontSize),
       };
     case "draw":
-      // The vendored normalizer is authoritative for geometry: if it
+      // The draw normalizer is authoritative for geometry: if it
       // rejects the command the renderer would produce nothing, so drop
       // it here rather than carry an object that can never paint.
-      if (DRAW.normalize(cmd, CANVAS_SIZE) === null) return null;
+      if (normalizeDraw(cmd, CANVAS_SIZE) === null) return null;
       return {
         ...base,
         kind: "draw",

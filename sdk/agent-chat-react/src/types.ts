@@ -1022,6 +1022,8 @@ export interface AgentChatRuntimeApi {
     content: string,
     images?: AgentChatImageAttachment[],
     attachments?: AgentChatPendingAttachment[],
+    /** Free-form per-turn metadata, forwarded verbatim to the adapter. */
+    metadata?: Record<string, unknown>,
   ): Promise<void>;
   stop(): Promise<void>;
   retry(): Promise<void>;

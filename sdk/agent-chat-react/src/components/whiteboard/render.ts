@@ -1,5 +1,8 @@
-import { DRAW } from "../../vendor/penecho";
-import type { DrawBounds } from "../../vendor/penecho";
+import {
+  type DrawBounds,
+  normalize as normalizeDraw,
+  render as renderDraw,
+} from "./draw";
 import { CANVAS_SIZE, type WbDoc, type WbObject } from "./doc";
 import type { RasterFormula } from "./formula";
 
@@ -91,10 +94,10 @@ export function objectBounds(
     case "ink":
       return inkBounds(obj.pts, obj.width);
     case "draw": {
-      // The vendored normalizer already accounts for curve extrema,
+      // The draw normalizer already accounts for curve extrema,
       // stroke padding and arrowheads — exactly the computation not
       // worth rewriting.
-      const normalized = DRAW.normalize(drawCommandOf(obj), CANVAS_SIZE);
+      const normalized = normalizeDraw(drawCommandOf(obj), CANVAS_SIZE);
       return normalized ? normalized._draw.bounds : null;
     }
     case "text": {
@@ -210,7 +213,7 @@ function paintDraw(
   obj: Extract<WbObject, { kind: "draw" }>,
   services: RenderServices,
 ): void {
-  const rendered = DRAW.render(
+  const rendered = renderDraw(
     drawCommandOf(obj),
     services.createCanvas,
     AGENT_COLOR,

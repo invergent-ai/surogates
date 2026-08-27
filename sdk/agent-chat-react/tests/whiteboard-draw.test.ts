@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DRAW } from "@/vendor/penecho";
+import * as DRAW from "@/components/whiteboard/draw";
 
 /**
  * Records every 2D-context call. Ported from PenEcho's own
@@ -32,7 +32,7 @@ const rect = {
   items: [[0, 0, 200, 120]],
 };
 
-describe("vendored draw.js — validation", () => {
+describe("draw — validation", () => {
   it("normalizes a valid rect command", () => {
     const result = DRAW.normalize(rect);
     expect(result).not.toBeNull();
@@ -78,7 +78,7 @@ describe("vendored draw.js — validation", () => {
   });
 });
 
-describe("vendored draw.js — bounds", () => {
+describe("draw — bounds", () => {
   it("includes stroke padding in the bounds", () => {
     const bounds = DRAW.normalize({ ...rect, width: 30 })!._draw.bounds;
     expect(bounds.w).toBeGreaterThan(200);
@@ -98,7 +98,7 @@ describe("vendored draw.js — bounds", () => {
   });
 });
 
-describe("vendored draw.js — rendering", () => {
+describe("draw — rendering", () => {
   it("renders a rect and returns its logical origin", () => {
     const rendered = DRAW.render(rect, (w, h) => fakeCanvas(w, h));
     expect(rendered).not.toBeNull();
@@ -118,7 +118,7 @@ describe("vendored draw.js — rendering", () => {
   });
 });
 
-describe("vendored draw.js — smoothing", () => {
+describe("draw — smoothing", () => {
   const points = [
     { x: 0, y: 0 },
     { x: 10, y: 10 },

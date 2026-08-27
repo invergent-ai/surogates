@@ -47,7 +47,7 @@
 | `surogates/harness/loop_context_replay.py` | Prune superseded canvas images. |
 | `surogates/harness/loop.py` | Thread the turn's `sketch`/`deep` mode into the tool filter. |
 | `surogates/api/routes/sessions.py` | Cap `metadata.whiteboard`. |
-| `sdk/agent-chat-react/src/vendor/penecho/` | Vendored `draw.js`, `mixed-text.js`, `selection.js` + `README.md` |
+| `sdk/agent-chat-react/src/components/whiteboard/draw.ts` | PenEcho's `draw.js` ported to typed ESM (attribution in the header) |
 | `sdk/agent-chat-react/src/components/whiteboard/doc.ts` | Canvas document type, event fold, undo stack. |
 | `sdk/agent-chat-react/src/components/whiteboard/render.ts` | Objects -> Canvas2D. |
 | `sdk/agent-chat-react/src/components/whiteboard/atlas.ts` | Atlas + hotspot-grid builder. |
@@ -1999,7 +1999,7 @@ git commit -m "test(whiteboard): cover a whiteboard turn end to end"
 
 # Phase B — SDK canvas
 
-## Task 10: Vendor the PenEcho modules
+## Task 10: Port PenEcho's draw module
 
 **Files:**
 - Create: `sdk/agent-chat-react/src/vendor/penecho/draw.js`

@@ -564,6 +564,10 @@ export function useAgentChatRuntime({
       content: string,
       images?: AgentChatImageAttachment[],
       pendingAttachments?: AgentChatPendingAttachment[],
+      // Free-form per-turn metadata forwarded verbatim to the adapter.
+      // The whiteboard rides its canvas geometry here; the harness reads
+      // only the keys it understands and ignores the rest.
+      metadata?: Record<string, unknown>,
     ) => {
       // Display-only mirror of pendingAttachments for the optimistic
       // local user-message: same filename + size, no path (chip renders
@@ -616,7 +620,7 @@ export function useAgentChatRuntime({
             }),
           );
         }
-        await sendTurn(adapter, sid, content, images, refs, goal);
+        await sendTurn(adapter, sid, content, images, refs, goal, metadata);
       };
 
       if (!sessionId) {
@@ -782,6 +786,7 @@ async function sendTurn(
   images: AgentChatImageAttachment[] | undefined,
   attachments: AgentChatAttachment[] | undefined,
   goal: ParsedGoalDefinition | null,
+  metadata: Record<string, unknown> | undefined,
 ): Promise<void> {
   if (goal && adapter.defineOutcome) {
     await adapter.defineOutcome({
@@ -791,7 +796,9 @@ async function sendTurn(
     });
     return;
   }
-  await adapter.sendMessage({ sessionId, content, images, attachments });
+  await adapter.sendMessage({
+    sessionId, content, images, attachments, metadata,
+  });
 }
 
 /**

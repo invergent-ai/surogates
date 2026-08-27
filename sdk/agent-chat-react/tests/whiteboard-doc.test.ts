@@ -90,7 +90,7 @@ describe("canvas document", () => {
     expect(obj.kind).toBe("draw");
   });
 
-  it("skips a command the vendored validator rejects", () => {
+  it("skips a command the draw validator rejects", () => {
     const doc = applyCommands(emptyDoc(), [
       text,
       {
