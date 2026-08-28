@@ -868,6 +868,16 @@ describe("close-ups of new ink", () => {
     expect(rec.size()?.h).toBeGreaterThan(100);
   });
 
+  it("always magnifies when it is sent at all", () => {
+    // Session 661ecc5b: 118px handwriting got a close-up at scale 1 --
+    // the overview again, which helped nothing.
+    const rec = drawing();
+    const crop = buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 400, h: 120 } }, rec.services, 118,
+    );
+    expect(crop?.scale).toBeGreaterThanOrEqual(1.5);
+  });
+
   it("never shrinks below 1:1 for large handwriting that fits", () => {
     const rec = drawing();
     const crop = buildRegionCrop(

@@ -744,7 +744,10 @@ export function buildRegionCrop(
 ): InkCrop | null {
   const margin = Math.max(unit * 0.6, 8);
   const area = grow(region.rect, margin);
-  let scale = Math.max(1, CROP_INK_PX / Math.max(unit, 1));
+  // A close-up that is sent must magnify: at 118px handwriting the
+  // target height alone gave scale 1, and the model got the overview
+  // twice. Floor at 1.5x; the size cap still wins for a huge region.
+  let scale = Math.max(1.5, CROP_INK_PX / Math.max(unit, 1));
   scale = Math.min(scale, CROP_MAX_PX / area.w, CROP_MAX_PX / area.h);
   scale = Math.max(scale, 0.25);
   const size = {

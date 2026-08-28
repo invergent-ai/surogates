@@ -572,21 +572,24 @@ export function makeSlotObject(
 /**
  * The slot a pen stroke reserves, when it draws the marker for one.
  *
- * The marker is a spiral: one continuous stroke winding at least
- * SLOT_TURNS times around its own centre, tightening (or widening)
- * as it goes. Chosen against three constraints -- it must be drawable
- * without lifting the pen; it must not be a letter, digit, operator or
- * common shape; and it must not be something a real drawing contains
- * by accident. A box fails the first (nobody draws one in a stroke)
- * and the third (boxes are everywhere). The spiral's nearest
- * neighbours -- `@`, `6`, `9`, `e`, `∞`, a circle -- all wind less than
- * a turn and a half or reverse direction, and a stray curl in
- * handwriting is far smaller than a line of writing.
+ * The marker is a spiral or a coil: one continuous stroke whose heading
+ * keeps turning the same way through at least SLOT_TURNS full turns.
+ * Measured as turning -- the cumulative rotation of the pen's direction
+ * -- not as orbiting about a centre, because people draw "a spiral" as
+ * loops that travel (a spring, a scribbled coil) as often as loops that
+ * tighten, and a travelling coil barely orbits its own centroid.
+ *
+ * Chosen against three constraints: drawable without lifting the pen;
+ * not a letter, digit, operator or common shape; not something a real
+ * drawing contains by accident. A circle turns once; `@`, `6`, `9`, `e`
+ * and `g` turn less than a turn and a half; `3`, `S`, `8` and `∞`
+ * reverse direction and their turning cancels. A curl in handwriting is
+ * far smaller than a line of writing.
  *
  * Returns the stroke's extent, which is the slot: the user sizes it by
- * how big they draw the spiral. Emptiness -- nothing already inside --
- * is the caller's check; a spiral drawn around content is emphasis,
- * not a placeholder.
+ * how big they draw the marker. Emptiness -- nothing already inside --
+ * is the caller's check; a coil drawn around content is emphasis, not a
+ * placeholder.
  */
 export const SLOT_TURNS = 1.75;
 
@@ -594,58 +597,54 @@ export function spiralFromStroke(
   pts: readonly number[],
   unit: number,
 ): { x: number; y: number; w: number; h: number } | null {
-  const n = pts.length / 2;
-  if (n < 12) return null;
+  if (pts.length < 24) return null;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  let cx = 0;
-  let cy = 0;
   for (let i = 0; i + 1 < pts.length; i += 2) {
     minX = Math.min(minX, pts[i]);
     maxX = Math.max(maxX, pts[i]);
     minY = Math.min(minY, pts[i + 1]);
     maxY = Math.max(maxY, pts[i + 1]);
-    cx += pts[i];
-    cy += pts[i + 1];
   }
-  cx /= n;
-  cy /= n;
   const w = maxX - minX;
   const h = maxY - minY;
   const short = Math.min(w, h);
-  if (short < unit * 0.8 || short / Math.max(w, h) < 0.5) return null;
+  if (short < unit * 0.8 || short / Math.max(w, h) < 0.4) return null;
 
-  // Unwrapped angle about the centroid: total winding and its
-  // consistency. A spiral turns one way the whole time.
-  let winding = 0;
-  let forward = 0;
-  let steps = 0;
-  let prev = Math.atan2(pts[1] - cy, pts[0] - cx);
-  const radii: number[] = [Math.hypot(pts[0] - cx, pts[1] - cy)];
+  // Resample so hand jitter between near-identical samples does not
+  // register as turning.
+  const step = Math.max(unit * 0.08, 2);
+  const xs: number[] = [pts[0]];
+  const ys: number[] = [pts[1]];
   for (let i = 2; i + 1 < pts.length; i += 2) {
-    const angle = Math.atan2(pts[i + 1] - cy, pts[i] - cx);
-    let d = angle - prev;
+    const dx = pts[i] - xs[xs.length - 1];
+    const dy = pts[i + 1] - ys[ys.length - 1];
+    if (Math.hypot(dx, dy) >= step) {
+      xs.push(pts[i]);
+      ys.push(pts[i + 1]);
+    }
+  }
+  if (xs.length < 8) return null;
+
+  let clockwise = 0;
+  let anticlockwise = 0;
+  let prev = Math.atan2(ys[1] - ys[0], xs[1] - xs[0]);
+  for (let i = 2; i < xs.length; i++) {
+    const heading = Math.atan2(ys[i] - ys[i - 1], xs[i] - xs[i - 1]);
+    let d = heading - prev;
     if (d > Math.PI) d -= 2 * Math.PI;
     if (d < -Math.PI) d += 2 * Math.PI;
-    prev = angle;
-    winding += d;
-    steps++;
-    if (Math.sign(d) === Math.sign(winding) || d === 0) forward++;
-    radii.push(Math.hypot(pts[i] - cx, pts[i + 1] - cy));
+    prev = heading;
+    if (d > 0) clockwise += d;
+    else anticlockwise -= d;
   }
-  if (Math.abs(winding) < SLOT_TURNS * 2 * Math.PI) return null;
-  if (forward / steps < 0.85) return null;
-
-  // Tightening or widening: the first and last quarter differ clearly
-  // in radius. A circle retraced twice does not.
-  const quarter = Math.max(1, Math.floor(radii.length / 4));
-  const mean = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
-  const first = mean(radii.slice(0, quarter));
-  const last = mean(radii.slice(-quarter));
-  if (Math.min(first, last) / Math.max(first, last) > 0.6) return null;
-
+  const total = clockwise + anticlockwise;
+  const net = Math.abs(clockwise - anticlockwise);
+  if (net < SLOT_TURNS * 2 * Math.PI) return null;
+  // One way the whole time: a shape that doubles back is a letter.
+  if (net / total < 0.8) return null;
   return { x: minX, y: minY, w, h };
 }
 

@@ -476,6 +476,16 @@ describe("slots", () => {
     }
     return pts;
   };
+  /** Loops that travel: a coil of `turns` loops descending `drop` units. */
+  const coil = (turns: number, r: number, drop: number, steps = 120) => {
+    const pts: number[] = [];
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const a = t * turns * 2 * Math.PI;
+      pts.push(60 + r * Math.cos(a), 60 + r * Math.sin(a) + drop * t);
+    }
+    return pts;
+  };
 
   it("recognises a spiral drawn inward as a slot", () => {
     const box = spiralFromStroke(spiral(2.2, 55, 10), 40);
@@ -483,30 +493,45 @@ describe("slots", () => {
     expect(box!.w).toBeGreaterThan(80);
   });
 
-  it("recognises a spiral drawn outward too", () => {
-    expect(spiralFromStroke(spiral(2.2, 10, 55), 40)).not.toBeNull();
+  it("recognises a coil -- loops that travel -- as a slot", () => {
+    // Session 661ecc5b: the user's "spiral" was a spring of two and a
+    // half loops descending the page, which barely orbits its centroid.
+    expect(spiralFromStroke(coil(2.5, 40, 120), 40)).not.toBeNull();
+  });
+
+  it("recognises a circle traced twice as a slot", () => {
+    // Nobody traces a circle twice by accident.
+    expect(spiralFromStroke(spiral(2.2, 55, 55), 40)).not.toBeNull();
   });
 
   it("does not mistake a circle for a slot", () => {
-    // One turn, constant radius: the most common closed shape there is.
     expect(spiralFromStroke(spiral(1, 55, 55), 40)).toBeNull();
   });
 
-  it("does not mistake a circle traced twice for a slot", () => {
-    expect(spiralFromStroke(spiral(2.2, 55, 55), 40)).toBeNull();
-  });
-
   it("does not mistake an @ or a 6 for a slot", () => {
-    // A turn and a quarter is where those stop.
     expect(spiralFromStroke(spiral(1.3, 55, 15), 40)).toBeNull();
   });
 
   it("does not mistake a figure of eight for a slot", () => {
-    // Winds one way then the other: the total comes to nothing.
+    // Turns one way then the other: the turning cancels.
     const pts: number[] = [];
     for (let i = 0; i <= 96; i++) {
       const a = (i / 96) * 2 * Math.PI;
       pts.push(60 + 55 * Math.sin(a), 60 + 30 * Math.sin(2 * a));
+    }
+    expect(spiralFromStroke(pts, 40)).toBeNull();
+  });
+
+  it("does not mistake a 3 or an S for a slot", () => {
+    // Two half-turns in opposite directions.
+    const pts: number[] = [];
+    for (let i = 0; i <= 48; i++) {
+      const a = Math.PI * 1.5 * (i / 48) - Math.PI * 0.75;
+      pts.push(60 + 30 * Math.cos(a), 30 + 30 * Math.sin(a));
+    }
+    for (let i = 0; i <= 48; i++) {
+      const a = -Math.PI * 1.5 * (i / 48) + Math.PI * 0.75;
+      pts.push(60 + 30 * Math.cos(a), 90 + 30 * Math.sin(a));
     }
     expect(spiralFromStroke(pts, 40)).toBeNull();
   });
