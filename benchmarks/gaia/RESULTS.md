@@ -12,16 +12,16 @@ capability problem.
 
 | Date | Run | Where | Model served | Size | Strict | Score |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2026-07-26 | `dev-001` (local) | local harness | claude-sonnet-5 | 110 | 86 | **78.2%** |
+| 2026-07-26 | `dev-001` | local harness | claude-sonnet-5 | 110 | 86 | **78.2%** |
 | 2026-08-14 | `dev-005` | local harness | claude-sonnet-5 (+ qwen3.7-max) | 110 | 74 | **67.3%** |
-| 2026-08-27 | `dev-001` (prod) | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 62 | **56.4%** |
+| 2026-08-27 | `dev-006` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 62 | **56.4%** |
 
-> **Two different runs are both called `dev-001`.** Run ids auto-increment
-> from the contents of `runs/`, so a fresh `runs/` restarts the count. The
-> 2026-07-26 row is the local-harness run whose traces are in this repo; the
-> 2026-08-27 row is the production run, whose traces were only ever on the
-> machine that ran it and are not here. Disambiguated above rather than
-> renumbered, because the ids are what each run's own report.md says.
+> **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids
+> auto-increment from the contents of `runs/`, and it was produced against a
+> fresh `runs/`, so it restarted the count and collided with the local run of
+> the same name. Renumbered here to the next free id, `dev-006`. Its traces
+> were only ever on the machine that ran it, so there is no `runs/dev-006/`
+> to reconcile — if those traces resurface, land them under that id.
 
 The prod run scored L1 21/33, L2 36/60, L3 5/17, with zero infra errors and
 flags: 14 `no_final_answer`, 11 `no_tool_use`, 4 `empty_llm_response`,
