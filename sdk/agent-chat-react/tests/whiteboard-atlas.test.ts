@@ -6,10 +6,13 @@ import {
   atlasMetadata,
   buildAtlas,
   AGENT_OBJECT_LIMIT,
+  MAX_CROPS,
   MAX_MARKS,
   OCCUPANCY_GRID,
   agentObjectReport,
   boardMarks,
+  buildInkCrop,
+  cropCandidates,
   inkClusters,
   contentBeyond,
   contentBounds,
@@ -813,5 +816,86 @@ describe("clustering the user's ink into the things they wrote", () => {
     ]);
     const labels = calls.filter((c) => c[0] === "fillText").map((c) => c[1]);
     expect(labels).toContain("A1");
+  });
+});
+
+describe("close-ups of new ink", () => {
+  const stroke = (id: string, x: number, y: number, w: number, h: number) => ({
+    id, origin: "local", selected: false, kind: "ink" as const,
+    pts: [x, y, x + w, y + h], width: 0, color: "#000",
+  });
+  const board = (...objects: unknown[]) =>
+    ({ ...emptyDoc(), objects }) as never;
+  const drawing = () => {
+    const calls: unknown[][] = [];
+    const ctx = new Proxy({} as Record<string, unknown>, {
+      get: (_t, p) =>
+        p === "measureText"
+          ? () => ({ width: 20 })
+          : (...args: unknown[]) => { calls.push([p, ...args]); },
+      set: () => true,
+    });
+    let made: { w: number; h: number } | null = null;
+    return {
+      calls,
+      size: () => made,
+      services: {
+        ...services,
+        createCanvas: (w: number, h: number) => {
+          made = { w, h };
+          return { width: w, height: h, getContext: () => ctx } as unknown as
+            HTMLCanvasElement;
+        },
+      },
+    };
+  };
+
+  it("renders the mark large enough to read", () => {
+    // 60-unit handwriting arrives ~110px tall instead of the few dozen
+    // pixels it gets on the overview.
+    const rec = drawing();
+    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 300, h: 60 }, fresh: true };
+    const crop = buildInkCrop(board(stroke("s", 0, 0, 300, 60)), mark, rec.services, 60);
+    expect(crop?.scale).toBeGreaterThan(1.5);
+    expect(rec.size()?.h).toBeGreaterThan(100);
+  });
+
+  it("never shrinks below 1:1 for large handwriting", () => {
+    const rec = drawing();
+    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 600, h: 250 }, fresh: true };
+    const crop = buildInkCrop(board(), mark, rec.services, 250);
+    expect(crop?.scale).toBeGreaterThanOrEqual(1);
+  });
+
+  it("caps the image size for a very wide mark", () => {
+    const rec = drawing();
+    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 4000, h: 60 }, fresh: true };
+    buildInkCrop(board(), mark, rec.services, 60);
+    expect(rec.size()?.w).toBeLessThanOrEqual(1024);
+  });
+
+  it("only crops new ink that has no reading yet", () => {
+    const marks = [
+      { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true, reading: "known" },
+      { id: "A2", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true },
+      { id: "A3", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 } },
+      { id: "B1", kind: "agent" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true },
+    ];
+    expect(cropCandidates(marks).map((m) => m.id)).toEqual(["A2"]);
+  });
+
+  it("is bounded per turn", () => {
+    const marks = Array.from({ length: 5 }, (_, i) => ({
+      id: `A${i + 1}`, kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true,
+    }));
+    expect(cropCandidates(marks)).toHaveLength(MAX_CROPS);
+  });
+
+  it("rides on the turn metadata with its image index", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      crops: [{ mark: "A2", imageIndex: 1, scale: 1.83 }],
+    });
+    expect(meta.crops).toEqual([{ mark: "A2", imageIndex: 1, scale: 1.83 }]);
   });
 });

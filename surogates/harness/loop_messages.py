@@ -201,6 +201,30 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     # confidently out of date -- one session ended with its answer
     # wrapped in hand-drawn brackets and squared, and it answered the
     # transcript rather than the board.
+    # Close-ups: the overview is for context and placement, and its
+    # glyphs are a few dozen pixels tall -- where every misread came
+    # from.  Each new, unread mark also arrives as its own image, large
+    # enough to read, and the reading must come from that one.
+    crops = payload.get("crops")
+    if isinstance(crops, list) and crops:
+        parts = []
+        for entry in crops:
+            if not isinstance(entry, dict):
+                continue
+            mark, index = entry.get("mark"), entry.get("imageIndex")
+            if not (isinstance(mark, str) and mark and _is_num(index)):
+                continue
+            scale = entry.get("scale")
+            zoom = f" at {scale}x" if _is_num(scale) else ""
+            parts.append(f"image {int(index) + 1} is {mark} close up{zoom}")
+        if parts:
+            lines.append(
+                f"After the overview, {'; '.join(parts)}. Read that "
+                f"mark's handwriting from its close-up, not from the "
+                f"overview: the overview is for where things are, the "
+                f"close-up is for what they say."
+            )
+
     # Labelled marks: the same ids drawn on the image, listed here and
     # accepted by the tool, so "right of A3" is one name everywhere.
     marks = payload.get("marks")

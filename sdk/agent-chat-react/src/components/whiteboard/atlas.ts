@@ -620,6 +620,68 @@ export function paintMarks(
   ctx.restore();
 }
 
+/** Target height of the handwriting in a close-up, in pixels. */
+const CROP_INK_PX = 110;
+/** Longest side a close-up may have. */
+const CROP_MAX_PX = 1024;
+/** Close-ups per turn. Readings persist, so it is normally one. */
+export const MAX_CROPS = 2;
+
+export interface InkCrop {
+  mark: string;
+  canvas: HTMLCanvasElement;
+  scale: number;
+}
+
+/**
+ * A close-up of one ink mark, rendered large enough to read.
+ *
+ * Every misread so far came from glyphs a few dozen pixels tall on the
+ * overview: `1)` and `√(` are hard to tell apart at that size. The
+ * overview still carries context and placement; this carries
+ * legibility. Scaled so the handwriting is about CROP_INK_PX tall,
+ * never below 1:1, and framed with a margin of one line so the
+ * surroundings that disambiguate a symbol are in shot too.
+ */
+export function buildInkCrop(
+  doc: WbDoc,
+  mark: BoardMark,
+  services: RenderServices,
+  unit: number,
+): InkCrop | null {
+  if (!mark.rect) return null;
+  const margin = Math.max(unit * 0.6, 8);
+  const region = grow(mark.rect, margin);
+  let scale = Math.max(1, CROP_INK_PX / Math.max(unit, 1));
+  scale = Math.min(scale, CROP_MAX_PX / region.w, CROP_MAX_PX / region.h);
+  scale = Math.max(scale, 0.25);
+  const size = {
+    w: Math.max(1, Math.ceil(region.w * scale)),
+    h: Math.max(1, Math.ceil(region.h * scale)),
+  };
+  const canvas = services.createCanvas(size.w, size.h);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, size.w, size.h);
+  renderDoc(
+    ctx,
+    { ...doc, objects: doc.objects.map((o) => ({ ...o, selected: false })) },
+    { x: region.x, y: region.y, zoom: scale },
+    size,
+    services,
+  );
+  return { mark: mark.id, canvas, scale: Math.round(scale * 100) / 100 };
+}
+
+/** The marks worth a close-up this turn: new ink nobody has read yet. */
+export function cropCandidates(marks: BoardMark[]): BoardMark[] {
+  return marks
+    .filter((m) => m.kind === "ink" && m.rect && m.fresh && !m.reading)
+    .slice(0, MAX_CROPS);
+}
+
 /**
  * Which way the board continues past the capture.
  *
@@ -799,6 +861,8 @@ export interface AtlasExtras {
   agentObjects?: AgentObjectReport[];
   /** See {@link boardMarks}. */
   marks?: BoardMark[];
+  /** Close-ups attached after the overview: which mark, which image. */
+  crops?: { mark: string; imageIndex: number; scale: number }[];
 }
 
 /**
@@ -861,6 +925,7 @@ export function atlasMetadata(
       ...(m.reading ? { reading: m.reading, readBy: m.readBy } : {}),
     }));
   }
+  if (extras.crops?.length) meta.crops = extras.crops;
   if (extras.agentObjects?.length) {
     meta.agentObjects = extras.agentObjects.map((o) => ({
       origin: o.origin,

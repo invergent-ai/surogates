@@ -21,6 +21,8 @@ import {
   atlasMetadata,
   boardMarks,
   buildAtlas,
+  buildInkCrop,
+  cropCandidates,
   contentBeyond,
   contentBounds,
   inkHeight,
@@ -169,7 +171,6 @@ export function WhiteboardSurface({
   const [color, setColor] = useState<string>(INK_COLORS[0]);
   const [width, setWidth] = useState<number>(INK_WIDTHS[1]);
   const [question, setQuestion] = useState("");
-  // An open text editor, positioned in logical space. Null when closed.
   // An open text editor, positioned in logical space. Null when closed.
   // With `reading` set it is correcting what a cluster of ink says
   // rather than adding text: the stored reading is what the model is
@@ -959,12 +960,24 @@ export function WhiteboardSurface({
       });
       const atlas = buildAtlas(doc, plan, services, marks);
       const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
+      // Close-ups of the new, unread ink, attached after the overview.
+      // The overview is for context and placement; these are for
+      // reading -- the misreads all came from glyphs a few dozen
+      // pixels tall.
+      const crops = cropCandidates(marks)
+        .map((m) => buildInkCrop(doc, m, services, unit ?? 40))
+        .filter((c): c is NonNullable<typeof c> => c !== null);
       const extras: AtlasExtras = {
         mode,
         inkHeight: unit,
         occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
         marks,
+        crops: crops.map((c, i) => ({
+          mark: c.mark,
+          imageIndex: i + 1,
+          scale: c.scale,
+        })),
       };
       seenAtLastAsk.current = new Set(doc.objects.map((o) => o.id));
       if (typedRef.current.length > 0) {
@@ -986,7 +999,13 @@ export function WhiteboardSurface({
 
       await runtime.send(
         text,
-        [{ data: atlas.toDataURL("image/png"), mimeType: "image/png" }],
+        [
+          { data: atlas.toDataURL("image/png"), mimeType: "image/png" },
+          ...crops.map((c) => ({
+            data: c.canvas.toDataURL("image/png"),
+            mimeType: "image/png",
+          })),
+        ],
         undefined,
         { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
       );

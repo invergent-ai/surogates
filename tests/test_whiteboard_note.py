@@ -438,3 +438,40 @@ def test_tells_the_model_to_trust_readings_and_transcribe_the_rest():
     ]))
     assert "do not re-read its pixels" in note
     assert "readings array" in note
+
+
+# --- close-ups ----------------------------------------------------------
+
+def test_points_the_model_at_the_close_up_for_reading():
+    note = _whiteboard_note_from_metadata(_meta(
+        crops=[{"mark": "A2", "imageIndex": 1, "scale": 1.83}],
+    ))
+    assert "image 2 is A2 close up at 1.83x" in note
+    assert "not from the overview" in note
+
+
+def test_omits_the_close_up_line_without_crops():
+    assert "close up" not in _whiteboard_note_from_metadata(_meta())
+
+
+def test_replay_keeps_every_image_of_the_newest_canvas_turn():
+    """A canvas turn is the overview plus close-ups of the new ink.
+
+    Pruning by image part kept only the last part -- the crop -- and
+    dropped the overview of the very turn being answered.
+    """
+    from surogates.whiteboard.session import CANVAS_NOTE_HEADER
+
+    def two_image_turn(n):
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"{CANVAS_NOTE_HEADER}\\nturn {n}"},
+                {"type": "image_url", "image_url": {"url": f"data:over{n}"}},
+                {"type": "image_url", "image_url": {"url": f"data:crop{n}"}},
+            ],
+        }
+
+    pruned = prune_superseded_canvas_images([two_image_turn(1), two_image_turn(2)])
+    urls = [img["image_url"]["url"] for img in _images(pruned)]
+    assert urls == ["data:over2", "data:crop2"]
