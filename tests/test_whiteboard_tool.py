@@ -92,3 +92,57 @@ def test_description_names_every_command_tool():
     for tool in ("write_text", "draw_formula", "draw", "erase",
                  "place_artifact"):
         assert tool in description
+
+
+# --- what the model learns back ---------------------------------------
+#
+# The image and the occupied-cell list are both captured at Ask time, so
+# a second iteration has no evidence its first draw happened. One real
+# sketch turn drew five objects, four at the same coordinates and two
+# byte-identical, because every acknowledgement read the same.
+
+
+def test_result_reports_where_the_object_landed():
+    out = _call(_registry(), {"commands": [
+        {"tool": "draw_formula", "x": 1310, "y": 338,
+         "latex": "= \\infty", "fontSize": 80},
+    ]})
+    assert "(1310, 338)" in out
+    assert "= \\infty" in out
+
+
+def test_result_warns_that_the_image_predates_the_call():
+    out = _call(_registry(), {"commands": [
+        {"tool": "write_text", "x": 0, "y": 0, "text": "hi",
+         "fontSize": 20, "maxWidth": 100},
+    ]})
+    assert "captured before this call" in out
+    assert "do not draw it again" in out
+
+
+def test_result_lists_every_command():
+    out = _call(_registry(), {"commands": [
+        {"tool": "write_text", "x": 10, "y": 20, "text": "a",
+         "fontSize": 20, "maxWidth": 100},
+        {"tool": "write_text", "x": 30, "y": 40, "text": "b",
+         "fontSize": 20, "maxWidth": 100},
+    ]})
+    assert "(10, 20)" in out and "(30, 40)" in out
+
+
+def test_result_truncates_a_long_label():
+    out = _call(_registry(), {"commands": [
+        {"tool": "write_text", "x": 0, "y": 0, "text": "z" * 200,
+         "fontSize": 20, "maxWidth": 100},
+    ]})
+    # The commands are already in the event log; echoing them whole
+    # would double their cost in the next turn's replay.
+    assert len(out) < 600
+
+
+def test_result_survives_a_command_without_coordinates():
+    # erase mode=path carries points, not x/y.
+    out = _call(_registry(), {"commands": [
+        {"tool": "erase", "mode": "path", "points": [[0, 0], [1, 1]]},
+    ]})
+    assert "Drew 1 object" in out

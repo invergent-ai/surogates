@@ -149,3 +149,73 @@ def test_tolerates_a_non_dict_event_payload():
     assert _latest_whiteboard_metadata(
         [_event(EventType.USER_MESSAGE.value, None)],
     ) is None
+
+
+# --- sketch stops after it draws --------------------------------------
+#
+# Narrowing the catalogue to one tool was only ever a nudge. One real
+# sketch turn drew five objects, four at the same coordinates and two
+# byte-identical, because the image and the occupied-cell list it was
+# reasoning from both predated its own draws.
+
+from surogates.harness.loop import _whiteboard_sketch_turn_done
+
+
+def _sketch_meta(mode="sketch"):
+    return {"whiteboard": {"mode": mode, "sourceRect": {
+        "x": 0, "y": 0, "w": 100, "h": 100,
+    }}}
+
+
+def _drew(content="Drew 1 object on the canvas: \"5\" at (10, 20)."):
+    calls = [{"id": "c1", "function": {"name": "whiteboard_draw"}}]
+    results = [{"role": "tool", "tool_call_id": "c1", "content": content}]
+    return calls, results
+
+
+def test_a_sketch_turn_stops_once_it_has_drawn():
+    calls, results = _drew()
+    assert _whiteboard_sketch_turn_done(
+        calls, results, _sketch_meta(), has_whiteboard=True,
+    )
+
+
+def test_a_deep_turn_keeps_going():
+    # "Think harder" is many round-trips by design.
+    calls, results = _drew()
+    assert not _whiteboard_sketch_turn_done(
+        calls, results, _sketch_meta("deep"), has_whiteboard=True,
+    )
+
+
+def test_a_failed_draw_does_not_end_the_turn():
+    # The error exists to be acted on; stopping leaves the board
+    # untouched and the user with nothing.
+    calls, results = _drew("Error: command[0] (erase) is missing 'mode'.")
+    assert not _whiteboard_sketch_turn_done(
+        calls, results, _sketch_meta(), has_whiteboard=True,
+    )
+
+
+def test_other_tools_do_not_end_a_sketch_turn():
+    calls = [{"id": "c1", "function": {"name": "web_search"}}]
+    results = [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+    assert not _whiteboard_sketch_turn_done(
+        calls, results, _sketch_meta(), has_whiteboard=True,
+    )
+
+
+def test_an_ordinary_chat_turn_is_untouched():
+    # The board is a view mode: a typed message on a board-enabled agent
+    # keeps its iterations.
+    calls, results = _drew()
+    assert not _whiteboard_sketch_turn_done(
+        calls, results, {"view_context": {}}, has_whiteboard=True,
+    )
+
+
+def test_an_agent_without_the_board_is_untouched():
+    calls, results = _drew()
+    assert not _whiteboard_sketch_turn_done(
+        calls, results, _sketch_meta(), has_whiteboard=False,
+    )

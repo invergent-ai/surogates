@@ -167,3 +167,166 @@ def test_pruning_does_not_mutate_the_input():
     messages = [_turn(1), _turn(2)]
     prune_superseded_canvas_images(messages)
     assert len(_images(messages)) == 2
+
+
+# --- how big the user writes ------------------------------------------
+
+def test_renders_the_handwriting_scale():
+    """Without it the model sizes its answer blind.
+
+    On a real board of ~250-unit digits it chose fontSize 90, and the
+    answer landed a quarter the size of the sum it belonged to.
+    """
+    note = _whiteboard_note_from_metadata(_meta(inkHeight=252))
+    assert "252 canvas units" in note
+    assert "fontSize" in note
+
+
+def test_omits_the_handwriting_scale_when_there_is_no_ink():
+    # A board holding only agent objects has nothing to measure; an
+    # invented number would be worse than silence.
+    note = _whiteboard_note_from_metadata(_meta())
+    assert "canvas units" not in note
+
+
+def test_ignores_a_nonsense_handwriting_scale():
+    for bad in (0, -5, "tall", None, True):
+        note = _whiteboard_note_from_metadata(_meta(inkHeight=bad))
+        assert "canvas units" not in (note or "")
+
+
+# --- what is already on the board -------------------------------------
+
+def test_renders_the_occupancy_grid():
+    """The model cannot get this from the transcript.
+
+    Its own draw calls record where it *asked* for things, and the user's
+    drags, resizes and deletions are never recorded at all -- so history
+    is not merely incomplete about the board, it is out of date.
+    """
+    note = _whiteboard_note_from_metadata(
+        _meta(occupied=[[0, 3], [1, 3]], occupancyGrid=16),
+    )
+    assert "16x16 grid" in note
+    assert "[[0, 3], [1, 3]]" in note
+    # The grid is drawn on the image too, and must not be read as ink.
+    assert "not something the user drew" in note
+
+
+def test_the_grid_is_a_constraint_not_a_placement_rule():
+    """Told to "place new objects in free cells", the model shopped.
+
+    On a real board it wrote the answer to an integral below the working
+    rather than after the "=" -- both cells were free, and it picked the
+    one the grid mentioned over the one the content called for.
+    """
+    note = _whiteboard_note_from_metadata(
+        _meta(occupied=[[0, 3]], occupancyGrid=16),
+    )
+    assert "where the content calls for it" in note
+    assert "only to keep off" in note
+
+
+def test_omits_occupancy_on_an_empty_board():
+    assert "grid over sourceRect" not in _whiteboard_note_from_metadata(_meta())
+
+
+def test_ignores_occupancy_without_a_grid_size():
+    # The cells are meaningless without the divisor.
+    note = _whiteboard_note_from_metadata(_meta(occupied=[[0, 3]]))
+    assert "grid over sourceRect" not in note
+
+
+def test_says_the_image_is_a_crop_of_a_larger_board():
+    # Unsaid, the empty margin reads as free canvas and work lands on
+    # objects sitting just outside the frame.
+    note = _whiteboard_note_from_metadata(_meta(beyond=["right", "below"]))
+    assert "continues right, below" in note
+    assert "crop" in note
+
+
+def test_omits_the_crop_note_when_the_frame_holds_everything():
+    assert "continues" not in _whiteboard_note_from_metadata(_meta())
+
+
+def test_gives_the_cell_to_canvas_mapping():
+    """Inverting the image formula by hand went wrong once per axis.
+
+    Asked for the slot after an "x =", the model converted the column
+    and left the row in image coordinates, landing its answer below the
+    frame it had been shown -- row 17 of a 16-row grid.
+    """
+    note = _whiteboard_note_from_metadata(
+        _meta(occupied=[[0, 3]], occupancyGrid=16,
+              cellSize={"w": 82.0, "h": 53.18}),
+    )
+    assert "col*82.0" in note
+    assert "row*53.18" in note
+    assert "never a position measured off the image" in note
+
+
+def test_omits_the_mapping_without_a_cell_size():
+    note = _whiteboard_note_from_metadata(
+        _meta(occupied=[[0, 3]], occupancyGrid=16),
+    )
+    assert "sourceRect.x + col" not in note
+
+
+def test_ignores_a_malformed_cell_size():
+    for bad in ({"w": "wide", "h": 10}, {"w": True, "h": 10}, {"w": 10}, 7):
+        note = _whiteboard_note_from_metadata(
+            _meta(occupied=[[0, 3]], occupancyGrid=16, cellSize=bad),
+        )
+        assert "sourceRect.x + col" not in (note or "")
+
+
+# --- what became of the agent's own work ------------------------------
+
+def test_reports_where_its_objects_sit_now():
+    note = _whiteboard_note_from_metadata(_meta(agentObjects=[
+        {"origin": "c1", "label": "e^x + C", "x": 480, "y": 390,
+         "w": 300, "h": 88},
+    ]))
+    assert '"e^x + C" is at (480, 390), 300x88' in note
+
+
+def test_reports_a_deleted_object():
+    note = _whiteboard_note_from_metadata(_meta(agentObjects=[
+        {"origin": "c1", "label": "gone", "removed": True},
+    ]))
+    assert "no longer on the board" in note
+
+
+def test_reports_ink_drawn_around_one_of_its_objects():
+    """The real case: an answer wrapped in brackets and squared.
+
+    The object never moved -- what it means changed -- so a report of
+    only what moved or vanished would have said nothing at all.
+    """
+    note = _whiteboard_note_from_metadata(_meta(agentObjects=[
+        {"origin": "c1", "label": "e^x + C", "x": 480, "y": 390,
+         "w": 300, "h": 88, "touched": True},
+    ]))
+    assert "drawn on or around it" in note
+    assert "not as separate work beside it" in note
+
+
+def test_omits_the_inventory_when_it_has_drawn_nothing():
+    assert "as the board holds it now" not in _whiteboard_note_from_metadata(
+        _meta(),
+    )
+
+
+def test_skips_a_malformed_inventory_entry():
+    note = _whiteboard_note_from_metadata(_meta(agentObjects=[
+        {"origin": "c1", "label": "bad", "x": "left", "y": 1, "w": 2, "h": 3},
+        {"origin": "c2", "label": "good", "x": 1, "y": 2, "w": 3, "h": 4},
+    ]))
+    assert "bad" not in note
+    assert "good" in note
+
+
+def test_tolerates_a_nonsense_inventory():
+    for bad in ("nope", [1, 2], [{"origin": "c1"}]):
+        note = _whiteboard_note_from_metadata(_meta(agentObjects=bad))
+        assert note is None or isinstance(note, str)

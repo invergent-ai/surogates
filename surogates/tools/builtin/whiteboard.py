@@ -47,6 +47,12 @@ _DESCRIPTION = (
     "richer, or interactive than a simple sketch -- a chart, a diagram, a "
     "table, an interactive widget -- create an artifact and place it "
     "rather than approximating it with many draw commands.\n\n"
+    "Any command may carry `replaces`: the id of an earlier "
+    "whiteboard_draw call whose objects it supersedes. Use it to correct "
+    "or update something you drew before -- the old objects are removed "
+    "as the new one lands, so a revised answer replaces the previous one "
+    "instead of piling on top of it. The turn note lists what you drew "
+    "and where it now sits.\n\n"
     f"At most {MAX_COMMANDS} commands per call. Do not redraw content "
     "that is already on the canvas: add only the continuation, answer, or "
     "annotation that is missing."
@@ -127,7 +133,45 @@ async def _whiteboard_draw_handler(
     count = len(commands)
     logger.info("whiteboard_draw accepted %d command(s)", count)
     return (
-        f"Drew {count} object{'s' if count != 1 else ''} on the canvas. "
+        f"Drew {count} object{'s' if count != 1 else ''} on the canvas"
+        f"{_placement_summary(commands)}. "
         f"They are now the user's active selection, so they can move, "
-        f"resize or delete them."
+        f"resize or delete them. "
+        f"The attached image and the occupied-cell list were captured "
+        f"before this call and do not show it. Anything else you draw "
+        f"this turn must keep clear of the position above, and if this "
+        f"was the answer, stop -- do not draw it again."
     )
+
+
+def _placement_summary(commands: list[Any]) -> str:
+    """Where the commands landed, for the model's own benefit.
+
+    The image and the occupancy list both date from before the call, so
+    without this a second iteration has no evidence its first draw
+    happened: same picture, same free cells, same acknowledgement. One
+    real turn drew the same formula at the same coordinates twice and
+    piled four answers on one spot.
+    """
+    spots: list[str] = []
+    for cmd in commands:
+        if not isinstance(cmd, dict):
+            continue
+        x, y = cmd.get("x"), cmd.get("y")
+        if not (_is_number(x) and _is_number(y)):
+            continue
+        what = cmd.get("text") or cmd.get("latex") or cmd.get("tool") or ""
+        label = str(what).strip().replace("\n", " ")
+        if len(label) > 40:
+            label = f"{label[:39]}…"
+        # Quoted plainly, not with repr: repr doubles every backslash,
+        # which turns a LaTeX command into something the model has to
+        # unescape before it can recognise its own output.
+        spots.append(f'"{label}" at ({x}, {y})' if label else f"({x}, {y})")
+    if not spots:
+        return ""
+    return f": {'; '.join(spots)}"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
