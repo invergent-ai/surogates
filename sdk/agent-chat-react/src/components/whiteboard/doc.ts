@@ -570,64 +570,82 @@ export function makeSlotObject(
 }
 
 /**
- * The rectangle a few pen strokes draw together, when they draw one.
+ * The slot a pen stroke reserves, when it draws the marker for one.
  *
- * A placeholder on paper is a box, and people draw boxes in one, two or
- * three strokes -- a `⌐` and an `⌊`, or three sides and a gap. So this
- * takes the strokes as a set and asks three things of their union: it
- * is at least a line of writing tall and wide; the ink stays on the
- * border rather than crossing the middle; and at least three of the
- * four edges are drawn along most of their length. Closure is not
- * required -- a real session's box had a whole side missing.
+ * The marker is a spiral: one continuous stroke winding at least
+ * SLOT_TURNS times around its own centre, tightening (or widening)
+ * as it goes. Chosen against three constraints -- it must be drawable
+ * without lifting the pen; it must not be a letter, digit, operator or
+ * common shape; and it must not be something a real drawing contains
+ * by accident. A box fails the first (nobody draws one in a stroke)
+ * and the third (boxes are everywhere). The spiral's nearest
+ * neighbours -- `@`, `6`, `9`, `e`, `∞`, a circle -- all wind less than
+ * a turn and a half or reverse direction, and a stray curl in
+ * handwriting is far smaller than a line of writing.
  *
- * Emptiness -- nothing already inside -- is the caller's check, since
- * it needs the document; a box drawn *around* content is a reference,
- * not a slot.
+ * Returns the stroke's extent, which is the slot: the user sizes it by
+ * how big they draw the spiral. Emptiness -- nothing already inside --
+ * is the caller's check; a spiral drawn around content is emphasis,
+ * not a placeholder.
  */
-export function boxFromStrokes(
-  strokes: readonly (readonly number[])[],
+export const SLOT_TURNS = 1.75;
+
+export function spiralFromStroke(
+  pts: readonly number[],
   unit: number,
 ): { x: number; y: number; w: number; h: number } | null {
-  const xs: number[] = [];
-  const ys: number[] = [];
-  for (const pts of strokes) {
-    for (let i = 0; i + 1 < pts.length; i += 2) {
-      xs.push(pts[i]);
-      ys.push(pts[i + 1]);
-    }
+  const n = pts.length / 2;
+  if (n < 12) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i + 1 < pts.length; i += 2) {
+    minX = Math.min(minX, pts[i]);
+    maxX = Math.max(maxX, pts[i]);
+    minY = Math.min(minY, pts[i + 1]);
+    maxY = Math.max(maxY, pts[i + 1]);
+    cx += pts[i];
+    cy += pts[i + 1];
   }
-  if (xs.length < 8) return null;
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  cx /= n;
+  cy /= n;
   const w = maxX - minX;
   const h = maxY - minY;
-  if (w < unit * 0.8 || h < unit * 0.8) return null;
+  const short = Math.min(w, h);
+  if (short < unit * 0.8 || short / Math.max(w, h) < 0.5) return null;
 
-  const band = Math.max(w, h) * 0.18;
-  const bins = { top: new Set<number>(), bottom: new Set<number>(), left: new Set<number>(), right: new Set<number>() };
-  let onEdge = 0;
-  for (let i = 0; i < xs.length; i++) {
-    const x = xs[i];
-    const y = ys[i];
-    const nearTop = y - minY <= band;
-    const nearBottom = maxY - y <= band;
-    const nearLeft = x - minX <= band;
-    const nearRight = maxX - x <= band;
-    if (nearTop || nearBottom || nearLeft || nearRight) onEdge++;
-    const bx = Math.min(9, Math.floor(((x - minX) / w) * 10));
-    const by = Math.min(9, Math.floor(((y - minY) / h) * 10));
-    if (nearTop) bins.top.add(bx);
-    if (nearBottom) bins.bottom.add(bx);
-    if (nearLeft) bins.left.add(by);
-    if (nearRight) bins.right.add(by);
+  // Unwrapped angle about the centroid: total winding and its
+  // consistency. A spiral turns one way the whole time.
+  let winding = 0;
+  let forward = 0;
+  let steps = 0;
+  let prev = Math.atan2(pts[1] - cy, pts[0] - cx);
+  const radii: number[] = [Math.hypot(pts[0] - cx, pts[1] - cy)];
+  for (let i = 2; i + 1 < pts.length; i += 2) {
+    const angle = Math.atan2(pts[i + 1] - cy, pts[i] - cx);
+    let d = angle - prev;
+    if (d > Math.PI) d -= 2 * Math.PI;
+    if (d < -Math.PI) d += 2 * Math.PI;
+    prev = angle;
+    winding += d;
+    steps++;
+    if (Math.sign(d) === Math.sign(winding) || d === 0) forward++;
+    radii.push(Math.hypot(pts[i] - cx, pts[i + 1] - cy));
   }
-  if (onEdge / xs.length < 0.85) return null;
-  const drawn = [bins.top, bins.bottom, bins.left, bins.right].filter(
-    (b) => b.size >= 6,
-  ).length;
-  if (drawn < 3) return null;
+  if (Math.abs(winding) < SLOT_TURNS * 2 * Math.PI) return null;
+  if (forward / steps < 0.85) return null;
+
+  // Tightening or widening: the first and last quarter differ clearly
+  // in radius. A circle retraced twice does not.
+  const quarter = Math.max(1, Math.floor(radii.length / 4));
+  const mean = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / arr.length;
+  const first = mean(radii.slice(0, quarter));
+  const last = mean(radii.slice(-quarter));
+  if (Math.min(first, last) / Math.max(first, last) > 0.6) return null;
+
   return { x: minX, y: minY, w, h };
 }
 

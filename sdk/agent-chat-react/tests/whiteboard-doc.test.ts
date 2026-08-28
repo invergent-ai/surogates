@@ -3,13 +3,13 @@ import {
   type WbDoc,
   applyCommands,
   applyReadings,
-  boxFromStrokes,
   correctReading,
   emptyDoc,
   foldToolCalls,
   makeSlotObject,
   readingKey,
   scaleObject,
+  spiralFromStroke,
   translateObject,
 } from "@/components/whiteboard/doc";
 import type { AgentChatMessage } from "@/types";
@@ -465,55 +465,54 @@ describe("a draw the server rejected", () => {
 });
 
 describe("slots", () => {
-  const edge = (from: [number, number], to: [number, number], steps = 12) => {
-    const out: number[] = [];
+  /** A stroke winding `turns` times about (60,60), radius r0 → r1. */
+  const spiral = (turns: number, r0: number, r1: number, steps = 96) => {
+    const pts: number[] = [];
     for (let i = 0; i <= steps; i++) {
-      out.push(from[0] + ((to[0] - from[0]) * i) / steps, from[1] + ((to[1] - from[1]) * i) / steps);
+      const t = i / steps;
+      const r = r0 + (r1 - r0) * t;
+      const a = t * turns * 2 * Math.PI;
+      pts.push(60 + r * Math.cos(a), 60 + r * Math.sin(a));
     }
-    return out;
+    return pts;
   };
 
-  it("recognises a closed hollow box drawn in one stroke", () => {
-    const pts = [
-      ...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80]),
-      ...edge([120, 80], [0, 80]), ...edge([0, 80], [0, 2]),
-    ];
-    expect(boxFromStrokes([pts], 40)).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  it("recognises a spiral drawn inward as a slot", () => {
+    const box = spiralFromStroke(spiral(2.2, 55, 10), 40);
+    expect(box).not.toBeNull();
+    expect(box!.w).toBeGreaterThan(80);
   });
 
-  it("recognises a box drawn in two strokes, as people draw them", () => {
-    // Session 76aa0fa3: one stroke drew the bottom and left edges, the
-    // next drew the top and right. Neither closes; together they box.
-    const bottomLeft = [...edge([120, 80], [0, 80]), ...edge([0, 80], [0, 0])];
-    const topRight = [...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80])];
-    expect(boxFromStrokes([bottomLeft, topRight], 40)).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  it("recognises a spiral drawn outward too", () => {
+    expect(spiralFromStroke(spiral(2.2, 10, 55), 40)).not.toBeNull();
   });
 
-  it("accepts a box with one side missing", () => {
-    const pts = [...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80]), ...edge([120, 80], [0, 80])];
-    expect(boxFromStrokes([pts], 40)).not.toBeNull();
+  it("does not mistake a circle for a slot", () => {
+    // One turn, constant radius: the most common closed shape there is.
+    expect(spiralFromStroke(spiral(1, 55, 55), 40)).toBeNull();
   });
 
-  it("does not mistake a single L for a box", () => {
-    // Two edges is a corner, not a placeholder.
-    const pts = [...edge([0, 0], [0, 80]), ...edge([0, 80], [120, 80])];
-    expect(boxFromStrokes([pts], 40)).toBeNull();
+  it("does not mistake a circle traced twice for a slot", () => {
+    expect(spiralFromStroke(spiral(2.2, 55, 55), 40)).toBeNull();
   });
 
-  it("does not mistake a letter for a box", () => {
-    const pts = [0, 0, 20, 80, 40, 0, 60, 80, 80, 0];
-    expect(boxFromStrokes([pts], 40)).toBeNull();
+  it("does not mistake an @ or a 6 for a slot", () => {
+    // A turn and a quarter is where those stop.
+    expect(spiralFromStroke(spiral(1.3, 55, 15), 40)).toBeNull();
   });
 
-  it("does not mistake a scribble that crosses the middle for a box", () => {
+  it("does not mistake a figure of eight for a slot", () => {
+    // Winds one way then the other: the total comes to nothing.
     const pts: number[] = [];
-    for (let i = 0; i < 40; i++) pts.push((i * 37) % 120, (i * 53) % 80);
-    expect(boxFromStrokes([pts], 40)).toBeNull();
+    for (let i = 0; i <= 96; i++) {
+      const a = (i / 96) * 2 * Math.PI;
+      pts.push(60 + 55 * Math.sin(a), 60 + 30 * Math.sin(2 * a));
+    }
+    expect(spiralFromStroke(pts, 40)).toBeNull();
   });
 
-  it("ignores a box smaller than a line of writing", () => {
-    const pts = [...edge([0, 0], [10, 0]), ...edge([10, 0], [10, 10]), ...edge([10, 10], [0, 10]), ...edge([0, 10], [0, 0])];
-    expect(boxFromStrokes([pts], 40)).toBeNull();
+  it("ignores a curl smaller than a line of writing", () => {
+    expect(spiralFromStroke(spiral(2.5, 12, 3), 40)).toBeNull();
   });
 
   it("moves and scales like any object", () => {

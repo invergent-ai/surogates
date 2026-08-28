@@ -103,8 +103,10 @@ because maths carries its conventions and prose and drawing do not.
 
 **Slots** make *where* explicit and domain-blind. A slot is an empty
 box the user reserves for the result — drawn with the slot tool, or
-recognised when a pen stroke traces a closed, hollow box over empty
-canvas — labelled `S1, S2, …` beside the ink and agent marks. It is
+marked with a spiral — one pen stroke winding at least two turns
+inward over empty canvas, the marker chosen because it needs no pen
+lift, is no letter, digit, operator or common shape, and appears in
+no real drawing by accident — labelled `S1, S2, …` beside the ink and agent marks. It is
 the one gesture with the same meaning everywhere: the missing letter,
 the value after `=`, the paragraph under a heading, the cat in an empty
 frame. The model fills it with `anchor: "S1", side: "in"`; the client

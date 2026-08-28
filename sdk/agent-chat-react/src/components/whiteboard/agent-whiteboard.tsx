@@ -37,12 +37,12 @@ import {
 import {
   type WbDoc,
   type WbObject,
-  boxFromStrokes,
   correctReading,
   emptyDoc,
   foldToolCalls,
   makeSlotObject,
   makeTextObject,
+  spiralFromStroke,
   mapSelected,
   scaleObject,
   translateObject,
@@ -936,37 +936,16 @@ export function WhiteboardSurface({
     if (!builder) return;
     const stroke = builder.finish();
     if (!stroke) return;
-    // A hollow box drawn with the pen over empty canvas is a
-    // placeholder, not a drawing: the paper way of reserving space.
-    // People draw boxes in one stroke or several, so the new stroke is
-    // tried together with the one or two it follows. The strokes become
-    // a slot -- undoable like any stroke -- and the hint editor opens so
-    // the user can say what belongs there.
+    // A spiral drawn with the pen over empty canvas is the slot marker:
+    // one stroke, not a letter or a shape, and its extent is the space
+    // reserved. Silent -- the amber box appearing is the acknowledgement;
+    // the slot tool still asks for a hint, since that is a deliberate
+    // act. A spiral around existing content is emphasis and stays ink.
     if (tool === "pen" && stroke.kind === "ink") {
-      const recent = doc.objects
-        .slice(-2)
-        .filter((o): o is Extract<WbObject, { kind: "ink" }> =>
-          o.kind === "ink" && o.origin === "local");
-      for (let take = recent.length; take >= 0; take--) {
-        const partners = recent.slice(recent.length - take);
-        const box = boxFromStrokes(
-          [...partners.map((o) => o.pts), stroke.pts],
-          liveUnit,
-        );
-        if (!box) continue;
-        const consumed = new Set(partners.map((o) => o.id));
-        // objectsInRect returns ids.
-        const inside = objectsInRect(doc, box, services).filter(
-          (id) => !consumed.has(id),
-        );
-        if (inside.length > 0) continue;
+      const box = spiralFromStroke(stroke.pts, liveUnit);
+      if (box && objectsInRect(doc, box, services).length === 0) {
         const slot = makeSlotObject(box);
-        commit((prev) => ({
-          ...prev,
-          objects: [...prev.objects.filter((o) => !consumed.has(o.id)), slot],
-        }));
-        setEditor({ x: box.x, y: box.y + box.h, slot: { id: slot.id } });
-        setEditorText("");
+        commit((prev) => ({ ...prev, objects: [...prev.objects, slot] }));
         return;
       }
     }
