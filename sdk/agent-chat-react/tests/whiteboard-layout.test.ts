@@ -500,3 +500,97 @@ describe("erasing one's own object", () => {
     expect((out[0] as Cmd).replaces).toBeUndefined();
   });
 });
+
+describe("filling a slot", () => {
+  const slot = { x: 140, y: 20, w: 60, h: 70 };
+  const anchors = {
+    inkHeight: 60,
+    marks: { S1: { rect: slot, objectId: "local:9" } },
+  };
+
+  it("centres a short answer inside the box, sized to it", () => {
+    // `H [S1] USE`: the O goes in the gap, not beside the word.
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "write_text", text: "O", anchor: "S1", side: "in" }],
+        anchors,
+        services,
+      ),
+    );
+    const est = { w: 1 * (cmd.fontSize as number) * 0.6, h: (cmd.fontSize as number) * 1.35 };
+    expect(cmd.x as number).toBeGreaterThanOrEqual(slot.x);
+    expect((cmd.x as number) + est.w).toBeLessThanOrEqual(slot.x + slot.w + 1);
+    expect(cmd.y as number).toBeGreaterThanOrEqual(slot.y);
+    expect((cmd.y as number) + est.h).toBeLessThanOrEqual(slot.y + slot.h + 1);
+    expect(cmd.fillsSlot).toBe("local:9");
+    expect(cmd.anchor).toBeUndefined();
+  });
+
+  it("shrinks text that would not fit the width", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "write_text", text: "HOUSEBOAT", anchor: "S1", side: "in" }],
+        anchors,
+        services,
+      ),
+    );
+    const width = 9 * (cmd.fontSize as number) * 0.6;
+    expect(width).toBeLessThanOrEqual(slot.w * 0.95 + 1);
+  });
+
+  it("gives an artifact the slot's exact box", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "place_artifact", artifact_id: "cat", w: 1, h: 1, anchor: "S1", side: "in" }],
+        anchors,
+        services,
+      ),
+    );
+    expect([cmd.x, cmd.y, cmd.w, cmd.h]).toEqual([140, 20, 60, 70]);
+  });
+
+  it("scales a sketch from its 1000-unit local box into the slot", () => {
+    // A circle at the centre of the local box lands at the centre of
+    // the slot, at the slot's scale.
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw", anchor: "S1", side: "in",
+           types: ["circle", "line"], items: [[500, 500, 400], [0, 0, 1000, 1000]] }],
+        anchors,
+        services,
+      ),
+    );
+    expect(cmd.origin).toEqual([140, 20]);
+    const [circle, line] = cmd.items as number[][];
+    expect(circle).toEqual([30, 35, 24]);
+    expect(line).toEqual([0, 0, 60, 70]);
+  });
+
+  it("removes the slot when its fill is applied", () => {
+    const doc = {
+      ...emptyDoc(),
+      objects: [{ id: "local:9", origin: "local", selected: false, kind: "slot" as const,
+                  x: 140, y: 20, w: 60, h: 70 }],
+    };
+    const resolved = resolveCommands(
+      doc,
+      [{ tool: "write_text", text: "O", anchor: "S1", side: "in" }],
+      anchors,
+      services,
+    );
+    const next = applyCommands(doc, resolved, 2, "fillcall");
+    expect(next.objects.some((o) => o.kind === "slot")).toBe(false);
+    expect(next.objects.some((o) => o.kind === "text")).toBe(true);
+  });
+
+  it("parses the slot's object id out of the metadata", () => {
+    const parsed = turnAnchorsFromMetadata({
+      whiteboard: { marks: [{ id: "S1", kind: "slot", x: 1, y: 2, w: 3, h: 4, objectId: "local:9" }] },
+    });
+    expect(parsed?.marks?.S1).toEqual({ rect: { x: 1, y: 2, w: 3, h: 4 }, objectId: "local:9" });
+  });
+});

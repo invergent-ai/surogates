@@ -144,3 +144,10 @@ def test_guidance_treats_ink_around_the_agents_object_as_an_operation():
     assert "an operation on\nit" in text or "an operation on it" in text
     assert "(ln|x| + C)²" in text
     assert "never\ntranscribe them into a reading" in text or "never transcribe them into a reading" in text
+
+
+def test_guidance_makes_slots_the_first_instruction():
+    text = _library().get("guidance/whiteboard")
+    assert "### Slots: the user says where" in text
+    assert "H [S1] USE" in text
+    assert "`fill`, `continue`, `transform` or\n`respond`" in text or "`fill`, `continue`, `transform` or `respond`" in text

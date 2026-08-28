@@ -286,6 +286,7 @@ export function occupancyCells(
   const cellH = sourceRect.h / OCCUPANCY_GRID;
 
   for (const obj of doc.objects) {
+    if (obj.kind === "slot") continue;
     const b = objectBounds(obj, services);
     if (!b) continue;
     const c0 = Math.floor((b.x - sourceRect.x) / cellW);
@@ -414,9 +415,13 @@ export const MAX_MARKS = 24;
 
 /** A labelled, anchorable thing on the board. */
 export interface BoardMark {
-  /** `A3` for the user's ink, `B1` for the agent's own objects. */
+  /** `A3` for the user's ink, `B1` for the agent's objects, `S1` for a slot. */
   id: string;
-  kind: "ink" | "agent";
+  kind: "ink" | "agent" | "slot";
+  /** Slot marks: the user's note on what belongs there. */
+  hint?: string;
+  /** Slot marks: the document object, so a fill can remove it. */
+  objectId?: string;
   /** Null for an agent object the user has since removed. */
   rect: Rect | null;
   /** Agent marks: the `whiteboard_draw` call that produced it. */
@@ -569,6 +574,19 @@ export function boardMarks(
       });
     },
   );
+  // Slots: the space the user reserved for the answer. Listed last so
+  // the ids stay stable while marks above them come and go.
+  doc.objects
+    .filter((o): o is Extract<WbObject, { kind: "slot" }> => o.kind === "slot")
+    .forEach((o, i) => {
+      marks.push({
+        id: `S${i + 1}`,
+        kind: "slot",
+        rect: { x: o.x, y: o.y, w: o.w, h: o.h },
+        objectId: o.id,
+        ...(o.hint ? { hint: o.hint } : {}),
+      });
+    });
   return marks;
 }
 
@@ -595,10 +613,13 @@ export function paintMarks(
   for (const mark of marks) {
     if (!mark.rect) continue;
     const r = map(mark.rect);
-    ctx.strokeStyle = mark.fresh
-      ? "rgba(217, 119, 6, 0.9)"
-      : "rgba(217, 119, 6, 0.5)";
-    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    if (mark.kind !== "slot") {
+      // A slot paints its own dashed box with the document.
+      ctx.strokeStyle = mark.fresh
+        ? "rgba(217, 119, 6, 0.9)"
+        : "rgba(217, 119, 6, 0.5)";
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+    }
     const padX = fontPx * 0.35;
     const tagW = ctx.measureText(mark.id).width + padX * 2;
     const tagH = fontPx * 1.3;
@@ -987,6 +1008,8 @@ export function atlasMetadata(
       ...(m.touched ? { touched: true } : {}),
       ...(m.strokes ? { strokes: m.strokes } : {}),
       ...(m.reading ? { reading: m.reading, readBy: m.readBy } : {}),
+      ...(m.hint ? { hint: m.hint } : {}),
+      ...(m.objectId ? { objectId: m.objectId } : {}),
     }));
   }
   if (extras.crops?.length) meta.crops = extras.crops;

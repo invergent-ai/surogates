@@ -3,10 +3,14 @@ import {
   type WbDoc,
   applyCommands,
   applyReadings,
+  boxFromStroke,
   correctReading,
   emptyDoc,
   foldToolCalls,
+  makeSlotObject,
   readingKey,
+  scaleObject,
+  translateObject,
 } from "@/components/whiteboard/doc";
 import type { AgentChatMessage } from "@/types";
 
@@ -457,5 +461,45 @@ describe("a draw the server rejected", () => {
   it("leaves an accepted call alone", () => {
     const doc = foldToolCalls(emptyDoc(), [call("Drew 1 object on the canvas")]);
     expect(doc.objects).toHaveLength(1);
+  });
+});
+
+describe("slots", () => {
+  it("recognises a closed hollow box drawn with the pen", () => {
+    // A rectangle traced clockwise from the top-left, back to the start.
+    const pts: number[] = [];
+    for (let x = 0; x <= 120; x += 10) pts.push(x, 0);
+    for (let y = 10; y <= 80; y += 10) pts.push(120, y);
+    for (let x = 110; x >= 0; x -= 10) pts.push(x, 80);
+    for (let y = 70; y >= 2; y -= 10) pts.push(0, y);
+    const box = boxFromStroke(pts, 40);
+    expect(box).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  });
+
+  it("does not mistake a letter for a box", () => {
+    // An open zigzag never closes.
+    const pts = [0, 0, 20, 80, 40, 0, 60, 80, 80, 0];
+    expect(boxFromStroke(pts, 40)).toBeNull();
+  });
+
+  it("does not mistake a scribble that crosses the middle for a box", () => {
+    const pts: number[] = [];
+    for (let i = 0; i < 40; i++) pts.push((i * 37) % 120, (i * 53) % 80);
+    pts.push(pts[0], pts[1]);
+    expect(boxFromStroke(pts, 40)).toBeNull();
+  });
+
+  it("ignores a box smaller than a line of writing", () => {
+    const pts = [0, 0, 10, 0, 10, 10, 0, 10, 0, 1, 0, 0, 5, 0, 10, 0, 10, 5];
+    expect(boxFromStroke(pts, 40)).toBeNull();
+  });
+
+  it("moves and scales like any object", () => {
+    const slot = makeSlotObject({ x: 10, y: 20, w: 30, h: 40 }, "the cat");
+    const moved = translateObject(slot, 5, 5) as { x: number; y: number };
+    expect([moved.x, moved.y]).toEqual([15, 25]);
+    const scaled = scaleObject(slot, 2, 2, { x: 10, y: 20 }) as { w: number; h: number };
+    expect([scaled.w, scaled.h]).toEqual([60, 80]);
+    expect((slot as { hint?: string }).hint).toBe("the cat");
   });
 });

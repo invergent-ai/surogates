@@ -35,9 +35,11 @@ import {
 import {
   type WbDoc,
   type WbObject,
+  boxFromStroke,
   correctReading,
   emptyDoc,
   foldToolCalls,
+  makeSlotObject,
   makeTextObject,
   mapSelected,
   scaleObject,
@@ -179,6 +181,8 @@ export function WhiteboardSurface({
     x: number;
     y: number;
     reading?: { strokeIds: string[] };
+    /** Naming what belongs in a slot just drawn. */
+    slot?: { id: string };
   } | null>(null);
   const [editorText, setEditorText] = useState("");
   const [marquee, setMarquee] = useState<
@@ -701,6 +705,15 @@ export function WhiteboardSurface({
         }));
       }
 
+      if (tool === "slot") {
+        // Reserve space: drag a box where the answer should go. The
+        // marquee does the dragging; pointerup turns it into a slot.
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setMarquee({ from: logical, to: logical });
+        return;
+      }
+
       if (tool === "text") {
         // No pointer capture and no default action. The browser focuses
         // the canvas on the click that follows this pointerdown, which
@@ -856,6 +869,31 @@ export function WhiteboardSurface({
   const onPointerUp = useCallback(() => {
     panFrom.current = null;
 
+    if (marquee && tool === "slot") {
+      const dragged = rectFromCorners(marquee.from, marquee.to);
+      setMarquee(null);
+      // A click without a drag reserves a one-line square at the click,
+      // enough for a digit or a letter -- the `H [ ] USE` case.
+      const side = liveUnit * 1.4;
+      const rect =
+        dragged.w < 8 && dragged.h < 8
+          ? { x: marquee.from.x - side / 2, y: marquee.from.y - side / 2, w: side, h: side }
+          : dragged;
+      const slot = makeSlotObject(rect);
+      commit((prev) => ({
+        ...prev,
+        objects: [
+          ...prev.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
+          slot,
+        ],
+      }));
+      // Optional hint: what belongs here. Enter with nothing leaves it
+      // to the board to say.
+      setEditor({ x: rect.x, y: rect.y + rect.h, slot: { id: slot.id } });
+      setEditorText("");
+      return;
+    }
+
     if (marquee) {
       const rect = rectFromCorners(marquee.from, marquee.to);
       setMarquee(null);
@@ -892,6 +930,20 @@ export function WhiteboardSurface({
     if (!builder) return;
     const stroke = builder.finish();
     if (!stroke) return;
+    // A closed, hollow box drawn with the pen over empty canvas is a
+    // placeholder, not a drawing: the paper way of reserving space.
+    // It becomes a slot -- undoable like any stroke -- and the hint
+    // editor opens so the user can say what belongs there.
+    if (tool === "pen" && stroke.kind === "ink") {
+      const box = boxFromStroke(stroke.pts, liveUnit);
+      if (box && objectsInRect(doc, box, services).length === 0) {
+        const slot = makeSlotObject(box);
+        commit((prev) => ({ ...prev, objects: [...prev.objects, slot] }));
+        setEditor({ x: box.x, y: box.y + box.h, slot: { id: slot.id } });
+        setEditorText("");
+        return;
+      }
+    }
     const object: WbObject =
       tool === "eraser"
         ? ({
@@ -903,7 +955,7 @@ export function WhiteboardSurface({
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
-  }, [tool, width, commit, pushHistory, marquee, doc, services]);
+  }, [tool, width, commit, pushHistory, marquee, doc, services, liveUnit]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -923,6 +975,18 @@ export function WhiteboardSurface({
     setEditor(null);
     setEditorText("");
     if (!at) return;
+    if (at.slot) {
+      const { id } = at.slot;
+      if (body) {
+        commit((prev) => ({
+          ...prev,
+          objects: prev.objects.map((o) =>
+            o.id === id && o.kind === "slot" ? { ...o, hint: body } : o,
+          ),
+        }));
+      }
+      return;
+    }
     if (at.reading) {
       // An empty correction clears the reading, so the ink reads as
       // unread again and the model transcribes it afresh.
@@ -1001,9 +1065,14 @@ export function WhiteboardSurface({
       // The overview is for context and placement; these are for
       // reading -- the misreads all came from glyphs a few dozen
       // pixels tall.
-      const crops = cropRegions(marks, unit ?? 40)
-        .map((r) => buildRegionCrop(doc, r, services, unit ?? 40))
-        .filter((c): c is NonNullable<typeof c> => c !== null);
+      // No close-up when the handwriting already renders large on the
+      // overview -- the crop exists for glyphs a few dozen pixels tall.
+      const legible = (unit ?? 40) * plan.imageScale >= 100;
+      const crops = legible
+        ? []
+        : cropRegions(marks, unit ?? 40)
+            .map((r) => buildRegionCrop(doc, r, services, unit ?? 40))
+            .filter((c): c is NonNullable<typeof c> => c !== null);
       const extras: AtlasExtras = {
         mode,
         inkHeight: unit,

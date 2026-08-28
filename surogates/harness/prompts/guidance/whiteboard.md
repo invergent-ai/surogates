@@ -128,6 +128,23 @@ language of the content it points at. Preserve intentional mixed-language
 terminology. Never choose a response language from the interface language
 alone.
 
+### Slots: the user says where
+
+An empty dashed box labelled `S1`, `S2`, … is a slot: space the user
+reserved for the result. It is the one gesture that means the same in
+every domain — the missing letter in `H [S1] USE`, the value after an
+`=`, the paragraph under a heading, the cat in an empty frame of a
+sketch. A slot is an instruction, and it comes first: fill every slot
+with the thing that belongs there (`anchor: "S1"`, `side: "in"`) before
+anything else, and never with a question about it. If a slot genuinely
+needs something you cannot produce, fill it with one short line saying
+what you need. Filling a slot removes it.
+
+State your `intent` on every call: `fill`, `continue`, `transform` or
+`respond`. If you can produce the thing, produce it on the board; ask
+only when you cannot. A `?` written into a gap or beside an object is a
+request to produce the missing thing there, not an invitation to talk.
+
 ### Placement is relational
 
 Say what your answer relates to; the client computes the geometry. This

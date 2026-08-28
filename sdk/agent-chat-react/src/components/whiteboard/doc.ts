@@ -60,6 +60,20 @@ export type WbObject = WbBase &
         version?: number;
       }
     | {
+        /**
+         * Empty space the user reserved for the answer. The universal
+         * "where": maths (`∫…dx = [slot]`), text (`H [slot] USE`), a
+         * drawing ("the cat goes here"). Filling it removes it.
+         */
+        kind: "slot";
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        /** What the user typed about what belongs here, if anything. */
+        hint?: string;
+      }
+    | {
         kind: "erase";
         mode: "rect" | "path";
         x?: number;
@@ -310,12 +324,24 @@ export function applyCommands(
       superseded.add(record.replaces);
     }
   }
+  // A command that filled a slot takes the slot with it: the space was
+  // reserved for exactly this, and an empty box left behind would read
+  // as still waiting for an answer.
+  const filled = new Set<string>();
+  for (const cmd of commands) {
+    if (cmd && typeof cmd === "object") {
+      const f = (cmd as Record<string, unknown>).fillsSlot;
+      if (typeof f === "string" && f) filled.add(f);
+    }
+  }
   // Advance the cursor even when nothing survived validation, or the
   // persistence tail replays the same dead call on every load.
-  if (added.length === 0 && superseded.size === 0) {
+  if (added.length === 0 && superseded.size === 0 && filled.size === 0) {
     return { ...doc, lastEventId: nextEventId };
   }
-  const kept = doc.objects.filter((o) => !superseded.has(o.origin));
+  const kept = doc.objects.filter(
+    (o) => !superseded.has(o.origin) && !(o.kind === "slot" && filled.has(o.id)),
+  );
   return {
     ...doc,
     version: 1,
@@ -439,6 +465,7 @@ export function translateObject(
     case "text":
     case "formula":
     case "artifact":
+    case "slot":
       return { ...obj, x: obj.x + dx, y: obj.y + dy };
     case "erase":
       return {
@@ -504,6 +531,7 @@ export function scaleObject(
         fontSize: Math.max(4, obj.fontSize * uniform),
       };
     case "artifact":
+    case "slot":
       return {
         ...obj,
         x: px(obj.x),
@@ -521,6 +549,66 @@ export function scaleObject(
         points: obj.points?.map(([x, y]) => [px(x), py(y)]),
       };
   }
+}
+
+/** A slot the user reserved for the answer, covering *rect*. */
+export function makeSlotObject(
+  rect: { x: number; y: number; w: number; h: number },
+  hint?: string,
+): WbObject {
+  return {
+    id: nextId("local"),
+    origin: "local",
+    selected: false,
+    kind: "slot",
+    x: rect.x,
+    y: rect.y,
+    w: rect.w,
+    h: rect.h,
+    ...(hint?.trim() ? { hint: hint.trim() } : {}),
+  };
+}
+
+/**
+ * The rectangle a pen stroke draws, when it draws one.
+ *
+ * A closed loop whose points all hug the edges of their own bounding
+ * box is a box, not a letter: someone drawing a placeholder on paper.
+ * Returns its bounds, or null. Emptiness -- nothing already inside --
+ * is the caller's check, since it needs the document.
+ */
+export function boxFromStroke(
+  pts: readonly number[],
+  unit: number,
+): { x: number; y: number; w: number; h: number } | null {
+  if (pts.length < 16) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (let i = 0; i + 1 < pts.length; i += 2) {
+    minX = Math.min(minX, pts[i]);
+    maxX = Math.max(maxX, pts[i]);
+    minY = Math.min(minY, pts[i + 1]);
+    maxY = Math.max(maxY, pts[i + 1]);
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (w < unit * 0.8 || h < unit * 0.8) return null;
+  // Closed: it ends near where it began.
+  const gap = Math.hypot(pts[0] - pts[pts.length - 2], pts[1] - pts[pts.length - 1]);
+  if (gap > Math.max(w, h) * 0.25) return null;
+  // Hollow: the ink stays near the border rather than crossing the middle.
+  const band = Math.max(w, h) * 0.18;
+  let onEdge = 0;
+  const n = pts.length / 2;
+  for (let i = 0; i + 1 < pts.length; i += 2) {
+    const dx = Math.min(pts[i] - minX, maxX - pts[i]);
+    const dy = Math.min(pts[i + 1] - minY, maxY - pts[i + 1]);
+    if (dx <= band || dy <= band) onEdge++;
+  }
+  if (onEdge / n < 0.85) return null;
+  return { x: minX, y: minY, w, h };
 }
 
 /** A user-authored text object placed at *pt*. */

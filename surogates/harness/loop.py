@@ -1657,11 +1657,19 @@ class AgentHarness(
             # for work before the drawing and keeps the full catalogue.
             # Read from the turn's own user message, not the session row:
             # the two speeds alternate freely within one conversation.
+            _turn_whiteboard_metadata = _latest_whiteboard_metadata(all_events)
             tool_filter = _whiteboard_sketch_filter(
                 tool_filter,
-                _latest_whiteboard_metadata(all_events),
+                _turn_whiteboard_metadata,
                 has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
             )
+            # The draw handler rejects a call that leaves the user's slot
+            # empty, and it can only know the slots from here.
+            from surogates.whiteboard.turn import (
+                current_slots as _wb_slots,
+                slots_from_metadata as _wb_slots_from,
+            )
+            _wb_slots.set(_wb_slots_from(_turn_whiteboard_metadata))
 
             # user_reports exposes other end-users' data — its schema is
             # only offered to operator (Studio ops-chat) sessions.  The

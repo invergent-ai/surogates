@@ -91,3 +91,32 @@ geometry note.
 
 No new models at any stage: clustering and layout are algorithms; the
 one model-shaped job (reading new ink, once) stays on the session VLM.
+
+## Slots and intent
+
+Three production sessions showed the model inferring three things at
+once from spatial convention alone — *where* the result goes, *what*
+to do, and whether to *perform* it or talk about it — and each failed
+once: `( ln|x|+C )²` explained instead of squared; `H _ USE` asked
+about instead of filled; the trailing `=` the only one that worked,
+because maths carries its conventions and prose and drawing do not.
+
+**Slots** make *where* explicit and domain-blind. A slot is an empty
+box the user reserves for the result — drawn with the slot tool, or
+recognised when a pen stroke traces a closed, hollow box over empty
+canvas — labelled `S1, S2, …` beside the ink and agent marks. It is
+the one gesture with the same meaning everywhere: the missing letter,
+the value after `=`, the paragraph under a heading, the cat in an empty
+frame. The model fills it with `anchor: "S1", side: "in"`; the client
+fits the content into the box (text shrinks to fit, artifacts take the
+box, sketches are drawn in a 1000×1000 local space and scaled in) and
+the slot disappears. A call that leaves a slot empty is rejected by the
+tool before the client folds anything, so the retry cannot land beside
+a miss. The user can attach a hint (what belongs here) when drawing it.
+
+**Intent** makes *what* inspectable: every call declares `fill`,
+`continue`, `transform` or `respond`. And the guidance settles *act*:
+if you can produce the thing, produce it on the board; ask only when
+you cannot. PenEcho (`study/penecho`) has the model-declared intent and
+an `observedText` transcription, and an action menu for the user; it
+has no slot or placeholder mechanism.
