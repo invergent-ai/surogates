@@ -4,8 +4,15 @@ import {
   MAX_ATLAS_HEIGHT,
   MAX_ATLAS_WIDTH,
   atlasMetadata,
+  buildAtlas,
+  AGENT_OBJECT_LIMIT,
+  OCCUPANCY_GRID,
+  agentObjectReport,
+  contentBeyond,
   contentBounds,
+  inkHeight,
   mapHotspots,
+  occupancyCells,
   planAtlas,
 } from "@/components/whiteboard/atlas";
 import { applyCommands, emptyDoc } from "@/components/whiteboard/doc";
@@ -101,9 +108,11 @@ describe("atlas planning", () => {
   it("captures negative regions without clamping them away", () => {
     // The canvas has no edges: a board drawn up and to the left of the
     // origin is ordinary, and clamping to 0 would crop it out entirely.
-    const latest = { x: -8000, y: -6000, w: 400, h: 300 };
+    // Framed from the viewport, so the user is looking at it.
+    const far = { x: -8000, y: -6000, zoom: 1 };
+    const latest = { x: -7900, y: -5900, w: 400, h: 300 };
     const { sourceRect } = planAtlas(
-      emptyDoc(), latest, view, viewport, services,
+      emptyDoc(), latest, far, viewport, services,
     );
     expect(sourceRect.x).toBeLessThanOrEqual(latest.x);
     expect(sourceRect.y).toBeLessThanOrEqual(latest.y);
@@ -255,5 +264,422 @@ describe("atlas metadata", () => {
       })),
     ).length;
     expect(size).toBeLessThan(65_536);
+  });
+});
+
+describe("keeping the board in shot", () => {
+  // From a real session: a finished sum, then `=` added to the right of
+  // it. The capture framed on the new stroke alone, so the model got two
+  // bare horizontal lines and answered "menu / list icon?".
+  const sum = {
+    tool: "write_text", x: 0, y: 0, text: "1 + 2",
+    fontSize: 32, maxWidth: 300,
+  };
+
+  function covers(rect: { x: number; y: number; w: number; h: number },
+                  inner: { x: number; y: number; w: number; h: number }) {
+    return (
+      rect.x <= inner.x &&
+      rect.y <= inner.y &&
+      rect.x + rect.w >= inner.x + inner.w &&
+      rect.y + rect.h >= inner.y + inner.h
+    );
+  }
+
+  it("keeps earlier content in frame when new ink lands far away", () => {
+    const doc = applyCommands(emptyDoc(), [sum], 1);
+    const latest = { x: 1200, y: 40, w: 16, h: 33 };
+    const { sourceRect } = planAtlas(doc, latest, view, viewport, services);
+
+    expect(covers(sourceRect, latest)).toBe(true);
+    // The sum itself must still be in the picture the model answers.
+    expect(covers(sourceRect, { x: 0, y: 0, w: 1, h: 1 })).toBe(true);
+  });
+
+  it("still covers a dirty region where content was erased", () => {
+    // Rubbing something out leaves a dirty rectangle with nothing in it,
+    // and the model should see where. The user erases what they are
+    // looking at, so it sits inside the viewport.
+    const doc = applyCommands(emptyDoc(), [sum], 1);
+    const erased = { x: 40, y: 30, w: 20, h: 20 };
+    const { sourceRect } = planAtlas(doc, erased, view, viewport, services);
+
+    expect(covers(sourceRect, erased)).toBe(true);
+  });
+
+  it("still falls back to the viewport on an empty canvas", () => {
+    const { sourceRect } = planAtlas(
+      emptyDoc(), null, view, viewport, services,
+    );
+    expect(sourceRect.w).toBeGreaterThan(0);
+    expect(sourceRect.h).toBeGreaterThan(0);
+  });
+});
+
+describe("telling the model how big the writing is", () => {
+  // Without it the model picks a font size blind: on a board of ~250-unit
+  // digits it chose 90, and the answer came out a quarter the size.
+  function inked(heights: number[]) {
+    return {
+      ...emptyDoc(),
+      objects: heights.map((h, i) => ({
+        id: `i${i}`, origin: "local", selected: false,
+        kind: "ink" as const,
+        pts: [0, 0, 10, h],
+        // Zero width so the bounds are exactly the point extent --
+        // inkBounds pads by the stroke width otherwise.
+        width: 0, color: "#000",
+      })),
+    };
+  }
+
+  it("is null for a board with no ink", () => {
+    expect(inkHeight(emptyDoc(), services)).toBeNull();
+    expect(inkHeight(applyCommands(emptyDoc(), [text], 1), services))
+      .toBeNull();
+  });
+
+  it("ignores the flat marks that carry no height", () => {
+    // The bars of an `=` are ~4 units tall; averaging them in drags the
+    // figure toward zero and the model writes too small again.
+    expect(inkHeight(inked([252, 4, 116, 198, 1, 4]), services)).toBe(198);
+  });
+
+  it("resists a single outsized stroke", () => {
+    // A max would follow a stray divider; the median does not.
+    expect(inkHeight(inked([200, 210, 220, 2000]), services)).toBe(215);
+  });
+
+  it("rides on the turn metadata, rounded", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], { inkHeight: 251.7 });
+    expect(meta.inkHeight).toBe(252);
+  });
+
+  it("is omitted when there is no ink to measure", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    expect(atlasMetadata(plan, null, [], { inkHeight: null }))
+      .not.toHaveProperty("inkHeight");
+  });
+});
+
+describe("a bounded view of an unbounded board", () => {
+  const wide = { w: 1600, h: 900 };
+  const at = (x: number, y: number) => ({ x, y, zoom: 1 });
+
+  it("stops growing instead of shrinking the board to fit", () => {
+    // A 6800-unit board arrived at imageScale 0.30, where the model's own
+    // 55-unit answers render 16px tall and it places new work on top of
+    // old by squinting. The capture stops; the board does not.
+    const zoomedOut = { x: 0, y: 0, zoom: 0.05 };
+    const { sourceRect, imageScale } = planAtlas(
+      emptyDoc(), null, zoomedOut, wide, services,
+    );
+    expect(sourceRect.w).toBeLessThanOrEqual(MAX_ATLAS_WIDTH);
+    expect(sourceRect.h).toBeLessThanOrEqual(MAX_ATLAS_HEIGHT);
+    // Capped span means no downscale: the picture is always 1:1.
+    expect(imageScale).toBe(1);
+  });
+
+  it("frames what the user is looking at", () => {
+    const { sourceRect } = planAtlas(
+      emptyDoc(), null, at(5000, 4000), wide, services,
+    );
+    expect(sourceRect.x).toBeLessThanOrEqual(5000);
+    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(5000 + wide.w);
+  });
+
+  it("says which way the board continues past the frame", () => {
+    // Content too big to show whole, so the frame is a window onto it.
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 0, y: 0, text: "here",
+        fontSize: 32, maxWidth: 100 },
+      { tool: "write_text", x: 9000, y: 9000, text: "far",
+        fontSize: 32, maxWidth: 100 },
+    ], 1);
+    const { sourceRect } = planAtlas(doc, null, at(0, 0), wide, services);
+    expect(contentBeyond(doc, sourceRect, services)).toEqual(["right", "below"]);
+  });
+
+  it("says nothing when the frame holds everything", () => {
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 10, y: 10, text: "near",
+        fontSize: 32, maxWidth: 100 },
+    ], 1);
+    const { sourceRect } = planAtlas(doc, null, at(0, 0), wide, services);
+    expect(contentBeyond(doc, sourceRect, services)).toEqual([]);
+  });
+});
+
+describe("occupancy", () => {
+  const rect = { x: 0, y: 0, w: 1600, h: 1600 };   // 16x16 cells of 100
+
+  const textAt = (x: number, y: number) => ({
+    tool: "write_text", x, y, text: "a", fontSize: 40, maxWidth: 100,
+  });
+
+  it("marks the cells an object covers", () => {
+    const doc = applyCommands(emptyDoc(), [textAt(250, 350)], 1);
+    const cells = occupancyCells(doc, rect, services);
+    expect(cells).toContainEqual([2, 3]);
+  });
+
+  it("costs the same whatever the board holds", () => {
+    // The whole reason for a grid: a rectangle list would grow without
+    // bound, and these notes stay in the context for the rest of the
+    // session.
+    const many = Array.from({ length: 300 }, (_, i) =>
+      textAt((i % 16) * 100, Math.floor(i / 16) * 100));
+    const cells = occupancyCells(applyCommands(emptyDoc(), many, 1),
+      rect, services);
+    expect(cells.length).toBeLessThanOrEqual(OCCUPANCY_GRID * OCCUPANCY_GRID);
+  });
+
+  it("reports each cell once however many objects share it", () => {
+    const doc = applyCommands(emptyDoc(),
+      [textAt(10, 10), textAt(20, 20), textAt(30, 30)], 1);
+    const cells = occupancyCells(doc, rect, services);
+    expect(cells.filter(([c, r]) => c === 0 && r === 0)).toHaveLength(1);
+  });
+
+  it("ignores objects outside the frame", () => {
+    const doc = applyCommands(emptyDoc(), [textAt(50000, 50000)], 1);
+    expect(occupancyCells(doc, rect, services)).toEqual([]);
+  });
+
+  it("is empty for an empty board", () => {
+    expect(occupancyCells(emptyDoc(), rect, services)).toEqual([]);
+  });
+
+  it("rides on the turn metadata with its grid size", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      occupied: [[1, 2]], beyond: ["right"],
+    });
+    expect(meta.occupied).toEqual([[1, 2]]);
+    expect(meta.occupancyGrid).toBe(OCCUPANCY_GRID);
+    expect(meta.beyond).toEqual(["right"]);
+  });
+});
+
+describe("the grid drawn on the picture", () => {
+  /** A canvas that records what was drawn into it. */
+  function recording() {
+    const calls: unknown[][] = [];
+    const ctx = new Proxy({} as Record<string, unknown>, {
+      get: (_t, p) => {
+        if (p === "calls") return calls;
+        return (...args: unknown[]) => {
+          calls.push([p, ...args]);
+        };
+      },
+      set: (t, p, v) => {
+        calls.push(["set", p, v]);
+        t[p as string] = v;
+        return true;
+      },
+    });
+    return {
+      calls,
+      services: {
+        ...services,
+        createCanvas: (w: number, h: number) =>
+          ({ width: w, height: h, getContext: () => ctx }) as unknown as
+            HTMLCanvasElement,
+      },
+    };
+  }
+
+  it("draws the cell lines and the edge labels", () => {
+    // Reading `[col, row]` pairs means cross-referencing a list against a
+    // picture; drawn on, the model can see which cells are free.
+    const { calls, services: rec } = recording();
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    buildAtlas(emptyDoc(), plan, rec);
+
+    const labels = calls.filter((c) => c[0] === "fillText").map((c) => c[1]);
+    expect(labels).toContain("0");
+    expect(labels).toContain(String(OCCUPANCY_GRID - 1));
+    expect(calls.some((c) => c[0] === "stroke")).toBe(true);
+  });
+
+  it("keeps the overlay off the board's own coordinate space", () => {
+    // renderDoc leaves a board-space transform behind. The grid belongs
+    // to the picture, so it resets first -- otherwise the lines land
+    // wherever the board happens to be panned to.
+    const { calls, services: rec } = recording();
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    buildAtlas(emptyDoc(), plan, rec);
+
+    const firstLabel = calls.findIndex((c) => c[0] === "fillText");
+    const identity = calls.findIndex(
+      (c, i) =>
+        i < firstLabel && c[0] === "setTransform" &&
+        c[1] === 1 && c[2] === 0 && c[3] === 0 && c[4] === 1 &&
+        c[5] === 0 && c[6] === 0,
+    );
+    expect(identity).toBeGreaterThan(-1);
+  });
+});
+
+describe("never cropping an expression in half", () => {
+  const wide = { w: 1600, h: 900 };
+
+  it("shows the whole board when it fits, wherever the user scrolled", () => {
+    // The regression this replaces: working at the right-hand end of an
+    // integral, the capture began mid-`e^x` with the integral sign off
+    // the left edge, and the model answered the fragment it could see.
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: -150, y: 0, text: "integral",
+        fontSize: 40, maxWidth: 200 },
+      { tool: "write_text", x: 700, y: 0, text: "tail",
+        fontSize: 40, maxWidth: 100 },
+    ], 1);
+    // Scrolled right, so the left end is off screen.
+    const scrolled = { x: 214, y: -329, zoom: 1 };
+    const { sourceRect } = planAtlas(doc, null, scrolled, wide, services);
+
+    expect(sourceRect.x).toBeLessThanOrEqual(-150);
+    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(800);
+  });
+
+  it("falls back to the viewport once the board outgrows the frame", () => {
+    // Something has to be left out; the least bad thing to keep is what
+    // the user is looking at.
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 0, y: 0, text: "a", fontSize: 40, maxWidth: 100 },
+      { tool: "write_text", x: 9000, y: 0, text: "b", fontSize: 40, maxWidth: 100 },
+    ], 1);
+    const scrolled = { x: 8500, y: 0, zoom: 1 };
+    const { sourceRect } = planAtlas(doc, null, scrolled, wide, services);
+
+    expect(sourceRect.w).toBeLessThanOrEqual(MAX_ATLAS_WIDTH);
+    expect(sourceRect.x).toBeGreaterThan(1000);
+    expect(contentBeyond(doc, sourceRect, services)).toContain("left");
+  });
+});
+
+describe("occupancy measures ink, not the wrap width", () => {
+  const rect = { x: 0, y: 0, w: 1600, h: 1600 };   // 100-unit cells
+
+  it("does not claim the whole wrap width for one glyph", () => {
+    // objectBounds reports maxWidth, the width the author asked to wrap
+    // at. A one-glyph answer with maxWidth 800 claimed eight cells it
+    // never touched, and the model routed around free canvas.
+    const doc = applyCommands(emptyDoc(), [{
+      tool: "write_text", x: 0, y: 0, text: "5", fontSize: 40, maxWidth: 800,
+    }], 1);
+    expect(occupancyCells(doc, rect, services).length).toBeLessThanOrEqual(2);
+  });
+
+  it("still covers a long line that really is wide", () => {
+    const doc = applyCommands(emptyDoc(), [{
+      tool: "write_text", x: 0, y: 0, text: "1222 + 5000 = 6222",
+      fontSize: 55, maxWidth: 800,
+    }], 1);
+    const cells = occupancyCells(doc, rect, services);
+    // ~18 glyphs at 0.6em of 55 is ~590 units: six cells, not one.
+    expect(cells.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("never claims more than the wrap width", () => {
+    const doc = applyCommands(emptyDoc(), [{
+      tool: "write_text", x: 0, y: 0, text: "wrapped onto several lines",
+      fontSize: 40, maxWidth: 100,
+    }], 1);
+    const cols = occupancyCells(doc, rect, services).map(([c]) => c);
+    expect(Math.max(...cols)).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("what became of the agent's own work", () => {
+  const drawn = (origin: string, x: number, y: number, text: string) => ({
+    id: `${origin}:1`, origin, selected: false, kind: "text" as const,
+    x, y, text, fontSize: 40, maxWidth: 200, lineHeight: 1.35,
+  });
+  const ink = (id: string, x: number, y: number, h = 60) => ({
+    id, origin: "local", selected: false, kind: "ink" as const,
+    pts: [x, y, x + 10, y + h], width: 0, color: "#000",
+  });
+  const board = (objects: unknown[], folded: string[]) =>
+    ({ ...emptyDoc(), folded, objects }) as never;
+
+  it("reports where an object sits now", () => {
+    const doc = board([drawn("callA", 480, 390, "e^x + C")], ["callA"]);
+    const [entry] = agentObjectReport(doc, services);
+    expect(entry.origin).toBe("callA");
+    expect(entry.label).toBe("e^x + C");
+    expect(entry.bounds?.x).toBe(480);
+  });
+
+  it("reports a deleted object as gone", () => {
+    // The call is folded but nothing survives from it.
+    const [entry] = agentObjectReport(board([], ["callA"]), services);
+    expect(entry.bounds).toBeNull();
+  });
+
+  it("flags ink the user drew around it", () => {
+    // The real case: an answer wrapped in hand-drawn brackets and
+    // squared. The object never moved; what it means changed.
+    const doc = board(
+      [drawn("callA", 480, 390, "e^x + C"), ink("new1", 465, 380)],
+      ["callA"],
+    );
+    const [entry] = agentObjectReport(doc, services, {
+      newLocalIds: new Set(["new1"]),
+    });
+    expect(entry.touched).toBe(true);
+  });
+
+  it("does not flag ink that was already there", () => {
+    const doc = board(
+      [drawn("callA", 480, 390, "e^x + C"), ink("old1", 465, 380)],
+      ["callA"],
+    );
+    const [entry] = agentObjectReport(doc, services, {
+      newLocalIds: new Set(),
+    });
+    expect(entry.touched).toBe(false);
+  });
+
+  it("does not flag new ink drawn far away", () => {
+    const doc = board(
+      [drawn("callA", 480, 390, "e^x + C"), ink("new1", 5000, 5000)],
+      ["callA"],
+    );
+    const [entry] = agentObjectReport(doc, services, {
+      newLocalIds: new Set(["new1"]),
+    });
+    expect(entry.touched).toBe(false);
+  });
+
+  it("keeps the newest and drops the oldest past the cap", () => {
+    // These notes are permanent, so the list has to be bounded.
+    const folded = Array.from({ length: 20 }, (_, i) => `call${i}`);
+    const doc = board(
+      folded.map((o, i) => drawn(o, i * 10, 0, `t${i}`)),
+      folded,
+    );
+    const report = agentObjectReport(doc, services);
+    expect(report.length).toBe(AGENT_OBJECT_LIMIT);
+    expect(report[0].origin).toBe("call19");
+  });
+
+  it("is empty when the agent has drawn nothing", () => {
+    expect(agentObjectReport(emptyDoc(), services)).toEqual([]);
+  });
+
+  it("rides on the turn metadata", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      agentObjects: [
+        { origin: "c1", label: "five", bounds: null },
+        { origin: "c2", label: "six",
+          bounds: { x: 1, y: 2, w: 3, h: 4 }, touched: true },
+      ],
+    });
+    const rows = meta.agentObjects as Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({ origin: "c1", removed: true });
+    expect(rows[1]).toMatchObject({ origin: "c2", x: 1, touched: true });
   });
 });

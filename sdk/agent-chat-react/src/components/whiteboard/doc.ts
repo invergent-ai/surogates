@@ -100,6 +100,20 @@ function nextId(origin: string): string {
   return `${origin}:${localCounter}`;
 }
 
+/**
+ * A size the model may have spelled `width`/`height`.
+ *
+ * The command vocabulary is mixed — `draw` has a stroke `width`,
+ * `write_text` has `maxWidth`, `erase` and `place_artifact` have `w`/`h`
+ * — so the long spelling turns up on the short-spelled commands. The
+ * validator accepts it, and this is the half that makes it draw: without
+ * it an aliased erase passes validation and then rubs out nothing.
+ */
+function size(cmd: Record<string, unknown>, key: "w" | "h"): unknown {
+  const alias = key === "w" ? "width" : "height";
+  return cmd[key] ?? cmd[alias];
+}
+
 /** Convert one command into an object, or null to skip it. */
 function toObject(
   cmd: Record<string, unknown>,
@@ -152,8 +166,8 @@ function toObject(
         mode: cmd.mode,
         x: cmd.x as number | undefined,
         y: cmd.y as number | undefined,
-        w: cmd.w as number | undefined,
-        h: cmd.h as number | undefined,
+        w: size(cmd, "w") as number | undefined,
+        h: size(cmd, "h") as number | undefined,
         points: cmd.points as number[][] | undefined,
         size: cmd.size as number | undefined,
       };
@@ -165,8 +179,8 @@ function toObject(
         artifactId: cmd.artifact_id,
         x: Number(cmd.x),
         y: Number(cmd.y),
-        w: Number(cmd.w),
-        h: Number(cmd.h),
+        w: Number(size(cmd, "w")),
+        h: Number(size(cmd, "h")),
       };
     default:
       return null;
@@ -192,21 +206,35 @@ export function applyCommands(
   if (!Array.isArray(commands)) return doc;
 
   const added: WbObject[] = [];
+  // Origins this call supersedes. The agent can only add objects, so
+  // without this a corrected answer is drawn on top of the wrong one —
+  // `erase` paints white, it does not delete. One turn stacked four
+  // answers on a single spot.
+  const superseded = new Set<string>();
   for (const cmd of commands) {
     if (typeof cmd !== "object" || cmd === null) continue;
-    const obj = toObject(cmd as Record<string, unknown>, origin);
+    const record = cmd as Record<string, unknown>;
+    const obj = toObject(record, origin);
     if (obj) added.push(obj);
+    // Honoured even when the command itself was unusable: the intent to
+    // retract is independent of whether the replacement could be drawn,
+    // and leaving the old one behind on a failed replace is the worse
+    // of the two outcomes.
+    if (typeof record.replaces === "string" && record.replaces) {
+      superseded.add(record.replaces);
+    }
   }
   // Advance the cursor even when nothing survived validation, or the
   // persistence tail replays the same dead call on every load.
-  if (added.length === 0) {
+  if (added.length === 0 && superseded.size === 0) {
     return { ...doc, lastEventId: nextEventId };
   }
+  const kept = doc.objects.filter((o) => !superseded.has(o.origin));
   return {
     ...doc,
     version: 1,
     objects: [
-      ...doc.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
+      ...kept.map((o) => (o.selected ? { ...o, selected: false } : o)),
       ...added,
     ],
     lastEventId: nextEventId,

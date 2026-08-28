@@ -1111,9 +1111,12 @@ class AgentHarness(
             # see the user's first message.  Runs in parallel with context
             # engineering and the main LLM call, so the chat turn isn't
             # delayed waiting for the title.
+            # Titled from the raw events, not from ``messages``: the
+            # rebuilt messages carry the harness's injected notes folded
+            # onto the user's text.
             self._maybe_generate_title(
                 session=session,
-                messages=messages,
+                messages=_title_source_messages(all_events),
                 model=session.model or self._default_model,
             )
 
@@ -2662,6 +2665,28 @@ class AgentHarness(
                 await self._complete_session(
                     session, messages, lease,
                     reason="tool_loop_halt",
+                    cost_tracker=cost_tracker,
+                    turn_id=turn_id,
+                )
+                return
+
+            # A sketch turn that has drawn is finished.  Narrowing the
+            # catalogue to one tool was only ever a nudge -- nothing
+            # stopped the model calling it again, and with the image and
+            # the occupied-cell list both captured before its own draws,
+            # it had no evidence it had already answered.
+            if _whiteboard_sketch_turn_done(
+                tool_calls_raw,
+                tool_results,
+                _latest_whiteboard_metadata(all_events),
+                has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+            ):
+                logger.info(
+                    "Session %s: sketch turn drew; ending turn", session.id,
+                )
+                await self._complete_session(
+                    session, messages, lease,
+                    reason="whiteboard_sketch_drawn",
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
@@ -4437,6 +4462,36 @@ class AgentHarness(
 
 
 
+def _title_source_messages(events: list[Any] | None) -> list[dict]:
+    """The user's turns as the user actually wrote them.
+
+    ``_rebuild_messages`` folds the per-turn ephemeral notes -- canvas
+    geometry, view context, the attachment list -- onto the *front* of
+    the user's text, so titling its output titles the scaffolding rather
+    than the request.  The whiteboard made that unmissable: its question
+    box is optional, so with nothing typed the geometry note IS the
+    whole message and every board came out named after the coordinate
+    contract it explains.
+
+    Reading the durable event payload instead keeps the title about what
+    the user said, and leaves it unset when they said nothing -- which
+    is the honest answer, and better than the same wrong title on every
+    board.
+    """
+    messages: list[dict] = []
+    for event in events or []:
+        event_type = getattr(event, "type", None)
+        if (
+            getattr(event_type, "value", event_type)
+            != EventType.USER_MESSAGE.value
+        ):
+            continue
+        data = getattr(event, "data", None)
+        content = data.get("content") if isinstance(data, dict) else None
+        messages.append({"role": "user", "content": content or ""})
+    return messages
+
+
 def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
     """Return the newest ``user.message`` event's metadata, or ``None``.
 
@@ -4453,6 +4508,59 @@ def _latest_whiteboard_metadata(events: list[Any] | None) -> Any:
         data = getattr(event, "data", None)
         return data.get("metadata") if isinstance(data, dict) else None
     return None
+
+
+def _whiteboard_sketch_turn_done(
+    tool_calls_raw: list[dict],
+    tool_results: list[dict],
+    metadata: Any,
+    *,
+    has_whiteboard: bool,
+) -> bool:
+    """Whether a sketch turn has drawn and should stop there.
+
+    ``sketch`` is meant to be one round-trip -- see
+    :func:`_whiteboard_sketch_filter` -- but narrowing the catalogue to a
+    single tool never limited how many times the model could call it.
+    One real turn drew five objects, four at the same coordinates and two
+    byte-identical: the image and the occupied-cell list it was reasoning
+    from were both captured before its own draws, so nothing it could see
+    said it had already answered.
+
+    A *failed* draw does not end the turn.  The error message exists to
+    be acted on, and stopping on it would leave the board untouched and
+    the user with nothing.
+    """
+    if not has_whiteboard:
+        return False
+
+    from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
+    from surogates.whiteboard.session import (
+        MODE_SKETCH,
+        is_whiteboard_turn,
+        turn_mode,
+    )
+
+    # Keyed on the turn, like the filter: an ordinary chat message to a
+    # board-enabled agent is not a sketch turn and keeps its iterations.
+    if not is_whiteboard_turn(metadata):
+        return False
+    if turn_mode(metadata) != MODE_SKETCH:
+        return False
+
+    drew = {
+        call.get("id")
+        for call in tool_calls_raw
+        if call.get("function", {}).get("name") in WHITEBOARD_TOOL_NAMES
+    }
+    if not drew:
+        return False
+    for result in tool_results:
+        if result.get("tool_call_id") not in drew:
+            continue
+        if not str(result.get("content") or "").startswith("Error:"):
+            return True
+    return False
 
 
 def _whiteboard_sketch_filter(

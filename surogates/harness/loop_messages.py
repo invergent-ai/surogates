@@ -69,6 +69,9 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     if payload is None:
         return None
 
+    def _is_num(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
     def _rect(value: Any) -> str | None:
         if not isinstance(value, dict):
             return None
@@ -113,6 +116,122 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             f"The user lassoed a selection ({selection}). Treat it as the "
             f"exclusive context for this turn."
         )
+
+    # The board continues past the capture, which is bounded so it stays
+    # legible.  Unsaid, the empty margin reads as free canvas and work
+    # lands on objects sitting just outside the frame.
+    beyond = payload.get("beyond")
+    if isinstance(beyond, list) and beyond:
+        where = ", ".join(str(d) for d in beyond if isinstance(d, str))
+        if where:
+            lines.append(
+                f"This is a view of a larger board: content continues "
+                f"{where}. Treat the edge of the image as a crop, not as "
+                f"the end of the canvas."
+            )
+
+    # Where the existing objects are, as of this turn.  The model cannot
+    # get this from the transcript: its own draw calls record where it
+    # *asked* for things, and the user's drags, resizes and deletions are
+    # never recorded at all, so the history is confidently out of date.
+    occupied = payload.get("occupied")
+    grid = payload.get("occupancyGrid")
+    if isinstance(occupied, list) and occupied and isinstance(grid, int):
+        # Phrased as a constraint, not as a placement rule.  Told to
+        # "place new objects in free cells", the model went shopping for
+        # any empty cell and wrote the answer to an integral below the
+        # working instead of after the "=" -- both cells were free, and
+        # it picked the one the grid mentioned rather than the one the
+        # content called for.
+        lines.append(
+            f"A faint {grid}x{grid} grid is drawn over the image, "
+            f"labelled along the top and left edges; it is an overlay to "
+            f"help you place things, not something the user drew. These "
+            f"cells already hold work, as of this turn, [col, row]: "
+            f"{occupied}. Put your answer where the content calls for it "
+            f"-- continuing the user's line, beside the thing it "
+            f"answers -- and use the grid only to keep off what is "
+            f"already there."
+        )
+        # Converting a chosen cell back to canvas coordinates means
+        # inverting the image formula above, once per axis.  Asked for
+        # the slot after an "x =", the model inverted the column and
+        # left the row in image coordinates, putting its answer below
+        # the frame it had been shown.  Given the cell size it can place
+        # by arithmetic that has no direction to get backwards.
+        def _num(value: Any) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(
+                value, bool
+            )
+
+        cell = payload.get("cellSize")
+        if isinstance(cell, dict) and _num(cell.get("w")) and _num(cell.get("h")):
+            lines.append(
+                f"Cell (col, row) starts at canvas x = sourceRect.x + "
+                f"col*{cell['w']}, y = sourceRect.y + row*{cell['h']}. "
+                f"Every coordinate you return is a canvas coordinate, "
+                f"never a position measured off the image."
+            )
+
+    # Without this the model has no sense of scale: the note says where
+    # the capture is and what it covers, but nothing about how big the
+    # strokes inside it are.  Asked to answer a sum written in ~250-unit
+    # digits it picked fontSize 90, and its answer landed a quarter the
+    # size of the working it belonged to.
+    ink = payload.get("inkHeight")
+    if isinstance(ink, (int, float)) and not isinstance(ink, bool) and ink > 0:
+        # The second sentence is not padding.  Given only the first, the
+        # model set fontSize 75 to match 80-unit handwriting, left
+        # maxWidth at 400, and turned a one-sentence answer into nine
+        # lines and 877 units of tower down the middle of the board.
+        lines.append(
+            f"The user's handwriting is about {int(ink)} canvas units "
+            f"tall. Size a short answer -- a number, a formula -- to sit "
+            f"with it. A sentence of prose at that size is enormous: use "
+            f"a smaller fontSize and a maxWidth wide enough that it reads "
+            f"across rather than down (a line holds roughly "
+            f"maxWidth/(fontSize*0.6) characters)."
+        )
+
+    # What became of the agent's own work.  The transcript records where
+    # it *asked* for each object and nothing after that, because what
+    # comes after is the user: dragging, resizing, deleting, or drawing
+    # something that changes what an object means.  None of it reaches
+    # the conversation, so the agent's memory of its own output is
+    # confidently out of date -- one session ended with its answer
+    # wrapped in hand-drawn brackets and squared, and it answered the
+    # transcript rather than the board.
+    mine = payload.get("agentObjects")
+    if isinstance(mine, list) and mine:
+        rows: list[str] = []
+        for entry in mine:
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("label") or "").strip()
+            named = f'"{label}"' if label else "an object"
+            if entry.get("removed"):
+                rows.append(f"- {named}: no longer on the board")
+                continue
+            if not all(_is_num(entry.get(k)) for k in ("x", "y", "w", "h")):
+                continue
+            where = (
+                f"- {named} is at ({entry['x']}, {entry['y']}), "
+                f"{entry['w']}x{entry['h']}"
+            )
+            if entry.get("touched"):
+                where += (
+                    " -- the user has since drawn on or around it. Read "
+                    "that ink as changing what it means, not as separate "
+                    "work beside it"
+                )
+            rows.append(where)
+        if rows:
+            joined = "\n".join(rows)
+            lines.append(
+                f"What you drew earlier, as the board holds it now (your "
+                f"own draw calls record where you asked for these, not "
+                f"what the user did to them afterwards):\n{joined}"
+            )
 
     typed = payload.get("typedInput")
     if isinstance(typed, str) and typed.strip():

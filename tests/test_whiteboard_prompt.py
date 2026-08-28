@@ -110,3 +110,28 @@ def test_the_fragment_is_keyed_on_the_tool_not_the_session():
         available_tools={"whiteboard_draw"},
     ).build()
     assert "Whiteboard canvas" in prompt
+
+
+def test_guidance_covers_handwritten_maths_ambiguity():
+    """Three sessions in a row failed on the same misreadings.
+
+    `2x + 1 = 5` read as `2 x 1 = 5`, an integral sign read as `S`, and
+    `2x + 1 = 7` read as `2x4 / 1 = ?` -- every one the handwritten
+    variable taken for an operator. The guidance covered logographic
+    script in detail and said nothing about mathematics.
+    """
+    text = _library().get("guidance/whiteboard")
+    assert "Reading handwritten mathematics" in text
+    # The specific confusions, not just a vague instruction to be careful.
+    assert "the variable `x`" in text
+    assert "well-formed expression" in text
+
+
+def test_guidance_forbids_reading_symbols_from_the_hotspot_trail():
+    """The model said it was "reading from the hotspot trajectory".
+
+    That trail is a coarse grid path of the pen; characters cannot be
+    recovered from it, and trying produced an invented expression.
+    """
+    text = _library().get("guidance/whiteboard")
+    assert "never read characters or symbols out of it" in text

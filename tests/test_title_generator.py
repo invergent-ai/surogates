@@ -15,7 +15,8 @@ from surogates.harness.title_generator import (
     generate_session_title,
     maybe_generate_session_title,
 )
-from surogates.harness.loop import AgentHarness
+from surogates.harness.loop import AgentHarness, _title_source_messages
+from surogates.session.events import EventType
 from surogates.session.models import Event, Session, SessionLease
 
 
@@ -544,3 +545,80 @@ async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
     assert call_kwargs["messages"] == rebuilt_messages
     assert call_kwargs["model"] == "gpt-4o"
     assert harness._background_tasks == set()
+
+
+class TestTitleSourceMessages:
+    """The titler must see the user's words, not the harness's notes.
+
+    ``_rebuild_messages`` prepends the per-turn ephemeral notes to the
+    user's text.  Feeding that to the titler named every whiteboard
+    session after the canvas geometry note -- the board's question box is
+    optional, so with nothing typed the note is the entire message.
+    """
+
+    @staticmethod
+    def _user_event(content, **data):
+        return SimpleNamespace(
+            type=EventType.USER_MESSAGE.value,
+            data={"content": content, **data},
+        )
+
+    def test_uses_the_typed_question_not_the_canvas_note(self) -> None:
+        events = [
+            self._user_event(
+                "what is A + B?",
+                metadata={"whiteboard": {"sourceRect": {
+                    "x": 0, "y": 0, "w": 10, "h": 10,
+                }, "imageScale": 2}},
+            ),
+        ]
+        assert _title_source_messages(events) == [
+            {"role": "user", "content": "what is A + B?"},
+        ]
+
+    def test_a_silent_board_turn_carries_no_text_to_title(self) -> None:
+        # The regression: this used to arrive as the geometry note and
+        # every board was titled after it.
+        events = [
+            self._user_event(
+                "",
+                metadata={"whiteboard": {"mode": "sketch"}},
+            ),
+        ]
+        assert _title_source_messages(events) == [
+            {"role": "user", "content": ""},
+        ]
+
+    def test_a_silent_board_turn_produces_no_title(self) -> None:
+        # An empty first message is what makes the generator decline, so
+        # no title beats the same wrong title on every board.
+        import asyncio as _asyncio
+
+        events = [self._user_event("")]
+        store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
+        title = _asyncio.run(
+            maybe_generate_session_title(
+                store=store,
+                llm_client=SimpleNamespace(),
+                session=SimpleNamespace(id=uuid4(), title=None),
+                messages=_title_source_messages(events),
+                model="m",
+            )
+        )
+        assert title is None
+        store.update_session_title_if_empty.assert_not_called()
+
+    def test_ignores_non_user_events(self) -> None:
+        events = [
+            SimpleNamespace(type="llm.response", data={"content": "hi"}),
+            self._user_event("real question"),
+        ]
+        assert _title_source_messages(events) == [
+            {"role": "user", "content": "real question"},
+        ]
+
+    def test_tolerates_a_missing_payload(self) -> None:
+        events = [SimpleNamespace(type=EventType.USER_MESSAGE.value, data=None)]
+        assert _title_source_messages(events) == [
+            {"role": "user", "content": ""},
+        ]

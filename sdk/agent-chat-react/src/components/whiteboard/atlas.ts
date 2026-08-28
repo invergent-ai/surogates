@@ -11,7 +11,7 @@
  * `surogates/harness/loop_messages.py`. Renaming one silently shortens
  * the note the model sees rather than failing.
  */
-import type { WbDoc } from "./doc";
+import type { WbDoc, WbObject } from "./doc";
 import { objectBounds, renderDoc } from "./render";
 import type { RenderServices, View, ViewportSize } from "./render";
 
@@ -31,6 +31,30 @@ const MIN_CAPTURE_SPAN = 600;
 /** Fraction of the capture span added as margin around the content. */
 const CAPTURE_MARGIN = 0.25;
 
+/**
+ * Widest capture sent, in canvas units.
+ *
+ * Matched to the atlas caps so a capture at the limit still renders 1:1.
+ * Past it the board would be squeezed to fit -- a 6800-unit board came
+ * out at imageScale 0.30, where the model's own 55-unit answers are 16px
+ * tall and it places new work on top of old by squinting.
+ *
+ * The board is infinite; the capture is not. What falls outside is
+ * reported by {@link contentBeyond} rather than shrunk into
+ * illegibility.
+ */
+const MAX_CAPTURE_SPAN_W = MAX_ATLAS_WIDTH;
+const MAX_CAPTURE_SPAN_H = MAX_ATLAS_HEIGHT;
+
+/**
+ * Cells per side of the occupancy grid laid over the capture.
+ *
+ * Fixed, so the cost of describing a board is the same whether it holds
+ * three objects or three hundred -- which is the whole point of sending
+ * a grid instead of a list of rectangles.
+ */
+export const OCCUPANCY_GRID = 16;
+
 export interface Rect {
   x: number;
   y: number;
@@ -48,6 +72,9 @@ export interface AtlasPlan {
 
 const clamp = (v: number, lo: number, hi: number) =>
   Math.min(hi, Math.max(lo, v));
+
+/** Two decimals is plenty for a cell size and keeps the note short. */
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 /** Union of every object's bounds, or null when the board is empty. */
 export function contentBounds(
@@ -70,6 +97,60 @@ export function contentBounds(
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+/**
+ * Roughly how tall the user's handwriting is, in canvas units.
+ *
+ * The model is otherwise blind to scale: the note tells it where the
+ * capture is and what it covers, but nothing about how big the strokes
+ * in it are, so it picks a font size out of the air. On a real board of
+ * ~250-unit digits it chose 90, and its answer landed a quarter the size
+ * of the sum it was answering.
+ *
+ * Flat marks carry no height information -- the bars of an `=`, a minus,
+ * the dot of an `i` -- and counting them drags the figure toward zero,
+ * so strokes far shorter than typical are dropped. The cutoff is taken
+ * from the median rather than the tallest: against the tallest, one
+ * outsized stroke (a bracket, a long divider) excludes the very writing
+ * being measured. Taking the median twice is what makes both the flat
+ * marks and the outlier harmless.
+ *
+ * ponytail: fixed 25%-of-median cutoff, tuned on handwriting; revisit if
+ * boards mixing two writing sizes read badly.
+ */
+export function inkHeight(doc: WbDoc, services: RenderServices): number | null {
+  const heights: number[] = [];
+  for (const obj of doc.objects) {
+    if (obj.kind !== "ink") continue;
+    const b = objectBounds(obj, services);
+    if (b && b.h > 0) heights.push(b.h);
+  }
+  if (heights.length === 0) return null;
+  const upright = heights.filter((h) => h >= median(heights) * 0.25);
+  return upright.length === 0 ? null : median(upright);
+}
+
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** The smallest rectangle covering both, or whichever one exists. */
+function union(a: Rect | null, b: Rect | null): Rect | null {
+  if (!a) return b;
+  if (!b) return a;
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    w: Math.max(a.x + a.w, b.x + b.w) - x,
+    h: Math.max(a.y + a.h, b.y + b.h) - y,
+  };
+}
+
 /** The viewport as a logical rectangle. */
 function viewportRect(view: View, size: ViewportSize): Rect {
   return {
@@ -83,9 +164,22 @@ function viewportRect(view: View, size: ViewportSize): Rect {
 /**
  * Choose the capture rectangle and its image scale.
  *
- * Priority: the latest input if there is one, else all content, else the
- * current viewport. Whatever is chosen is padded and floored to a
- * minimum span. Nothing is clamped: the canvas has no edges.
+ * The capture is what the user is looking at, plus a margin of the board
+ * around it, and always the latest input. Not the whole board: content
+ * is unbounded and the atlas is not, so framing on everything squeezes a
+ * long board into the same pixels until the model is placing objects by
+ * squinting at a thumbnail. A 6800-unit board arrived at imageScale 0.30
+ * -- 55-unit text rendered 16px tall -- and the model wrote its answer
+ * on top of an earlier one. What falls outside is reported by
+ * {@link contentBeyond} instead.
+ *
+ * Nor is it framed on the latest input alone. That is the *attention*
+ * signal, carried by `latestInput` and the hotspot trail; framing on it
+ * cropped away the very thing it referred to. A user who added `=` to a
+ * finished sum got back two bare horizontal lines, which the model
+ * reasonably read as a "menu / list icon?".
+ *
+ * Nothing is clamped to a canvas rectangle: the canvas has no edges.
  */
 export function planAtlas(
   doc: WbDoc,
@@ -94,18 +188,42 @@ export function planAtlas(
   viewport: ViewportSize,
   services: RenderServices,
 ): AtlasPlan {
-  const base =
-    latest ?? contentBounds(doc, services) ?? viewportRect(view, viewport);
+  const seen = viewportRect(view, viewport);
+  // The margin is what lets an answer reference something just past the
+  // edge of the screen, which is where the user's own eye already is.
+  const around: Rect = {
+    x: seen.x - seen.w * CAPTURE_MARGIN,
+    y: seen.y - seen.h * CAPTURE_MARGIN,
+    w: seen.w * (1 + CAPTURE_MARGIN * 2),
+    h: seen.h * (1 + CAPTURE_MARGIN * 2),
+  };
 
-  // Grow to the minimum span about the base's centre, then add margin,
-  // so a 4px tick mark still arrives with context around it.
+  // A board that fits is shown whole, wherever the user has scrolled to.
+  // Framing on the viewport alone cuts expressions in half: a user
+  // working at the right-hand end of an integral got back a capture
+  // starting mid-`e^x`, with the integral sign off the left edge, and
+  // the model answered the fragment it could see. Knowing that content
+  // continues left is not the same as being able to read it.
+  //
+  // Only once the board outgrows a legible capture does the viewport
+  // decide, because then something has to be left out and the least bad
+  // thing to keep is what the user is looking at.
+  const content = contentBounds(doc, services);
+  const fitsWhole =
+    content !== null &&
+    content.w <= MAX_CAPTURE_SPAN_W &&
+    content.h <= MAX_CAPTURE_SPAN_H;
+  // Either way the latest input is in shot, even if the user scrolled
+  // away after drawing it.
+  const base = union(fitsWhole ? content : around, latest) as Rect;
+
   const cx = base.x + base.w / 2;
   const cy = base.y + base.h / 2;
-  const spanW = Math.max(base.w * (1 + CAPTURE_MARGIN * 2), MIN_CAPTURE_SPAN);
-  const spanH = Math.max(base.h * (1 + CAPTURE_MARGIN * 2), MIN_CAPTURE_SPAN);
+  // Floored so a single tick mark on a blank board still arrives with
+  // surroundings; capped so a long board still arrives legible.
+  const spanW = clamp(base.w, MIN_CAPTURE_SPAN, MAX_CAPTURE_SPAN_W);
+  const spanH = clamp(base.h, MIN_CAPTURE_SPAN, MAX_CAPTURE_SPAN_H);
 
-  // No clamp into a canvas rectangle: the canvas has no edges, so the
-  // capture is simply centred on what it needs to cover.
   const sourceRect: Rect = {
     x: cx - spanW / 2,
     y: cy - spanH / 2,
@@ -135,6 +253,214 @@ export function planAtlas(
       ),
     },
   };
+}
+
+/**
+ * Which cells of the capture already hold something.
+ *
+ * The model cannot be told to keep off existing work by looking: on a
+ * busy board its own earlier answers are a few pixels tall, and the user
+ * may have dragged, resized or deleted them since -- edits that exist
+ * only in the document, never in the transcript. So the transcript is
+ * not merely incomplete about the board, it is confidently out of date,
+ * and this is the correction.
+ *
+ * A grid rather than a list of rectangles because the cost has to stay
+ * flat: three objects and three hundred produce the same handful of
+ * cells, where a rectangle list grows with the board until it dwarfs
+ * everything else in the turn.
+ *
+ * Cells are returned as `[col, row]`, the same shape as
+ * {@link mapHotspots}, so the model reads one spatial vocabulary rather
+ * than two.
+ */
+/**
+ * What an object actually covers, for occupancy purposes.
+ *
+ * {@link objectBounds} reports a text object's width as its `maxWidth`,
+ * which is the wrap width the author asked for, not the ink it produced.
+ * A one-glyph answer written with `maxWidth: 800` would claim eight
+ * cells it does not use, and the model would then route around canvas
+ * that is free -- getting steadily worse as its own generous wrap widths
+ * accumulate.
+ *
+ * Estimated from the glyph count rather than measured: measuring needs a
+ * canvas context, and being a little wrong about the width of a word is
+ * cheaper than threading one through. The estimate is deliberately
+ * slightly wide, so it errs toward keeping clear.
+ *
+ * ponytail: 0.6em per glyph, near the average for a proportional face;
+ * swap for a real measure if a service ever carries one.
+ */
+function occupiedBounds(
+  obj: WbObject,
+  services: RenderServices,
+): Rect | null {
+  const b = objectBounds(obj, services);
+  if (!b || obj.kind !== "text") return b;
+  const longest = Math.max(
+    ...obj.text.split("\n").map((line) => line.length),
+    0,
+  );
+  const inked = Math.max(obj.fontSize, longest * obj.fontSize * 0.6);
+  return { ...b, w: Math.min(b.w, inked) };
+}
+
+export function occupancyCells(
+  doc: WbDoc,
+  sourceRect: Rect,
+  services: RenderServices,
+): number[][] {
+  if (sourceRect.w <= 0 || sourceRect.h <= 0) return [];
+  const seen = new Set<number>();
+  const cells: number[][] = [];
+  const cellW = sourceRect.w / OCCUPANCY_GRID;
+  const cellH = sourceRect.h / OCCUPANCY_GRID;
+
+  for (const obj of doc.objects) {
+    const b = occupiedBounds(obj, services);
+    if (!b) continue;
+    const c0 = Math.floor((b.x - sourceRect.x) / cellW);
+    const c1 = Math.floor((b.x + b.w - sourceRect.x) / cellW);
+    const r0 = Math.floor((b.y - sourceRect.y) / cellH);
+    const r1 = Math.floor((b.y + b.h - sourceRect.y) / cellH);
+    for (let r = Math.max(0, r0); r <= Math.min(OCCUPANCY_GRID - 1, r1); r++) {
+      for (let c = Math.max(0, c0); c <= Math.min(OCCUPANCY_GRID - 1, c1); c++) {
+        const key = r * OCCUPANCY_GRID + c;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        cells.push([c, r]);
+      }
+    }
+  }
+  // Reading order, so a run of free space is easy to spot.
+  cells.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  return cells;
+}
+
+/** How many of the agent's own objects the turn note lists. */
+export const AGENT_OBJECT_LIMIT = 8;
+
+/** One of the agent's own objects, as the board holds it now. */
+export interface AgentObjectReport {
+  /** The `whiteboard_draw` call that produced it. */
+  origin: string;
+  label: string;
+  /** Where it sits now, or null when the user has deleted it. */
+  bounds: Rect | null;
+  /** New user ink lands on or around it: an edit to it, not new work. */
+  touched?: boolean;
+}
+
+/** A short, note-sized description of what an object is. */
+function objectLabel(obj: WbObject): string {
+  const raw =
+    obj.kind === "text"
+      ? obj.text
+      : obj.kind === "formula"
+        ? obj.latex
+        : obj.kind === "artifact"
+          ? `artifact ${obj.artifactId}`
+          : obj.kind;
+  const flat = String(raw).replace(/\s+/g, " ").trim();
+  return flat.length > 40 ? `${flat.slice(0, 39)}…` : flat;
+}
+
+/** *rect* grown by *margin* on every side. */
+function grow(rect: Rect, margin: number): Rect {
+  return {
+    x: rect.x - margin,
+    y: rect.y - margin,
+    w: rect.w + margin * 2,
+    h: rect.h + margin * 2,
+  };
+}
+
+function overlaps(a: Rect, b: Rect): boolean {
+  return (
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+  );
+}
+
+/**
+ * What became of everything the agent has drawn.
+ *
+ * The transcript records where it *asked* for each object. It does not
+ * record what happened next, because what happens next is the user:
+ * dragging, resizing, deleting, or drawing something that changes what
+ * an object means. None of that reaches the conversation, so the
+ * agent's memory of its own work is confidently out of date.
+ *
+ * One real session ended with the agent's answer wrapped in
+ * hand-drawn brackets and squared. The board said one thing, the
+ * transcript another, and the agent answered the transcript.
+ *
+ * *newLocalIds* are the user's objects added since the last Ask; an
+ * agent object they land on is flagged `touched`, because ink drawn
+ * over or around an answer is an edit to it rather than a new question
+ * beside it. The margin is generous on purpose: a bracket is drawn
+ * just outside the thing it encloses, never across it.
+ */
+export function agentObjectReport(
+  doc: WbDoc,
+  services: RenderServices,
+  opts: { newLocalIds?: ReadonlySet<string>; limit?: number } = {},
+): AgentObjectReport[] {
+  const limit = opts.limit ?? AGENT_OBJECT_LIMIT;
+  const fresh: Rect[] = [];
+  if (opts.newLocalIds?.size) {
+    for (const obj of doc.objects) {
+      if (obj.origin !== "local" || !opts.newLocalIds.has(obj.id)) continue;
+      const b = objectBounds(obj, services);
+      if (b) fresh.push(b);
+    }
+  }
+  const reach = inkHeight(doc, services) ?? 0;
+
+  // Newest first: the recent ones are the ones still being worked on,
+  // and the cap has to fall on the oldest.
+  const origins = doc.folded.slice(-limit).reverse();
+  const report: AgentObjectReport[] = [];
+  for (const origin of origins) {
+    const mine = doc.objects.filter((o) => o.origin === origin);
+    if (mine.length === 0) {
+      report.push({ origin, label: "", bounds: null });
+      continue;
+    }
+    for (const obj of mine) {
+      const bounds = objectBounds(obj, services);
+      const near = bounds ? grow(bounds, reach * 0.75) : null;
+      report.push({
+        origin,
+        label: objectLabel(obj),
+        bounds,
+        touched: near ? fresh.some((f) => overlaps(near, f)) : false,
+      });
+    }
+  }
+  return report;
+}
+
+/**
+ * Which way the board continues past the capture.
+ *
+ * The capture is bounded, so its edge is not the edge of anything. Say
+ * so, or the model treats the empty margin as free canvas and places
+ * work into objects sitting just outside the frame.
+ */
+export function contentBeyond(
+  doc: WbDoc,
+  sourceRect: Rect,
+  services: RenderServices,
+): string[] {
+  const content = contentBounds(doc, services);
+  if (!content) return [];
+  const out: string[] = [];
+  if (content.y < sourceRect.y) out.push("above");
+  if (content.x + content.w > sourceRect.x + sourceRect.w) out.push("right");
+  if (content.y + content.h > sourceRect.y + sourceRect.h) out.push("below");
+  if (content.x < sourceRect.x) out.push("left");
+  return out;
 }
 
 /**
@@ -208,13 +534,75 @@ export function buildAtlas(
     plan.imageSize,
     services,
   );
+  paintGridOverlay(ctx, plan.imageSize);
   return canvas;
+}
+
+/**
+ * Draw the occupancy grid over the finished atlas, labelled.
+ *
+ * The cells are already described in the note as `[col, row]` pairs, but
+ * reading those means cross-referencing a list against a picture and
+ * doing arithmetic on `sourceRect` to place anything. Drawn on, the model
+ * can see which cells hold work and which are free, and name a
+ * destination by pointing rather than by calculating.
+ *
+ * Deliberately faint and cool-toned: it has to be legible enough to
+ * count but never mistakable for something the user drew. The note says
+ * so as well -- both, because either alone has been enough for a model
+ * to answer the scaffolding instead of the question.
+ *
+ * Image space only. `renderDoc` leaves a board-space transform behind,
+ * and the grid is a property of the picture, not of the canvas.
+ */
+function paintGridOverlay(
+  ctx: CanvasRenderingContext2D,
+  size: { w: number; h: number },
+): void {
+  const cellW = size.w / OCCUPANCY_GRID;
+  const cellH = size.h / OCCUPANCY_GRID;
+
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.strokeStyle = "rgba(37, 99, 235, 0.18)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < OCCUPANCY_GRID; i++) {
+    // The half-pixel keeps a 1px line on the pixel rather than across
+    // two, which otherwise renders as a 2px smear.
+    const x = Math.round(i * cellW) + 0.5;
+    const y = Math.round(i * cellH) + 0.5;
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, size.h);
+    ctx.moveTo(0, y);
+    ctx.lineTo(size.w, y);
+  }
+  ctx.stroke();
+
+  // Indices along the top and left edges only. One label per cell would
+  // put 256 numbers over the board.
+  ctx.fillStyle = "rgba(37, 99, 235, 0.55)";
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textBaseline = "top";
+  for (let i = 0; i < OCCUPANCY_GRID; i++) {
+    ctx.fillText(String(i), i * cellW + 3, 2);
+    if (i > 0) ctx.fillText(String(i), 3, i * cellH + 2);
+  }
+  ctx.restore();
 }
 
 export interface AtlasExtras {
   mode?: "sketch" | "deep";
   selection?: Rect | null;
   typedInput?: string;
+  /** See {@link inkHeight}. Omitted when the board carries no ink. */
+  inkHeight?: number | null;
+  /** See {@link occupancyCells}. */
+  occupied?: number[][];
+  /** See {@link contentBeyond}. */
+  beyond?: string[];
+  /** See {@link agentObjectReport}. */
+  agentObjects?: AgentObjectReport[];
 }
 
 /**
@@ -241,5 +629,36 @@ export function atlasMetadata(
   if (hotspots.length > 0) meta.hotspots = hotspots;
   if (extras.selection) meta.selection = extras.selection;
   if (extras.typedInput?.trim()) meta.typedInput = extras.typedInput.trim();
+  if (extras.inkHeight && extras.inkHeight > 0) {
+    meta.inkHeight = Math.round(extras.inkHeight);
+  }
+  if (extras.occupied?.length) {
+    meta.occupied = extras.occupied;
+    meta.occupancyGrid = OCCUPANCY_GRID;
+    // So a chosen cell converts to canvas coordinates without inverting
+    // the image formula by hand. Asked for the slot after an `x =`, the
+    // model converted the column correctly and left the row in image
+    // coordinates, landing the answer below the frame it was shown.
+    meta.cellSize = {
+      w: round2(plan.sourceRect.w / OCCUPANCY_GRID),
+      h: round2(plan.sourceRect.h / OCCUPANCY_GRID),
+    };
+  }
+  if (extras.beyond?.length) meta.beyond = extras.beyond;
+  if (extras.agentObjects?.length) {
+    meta.agentObjects = extras.agentObjects.map((o) => ({
+      origin: o.origin,
+      label: o.label,
+      ...(o.bounds
+        ? {
+            x: round2(o.bounds.x),
+            y: round2(o.bounds.y),
+            w: round2(o.bounds.w),
+            h: round2(o.bounds.h),
+          }
+        : { removed: true }),
+      ...(o.touched ? { touched: true } : {}),
+    }));
+  }
   return meta;
 }
