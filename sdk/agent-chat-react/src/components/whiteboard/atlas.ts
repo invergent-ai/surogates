@@ -948,7 +948,22 @@ export interface AtlasExtras {
   marks?: BoardMark[];
   /** Close-ups attached after the overview: which marks, which image. */
   crops?: { marks: string[]; imageIndex: number; scale: number }[];
+  /** What the user asked for with the action selector; absent = auto. */
+  action?: UserAction;
 }
+
+/**
+ * The user's own answer to "what do you want": PenEcho's action menu.
+ * `auto` sends nothing and leaves it to the board and the model.
+ */
+export type UserAction = "auto" | "answer" | "continue" | "explain" | "hint";
+export const USER_ACTIONS: { id: UserAction; label: string }[] = [
+  { id: "auto", label: "Auto" },
+  { id: "answer", label: "Answer" },
+  { id: "continue", label: "Continue" },
+  { id: "explain", label: "Explain" },
+  { id: "hint", label: "Hint" },
+];
 
 /**
  * The `metadata.whiteboard` payload for one turn.
@@ -1013,6 +1028,7 @@ export function atlasMetadata(
     }));
   }
   if (extras.crops?.length) meta.crops = extras.crops;
+  if (extras.action && extras.action !== "auto") meta.action = extras.action;
   if (extras.agentObjects?.length) {
     meta.agentObjects = extras.agentObjects.map((o) => ({
       origin: o.origin,

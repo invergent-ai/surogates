@@ -96,6 +96,36 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             f"imageX=(globalX-sourceRect.x)*imageScale."
         )
 
+    # The user's action button, when pressed: PenEcho's userAction.  It
+    # settles what to do before anything is inferred from the ink, and
+    # it outranks the inference.  Unknown values are ignored -- the
+    # client sends only these, and a typo must not become an instruction.
+    action = payload.get("action")
+    meaning = {
+        "answer": (
+            "produce the result -- the value, the missing piece, the "
+            "requested drawing -- on the board, filling any slot with it"
+        ),
+        "continue": (
+            "continue the user's newest work in kind: the next line, the "
+            "next step, the next stroke -- not commentary on it"
+        ),
+        "explain": (
+            "explain the newest content, or what their box or arrow "
+            "points at, in short prose placed beside it"
+        ),
+        "hint": (
+            "give one short clue that moves the user toward the answer "
+            "without giving the answer; never write the result itself"
+        ),
+    }.get(action) if isinstance(action, str) else None
+    if meaning:
+        lines.append(
+            f"The user pressed {str(action).upper()}: {meaning}. This is "
+            f"their instruction for the turn and outranks anything you "
+            f"would otherwise infer from the ink."
+        )
+
     latest = _rect(payload.get("latestInput"))
     if latest:
         lines.append(

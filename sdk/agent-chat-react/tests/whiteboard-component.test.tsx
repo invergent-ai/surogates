@@ -1416,3 +1416,47 @@ describe("what counts as the user's selection", () => {
     expect(metadataOf(send)?.selection).toBeUndefined();
   });
 });
+
+describe("the action selector", () => {
+  async function board() {
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    return { el, send };
+  }
+  const metadataOf = (send: ReturnType<typeof vi.fn>) =>
+    (send.mock.calls[0]?.[3] as { whiteboard?: Record<string, unknown> })?.whiteboard;
+
+  it("offers PenEcho's actions", async () => {
+    const { el } = await board();
+    const select = byLabel(el, "Intent") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      "auto", "answer", "continue", "explain", "hint",
+    ]);
+  });
+
+  it("sends nothing on auto", async () => {
+    const { el, send } = await board();
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(metadataOf(send)?.action).toBeUndefined();
+  });
+
+  it("sends the chosen action with the turn", async () => {
+    const { el, send } = await board();
+    const select = byLabel(el, "Intent") as HTMLSelectElement;
+    await act(async () => {
+      select.value = "hint";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(metadataOf(send)?.action).toBe("hint");
+  });
+});

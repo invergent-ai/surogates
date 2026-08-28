@@ -18,6 +18,8 @@ import { Spinner } from "../ui/spinner";
 import {
   type AtlasExtras,
   type Rect,
+  type UserAction,
+  USER_ACTIONS,
   atlasMetadata,
   boardMarks,
   buildAtlas,
@@ -195,6 +197,10 @@ export function WhiteboardSurface({
   // round-trips and worth naming; `sketch` is one and should not
   // advertise a wait that is about to be over.
   const [askMode, setAskMode] = useState<"sketch" | "deep">("sketch");
+  // What the user wants from the next Ask, when they care to say:
+  // answer it, continue it, explain it, or only hint. Sticky for the
+  // session; "auto" sends nothing and leaves it to the board.
+  const [action, setAction] = useState<UserAction>("auto");
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -1075,6 +1081,7 @@ export function WhiteboardSurface({
             .filter((c): c is NonNullable<typeof c> => c !== null);
       const extras: AtlasExtras = {
         mode,
+        action,
         inkHeight: unit,
         occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
@@ -1118,7 +1125,7 @@ export function WhiteboardSurface({
         { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
       );
     },
-    [doc, view, size, services, question, runtime],
+    [doc, view, size, services, question, runtime, action],
   );
 
   // ------------------------------------------------------------------
@@ -1351,6 +1358,21 @@ export function WhiteboardSurface({
             }
           }}
         />
+        {/* PenEcho's action menu, compact: the user's own answer to
+            "what do you want", when the board alone would not say. */}
+        <select
+          aria-label="Intent"
+          className="h-9 rounded border bg-background px-2 text-sm"
+          value={action}
+          disabled={busy}
+          onChange={(e) => setAction(e.target.value as UserAction)}
+        >
+          {USER_ACTIONS.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.label}
+            </option>
+          ))}
+        </select>
         <Button
           type="button"
           disabled={busy}
