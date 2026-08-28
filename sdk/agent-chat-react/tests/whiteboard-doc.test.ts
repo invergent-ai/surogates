@@ -3,7 +3,7 @@ import {
   type WbDoc,
   applyCommands,
   applyReadings,
-  boxFromStroke,
+  boxFromStrokes,
   correctReading,
   emptyDoc,
   foldToolCalls,
@@ -465,33 +465,55 @@ describe("a draw the server rejected", () => {
 });
 
 describe("slots", () => {
-  it("recognises a closed hollow box drawn with the pen", () => {
-    // A rectangle traced clockwise from the top-left, back to the start.
-    const pts: number[] = [];
-    for (let x = 0; x <= 120; x += 10) pts.push(x, 0);
-    for (let y = 10; y <= 80; y += 10) pts.push(120, y);
-    for (let x = 110; x >= 0; x -= 10) pts.push(x, 80);
-    for (let y = 70; y >= 2; y -= 10) pts.push(0, y);
-    const box = boxFromStroke(pts, 40);
-    expect(box).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  const edge = (from: [number, number], to: [number, number], steps = 12) => {
+    const out: number[] = [];
+    for (let i = 0; i <= steps; i++) {
+      out.push(from[0] + ((to[0] - from[0]) * i) / steps, from[1] + ((to[1] - from[1]) * i) / steps);
+    }
+    return out;
+  };
+
+  it("recognises a closed hollow box drawn in one stroke", () => {
+    const pts = [
+      ...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80]),
+      ...edge([120, 80], [0, 80]), ...edge([0, 80], [0, 2]),
+    ];
+    expect(boxFromStrokes([pts], 40)).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  });
+
+  it("recognises a box drawn in two strokes, as people draw them", () => {
+    // Session 76aa0fa3: one stroke drew the bottom and left edges, the
+    // next drew the top and right. Neither closes; together they box.
+    const bottomLeft = [...edge([120, 80], [0, 80]), ...edge([0, 80], [0, 0])];
+    const topRight = [...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80])];
+    expect(boxFromStrokes([bottomLeft, topRight], 40)).toEqual({ x: 0, y: 0, w: 120, h: 80 });
+  });
+
+  it("accepts a box with one side missing", () => {
+    const pts = [...edge([0, 0], [120, 0]), ...edge([120, 0], [120, 80]), ...edge([120, 80], [0, 80])];
+    expect(boxFromStrokes([pts], 40)).not.toBeNull();
+  });
+
+  it("does not mistake a single L for a box", () => {
+    // Two edges is a corner, not a placeholder.
+    const pts = [...edge([0, 0], [0, 80]), ...edge([0, 80], [120, 80])];
+    expect(boxFromStrokes([pts], 40)).toBeNull();
   });
 
   it("does not mistake a letter for a box", () => {
-    // An open zigzag never closes.
     const pts = [0, 0, 20, 80, 40, 0, 60, 80, 80, 0];
-    expect(boxFromStroke(pts, 40)).toBeNull();
+    expect(boxFromStrokes([pts], 40)).toBeNull();
   });
 
   it("does not mistake a scribble that crosses the middle for a box", () => {
     const pts: number[] = [];
     for (let i = 0; i < 40; i++) pts.push((i * 37) % 120, (i * 53) % 80);
-    pts.push(pts[0], pts[1]);
-    expect(boxFromStroke(pts, 40)).toBeNull();
+    expect(boxFromStrokes([pts], 40)).toBeNull();
   });
 
   it("ignores a box smaller than a line of writing", () => {
-    const pts = [0, 0, 10, 0, 10, 10, 0, 10, 0, 1, 0, 0, 5, 0, 10, 0, 10, 5];
-    expect(boxFromStroke(pts, 40)).toBeNull();
+    const pts = [...edge([0, 0], [10, 0]), ...edge([10, 0], [10, 10]), ...edge([10, 10], [0, 10]), ...edge([0, 10], [0, 0])];
+    expect(boxFromStrokes([pts], 40)).toBeNull();
   });
 
   it("moves and scales like any object", () => {

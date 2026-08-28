@@ -37,7 +37,7 @@ import {
 import {
   type WbDoc,
   type WbObject,
-  boxFromStroke,
+  boxFromStrokes,
   correctReading,
   emptyDoc,
   foldToolCalls,
@@ -936,15 +936,34 @@ export function WhiteboardSurface({
     if (!builder) return;
     const stroke = builder.finish();
     if (!stroke) return;
-    // A closed, hollow box drawn with the pen over empty canvas is a
+    // A hollow box drawn with the pen over empty canvas is a
     // placeholder, not a drawing: the paper way of reserving space.
-    // It becomes a slot -- undoable like any stroke -- and the hint
-    // editor opens so the user can say what belongs there.
+    // People draw boxes in one stroke or several, so the new stroke is
+    // tried together with the one or two it follows. The strokes become
+    // a slot -- undoable like any stroke -- and the hint editor opens so
+    // the user can say what belongs there.
     if (tool === "pen" && stroke.kind === "ink") {
-      const box = boxFromStroke(stroke.pts, liveUnit);
-      if (box && objectsInRect(doc, box, services).length === 0) {
+      const recent = doc.objects
+        .slice(-2)
+        .filter((o): o is Extract<WbObject, { kind: "ink" }> =>
+          o.kind === "ink" && o.origin === "local");
+      for (let take = recent.length; take >= 0; take--) {
+        const partners = recent.slice(recent.length - take);
+        const box = boxFromStrokes(
+          [...partners.map((o) => o.pts), stroke.pts],
+          liveUnit,
+        );
+        if (!box) continue;
+        const consumed = new Set(partners.map((o) => o.id));
+        const inside = objectsInRect(doc, box, services).filter(
+          (o) => !consumed.has(o.id),
+        );
+        if (inside.length > 0) continue;
         const slot = makeSlotObject(box);
-        commit((prev) => ({ ...prev, objects: [...prev.objects, slot] }));
+        commit((prev) => ({
+          ...prev,
+          objects: [...prev.objects.filter((o) => !consumed.has(o.id)), slot],
+        }));
         setEditor({ x: box.x, y: box.y + box.h, slot: { id: slot.id } });
         setEditorText("");
         return;
@@ -1073,7 +1092,8 @@ export function WhiteboardSurface({
       // pixels tall.
       // No close-up when the handwriting already renders large on the
       // overview -- the crop exists for glyphs a few dozen pixels tall.
-      const legible = (unit ?? 40) * plan.imageScale >= 100;
+      // PenEcho's threshold: skip only when the writing is already big.
+      const legible = (unit ?? 40) * plan.imageScale >= 180;
       const crops = legible
         ? []
         : cropRegions(marks, unit ?? 40)

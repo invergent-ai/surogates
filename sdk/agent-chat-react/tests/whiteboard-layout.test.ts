@@ -594,3 +594,41 @@ describe("filling a slot", () => {
     expect(parsed?.marks?.S1).toEqual({ rect: { x: 1, y: 2, w: 3, h: 4 }, objectId: "local:9" });
   });
 });
+
+
+describe("formula height", () => {
+  // A stacked fraction at handwriting font size renders ~2.5 lines tall
+  // and dwarfs the expression it answers.
+  const stacked = {
+    ...services,
+    formula: (latex: string, fontSize: number) => ({
+      w: latex.length * fontSize * 0.5,
+      h: latex.includes("\\frac") ? fontSize * 2.5 : fontSize * 1.2,
+    }),
+  };
+
+  it("caps a tall fraction to the height of the writing", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw_formula", latex: "\\frac{x^2}{2} + C", anchor: "latest" }],
+        { latestInput: { x: 0, y: 0, w: 900, h: 300 }, inkHeight: 131 },
+        stacked,
+      ),
+    );
+    const rendered = stacked.formula("\\frac{x^2}{2} + C", cmd.fontSize as number).h;
+    expect(rendered).toBeLessThanOrEqual(131 * 1.6 + 1);
+  });
+
+  it("leaves a one-line formula at handwriting size", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw_formula", latex: "3", anchor: "latest" }],
+        { latestInput: { x: 0, y: 0, w: 900, h: 300 }, inkHeight: 131 },
+        stacked,
+      ),
+    );
+    expect(cmd.fontSize).toBe(131);
+  });
+});

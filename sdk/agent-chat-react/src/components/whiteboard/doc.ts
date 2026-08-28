@@ -570,44 +570,64 @@ export function makeSlotObject(
 }
 
 /**
- * The rectangle a pen stroke draws, when it draws one.
+ * The rectangle a few pen strokes draw together, when they draw one.
  *
- * A closed loop whose points all hug the edges of their own bounding
- * box is a box, not a letter: someone drawing a placeholder on paper.
- * Returns its bounds, or null. Emptiness -- nothing already inside --
- * is the caller's check, since it needs the document.
+ * A placeholder on paper is a box, and people draw boxes in one, two or
+ * three strokes -- a `⌐` and an `⌊`, or three sides and a gap. So this
+ * takes the strokes as a set and asks three things of their union: it
+ * is at least a line of writing tall and wide; the ink stays on the
+ * border rather than crossing the middle; and at least three of the
+ * four edges are drawn along most of their length. Closure is not
+ * required -- a real session's box had a whole side missing.
+ *
+ * Emptiness -- nothing already inside -- is the caller's check, since
+ * it needs the document; a box drawn *around* content is a reference,
+ * not a slot.
  */
-export function boxFromStroke(
-  pts: readonly number[],
+export function boxFromStrokes(
+  strokes: readonly (readonly number[])[],
   unit: number,
 ): { x: number; y: number; w: number; h: number } | null {
-  if (pts.length < 16) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (let i = 0; i + 1 < pts.length; i += 2) {
-    minX = Math.min(minX, pts[i]);
-    maxX = Math.max(maxX, pts[i]);
-    minY = Math.min(minY, pts[i + 1]);
-    maxY = Math.max(maxY, pts[i + 1]);
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const pts of strokes) {
+    for (let i = 0; i + 1 < pts.length; i += 2) {
+      xs.push(pts[i]);
+      ys.push(pts[i + 1]);
+    }
   }
+  if (xs.length < 8) return null;
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
   const w = maxX - minX;
   const h = maxY - minY;
   if (w < unit * 0.8 || h < unit * 0.8) return null;
-  // Closed: it ends near where it began.
-  const gap = Math.hypot(pts[0] - pts[pts.length - 2], pts[1] - pts[pts.length - 1]);
-  if (gap > Math.max(w, h) * 0.25) return null;
-  // Hollow: the ink stays near the border rather than crossing the middle.
+
   const band = Math.max(w, h) * 0.18;
+  const bins = { top: new Set<number>(), bottom: new Set<number>(), left: new Set<number>(), right: new Set<number>() };
   let onEdge = 0;
-  const n = pts.length / 2;
-  for (let i = 0; i + 1 < pts.length; i += 2) {
-    const dx = Math.min(pts[i] - minX, maxX - pts[i]);
-    const dy = Math.min(pts[i + 1] - minY, maxY - pts[i + 1]);
-    if (dx <= band || dy <= band) onEdge++;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i];
+    const y = ys[i];
+    const nearTop = y - minY <= band;
+    const nearBottom = maxY - y <= band;
+    const nearLeft = x - minX <= band;
+    const nearRight = maxX - x <= band;
+    if (nearTop || nearBottom || nearLeft || nearRight) onEdge++;
+    const bx = Math.min(9, Math.floor(((x - minX) / w) * 10));
+    const by = Math.min(9, Math.floor(((y - minY) / h) * 10));
+    if (nearTop) bins.top.add(bx);
+    if (nearBottom) bins.bottom.add(bx);
+    if (nearLeft) bins.left.add(by);
+    if (nearRight) bins.right.add(by);
   }
-  if (onEdge / n < 0.85) return null;
+  if (onEdge / xs.length < 0.85) return null;
+  const drawn = [bins.top, bins.bottom, bins.left, bins.right].filter(
+    (b) => b.size >= 6,
+  ).length;
+  if (drawn < 3) return null;
   return { x: minX, y: minY, w, h };
 }
 

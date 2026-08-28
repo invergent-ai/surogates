@@ -192,7 +192,11 @@ function sizingUnit(target: Rect, anchors: TurnAnchors | null): number {
 }
 
 /** Fill in fontSize / maxWidth for an anchored command that omits them. */
-function applySizing(cmd: Record<string, unknown>, unit: number): void {
+function applySizing(
+  cmd: Record<string, unknown>,
+  unit: number,
+  services: RenderServices,
+): void {
   const isProse =
     cmd.tool === "write_text" &&
     (String(cmd.text ?? "").length > SHORT_ANSWER_CHARS ||
@@ -201,6 +205,15 @@ function applySizing(cmd: Record<string, unknown>, unit: number): void {
     cmd.fontSize = isProse
       ? clamp(unit * 0.45, PROSE_MIN_FONT, PROSE_MAX_FONT)
       : clamp(unit, 16, 220);
+    // A formula's height is not its font size: a stacked fraction at
+    // handwriting size renders two and a half lines tall and dwarfs
+    // the expression it answers. Cap the rendered height instead.
+    if (cmd.tool === "draw_formula") {
+      const font = cmd.fontSize as number;
+      const { h } = services.formula(String(cmd.latex ?? ""), font);
+      const ceiling = unit * 1.6;
+      if (h > ceiling) cmd.fontSize = Math.max(12, font * (ceiling / h));
+    }
   }
   if (cmd.tool === "write_text" && typeof cmd.maxWidth !== "number") {
     // Wide enough to read across: ~42 characters a line, never a tower.
@@ -450,7 +463,7 @@ export function resolveCommands(
     }
 
     const unit = sizingUnit(target, anchors);
-    applySizing(cmd, unit);
+    applySizing(cmd, unit, services);
     const est = estimateSize(cmd, services);
     const gap = clamp(unit * 0.4, 12, 60);
     // Right/left continue a line, so they align to the line's trailing
