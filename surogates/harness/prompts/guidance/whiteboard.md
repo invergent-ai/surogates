@@ -65,6 +65,17 @@ answering the malformed version.
 the user never asked, drawn onto their board. Being unsure and asking is
 always cheaper than being wrong in ink.
 
+### Readings persist
+
+Each ink mark you transcribe is stored with that ink and comes back to
+you as text on every later turn, in the turn note. A mark whose entry
+already says what it reads is settled — the user can see and correct
+that text, so trust it over your own re-reading of the pixels. Read only
+the marks listed as unread (normally the NEW ones), and return your
+transcription of each in the `readings` array of your `whiteboard_draw`
+call: `readings: [{mark: "A2", text: "2x + 1 = 7"}]`. Write exactly what
+is on the board — the question, not your answer to it.
+
 ### Extending, not reproducing
 
 Treat the canvas as an existing document to extend. Add only the missing
@@ -105,33 +116,39 @@ language of the content it points at. Preserve intentional mixed-language
 terminology. Never choose a response language from the interface language
 alone.
 
-### Layout is your responsibility
+### Placement is relational
 
-Every `write_text` command MUST choose `x` and `y` as the top-left start
-position and `maxWidth` as the wrapping width. Inspect the image and pick
-the blank area where the answer is most useful. Do not mechanically
-append text after the newest handwriting.
+Say what your answer relates to; the client computes the geometry. This
+is how a person talks at a whiteboard — "the answer goes after the
+equals sign" — and it is the reliable path: positions are resolved
+against the live board, sized to the writing they sit with, wrapped by
+real measurement, and nudged off existing work.
 
-- For an arrow or box request, align `x`/`y` with the arrow destination.
-- For an ordinary question, pick a nearby blank area that preserves
-  reading flow and avoids existing writing.
-- Never place an explanation far from the content it refers to merely
-  because that area is blank. On an infinite canvas everything outside
-  the current view is blank.
-- Match `fontSize` roughly to nearby handwriting. `lineHeight` is a
-  multiplier such as 1.35, not pixels.
-- Do not send a colour: the client applies the user's chosen ink colour.
+- Everything on the board carries a label -- amber boxes on the image,
+  listed in the turn note. `A1, A2, …` are the user's ink, `B1, B2, …`
+  are your own objects. Anchor to the label of the thing your answer
+  relates to: `anchor: "A3"`.
+- The answer to what the user just wrote: `anchor: "latest"`, `side:
+  "right"` (the default side) -- or the label marked NEW in the note.
+- An explanation or working underneath: `anchor: "latest"`, `side:
+  "below"` — prose is automatically sized to read, never match a
+  sentence to handwriting scale yourself.
+- Something about their lasso: `anchor: "selection"`.
+- Continuing or annotating one of your own objects: `anchor` with its
+  call id from the turn note.
+- Correcting yourself: `replaces` with the call id — the revision takes
+  the old object's place and the old one is removed. Never draw a
+  correction on top of the thing it corrects.
 
-The canvas is infinite. It has no edges, the origin is arbitrary, and
-coordinates are freely negative — content spreads in every direction, so
-never treat 0,0 as a corner or assume there is a top-left to align to.
-Every coordinate you return must be a finite global canvas coordinate,
-never an image coordinate.
+Anchored commands omit `x`, `y`, `fontSize` and `maxWidth`. Do not send
+a colour: the client applies the user's chosen ink colour.
 
-Place your answer relative to the content it answers, using `sourceRect`
-to convert. There is no "start of the page" to fall back on: an answer at
-0,0 on an infinite canvas is not at the top, it is somewhere the user is
-probably not looking.
+Explicit coordinates remain available for the placements no relation
+describes — a `draw` sketch, or a spot with nothing to anchor to. They
+are global canvas units, freely negative, never image pixels: the canvas
+is infinite, 0,0 is not a corner, and an answer at 0,0 is somewhere the
+user is probably not looking. When you must use them, convert with
+`sourceRect` from the turn note.
 
 ### Choosing a command
 

@@ -71,6 +71,13 @@ export interface AgentChatMessage {
   errorInfo?: AgentChatErrorInfo;
   images?: AgentChatImageAttachment[];
   attachments?: AgentChatDisplayAttachment[];
+  /**
+   * The per-turn metadata the user message was sent with, as stored on
+   * its event. The whiteboard resolves relational anchors ("latest",
+   * "selection") from the `whiteboard` block at fold time, so it must
+   * survive replay from the event log, not just the live send.
+   */
+  metadata?: Record<string, unknown>;
   llmResponseEventId?: number;
   userFeedback?: { rating: "up" | "down"; reason?: string };
   // Simple chat-mode correlators. ``turnId`` and ``iterationIndex`` are

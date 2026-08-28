@@ -49,6 +49,75 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
 #: Keys holding a position.  Freely negative: the origin is arbitrary.
 _POSITION_KEYS = frozenset({"x", "y"})
 
+#: Commands that may be placed relationally -- by naming an anchor
+#: instead of computing coordinates.  ``draw`` stays absolute: a sketch
+#: is genuinely geometric.  ``erase`` has nothing to anchor to.
+_RELATIONAL_TOOLS = frozenset({"write_text", "draw_formula", "place_artifact"})
+
+#: The named anchors that exist without an object id: the user's newest
+#: ink and their lasso.  Anything else must be an earlier call id.
+_NAMED_ANCHORS = frozenset({"latest", "selection"})
+
+#: Where an anchored command sits relative to its anchor.
+_SIDES = frozenset({"right", "below", "above", "left"})
+
+#: What an anchored command still has to say itself.  Geometry and
+#: sizing come from the anchor; the content cannot.
+_REQUIRED_ANCHORED: dict[str, tuple[str, ...]] = {
+    "write_text": ("text",),
+    "draw_formula": ("latex",),
+    "place_artifact": ("artifact_id", "w", "h"),
+}
+
+
+def _is_anchored(cmd: dict[str, Any]) -> bool:
+    """Whether *cmd* delegates placement to the client.
+
+    Either an explicit anchor, or a ``replaces`` with no coordinates --
+    a revision with nowhere named to go takes the replaced object's
+    place.
+    """
+    if isinstance(cmd.get("anchor"), str) and cmd["anchor"].strip():
+        return True
+    return (
+        isinstance(cmd.get("replaces"), str)
+        and bool(cmd["replaces"].strip())
+        and "x" not in cmd
+        and "y" not in cmd
+    )
+
+
+def _validate_relational(
+    cmd: dict[str, Any], idx: int, tool: str,
+) -> str | None:
+    """Shape-check ``anchor``/``side``; both are optional."""
+    anchor = cmd.get("anchor")
+    if anchor is not None:
+        if tool not in _RELATIONAL_TOOLS:
+            return (
+                f"command[{idx}] ({tool}): anchor is not supported here. "
+                f"Anchored placement: {', '.join(sorted(_RELATIONAL_TOOLS))}."
+            )
+        if not (isinstance(anchor, str) and anchor.strip()):
+            return (
+                f"command[{idx}] ({tool}): anchor must be 'latest', "
+                f"'selection', or the id of an earlier whiteboard_draw "
+                f"call."
+            )
+    side = cmd.get("side")
+    if side is not None:
+        if anchor is None and not _is_anchored(cmd):
+            return (
+                f"command[{idx}] ({tool}): side only makes sense with an "
+                f"anchor (or a replaces that stands in for one)."
+            )
+        if side not in _SIDES:
+            return (
+                f"command[{idx}] ({tool}): unknown side {side!r}. Valid "
+                f"sides: {', '.join(sorted(_SIDES))}."
+            )
+    return None
+
 #: Keys holding an extent.  A negative width is meaningless however
 #: infinite the canvas is, and silently renders nothing.
 _SIZE_KEYS = frozenset({"w", "h", "maxWidth"})
@@ -355,7 +424,18 @@ def validate_commands(commands: Any) -> str | None:
         if tool in _ALIASING_TOOLS:
             cmd = _with_size_aliases(cmd)
 
-        missing = [k for k in _REQUIRED[tool] if k not in cmd]
+        err = _validate_relational(cmd, idx, tool)
+        if err:
+            return err
+
+        # An anchored command delegates geometry to the client: position
+        # comes from the anchor, and for text/formula the sizes default
+        # from the anchor's height.  Requiring x/y/fontSize here would
+        # force the model back into the coordinate arithmetic that
+        # relational placement exists to end.
+        anchored = _is_anchored(cmd) and tool in _RELATIONAL_TOOLS
+        required = _REQUIRED_ANCHORED[tool] if anchored else _REQUIRED[tool]
+        missing = [k for k in required if k not in cmd]
         if missing:
             return (
                 f"command[{idx}] ({tool}) is missing required "
@@ -391,3 +471,41 @@ def validate_commands(commands: Any) -> str | None:
                 )
 
     return _text_tower(commands) or _wrap_collision(commands)
+
+
+#: Readings per call, and the longest one.  A transcription is a line of
+#: handwriting, not an essay.
+MAX_READINGS = 32
+MAX_READING_CHARS = 400
+
+
+def validate_readings(readings: Any) -> str | None:
+    """Shape-check the ``readings`` array of a ``whiteboard_draw`` call.
+
+    Each entry transcribes one labelled ink mark: ``{mark, text}``.  The
+    client stores it against the mark's strokes, so the next turn hands
+    the model text instead of pixels for everything it has already read.
+    Optional: ``None`` when absent.
+    """
+    if readings is None:
+        return None
+    if not isinstance(readings, list):
+        return "readings must be an array of {mark, text}."
+    if len(readings) > MAX_READINGS:
+        return f"At most {MAX_READINGS} readings per call."
+    for idx, entry in enumerate(readings):
+        if not isinstance(entry, dict):
+            return f"readings[{idx}] must be an object with mark and text."
+        mark = entry.get("mark")
+        text = entry.get("text")
+        if not (isinstance(mark, str) and mark.strip()):
+            return f"readings[{idx}]: mark must be a label such as 'A2'."
+        if not isinstance(text, str):
+            return f"readings[{idx}]: text must be a string."
+        if len(text) > MAX_READING_CHARS:
+            return (
+                f"readings[{idx}]: text is {len(text)} characters; a "
+                f"reading is one line of handwriting, at most "
+                f"{MAX_READING_CHARS}."
+            )
+    return None

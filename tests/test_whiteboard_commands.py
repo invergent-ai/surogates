@@ -362,3 +362,114 @@ def test_a_short_answer_at_handwriting_scale_is_fine():
 def test_a_genuine_short_paragraph_is_untouched():
     # Three lines never trips it, and a wide block never does either.
     assert validate_commands(_prose(fontSize=30, maxWidth=900)) is None
+
+
+# ---------------------------------------------------------------------
+# Relational placement
+#
+# The model names a thing and a relation; the client computes geometry.
+# See docs/board/relational-placement.md for why the coordinate contract
+# is being retired.
+# ---------------------------------------------------------------------
+
+
+def test_accepts_an_anchored_formula_without_geometry():
+    assert validate_commands([
+        {"tool": "draw_formula", "latex": "3", "anchor": "latest",
+         "side": "right"},
+    ]) is None
+
+
+def test_accepts_anchored_prose_without_sizes():
+    # fontSize/maxWidth are the client's job for anchored text -- the
+    # model choosing them is what produced the nine-line tower.
+    assert validate_commands([
+        {"tool": "write_text", "text": "Diverges: e^x grows without bound.",
+         "anchor": "latest", "side": "below"},
+    ]) is None
+
+
+def test_accepts_a_revision_that_inherits_its_place():
+    assert validate_commands([
+        {"tool": "draw_formula", "latex": "= e^2 + 1",
+         "replaces": "toolu_01X"},
+    ]) is None
+
+
+def test_accepts_an_anchor_to_an_earlier_call():
+    assert validate_commands([
+        {"tool": "write_text", "text": "see above", "anchor": "toolu_01A"},
+    ]) is None
+
+
+def test_rejects_an_unknown_side():
+    error = validate_commands([
+        {"tool": "write_text", "text": "hi", "anchor": "latest",
+         "side": "diagonal"},
+    ])
+    assert error is not None and "side" in error
+
+
+def test_rejects_a_side_without_an_anchor():
+    error = validate_commands([
+        {"tool": "write_text", "text": "hi", "x": 0, "y": 0,
+         "fontSize": 20, "maxWidth": 100, "side": "right"},
+    ])
+    assert error is not None and "side" in error
+
+
+def test_rejects_an_anchor_on_a_sketch():
+    # A draw is genuinely geometric; anchoring it would hide that the
+    # client cannot lay out its primitives.
+    error = validate_commands([
+        {"tool": "draw", "origin": [0, 0], "types": ["line"],
+         "items": [[0, 0, 1, 1]], "anchor": "latest"},
+    ])
+    assert error is not None and "anchor" in error
+
+
+def test_rejects_a_blank_anchor():
+    error = validate_commands([
+        {"tool": "write_text", "text": "hi", "anchor": "  "},
+    ])
+    assert error is not None and "anchor" in error
+
+
+def test_absolute_commands_still_require_their_geometry():
+    error = validate_commands([{"tool": "write_text", "text": "hi"}])
+    assert error is not None and "x, y" in error
+
+
+# ---------------------------------------------------------------------
+# readings: the model's transcription of labelled ink, stored once
+# ---------------------------------------------------------------------
+
+from surogates.whiteboard.commands import validate_readings
+
+
+def test_readings_are_optional():
+    assert validate_readings(None) is None
+
+
+def test_accepts_well_formed_readings():
+    assert validate_readings([{"mark": "A2", "text": "2x + 1 = 7"}]) is None
+
+
+def test_rejects_a_reading_without_a_mark():
+    error = validate_readings([{"text": "orphan"}])
+    assert error is not None and "mark" in error
+
+
+def test_rejects_a_non_string_text():
+    error = validate_readings([{"mark": "A1", "text": 7}])
+    assert error is not None and "text" in error
+
+
+def test_rejects_an_essay_as_a_reading():
+    # A reading is one line of handwriting, not the answer to it.
+    error = validate_readings([{"mark": "A1", "text": "x" * 401}])
+    assert error is not None and "400" in error
+
+
+def test_rejects_a_non_list():
+    assert validate_readings({"mark": "A1", "text": "x"}) is not None

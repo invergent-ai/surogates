@@ -201,21 +201,95 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     # confidently out of date -- one session ended with its answer
     # wrapped in hand-drawn brackets and squared, and it answered the
     # transcript rather than the board.
+    # Labelled marks: the same ids drawn on the image, listed here and
+    # accepted by the tool, so "right of A3" is one name everywhere.
+    marks = payload.get("marks")
+    if isinstance(marks, list) and marks:
+        rows = []
+        fresh_ids = []
+        for entry in marks:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                continue
+            mid = entry["id"]
+            origin = entry.get("origin")
+            handle = (
+                f" (call {origin})" if isinstance(origin, str) and origin else ""
+            )
+            label = str(entry.get("label") or "").strip()
+            what = f'"{label}"' if label else (
+                "the user's ink" if entry.get("kind") == "ink" else "your object"
+            )
+            if entry.get("removed"):
+                rows.append(f"- {mid}{handle}: {what} -- no longer on the board")
+                continue
+            if not all(_is_num(entry.get(k)) for k in ("x", "y", "w", "h")):
+                continue
+            row = (
+                f"- {mid}{handle}: {what} at ({entry['x']}, {entry['y']}), "
+                f"{entry['w']}x{entry['h']}"
+            )
+            reading = entry.get("reading")
+            if isinstance(reading, str) and reading.strip():
+                who = (
+                    "confirmed by the user"
+                    if entry.get("readBy") == "user"
+                    else "your earlier reading"
+                )
+                row += f' -- reads: "{reading.strip()}" ({who})'
+            elif entry.get("kind") == "ink" and not entry.get("fresh"):
+                # NEW already says it has not been read.
+                row += " -- unread"
+            if entry.get("fresh"):
+                row += " -- NEW since your last turn"
+                fresh_ids.append(mid)
+            if entry.get("touched"):
+                row += (
+                    " -- the user has since drawn on or around it. Read "
+                    "that ink as changing what it means, not as separate "
+                    "work beside it"
+                )
+            rows.append(row)
+        if rows:
+            joined = "\n".join(rows)
+            newest = (
+                f" What the user just wrote is {', '.join(fresh_ids)}."
+                if fresh_ids else ""
+            )
+            lines.append(
+                f"Labelled marks on the image (amber boxes; the label sits "
+                f"at each box's top-left corner): A-marks are the user's "
+                f"ink, B-marks are objects you drew, as the board holds "
+                f"them now.{newest}\n{joined}\n"
+                f"A mark that already reads as something is settled: "
+                f"take that text as what is written and do not re-read "
+                f"its pixels. Transcribe the unread marks and return them "
+                f"in the call's readings array.\n"
+                f"Anchor by label -- anchor:'A2', side:'right' -- or "
+                f"anchor:'latest' for the newest ink and 'selection' for "
+                f"the user's lasso. Revise your own object with "
+                f"replaces:'B1'. Only fall back to explicit coordinates "
+                f"for a placement no relation describes."
+            )
+
     mine = payload.get("agentObjects")
-    if isinstance(mine, list) and mine:
+    if isinstance(mine, list) and mine and not (isinstance(marks, list) and marks):
         rows: list[str] = []
         for entry in mine:
             if not isinstance(entry, dict):
                 continue
             label = str(entry.get("label") or "").strip()
             named = f'"{label}"' if label else "an object"
+            # The call id is the handle for `replaces` and `anchor`, so
+            # it must appear beside the thing it names.
+            origin = entry.get("origin")
+            handle = f" (call {origin})" if isinstance(origin, str) and origin else ""
             if entry.get("removed"):
-                rows.append(f"- {named}: no longer on the board")
+                rows.append(f"- {named}{handle}: no longer on the board")
                 continue
             if not all(_is_num(entry.get(k)) for k in ("x", "y", "w", "h")):
                 continue
             where = (
-                f"- {named} is at ({entry['x']}, {entry['y']}), "
+                f"- {named}{handle} is at ({entry['x']}, {entry['y']}), "
                 f"{entry['w']}x{entry['h']}"
             )
             if entry.get("touched"):
@@ -230,7 +304,12 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             lines.append(
                 f"What you drew earlier, as the board holds it now (your "
                 f"own draw calls record where you asked for these, not "
-                f"what the user did to them afterwards):\n{joined}"
+                f"what the user did to them afterwards):\n{joined}\n"
+                f"Place relationally: anchor='latest' for the user's "
+                f"newest ink, anchor='selection' for their lasso, or "
+                f"anchor/replaces with one of the call ids above. Only "
+                f"fall back to explicit coordinates for a placement no "
+                f"relation describes."
             )
 
     typed = payload.get("typedInput")

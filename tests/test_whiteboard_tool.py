@@ -146,3 +146,26 @@ def test_result_survives_a_command_without_coordinates():
         {"tool": "erase", "mode": "path", "points": [[0, 0], [1, 1]]},
     ]})
     assert "Drew 1 object" in out
+
+
+def test_result_acknowledges_recorded_readings():
+    out = _call(_registry(), {
+        "commands": [{"tool": "draw_formula", "latex": "3", "anchor": "latest"}],
+        "readings": [{"mark": "A2", "text": "2x + 1 = 7"}],
+    })
+    assert "Recorded your reading of A2" in out
+
+
+def test_result_rejects_malformed_readings():
+    out = _call(_registry(), {
+        "commands": [{"tool": "draw_formula", "latex": "3", "anchor": "latest"}],
+        "readings": [{"text": "no mark"}],
+    })
+    assert out.startswith("Error:")
+
+
+def test_schema_declares_readings():
+    schema = _registry().get("whiteboard_draw").schema
+    props = schema.parameters["properties"]
+    assert "readings" in props
+    assert props["readings"]["items"]["required"] == ["mark", "text"]

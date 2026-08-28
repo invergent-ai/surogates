@@ -359,6 +359,10 @@ function applyUserMessage(
   const content = stringValue(data.content);
   const images = parseUserMessageImages(data.images);
   const attachments = parseUserMessageAttachments(data.attachments);
+  const metadata =
+    data.metadata && typeof data.metadata === "object"
+      ? (data.metadata as Record<string, unknown>)
+      : undefined;
   const next = [...messages];
   const localIdx = next.findIndex(
     (m) =>
@@ -377,6 +381,7 @@ function applyUserMessage(
       // workspace path.
       images: images ?? local.images,
       attachments: attachments ?? local.attachments,
+      metadata: metadata ?? local.metadata,
     };
     return next;
   }
@@ -388,6 +393,7 @@ function applyUserMessage(
     status: "complete",
     images,
     attachments,
+    metadata,
   });
   return next;
 }

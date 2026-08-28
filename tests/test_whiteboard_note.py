@@ -287,7 +287,10 @@ def test_reports_where_its_objects_sit_now():
         {"origin": "c1", "label": "e^x + C", "x": 480, "y": 390,
          "w": 300, "h": 88},
     ]))
-    assert '"e^x + C" is at (480, 390), 300x88' in note
+    # The call id rides beside the label: it is the handle for
+    # anchor/replaces, and without it in the note the model cannot
+    # reference its own objects.
+    assert '"e^x + C" (call c1) is at (480, 390), 300x88' in note
 
 
 def test_reports_a_deleted_object():
@@ -330,3 +333,108 @@ def test_tolerates_a_nonsense_inventory():
     for bad in ("nope", [1, 2], [{"origin": "c1"}]):
         note = _whiteboard_note_from_metadata(_meta(agentObjects=bad))
         assert note is None or isinstance(note, str)
+
+
+# --- labelled marks -----------------------------------------------------
+
+def _marks():
+    return [
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60},
+        {"id": "A2", "kind": "ink", "x": 0, "y": 200, "w": 120, "h": 60,
+         "fresh": True},
+        {"id": "B1", "kind": "agent", "origin": "toolu_01A",
+         "label": "e^x + C", "x": 340, "y": 0, "w": 200, "h": 70,
+         "touched": True},
+        {"id": "B2", "kind": "agent", "origin": "toolu_01B",
+         "label": "gone", "removed": True},
+    ]
+
+
+def test_renders_every_mark_with_its_label():
+    note = _whiteboard_note_from_metadata(_meta(marks=_marks()))
+    assert "- A1: the user's ink at (0, 0), 300x60" in note
+    assert '- B1 (call toolu_01A): "e^x + C" at (340, 0), 200x70' in note
+    assert '- B2 (call toolu_01B): "gone" -- no longer on the board' in note
+
+
+def test_says_which_marks_are_new_this_turn():
+    # The newest ink is the question; naming it saves the model reading
+    # the hotspot trail to find it.
+    note = _whiteboard_note_from_metadata(_meta(marks=_marks()))
+    assert "What the user just wrote is A2." in note
+    assert "A2: the user's ink at (0, 200), 120x60 -- NEW" in note
+
+
+def test_keeps_the_touched_warning_on_marks():
+    note = _whiteboard_note_from_metadata(_meta(marks=_marks()))
+    assert "drawn on or around it" in note
+
+
+def test_tells_the_model_to_anchor_by_label():
+    note = _whiteboard_note_from_metadata(_meta(marks=_marks()))
+    assert "anchor:'A2'" in note
+    assert "replaces:'B1'" in note
+
+
+def test_marks_supersede_the_older_inventory():
+    # Both present (never in practice): render marks once, not the
+    # inventory again underneath.
+    note = _whiteboard_note_from_metadata(_meta(
+        marks=_marks(),
+        agentObjects=[{"origin": "c9", "label": "dup", "x": 1, "y": 1,
+                       "w": 1, "h": 1}],
+    ))
+    assert "dup" not in note
+
+
+def test_falls_back_to_the_inventory_for_old_events():
+    # Sessions recorded before marks existed still replay their notes.
+    note = _whiteboard_note_from_metadata(_meta(
+        agentObjects=[{"origin": "c1", "label": "old", "x": 1, "y": 2,
+                       "w": 3, "h": 4}],
+    ))
+    assert '"old" (call c1) is at (1, 2)' in note
+
+
+def test_skips_a_malformed_mark():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": "left"},
+        "nonsense",
+        {"kind": "ink", "x": 0, "y": 0, "w": 1, "h": 1},
+        {"id": "A9", "kind": "ink", "x": 5, "y": 5, "w": 5, "h": 5},
+    ]))
+    assert "A9" in note
+    assert "A1" not in note
+
+
+# --- readings on marks --------------------------------------------------
+
+def test_renders_a_stored_reading_on_its_mark():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60,
+         "reading": "2x + 1 = 7", "readBy": "agent"},
+    ]))
+    assert 'A1: the user\'s ink at (0, 0), 300x60 -- reads: "2x + 1 = 7" (your earlier reading)' in note
+
+
+def test_marks_a_user_confirmed_reading_as_such():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60,
+         "reading": "x = 3", "readBy": "user"},
+    ]))
+    assert "(confirmed by the user)" in note
+
+
+def test_flags_ink_without_a_reading_as_unread():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60},
+    ]))
+    assert "A1: the user's ink at (0, 0), 300x60 -- unread" in note
+
+
+def test_tells_the_model_to_trust_readings_and_transcribe_the_rest():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60},
+    ]))
+    assert "do not re-read its pixels" in note
+    assert "readings array" in note

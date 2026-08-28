@@ -19,19 +19,21 @@ import {
   type AtlasExtras,
   type Rect,
   atlasMetadata,
+  boardMarks,
   buildAtlas,
-  agentObjectReport,
   contentBeyond,
   contentBounds,
   inkHeight,
   mapHotspots,
   OCCUPANCY_GRID,
   occupancyCells,
+  paintMarks,
   planAtlas,
 } from "./atlas";
 import {
   type WbDoc,
   type WbObject,
+  correctReading,
   emptyDoc,
   foldToolCalls,
   makeTextObject,
@@ -50,6 +52,7 @@ import {
   zoomFactorFromWheel,
   zoomToFit,
 } from "./input";
+import { makeCommandResolver } from "./layout";
 import {
   latestBoardSession,
   loadDoc,
@@ -167,7 +170,15 @@ export function WhiteboardSurface({
   const [width, setWidth] = useState<number>(INK_WIDTHS[1]);
   const [question, setQuestion] = useState("");
   // An open text editor, positioned in logical space. Null when closed.
-  const [editor, setEditor] = useState<{ x: number; y: number } | null>(null);
+  // An open text editor, positioned in logical space. Null when closed.
+  // With `reading` set it is correcting what a cluster of ink says
+  // rather than adding text: the stored reading is what the model is
+  // handed as truth, so a wrong one has to be one click from fixed.
+  const [editor, setEditor] = useState<{
+    x: number;
+    y: number;
+    reading?: { strokeIds: string[] };
+  } | null>(null);
   const [editorText, setEditorText] = useState("");
   const [marquee, setMarquee] = useState<
     { from: { x: number; y: number }; to: { x: number; y: number } } | null
@@ -240,6 +251,10 @@ export function WhiteboardSurface({
     }),
     [formulaCache],
   );
+
+  // Resolves anchored draw commands ("right of the latest ink") into
+  // coordinates at fold time, against the board as it is then.
+  const resolveDraw = useMemo(() => makeCommandResolver(services), [services]);
 
   // ------------------------------------------------------------------
   // Document lifecycle
@@ -339,7 +354,12 @@ export function WhiteboardSurface({
     // board's document can never be saved under the incoming session's id.
     setCanvasReady(false);
     let cancelled = false;
-    void loadDoc(adapter, sessionId as string, runtime.messages).then(
+    void loadDoc(
+      adapter,
+      sessionId as string,
+      runtime.messages,
+      resolveDraw,
+    ).then(
       (loaded) => {
         if (cancelled) return;
         loadedSession.current = sessionId;
@@ -362,8 +382,8 @@ export function WhiteboardSurface({
   // nothing is skipped by waiting; the load simply arrives complete.
   useEffect(() => {
     if (!canvasReady) return;
-    setDoc((d) => foldToolCalls(d, runtime.messages));
-  }, [runtime.messages, canvasReady]);
+    setDoc((d) => foldToolCalls(d, runtime.messages, resolveDraw));
+  }, [runtime.messages, canvasReady, resolveDraw]);
 
   // A null session id is what `useDebouncedSave` already treats as
   // "nothing to write to", so the gate reuses it rather than growing a
@@ -450,6 +470,13 @@ export function WhiteboardSurface({
     () => planAtlas(doc, null, view, size, services).sourceRect,
     [doc, view, size, services],
   );
+  // The same labels the agent will be sent, so the user can read "A3"
+  // off the board and use it in a question.
+  const liveUnit = useMemo(() => inkHeight(doc, services) ?? 40, [doc, services]);
+  const liveMarks = useMemo(
+    () => boardMarks(doc, services, { unit: liveUnit }),
+    [doc, services, liveUnit],
+  );
 
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
@@ -500,6 +527,12 @@ export function WhiteboardSurface({
         }
       }
       ctx.restore();
+    }
+    if (liveMarks.length > 0) {
+      const px = 1 / (view.zoom * dpr);
+      paintMarks(ctx, liveMarks, (r) => r, 12 / view.zoom, px * 1.5, {
+        showReadings: true,
+      });
     }
 
     // The marquee is interface, not content: painted here in screen
@@ -558,7 +591,7 @@ export function WhiteboardSurface({
       ctx.lineJoin = "round";
       ctx.stroke();
     }
-  }, [doc, view, size, services, color, width, marquee, tool, gridRect]);
+  }, [doc, view, size, services, color, width, marquee, tool, gridRect, liveMarks]);
 
   repaintRef.current = paint;
 
@@ -607,6 +640,31 @@ export function WhiteboardSurface({
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
         panFrom.current = screen;
+        return;
+      }
+
+      // A click on the strip under an ink mark -- where its reading is
+      // shown -- opens the reading for correction, whatever tool is in
+      // hand. The reading is what the model is handed as truth, so
+      // fixing it must not cost a tool change.
+      const strip = liveMarks.find(
+        (m) =>
+          m.kind === "ink" &&
+          m.rect &&
+          m.strokes &&
+          logical.x >= m.rect.x &&
+          logical.x <= m.rect.x + m.rect.w &&
+          logical.y >= m.rect.y + m.rect.h &&
+          logical.y <= m.rect.y + m.rect.h + liveUnit * 0.6,
+      );
+      if (strip?.rect && strip.strokes) {
+        e.preventDefault();
+        setEditor({
+          x: strip.rect.x,
+          y: strip.rect.y + strip.rect.h,
+          reading: { strokeIds: strip.strokes },
+        });
+        setEditorText(strip.reading ?? "");
         return;
       }
 
@@ -681,7 +739,10 @@ export function WhiteboardSurface({
       strokeRef.current = builder;
       noteDirty(logical);
     },
-    [disabled, localPoint, view, tool, doc, services, commit, color, width, noteDirty],
+    [
+      disabled, localPoint, view, tool, doc, services, commit, color, width,
+      noteDirty, liveMarks, liveUnit,
+    ],
   );
 
   const onPointerMove = useCallback(
@@ -823,7 +884,15 @@ export function WhiteboardSurface({
     const body = editorText.trim();
     setEditor(null);
     setEditorText("");
-    if (!at || !body) return;
+    if (!at) return;
+    if (at.reading) {
+      // An empty correction clears the reading, so the ink reads as
+      // unread again and the model transcribes it afresh.
+      const { strokeIds } = at.reading;
+      commit((prev) => correctReading(prev, strokeIds, body));
+      return;
+    }
+    if (!body) return;
     // Recorded verbatim so the model reads the exact characters rather
     // than transcribing its own rendering of them out of the atlas.
     typedRef.current.push(body);
@@ -873,25 +942,29 @@ export function WhiteboardSurface({
       setAskMode(mode);
       const latest = dirtyRef.current;
       const plan = planAtlas(doc, latest, view, size, services);
-      const atlas = buildAtlas(doc, plan, services);
+      const unit = inkHeight(doc, services);
+      // Labelled marks: the same ids on the picture, in the note and in
+      // the tool, so "right of A3" is one name everywhere. Read off the
+      // live document, which is the only record of what the user moved,
+      // resized or deleted -- none of which reaches the transcript.
+      const marks = boardMarks(doc, services, {
+        unit: unit ?? 40,
+        newLocalIds: new Set(
+          doc.objects
+            .filter(
+              (o) => o.origin === "local" && !seenAtLastAsk.current.has(o.id),
+            )
+            .map((o) => o.id),
+        ),
+      });
+      const atlas = buildAtlas(doc, plan, services, marks);
       const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
       const extras: AtlasExtras = {
         mode,
-        inkHeight: inkHeight(doc, services),
-        // Read off the live document, which is the only record of what
-        // the user moved, resized or deleted -- none of which reaches
-        // the transcript.
+        inkHeight: unit,
         occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
-        agentObjects: agentObjectReport(doc, services, {
-          newLocalIds: new Set(
-            doc.objects
-              .filter(
-                (o) => o.origin === "local" && !seenAtLastAsk.current.has(o.id),
-              )
-              .map((o) => o.id),
-          ),
-        }),
+        marks,
       };
       seenAtLastAsk.current = new Set(doc.objects.map((o) => o.id));
       if (typedRef.current.length > 0) {
