@@ -17,6 +17,8 @@ import json
 import mimetypes
 import os
 import time
+
+import httpx
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,9 +104,19 @@ async def run_task(
 
         cursor = 0
         while True:
-            async for ev in client.stream_events(session_id, after=cursor):
-                events.append(ev)
-                cursor = max(cursor, ev.id)
+            try:
+                async for ev in client.stream_events(session_id, after=cursor):
+                    events.append(ev)
+                    cursor = max(cursor, ev.id)
+            except httpx.TransportError:
+                # A slow model turn can emit nothing for longer than the
+                # client's read timeout, killing the stream mid-iteration
+                # while the session is still running server-side. Same
+                # remedy as the server's own 300s close: reconnect from
+                # the cursor. A genuinely dead platform still terminates --
+                # the status poll below exhausts its retry window and
+                # raises out of the task.
+                pass
 
             # The stream ended: either the session finished, or the server
             # hit its 300s cap. Status tells us which.

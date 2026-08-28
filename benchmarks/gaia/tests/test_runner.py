@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from gaia_bench.client import Event
@@ -93,6 +94,41 @@ async def test_reconnects_after_stream_timeout_with_last_event_id():
     result = await run_task(client, make_task())
     assert client.after_cursors == [0, 7]
     assert result.answer == "4"
+
+
+async def test_reconnects_after_mid_stream_transport_error():
+    # A slow model turn can go >30s without emitting an event, so the read
+    # timeout fires MID-iteration while the session is still running
+    # server-side. Events already received must be kept and the stream
+    # re-opened from the cursor -- not recorded as a task error.
+    client = FakeClient(
+        [[resp(3, "working")], [resp(4, "FINAL ANSWER: 4")]],
+        status="active",
+    )
+    orig_stream = client.stream_events
+    raised = {"done": False}
+
+    async def flaky(session_id, after=0):
+        async for ev in orig_stream(session_id, after=after):
+            yield ev
+        if not raised["done"]:
+            raised["done"] = True
+            raise httpx.ReadTimeout("stream went quiet")
+
+    client.stream_events = flaky
+    calls = {"n": 0}
+
+    async def status(session_id):
+        calls["n"] += 1
+        return "active" if calls["n"] <= 1 else "completed"
+
+    client.get_session_status = status
+
+    result = await run_task(client, make_task())
+    assert result.error is None
+    assert result.terminal_status == "completed"
+    assert result.answer == "4"
+    assert client.after_cursors == [0, 3]
 
 
 async def test_failed_status_terminates_instead_of_hanging():
