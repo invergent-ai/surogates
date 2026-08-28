@@ -955,8 +955,9 @@ export function WhiteboardSurface({
         );
         if (!box) continue;
         const consumed = new Set(partners.map((o) => o.id));
+        // objectsInRect returns ids.
         const inside = objectsInRect(doc, box, services).filter(
-          (o) => !consumed.has(o.id),
+          (id) => !consumed.has(id),
         );
         if (inside.length > 0) continue;
         const slot = makeSlotObject(box);
