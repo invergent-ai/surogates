@@ -242,6 +242,37 @@ function lineEnd(
   return acc;
 }
 
+/** Origins of agent objects an erase rect mostly covers. */
+function erasedAgentOrigins(
+  cmd: Record<string, unknown>,
+  doc: WbDoc,
+  services: RenderServices,
+): string[] {
+  const w = typeof cmd.w === "number" ? cmd.w : (cmd.width as number);
+  const h = typeof cmd.h === "number" ? cmd.h : (cmd.height as number);
+  if (
+    typeof cmd.x !== "number" ||
+    typeof cmd.y !== "number" ||
+    typeof w !== "number" ||
+    typeof h !== "number"
+  ) {
+    return [];
+  }
+  const rect = { x: cmd.x, y: cmd.y, w, h };
+  const origins = new Set<string>();
+  for (const obj of doc.objects) {
+    if (obj.origin === "local" || obj.kind === "erase") continue;
+    const b = objectBounds(obj, services);
+    if (!b || b.w <= 0 || b.h <= 0) continue;
+    const ix = Math.max(0, Math.min(rect.x + rect.w, b.x + b.w) - Math.max(rect.x, b.x));
+    const iy = Math.max(0, Math.min(rect.y + rect.h, b.y + b.h) - Math.max(rect.y, b.y));
+    // "Mostly": half the object's area. A rect that clips a corner is
+    // an erase near it, not of it.
+    if ((ix * iy) / (b.w * b.h) >= 0.5) origins.add(obj.origin);
+  }
+  return [...origins];
+}
+
 function overlaps(a: Rect, b: Rect): boolean {
   return (
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
@@ -275,6 +306,19 @@ export function resolveCommands(
       continue;
     }
     const cmd = { ...(raw as Record<string, unknown>) };
+    // An erase rect over the agent's own object means "remove it" --
+    // that is the verb a model reaches for, even told to use replaces.
+    // Erase only paints white, so honouring it literally leaves the old
+    // answer under a white smear that hides nothing at the next fold.
+    // Each covered object becomes a supersession; the paint is kept for
+    // any user ink the rect also covers.
+    if (cmd.tool === "erase" && cmd.mode === "rect") {
+      const covered = erasedAgentOrigins(cmd, doc, services);
+      for (const origin of covered) {
+        resolved.push({ ...cmd, replaces: origin });
+      }
+      if (covered.length > 0) continue;
+    }
     // A `B1`-style replaces names a mark; the document supersedes by
     // call id, so translate before anything reads it.
     if (typeof cmd.replaces === "string") {

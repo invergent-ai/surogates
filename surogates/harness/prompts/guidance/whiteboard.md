@@ -136,9 +136,11 @@ real measurement, and nudged off existing work.
 - Something about their lasso: `anchor: "selection"`.
 - Continuing or annotating one of your own objects: `anchor` with its
   call id from the turn note.
-- Correcting yourself: `replaces` with the call id — the revision takes
-  the old object's place and the old one is removed. Never draw a
-  correction on top of the thing it corrects.
+- Correcting yourself: `replaces` with the label or call id — the
+  revision takes the old object's place and the old one is removed.
+  Never draw a correction on top of the thing it corrects, and never
+  `erase` your own object: erase paints white over ink, it does not
+  remove anything.
 
 Anchored commands omit `x`, `y`, `fontSize` and `maxWidth`. Do not send
 a colour: the client applies the user's chosen ink colour.

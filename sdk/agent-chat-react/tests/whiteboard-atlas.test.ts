@@ -543,7 +543,8 @@ describe("never cropping an expression in half", () => {
     const { sourceRect } = planAtlas(doc, null, scrolled, wide, services);
 
     expect(sourceRect.x).toBeLessThanOrEqual(-150);
-    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(800);
+    // "tail" is four glyphs at 40: ~96 units of ink, not its 100 maxWidth.
+    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(700 + 96);
   });
 
   it("falls back to the viewport once the board outgrows the frame", () => {

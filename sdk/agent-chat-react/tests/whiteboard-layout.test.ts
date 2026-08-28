@@ -407,3 +407,96 @@ describe("anchoring by label", () => {
     expect(Object.keys(parsed?.marks ?? {})).toHaveLength(2);
   });
 });
+
+describe("text bounds account for wrapping", () => {
+  // Session 87eb4165: the old answer wrapped to two lines but reported a
+  // one-line box, so the nudge cleared its first line and landed the new
+  // answer squarely on its second.
+  const prose =
+    "This integral appears incomplete. What should be under the square root?";
+
+  it("keeps a new answer clear of a wrapped one", () => {
+    const withOld = applyCommands(
+      emptyDoc(),
+      [{ tool: "write_text", x: 772, y: 269, text: prose,
+         fontSize: 28.8, maxWidth: 726, lineHeight: 1.35 }],
+      1,
+      "old",
+    );
+    // The `=` at the end of the user's line: both answers target it,
+    // which is what put the second on top of the first.
+    const doc = {
+      ...withOld,
+      objects: [
+        ...withOld.objects,
+        { id: "eq", origin: "local", selected: false, kind: "ink" as const,
+          pts: [700, 260, 740, 290], width: 0, color: "#000" },
+      ],
+    };
+    const cmd = one(
+      resolveCommands(
+        doc,
+        [{ tool: "write_text", anchor: "latest", side: "right",
+           text: "This integral diverges (equals ∞). Both e^x and √x grow without bound." }],
+        { latestInput: { x: 7, y: -140, w: 740, h: 647 }, inkHeight: 64 },
+        services,
+      ),
+    );
+    // Two lines of 28.8 at 1.35 is ~78 units: the new block must start
+    // below the whole of the old one, not below its first line.
+    expect(cmd.y as number).toBeGreaterThanOrEqual(269 + 77);
+  });
+});
+
+describe("erasing one's own object", () => {
+  const old = () =>
+    applyCommands(
+      emptyDoc(),
+      [{ tool: "write_text", x: 772, y: 269, text: "an earlier answer",
+         fontSize: 30, maxWidth: 400 }],
+      1,
+      "toolu_old",
+    );
+
+  it("turns an erase rect over it into a removal", () => {
+    // Erase only paints white; the old answer would sit under the smear
+    // and block the next placement. The model reaches for erase anyway.
+    const out = resolveCommands(
+      old(),
+      [{ tool: "erase", mode: "rect", x: 772, y: 269, w: 726, h: 39 }],
+      null,
+      services,
+    );
+    expect(out).toHaveLength(1);
+    expect((out[0] as Cmd).replaces).toBe("toolu_old");
+    const doc = applyCommands(old(), out, 2, "toolu_new");
+    expect(doc.objects.some((o) => o.origin === "toolu_old")).toBe(false);
+  });
+
+  it("leaves an erase that only clips a corner alone", () => {
+    const out = resolveCommands(
+      old(),
+      [{ tool: "erase", mode: "rect", x: 1100, y: 290, w: 100, h: 100 }],
+      null,
+      services,
+    );
+    expect((out[0] as Cmd).replaces).toBeUndefined();
+  });
+
+  it("never removes the user's ink this way", () => {
+    const doc = {
+      ...emptyDoc(),
+      objects: [{
+        id: "s1", origin: "local", selected: false, kind: "ink" as const,
+        pts: [0, 0, 100, 40], width: 0, color: "#000",
+      }],
+    };
+    const out = resolveCommands(
+      doc as never,
+      [{ tool: "erase", mode: "rect", x: -10, y: -10, w: 200, h: 100 }],
+      null,
+      services,
+    );
+    expect((out[0] as Cmd).replaces).toBeUndefined();
+  });
+});

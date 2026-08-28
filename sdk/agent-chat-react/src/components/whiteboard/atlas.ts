@@ -274,38 +274,6 @@ export function planAtlas(
  * {@link mapHotspots}, so the model reads one spatial vocabulary rather
  * than two.
  */
-/**
- * What an object actually covers, for occupancy purposes.
- *
- * {@link objectBounds} reports a text object's width as its `maxWidth`,
- * which is the wrap width the author asked for, not the ink it produced.
- * A one-glyph answer written with `maxWidth: 800` would claim eight
- * cells it does not use, and the model would then route around canvas
- * that is free -- getting steadily worse as its own generous wrap widths
- * accumulate.
- *
- * Estimated from the glyph count rather than measured: measuring needs a
- * canvas context, and being a little wrong about the width of a word is
- * cheaper than threading one through. The estimate is deliberately
- * slightly wide, so it errs toward keeping clear.
- *
- * ponytail: 0.6em per glyph, near the average for a proportional face;
- * swap for a real measure if a service ever carries one.
- */
-function occupiedBounds(
-  obj: WbObject,
-  services: RenderServices,
-): Rect | null {
-  const b = objectBounds(obj, services);
-  if (!b || obj.kind !== "text") return b;
-  const longest = Math.max(
-    ...obj.text.split("\n").map((line) => line.length),
-    0,
-  );
-  const inked = Math.max(obj.fontSize, longest * obj.fontSize * 0.6);
-  return { ...b, w: Math.min(b.w, inked) };
-}
-
 export function occupancyCells(
   doc: WbDoc,
   sourceRect: Rect,
@@ -318,7 +286,7 @@ export function occupancyCells(
   const cellH = sourceRect.h / OCCUPANCY_GRID;
 
   for (const obj of doc.objects) {
-    const b = occupiedBounds(obj, services);
+    const b = objectBounds(obj, services);
     if (!b) continue;
     const c0 = Math.floor((b.x - sourceRect.x) / cellW);
     const c1 = Math.floor((b.x + b.w - sourceRect.x) / cellW);
