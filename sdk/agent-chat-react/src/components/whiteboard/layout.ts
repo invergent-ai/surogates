@@ -45,6 +45,8 @@ const clamp = (v: number, lo: number, hi: number) =>
 export interface TurnAnchors {
   latestInput?: Rect;
   selection?: Rect;
+  /** Median stroke height of the user's handwriting, in canvas units. */
+  inkHeight?: number;
 }
 
 function rectOf(value: unknown): Rect | null {
@@ -70,6 +72,9 @@ export function turnAnchorsFromMetadata(
   const selection = rectOf(block.selection);
   if (latest) anchors.latestInput = latest;
   if (selection) anchors.selection = selection;
+  if (typeof block.inkHeight === "number" && block.inkHeight > 0) {
+    anchors.inkHeight = block.inkHeight;
+  }
   return anchors;
 }
 
@@ -143,22 +148,75 @@ function estimateSize(
   return { w: widest || maxWidth, h: Math.max(1, lines) * font * lineHeight };
 }
 
+/**
+ * The size everything is measured against: one line of the user's
+ * handwriting.
+ *
+ * NOT the anchor rectangle's height. `latest` is the bounding box of
+ * everything drawn since the last Ask, so a tall radical or integral
+ * sign makes it 600 units while the digits are 60 -- and an answer
+ * sized to the box came out at fontSize 220 beside 60-unit writing.
+ * The board measures the handwriting already; that is the unit. An
+ * agent object anchor has no ink, so its own height (one line) stands
+ * in, capped so a big earlier answer does not breed a bigger one.
+ */
+function sizingUnit(target: Rect, anchors: TurnAnchors | null): number {
+  return anchors?.inkHeight ?? clamp(target.h, 16, 120);
+}
+
 /** Fill in fontSize / maxWidth for an anchored command that omits them. */
-function applySizing(cmd: Record<string, unknown>, target: Rect): void {
+function applySizing(cmd: Record<string, unknown>, unit: number): void {
   const isProse =
     cmd.tool === "write_text" &&
     (String(cmd.text ?? "").length > SHORT_ANSWER_CHARS ||
       String(cmd.text ?? "").includes("\n"));
   if (typeof cmd.fontSize !== "number") {
     cmd.fontSize = isProse
-      ? clamp(target.h * 0.45, PROSE_MIN_FONT, PROSE_MAX_FONT)
-      : clamp(target.h * 0.9, 16, 220);
+      ? clamp(unit * 0.45, PROSE_MIN_FONT, PROSE_MAX_FONT)
+      : clamp(unit, 16, 220);
   }
   if (cmd.tool === "write_text" && typeof cmd.maxWidth !== "number") {
     // Wide enough to read across: ~42 characters a line, never a tower.
     const font = cmd.fontSize as number;
     cmd.maxWidth = Math.max(320, Math.round(42 * font * GLYPH_ADVANCE));
   }
+}
+
+/**
+ * The strokes at the trailing edge of the anchor -- the `=` the answer
+ * continues -- or null when the anchor holds no ink.
+ *
+ * The bounding box of a whole expression is the wrong thing to align
+ * to: its vertical centre is the middle of the tallest stroke, which
+ * for `√(2⁴) =` is halfway up the radical, and the answer lands above
+ * the equals sign it belongs to. The last band of ink is the line.
+ */
+function lineEnd(
+  doc: WbDoc,
+  target: Rect,
+  unit: number,
+  services: RenderServices,
+): Rect | null {
+  const edge = target.x + target.w - Math.max(unit * 2, target.w * 0.15);
+  let acc: Rect | null = null;
+  for (const obj of doc.objects) {
+    if (obj.kind !== "ink") continue;
+    const b = objectBounds(obj, services);
+    if (!b || !overlaps(b, target) || b.x + b.w < edge) continue;
+    if (!acc) {
+      acc = { ...b };
+      continue;
+    }
+    const x = Math.min(acc.x, b.x);
+    const y = Math.min(acc.y, b.y);
+    acc = {
+      x,
+      y,
+      w: Math.max(acc.x + acc.w, b.x + b.w) - x,
+      h: Math.max(acc.y + acc.h, b.y + b.h) - y,
+    };
+  }
+  return acc;
 }
 
 function overlaps(a: Rect, b: Rect): boolean {
@@ -213,9 +271,13 @@ export function resolveCommands(
       continue;
     }
 
-    applySizing(cmd, target);
+    const unit = sizingUnit(target, anchors);
+    applySizing(cmd, unit);
     const est = estimateSize(cmd, services);
-    const gap = Math.max(12, target.h * 0.35);
+    const gap = clamp(unit * 0.4, 12, 60);
+    // Right/left continue a line, so they align to the line's trailing
+    // ink; below/above relate to the block as a whole.
+    const line = lineEnd(doc, target, unit, services) ?? target;
     // A revision with no anchor and no side takes the replaced object's
     // place — that is the whole point of replacing. A side is honoured
     // when given ("put the correction below the old one"), and an
@@ -247,11 +309,11 @@ export function resolveCommands(
         break;
       case "left":
         x = target.x - gap - est.w;
-        y = target.y + (target.h - est.h) / 2;
+        y = line.y + (line.h - est.h) / 2;
         break;
       default:
-        x = target.x + target.w + gap;
-        y = target.y + (target.h - est.h) / 2;
+        x = line.x + line.w + gap;
+        y = line.y + (line.h - est.h) / 2;
     }
 
     // Keep off existing work: step downward until clear. The replaced

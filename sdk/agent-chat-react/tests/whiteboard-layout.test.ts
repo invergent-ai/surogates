@@ -25,7 +25,10 @@ describe("resolving anchors", () => {
   // The `2x + 1 = 7` session: the user's line sat at (-190, -18) with
   // ~190-unit digits, and the model — converting image to canvas by
   // hand — landed its answer below the frame it was shown.
-  const anchors = { latestInput: { x: -190, y: -18, w: 900, h: 190 } };
+  const anchors = {
+    latestInput: { x: -190, y: -18, w: 900, h: 190 },
+    inkHeight: 193,
+  };
 
   it("puts the answer right of the newest ink", () => {
     const [cmd] = resolveCommands(
@@ -50,9 +53,11 @@ describe("resolving anchors", () => {
         services,
       ),
     );
+    // The session's model chose 180 for 193-unit ink and the user
+    // called the size right; the rule lands in the same band.
     const font = cmd.fontSize as number;
     expect(font).toBeGreaterThan(150);
-    expect(font).toBeLessThanOrEqual(190);
+    expect(font).toBeLessThanOrEqual(200);
   });
 
   it("sizes prose to read, never to match handwriting", () => {
@@ -224,5 +229,92 @@ describe("anchors ride the turn's user message", () => {
       turnAnchorsFromMetadata({ whiteboard: { latestInput: "wide" } }),
     ).toEqual({});
     expect(turnAnchorsFromMetadata(undefined)).toBeNull();
+  });
+});
+
+describe("sizing and aligning to the handwriting, not the box", () => {
+  // Session caae0d8d, turn 1: latestInput was 879x603 because the
+  // expression had a tall integral sign, while the digits were 60. The
+  // answer came out at fontSize 220.
+  const tallBox = {
+    latestInput: { x: -12, y: -55, w: 879, h: 603 },
+    inkHeight: 60,
+  };
+
+  it("sizes the answer to the handwriting height, not the anchor box", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw_formula", latex: "e^x + x + C", anchor: "latest" }],
+        tallBox,
+        services,
+      ),
+    );
+    expect(cmd.fontSize as number).toBeLessThanOrEqual(70);
+    expect(cmd.fontSize as number).toBeGreaterThanOrEqual(50);
+  });
+
+  it("keeps the gap proportional to the handwriting too", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw_formula", latex: "3", anchor: "latest" }],
+        tallBox,
+        services,
+      ),
+    );
+    // Right of the box, but not 200 units away from it.
+    expect(cmd.x as number).toBeGreaterThan(-12 + 879);
+    expect(cmd.x as number).toBeLessThan(-12 + 879 + 80);
+  });
+
+  it("aligns the answer to the line end, not the middle of the tallest stroke", () => {
+    // `√(2⁴) =`: a radical spanning y 0..300 on the left and a short
+    // `=` at y 130..150 on the right. The answer belongs on the `=`.
+    const ink = (id: string, x: number, y: number, w: number, h: number) => ({
+      id, origin: "local", selected: false, kind: "ink" as const,
+      pts: [x, y, x + w, y + h], width: 0, color: "#000",
+    });
+    const doc = {
+      ...emptyDoc(),
+      objects: [ink("radical", 0, 0, 40, 300), ink("equals", 400, 130, 60, 20)],
+    } as never;
+    const anchors = {
+      latestInput: { x: 0, y: 0, w: 460, h: 300 },
+      inkHeight: 60,
+    };
+    const cmd = one(
+      resolveCommands(
+        doc,
+        [{ tool: "draw_formula", latex: "4", anchor: "latest" }],
+        anchors,
+        services,
+      ),
+    );
+    const est = services.formula("4", cmd.fontSize as number);
+    const centre = (cmd.y as number) + est.h / 2;
+    // Centred on the `=` (140), not on the box (150) or the radical.
+    expect(Math.abs(centre - 140)).toBeLessThan(15);
+    expect(cmd.x as number).toBeGreaterThan(460);
+  });
+
+  it("falls back to the anchor's own height when it is an agent object", () => {
+    // No ink to measure: the earlier answer's line height stands in,
+    // capped so a big answer does not breed a bigger one.
+    const doc = applyCommands(
+      emptyDoc(),
+      [{ tool: "draw_formula", x: 0, y: 0, latex: "e^x", fontSize: 220 }],
+      1,
+      "big",
+    );
+    const cmd = one(
+      resolveCommands(
+        doc,
+        [{ tool: "write_text", text: "ok", anchor: "big" }],
+        null,
+        services,
+      ),
+    );
+    expect(cmd.fontSize as number).toBeLessThanOrEqual(120);
   });
 });
