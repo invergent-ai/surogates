@@ -31,6 +31,7 @@ from surogates.config import (
 )
 from surogates.harness.error_classify import classify_harness_error
 from surogates.session.events import EventType
+from surogates.session.store import SessionNotFoundError
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -691,6 +692,21 @@ class Orchestrator:
                     agent_id=rewake_session.agent_id,
                     session_id=session_id,
                 )
+        except SessionNotFoundError:
+            # Deleted mid-flight (a user stopping and deleting a session
+            # races the wake it already queued).  That is a normal end,
+            # not a crash: retrying re-reads the same missing row, and
+            # the crash-loop breaker then trips and tries to write
+            # SESSION_FAIL against a session_id the events FK no longer
+            # accepts.  Drop the work and clear the Redis breaker key so
+            # a recycled id doesn't inherit this one's streak.
+            logger.info(
+                "Session %s no longer exists; dropping wake",
+                session_id,
+            )
+            self._rewake_pending.discard(session_id)
+            await self._clear_crash_loop_state(session_id)
+            return
         except Exception as exc:
             logger.exception(
                 "Harness failed for session %s (attempt %d/%d)",

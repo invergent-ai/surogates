@@ -20,6 +20,7 @@ from surogates.orchestrator.dispatcher import (
     Orchestrator,
 )
 from surogates.session.events import EventType
+from surogates.session.store import SessionNotFoundError
 
 
 class FakeRedis:
@@ -247,4 +248,37 @@ async def test_successful_wake_clears_crash_count() -> None:
 
     assert len(wakes) == 2
     assert _session_fails(store) == []
+    assert f"{_CRASH_LOOP_KEY_PREFIX}{session_id}" not in redis.data
+
+
+async def test_deleted_session_is_dropped_not_retried() -> None:
+    """Deleting a session mid-flight is a normal end, not a crash.
+
+    Stopping and deleting a session races the wake already sitting in the
+    queue.  The harness then raises SessionNotFoundError on every attempt,
+    which used to burn the full retry budget, trip the breaker on the
+    identical fingerprint, and finally try to write SESSION_FAIL against a
+    session_id the events foreign key no longer accepts -- surfacing as an
+    ERROR-level ForeignKeyViolationError in the worker log.
+    """
+    session_id = uuid4()
+    redis = FakeRedis()
+    store = FakeStore()
+    wakes: list[int] = []
+
+    class DeletedSessionHarness:
+        async def wake(self, _sid):
+            wakes.append(1)
+            raise SessionNotFoundError(f"session {session_id} not found")
+
+    orchestrator = _make_orchestrator(
+        redis, store, lambda _sid: DeletedSessionHarness(),
+    )
+    await orchestrator._process(session_id)
+
+    # Tried once and given up on: no retries, no breaker, and above all
+    # no event written against the missing row.
+    assert len(wakes) == 1
+    assert store.emitted == []
+    assert store.statuses == []
     assert f"{_CRASH_LOOP_KEY_PREFIX}{session_id}" not in redis.data
