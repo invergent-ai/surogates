@@ -15,6 +15,7 @@ capability problem.
 | 2026-07-26 | `dev-001` | local harness | claude-sonnet-5 | 110 | 86 | **78.2%** |
 | 2026-08-14 | `dev-005` | local harness | claude-sonnet-5 (+ qwen3.7-max) | 110 | 74 | **67.3%** |
 | 2026-08-27 | `dev-006` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 62 | **56.4%** |
+| 2026-08-28 | `dev-007` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 53 | **48.2%** |
 
 > **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids
 > auto-increment from the contents of `runs/`, and it was produced against a
@@ -23,11 +24,26 @@ capability problem.
 > were only ever on the machine that ran it, so there is no `runs/dev-006/`
 > to reconcile — if those traces resurface, land them under that id.
 
-The prod run scored L1 21/33, L2 36/60, L3 5/17, with zero infra errors and
-flags: 14 `no_final_answer`, 11 `no_tool_use`, 4 `empty_llm_response`,
-2 `tool_error`. It is not directly comparable to the local rows — different
+The 2026-08-27 run scored L1 21/33, L2 36/60, L3 5/17, with zero collection
+errors, no `infra_error` flags, and flags: 14 `no_final_answer`,
+11 `no_tool_use`, 4 `empty_llm_response`, 2 `tool_error`. It is not directly comparable to the local rows — different
 platform, different agent config, different model tier — but the failure
 shape is the same one the local runs show: turns ending without acting.
+
+`dev-007` (same agent, same served model as `dev-006`) scored L1 17/33,
+L2 31/60, L3 5/17, with zero collection errors, no `infra_error` flags, and
+flags:
+22 `no_final_answer`, 16 `tool_error`, 9 `no_tool_use`, 1 `empty_llm_response`.
+The trace evidence points platform-side for the 9-point drop: 15 of the 22
+unanswered sessions end on an `llm.request` that never receives an
+`llm.response` — the provider returned nothing and the harness marked the
+session `completed` instead of `failed` — and tool errors hit every tool
+(terminal, browser, web_search, web_extract, vision) rather than any single
+one. Sessions long enough to trigger context compaction answered 92% of the
+time; the failures concentrate in sessions that died on their first or second
+turn awaiting the model. Two platform items fall out: empty-response turn
+exhaustion should fail a session rather than complete it, and the serving
+route's reliability varied sharply between the two days.
 
 ### Smaller runs
 
