@@ -95,6 +95,10 @@ export async function loadDoc(
         folded: Array.isArray(parsed.folded)
           ? parsed.folded
           : parsed.objects.map((o) => o.origin),
+        readings:
+          parsed.readings && typeof parsed.readings === "object"
+            ? parsed.readings
+            : {},
       };
     }
   } catch {

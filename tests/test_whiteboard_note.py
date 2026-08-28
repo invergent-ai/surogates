@@ -405,3 +405,36 @@ def test_skips_a_malformed_mark():
     ]))
     assert "A9" in note
     assert "A1" not in note
+
+
+# --- readings on marks --------------------------------------------------
+
+def test_renders_a_stored_reading_on_its_mark():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60,
+         "reading": "2x + 1 = 7", "readBy": "agent"},
+    ]))
+    assert 'A1: the user\'s ink at (0, 0), 300x60 -- reads: "2x + 1 = 7" (your earlier reading)' in note
+
+
+def test_marks_a_user_confirmed_reading_as_such():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60,
+         "reading": "x = 3", "readBy": "user"},
+    ]))
+    assert "(confirmed by the user)" in note
+
+
+def test_flags_ink_without_a_reading_as_unread():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60},
+    ]))
+    assert "A1: the user's ink at (0, 0), 300x60 -- unread" in note
+
+
+def test_tells_the_model_to_trust_readings_and_transcribe_the_rest():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "A1", "kind": "ink", "x": 0, "y": 0, "w": 300, "h": 60},
+    ]))
+    assert "do not re-read its pixels" in note
+    assert "readings array" in note

@@ -71,9 +71,28 @@ export type WbObject = WbBase &
       }
   );
 
+/**
+ * What a cluster of the user's ink says, read once and kept.
+ *
+ * Keyed by the exact strokes it covers (see `readingKey`), so adding a
+ * stroke to an expression changes its key and it reads as new -- which
+ * it is: the meaning changed. A reading the user corrected outranks any
+ * the agent produces later.
+ */
+export interface WbReading {
+  text: string;
+  source: "agent" | "user";
+  strokeIds: string[];
+}
+
 export interface WbDoc {
   version: 1;
   objects: WbObject[];
+  /**
+   * Transcriptions of the user's ink by cluster key. Optional so boards
+   * saved before readings existed still load; absent means "none".
+   */
+  readings?: Record<string, WbReading>;
   /**
    * Highest event id folded in. The persistence layer replays only tool
    * calls newer than this after loading the saved document.
@@ -91,7 +110,74 @@ export interface WbDoc {
 }
 
 export function emptyDoc(): WbDoc {
-  return { version: 1, objects: [], lastEventId: 0, folded: [] };
+  return { version: 1, objects: [], lastEventId: 0, folded: [], readings: {} };
+}
+
+/** The key a cluster's reading is stored under: its strokes, in order. */
+export function readingKey(strokeIds: readonly string[]): string {
+  return [...strokeIds].sort().join("|");
+}
+
+/**
+ * Record the agent's transcriptions of labelled ink.
+ *
+ * `readings` is the `readings` array of a `whiteboard_draw` call --
+ * `{mark, text}` pairs naming A-labels from the turn's marks -- and
+ * `metadata` is that turn's user message metadata, which carries each
+ * mark's stroke ids. A reading the user has corrected is never
+ * overwritten. Readings whose strokes are gone are dropped: the ink
+ * they described no longer exists.
+ */
+export function applyReadings(
+  doc: WbDoc,
+  readings: unknown[],
+  metadata: Record<string, unknown> | undefined,
+): WbDoc {
+  const strokesByMark = new Map<string, string[]>();
+  const wb = metadata?.whiteboard as Record<string, unknown> | undefined;
+  if (Array.isArray(wb?.marks)) {
+    for (const raw of wb.marks) {
+      const m = raw as Record<string, unknown>;
+      if (typeof m?.id === "string" && Array.isArray(m.strokes)) {
+        strokesByMark.set(m.id, m.strokes.filter((s) => typeof s === "string"));
+      }
+    }
+  }
+  const alive = new Set(doc.objects.map((o) => o.id));
+  const next: Record<string, WbReading> = {};
+  for (const [key, reading] of Object.entries(doc.readings ?? {})) {
+    if (reading.strokeIds.every((id) => alive.has(id))) next[key] = reading;
+  }
+  for (const raw of readings) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.mark !== "string" || typeof r.text !== "string") continue;
+    const strokeIds = strokesByMark.get(r.mark);
+    if (!strokeIds?.length) continue;
+    const text = r.text.trim();
+    if (!text) continue;
+    const key = readingKey(strokeIds);
+    if (next[key]?.source === "user") continue;
+    next[key] = { text, source: "agent", strokeIds };
+  }
+  return { ...doc, readings: next };
+}
+
+/** Store the user's own correction of what a cluster says. */
+export function correctReading(
+  doc: WbDoc,
+  strokeIds: readonly string[],
+  text: string,
+): WbDoc {
+  const key = readingKey(strokeIds);
+  const readings = { ...(doc.readings ?? {}) };
+  const trimmed = text.trim();
+  if (trimmed) {
+    readings[key] = { text: trimmed, source: "user", strokeIds: [...strokeIds] };
+  } else {
+    delete readings[key];
+  }
+  return { ...doc, readings };
 }
 
 let localCounter = 0;
@@ -297,6 +383,10 @@ export function foldToolCalls(
         ? resolve(next, rawCommands, turnMetadata)
         : rawCommands;
       next = applyCommands(next, commands, next.lastEventId, call.id);
+      const readings = (parsed as { readings?: unknown } | null)?.readings;
+      if (Array.isArray(readings) && readings.length > 0) {
+        next = applyReadings(next, readings, turnMetadata);
+      }
     }
   }
   if (newlyFolded.length === 0) return next;

@@ -11,7 +11,7 @@
  * `surogates/harness/loop_messages.py`. Renaming one silently shortens
  * the note the model sees rather than failing.
  */
-import type { WbDoc, WbObject } from "./doc";
+import { type WbDoc, type WbObject, readingKey } from "./doc";
 import { objectBounds, renderDoc } from "./render";
 import type { RenderServices, View, ViewportSize } from "./render";
 
@@ -459,6 +459,11 @@ export interface BoardMark {
   fresh?: boolean;
   /** Agent marks: new ink landed on or around it. */
   touched?: boolean;
+  /** Ink marks: the strokes in the cluster, the key its reading lives under. */
+  strokes?: string[];
+  /** Ink marks: what it says, if it has been read. */
+  reading?: string;
+  readBy?: "agent" | "user";
 }
 
 /** One cluster of the user's strokes and the strokes in it. */
@@ -572,12 +577,18 @@ export function boardMarks(
     );
     clusters = clusters.filter((c) => keep.has(c));
   }
-  const marks: BoardMark[] = clusters.map((c, i) => ({
-    id: `A${i + 1}`,
-    kind: "ink",
-    rect: c.rect,
-    ...(c.fresh ? { fresh: true } : {}),
-  }));
+  const readings = doc.readings ?? {};
+  const marks: BoardMark[] = clusters.map((c, i) => {
+    const read = readings[readingKey(c.strokeIds)];
+    return {
+      id: `A${i + 1}`,
+      kind: "ink",
+      rect: c.rect,
+      strokes: c.strokeIds,
+      ...(c.fresh ? { fresh: true } : {}),
+      ...(read ? { reading: read.text, readBy: read.source } : {}),
+    };
+  });
   agentObjectReport(doc, services, { newLocalIds: opts.newLocalIds }).forEach(
     (o, i) => {
       marks.push({
@@ -607,6 +618,7 @@ export function paintMarks(
   map: (r: Rect) => Rect,
   fontPx: number,
   lineWidth: number,
+  opts: { showReadings?: boolean } = {},
 ): void {
   ctx.save();
   ctx.lineWidth = lineWidth;
@@ -626,6 +638,16 @@ export function paintMarks(
     ctx.fillRect(r.x, r.y - tagH, tagW, tagH);
     ctx.fillStyle = "#ffffff";
     ctx.fillText(mark.id, r.x + padX, r.y - tagH + fontPx * 0.15);
+    // The stored reading, under the ink, so the user can see what the
+    // board believes it says and fix it. Live canvas only: the note
+    // carries it to the model, and on the picture it would be clutter.
+    if (opts.showReadings && mark.reading) {
+      ctx.font = `italic ${fontPx}px system-ui, sans-serif`;
+      ctx.fillStyle =
+        mark.readBy === "user" ? "rgba(22, 101, 52, 0.85)" : "rgba(107, 114, 128, 0.85)";
+      ctx.fillText(mark.reading, r.x, r.y + r.h + fontPx * 0.3);
+      ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
+    }
   }
   ctx.restore();
 }
@@ -867,6 +889,8 @@ export function atlasMetadata(
       ...(m.label ? { label: m.label } : {}),
       ...(m.fresh ? { fresh: true } : {}),
       ...(m.touched ? { touched: true } : {}),
+      ...(m.strokes ? { strokes: m.strokes } : {}),
+      ...(m.reading ? { reading: m.reading, readBy: m.readBy } : {}),
     }));
   }
   if (extras.agentObjects?.length) {

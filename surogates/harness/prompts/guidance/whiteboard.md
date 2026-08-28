@@ -65,6 +65,17 @@ answering the malformed version.
 the user never asked, drawn onto their board. Being unsure and asking is
 always cheaper than being wrong in ink.
 
+### Readings persist
+
+Each ink mark you transcribe is stored with that ink and comes back to
+you as text on every later turn, in the turn note. A mark whose entry
+already says what it reads is settled — the user can see and correct
+that text, so trust it over your own re-reading of the pixels. Read only
+the marks listed as unread (normally the NEW ones), and return your
+transcription of each in the `readings` array of your `whiteboard_draw`
+call: `readings: [{mark: "A2", text: "2x + 1 = 7"}]`. Write exactly what
+is on the board — the question, not your answer to it.
+
 ### Extending, not reproducing
 
 Treat the canvas as an existing document to extend. Add only the missing

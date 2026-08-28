@@ -471,3 +471,41 @@ def validate_commands(commands: Any) -> str | None:
                 )
 
     return _text_tower(commands) or _wrap_collision(commands)
+
+
+#: Readings per call, and the longest one.  A transcription is a line of
+#: handwriting, not an essay.
+MAX_READINGS = 32
+MAX_READING_CHARS = 400
+
+
+def validate_readings(readings: Any) -> str | None:
+    """Shape-check the ``readings`` array of a ``whiteboard_draw`` call.
+
+    Each entry transcribes one labelled ink mark: ``{mark, text}``.  The
+    client stores it against the mark's strokes, so the next turn hands
+    the model text instead of pixels for everything it has already read.
+    Optional: ``None`` when absent.
+    """
+    if readings is None:
+        return None
+    if not isinstance(readings, list):
+        return "readings must be an array of {mark, text}."
+    if len(readings) > MAX_READINGS:
+        return f"At most {MAX_READINGS} readings per call."
+    for idx, entry in enumerate(readings):
+        if not isinstance(entry, dict):
+            return f"readings[{idx}] must be an object with mark and text."
+        mark = entry.get("mark")
+        text = entry.get("text")
+        if not (isinstance(mark, str) and mark.strip()):
+            return f"readings[{idx}]: mark must be a label such as 'A2'."
+        if not isinstance(text, str):
+            return f"readings[{idx}]: text must be a string."
+        if len(text) > MAX_READING_CHARS:
+            return (
+                f"readings[{idx}]: text is {len(text)} characters; a "
+                f"reading is one line of handwriting, at most "
+                f"{MAX_READING_CHARS}."
+            )
+    return None

@@ -438,3 +438,38 @@ def test_rejects_a_blank_anchor():
 def test_absolute_commands_still_require_their_geometry():
     error = validate_commands([{"tool": "write_text", "text": "hi"}])
     assert error is not None and "x, y" in error
+
+
+# ---------------------------------------------------------------------
+# readings: the model's transcription of labelled ink, stored once
+# ---------------------------------------------------------------------
+
+from surogates.whiteboard.commands import validate_readings
+
+
+def test_readings_are_optional():
+    assert validate_readings(None) is None
+
+
+def test_accepts_well_formed_readings():
+    assert validate_readings([{"mark": "A2", "text": "2x + 1 = 7"}]) is None
+
+
+def test_rejects_a_reading_without_a_mark():
+    error = validate_readings([{"text": "orphan"}])
+    assert error is not None and "mark" in error
+
+
+def test_rejects_a_non_string_text():
+    error = validate_readings([{"mark": "A1", "text": 7}])
+    assert error is not None and "text" in error
+
+
+def test_rejects_an_essay_as_a_reading():
+    # A reading is one line of handwriting, not the answer to it.
+    error = validate_readings([{"mark": "A1", "text": "x" * 401}])
+    assert error is not None and "400" in error
+
+
+def test_rejects_a_non_list():
+    assert validate_readings({"mark": "A1", "text": "x"}) is not None

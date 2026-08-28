@@ -33,6 +33,7 @@ import {
 import {
   type WbDoc,
   type WbObject,
+  correctReading,
   emptyDoc,
   foldToolCalls,
   makeTextObject,
@@ -169,7 +170,15 @@ export function WhiteboardSurface({
   const [width, setWidth] = useState<number>(INK_WIDTHS[1]);
   const [question, setQuestion] = useState("");
   // An open text editor, positioned in logical space. Null when closed.
-  const [editor, setEditor] = useState<{ x: number; y: number } | null>(null);
+  // An open text editor, positioned in logical space. Null when closed.
+  // With `reading` set it is correcting what a cluster of ink says
+  // rather than adding text: the stored reading is what the model is
+  // handed as truth, so a wrong one has to be one click from fixed.
+  const [editor, setEditor] = useState<{
+    x: number;
+    y: number;
+    reading?: { strokeIds: string[] };
+  } | null>(null);
   const [editorText, setEditorText] = useState("");
   const [marquee, setMarquee] = useState<
     { from: { x: number; y: number }; to: { x: number; y: number } } | null
@@ -463,9 +472,10 @@ export function WhiteboardSurface({
   );
   // The same labels the agent will be sent, so the user can read "A3"
   // off the board and use it in a question.
+  const liveUnit = useMemo(() => inkHeight(doc, services) ?? 40, [doc, services]);
   const liveMarks = useMemo(
-    () => boardMarks(doc, services, { unit: inkHeight(doc, services) ?? 40 }),
-    [doc, services],
+    () => boardMarks(doc, services, { unit: liveUnit }),
+    [doc, services, liveUnit],
   );
 
   const paint = useCallback(() => {
@@ -520,7 +530,9 @@ export function WhiteboardSurface({
     }
     if (liveMarks.length > 0) {
       const px = 1 / (view.zoom * dpr);
-      paintMarks(ctx, liveMarks, (r) => r, 12 / view.zoom, px * 1.5);
+      paintMarks(ctx, liveMarks, (r) => r, 12 / view.zoom, px * 1.5, {
+        showReadings: true,
+      });
     }
 
     // The marquee is interface, not content: painted here in screen
@@ -631,6 +643,31 @@ export function WhiteboardSurface({
         return;
       }
 
+      // A click on the strip under an ink mark -- where its reading is
+      // shown -- opens the reading for correction, whatever tool is in
+      // hand. The reading is what the model is handed as truth, so
+      // fixing it must not cost a tool change.
+      const strip = liveMarks.find(
+        (m) =>
+          m.kind === "ink" &&
+          m.rect &&
+          m.strokes &&
+          logical.x >= m.rect.x &&
+          logical.x <= m.rect.x + m.rect.w &&
+          logical.y >= m.rect.y + m.rect.h &&
+          logical.y <= m.rect.y + m.rect.h + liveUnit * 0.6,
+      );
+      if (strip?.rect && strip.strokes) {
+        e.preventDefault();
+        setEditor({
+          x: strip.rect.x,
+          y: strip.rect.y + strip.rect.h,
+          reading: { strokeIds: strip.strokes },
+        });
+        setEditorText(strip.reading ?? "");
+        return;
+      }
+
       if (tool === "text") {
         // No pointer capture and no default action. The browser focuses
         // the canvas on the click that follows this pointerdown, which
@@ -702,7 +739,10 @@ export function WhiteboardSurface({
       strokeRef.current = builder;
       noteDirty(logical);
     },
-    [disabled, localPoint, view, tool, doc, services, commit, color, width, noteDirty],
+    [
+      disabled, localPoint, view, tool, doc, services, commit, color, width,
+      noteDirty, liveMarks, liveUnit,
+    ],
   );
 
   const onPointerMove = useCallback(
@@ -844,7 +884,15 @@ export function WhiteboardSurface({
     const body = editorText.trim();
     setEditor(null);
     setEditorText("");
-    if (!at || !body) return;
+    if (!at) return;
+    if (at.reading) {
+      // An empty correction clears the reading, so the ink reads as
+      // unread again and the model transcribes it afresh.
+      const { strokeIds } = at.reading;
+      commit((prev) => correctReading(prev, strokeIds, body));
+      return;
+    }
+    if (!body) return;
     // Recorded verbatim so the model reads the exact characters rather
     // than transcribing its own rendering of them out of the atlas.
     typedRef.current.push(body);

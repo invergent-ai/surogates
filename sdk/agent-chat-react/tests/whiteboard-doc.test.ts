@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  type WbDoc,
   applyCommands,
+  applyReadings,
+  correctReading,
   emptyDoc,
   foldToolCalls,
+  readingKey,
 } from "@/components/whiteboard/doc";
 import type { AgentChatMessage } from "@/types";
 
@@ -337,5 +341,87 @@ describe("superseding an earlier draw", () => {
       first, [{ ...at(50, "add"), replaces: "callZ" }], 2, "callB",
     );
     expect(next.objects).toHaveLength(2);
+  });
+});
+
+describe("readings persist with the ink they describe", () => {
+  const ink = (id: string, x: number) => ({
+    id, origin: "local", selected: false, kind: "ink" as const,
+    pts: [x, 0, x + 40, 60], width: 0, color: "#000",
+  });
+  const board = (...ids: string[]) =>
+    ({ ...emptyDoc(), objects: ids.map((id, i) => ink(id, i * 50)) }) as WbDoc;
+  const turn = (marks: unknown[]) => ({ whiteboard: { marks } });
+
+  it("stores a reading against the mark's strokes", () => {
+    const doc = applyReadings(
+      board("s1", "s2"),
+      [{ mark: "A1", text: "2x + 1 = 7" }],
+      turn([{ id: "A1", kind: "ink", strokes: ["s1", "s2"] }]),
+    );
+    expect(doc.readings?.[readingKey(["s2", "s1"])]).toEqual({
+      text: "2x + 1 = 7", source: "agent", strokeIds: ["s1", "s2"],
+    });
+  });
+
+  it("keys by the exact strokes, so added ink reads as new", () => {
+    // The meaning changed when the stroke was added; the old reading
+    // must not be handed back as if it still applied.
+    const doc = applyReadings(
+      board("s1", "s2", "s3"),
+      [{ mark: "A1", text: "2x + 1" }],
+      turn([{ id: "A1", kind: "ink", strokes: ["s1", "s2"] }]),
+    );
+    expect(doc.readings?.[readingKey(["s1", "s2", "s3"])]).toBeUndefined();
+  });
+
+  it("never overwrites a reading the user corrected", () => {
+    let doc = correctReading(board("s1"), ["s1"], "the user's version");
+    doc = applyReadings(
+      doc,
+      [{ mark: "A1", text: "the agent's guess" }],
+      turn([{ id: "A1", kind: "ink", strokes: ["s1"] }]),
+    );
+    expect(doc.readings?.[readingKey(["s1"])]?.text).toBe("the user's version");
+    expect(doc.readings?.[readingKey(["s1"])]?.source).toBe("user");
+  });
+
+  it("drops readings whose ink is gone", () => {
+    let doc = correctReading(board("s1", "s2"), ["s2"], "gone soon");
+    doc = { ...doc, objects: doc.objects.filter((o) => o.id !== "s2") };
+    doc = applyReadings(doc, [], turn([]));
+    expect(doc.readings).toEqual({});
+  });
+
+  it("ignores readings for unknown marks and blank text", () => {
+    const doc = applyReadings(
+      board("s1"),
+      [{ mark: "A9", text: "x" }, { mark: "A1", text: "   " }, "junk"],
+      turn([{ id: "A1", kind: "ink", strokes: ["s1"] }]),
+    );
+    expect(doc.readings).toEqual({});
+  });
+
+  it("clearing a correction removes the reading", () => {
+    let doc = correctReading(board("s1"), ["s1"], "typo");
+    doc = correctReading(doc, ["s1"], "");
+    expect(doc.readings).toEqual({});
+  });
+
+  it("folds readings out of a draw call using the turn's marks", () => {
+    const messages = [
+      {
+        id: "u1", role: "user", content: "", createdAt: new Date(),
+        status: "complete",
+        metadata: turn([{ id: "A1", kind: "ink", strokes: ["s1"] }]),
+      },
+      message("c1", "whiteboard_draw", {
+        commands: [{ tool: "draw_formula", latex: "3", x: 0, y: 0, fontSize: 40 }],
+        readings: [{ mark: "A1", text: "2 + 1 =" }],
+      }),
+    ] as unknown as AgentChatMessage[];
+    const doc = foldToolCalls(board("s1"), messages);
+    expect(doc.readings?.[readingKey(["s1"])]?.text).toBe("2 + 1 =");
+    expect(doc.objects.some((o) => o.kind === "formula")).toBe(true);
   });
 });

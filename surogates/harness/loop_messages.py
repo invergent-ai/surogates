@@ -228,6 +228,17 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 f"- {mid}{handle}: {what} at ({entry['x']}, {entry['y']}), "
                 f"{entry['w']}x{entry['h']}"
             )
+            reading = entry.get("reading")
+            if isinstance(reading, str) and reading.strip():
+                who = (
+                    "confirmed by the user"
+                    if entry.get("readBy") == "user"
+                    else "your earlier reading"
+                )
+                row += f' -- reads: "{reading.strip()}" ({who})'
+            elif entry.get("kind") == "ink" and not entry.get("fresh"):
+                # NEW already says it has not been read.
+                row += " -- unread"
             if entry.get("fresh"):
                 row += " -- NEW since your last turn"
                 fresh_ids.append(mid)
@@ -249,6 +260,10 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 f"at each box's top-left corner): A-marks are the user's "
                 f"ink, B-marks are objects you drew, as the board holds "
                 f"them now.{newest}\n{joined}\n"
+                f"A mark that already reads as something is settled: "
+                f"take that text as what is written and do not re-read "
+                f"its pixels. Transcribe the unread marks and return them "
+                f"in the call's readings array.\n"
                 f"Anchor by label -- anchor:'A2', side:'right' -- or "
                 f"anchor:'latest' for the newest ink and 'selection' for "
                 f"the user's lasso. Revise your own object with "

@@ -18,6 +18,7 @@ from surogates.whiteboard.commands import (
     COORD_LIMIT,
     MAX_COMMANDS,
     validate_commands,
+    validate_readings,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,14 @@ _DESCRIPTION = (
     "Explicit x/y (global canvas units, freely negative, never image "
     "pixels) always wins over an anchor: it is the escape hatch for "
     "placements no relation describes.\n\n"
+    "READINGS PERSIST. Alongside commands, pass readings: "
+    "[{mark:'A2', text:'2x + 1 = 7'}] -- your transcription of each ink "
+    "mark you read this turn. It is stored with that ink and handed back "
+    "to you as text on every later turn, so a mark whose note entry "
+    "already says what it reads is settled: trust it, do not re-read "
+    "its pixels. Transcribe only marks without a reading (the NEW ones, "
+    "typically). Plain text or LaTeX, one line, exactly what is written "
+    "-- not your answer to it.\n\n"
     f"At most {MAX_COMMANDS} commands per call. Do not redraw content "
     "that is already on the canvas: add only the continuation, answer, or "
     "annotation that is missing."
@@ -103,6 +112,22 @@ def register(registry: ToolRegistry) -> None:
                             "additionalProperties": True,
                         },
                     },
+                    "readings": {
+                        "type": "array",
+                        "description": (
+                            "Your transcription of each ink mark you read "
+                            "this turn, {mark, text}. Stored with the ink "
+                            "and returned as text on later turns."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "required": ["mark", "text"],
+                            "properties": {
+                                "mark": {"type": "string"},
+                                "text": {"type": "string"},
+                            },
+                        },
+                    },
                 },
                 "required": ["commands"],
             },
@@ -139,6 +164,10 @@ async def _whiteboard_draw_handler(
     error = validate_commands(commands)
     if error:
         return f"Error: {error}"
+    readings = arguments.get("readings")
+    error = validate_readings(readings)
+    if error:
+        return f"Error: {error}"
 
     count = len(commands)
     logger.info("whiteboard_draw accepted %d command(s)", count)
@@ -151,6 +180,24 @@ async def _whiteboard_draw_handler(
         f"before this call and do not show it. Anything else you draw "
         f"this turn must keep clear of the position above, and if this "
         f"was the answer, stop -- do not draw it again."
+        f"{_readings_ack(readings)}"
+    )
+
+
+def _readings_ack(readings: Any) -> str:
+    if not isinstance(readings, list) or not readings:
+        return ""
+    marks = [
+        str(r.get("mark")).strip()
+        for r in readings
+        if isinstance(r, dict) and isinstance(r.get("mark"), str)
+    ]
+    marks = [m for m in marks if m]
+    if not marks:
+        return ""
+    return (
+        f" Recorded your reading of {', '.join(marks)}; it will come back "
+        f"to you as text from now on."
     )
 
 

@@ -73,18 +73,21 @@ conversion for placement, and coordinate staleness. Progressively (see
 staging): the occupancy grid, the cell-size formula, and most of the
 geometry note.
 
-## Staging
+## Staging (all three built)
 
-1. **This change** — relational placement beside the absolute path, on
-   the existing `whiteboard_draw` tool. No new commands: two optional
-   fields.
-2. **Ink clustering + set-of-marks ids** — user ink grouped into
-   addressable clusters, labelled on the atlas, so anchors extend to
-   "that expression" rather than only "the newest ink".
-3. **Persistent transcription** — each cluster read once by the session
-   VLM, stored, corrected by the user, and thereafter sent as text.
-   Reading errors stop compounding; old regions stop costing vision
-   tokens. The confirmed pairs accumulate as training data.
+1. **Relational placement** — beside the absolute path, on the existing
+   `whiteboard_draw` tool. No new commands: two optional fields.
+2. **Ink clustering + labelled marks** — user ink grouped into
+   addressable clusters (`A1, A2, …`), the agent's objects labelled
+   (`B1, B2, …`), the same ids drawn on the atlas and canvas, listed in
+   the note, and accepted as `anchor`/`replaces`.
+3. **Persistent transcription** — the model returns `readings:
+   [{mark, text}]` with its draw; each is stored against the exact
+   strokes it covers (`doc.readings`, keyed by stroke ids, so added ink
+   reads as new) and handed back as text on every later turn. The user
+   sees each reading under its ink and corrects it in place; a user
+   correction outranks any later agent reading. The confirmed pairs
+   accumulate as training data.
 
 No new models at any stage: clustering and layout are algorithms; the
 one model-shaped job (reading new ink, once) stays on the session VLM.
