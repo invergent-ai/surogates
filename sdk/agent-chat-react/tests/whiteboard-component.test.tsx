@@ -1258,3 +1258,77 @@ describe("progress while the agent works", () => {
     expect(canvas.className).not.toContain("pointer-events-none");
   });
 });
+
+describe("correcting a reading", () => {
+  // A board with one stroke at logical (0,0)-(100,60) whose reading is
+  // stored, loaded from the workspace. The initial view puts logical
+  // (x, y) at screen (x + 400, y + 300).
+  const strokeIds = ["local:1"];
+  const saved = () => ({
+    version: 1,
+    lastEventId: 0,
+    folded: [],
+    objects: [{
+      id: "local:1", origin: "local", selected: false, kind: "ink",
+      pts: [0, 0, 100, 60], width: 0, color: "#000",
+    }],
+    readings: {
+      [strokeIds.join("|")]: { text: "2x", source: "agent", strokeIds },
+    },
+  });
+
+  async function boardWith(doc: unknown) {
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => ({
+        path: "_whiteboard/canvas.json",
+        content: JSON.stringify(doc),
+        size: 1,
+        encoding: "utf-8" as const,
+        truncated: false,
+      })),
+    });
+    const el = await render(<AgentWhiteboard adapter={adapter} sessionId="s1" />);
+    await act(async () => { await Promise.resolve(); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    return { el, canvas };
+  }
+
+  const editorOf = (el: HTMLElement) =>
+    el.querySelector<HTMLTextAreaElement>('textarea[aria-label="Text"]');
+
+  const click = (canvas: HTMLCanvasElement, x: number, y: number) =>
+    act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+
+  it("does not open when drawing beneath the ink with the pen", async () => {
+    // The bug: drawing the next line under an integral opened an editor
+    // instead of a stroke.
+    const { el, canvas } = await boardWith(saved());
+    await click(canvas, 420, 368);
+    expect(editorOf(el)).toBeNull();
+  });
+
+  it("opens on the reading text with the select tool, prefilled", async () => {
+    const { el, canvas } = await boardWith(saved());
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await click(canvas, 410, 368);
+    const area = editorOf(el);
+    expect(area).not.toBeNull();
+    expect(area?.value).toBe("2x");
+  });
+
+  it("does not open beneath unread ink even with the select tool", async () => {
+    const doc = { ...saved(), readings: {} };
+    const { el, canvas } = await boardWith(doc);
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await click(canvas, 410, 368);
+    expect(editorOf(el)).toBeNull();
+  });
+});

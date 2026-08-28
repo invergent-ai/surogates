@@ -644,20 +644,29 @@ export function WhiteboardSurface({
         return;
       }
 
-      // A click on the strip under an ink mark -- where its reading is
-      // shown -- opens the reading for correction, whatever tool is in
-      // hand. The reading is what the model is handed as truth, so
-      // fixing it must not cost a tool change.
-      const strip = liveMarks.find(
-        (m) =>
-          m.kind === "ink" &&
-          m.rect &&
-          m.strokes &&
-          logical.x >= m.rect.x &&
-          logical.x <= m.rect.x + m.rect.w &&
-          logical.y >= m.rect.y + m.rect.h &&
-          logical.y <= m.rect.y + m.rect.h + liveUnit * 0.6,
-      );
+      // With the select tool, a click on a reading -- the italic text
+      // under an ink mark -- opens it for correction. Only then: the
+      // first version fired on any click in the band under any mark,
+      // whatever the tool, so drawing the next line beneath an integral
+      // opened an editor instead of a stroke. The hit box is the text
+      // itself, and there has to be a reading to correct.
+      const readingFont = 12 / view.zoom;
+      const strip =
+        tool === "select"
+          ? liveMarks.find(
+              (m) =>
+                m.kind === "ink" &&
+                m.rect &&
+                m.strokes &&
+                m.reading &&
+                logical.x >= m.rect.x &&
+                logical.x <=
+                  m.rect.x +
+                  Math.max(m.reading.length * readingFont * 0.6, readingFont) &&
+                logical.y >= m.rect.y + m.rect.h &&
+                logical.y <= m.rect.y + m.rect.h + readingFont * 1.6,
+            )
+          : undefined;
       if (strip?.rect && strip.strokes) {
         e.preventDefault();
         setEditor({
