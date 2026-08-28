@@ -193,6 +193,10 @@ export function AgentChat({
   //     base agent's "turn" there is a single ``delegate_task`` call;
   //     the final artifact IS the recap.  An extra summary card just
   //     repeats the work in a less useful form.
+  //   * boards.  The canvas is the deliverable and it is already on
+  //     screen, so the card's only content is ``_whiteboard/canvas.json``
+  //     -- the board's own backing file, named with the ``_`` prefix
+  //     precisely to keep it out of the user's way.
   const orchestratesDeepResearch = useMemo(
     () => runtime.messages.some(
       (m) => m.toolCalls?.some(
@@ -203,7 +207,9 @@ export function AgentChat({
     [runtime.messages],
   );
   const hideTurnSummary =
-    isSubAgentSession(runtime.session) || orchestratesDeepResearch;
+    isSubAgentSession(runtime.session)
+    || orchestratesDeepResearch
+    || isBoardSession(runtime.session);
   const browserState = runtime.state.browser;
   // A "closed" browser state is functionally the same as no browser — the
   // BrowserPane would otherwise render an empty "preview unavailable" panel.

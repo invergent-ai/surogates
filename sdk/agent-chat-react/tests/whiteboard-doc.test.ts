@@ -255,3 +255,87 @@ describe("deleting an agent's object", () => {
     expect(foldToolCalls(emptyDoc(), [bad]).folded).toContain("m9");
   });
 });
+
+
+describe("width/height where the schema says w/h", () => {
+  // From a real session: the model wrote a wrong correction, tried twice
+  // to erase it with `width`/`height`, and was rejected. The validator
+  // now accepts that spelling, so the client has to draw it — otherwise
+  // the erase passes validation and rubs out nothing.
+  const erase = (extent: Record<string, unknown>) =>
+    message("e1", "whiteboard_draw", {
+      commands: [{ tool: "erase", mode: "rect", x: 460, y: 300, ...extent }],
+    });
+
+  it("applies an erase spelled width/height", () => {
+    const doc = foldToolCalls(emptyDoc(), [erase({ width: 460, height: 60 })]);
+    const obj = doc.objects[0] as { w: number; h: number };
+    expect([obj.w, obj.h]).toEqual([460, 60]);
+  });
+
+  it("prefers w/h when both are present", () => {
+    const doc = foldToolCalls(emptyDoc(), [
+      erase({ w: 10, h: 20, width: 999, height: 999 }),
+    ]);
+    const obj = doc.objects[0] as { w: number; h: number };
+    expect([obj.w, obj.h]).toEqual([10, 20]);
+  });
+
+  it("applies a place_artifact spelled width/height", () => {
+    const doc = foldToolCalls(emptyDoc(), [
+      message("a1", "whiteboard_draw", {
+        commands: [{
+          tool: "place_artifact", artifact_id: "art", x: 0, y: 0,
+          width: 100, height: 50,
+        }],
+      }),
+    ]);
+    const obj = doc.objects[0] as { w: number; h: number };
+    expect([obj.w, obj.h]).toEqual([100, 50]);
+  });
+});
+
+describe("superseding an earlier draw", () => {
+  const at = (x: number, text: string) => ({
+    tool: "write_text", x, y: 0, text, fontSize: 40, maxWidth: 100,
+  });
+
+  it("removes the objects the call supersedes", () => {
+    // Revising an answer used to mean drawing over the old one: `erase`
+    // paints white, it does not delete.
+    const first = applyCommands(emptyDoc(), [at(0, "wrong")], 1, "callA");
+    const next = applyCommands(
+      first, [{ ...at(0, "right"), replaces: "callA" }], 2, "callB",
+    );
+    expect(next.objects).toHaveLength(1);
+    expect((next.objects[0] as { text: string }).text).toBe("right");
+  });
+
+  it("leaves everything else alone", () => {
+    let doc = applyCommands(emptyDoc(), [at(0, "keep")], 1, "callA");
+    doc = applyCommands(doc, [at(50, "drop")], 2, "callB");
+    const next = applyCommands(
+      doc, [{ ...at(50, "new"), replaces: "callB" }], 3, "callC",
+    );
+    const texts = next.objects.map((o) => (o as { text: string }).text);
+    expect(texts).toEqual(["keep", "new"]);
+  });
+
+  it("retracts even when the replacement itself is unusable", () => {
+    // The intent to retract is independent of whether the new object
+    // could be drawn; leaving the old one behind is the worse outcome.
+    const first = applyCommands(emptyDoc(), [at(0, "wrong")], 1, "callA");
+    const next = applyCommands(
+      first, [{ tool: "nonsense", replaces: "callA" }], 2, "callB",
+    );
+    expect(next.objects).toHaveLength(0);
+  });
+
+  it("ignores a replaces that matches nothing", () => {
+    const first = applyCommands(emptyDoc(), [at(0, "keep")], 1, "callA");
+    const next = applyCommands(
+      first, [{ ...at(50, "add"), replaces: "callZ" }], 2, "callB",
+    );
+    expect(next.objects).toHaveLength(2);
+  });
+});

@@ -14,13 +14,19 @@ import type {
   AgentChatViewMode,
 } from "../../types";
 import { Button } from "../ui/button";
+import { Spinner } from "../ui/spinner";
 import {
   type AtlasExtras,
   type Rect,
   atlasMetadata,
   buildAtlas,
+  agentObjectReport,
+  contentBeyond,
   contentBounds,
+  inkHeight,
   mapHotspots,
+  OCCUPANCY_GRID,
+  occupancyCells,
   planAtlas,
 } from "./atlas";
 import {
@@ -83,6 +89,12 @@ const ERASER_SCALE = 4;
 
 const TEXT_FONT_SIZE = 24;
 const TEXT_MAX_WIDTH = 320;
+
+/** How long a canvas load may take before the board says so. */
+const RESTORE_HINT_DELAY_MS = 250;
+
+/** `PointerEvent.button` for the middle button / wheel click. */
+const MIDDLE_BUTTON = 1;
 
 /** Mirrors the composer's segments so the two switches read alike. */
 const VIEW_MODE_LABELS: Record<AgentChatViewMode, string> = {
@@ -163,6 +175,10 @@ export function WhiteboardSurface({
   // Set by "New board" so the resume effect does not immediately pull
   // the user back into the board they just left.
   const [wantFresh, setWantFresh] = useState(false);
+  // Which button started the turn in flight. `deep` is many
+  // round-trips and worth naming; `sketch` is one and should not
+  // advertise a wait that is about to be over.
+  const [askMode, setAskMode] = useState<"sketch" | "deep">("sketch");
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -199,6 +215,11 @@ export function WhiteboardSurface({
   // rendering of it back out of the atlas.
   const typedRef = useRef<string[]>([]);
   const dirtyRef = useRef<Rect | null>(null);
+  // Object ids as they stood at the last Ask. What is local and not in
+  // here is what the user has added since -- which is how ink drawn
+  // around one of the agent's answers is told apart from ink that was
+  // always there.
+  const seenAtLastAsk = useRef<Set<string>>(new Set());
 
   const repaintRef = useRef<() => void>(() => undefined);
   const formulaCache = useMemo(
@@ -260,6 +281,39 @@ export function WhiteboardSurface({
   // replayed objects.
   const loadedSession = useRef<string | null | undefined>(undefined);
 
+  // Whether the canvas on screen reflects the stored one yet.  Autosave
+  // is held until it does.
+  //
+  // A remount starts from `emptyDoc()`, and the fold effect below
+  // immediately replays the agent's draw calls onto it -- so for the
+  // moment before the load resolves, the live document is a real,
+  // non-empty board holding the agent's objects and none of the user's.
+  // Saving in that window writes it over the stored board, destroying
+  // the ink the load was about to restore, and the load then returns
+  // what was just written.  That is why the loss needed an agent reply
+  // to reproduce: with nothing to fold the document stays empty, and
+  // `useDebouncedSave` already declines to save an empty one.
+  const [canvasReady, setCanvasReady] = useState(false);
+
+  // The veil is shown only once a load is slow enough to be worth
+  // mentioning.  A warm switch back resolves well inside this, and a
+  // spinner flashing on every toggle of the view is worse than showing
+  // nothing at all.  Blocking input is NOT delayed -- that has to hold
+  // from the first frame, or the strokes it exists to protect are the
+  // ones that get eaten.
+  const [restoringVisible, setRestoringVisible] = useState(false);
+  useEffect(() => {
+    if (canvasReady) {
+      setRestoringVisible(false);
+      return;
+    }
+    const timer = setTimeout(
+      () => setRestoringVisible(true),
+      RESTORE_HINT_DELAY_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [canvasReady]);
+
   useEffect(() => {
     // Once a session exists again the "fresh" intent is spent; without
     // clearing it, every later return to the board starts blank.
@@ -276,15 +330,21 @@ export function WhiteboardSurface({
       // adopting the session its own first Ask created, and everything
       // drawn before that question is still the live document.
       if (!sessionId && previous) setDoc(emptyDoc());
+      // Nothing to wait for: the document on screen is the live one.
+      setCanvasReady(true);
       return;
     }
 
+    // Switching to a different session re-arms the gate, so the outgoing
+    // board's document can never be saved under the incoming session's id.
+    setCanvasReady(false);
     let cancelled = false;
     void loadDoc(adapter, sessionId as string, runtime.messages).then(
       (loaded) => {
         if (cancelled) return;
         loadedSession.current = sessionId;
         setDoc(loaded);
+        setCanvasReady(true);
       },
     );
     return () => {
@@ -295,11 +355,20 @@ export function WhiteboardSurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adapter, sessionId]);
 
+  // Held until the stored board is in hand.  Folding onto the empty
+  // document a remount starts from would paint the agent's objects
+  // alone -- a board the user never had, shown for as long as the fetch
+  // takes and then replaced.  `loadDoc` folds the same calls itself, so
+  // nothing is skipped by waiting; the load simply arrives complete.
   useEffect(() => {
+    if (!canvasReady) return;
     setDoc((d) => foldToolCalls(d, runtime.messages));
-  }, [runtime.messages]);
+  }, [runtime.messages, canvasReady]);
 
-  useDebouncedSave(adapter, sessionId, doc);
+  // A null session id is what `useDebouncedSave` already treats as
+  // "nothing to write to", so the gate reuses it rather than growing a
+  // second way to say the same thing.
+  useDebouncedSave(adapter, canvasReady ? sessionId : null, doc);
 
   // The transcript views are only worth offering once there is a
   // transcript. Before the agent's first answer, switching to Simple or
@@ -373,6 +442,15 @@ export function WhiteboardSurface({
     return () => ro.disconnect();
   }, []);
 
+  // The frame the next Ask will capture. Memoised because it walks every
+  // object, and paint runs on every pointer sample. `latest` is left out
+  // deliberately: it lives in a ref, so it could not invalidate this,
+  // and while the board fits the frame it makes no difference anyway.
+  const gridRect = useMemo(
+    () => planAtlas(doc, null, view, size, services).sourceRect,
+    [doc, view, size, services],
+  );
+
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -389,6 +467,40 @@ export function WhiteboardSurface({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.w, size.h);
     renderDoc(ctx, doc, view, size, services, dpr);
+
+    // The same cells the agent is sent, drawn under the ink so the two
+    // of you are looking at one reference frame: "the answer goes in
+    // 9,6" means the same square to both. Painted here rather than
+    // written to the document, so it can never reach the atlas twice or
+    // be mistaken for something drawn.
+    if (gridRect) {
+      const px = 1 / (view.zoom * dpr);
+      const cw = gridRect.w / OCCUPANCY_GRID;
+      const ch = gridRect.h / OCCUPANCY_GRID;
+      ctx.save();
+      ctx.strokeStyle = "rgba(37, 99, 235, 0.16)";
+      ctx.lineWidth = px;
+      ctx.beginPath();
+      for (let i = 0; i <= OCCUPANCY_GRID; i++) {
+        ctx.moveTo(gridRect.x + i * cw, gridRect.y);
+        ctx.lineTo(gridRect.x + i * cw, gridRect.y + gridRect.h);
+        ctx.moveTo(gridRect.x, gridRect.y + i * ch);
+        ctx.lineTo(gridRect.x + gridRect.w, gridRect.y + i * ch);
+      }
+      ctx.stroke();
+      // Counter-scaled so the labels stay a constant size on screen
+      // however far the board is zoomed.
+      ctx.fillStyle = "rgba(37, 99, 235, 0.5)";
+      ctx.font = `${11 / view.zoom}px system-ui, sans-serif`;
+      ctx.textBaseline = "top";
+      for (let i = 0; i < OCCUPANCY_GRID; i++) {
+        ctx.fillText(String(i), gridRect.x + i * cw + 3 * px, gridRect.y + 2 * px);
+        if (i > 0) {
+          ctx.fillText(String(i), gridRect.x + 3 * px, gridRect.y + i * ch + 2 * px);
+        }
+      }
+      ctx.restore();
+    }
 
     // The marquee is interface, not content: painted here in screen
     // space and never written to the document, so it can never reach
@@ -446,7 +558,7 @@ export function WhiteboardSurface({
       ctx.lineJoin = "round";
       ctx.stroke();
     }
-  }, [doc, view, size, services, color, width, marquee, tool]);
+  }, [doc, view, size, services, color, width, marquee, tool, gridRect]);
 
   repaintRef.current = paint;
 
@@ -484,6 +596,19 @@ export function WhiteboardSurface({
       if (disabled) return;
       const screen = localPoint(e);
       const logical = screenToLogical(screen, view);
+
+      // Checked before any tool: the middle button pans whatever is in
+      // hand, so moving the board mid-drawing costs nothing. Putting it
+      // after the tool branches would let `text` open an editor and
+      // `pen` start a stroke on a middle-click first.
+      if (e.button === MIDDLE_BUTTON) {
+        // Suppresses the browser's middle-click autoscroll, which would
+        // otherwise take over the drag with its own scrolling puck.
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        panFrom.current = screen;
+        return;
+      }
 
       if (tool === "text") {
         // No pointer capture and no default action. The browser focuses
@@ -745,11 +870,30 @@ export function WhiteboardSurface({
   const ask = useCallback(
     async (mode: "sketch" | "deep") => {
       if (!canvasRef.current) return;
+      setAskMode(mode);
       const latest = dirtyRef.current;
       const plan = planAtlas(doc, latest, view, size, services);
       const atlas = buildAtlas(doc, plan, services);
       const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
-      const extras: AtlasExtras = { mode };
+      const extras: AtlasExtras = {
+        mode,
+        inkHeight: inkHeight(doc, services),
+        // Read off the live document, which is the only record of what
+        // the user moved, resized or deleted -- none of which reaches
+        // the transcript.
+        occupied: occupancyCells(doc, plan.sourceRect, services),
+        beyond: contentBeyond(doc, plan.sourceRect, services),
+        agentObjects: agentObjectReport(doc, services, {
+          newLocalIds: new Set(
+            doc.objects
+              .filter(
+                (o) => o.origin === "local" && !seenAtLastAsk.current.has(o.id),
+              )
+              .map((o) => o.id),
+          ),
+        }),
+      };
+      seenAtLastAsk.current = new Set(doc.objects.map((o) => o.id));
       if (typedRef.current.length > 0) {
         extras.typedInput = typedRef.current.join("\n\n");
       }
@@ -812,7 +956,22 @@ export function WhiteboardSurface({
     return byId;
   }, [runtime.messages]);
 
-  const busy = runtime.isRunning || disabled;
+  // Asking against a board that is still loading would send an atlas of
+  // the half-restored document -- the agent's objects without the ink
+  // they answer.
+  const busy = runtime.isRunning || disabled || !canvasReady;
+
+  // The newest thing the agent has said it is doing. A sketch turn is a
+  // single round-trip and never produces one; a deep turn produces one
+  // per iteration, and without them a minute of real work is
+  // indistinguishable from a hang.
+  const progress = useMemo(() => {
+    for (let i = runtime.messages.length - 1; i >= 0; i--) {
+      const summary = runtime.messages[i].iterationSummary?.summary?.trim();
+      if (summary) return summary;
+    }
+    return null;
+  }, [runtime.messages]);
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -842,6 +1001,17 @@ export function WhiteboardSurface({
             className={cn(
               "h-full w-full touch-none bg-white",
               tool === "pan" ? "cursor-grab" : "cursor-crosshair",
+              // Held from the first frame, not from when the veil
+              // appears: the load resolves by replacing the document
+              // wholesale, so anything drawn before it lands is thrown
+              // away.  Better to decline the stroke than to eat it.
+              //
+              // Held again while the agent works. The atlas and the
+              // occupied cells it is answering were captured when Ask
+              // was pressed, so ink added now is invisible to it — it
+              // places its answer against a board that no longer
+              // matches, and can land on top of what was just drawn.
+              (!canvasReady || runtime.isRunning) && "pointer-events-none",
             )}
             style={{ width: size.w, height: size.h }}
             onPointerDown={onPointerDown}
@@ -858,6 +1028,47 @@ export function WhiteboardSurface({
             }}
             onWheel={onWheel}
           />
+
+          {/* The board is held while the agent works, and says so. The
+              atlas it is answering was captured at Ask, so a stroke
+              added now is invisible to it -- and blocking without
+              showing it is worse than not blocking, because the ink
+              simply would not appear.
+
+              The label sits at the bottom edge, next to the controls
+              that started the turn, rather than over the middle: unlike
+              the restoring veil there is real content underneath that
+              the user is waiting to see answered. A sketch turn shows
+              only that it is thinking; a deep turn reports each step,
+              which is the difference between a slow answer and an
+              apparent hang. */}
+          {runtime.isRunning ? (
+            <div className="pointer-events-none absolute inset-0 bg-black/10">
+              <div className="absolute inset-x-0 bottom-2 flex justify-center px-12">
+                <span className="flex max-w-full items-center gap-2 rounded-full border bg-background px-4 py-1.5 text-sm text-muted-foreground shadow-sm">
+                  <Spinner className="size-4 shrink-0" />
+                  <span className="truncate">
+                    {progress ??
+                      (askMode === "deep" ? "Thinking harder…" : "Thinking…")}
+                  </span>
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          {/* The veil covers a blank canvas, not a half-drawn one: the
+              fold is held until the load lands, so there is nothing
+              underneath to show through. It reads as the surface being
+              busy, which is what a loading state is for. Tinted, not
+              blurred -- there is nothing to blur. */}
+          {restoringVisible ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/10">
+              <span className="flex items-center gap-3 rounded-full border bg-background px-6 py-3 text-sm font-medium text-muted-foreground shadow-md">
+                <Spinner className="size-5" />
+                Restoring board…
+              </span>
+            </div>
+          ) : null}
 
           {/* A canvas cannot host an iframe, so artifacts render as
               positioned DOM above it. The canvas carries a frame in
@@ -922,8 +1133,13 @@ export function WhiteboardSurface({
       </div>
 
       <div className="flex items-center gap-2 border-t p-2">
+        {/* Bounded rather than `flex-1`: filling the row pushed the
+            buttons onto the right edge, under the host's floating
+            Copilot button. Everything now packs left and the corner
+            stays clear. `min-w-0` keeps it shrinking on a narrow
+            window instead of forcing the buttons off the end. */}
         <input
-          className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm"
+          className="w-64 min-w-0 shrink rounded border bg-background px-2 py-1 text-sm"
           placeholder="Ask about the board (optional)"
           value={question}
           disabled={busy}

@@ -308,3 +308,67 @@ describe("recognising a board session", () => {
     expect(isBoardSession(undefined)).toBe(false);
   });
 });
+
+
+describe("switching views and back", () => {
+  /**
+   * A workspace whose upload lands a tick later than a read, the way a
+   * real one does. The view switch unmounts the board and remounts it,
+   * so the unmount's save and the remount's load are in flight together.
+   */
+  function racingWorkspace(initial: unknown) {
+    let stored = initial;
+    return {
+      getWorkspaceFile: vi.fn(async () => {
+        if (stored === null) throw new Error("404");
+        return {
+          path: CANVAS_PATH,
+          content: JSON.stringify(stored),
+          size: 1,
+          encoding: "utf-8" as const,
+          truncated: false,
+        };
+      }),
+      uploadWorkspaceFile: vi.fn(async ({ file }: { file: File }) => {
+        stored = JSON.parse(await file.text());
+      }),
+    } as unknown as AgentChatAdapter;
+  }
+
+  it("keeps strokes drawn since the last debounce", async () => {
+    // Draw, then switch away before the 1500ms autosave fires: the only
+    // copy of those strokes is the one the unmount flush is uploading.
+    const adapter = racingWorkspace(null);
+    const drawn = applyCommands(emptyDoc(), [text], 0);
+
+    void saveDoc(adapter, "s1", drawn); // unmount flush, not awaited
+    const reloaded = await loadDoc(adapter, "s1", []); // remount load
+
+    expect(reloaded.objects).toHaveLength(1);
+  });
+
+  it("does not write the stale board back over the good one", async () => {
+    // What makes the loss permanent: the remount's own debounced save
+    // persists whatever the load returned.
+    const adapter = racingWorkspace(null);
+    const drawn = applyCommands(emptyDoc(), [text], 0);
+
+    void saveDoc(adapter, "s1", drawn);
+    const reloaded = await loadDoc(adapter, "s1", []);
+    await saveDoc(adapter, "s1", reloaded);
+
+    expect((await loadDoc(adapter, "s1", [])).objects).toHaveLength(1);
+  });
+
+  it("still folds agent draws that landed while away", async () => {
+    const adapter = racingWorkspace(null);
+    const drawn = applyCommands(emptyDoc(), [text], 0);
+
+    void saveDoc(adapter, "s1", drawn);
+    const reloaded = await loadDoc(adapter, "s1", [
+      drawMessage("while-away", [text]),
+    ]);
+
+    expect(reloaded.objects).toHaveLength(2);
+  });
+});

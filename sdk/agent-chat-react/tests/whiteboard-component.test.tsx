@@ -1,8 +1,12 @@
 import { act, StrictMode, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentWhiteboard } from "../src/components/whiteboard/agent-whiteboard";
+import {
+  AgentWhiteboard,
+  WhiteboardSurface,
+} from "../src/components/whiteboard/agent-whiteboard";
 import { applyCommands, emptyDoc } from "../src/components/whiteboard/doc";
+import { SAVE_DEBOUNCE_MS } from "../src/components/whiteboard/persist";
 import type { AgentChatAdapter } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -860,5 +864,397 @@ describe("AgentWhiteboard", () => {
     );
     expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
     expect(byLabel(el, "Pen")).toHaveProperty("disabled", true);
+  });
+});
+
+describe("returning to the board after an agent reply", () => {
+  const agentDraw = {
+    id: "m1", role: "assistant" as const, content: "",
+    toolCalls: [{
+      id: "call1", toolName: "whiteboard_draw",
+      args: JSON.stringify({ commands: [{
+        tool: "write_text", x: 600, y: 40, text: "4",
+        fontSize: 48, maxWidth: 80,
+      }] }),
+      status: "complete",
+    }],
+  };
+
+  /** A runtime holding one finished agent turn, as on a remount. */
+  function stubRuntime(messages: unknown[]) {
+    return {
+      messages,
+      isRunning: false,
+      send: vi.fn(async () => undefined),
+    } as never;
+  }
+
+  it("does not save the replayed board before the stored one loads", async () => {
+    // The regression, from a real session: switching away and back
+    // remounts from emptyDoc(), the fold effect immediately replays the
+    // agent's objects onto it, and the autosave wrote that ink-less
+    // board over the stored one -- which the load then read back. It
+    // needed an agent reply to reproduce: with nothing to fold the
+    // document stays empty and the autosave already declines to write
+    // an empty one.
+    let release!: (v: unknown) => void;
+    const pending = new Promise((r) => { release = r; });
+    const ink = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 5, y: 5, text: "2 + 2 =", fontSize: 20,
+        maxWidth: 200 },
+    ], 1);
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => {
+        await pending;
+        return {
+          path: "_whiteboard/canvas.json",
+          content: JSON.stringify(ink),
+          size: 1,
+          encoding: "utf-8" as const,
+          truncated: false,
+        };
+      }),
+    });
+
+    await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={stubRuntime([agentDraw])}
+      />,
+    );
+    // Let the fold land and the autosave debounce elapse, with the load
+    // still outstanding.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, SAVE_DEBOUNCE_MS * 2));
+    });
+    expect(adapter.uploadWorkspaceFile).not.toHaveBeenCalled();
+
+    release(null);
+    await act(async () => { await Promise.resolve(); });
+
+    // And once it lands, what is on screen -- and so what any later save
+    // writes -- is the stored board plus the agent's objects.
+    await act(async () => {
+      root!.unmount();
+      root = null;
+    });
+    const calls = (adapter.uploadWorkspaceFile as unknown as {
+      mock: { calls: { file: File }[][] };
+    }).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const written = JSON.parse(await calls[calls.length - 1][0].file.text());
+    expect(written.objects).toHaveLength(2);
+  });
+});
+
+describe("the restoring indicator", () => {
+  function deferredAdapter(doc: unknown) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => {
+        await gate;
+        return {
+          path: "_whiteboard/canvas.json",
+          content: JSON.stringify(doc),
+          size: 1,
+          encoding: "utf-8" as const,
+          truncated: false,
+        };
+      }),
+    });
+    return { adapter, release };
+  }
+
+  const stored = () =>
+    applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 5, y: 5, text: "mine", fontSize: 20,
+        maxWidth: 100 },
+    ], 1);
+
+  it("refuses strokes while the stored board is still loading", async () => {
+    // The point of the indicator: the load replaces the document
+    // wholesale, so a stroke drawn now is discarded without trace.
+    const { adapter } = deferredAdapter(stored());
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    const canvas = el.querySelector<HTMLElement>(
+      '[aria-label="Whiteboard canvas"]',
+    );
+    expect(canvas?.className).toContain("pointer-events-none");
+  });
+
+  it("blocks Ask until the board is restored", async () => {
+    const { adapter, release } = deferredAdapter(stored());
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(true);
+
+    release();
+    await act(async () => { await Promise.resolve(); });
+    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says nothing when the load is quick", async () => {
+    // A warm switch back resolves inside the delay; a spinner flashing
+    // on every toggle would be worse than silence.
+    const { adapter, release } = deferredAdapter(stored());
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    release();
+    await act(async () => { await Promise.resolve(); });
+    expect(el.textContent).not.toContain("Restoring board");
+  });
+
+  it("says so when the load drags", async () => {
+    const { adapter, release } = deferredAdapter(stored());
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+    expect(el.textContent).toContain("Restoring board");
+
+    release();
+    await act(async () => { await Promise.resolve(); });
+    expect(el.textContent).not.toContain("Restoring board");
+  });
+
+  it("does not veil a fresh board that has nothing to load", async () => {
+    // No session means no stored canvas: drawing must work instantly.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId={null} />,
+    );
+    const canvas = el.querySelector<HTMLElement>(
+      '[aria-label="Whiteboard canvas"]',
+    );
+    expect(canvas?.className).not.toContain("pointer-events-none");
+    expect(el.textContent).not.toContain("Restoring board");
+  });
+});
+
+describe("what the board shows while it loads", () => {
+  it("paints nothing until the stored board lands", async () => {
+    // The agent's objects replay out of the message list instantly. Fold
+    // them onto the empty document a remount starts from and the user
+    // watches a board they never had -- the answer with none of their
+    // working -- until the fetch replaces it.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const ink = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 5, y: 5, text: "1 + 2 =", fontSize: 20,
+        maxWidth: 200 },
+    ], 1);
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => {
+        await gate;
+        return {
+          path: "_whiteboard/canvas.json",
+          content: JSON.stringify(ink),
+          size: 1,
+          encoding: "utf-8" as const,
+          truncated: false,
+        };
+      }),
+    });
+
+    sharedCalls.length = 0;
+    await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{
+          messages: [{
+            id: "m1", role: "assistant", content: "",
+            toolCalls: [{
+              id: "call1", toolName: "whiteboard_draw",
+              // Not a bare digit: the grid overlay paints labels 0..15,
+              // and the assertion below must distinguish the agent's
+              // object from the scaffolding drawn around it.
+              args: JSON.stringify({ commands: [{
+                tool: "write_text", x: 600, y: 40, text: "ANSWER",
+                fontSize: 48, maxWidth: 200,
+              }] }),
+              status: "complete",
+            }],
+          }],
+          isRunning: false,
+          send: vi.fn(async () => undefined),
+        } as never}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    const painted = () =>
+      sharedCalls.filter((c) => c[0] === "fillText").map((c) => c[1]);
+    expect(painted()).not.toContain("ANSWER");
+
+    release();
+    await act(async () => { await Promise.resolve(); });
+
+    // And once it lands, both are on the board together.
+    expect(painted()).toContain("ANSWER");
+    expect(painted()).toContain("1 + 2 =");
+  });
+});
+
+describe("panning with the middle button", () => {
+  async function board() {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <AgentWhiteboard adapter={adapter} sessionId={null} />,
+    );
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    return { el, canvas };
+  }
+
+  const drag = (canvas: HTMLCanvasElement, button: number) =>
+    act(async () => {
+      canvas.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          clientX: 400, clientY: 300, button, bubbles: true, cancelable: true,
+        }),
+      );
+      canvas.dispatchEvent(
+        new PointerEvent("pointermove", {
+          clientX: 460, clientY: 340, bubbles: true,
+        }),
+      );
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+
+  it("moves the board whatever tool is in hand", async () => {
+    // The pen is the default tool: without this, panning means reaching
+    // for the pan tool and back again mid-drawing.
+    const { canvas } = await board();
+    const before = lastViewTranslation();
+    await drag(canvas, 1);
+    const after = lastViewTranslation();
+
+    expect(after).not.toEqual(before);
+    // Dragged right and down, so the view origin moves left and up.
+    expect(after!.x).toBeGreaterThan(before!.x);
+    expect(after!.y).toBeGreaterThan(before!.y);
+  });
+
+  it("draws no ink while doing it", async () => {
+    const { el, canvas } = await board();
+    await drag(canvas, 1);
+    // A stroke would be an undoable edit; panning is not one.
+    expect(byLabel(el, "Undo")).toHaveProperty("disabled", true);
+  });
+
+  it("suppresses the browser's middle-click autoscroll", async () => {
+    const { canvas } = await board();
+    const down = new PointerEvent("pointerdown", {
+      clientX: 400, clientY: 300, button: 1, bubbles: true, cancelable: true,
+    });
+    await act(async () => { canvas.dispatchEvent(down); });
+    expect(down.defaultPrevented).toBe(true);
+  });
+
+  it("leaves the left button drawing", async () => {
+    const { el, canvas } = await board();
+    await drag(canvas, 0);
+    expect(byLabel(el, "Undo")).toHaveProperty("disabled", false);
+  });
+});
+
+describe("progress while the agent works", () => {
+  const runtimeWith = (over: Record<string, unknown>) =>
+    ({
+      messages: [], isRunning: false, send: vi.fn(async () => undefined),
+      ...over,
+    }) as never;
+
+  const summaryMessage = (summary: string) => ({
+    id: "m1", role: "assistant" as const, content: "",
+    iterationSummary: {
+      iterationIndex: 0, summary, toolCallIds: [],
+      startedAt: "", endedAt: "",
+    },
+  });
+
+  it("says nothing when idle", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({})} />,
+    );
+    expect(el.textContent).not.toContain("Thinking");
+  });
+
+  it("shows it is working on an ordinary Ask", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({ isRunning: true })} />,
+    );
+    expect(el.textContent).toContain("Thinking…");
+  });
+
+  it("reports the agent's own step once it has one", async () => {
+    // A deep turn is many round-trips; without its steps a minute of
+    // real work is indistinguishable from a hang.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({
+          isRunning: true,
+          messages: [summaryMessage("Searching for the integral rule")],
+        })} />,
+    );
+    expect(el.textContent).toContain("Searching for the integral rule");
+  });
+
+  it("prefers the newest step", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({
+          isRunning: true,
+          messages: [summaryMessage("first"), summaryMessage("second")],
+        })} />,
+    );
+    expect(el.textContent).toContain("second");
+    expect(el.textContent).not.toContain("first");
+  });
+
+  it("holds the board while the agent works", async () => {
+    // Ink added now is invisible to the agent: the atlas and the
+    // occupied cells it is answering were captured at Ask.
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({ isRunning: true })} />,
+    );
+    // The overlay never takes the pointer itself...
+    const overlay = Array.from(el.querySelectorAll("div")).find((d) =>
+      d.className.includes("pointer-events-none") &&
+      d.textContent?.includes("Thinking…"),
+    );
+    expect(overlay).toBeTruthy();
+
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    expect(canvas.className).toContain("pointer-events-none");
+  });
+
+  it("hands the board back once the turn ends", async () => {
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface adapter={adapter} sessionId="s1"
+        runtime={runtimeWith({})} />,
+    );
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    expect(canvas.className).not.toContain("pointer-events-none");
   });
 });

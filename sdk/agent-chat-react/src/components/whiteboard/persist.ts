@@ -27,6 +27,20 @@ export const CANVAS_PATH = `${CANVAS_DIR}/${CANVAS_FILE}`;
 /** Debounce for autosave. Long enough to coalesce a burst of strokes. */
 export const SAVE_DEBOUNCE_MS = 1500;
 
+/**
+ * Saves that have not landed yet, per session.
+ *
+ * Switching the view unmounts the board and remounts it, so the unmount's
+ * save and the remount's load are in flight together — and the load wins,
+ * because a read beats an upload. It returns the board from before the
+ * strokes, and the remount's own debounce then writes that back, which is
+ * what makes the loss permanent.
+ *
+ * One writer means the file is still the document; it just has to be
+ * finished being written before it is read.
+ */
+const inFlightSaves = new Map<string, Promise<void>>();
+
 function decode(content: string, encoding: string): string {
   if (encoding !== "base64") return content;
   try {
@@ -49,6 +63,9 @@ export async function loadDoc(
   sessionId: string,
   messages: AgentChatMessage[],
 ): Promise<WbDoc> {
+  // Never rejects: saveDoc swallows its own failures.
+  await inFlightSaves.get(sessionId);
+
   let doc = emptyDoc();
   try {
     const file = await adapter.getWorkspaceFile({
@@ -88,22 +105,36 @@ export async function loadDoc(
  * carries the agent's objects, and surfacing an error here would put a
  * network hiccup in front of someone who is drawing.
  */
-export async function saveDoc(
+export function saveDoc(
   adapter: AgentChatAdapter,
   sessionId: string,
   doc: WbDoc,
 ): Promise<void> {
-  try {
-    const body = JSON.stringify(doc);
-    const file = new File([body], CANVAS_FILE, { type: "application/json" });
-    await adapter.uploadWorkspaceFile({
-      sessionId,
-      file,
-      directory: CANVAS_DIR,
-    });
-  } catch {
-    // Intentionally silent — see the docstring.
-  }
+  const done = (async () => {
+    try {
+      const body = JSON.stringify(doc);
+      const file = new File([body], CANVAS_FILE, {
+        type: "application/json",
+      });
+      await adapter.uploadWorkspaceFile({
+        sessionId,
+        file,
+        directory: CANVAS_DIR,
+      });
+    } catch {
+      // Intentionally silent — see the docstring.
+    }
+  })();
+  // Registered synchronously: the unmount flush and the remount load run
+  // in the same React commit, so a save that only published itself after
+  // its first await would not be visible to the load that has to wait
+  // for it.
+  inFlightSaves.set(sessionId, done);
+  return done.then(() => {
+    if (inFlightSaves.get(sessionId) === done) {
+      inFlightSaves.delete(sessionId);
+    }
+  });
 }
 
 /**
