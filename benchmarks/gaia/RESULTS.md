@@ -10,10 +10,24 @@ Strict is the official GAIA scorer. Lenient additionally accepts a correct
 answer in the wrong format; the gap between them is a prompt problem, not a
 capability problem.
 
-| Date | Run | Model served | Size | Strict | Score |
-| --- | --- | --- | --- | --- | --- |
-| 2026-07-26 | `dev-001` | claude-sonnet-5 | 110 | 86 | **78.2%** |
-| 2026-08-14 | `dev-005` | claude-sonnet-5 (+ qwen3.7-max) | 110 | 74 | **67.3%** |
+| Date | Run | Where | Model served | Size | Strict | Score |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-26 | `dev-001` (local) | local harness | claude-sonnet-5 | 110 | 86 | **78.2%** |
+| 2026-08-14 | `dev-005` | local harness | claude-sonnet-5 (+ qwen3.7-max) | 110 | 74 | **67.3%** |
+| 2026-08-27 | `dev-001` (prod) | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 62 | **56.4%** |
+
+> **Two different runs are both called `dev-001`.** Run ids auto-increment
+> from the contents of `runs/`, so a fresh `runs/` restarts the count. The
+> 2026-07-26 row is the local-harness run whose traces are in this repo; the
+> 2026-08-27 row is the production run, whose traces were only ever on the
+> machine that ran it and are not here. Disambiguated above rather than
+> renumbered, because the ids are what each run's own report.md says.
+
+The prod run scored L1 21/33, L2 36/60, L3 5/17, with zero infra errors and
+flags: 14 `no_final_answer`, 11 `no_tool_use`, 4 `empty_llm_response`,
+2 `tool_error`. It is not directly comparable to the local rows — different
+platform, different agent config, different model tier — but the failure
+shape is the same one the local runs show: turns ending without acting.
 
 ### Smaller runs
 
