@@ -444,10 +444,20 @@ def test_tells_the_model_to_trust_readings_and_transcribe_the_rest():
 
 def test_points_the_model_at_the_close_up_for_reading():
     note = _whiteboard_note_from_metadata(_meta(
-        crops=[{"mark": "A2", "imageIndex": 1, "scale": 1.83}],
+        crops=[{"marks": ["A2", "B1"], "imageIndex": 1, "scale": 1.83}],
     ))
-    assert "image 2 is A2 close up at 1.83x" in note
+    assert "image 2 is A2, B1 close up at 1.83x" in note
     assert "not from the overview" in note
+    # A close-up holding the agent's own object shows ink written
+    # around it -- `( ln|x|+C )²` -- and must be read as one expression.
+    assert "read the whole thing as one expression" in note
+
+
+def test_still_reads_the_older_single_mark_crop_shape():
+    note = _whiteboard_note_from_metadata(_meta(
+        crops=[{"mark": "A2", "imageIndex": 1, "scale": 2}],
+    ))
+    assert "image 2 is A2 close up at 2x" in note
 
 
 def test_omits_the_close_up_line_without_crops():

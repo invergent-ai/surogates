@@ -623,41 +623,112 @@ export function paintMarks(
 /** Target height of the handwriting in a close-up, in pixels. */
 const CROP_INK_PX = 110;
 /** Longest side a close-up may have. */
-const CROP_MAX_PX = 1024;
+const CROP_MAX_PX = 1536;
 /** Close-ups per turn. Readings persist, so it is normally one. */
 export const MAX_CROPS = 2;
 
+/** One close-up: the marks it shows and the board rect it covers. */
+export interface CropRegion {
+  ids: string[];
+  rect: Rect;
+}
+
 export interface InkCrop {
-  mark: string;
+  ids: string[];
   canvas: HTMLCanvasElement;
   scale: number;
 }
 
+function unionRect(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    w: Math.max(a.x + a.w, b.x + b.w) - x,
+    h: Math.max(a.y + a.h, b.y + b.h) - y,
+  };
+}
+
 /**
- * A close-up of one ink mark, rendered large enough to read.
+ * What to show close up this turn: the new, unread ink -- together with
+ * whatever it was written on.
+ *
+ * A crop of the new ink alone is the wrong picture when the ink is an
+ * operation on something already there. A user wrapping the agent's
+ * answer in `( )²` produces a new mark holding just `)²`, which read
+ * alone is a `?`; the meaning is only visible with the answer inside
+ * the brackets. So a fresh mark pulls in the agent objects it touches
+ * and any other fresh marks near it, and the region is cropped whole.
+ */
+export function cropRegions(marks: BoardMark[], unit: number): CropRegion[] {
+  const fresh = marks.filter(
+    (m) => m.kind === "ink" && m.rect && m.fresh && !m.reading,
+  );
+  if (fresh.length === 0) return [];
+  const touched = marks.filter((m) => m.kind === "agent" && m.rect && m.touched);
+  const reach = Math.max(unit, 8);
+
+  let regions: CropRegion[] = fresh.map((m) => ({
+    ids: [m.id],
+    rect: m.rect as Rect,
+  }));
+  for (const agent of touched) {
+    const near = regions.find((r) => overlaps(grow(r.rect, reach), agent.rect as Rect));
+    if (near) {
+      near.ids.push(agent.id);
+      near.rect = unionRect(near.rect, agent.rect as Rect);
+    }
+  }
+  // Merge regions that now overlap each other, until none do.
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < regions.length && !merged; i++) {
+      for (let j = i + 1; j < regions.length; j++) {
+        if (overlaps(grow(regions[i].rect, reach), regions[j].rect)) {
+          regions[i] = {
+            ids: [...regions[i].ids, ...regions[j].ids],
+            rect: unionRect(regions[i].rect, regions[j].rect),
+          };
+          regions.splice(j, 1);
+          merged = true;
+          break;
+        }
+      }
+    }
+  }
+  regions = regions.slice(0, MAX_CROPS);
+  for (const r of regions) {
+    r.ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+  return regions;
+}
+
+/**
+ * Render one region large enough to read.
  *
  * Every misread so far came from glyphs a few dozen pixels tall on the
  * overview: `1)` and `√(` are hard to tell apart at that size. The
  * overview still carries context and placement; this carries
  * legibility. Scaled so the handwriting is about CROP_INK_PX tall,
- * never below 1:1, and framed with a margin of one line so the
- * surroundings that disambiguate a symbol are in shot too.
+ * never below 1:1 unless the region is too wide for the cap, and
+ * framed with a margin of one line.
  */
-export function buildInkCrop(
+export function buildRegionCrop(
   doc: WbDoc,
-  mark: BoardMark,
+  region: CropRegion,
   services: RenderServices,
   unit: number,
 ): InkCrop | null {
-  if (!mark.rect) return null;
   const margin = Math.max(unit * 0.6, 8);
-  const region = grow(mark.rect, margin);
+  const area = grow(region.rect, margin);
   let scale = Math.max(1, CROP_INK_PX / Math.max(unit, 1));
-  scale = Math.min(scale, CROP_MAX_PX / region.w, CROP_MAX_PX / region.h);
+  scale = Math.min(scale, CROP_MAX_PX / area.w, CROP_MAX_PX / area.h);
   scale = Math.max(scale, 0.25);
   const size = {
-    w: Math.max(1, Math.ceil(region.w * scale)),
-    h: Math.max(1, Math.ceil(region.h * scale)),
+    w: Math.max(1, Math.ceil(area.w * scale)),
+    h: Math.max(1, Math.ceil(area.h * scale)),
   };
   const canvas = services.createCanvas(size.w, size.h);
   const ctx = canvas.getContext("2d");
@@ -668,18 +739,11 @@ export function buildInkCrop(
   renderDoc(
     ctx,
     { ...doc, objects: doc.objects.map((o) => ({ ...o, selected: false })) },
-    { x: region.x, y: region.y, zoom: scale },
+    { x: area.x, y: area.y, zoom: scale },
     size,
     services,
   );
-  return { mark: mark.id, canvas, scale: Math.round(scale * 100) / 100 };
-}
-
-/** The marks worth a close-up this turn: new ink nobody has read yet. */
-export function cropCandidates(marks: BoardMark[]): BoardMark[] {
-  return marks
-    .filter((m) => m.kind === "ink" && m.rect && m.fresh && !m.reading)
-    .slice(0, MAX_CROPS);
+  return { ids: region.ids, canvas, scale: Math.round(scale * 100) / 100 };
 }
 
 /**
@@ -861,8 +925,8 @@ export interface AtlasExtras {
   agentObjects?: AgentObjectReport[];
   /** See {@link boardMarks}. */
   marks?: BoardMark[];
-  /** Close-ups attached after the overview: which mark, which image. */
-  crops?: { mark: string; imageIndex: number; scale: number }[];
+  /** Close-ups attached after the overview: which marks, which image. */
+  crops?: { marks: string[]; imageIndex: number; scale: number }[];
 }
 
 /**

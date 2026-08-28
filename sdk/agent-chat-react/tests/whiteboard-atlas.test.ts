@@ -10,9 +10,11 @@ import {
   MAX_MARKS,
   OCCUPANCY_GRID,
   agentObjectReport,
+  type BoardMark,
+  type Rect,
   boardMarks,
-  buildInkCrop,
-  cropCandidates,
+  buildRegionCrop,
+  cropRegions,
   inkClusters,
   contentBeyond,
   contentBounds,
@@ -849,53 +851,91 @@ describe("close-ups of new ink", () => {
       },
     };
   };
+  const ink = (id: string, rect: Rect, over: Partial<BoardMark> = {}): BoardMark =>
+    ({ id, kind: "ink", rect, fresh: true, ...over });
 
-  it("renders the mark large enough to read", () => {
+  it("renders the region large enough to read", () => {
     // 60-unit handwriting arrives ~110px tall instead of the few dozen
     // pixels it gets on the overview.
     const rec = drawing();
-    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 300, h: 60 }, fresh: true };
-    const crop = buildInkCrop(board(stroke("s", 0, 0, 300, 60)), mark, rec.services, 60);
+    const crop = buildRegionCrop(
+      board(stroke("s", 0, 0, 300, 60)),
+      { ids: ["A1"], rect: { x: 0, y: 0, w: 300, h: 60 } },
+      rec.services,
+      60,
+    );
     expect(crop?.scale).toBeGreaterThan(1.5);
     expect(rec.size()?.h).toBeGreaterThan(100);
   });
 
-  it("never shrinks below 1:1 for large handwriting", () => {
+  it("never shrinks below 1:1 for large handwriting that fits", () => {
     const rec = drawing();
-    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 600, h: 250 }, fresh: true };
-    const crop = buildInkCrop(board(), mark, rec.services, 250);
+    const crop = buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 600, h: 250 } }, rec.services, 250,
+    );
     expect(crop?.scale).toBeGreaterThanOrEqual(1);
   });
 
-  it("caps the image size for a very wide mark", () => {
+  it("caps the image size for a very wide region", () => {
     const rec = drawing();
-    const mark = { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 4000, h: 60 }, fresh: true };
-    buildInkCrop(board(), mark, rec.services, 60);
-    expect(rec.size()?.w).toBeLessThanOrEqual(1024);
+    buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 4000, h: 60 } }, rec.services, 60,
+    );
+    expect(rec.size()?.w).toBeLessThanOrEqual(1536);
   });
 
-  it("only crops new ink that has no reading yet", () => {
-    const marks = [
-      { id: "A1", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true, reading: "known" },
-      { id: "A2", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true },
-      { id: "A3", kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 } },
-      { id: "B1", kind: "agent" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true },
+  it("crops new unread ink together with the agent object it touches", () => {
+    // `( ln|x|+C )²`: the `)²` alone reads as a `?`; with the answer
+    // inside the brackets it reads as squaring it.
+    const marks: BoardMark[] = [
+      ink("A2", { x: 896, y: 185, w: 222, h: 217 }),
+      { id: "B1", kind: "agent", rect: { x: 617, y: 274, w: 289, h: 70 },
+        origin: "c1", label: "ln|x| + C", touched: true },
     ];
-    expect(cropCandidates(marks).map((m) => m.id)).toEqual(["A2"]);
+    const [region] = cropRegions(marks, 69);
+    expect(region.ids).toEqual(["A2", "B1"]);
+    expect(region.rect.x).toBeLessThanOrEqual(617);
+    expect(region.rect.x + region.rect.w).toBeGreaterThanOrEqual(896 + 222);
+  });
+
+  it("keeps far-apart new marks as separate close-ups", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 100, h: 50 }),
+      ink("A2", { x: 5000, y: 5000, w: 100, h: 50 }),
+    ];
+    expect(cropRegions(marks, 40)).toHaveLength(2);
+  });
+
+  it("merges new marks that sit close together", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 100, h: 50 }),
+      ink("A2", { x: 120, y: 0, w: 100, h: 50 }),
+    ];
+    const regions = cropRegions(marks, 40);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].ids).toEqual(["A1", "A2"]);
+  });
+
+  it("skips ink that already has a reading, and old ink", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 1, h: 1 }, { reading: "known" }),
+      ink("A2", { x: 0, y: 0, w: 1, h: 1 }, { fresh: false }),
+      ink("A3", { x: 9000, y: 9000, w: 1, h: 1 }),
+    ];
+    expect(cropRegions(marks, 40).map((r) => r.ids)).toEqual([["A3"]]);
   });
 
   it("is bounded per turn", () => {
-    const marks = Array.from({ length: 5 }, (_, i) => ({
-      id: `A${i + 1}`, kind: "ink" as const, rect: { x: 0, y: 0, w: 1, h: 1 }, fresh: true,
-    }));
-    expect(cropCandidates(marks)).toHaveLength(MAX_CROPS);
+    const marks = Array.from({ length: 5 }, (_, i) =>
+      ink(`A${i + 1}`, { x: i * 5000, y: 0, w: 1, h: 1 }));
+    expect(cropRegions(marks, 40)).toHaveLength(MAX_CROPS);
   });
 
   it("rides on the turn metadata with its image index", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
     const meta = atlasMetadata(plan, null, [], {
-      crops: [{ mark: "A2", imageIndex: 1, scale: 1.83 }],
+      crops: [{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }],
     });
-    expect(meta.crops).toEqual([{ mark: "A2", imageIndex: 1, scale: 1.83 }]);
+    expect(meta.crops).toEqual([{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }]);
   });
 });

@@ -366,6 +366,24 @@ export function foldToolCalls(
     }
     for (const call of message.toolCalls ?? []) {
       if (call.toolName !== DRAW_TOOL) continue;
+      // A call the server rejected must not stay on the board. The call
+      // streams before its result, so it may already have been folded
+      // by the time the error lands; every fold therefore re-checks and
+      // removes what a rejected call drew. Without this each validator
+      // retry double-drew: the rejected version and the corrected one.
+      if (call.result?.startsWith("Error:")) {
+        if (!seen.has(call.id)) {
+          seen.add(call.id);
+          newlyFolded.push(call.id);
+        }
+        if (next.objects.some((o) => o.origin === call.id)) {
+          next = {
+            ...next,
+            objects: next.objects.filter((o) => o.origin !== call.id),
+          };
+        }
+        continue;
+      }
       if (seen.has(call.id)) continue;
       seen.add(call.id);
       // Recorded even when the payload turns out to be unusable, or the

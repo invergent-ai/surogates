@@ -21,8 +21,8 @@ import {
   atlasMetadata,
   boardMarks,
   buildAtlas,
-  buildInkCrop,
-  cropCandidates,
+  buildRegionCrop,
+  cropRegions,
   contentBeyond,
   contentBounds,
   inkHeight,
@@ -232,6 +232,12 @@ export function WhiteboardSurface({
   // around one of the agent's answers is told apart from ink that was
   // always there.
   const seenAtLastAsk = useRef<Set<string>>(new Set());
+  // Whether the current selection was made by the user. Objects the
+  // agent draws arrive selected so they can be dragged straight away,
+  // and that selection used to leak into the next Ask as "the user
+  // lassoed this" -- so the model read its own answer as the user's
+  // question, twice.
+  const userSelected = useRef(false);
 
   const repaintRef = useRef<() => void>(() => undefined);
   const formulaCache = useMemo(
@@ -383,7 +389,11 @@ export function WhiteboardSurface({
   // nothing is skipped by waiting; the load simply arrives complete.
   useEffect(() => {
     if (!canvasReady) return;
-    setDoc((d) => foldToolCalls(d, runtime.messages, resolveDraw));
+    setDoc((d) => {
+      const next = foldToolCalls(d, runtime.messages, resolveDraw);
+      if (next.folded.length !== d.folded.length) userSelected.current = false;
+      return next;
+    });
   }, [runtime.messages, canvasReady, resolveDraw]);
 
   // A null session id is what `useDebouncedSave` already treats as
@@ -678,6 +688,19 @@ export function WhiteboardSurface({
         return;
       }
 
+      // Starting to draw or erase dismisses any selection: the user has
+      // moved on from what was selected, and reporting it with the next
+      // Ask would misdescribe their attention.
+      if ((tool === "pen" || tool === "eraser") && doc.objects.some((o) => o.selected)) {
+        userSelected.current = false;
+        setDoc((prev) => ({
+          ...prev,
+          objects: prev.objects.map((o) =>
+            o.selected ? { ...o, selected: false } : o,
+          ),
+        }));
+      }
+
       if (tool === "text") {
         // No pointer capture and no default action. The browser focuses
         // the canvas on the click that follows this pointerdown, which
@@ -718,11 +741,15 @@ export function WhiteboardSurface({
         const hit = hitTest(doc, logical, services);
         if (hit?.selected) {
           // Already selected: this is the start of a move, not a
-          // re-select, so leave the selection alone.
+          // re-select, so leave the selection alone -- but the user has
+          // now pointed at it, which makes the selection theirs even if
+          // it arrived selected from the agent's draw.
+          userSelected.current = true;
           gestureBaseline.current = doc;
           dragFrom.current = logical;
           return;
         }
+        userSelected.current = hit !== null;
         commit((prev) => ({
           ...prev,
           objects: prev.objects.map((o) => ({
@@ -837,6 +864,7 @@ export function WhiteboardSurface({
         rect.w < 2 && rect.h < 2
           ? []
           : objectsInRect(doc, rect, services);
+      userSelected.current = ids.length > 0;
       commit((prev) => ({
         ...prev,
         objects: prev.objects.map((o) => ({
@@ -973,8 +1001,8 @@ export function WhiteboardSurface({
       // The overview is for context and placement; these are for
       // reading -- the misreads all came from glyphs a few dozen
       // pixels tall.
-      const crops = cropCandidates(marks)
-        .map((m) => buildInkCrop(doc, m, services, unit ?? 40))
+      const crops = cropRegions(marks, unit ?? 40)
+        .map((r) => buildRegionCrop(doc, r, services, unit ?? 40))
         .filter((c): c is NonNullable<typeof c> => c !== null);
       const extras: AtlasExtras = {
         mode,
@@ -983,7 +1011,7 @@ export function WhiteboardSurface({
         beyond: contentBeyond(doc, plan.sourceRect, services),
         marks,
         crops: crops.map((c, i) => ({
-          mark: c.mark,
+          marks: c.ids,
           imageIndex: i + 1,
           scale: c.scale,
         })),
@@ -992,7 +1020,9 @@ export function WhiteboardSurface({
       if (typedRef.current.length > 0) {
         extras.typedInput = typedRef.current.join("\n\n");
       }
-      const selected = doc.objects.find((o) => o.selected);
+      const selected = userSelected.current
+        ? doc.objects.find((o) => o.selected)
+        : undefined;
       if (selected) {
         const b = objectBounds(selected, services);
         if (b) extras.selection = b;

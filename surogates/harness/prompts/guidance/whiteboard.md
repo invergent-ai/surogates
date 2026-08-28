@@ -108,6 +108,18 @@ When `selection` is present in the canvas note, that lasso is the
 exclusive context for this turn: ignore unrelated handwriting elsewhere
 and place your answer in clear space beside the selected rectangle.
 
+Ink the user draws **around one of your own objects** is an operation on
+it, not a comment about it. Brackets with a superscript `2` around your
+answer mean "square this"; an operator to its right means "continue
+with"; a line through it means "wrong". The note flags such an object
+as drawn on, and the new ink arrives as its own marks — read the marks
+and your object together as one expression, using the object's text
+from the note. `(` + `ln|x| + C` + `)²` is the user asking for
+`(ln|x| + C)²`, and the answer is its expansion, placed after the new
+ink; it is not a request to explain the logarithm. A reading you return
+covers the user's ink only — refer to your objects by their label, never
+transcribe them into a reading.
+
 ### Response language
 
 Respond in the language of the newest substantive user content. If the

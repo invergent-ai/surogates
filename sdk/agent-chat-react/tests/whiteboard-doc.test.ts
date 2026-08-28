@@ -425,3 +425,37 @@ describe("readings persist with the ink they describe", () => {
     expect(doc.objects.some((o) => o.kind === "formula")).toBe(true);
   });
 });
+
+describe("a draw the server rejected", () => {
+  const call = (result?: string) =>
+    ({
+      ...message("r1", "whiteboard_draw", { commands: [text] }),
+      toolCalls: [{
+        id: "r1", toolName: "whiteboard_draw",
+        args: JSON.stringify({ commands: [text] }), status: "complete",
+        ...(result ? { result } : {}),
+      }],
+    }) as AgentChatMessage;
+
+  it("is not drawn", () => {
+    // Every validator retry used to double-draw: the rejected version
+    // and the corrected one.
+    const doc = foldToolCalls(emptyDoc(), [call("Error: command[0] wraps")]);
+    expect(doc.objects).toHaveLength(0);
+    expect(doc.folded).toContain("r1");
+  });
+
+  it("is removed again if it was folded before its result arrived", () => {
+    // The call streams ahead of its result, so the first fold sees no
+    // result and draws; the next fold sees the error and takes it back.
+    const drawn = foldToolCalls(emptyDoc(), [call()]);
+    expect(drawn.objects).toHaveLength(1);
+    const taken = foldToolCalls(drawn, [call("Error: nope")]);
+    expect(taken.objects).toHaveLength(0);
+  });
+
+  it("leaves an accepted call alone", () => {
+    const doc = foldToolCalls(emptyDoc(), [call("Drew 1 object on the canvas")]);
+    expect(doc.objects).toHaveLength(1);
+  });
+});

@@ -211,18 +211,26 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
         for entry in crops:
             if not isinstance(entry, dict):
                 continue
-            mark, index = entry.get("mark"), entry.get("imageIndex")
-            if not (isinstance(mark, str) and mark and _is_num(index)):
+            index = entry.get("imageIndex")
+            names = entry.get("marks")
+            if not isinstance(names, list):
+                names = [entry.get("mark")]
+            names = [n for n in names if isinstance(n, str) and n]
+            if not (names and _is_num(index)):
                 continue
             scale = entry.get("scale")
             zoom = f" at {scale}x" if _is_num(scale) else ""
-            parts.append(f"image {int(index) + 1} is {mark} close up{zoom}")
+            parts.append(
+                f"image {int(index) + 1} is {', '.join(names)} close up{zoom}"
+            )
         if parts:
             lines.append(
-                f"After the overview, {'; '.join(parts)}. Read that "
-                f"mark's handwriting from its close-up, not from the "
-                f"overview: the overview is for where things are, the "
-                f"close-up is for what they say."
+                f"After the overview, {'; '.join(parts)}. Read the "
+                f"handwriting from the close-up, not from the overview: "
+                f"the overview is for where things are, the close-up is "
+                f"for what they say. A close-up that includes one of your "
+                f"own objects shows new ink written around it -- read the "
+                f"whole thing as one expression."
             )
 
     # Labelled marks: the same ids drawn on the image, listed here and
