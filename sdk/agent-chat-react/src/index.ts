@@ -14,6 +14,7 @@ export {
   useAgentChatAdapterContext,
 } from "./adapter-context";
 export {
+  persistChatViewMode,
   useAgentChatRuntime,
   useChatViewMode,
 } from "./runtime/use-agent-chat-runtime";

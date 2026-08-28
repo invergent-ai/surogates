@@ -1,7 +1,8 @@
-import { act, type ReactElement } from "react";
+import { act, StrictMode, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentWhiteboard } from "../src/components/whiteboard/agent-whiteboard";
+import { applyCommands, emptyDoc } from "../src/components/whiteboard/doc";
 import type { AgentChatAdapter } from "../src/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -224,27 +225,6 @@ describe("AgentWhiteboard", () => {
       metadata?: { whiteboard?: { mode?: string } };
     };
     expect(payload.metadata?.whiteboard?.mode).toBe("deep");
-  });
-
-  it("keeps the transcript collapsed by default", async () => {
-    const { adapter } = makeAdapter();
-    const el = await render(
-      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
-    );
-    expect(byLabel(el, "Toggle transcript")?.getAttribute("aria-expanded"))
-      .toBe("false");
-  });
-
-  it("opens the transcript on click", async () => {
-    const { adapter } = makeAdapter();
-    const el = await render(
-      <AgentWhiteboard adapter={adapter} sessionId="s1" />,
-    );
-    await act(async () => {
-      byLabel(el, "Toggle transcript")?.click();
-    });
-    expect(byLabel(el, "Toggle transcript")?.getAttribute("aria-expanded"))
-      .toBe("true");
   });
 
   it("survives a missing canvas document", async () => {
@@ -702,6 +682,57 @@ describe("AgentWhiteboard", () => {
       await Promise.resolve();
     });
     expect(onSessionChange).toHaveBeenCalledWith("board");
+  });
+
+  it("loads the canvas under StrictMode", async () => {
+    // StrictMode runs every effect twice: mount, clean up, mount again.
+    // The loader used to claim the session id up front, so the first
+    // run's fetch was cancelled and the second saw `previous === next`
+    // and skipped loading altogether -- on every cold mount, which is
+    // every switch away from the board and back. The board then held
+    // nothing but the agent's replayed objects.
+    const saved = applyCommands(emptyDoc(), [
+      { tool: "write_text", x: 5, y: 5, text: "mine", fontSize: 20,
+        maxWidth: 100 },
+    ], 1);
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => ({
+        path: "_whiteboard/canvas.json",
+        content: JSON.stringify(saved),
+        size: 1,
+        encoding: "utf-8" as const,
+        truncated: false,
+      })),
+    });
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    await act(async () => {
+      root!.render(
+        <StrictMode>
+          <AgentWhiteboard adapter={adapter} sessionId="s1" />
+        </StrictMode>,
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(adapter.getWorkspaceFile).toHaveBeenCalled();
+
+    // The fetch must have been *applied*, not merely issued -- the
+    // cancelled run reached the server too. Unmounting flushes the live
+    // document, so what it writes back is what was on screen.
+    await act(async () => {
+      root!.unmount();
+      root = null;
+    });
+    const upload = (adapter.uploadWorkspaceFile as unknown as {
+      mock: { calls: { file: File }[][] };
+    }).mock.calls.at(-1)![0].file;
+    const written = JSON.parse(await upload.text()) as {
+      objects: { text?: string }[];
+    };
+    expect(written.objects.some((o) => o.text === "mine")).toBe(true);
   });
 
   it("loads the canvas of a board it resumed", async () => {

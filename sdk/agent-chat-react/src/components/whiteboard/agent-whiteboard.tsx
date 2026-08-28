@@ -160,7 +160,6 @@ export function WhiteboardSurface({
   const [marquee, setMarquee] = useState<
     { from: { x: number; y: number }; to: { x: number; y: number } } | null
   >(null);
-  const [showTranscript, setShowTranscript] = useState(false);
   // Set by "New board" so the resume effect does not immediately pull
   // the user back into the board they just left.
   const [wantFresh, setWantFresh] = useState(false);
@@ -249,9 +248,16 @@ export function WhiteboardSurface({
     };
   }, [adapter, agentId, sessionId, wantFresh, onSessionChange]);
 
-  // The session this board is currently showing. Compared against the
+  // The session whose canvas is actually on screen. Compared against the
   // incoming prop so adopting a just-created session is distinguishable
   // from switching to a different one.
+  //
+  // Claimed only once a load commits, never when one is merely started.
+  // StrictMode runs every effect twice — mount, clean up, mount again —
+  // so a run that claims the session up front and is then cancelled
+  // leaves the second run looking at `previous === next`, skipping the
+  // load entirely and showing a board holding nothing but the agent's
+  // replayed objects.
   const loadedSession = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
@@ -259,13 +265,13 @@ export function WhiteboardSurface({
     // clearing it, every later return to the board starts blank.
     if (sessionId && wantFresh) setWantFresh(false);
     const previous = loadedSession.current;
-    loadedSession.current = sessionId;
 
     if (
       !shouldReloadCanvas(previous, sessionId, {
         resumed: resumedSession.current === sessionId,
       })
     ) {
+      loadedSession.current = sessionId;
       // Clearing only on a real change: `null -> id` is this board
       // adopting the session its own first Ask created, and everything
       // drawn before that question is still the live document.
@@ -276,7 +282,9 @@ export function WhiteboardSurface({
     let cancelled = false;
     void loadDoc(adapter, sessionId as string, runtime.messages).then(
       (loaded) => {
-        if (!cancelled) setDoc(loaded);
+        if (cancelled) return;
+        loadedSession.current = sessionId;
+        setDoc(loaded);
       },
     );
     return () => {
@@ -292,6 +300,15 @@ export function WhiteboardSurface({
   }, [runtime.messages]);
 
   useDebouncedSave(adapter, sessionId, doc);
+
+  // The transcript views are only worth offering once there is a
+  // transcript. Before the agent's first answer, switching to Simple or
+  // Advanced opens an empty thread -- or, on a board that has not been
+  // asked anything yet, no session at all.
+  const hasAnswer = useMemo(
+    () => runtime.messages.some((m) => m.role === "assistant"),
+    [runtime.messages],
+  );
 
   // ------------------------------------------------------------------
   // History
@@ -951,7 +968,7 @@ export function WhiteboardSurface({
             New board
           </Button>
         ) : null}
-        {viewMode && onViewModeChange ? (
+        {viewMode && onViewModeChange && hasAnswer ? (
           <div className="flex items-center rounded-full border p-0.5">
             {(["simple", "expert", "whiteboard"] as const).map((mode) => (
               <button
@@ -972,29 +989,7 @@ export function WhiteboardSurface({
             ))}
           </div>
         ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          aria-label="Toggle transcript"
-          aria-expanded={showTranscript}
-          onClick={() => setShowTranscript((v) => !v)}
-        >
-          Transcript
-        </Button>
       </div>
-
-      {showTranscript && (
-        <div className="max-h-64 overflow-auto border-t p-2 text-sm">
-          {runtime.messages.map((m) => (
-            <div key={m.id} className="py-1">
-              <span className="mr-2 text-xs uppercase text-muted-foreground">
-                {m.role}
-              </span>
-              <span className="whitespace-pre-wrap">{m.content}</span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

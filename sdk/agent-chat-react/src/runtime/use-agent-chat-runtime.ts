@@ -77,6 +77,23 @@ function readPersistedViewMode(): "simple" | "expert" | null {
   return null;
 }
 
+/**
+ * Record the Simple/Advanced preference the chat surface reads on mount.
+ *
+ * Exported for hosts that leave the chat surface entirely — the
+ * standalone whiteboard route has no runtime to call `setViewMode` on,
+ * so without this its Simple and Advanced buttons would both land on
+ * whichever mode the chat page happened to be in last, and read as two
+ * buttons doing the same thing.
+ *
+ * Takes only the two transcript modes on purpose: "whiteboard" is a
+ * per-surface choice, not a stored preference, which is why
+ * `readPersistedViewMode` ignores it too.
+ */
+export function persistChatViewMode(mode: "simple" | "expert"): void {
+  writePersistedViewMode(mode);
+}
+
 function writePersistedViewMode(mode: "simple" | "expert"): void {
   if (typeof window === "undefined") return;
   try {
