@@ -318,3 +318,92 @@ describe("sizing and aligning to the handwriting, not the box", () => {
     expect(cmd.fontSize as number).toBeLessThanOrEqual(120);
   });
 });
+
+describe("anchoring by label", () => {
+  const anchors = {
+    inkHeight: 60,
+    marks: {
+      A2: { rect: { x: 100, y: 400, w: 300, h: 60 } },
+      B1: { rect: { x: 900, y: 40, w: 200, h: 50 }, origin: "toolu_01A" },
+      B2: { rect: null, origin: "toolu_01B" },
+    },
+  };
+
+  it("places right of a user-ink label", () => {
+    const cmd = one(
+      resolveCommands(
+        emptyDoc(),
+        [{ tool: "draw_formula", latex: "3", anchor: "A2" }],
+        anchors,
+        services,
+      ),
+    );
+    expect(cmd.x as number).toBeGreaterThan(400);
+    expect(cmd.y as number).toBeGreaterThan(300);
+    expect(cmd.y as number).toBeLessThan(500);
+  });
+
+  it("resolves an agent label against the live board, not the snapshot", () => {
+    // The user dragged B1 after the picture was taken; the answer must
+    // follow the object, which is the point of anchoring by name.
+    const doc = applyCommands(
+      emptyDoc(),
+      [{ tool: "draw_formula", x: 2000, y: 2000, latex: "e^x", fontSize: 50 }],
+      1,
+      "toolu_01A",
+    );
+    const cmd = one(
+      resolveCommands(
+        doc,
+        [{ tool: "write_text", text: "yes", anchor: "B1" }],
+        anchors,
+        services,
+      ),
+    );
+    expect(cmd.x as number).toBeGreaterThan(2000);
+  });
+
+  it("drops an anchor to a label the user has removed", () => {
+    const out = resolveCommands(
+      emptyDoc(),
+      [{ tool: "write_text", text: "yes", anchor: "B2" }],
+      anchors,
+      services,
+    );
+    expect(out[0]).toBeNull();
+  });
+
+  it("translates a B-label replaces into the call id", () => {
+    const doc = applyCommands(
+      emptyDoc(),
+      [{ tool: "draw_formula", x: 0, y: 0, latex: "wrong", fontSize: 50 }],
+      1,
+      "toolu_01A",
+    );
+    const cmd = one(
+      resolveCommands(
+        doc,
+        [{ tool: "draw_formula", latex: "right", replaces: "B1" }],
+        anchors,
+        services,
+      ),
+    );
+    expect(cmd.replaces).toBe("toolu_01A");
+    expect(cmd.x).toBe(0);
+  });
+
+  it("parses marks out of the metadata", () => {
+    const parsed = turnAnchorsFromMetadata({
+      whiteboard: {
+        marks: [
+          { id: "A1", kind: "ink", x: 1, y: 2, w: 3, h: 4 },
+          { id: "B1", kind: "agent", removed: true, origin: "c1" },
+          { kind: "ink", x: 0, y: 0, w: 1, h: 1 },
+        ],
+      },
+    });
+    expect(parsed?.marks?.A1).toEqual({ rect: { x: 1, y: 2, w: 3, h: 4 } });
+    expect(parsed?.marks?.B1).toEqual({ rect: null, origin: "c1" });
+    expect(Object.keys(parsed?.marks ?? {})).toHaveLength(2);
+  });
+});

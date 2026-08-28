@@ -6,8 +6,11 @@ import {
   atlasMetadata,
   buildAtlas,
   AGENT_OBJECT_LIMIT,
+  MAX_MARKS,
   OCCUPANCY_GRID,
   agentObjectReport,
+  boardMarks,
+  inkClusters,
   contentBeyond,
   contentBounds,
   inkHeight,
@@ -681,5 +684,133 @@ describe("what became of the agent's own work", () => {
     const rows = meta.agentObjects as Record<string, unknown>[];
     expect(rows[0]).toMatchObject({ origin: "c1", removed: true });
     expect(rows[1]).toMatchObject({ origin: "c2", x: 1, touched: true });
+  });
+});
+
+describe("clustering the user's ink into the things they wrote", () => {
+  const stroke = (id: string, x: number, y: number, w: number, h: number) => ({
+    id, origin: "local", selected: false, kind: "ink" as const,
+    pts: [x, y, x + w, y + h], width: 0, color: "#000",
+  });
+  const board = (objects: unknown[]) =>
+    ({ ...emptyDoc(), objects }) as never;
+  const unit = 60;
+
+  it("joins the symbols of one expression", () => {
+    // `2x + 1 = 7`: symbols a fraction of a unit apart, one line.
+    const doc = board([
+      stroke("2", 0, 0, 50, 60), stroke("x", 70, 10, 40, 50),
+      stroke("+", 130, 20, 40, 40), stroke("1", 200, 0, 15, 60),
+      stroke("=", 250, 25, 50, 15), stroke("7", 340, 0, 45, 60),
+    ]);
+    const clusters = inkClusters(doc, services, unit);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].strokeIds).toHaveLength(6);
+  });
+
+  it("separates two lines", () => {
+    // A second line a full line height below is a second thing.
+    const doc = board([
+      stroke("a", 0, 0, 200, 60),
+      stroke("b", 0, 180, 200, 60),
+    ]);
+    expect(inkClusters(doc, services, unit)).toHaveLength(2);
+  });
+
+  it("labels in reading order: top to bottom, then left to right", () => {
+    const doc = board([
+      stroke("bottom-left", 0, 300, 50, 50),
+      stroke("top-right", 500, 0, 50, 50),
+      stroke("top-left", 0, 0, 50, 50),
+    ]);
+    const marks = boardMarks(doc, services, { unit });
+    expect(marks.map((m) => m.id)).toEqual(["A1", "A2", "A3"]);
+    expect(marks[0].rect?.x).toBe(0);
+    expect(marks[0].rect?.y).toBe(0);
+    expect(marks[1].rect?.x).toBe(500);
+    expect(marks[2].rect?.y).toBe(300);
+  });
+
+  it("ignores the agent's objects when clustering ink", () => {
+    const doc = applyCommands(board([stroke("a", 0, 0, 50, 50)]), [
+      { tool: "write_text", x: 60, y: 0, text: "hi", fontSize: 40, maxWidth: 100 },
+    ], 1, "callA");
+    expect(inkClusters(doc, services, unit)).toHaveLength(1);
+  });
+
+  it("flags the cluster holding ink new since the last Ask", () => {
+    const doc = board([
+      stroke("old", 0, 0, 50, 50),
+      stroke("new", 0, 300, 50, 50),
+    ]);
+    const marks = boardMarks(doc, services, {
+      unit, newLocalIds: new Set(["new"]),
+    });
+    expect(marks.find((m) => m.rect?.y === 300)?.fresh).toBe(true);
+    expect(marks.find((m) => m.rect?.y === 0)?.fresh).toBeUndefined();
+  });
+
+  it("labels the agent's objects B1, B2 with their call ids", () => {
+    // Built the way agent objects really arrive: the fold records the
+    // call in `folded`, which is what the report walks.
+    const doc = {
+      ...applyCommands(emptyDoc(), [
+        { tool: "draw_formula", x: 0, y: 0, latex: "e^x", fontSize: 40 },
+      ], 1, "toolu_01A"),
+      folded: ["toolu_01A"],
+    };
+    const marks = boardMarks(doc, services, { unit });
+    expect(marks).toEqual([
+      expect.objectContaining({ id: "B1", kind: "agent", origin: "toolu_01A", label: "e^x" }),
+    ]);
+  });
+
+  it("bounds the number of marks, keeping what is new", () => {
+    // The note is permanent; a board of hundreds of doodles cannot be
+    // allowed to list them all forever.
+    const many = Array.from({ length: 40 }, (_, i) =>
+      stroke(`s${i}`, 0, i * 200, 50, 50));
+    const doc = board(many);
+    const marks = boardMarks(doc, services, {
+      unit, newLocalIds: new Set(["s39"]),
+    });
+    expect(marks.length).toBeLessThanOrEqual(MAX_MARKS);
+    expect(marks.some((m) => m.fresh)).toBe(true);
+  });
+
+  it("rides on the turn metadata", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      marks: [
+        { id: "A1", kind: "ink", rect: { x: 1, y: 2, w: 3, h: 4 }, fresh: true },
+        { id: "B1", kind: "agent", rect: null, origin: "c1", label: "gone" },
+      ],
+    });
+    const rows = meta.marks as Record<string, unknown>[];
+    expect(rows[0]).toMatchObject({ id: "A1", x: 1, fresh: true });
+    expect(rows[1]).toMatchObject({ id: "B1", removed: true, origin: "c1" });
+  });
+
+  it("paints each mark's label onto the atlas", () => {
+    const calls: unknown[][] = [];
+    const ctx = new Proxy({} as Record<string, unknown>, {
+      get: (_t, p) =>
+        p === "measureText"
+          ? () => ({ width: 20 })
+          : (...args: unknown[]) => { calls.push([p, ...args]); },
+      set: () => true,
+    });
+    const rec = {
+      ...services,
+      createCanvas: (w: number, h: number) =>
+        ({ width: w, height: h, getContext: () => ctx }) as unknown as
+          HTMLCanvasElement,
+    };
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    buildAtlas(emptyDoc(), plan, rec, [
+      { id: "A1", kind: "ink", rect: { x: 10, y: 10, w: 100, h: 50 } },
+    ]);
+    const labels = calls.filter((c) => c[0] === "fillText").map((c) => c[1]);
+    expect(labels).toContain("A1");
   });
 });

@@ -47,6 +47,8 @@ export interface TurnAnchors {
   selection?: Rect;
   /** Median stroke height of the user's handwriting, in canvas units. */
   inkHeight?: number;
+  /** Labelled marks by id: `A3` → its rect; `B1` → rect + call id. */
+  marks?: Record<string, { rect: Rect | null; origin?: string }>;
 }
 
 function rectOf(value: unknown): Rect | null {
@@ -74,6 +76,19 @@ export function turnAnchorsFromMetadata(
   if (selection) anchors.selection = selection;
   if (typeof block.inkHeight === "number" && block.inkHeight > 0) {
     anchors.inkHeight = block.inkHeight;
+  }
+  if (Array.isArray(block.marks)) {
+    const marks: NonNullable<TurnAnchors["marks"]> = {};
+    for (const raw of block.marks) {
+      if (!raw || typeof raw !== "object") continue;
+      const m = raw as Record<string, unknown>;
+      if (typeof m.id !== "string") continue;
+      marks[m.id] = {
+        rect: rectOf(m),
+        ...(typeof m.origin === "string" ? { origin: m.origin } : {}),
+      };
+    }
+    anchors.marks = marks;
   }
   return anchors;
 }
@@ -115,6 +130,14 @@ function anchorRect(
   if (typeof anchor === "string" && anchor) {
     if (anchor === "latest") return anchors?.latestInput ?? null;
     if (anchor === "selection") return anchors?.selection ?? null;
+    const mark = anchors?.marks?.[anchor];
+    if (mark) {
+      // An agent mark resolves against the live board, so a drag since
+      // the picture was taken is honoured; a removed one has no rect.
+      return mark.origin
+        ? originBounds(doc, mark.origin, services)
+        : mark.rect;
+    }
     return originBounds(doc, anchor, services);
   }
   // A replaces with no anchor and no coordinates: the revision takes
@@ -252,6 +275,12 @@ export function resolveCommands(
       continue;
     }
     const cmd = { ...(raw as Record<string, unknown>) };
+    // A `B1`-style replaces names a mark; the document supersedes by
+    // call id, so translate before anything reads it.
+    if (typeof cmd.replaces === "string") {
+      const mark = anchors?.marks?.[cmd.replaces];
+      if (mark?.origin) cmd.replaces = mark.origin;
+    }
     const positioned =
       typeof cmd.x === "number" && typeof cmd.y === "number";
     const wantsAnchor =

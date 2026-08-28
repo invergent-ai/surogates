@@ -19,14 +19,15 @@ import {
   type AtlasExtras,
   type Rect,
   atlasMetadata,
+  boardMarks,
   buildAtlas,
-  agentObjectReport,
   contentBeyond,
   contentBounds,
   inkHeight,
   mapHotspots,
   OCCUPANCY_GRID,
   occupancyCells,
+  paintMarks,
   planAtlas,
 } from "./atlas";
 import {
@@ -460,6 +461,12 @@ export function WhiteboardSurface({
     () => planAtlas(doc, null, view, size, services).sourceRect,
     [doc, view, size, services],
   );
+  // The same labels the agent will be sent, so the user can read "A3"
+  // off the board and use it in a question.
+  const liveMarks = useMemo(
+    () => boardMarks(doc, services, { unit: inkHeight(doc, services) ?? 40 }),
+    [doc, services],
+  );
 
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
@@ -510,6 +517,10 @@ export function WhiteboardSurface({
         }
       }
       ctx.restore();
+    }
+    if (liveMarks.length > 0) {
+      const px = 1 / (view.zoom * dpr);
+      paintMarks(ctx, liveMarks, (r) => r, 12 / view.zoom, px * 1.5);
     }
 
     // The marquee is interface, not content: painted here in screen
@@ -568,7 +579,7 @@ export function WhiteboardSurface({
       ctx.lineJoin = "round";
       ctx.stroke();
     }
-  }, [doc, view, size, services, color, width, marquee, tool, gridRect]);
+  }, [doc, view, size, services, color, width, marquee, tool, gridRect, liveMarks]);
 
   repaintRef.current = paint;
 
@@ -883,25 +894,29 @@ export function WhiteboardSurface({
       setAskMode(mode);
       const latest = dirtyRef.current;
       const plan = planAtlas(doc, latest, view, size, services);
-      const atlas = buildAtlas(doc, plan, services);
+      const unit = inkHeight(doc, services);
+      // Labelled marks: the same ids on the picture, in the note and in
+      // the tool, so "right of A3" is one name everywhere. Read off the
+      // live document, which is the only record of what the user moved,
+      // resized or deleted -- none of which reaches the transcript.
+      const marks = boardMarks(doc, services, {
+        unit: unit ?? 40,
+        newLocalIds: new Set(
+          doc.objects
+            .filter(
+              (o) => o.origin === "local" && !seenAtLastAsk.current.has(o.id),
+            )
+            .map((o) => o.id),
+        ),
+      });
+      const atlas = buildAtlas(doc, plan, services, marks);
       const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
       const extras: AtlasExtras = {
         mode,
-        inkHeight: inkHeight(doc, services),
-        // Read off the live document, which is the only record of what
-        // the user moved, resized or deleted -- none of which reaches
-        // the transcript.
+        inkHeight: unit,
         occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
-        agentObjects: agentObjectReport(doc, services, {
-          newLocalIds: new Set(
-            doc.objects
-              .filter(
-                (o) => o.origin === "local" && !seenAtLastAsk.current.has(o.id),
-              )
-              .map((o) => o.id),
-          ),
-        }),
+        marks,
       };
       seenAtLastAsk.current = new Set(doc.objects.map((o) => o.id));
       if (typedRef.current.length > 0) {

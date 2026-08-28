@@ -441,6 +441,195 @@ export function agentObjectReport(
   return report;
 }
 
+/** How many marks a turn carries. The note is permanent, so it is bounded. */
+export const MAX_MARKS = 24;
+
+/** A labelled, anchorable thing on the board. */
+export interface BoardMark {
+  /** `A3` for the user's ink, `B1` for the agent's own objects. */
+  id: string;
+  kind: "ink" | "agent";
+  /** Null for an agent object the user has since removed. */
+  rect: Rect | null;
+  /** Agent marks: the `whiteboard_draw` call that produced it. */
+  origin?: string;
+  /** Agent marks: what it says, note-sized. */
+  label?: string;
+  /** Ink marks: holds ink drawn since the last Ask. */
+  fresh?: boolean;
+  /** Agent marks: new ink landed on or around it. */
+  touched?: boolean;
+}
+
+/** One cluster of the user's strokes and the strokes in it. */
+export interface InkCluster {
+  rect: Rect;
+  strokeIds: string[];
+}
+
+/**
+ * Group the user's strokes into the things they wrote.
+ *
+ * Two strokes belong together when their boxes, grown by a margin
+ * scaled to the handwriting, overlap: wide sideways (the gaps between
+ * symbols in one expression) and narrow vertically (the gap between
+ * two lines is what separates them). Single-linkage over that relation
+ * is what a person means by "that expression".
+ *
+ * Reading order: top to bottom in bands one line high, then left to
+ * right, so `A1` is where a reader starts.
+ *
+ * ponytail: O(n²) pairwise pass; a grid index if a board ever holds
+ * thousands of strokes.
+ */
+export function inkClusters(
+  doc: WbDoc,
+  services: RenderServices,
+  unit: number,
+): InkCluster[] {
+  const strokes: { id: string; box: Rect; grown: Rect }[] = [];
+  for (const obj of doc.objects) {
+    if (obj.kind !== "ink" || obj.origin !== "local") continue;
+    const box = objectBounds(obj, services);
+    if (!box) continue;
+    strokes.push({
+      id: obj.id,
+      box,
+      grown: {
+        x: box.x - unit * 0.8,
+        y: box.y - unit * 0.4,
+        w: box.w + unit * 1.6,
+        h: box.h + unit * 0.8,
+      },
+    });
+  }
+  const parent = strokes.map((_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  for (let i = 0; i < strokes.length; i++) {
+    for (let j = i + 1; j < strokes.length; j++) {
+      if (overlaps(strokes[i].grown, strokes[j].grown)) {
+        parent[find(i)] = find(j);
+      }
+    }
+  }
+  const groups = new Map<number, InkCluster>();
+  strokes.forEach((s, i) => {
+    const root = find(i);
+    const g = groups.get(root);
+    if (!g) {
+      groups.set(root, { rect: { ...s.box }, strokeIds: [s.id] });
+      return;
+    }
+    const x = Math.min(g.rect.x, s.box.x);
+    const y = Math.min(g.rect.y, s.box.y);
+    g.rect = {
+      x,
+      y,
+      w: Math.max(g.rect.x + g.rect.w, s.box.x + s.box.w) - x,
+      h: Math.max(g.rect.y + g.rect.h, s.box.y + s.box.h) - y,
+    };
+    g.strokeIds.push(s.id);
+  });
+  const band = Math.max(unit * 1.5, 1);
+  return [...groups.values()].sort(
+    (a, b) =>
+      Math.round(a.rect.y / band) - Math.round(b.rect.y / band) ||
+      a.rect.x - b.rect.x,
+  );
+}
+
+/**
+ * Everything the model can point at, labelled.
+ *
+ * The user's ink as clusters (`A1`, `A2`, …) and the agent's own objects
+ * (`B1`, `B2`, …). The same labels are drawn on the atlas, listed in the
+ * turn note, and accepted as `anchor`/`replaces`, so "the answer goes
+ * right of A3" is one name shared by the picture, the text and the tool.
+ */
+export function boardMarks(
+  doc: WbDoc,
+  services: RenderServices,
+  opts: { newLocalIds?: ReadonlySet<string>; unit: number },
+): BoardMark[] {
+  const fresh = opts.newLocalIds ?? new Set<string>();
+  let clusters = inkClusters(doc, services, opts.unit).map((c) => ({
+    ...c,
+    fresh: c.strokeIds.some((id) => fresh.has(id)),
+  }));
+  if (clusters.length > MAX_MARKS) {
+    // Keep what is new, then the rest in reading order, then restore
+    // reading order for labelling.
+    const keep = new Set(
+      [...clusters]
+        .sort((a, b) => Number(b.fresh) - Number(a.fresh))
+        .slice(0, MAX_MARKS),
+    );
+    clusters = clusters.filter((c) => keep.has(c));
+  }
+  const marks: BoardMark[] = clusters.map((c, i) => ({
+    id: `A${i + 1}`,
+    kind: "ink",
+    rect: c.rect,
+    ...(c.fresh ? { fresh: true } : {}),
+  }));
+  agentObjectReport(doc, services, { newLocalIds: opts.newLocalIds }).forEach(
+    (o, i) => {
+      marks.push({
+        id: `B${i + 1}`,
+        kind: "agent",
+        rect: o.bounds,
+        origin: o.origin,
+        label: o.label,
+        ...(o.touched ? { touched: true } : {}),
+      });
+    },
+  );
+  return marks;
+}
+
+/**
+ * Draw the marks: a box around each thing and its label at the corner.
+ *
+ * Amber, so it cannot be confused with the blue grid or with ink. `map`
+ * takes a board rect to the space the context is in — image pixels for
+ * the atlas, board units for the live canvas — and `fontPx` is the
+ * label size in that space.
+ */
+export function paintMarks(
+  ctx: CanvasRenderingContext2D,
+  marks: BoardMark[],
+  map: (r: Rect) => Rect,
+  fontPx: number,
+  lineWidth: number,
+): void {
+  ctx.save();
+  ctx.lineWidth = lineWidth;
+  ctx.font = `bold ${fontPx}px system-ui, sans-serif`;
+  ctx.textBaseline = "top";
+  for (const mark of marks) {
+    if (!mark.rect) continue;
+    const r = map(mark.rect);
+    ctx.strokeStyle = mark.fresh
+      ? "rgba(217, 119, 6, 0.9)"
+      : "rgba(217, 119, 6, 0.5)";
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
+    const padX = fontPx * 0.35;
+    const tagW = ctx.measureText(mark.id).width + padX * 2;
+    const tagH = fontPx * 1.3;
+    ctx.fillStyle = "rgba(217, 119, 6, 0.95)";
+    ctx.fillRect(r.x, r.y - tagH, tagW, tagH);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(mark.id, r.x + padX, r.y - tagH + fontPx * 0.15);
+  }
+  ctx.restore();
+}
+
 /**
  * Which way the board continues past the capture.
  *
@@ -516,6 +705,7 @@ export function buildAtlas(
   doc: WbDoc,
   plan: AtlasPlan,
   services: RenderServices,
+  marks: BoardMark[] = [],
 ): HTMLCanvasElement {
   const canvas = services.createCanvas(plan.imageSize.w, plan.imageSize.h);
   const ctx = canvas.getContext("2d");
@@ -535,6 +725,20 @@ export function buildAtlas(
     services,
   );
   paintGridOverlay(ctx, plan.imageSize);
+  // Marks go on last so their labels sit above everything else.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  paintMarks(
+    ctx,
+    marks,
+    (r) => ({
+      x: (r.x - plan.sourceRect.x) * plan.imageScale,
+      y: (r.y - plan.sourceRect.y) * plan.imageScale,
+      w: r.w * plan.imageScale,
+      h: r.h * plan.imageScale,
+    }),
+    13,
+    1.5,
+  );
   return canvas;
 }
 
@@ -601,8 +805,10 @@ export interface AtlasExtras {
   occupied?: number[][];
   /** See {@link contentBeyond}. */
   beyond?: string[];
-  /** See {@link agentObjectReport}. */
+  /** See {@link agentObjectReport}. Superseded by `marks`. */
   agentObjects?: AgentObjectReport[];
+  /** See {@link boardMarks}. */
+  marks?: BoardMark[];
 }
 
 /**
@@ -645,6 +851,24 @@ export function atlasMetadata(
     };
   }
   if (extras.beyond?.length) meta.beyond = extras.beyond;
+  if (extras.marks?.length) {
+    meta.marks = extras.marks.map((m) => ({
+      id: m.id,
+      kind: m.kind,
+      ...(m.rect
+        ? {
+            x: round2(m.rect.x),
+            y: round2(m.rect.y),
+            w: round2(m.rect.w),
+            h: round2(m.rect.h),
+          }
+        : { removed: true }),
+      ...(m.origin ? { origin: m.origin } : {}),
+      ...(m.label ? { label: m.label } : {}),
+      ...(m.fresh ? { fresh: true } : {}),
+      ...(m.touched ? { touched: true } : {}),
+    }));
+  }
   if (extras.agentObjects?.length) {
     meta.agentObjects = extras.agentObjects.map((o) => ({
       origin: o.origin,

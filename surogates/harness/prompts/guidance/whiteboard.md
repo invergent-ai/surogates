@@ -113,8 +113,12 @@ equals sign" — and it is the reliable path: positions are resolved
 against the live board, sized to the writing they sit with, wrapped by
 real measurement, and nudged off existing work.
 
+- Everything on the board carries a label -- amber boxes on the image,
+  listed in the turn note. `A1, A2, …` are the user's ink, `B1, B2, …`
+  are your own objects. Anchor to the label of the thing your answer
+  relates to: `anchor: "A3"`.
 - The answer to what the user just wrote: `anchor: "latest"`, `side:
-  "right"` (the default side).
+  "right"` (the default side) -- or the label marked NEW in the note.
 - An explanation or working underneath: `anchor: "latest"`, `side:
   "below"` — prose is automatically sized to read, never match a
   sentence to handwriting scale yourself.

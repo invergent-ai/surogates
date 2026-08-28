@@ -201,8 +201,63 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     # confidently out of date -- one session ended with its answer
     # wrapped in hand-drawn brackets and squared, and it answered the
     # transcript rather than the board.
+    # Labelled marks: the same ids drawn on the image, listed here and
+    # accepted by the tool, so "right of A3" is one name everywhere.
+    marks = payload.get("marks")
+    if isinstance(marks, list) and marks:
+        rows = []
+        fresh_ids = []
+        for entry in marks:
+            if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+                continue
+            mid = entry["id"]
+            origin = entry.get("origin")
+            handle = (
+                f" (call {origin})" if isinstance(origin, str) and origin else ""
+            )
+            label = str(entry.get("label") or "").strip()
+            what = f'"{label}"' if label else (
+                "the user's ink" if entry.get("kind") == "ink" else "your object"
+            )
+            if entry.get("removed"):
+                rows.append(f"- {mid}{handle}: {what} -- no longer on the board")
+                continue
+            if not all(_is_num(entry.get(k)) for k in ("x", "y", "w", "h")):
+                continue
+            row = (
+                f"- {mid}{handle}: {what} at ({entry['x']}, {entry['y']}), "
+                f"{entry['w']}x{entry['h']}"
+            )
+            if entry.get("fresh"):
+                row += " -- NEW since your last turn"
+                fresh_ids.append(mid)
+            if entry.get("touched"):
+                row += (
+                    " -- the user has since drawn on or around it. Read "
+                    "that ink as changing what it means, not as separate "
+                    "work beside it"
+                )
+            rows.append(row)
+        if rows:
+            joined = "\n".join(rows)
+            newest = (
+                f" What the user just wrote is {', '.join(fresh_ids)}."
+                if fresh_ids else ""
+            )
+            lines.append(
+                f"Labelled marks on the image (amber boxes; the label sits "
+                f"at each box's top-left corner): A-marks are the user's "
+                f"ink, B-marks are objects you drew, as the board holds "
+                f"them now.{newest}\n{joined}\n"
+                f"Anchor by label -- anchor:'A2', side:'right' -- or "
+                f"anchor:'latest' for the newest ink and 'selection' for "
+                f"the user's lasso. Revise your own object with "
+                f"replaces:'B1'. Only fall back to explicit coordinates "
+                f"for a placement no relation describes."
+            )
+
     mine = payload.get("agentObjects")
-    if isinstance(mine, list) and mine:
+    if isinstance(mine, list) and mine and not (isinstance(marks, list) and marks):
         rows: list[str] = []
         for entry in mine:
             if not isinstance(entry, dict):
