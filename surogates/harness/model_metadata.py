@@ -122,7 +122,33 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.009,
         supports_vision=True,
     ),
+    "google/gemini-3.7-flash": ModelInfo(
+        id="google/gemini-3.7-flash",
+        context_window=1_048_576,
+        max_output_tokens=65_536,
+        input_cost_per_1k=0.000375,
+        output_cost_per_1k=0.001875,
+        supports_vision=True,
+    ),
     # --- Z.AI --------------------------------------------------------------
+    # 5.3 is text-only; the Flash sibling is the multimodal one (image+video).
+    "z-ai/glm-5.3": ModelInfo(
+        id="z-ai/glm-5.3",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.0014,
+        output_cost_per_1k=0.0044,
+    ),
+    # OpenRouter advertises a 1.31M window for the model but the serving
+    # provider caps at 1.05M, so we size to what is actually served.
+    "z-ai/glm-5.3-flash": ModelInfo(
+        id="z-ai/glm-5.3-flash",
+        context_window=1_048_576,
+        max_output_tokens=131_072,
+        input_cost_per_1k=7.5e-05,
+        output_cost_per_1k=0.00025,
+        supports_vision=True,
+    ),
     "z-ai/glm-5.2": ModelInfo(
         id="z-ai/glm-5.2",
         context_window=1_048_576,
@@ -184,6 +210,22 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         max_output_tokens=131_072,
         input_cost_per_1k=0.002,
         output_cost_per_1k=0.006,
+        supports_vision=True,
+    ),
+    # Same price point as Max but text-only, with a 262k output cap.
+    "qwen/qwen3.8-2.4t-a95b": ModelInfo(
+        id="qwen/qwen3.8-2.4t-a95b",
+        context_window=1_000_000,
+        max_output_tokens=262_144,
+        input_cost_per_1k=0.002,
+        output_cost_per_1k=0.006,
+    ),
+    "qwen/qwen3.8-flash": ModelInfo(
+        id="qwen/qwen3.8-flash",
+        context_window=1_000_000,
+        max_output_tokens=131_072,
+        input_cost_per_1k=0.00015,
+        output_cost_per_1k=0.00047,
         supports_vision=True,
     ),
     # --- Tencent ------------------------------------------------------------
@@ -276,6 +318,14 @@ _ALIASES: dict[str, str] = {
     "google/gemini-3-flash-preview-20251217": "google/gemini-3-flash-preview",
     "gemini-3.5-flash": "google/gemini-3.5-flash",
     "google/gemini-3.5-flash-20260519": "google/gemini-3.5-flash",
+    "gemini-3.7-flash": "google/gemini-3.7-flash",
+    "google/gemini-3.7-flash-20260813": "google/gemini-3.7-flash",
+    "glm-5.3": "z-ai/glm-5.3",
+    "z-ai/glm-5.3-20260816": "z-ai/glm-5.3",
+    "zai-org/GLM-5.3": "z-ai/glm-5.3",
+    "glm-5.3-flash": "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.3-flash-20260826": "z-ai/glm-5.3-flash",
+    "zai-org/GLM-5.3-Flash": "z-ai/glm-5.3-flash",
     "glm-5.2": "z-ai/glm-5.2",
     "z-ai/glm-5.2-20260616": "z-ai/glm-5.2",
     "zai-org/GLM-5.2": "z-ai/glm-5.2",
@@ -301,6 +351,11 @@ _ALIASES: dict[str, str] = {
     "moonshotai/Kimi-K3": "moonshotai/kimi-k3",
     "qwen3.8-max": "qwen/qwen3.8-max",
     "qwen/qwen3.8-max-20260803": "qwen/qwen3.8-max",
+    "qwen3.8-2.4t-a95b": "qwen/qwen3.8-2.4t-a95b",
+    "qwen/qwen3.8-2.4t-a95b-20260812": "qwen/qwen3.8-2.4t-a95b",
+    "Qwen/Qwen3.8-2.4T-A95B": "qwen/qwen3.8-2.4t-a95b",
+    "qwen3.8-flash": "qwen/qwen3.8-flash",
+    "qwen/qwen3.8-flash-20260826": "qwen/qwen3.8-flash",
     # Short names and gateway ids used by our own config and by callers.
     "sonnet": "anthropic/claude-sonnet-5",
     "claude-sonnet": "anthropic/claude-sonnet-5",
