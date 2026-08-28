@@ -13,7 +13,12 @@
  */
 import { useEffect, useRef } from "react";
 import type { AgentChatAdapter, AgentChatMessage } from "../../types";
-import { type WbDoc, emptyDoc, foldToolCalls } from "./doc";
+import {
+  type CommandResolver,
+  type WbDoc,
+  emptyDoc,
+  foldToolCalls,
+} from "./doc";
 
 /**
  * The `_` prefix keeps this out of the workspace file browser (see
@@ -62,6 +67,7 @@ export async function loadDoc(
   adapter: AgentChatAdapter,
   sessionId: string,
   messages: AgentChatMessage[],
+  resolve?: CommandResolver,
 ): Promise<WbDoc> {
   // Never rejects: saveDoc swallows its own failures.
   await inFlightSaves.get(sessionId);
@@ -95,7 +101,7 @@ export async function loadDoc(
     // No saved canvas yet, or it is unreadable — start clean and let the
     // event tail below rebuild whatever the agent has drawn.
   }
-  return foldToolCalls(doc, messages);
+  return foldToolCalls(doc, messages, resolve);
 }
 
 /**

@@ -247,14 +247,37 @@ export function applyCommands(
  * Idempotent on the tool-call id: the SSE stream and the reconciliation
  * poll deliver the same events, so a re-fold must not duplicate objects.
  */
+/**
+ * Turns an anchored command list into an absolute one before it is
+ * applied. `anchors` is the metadata of the user message that started
+ * the call's turn — the resolver reads `latest`/`selection` rects from
+ * it. Injected rather than imported so this module stays free of the
+ * render dependency; see `layout.ts` for the real one.
+ */
+export type CommandResolver = (
+  doc: WbDoc,
+  commands: unknown[],
+  anchors: Record<string, unknown> | undefined,
+) => unknown[];
+
 export function foldToolCalls(
   doc: WbDoc,
   messages: AgentChatMessage[],
+  resolve?: CommandResolver,
 ): WbDoc {
   const seen = new Set(doc.folded);
   const newlyFolded: string[] = [];
   let next = doc;
+  // The metadata of the user message governing the calls that follow
+  // it: relational anchors ("latest", "selection") are rects captured
+  // at that Ask, and they ride on the message so replay from the event
+  // log resolves exactly like the live fold did.
+  let turnMetadata: Record<string, unknown> | undefined;
   for (const message of messages) {
+    if (message.role === "user") {
+      turnMetadata = message.metadata;
+      continue;
+    }
     for (const call of message.toolCalls ?? []) {
       if (call.toolName !== DRAW_TOOL) continue;
       if (seen.has(call.id)) continue;
@@ -268,8 +291,11 @@ export function foldToolCalls(
       } catch {
         continue;
       }
-      const commands = (parsed as { commands?: unknown } | null)?.commands;
-      if (!Array.isArray(commands)) continue;
+      const rawCommands = (parsed as { commands?: unknown } | null)?.commands;
+      if (!Array.isArray(rawCommands)) continue;
+      const commands = resolve
+        ? resolve(next, rawCommands, turnMetadata)
+        : rawCommands;
       next = applyCommands(next, commands, next.lastEventId, call.id);
     }
   }

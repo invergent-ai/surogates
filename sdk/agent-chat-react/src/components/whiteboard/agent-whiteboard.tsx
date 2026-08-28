@@ -50,6 +50,7 @@ import {
   zoomFactorFromWheel,
   zoomToFit,
 } from "./input";
+import { makeCommandResolver } from "./layout";
 import {
   latestBoardSession,
   loadDoc,
@@ -241,6 +242,10 @@ export function WhiteboardSurface({
     [formulaCache],
   );
 
+  // Resolves anchored draw commands ("right of the latest ink") into
+  // coordinates at fold time, against the board as it is then.
+  const resolveDraw = useMemo(() => makeCommandResolver(services), [services]);
+
   // ------------------------------------------------------------------
   // Document lifecycle
   // ------------------------------------------------------------------
@@ -339,7 +344,12 @@ export function WhiteboardSurface({
     // board's document can never be saved under the incoming session's id.
     setCanvasReady(false);
     let cancelled = false;
-    void loadDoc(adapter, sessionId as string, runtime.messages).then(
+    void loadDoc(
+      adapter,
+      sessionId as string,
+      runtime.messages,
+      resolveDraw,
+    ).then(
       (loaded) => {
         if (cancelled) return;
         loadedSession.current = sessionId;
@@ -362,8 +372,8 @@ export function WhiteboardSurface({
   // nothing is skipped by waiting; the load simply arrives complete.
   useEffect(() => {
     if (!canvasReady) return;
-    setDoc((d) => foldToolCalls(d, runtime.messages));
-  }, [runtime.messages, canvasReady]);
+    setDoc((d) => foldToolCalls(d, runtime.messages, resolveDraw));
+  }, [runtime.messages, canvasReady, resolveDraw]);
 
   // A null session id is what `useDebouncedSave` already treats as
   // "nothing to write to", so the gate reuses it rather than growing a

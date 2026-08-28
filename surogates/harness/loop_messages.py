@@ -209,13 +209,17 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 continue
             label = str(entry.get("label") or "").strip()
             named = f'"{label}"' if label else "an object"
+            # The call id is the handle for `replaces` and `anchor`, so
+            # it must appear beside the thing it names.
+            origin = entry.get("origin")
+            handle = f" (call {origin})" if isinstance(origin, str) and origin else ""
             if entry.get("removed"):
-                rows.append(f"- {named}: no longer on the board")
+                rows.append(f"- {named}{handle}: no longer on the board")
                 continue
             if not all(_is_num(entry.get(k)) for k in ("x", "y", "w", "h")):
                 continue
             where = (
-                f"- {named} is at ({entry['x']}, {entry['y']}), "
+                f"- {named}{handle} is at ({entry['x']}, {entry['y']}), "
                 f"{entry['w']}x{entry['h']}"
             )
             if entry.get("touched"):
@@ -230,7 +234,12 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             lines.append(
                 f"What you drew earlier, as the board holds it now (your "
                 f"own draw calls record where you asked for these, not "
-                f"what the user did to them afterwards):\n{joined}"
+                f"what the user did to them afterwards):\n{joined}\n"
+                f"Place relationally: anchor='latest' for the user's "
+                f"newest ink, anchor='selection' for their lasso, or "
+                f"anchor/replaces with one of the call ids above. Only "
+                f"fall back to explicit coordinates for a placement no "
+                f"relation describes."
             )
 
     typed = payload.get("typedInput")

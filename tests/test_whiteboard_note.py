@@ -287,7 +287,10 @@ def test_reports_where_its_objects_sit_now():
         {"origin": "c1", "label": "e^x + C", "x": 480, "y": 390,
          "w": 300, "h": 88},
     ]))
-    assert '"e^x + C" is at (480, 390), 300x88' in note
+    # The call id rides beside the label: it is the handle for
+    # anchor/replaces, and without it in the note the model cannot
+    # reference its own objects.
+    assert '"e^x + C" (call c1) is at (480, 390), 300x88' in note
 
 
 def test_reports_a_deleted_object():

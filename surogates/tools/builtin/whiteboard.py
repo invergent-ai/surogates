@@ -25,34 +25,43 @@ logger = logging.getLogger(__name__)
 WHITEBOARD_TOOL_NAMES: frozenset[str] = frozenset({"whiteboard_draw"})
 
 _DESCRIPTION = (
-    "Draw on the shared whiteboard canvas. The canvas is infinite: there "
-    "are no edges, the origin is arbitrary, and coordinates are freely "
-    "negative. Every coordinate is a global canvas coordinate -- never an "
-    "image coordinate. Use the geometry in the turn's canvas note to "
-    "convert.\n\n"
+    "Draw on the shared whiteboard canvas.\n\n"
+    "PLACE BY RELATION, NOT BY COORDINATES. Name what your answer "
+    "relates to and which side it goes on; the client computes position "
+    "and size against the live board:\n"
+    "- {tool:'draw_formula', latex, anchor:'latest', side:'right'} -- "
+    "the answer, right of what the user just wrote.\n"
+    "- {tool:'write_text', text, anchor:'latest', side:'below'} -- an "
+    "explanation under it, sized to read.\n"
+    "- {tool:'draw_formula', latex, replaces:'<call id>'} -- a revision: "
+    "takes the replaced object's place, the old one is removed.\n"
+    "Anchors: 'latest' (the user's newest ink), 'selection' (their "
+    "lasso), or the id of one of your earlier calls -- the turn note "
+    "lists them with where each now sits. Sides: right (default), "
+    "below, above, left. Anchored commands omit x/y/fontSize/maxWidth; "
+    "a formula or short answer is sized to the anchor's handwriting, "
+    "prose gets a readable size and width.\n\n"
     "Commands:\n"
-    "- write_text {tool,x,y,text,fontSize,maxWidth,lineHeight?} -- prose. "
-    "You own layout: x,y is the top-left start and maxWidth is the wrap "
-    "width. Pick a blank region near the content you are answering.\n"
-    "- draw_formula {tool,x,y,latex,fontSize} -- mathematical notation.\n"
+    "- write_text {tool,text,anchor?,side?|x,y,fontSize,maxWidth,"
+    "lineHeight?} -- prose.\n"
+    "- draw_formula {tool,latex,anchor?,side?|x,y,fontSize} -- "
+    "mathematical notation.\n"
     "- draw {tool,origin:[x,y],types:[...],items:[[...]],width?,tension?,"
     "closed?,fill?,arrows?} -- a simple sketch or annotation of about ten "
     "or fewer primitives. types and items must be the same length. "
     "Encodings: line/smooth [x1,y1,x2,y2,...]; rect [x,y,w,h]; ellipse "
     "[cx,cy,rx,ry]; circle [cx,cy,r]; arc [cx,cy,rx,ry,startDeg,sweepDeg]. "
-    "Item coordinates are integer offsets from origin.\n"
+    "Item coordinates are integer offsets from origin. Sketches are "
+    "always absolute.\n"
     "- erase {tool,mode:'rect',x,y,w,h} or {tool,mode:'path',points,size}\n"
-    "- place_artifact {tool,artifact_id,x,y,w,h} -- position an artifact "
-    "you already created with create_artifact. For anything larger, "
-    "richer, or interactive than a simple sketch -- a chart, a diagram, a "
-    "table, an interactive widget -- create an artifact and place it "
-    "rather than approximating it with many draw commands.\n\n"
-    "Any command may carry `replaces`: the id of an earlier "
-    "whiteboard_draw call whose objects it supersedes. Use it to correct "
-    "or update something you drew before -- the old objects are removed "
-    "as the new one lands, so a revised answer replaces the previous one "
-    "instead of piling on top of it. The turn note lists what you drew "
-    "and where it now sits.\n\n"
+    "- place_artifact {tool,artifact_id,w,h,anchor?,side?|x,y} -- "
+    "position an artifact you already created with create_artifact. For "
+    "anything larger, richer, or interactive than a simple sketch -- a "
+    "chart, a diagram, a table, a widget -- create an artifact and place "
+    "it rather than approximating it with many draw commands.\n\n"
+    "Explicit x/y (global canvas units, freely negative, never image "
+    "pixels) always wins over an anchor: it is the escape hatch for "
+    "placements no relation describes.\n\n"
     f"At most {MAX_COMMANDS} commands per call. Do not redraw content "
     "that is already on the canvas: add only the continuation, answer, or "
     "annotation that is missing."
@@ -157,17 +166,23 @@ def _placement_summary(commands: list[Any]) -> str:
     for cmd in commands:
         if not isinstance(cmd, dict):
             continue
-        x, y = cmd.get("x"), cmd.get("y")
-        if not (_is_number(x) and _is_number(y)):
-            continue
         what = cmd.get("text") or cmd.get("latex") or cmd.get("tool") or ""
-        label = str(what).strip().replace("\n", " ")
-        if len(label) > 40:
-            label = f"{label[:39]}…"
         # Quoted plainly, not with repr: repr doubles every backslash,
         # which turns a LaTeX command into something the model has to
         # unescape before it can recognise its own output.
-        spots.append(f'"{label}" at ({x}, {y})' if label else f"({x}, {y})")
+        label = str(what).strip().replace("\n", " ")
+        if len(label) > 40:
+            label = f"{label[:39]}…"
+        named = f'"{label}"' if label else "an object"
+        x, y = cmd.get("x"), cmd.get("y")
+        anchor = cmd.get("anchor")
+        replaces = cmd.get("replaces")
+        if _is_number(x) and _is_number(y):
+            spots.append(f"{named} at ({x}, {y})")
+        elif isinstance(anchor, str) and anchor.strip():
+            spots.append(f"{named} placed {cmd.get('side') or 'right'} of {anchor}")
+        elif isinstance(replaces, str) and replaces.strip():
+            spots.append(f"{named} in place of call {replaces}")
     if not spots:
         return ""
     return f": {'; '.join(spots)}"
