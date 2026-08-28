@@ -1,3 +1,4 @@
+.env
 .venv/
 runs/
 __pycache__/
