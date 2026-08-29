@@ -18,6 +18,7 @@ capability problem.
 | 2026-08-28 | `dev-007` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 53 | **48.2%** |
 | 2026-08-29 | `dev-018` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 62 | **56.4%** |
 | 2026-08-29 | `dev-021` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 66 | **60.0%** |
+| 2026-08-29 | `dev-022` | local harness, agent `gaia2-tbmpuz` | claude-sonnet-5 | 110 | 68 | **61.8%** |
 
 > **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids auto-
 > increment from the contents of `runs/`, and it was produced against a fresh
@@ -112,6 +113,41 @@ Three touched the browser, and one of those was a real regression this run
 caught: navigate snapshots were not being pruned as superseded state, so a
 34-call session reached 324,700 input tokens against a 262,144 window. Fixed;
 not yet re-measured.
+
+## dev-021 → dev-022: snapshot pruning
+
+Re-measured after pruning superseded `browser_navigate` snapshots and marking
+un-inlinable attachments. Ran on `gaia2-tbmpuz`, which differs from
+`gaia-h5iiol` only in `research_enabled` / `deep_research_enabled` — flags that
+gate the `/auto-research` and `/deep-research` slash commands, which the
+benchmark never sends. Same model, same tools.
+
+| | dev-021 | dev-022 |
+| --- | --- | --- |
+| Strict | 66/110 (60.0%) | **68/110 (61.8%)** |
+| L1 / L2 / L3 | 21 / 39 / 6 | 23 / 37 / 8 |
+| `no_tool_use` | 11 | 8 |
+| `no_final_answer` | 6 | 5 |
+| `empty_llm_response` | 3 | 1 |
+| `tool_error` | 4 | 4 |
+| Cost | $86.47 | $72.94 |
+
+Net +2 is 8 newly passing against 6 newly failing, four of which carry no
+flag — answered and wrong, i.e. variance. Treat +2 as "not worse", not as a
+measured gain.
+
+Pruning worked but did not rescue its target task. `d5141ca5` went 324,700 →
+274,386 peak input tokens and 34 → 21 browser calls, and still failed. It
+spent 58 turns and 9,995,161 input tokens, 92% of them cache reads, for
+$3.56.
+
+**The context window the harness plans against is wrong.** Sessions run under
+the `surogate` sentinel, which the catalog gives a 262,144-token window, but
+they are served by claude-sonnet-5 at 1,000,000. That 274,386-token request
+succeeded — the real model had room to spare. So compaction and browser-state
+pruning are sized against a limit ~3.8x smaller than the one that applies,
+discarding context that never needed discarding. Nothing overflows; the
+harness is just planning against the wrong number.
 
 ## The earlier regression
 
