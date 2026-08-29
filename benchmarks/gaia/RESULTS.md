@@ -16,13 +16,18 @@ capability problem.
 | 2026-08-14 | `dev-005` | local harness | claude-sonnet-5 (+ qwen3.7-max) | 110 | 74 | **67.3%** |
 | 2026-08-27 | `dev-006` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 62 | **56.4%** |
 | 2026-08-28 | `dev-007` | prod, agent `gaia-xi8anu` | Surogate Pro | 110 | 53 | **48.2%** |
+| 2026-08-29 | `dev-018` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 62 | **56.4%** |
+| 2026-08-29 | `dev-021` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 66 | **60.0%** |
 
-> **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids
-> auto-increment from the contents of `runs/`, and it was produced against a
-> fresh `runs/`, so it restarted the count and collided with the local run of
-> the same name. Renumbered here to the next free id, `dev-006`. Its traces
-> were only ever on the machine that ran it, so there is no `runs/dev-006/`
-> to reconcile — if those traces resurface, land them under that id.
+> **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids auto-
+> increment from the contents of `runs/`, and it was produced against a fresh
+> `runs/`, so it restarted the count and collided with the local run of the
+> same name. Renumbered here to `dev-006`. Note the counter increments from
+> the *entry count* of `runs/`, not the highest existing id, so it does not
+> hand out `dev-006` itself — a local run in a populated `runs/` jumps
+> straight past it (the next one here came out `dev-017`). Its traces were
+> only ever on the machine that ran it, so there is no `runs/dev-006/` to
+> reconcile — if those traces resurface, land them under that id.
 
 The 2026-08-27 run scored L1 21/33, L2 36/60, L3 5/17, with zero collection
 errors, no `infra_error` flags, and flags: 14 `no_final_answer`,
@@ -69,7 +74,46 @@ nothing except that one task passed.
 
 `dev-002` is an aborted run — task traces, no `outcomes.json`, so it has no score.
 
-## The open regression
+## dev-018 → dev-021: the no-answer fixes
+
+`dev-021` re-measures `dev-018` after three harness fixes aimed at sessions
+that ended without an answer. Same agent, same served model, same split.
+
+| | dev-018 | dev-021 |
+| --- | --- | --- |
+| Strict | 62/110 (56.4%) | **66/110 (60.0%)** |
+| L1 / L2 / L3 | 21 / 34 / 7 | 21 / 39 / 6 |
+| `no_final_answer` | 24 | **6** |
+| `no_tool_use` | 15 | 11 |
+| `tool_error` | 4 | 4 |
+| `empty_llm_response` | 3 | 3 |
+| `infra_error` | 1 | 0 |
+
+Net +4 is 13 newly passing against 9 newly failing. The score moved less than
+the flag did, and the flag is the better evidence: `no_final_answer` fell by
+18, which is what the three fixes targeted.
+
+What the 24 no-answer sessions in `dev-018` actually were:
+
+- **13 — the model stated an intention and called no tool.** "Let me check the
+  page directly via the browser...." then `finish_reason: stop`. Eleven were
+  one turn after a browser call. Root cause: `browser_navigate` returned only
+  `{url, title}`, so the model landed on a page with nothing to read. It now
+  returns the page outline.
+- **6 — a punctuation-only final response**, a 2-token `"..."` after turns of
+  successful tool use. Non-empty, so it slipped past the empty-response ladder
+  and was taken as the final answer.
+- **5 — other**: one session with no `llm.response` at all, the rest answered
+  wrongly rather than not at all.
+
+On the 9 regressions: five carry no failure flag, meaning the model answered
+and was simply wrong — run-to-run variance, which this benchmark warns about.
+Three touched the browser, and one of those was a real regression this run
+caught: navigate snapshots were not being pruned as superseded state, so a
+34-call session reached 324,700 input tokens against a 262,144 window. Fixed;
+not yet re-measured.
+
+## The earlier regression
 
 `dev-005` lost **10.9 points** against `dev-001` on the same 110 tasks: 16
 tasks that passed in July fail in August, listed in `runs/dev-005/report.md`.
