@@ -97,7 +97,16 @@ def _estimate_messages_tokens_rough(messages: list[dict[str, Any]]) -> int:
 # The agent acts only on the most recent snapshot (and re-fetches state on
 # demand), so older results are dead weight that can be pruned eagerly instead
 # of waiting for a compaction pass.
-_SUPERSEDED_STATE_TOOLS: frozenset[str] = frozenset({"browser_get_state"})
+# Tools whose results are a snapshot of the current page: only the most
+# recent matters, because the agent re-fetches state rather than re-reading an
+# old one.  ``browser_navigate`` belongs here because it now returns the page
+# outline too -- without it those snapshots accumulate for the whole session.
+# Observed on GAIA dev-021: one task made 34 browser calls and reached 324,700
+# input tokens against a 262,144 window.
+_SUPERSEDED_STATE_TOOLS: frozenset[str] = frozenset({
+    "browser_get_state",
+    "browser_navigate",
+})
 
 
 def prune_superseded_tool_results(

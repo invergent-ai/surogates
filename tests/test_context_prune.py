@@ -247,3 +247,35 @@ def test_no_target_tool_results_returns_input_unchanged():
     out, count = _prune(msgs, keep_last=1)
     assert count == 0
     assert out is msgs
+
+
+class TestNavigateSnapshotsArePruned:
+    """browser_navigate returns a page outline, so its results supersede too.
+
+    Regression from GAIA dev-021: navigate snapshots were not in the pruned
+    set, so every one stayed in context for the whole session. One task made
+    34 browser calls and peaked at 324,700 input tokens against a 262,144
+    window -- it had passed the run before.
+    """
+
+    def test_navigate_is_in_the_superseded_set(self) -> None:
+        from surogates.harness.context import _SUPERSEDED_STATE_TOOLS
+
+        assert "browser_navigate" in _SUPERSEDED_STATE_TOOLS
+        assert "browser_get_state" in _SUPERSEDED_STATE_TOOLS
+
+    def test_older_navigate_snapshots_are_replaced(self) -> None:
+        msgs: list[dict] = [{"role": "system", "content": "sys"}]
+        for i in range(4):
+            msgs.append(_asst_call(f"n{i}", "browser_navigate"))
+            msgs.append(_tool_result(f"n{i}", BIG))
+
+        out, pruned = _prune(
+            msgs, keep_last=1,
+            tool_names=frozenset({"browser_get_state", "browser_navigate"}),
+        )
+        results = [m for m in out if m.get("role") == "tool"]
+        assert pruned == 3
+        assert [r["content"] for r in results[:3]] == [PLACEHOLDER] * 3
+        # The current page must always survive, or the agent has no DOM to act on.
+        assert results[-1]["content"] == BIG
