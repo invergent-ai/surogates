@@ -1681,3 +1681,43 @@ class TestPunctuationOnlyFinalResponse:
         # Non-Latin answers must not be mistaken for punctuation.
         for text in ("42", "Paris", "Αθήνα", "北京", "Москва", "...done"):
             assert _carries_information(text) is True, text
+
+
+class TestUnfinishedFinalResponse:
+    """A turn that states an intention is not a final answer.
+
+    GAIA dev-018: 13 sessions ended with the model announcing its next step
+    and calling no tool -- "Let me check the page directly via the
+    browser...." -- 11 of them one turn after a browser call, in sessions
+    that had been using tools successfully until then. The loop took the
+    intention as the answer and completed.
+    """
+
+    def test_trailing_ellipsis_looks_unfinished(self) -> None:
+        from surogates.harness.loop import _looks_unfinished
+
+        for text in (
+            "Let me check the page directly via the browser....",
+            "I'll dismiss the consent banner and then navigate...",
+            "Now let me look at the results…",
+            "...",
+        ):
+            assert _looks_unfinished(text) is True, text
+
+    def test_concluded_answers_are_left_alone(self) -> None:
+        from surogates.harness.loop import _looks_unfinished
+
+        for text in (
+            "The answer is 42.",
+            "Paris",
+            "3, 5, 8",
+            "I could not find the paper; the archive link is dead.",
+        ):
+            assert _looks_unfinished(text) is False, text
+
+    def test_retry_budget_is_one(self) -> None:
+        """Bounded to a single nudge: the content may be the real answer, so
+        an exhausted retry must accept it, not spend more turns on it."""
+        from surogates.harness.loop_constants import _MAX_UNFINISHED_RETRIES
+
+        assert _MAX_UNFINISHED_RETRIES == 1

@@ -32,6 +32,11 @@ _BACKGROUND_DRAIN_TIMEOUT_SECONDS: float = 35.0
 _MAX_LENGTH_CONTINUATIONS: int = 3
 _MAX_CONSECUTIVE_INVALID_TOOL_CALLS: int = 3
 _MAX_EMPTY_RESPONSE_RETRIES: int = 3
+
+#: Nudges for a turn that states an intention, calls no tool, and trails off.
+#: One is deliberate: the content may genuinely be the answer, so the guard
+#: gives the model a single chance to act and then accepts what it has.
+_MAX_UNFINISHED_RETRIES: int = 1
 # Retries for a provider that ends a response before the tool-call JSON is
 # complete.  This retry refunds the iteration budget, so without a cap the
 # wake loop's ``remaining > 0`` guard never advances and a provider stuck
@@ -54,3 +59,10 @@ _DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
     "cron_delete",
     "cron_list",
 })
+
+_UNFINISHED_RESPONSE_NUDGE: str = (
+    "[System: Your last message described what you were about to do but "
+    "called no tool, and the task is not answered. Do it now with a tool "
+    "call. If you already have enough information, give the final answer "
+    "instead -- do not restate the plan.]"
+)

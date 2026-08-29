@@ -117,11 +117,13 @@ from surogates.harness.loop_attachments import (
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
+    _UNFINISHED_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
     _LEASE_TTL_SECONDS,
     _LENGTH_CONTINUATION_PROMPT,
     _MAX_CONSECUTIVE_INVALID_TOOL_CALLS,
     _MAX_EMPTY_RESPONSE_RETRIES,
+    _MAX_UNFINISHED_RETRIES,
     _MAX_LENGTH_CONTINUATIONS,
     _MAX_PARTIAL_TOOL_CALL_RETRIES,
     _PRE_WAKE_HUB_TIMEOUT_SECONDS,
@@ -325,6 +327,20 @@ def _slash_command_name(content: str | None) -> str | None:
     if parse_deep_research_command(content) is not None:
         return "deep-research"
     return None
+
+
+def _looks_unfinished(text: str) -> bool:
+    """True when *text* trails off mid-thought instead of concluding.
+
+    Answers end; intentions trail off.  Every instance observed on GAIA
+    dev-018 ended in an ellipsis -- "Let me check the page directly via the
+    browser...." -- while the model had been calling tools successfully up
+    to that turn.  Kept to that one structural signal on purpose: judging
+    "is this an answer?" from prose would misfire on short legitimate
+    replies, and the caller bounds the cost of a false positive to a single
+    extra turn.
+    """
+    return text.rstrip().endswith(("...", "\u2026"))
 
 
 def _carries_information(text: str) -> bool:
@@ -1477,6 +1493,7 @@ class AgentHarness(
         thinking_prefill_retries = 0  # retries for thinking-only responses
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
+        unfinished_retries = 0    # nudges for a turn that trails off without acting
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
         # the planner ends a turn with no tool calls AND has never
@@ -2319,6 +2336,36 @@ class AgentHarness(
                                 "for %s", session.id, exc_info=True,
                             )
                         return
+
+                # The model announced an action, made no tool call, and its
+                # text trails off ("Let me check the page directly via the
+                # browser....").  On GAIA dev-018 this ended 13 sessions with
+                # no answer, 11 of them one turn after a browser call, in
+                # sessions that had been using tools successfully.  The turn
+                # is not a final answer; it is an intention.
+                #
+                # Nudged once and allowed to continue.  Unlike an empty
+                # response this content may genuinely be the answer, so an
+                # exhausted retry ACCEPTS it and completes normally rather
+                # than failing the session -- the cost of being wrong here is
+                # one extra turn, not a lost answer.
+                if (
+                    _looks_unfinished(visible_content)
+                    and unfinished_retries < _MAX_UNFINISHED_RETRIES
+                ):
+                    unfinished_retries += 1
+                    logger.info(
+                        "Session %s: final response trails off with no tool "
+                        "call (%r); nudging to continue (%d/%d)",
+                        session.id, visible_content[-40:],
+                        unfinished_retries, _MAX_UNFINISHED_RETRIES,
+                    )
+                    messages.append({"role": "assistant", "content": final_content})
+                    messages.append({
+                        "role": "user",
+                        "content": _UNFINISHED_RESPONSE_NUDGE,
+                    })
+                    continue
 
                 # Pop thinking-only prefill message(s) before appending
                 # the final response.  This avoids consecutive assistant
