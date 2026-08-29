@@ -168,6 +168,23 @@ def _with_size_aliases(cmd: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+#: Keys a model reaches for when it means ``latex`` on ``draw_formula``:
+#: ``text`` is the neighbouring command's key, the others are what the
+#: field is.  Aliased for the same reason as the sizes -- the intent is
+#: unambiguous and the rejection cost a whole round-trip.
+_LATEX_ALIASES = ("formula", "tex", "text")
+
+
+def _with_latex_alias(cmd: dict[str, Any]) -> dict[str, Any]:
+    """*cmd* with ``latex`` filled in from its aliases (a copy)."""
+    if "latex" in cmd:
+        return cmd
+    for alias in _LATEX_ALIASES:
+        if alias in cmd:
+            return {**cmd, "latex": cmd[alias]}
+    return cmd
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -438,6 +455,8 @@ def validate_commands(commands: Any) -> str | None:
 
         if tool in _ALIASING_TOOLS:
             cmd = _with_size_aliases(cmd)
+        if tool == "draw_formula":
+            cmd = _with_latex_alias(cmd)
 
         err = _validate_relational(cmd, idx, tool)
         if err:

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type WbDoc,
   applyCommands,
@@ -263,6 +263,25 @@ describe("deleting an agent's object", () => {
   });
 });
 
+
+describe("draw_formula spelled text instead of latex", () => {
+  it("draws the formula the validator let through", () => {
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "draw_formula", text: "x^2", x: 0, y: 0, fontSize: 40 },
+    ], 1);
+    expect(doc.objects[0]).toMatchObject({ kind: "formula", latex: "x^2" });
+  });
+
+  it("hands the resolver the aliased command, so sizing sees the latex", () => {
+    const resolve = vi.fn((_doc, cmds: unknown[]) => cmds);
+    foldToolCalls(emptyDoc(), [
+      message("m1", "whiteboard_draw", {
+        commands: [{ tool: "draw_formula", text: "x^2", anchor: "latest", side: "right" }],
+      }),
+    ], resolve as never);
+    expect(resolve.mock.calls[0][1][0]).toMatchObject({ latex: "x^2" });
+  });
+});
 
 describe("width/height where the schema says w/h", () => {
   // From a real session: the model wrote a wrong correction, tried twice

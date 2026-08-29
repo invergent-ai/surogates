@@ -521,3 +521,32 @@ def test_unfilled_slots_is_empty_once_filled():
 
 def test_unfilled_slots_is_empty_without_slots():
     assert unfilled_slots([{"tool": "erase", "mode": "path", "points": [[0, 0], [1, 1]]}], frozenset()) == []
+
+
+# ---------------------------------------------------------------------
+# draw_formula spelled with text/formula/tex instead of latex
+#
+# From a real session: a deep turn's first draw was rejected with
+# "missing required field(s): latex", and the user watched the retry.
+# ---------------------------------------------------------------------
+
+
+def test_draw_formula_accepts_text_for_latex():
+    assert validate_commands([
+        {"tool": "draw_formula", "text": "x^2", "anchor": "latest", "side": "right"},
+    ]) is None
+
+
+def test_draw_formula_accepts_formula_and_tex_for_latex():
+    for key in ("formula", "tex"):
+        assert validate_commands([
+            {"tool": "draw_formula", key: "x^2", "x": 0, "y": 0, "fontSize": 40},
+        ]) is None
+
+
+def test_draw_formula_still_rejects_without_any_latex():
+    error = validate_commands([
+        {"tool": "draw_formula", "anchor": "latest", "side": "right"},
+    ])
+    assert error is not None
+    assert "latex" in error

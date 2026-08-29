@@ -229,6 +229,22 @@ function size(cmd: Record<string, unknown>, key: "w" | "h"): unknown {
   return cmd[key] ?? cmd[alias];
 }
 
+/**
+ * A formula the model spelled `text`/`formula`/`tex` instead of `latex`.
+ *
+ * The validator accepts the aliases; this is the half that makes the
+ * command draw and size. Applied before the resolver, which measures
+ * the formula to size it against its anchor, and again in the fold for
+ * callers that skip the resolver.
+ */
+function withLatexAlias(cmd: unknown): unknown {
+  if (!cmd || typeof cmd !== "object") return cmd;
+  const c = cmd as Record<string, unknown>;
+  if (c.tool !== "draw_formula" || c.latex !== undefined) return cmd;
+  const latex = c.formula ?? c.tex ?? c.text;
+  return latex === undefined ? cmd : { ...c, latex };
+}
+
 /** Convert one command into an object, or null to skip it. */
 function toObject(
   cmd: Record<string, unknown>,
@@ -328,7 +344,7 @@ export function applyCommands(
   const superseded = new Set<string>();
   for (const cmd of commands) {
     if (typeof cmd !== "object" || cmd === null) continue;
-    const record = cmd as Record<string, unknown>;
+    const record = withLatexAlias(cmd) as Record<string, unknown>;
     const obj = toObject(record, origin);
     if (obj) added.push(obj);
     // Honoured even when the command itself was unusable: the intent to
@@ -436,8 +452,9 @@ export function foldToolCalls(
       } catch {
         continue;
       }
-      const rawCommands = (parsed as { commands?: unknown } | null)?.commands;
-      if (!Array.isArray(rawCommands)) continue;
+      const raw = (parsed as { commands?: unknown } | null)?.commands;
+      if (!Array.isArray(raw)) continue;
+      const rawCommands = raw.map(withLatexAlias);
       const commands = resolve
         ? resolve(next, rawCommands, turnMetadata)
         : rawCommands;
