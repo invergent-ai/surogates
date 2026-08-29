@@ -1525,3 +1525,51 @@ describe("placing the answer box", () => {
     expect(el.querySelector('textarea[aria-label="Text"]')).not.toBeNull();
   });
 });
+
+
+describe("selecting the answer box", () => {
+  it("selects only the box, not the first stroke", async () => {
+    // Strokes and slots used to draw ids from separate counters, so the
+    // first slot was `local:1` -- the first stroke's id -- and selecting
+    // one selected both.
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    // One pen stroke on the left...
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 100, clientY: 100, bubbles: true, cancelable: true }));
+      canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: 160, clientY: 140, bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    // ...an answer box on the right...
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 500, clientY: 300, button: 2, bubbles: true, cancelable: true }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    // ...select the box.
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 540, clientY: 300, bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    const meta = (send.mock.calls[0]?.[3] as { whiteboard?: { selection?: { w: number } } })?.whiteboard;
+    // The reported selection is the box's size, not a union with the stroke.
+    expect(meta?.selection).toBeDefined();
+    expect(meta!.selection!.w).toBeLessThan(400);
+  });
+});

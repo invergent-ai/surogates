@@ -194,10 +194,25 @@ export function correctReading(
   return { ...doc, readings };
 }
 
+/**
+ * Object ids are unique across everything that mints them and across
+ * page loads. Two counters used to run side by side -- strokes in
+ * `input.ts`, slots and text here -- so the first slot on a board was
+ * `local:1`, the same id as the first stroke, and selecting one
+ * selected both. And a counter restarts on reload, so new objects
+ * collided with the saved board too. The per-load token is what keeps
+ * ids stable once persisted and distinct across sessions.
+ */
+const LOAD_TOKEN = Math.random().toString(36).slice(2, 8);
 let localCounter = 0;
 function nextId(origin: string): string {
   localCounter += 1;
-  return `${origin}:${localCounter}`;
+  return `${origin}:${LOAD_TOKEN}${localCounter}`;
+}
+
+/** A fresh id for a user-authored object: strokes, slots, text. */
+export function nextLocalId(): string {
+  return nextId("local");
 }
 
 /**
@@ -576,9 +591,8 @@ export function makeTextObject(
   fontSize: number,
   maxWidth: number,
 ): WbObject {
-  localCounter += 1;
   return {
-    id: `local:text${localCounter}`,
+    id: nextId("local"),
     origin: "local",
     selected: false,
     kind: "text",

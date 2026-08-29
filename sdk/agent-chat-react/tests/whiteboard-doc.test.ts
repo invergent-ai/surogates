@@ -473,3 +473,19 @@ describe("slots", () => {
     expect((slot as { hint?: string }).hint).toBe("the cat");
   });
 });
+
+
+describe("object ids", () => {
+  it("never collide across strokes, slots and text", async () => {
+    const { StrokeBuilder } = await import("@/components/whiteboard/input");
+    const builder = new StrokeBuilder("#000", 4);
+    builder.begin({ x: 0, y: 0 });
+    builder.extend({ x: 10, y: 10 });
+    builder.extend({ x: 20, y: 20 });
+    const stroke = builder.finish();
+    const slot = makeSlotObject({ x: 0, y: 0, w: 10, h: 10 });
+    const ids = new Set([stroke?.id, slot.id]);
+    expect(ids.size).toBe(2);
+    expect(slot.id.startsWith("local:")).toBe(true);
+  });
+});
