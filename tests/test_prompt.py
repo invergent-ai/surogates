@@ -305,3 +305,74 @@ class TestBoardSection:
         tenant = _make_tenant(tmp_path)
         prompt = PromptBuilder(tenant).build()
         assert "# Coordination Board" not in prompt
+
+
+class TestParallelToolsGuidance:
+    """Batching guidance loads only when there is something to batch.
+
+    The streaming executor already fans CONCURRENCY_SAFE_TOOLS out, but
+    nothing asked the model for a batch: over 30 days of DEV traffic 74%
+    of iterations carried exactly one tool call while ~24% of all calls
+    sat in runs of consecutive independent lookups.
+    """
+
+    @staticmethod
+    def _tenant():
+        from uuid import uuid4
+
+        from surogates.tenant.context import TenantContext
+
+        return TenantContext(
+            org_id=uuid4(),
+            user_id=uuid4(),
+            org_config={"default_model": "gpt-4o"},
+            user_preferences={},
+            permissions=frozenset(),
+            asset_root="/tmp/test_assets",
+        )
+
+    def _section(self, tools):
+        from surogates.harness.prompt import PromptBuilder
+
+        return PromptBuilder(
+            tenant=self._tenant(), available_tools=set(tools),
+        )._tool_guidance_section()
+
+    @property
+    def _guidance(self):
+        from surogates.harness.prompt_library import default_library
+
+        return default_library().get("guidance/parallel_tools")
+
+    def test_injected_with_two_concurrency_safe_tools(self):
+        assert self._guidance in self._section({"read_file", "search_files"})
+
+    def test_injected_for_a_research_pairing(self):
+        assert self._guidance in self._section({"web_search", "web_extract"})
+
+    def test_not_injected_with_only_one(self):
+        """Nothing to batch a lone tool with."""
+        assert self._guidance not in self._section({"read_file"})
+
+    def test_not_injected_with_no_parallel_tools(self):
+        assert self._guidance not in self._section({"terminal", "write_file"})
+
+    def test_write_tools_do_not_count_toward_the_pair(self):
+        """write_file/patch/terminal are never dispatched concurrently, so
+        they must not trip the gate on their own."""
+        assert self._guidance not in self._section(
+            {"read_file", "write_file", "patch", "terminal"},
+        )
+
+    def test_gate_matches_the_executor_parallel_set(self):
+        """The guidance promises what the executor actually does; if the
+        two drift, the prompt starts advertising a concurrency the
+        harness will not deliver."""
+        from surogates.harness.tool_exec import CONCURRENCY_SAFE_TOOLS
+
+        for tool in CONCURRENCY_SAFE_TOOLS:
+            # Pair with a *different* member so the set really has two.
+            partner = "session_search" if tool != "session_search" else "read_file"
+            assert self._guidance in self._section({tool, partner}), (
+                f"{tool} is dispatched in parallel but does not arm the guidance"
+            )
