@@ -562,10 +562,15 @@ export function scaleObject(
         fontSize: Math.max(4, obj.fontSize * sy),
       };
     case "formula":
+      // Position takes the same factor as the type, not sx/sy: a
+      // formula's box grows uniformly, so moving it by a different
+      // factor per axis let it overflow the corner the drag was
+      // anchored to, and the selection rectangle breathed as the
+      // overflow changed with every sample.
       return {
         ...obj,
-        x: px(obj.x),
-        y: py(obj.y),
+        x: anchor.x + (obj.x - anchor.x) * dominant,
+        y: anchor.y + (obj.y - anchor.y) * dominant,
         fontSize: Math.max(4, obj.fontSize * dominant),
       };
     case "artifact":

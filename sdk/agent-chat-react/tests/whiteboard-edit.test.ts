@@ -133,6 +133,21 @@ describe("scaleObject", () => {
     expect(tiny.h).toBeGreaterThan(0);
   });
 
+  it("moves a formula by the same factor it grows by", () => {
+    const [obj] = applyCommands(emptyDoc(), [{
+      tool: "draw_formula", x: 100, y: 100, latex: "x^2", fontSize: 40,
+    }], 1).objects;
+    // Dragging the NW handle: the SE corner is the anchor and must not
+    // move. Scaled 1.5x with the position taking sy=1, the box grew
+    // past the anchor and the selection rectangle breathed with it.
+    const scaled = scaleObject(obj, 1.5, 1, { x: 200, y: 150 }) as {
+      x: number; y: number; fontSize: number;
+    };
+    expect(scaled.fontSize).toBe(60);
+    expect(scaled.x).toBe(50);
+    expect(scaled.y).toBe(75);
+  });
+
   it("keeps a formula's font readable at any factor", () => {
     const [obj] = applyCommands(emptyDoc(), [{
       tool: "draw_formula", x: 0, y: 0, latex: "x^2", fontSize: 40,

@@ -110,7 +110,10 @@ describe("FormulaCache", () => {
     });
   });
 
-  it("treats a different font size as a different entry", async () => {
+  it("rasterises once and scales the one raster to any font size", async () => {
+    // Keyed by size too, a resize drag missed on every pointer sample:
+    // the formula flickered back to its own source while each new size
+    // decoded, and its bounds flickered with it.
     const cache = new FormulaCache(() => undefined);
     const created: unknown[] = [];
     class CountingImage {
@@ -124,7 +127,31 @@ describe("FormulaCache", () => {
       cache.get("x^2", 32);
       cache.get("x^2", 48);
       await settle();
-      expect(created).toHaveLength(2);
+      expect(created).toHaveLength(1);
+    });
+  });
+
+  it("measures and draws the same glyphs at any size, in proportion", async () => {
+    const cache = new FormulaCache(() => undefined);
+    await withImage(class {
+      onerror: (() => void) | null = null;
+      set onload(fn: () => void) {
+        fn();
+      }
+      set src(_v: string) {
+        /* no-op */
+      }
+    }, async () => {
+      cache.get("x^2", 32);
+      await settle();
+      const small = cache.get("x^2", 32);
+      const big = cache.get("x^2", 64);
+      expect(small).not.toBeNull();
+      expect(big).not.toBeNull();
+      // One raster, two sizes: no miss, so no fallback to the source.
+      expect(big?.image).toBe(small?.image);
+      expect(big?.w).toBeCloseTo((small?.w ?? 0) * 2, 5);
+      expect(cache.measure("x^2", 64).h).toBeCloseTo((big?.h ?? 0), 5);
     });
   });
 
