@@ -42,7 +42,6 @@ import {
   foldToolCalls,
   makeSlotObject,
   makeTextObject,
-  spiralFromStroke,
   mapSelected,
   scaleObject,
   translateObject,
@@ -104,6 +103,8 @@ const RESTORE_HINT_DELAY_MS = 250;
 
 /** `PointerEvent.button` for the middle button / wheel click. */
 const MIDDLE_BUTTON = 1;
+/** `PointerEvent.button` for the right button: place an answer box. */
+const RIGHT_BUTTON = 2;
 
 /** Mirrors the composer's segments so the two switches read alike. */
 const VIEW_MODE_LABELS: Record<AgentChatViewMode, string> = {
@@ -499,6 +500,18 @@ export function WhiteboardSurface({
     [doc, services, liveUnit],
   );
 
+  // An answer-sized box at a point: a line of handwriting tall, a few
+  // words wide, its left edge at the point -- so placing it just after
+  // an equals sign lands it where the answer reads. Resize later with
+  // the select tool.
+  const answerBoxAt = useCallback(
+    (at: { x: number; y: number }) => {
+      const h = liveUnit * 1.6;
+      return { x: at.x, y: at.y - h / 2, w: liveUnit * 5, h };
+    },
+    [liveUnit],
+  );
+
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -711,6 +724,22 @@ export function WhiteboardSurface({
         }));
       }
 
+      // Right-click: drop an answer box at the pen tip, whatever tool
+      // is in hand. Placing the answer is the commonest thing to do
+      // after writing, and it should not cost a trip to the rail.
+      if (e.button === RIGHT_BUTTON) {
+        e.preventDefault();
+        const slot = makeSlotObject(answerBoxAt(logical));
+        commit((prev) => ({
+          ...prev,
+          objects: [
+            ...prev.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
+            slot,
+          ],
+        }));
+        return;
+      }
+
       if (tool === "slot") {
         // Reserve space: drag a box where the answer should go. The
         // marquee does the dragging; pointerup turns it into a slot.
@@ -797,7 +826,7 @@ export function WhiteboardSurface({
     },
     [
       disabled, localPoint, view, tool, doc, services, commit, color, width,
-      noteDirty, liveMarks, liveUnit,
+      noteDirty, liveMarks, liveUnit, answerBoxAt,
     ],
   );
 
@@ -878,13 +907,13 @@ export function WhiteboardSurface({
     if (marquee && tool === "slot") {
       const dragged = rectFromCorners(marquee.from, marquee.to);
       setMarquee(null);
-      // A click without a drag reserves a one-line square at the click,
-      // enough for a digit or a letter -- the `H [ ] USE` case.
-      const side = liveUnit * 1.4;
+      // A click without a drag drops an answer-sized box at the pen tip:
+      // a line of handwriting tall, a few words wide, its left edge where
+      // the user clicked -- so "click after the equals sign" lands the
+      // box where the answer reads. Drag to size it otherwise; resize
+      // later with the select tool.
       const rect =
-        dragged.w < 8 && dragged.h < 8
-          ? { x: marquee.from.x - side / 2, y: marquee.from.y - side / 2, w: side, h: side }
-          : dragged;
+        dragged.w < 8 && dragged.h < 8 ? answerBoxAt(marquee.from) : dragged;
       const slot = makeSlotObject(rect);
       commit((prev) => ({
         ...prev,
@@ -936,19 +965,6 @@ export function WhiteboardSurface({
     if (!builder) return;
     const stroke = builder.finish();
     if (!stroke) return;
-    // A spiral drawn with the pen over empty canvas is the slot marker:
-    // one stroke, not a letter or a shape, and its extent is the space
-    // reserved. Silent -- the amber box appearing is the acknowledgement;
-    // the slot tool still asks for a hint, since that is a deliberate
-    // act. A spiral around existing content is emphasis and stays ink.
-    if (tool === "pen" && stroke.kind === "ink") {
-      const box = spiralFromStroke(stroke.pts, liveUnit);
-      if (box && objectsInRect(doc, box, services).length === 0) {
-        const slot = makeSlotObject(box);
-        commit((prev) => ({ ...prev, objects: [...prev.objects, slot] }));
-        return;
-      }
-    }
     const object: WbObject =
       tool === "eraser"
         ? ({
@@ -960,7 +976,7 @@ export function WhiteboardSurface({
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
-  }, [tool, width, commit, pushHistory, marquee, doc, services, liveUnit]);
+  }, [tool, width, commit, pushHistory, marquee, doc, services, answerBoxAt]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -1225,6 +1241,9 @@ export function WhiteboardSurface({
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
+            // The right button places an answer box; the menu would
+            // land on top of it.
+            onContextMenu={(e) => e.preventDefault()}
             onPointerLeave={() => {
               // Otherwise the ring stays frozen wherever the pointer
               // left the canvas.

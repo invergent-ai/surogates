@@ -1,11 +1,11 @@
 import {
+  Bot,
   Eraser,
   Hand,
   Maximize2,
   MousePointer2,
   Pen,
   Redo2,
-  Square,
   Type,
   Undo2,
 } from "lucide-react";
@@ -28,7 +28,9 @@ const TOOLS: { id: WbTool; label: string; Icon: typeof Pen }[] = [
   { id: "pen", label: "Pen", Icon: Pen },
   { id: "eraser", label: "Eraser", Icon: Eraser },
   { id: "text", label: "Text", Icon: Type },
-  { id: "slot", label: "Slot", Icon: Square },
+  // Where the agent should answer: click to place an answer box, or
+  // drag one. The id stays "slot" -- that is what the object is.
+  { id: "slot", label: "Answer", Icon: Bot },
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];

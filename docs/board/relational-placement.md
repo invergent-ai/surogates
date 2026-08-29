@@ -102,11 +102,13 @@ about instead of filled; the trailing `=` the only one that worked,
 because maths carries its conventions and prose and drawing do not.
 
 **Slots** make *where* explicit and domain-blind. A slot is an empty
-box the user reserves for the result — drawn with the slot tool, or
-marked with a spiral — one pen stroke winding at least two turns
-inward over empty canvas, the marker chosen because it needs no pen
-lift, is no letter, digit, operator or common shape, and appears in
-no real drawing by accident — labelled `S1, S2, …` beside the ink and agent marks. It is
+box the user reserves for the result, placed with the **Answer** tool
+(robot icon): a click drops an answer-sized box at the pen tip, a drag
+sizes one. Gesture recognition was tried first — a drawn box, then a
+spiral — and dropped: nobody draws a box in one stroke, box-like and
+loop-like strokes are everywhere in real writing, and a deliberate
+placement has no false positives. Slots are labelled `S1, S2, …` beside
+the ink and agent marks. It is
 the one gesture with the same meaning everywhere: the missing letter,
 the value after `=`, the paragraph under a heading, the cat in an empty
 frame. The model fills it with `anchor: "S1", side: "in"`; the client

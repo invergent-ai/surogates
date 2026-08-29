@@ -1460,3 +1460,68 @@ describe("the action selector", () => {
     expect(metadataOf(send)?.action).toBe("hint");
   });
 });
+
+
+describe("placing the answer box", () => {
+  async function board() {
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    return { el, canvas, send };
+  }
+  const marksOf = (send: ReturnType<typeof vi.fn>) =>
+    ((send.mock.calls[0]?.[3] as { whiteboard?: { marks?: { id: string; kind: string }[] } })
+      ?.whiteboard?.marks ?? []);
+
+  it("offers an Answer tool with the robot", async () => {
+    const { el } = await board();
+    expect(byLabel(el, "Answer")).not.toBeNull();
+  });
+
+  it("right-click drops an answer box with the pen in hand", async () => {
+    const { el, canvas, send } = await board();
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 500, clientY: 300, button: 2, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(marksOf(send).some((m) => m.kind === "slot" && m.id === "S1")).toBe(true);
+  });
+
+  it("keeps the browser's context menu off the canvas", async () => {
+    const { canvas } = await board();
+    const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    await act(async () => { canvas.dispatchEvent(menu); });
+    expect(menu.defaultPrevented).toBe(true);
+  });
+
+  it("the Answer tool drops a box on click and asks for a hint", async () => {
+    const { el, canvas } = await board();
+    await act(async () => { byLabel(el, "Answer")?.click(); });
+    // Separate acts: the drag state set on pointerdown must flush before
+    // pointerup reads it, as it does between real browser events.
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 500, clientY: 300, bubbles: true, cancelable: true,
+      }));
+    });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    expect(el.querySelector('textarea[aria-label="Text"]')).not.toBeNull();
+  });
+});
