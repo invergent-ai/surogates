@@ -66,10 +66,32 @@ _ADVISOR_DESCRIPTION = (
     "a correction, or a stop signal"
 )
 
+# The caller-side half of the advisor protocol. The executor decides when
+# to consult on its own -- the classifier preflight that used to make that
+# call was measured useful 0.7% of the time and deleted -- so the timing
+# rules have to live where the executor reads them before choosing, which
+# is this trigger line under the advisor's roster entry.
 _ADVISOR_TRIGGER = (
     "before committing to an approach, when stuck on a recurring error, "
     "or before declaring a task done -- and only when no domain expert "
-    "above covers the subject"
+    "above covers the subject.\n"
+    "  Consult before substantive work, not after: finding files, reading "
+    "a source, or looking at what is there is orientation and does not "
+    "count -- writing, editing, and declaring an answer do. On a task of "
+    "more than a few steps, consult once before committing to an approach "
+    "and once before declaring it done; on short reactive steps dictated "
+    "by output you just read, do not keep consulting.\n"
+    "  Before the done-consult, make the deliverable durable first -- "
+    "write the file, commit the change. The consult takes time, and a "
+    "session that ends during it keeps a written result and loses an "
+    "unwritten one.\n"
+    "  Weigh the answer seriously. Adapt only on empirical failure or "
+    "primary-source evidence against a specific claim; a self-test that "
+    "passes is not evidence the advice was wrong, only that the test does "
+    "not check what the advice checks. If your own findings point one way "
+    "and the advisor points another, do not silently switch -- consult "
+    "once more naming the conflict and asking which constraint breaks the "
+    "tie."
 )
 
 

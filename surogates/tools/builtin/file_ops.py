@@ -975,6 +975,9 @@ PATCH_SCHEMA = ToolSchema(
         "terminal. Whitespace and indentation differences won't break the match, "
         "but old_string must identify exactly one place in the file. Returns a "
         "unified diff. Auto-runs syntax checks after editing.\n\n"
+        "The edit FAILS if old_string is not unique. When that happens, add the "
+        "minimum extra context needed to disambiguate, or set replace_all=true to "
+        "change every instance — do not retry the same old_string unchanged.\n\n"
         "Replace mode (default): find a unique string and replace it.\n"
         "Patch mode: apply V4A multi-file patches for bulk changes."
     ),
