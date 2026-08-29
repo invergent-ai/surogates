@@ -114,6 +114,7 @@ from surogates.harness.loop_attachments import (
     _attachments_note,  # noqa: F401
     _render_inlined_attachments,  # noqa: F401
 )
+from surogates.harness.loop_conclusion import conclude_from_transcript
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
@@ -2313,29 +2314,47 @@ class AgentHarness(
                             )
                             continue
 
-                        logger.error(
-                            "Session %s: LLM returned empty response %d "
-                            "times; emitting session.fail",
-                            session.id, _MAX_EMPTY_RESPONSE_RETRIES,
+                        # Before failing: the model stopped producing text,
+                        # but the turn may already contain the finding. A
+                        # recovered conclusion ends the turn properly; a
+                        # NOT_FOUND leaves the failure exactly as it was.
+                        concluded = await conclude_from_transcript(
+                            self._summary_client, self._summary_model,
+                            question=_latest_user_event_text(all_events or []),
+                            messages=messages,
                         )
-                        await self._store.emit_event(
-                            session.id,
-                            EventType.SESSION_FAIL,
-                            {
-                                "reason": "empty_llm_response",
-                                "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
-                            },
-                        )
-                        try:
-                            await self._store.update_session_status(
-                                session.id, "failed",
+                        if concluded:
+                            logger.info(
+                                "Session %s: recovered a conclusion from the "
+                                "transcript after %d empty responses",
+                                session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                        except Exception:
-                            logger.warning(
-                                "Failed to update session status to failed "
-                                "for %s", session.id, exc_info=True,
+                            assistant_message["content"] = concluded
+                            visible_content = concluded
+                        else:
+                            logger.error(
+                                "Session %s: LLM returned empty response %d "
+                                "times; emitting session.fail",
+                                session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                        return
+                            await self._store.emit_event(
+                                session.id,
+                                EventType.SESSION_FAIL,
+                                {
+                                    "reason": "empty_llm_response",
+                                    "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
+                                },
+                            )
+                            try:
+                                await self._store.update_session_status(
+                                    session.id, "failed",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to update session status to "
+                                    "failed for %s", session.id, exc_info=True,
+                                )
+                            return
 
                 # The model announced an action, made no tool call, and its
                 # text trails off ("Let me check the page directly via the
@@ -2366,6 +2385,26 @@ class AgentHarness(
                         "content": _UNFINISHED_RESPONSE_NUDGE,
                     })
                     continue
+
+                # The nudge is spent and the model is still trailing off. Its
+                # own text is not an answer, but the work it did may contain
+                # one -- ask the cheap model for the conclusion the transcript
+                # supports, and keep the original text if there is none.
+                if _looks_unfinished(visible_content):
+                    concluded = await conclude_from_transcript(
+                        self._summary_client, self._summary_model,
+                        question=_latest_user_event_text(all_events or []),
+                        messages=messages,
+                    )
+                    if concluded:
+                        logger.info(
+                            "Session %s: recovered a conclusion from the "
+                            "transcript after the turn trailed off",
+                            session.id,
+                        )
+                        assistant_message["content"] = concluded
+                        final_content = concluded
+                        visible_content = concluded
 
                 # Pop thinking-only prefill message(s) before appending
                 # the final response.  This avoids consecutive assistant
