@@ -5,10 +5,11 @@ applies_when: any browser_* tool loaded
 ---
 # Browser Interaction
 
-Use `browser_get_state` before interacting with a page whenever you need a
-target ref, and refresh refs after navigation, scrolling, modal dismissal, or
-any large page change. It returns a markdown outline: `- role @eN "name"` lines
-are the things you can click and type into.
+`browser_navigate` already returns the page outline, so act on what it gives
+you rather than re-fetching it. Call `browser_get_state` when you need refs
+again — after scrolling, dismissing a modal, or any large page change — or
+when navigation reports the outline was truncated. The outline is markdown:
+`- role @eN "name"` lines are the things you can click and type into.
 
 Reach for `browser_evaluate` instead of repeated scroll-and-restate loops when
 you need data rather than an action — every row of a table, all options of a

@@ -1034,3 +1034,77 @@ class TestEvaluateAuditTrail:
         # onto ``tool_call_data``, the audit trail silently loses long JS bodies.
         assert '"arguments": sanitized_args,' in src
         assert '"arguments": _truncate_args' not in src
+
+
+class TestNavigateSnapshot:
+    """Navigation returns the page outline, not just a title.
+
+    GAIA dev-018: 11 sessions stalled one turn after a browser call because
+    navigate returned only {url, title}. The model landed on a page with
+    nothing to read, said "Let me check the page directly via the
+    browser....", and the turn ended.
+    """
+
+    async def test_navigate_returns_the_page_outline(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_navigate_handler
+
+        client = FakeClient()
+        body = json.loads(await _browser_navigate_handler(
+            {"url": "https://example.com"},
+            tenant=tenant, session_id=uuid4(),
+            browser_pool=FakePool(), browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: client,
+        ))
+        assert body["url"] == "https://example.com"
+        assert body["title"] == "Test Page"
+        # The refs are what browser_click/browser_type consume.
+        assert "@e2" in body["snapshot"]
+        assert "Search" in body["snapshot"]
+
+    async def test_snapshot_can_be_declined(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_navigate_handler
+
+        body = json.loads(await _browser_navigate_handler(
+            {"url": "https://example.com", "snapshot": False},
+            tenant=tenant, session_id=uuid4(),
+            browser_pool=FakePool(), browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: FakeClient(),
+        ))
+        assert "snapshot" not in body
+        assert body["title"] == "Test Page"
+
+    async def test_navigation_survives_a_failed_snapshot(self, tenant) -> None:
+        """A snapshot failure must not fail a navigation that worked."""
+        from surogates.tools.builtin.browser import _browser_navigate_handler
+
+        class NoStateClient(FakeClient):
+            async def get_state(self, **kwargs: Any) -> dict[str, Any]:
+                raise RuntimeError("cdp detached")
+
+        body = json.loads(await _browser_navigate_handler(
+            {"url": "https://example.com"},
+            tenant=tenant, session_id=uuid4(),
+            browser_pool=FakePool(), browser_control=FakeControlStore(),
+            _client_factory=lambda endpoint: NoStateClient(),
+        ))
+        assert "error" not in body
+        assert body["url"] == "https://example.com"
+        assert "browser_get_state" in body["snapshot_error"]
+
+    def test_truncation_cuts_on_a_line_boundary(self) -> None:
+        """A mid-line cut would hand the model a '@eN' ref it cannot use."""
+        from surogates.tools.builtin.browser import (
+            _MAX_NAVIGATE_SNAPSHOT_CHARS,
+            _truncate_snapshot,
+        )
+
+        line = '- button @e1 "Click me"'
+        big = "\n".join([line] * 2000)
+        assert len(big) > _MAX_NAVIGATE_SNAPSHOT_CHARS
+        out, truncated = _truncate_snapshot(big)
+        assert truncated is True
+        assert len(out) <= _MAX_NAVIGATE_SNAPSHOT_CHARS
+        assert all(l == line for l in out.splitlines())
+
+        small = "\n".join([line] * 3)
+        assert _truncate_snapshot(small) == (small, False)

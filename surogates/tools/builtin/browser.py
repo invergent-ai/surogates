@@ -260,6 +260,15 @@ NAVIGATE_SCHEMA = {
             "enum": ["load", "domcontentloaded", "networkidle"],
             "default": "load",
         },
+        "snapshot": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Return the page outline with the navigation. Leave on unless "
+                "you are only following a redirect chain and do not intend to "
+                "read the page."
+            ),
+        },
     },
     "required": ["url"],
     "additionalProperties": False,
@@ -291,15 +300,47 @@ async def _browser_navigate_handler(
 
     _browser_id, endpoint, snapshot_cache = preflight
     client = _make_client(_client_factory, endpoint, snapshot_cache)
+    snapshot: str | None = None
     try:
         async with client:
             result = await client.navigate(
                 arguments["url"],
                 wait_until=arguments.get("wait_until", "load"),
             )
+            if arguments.get("snapshot", True):
+                # Landing on a page and being told only its title leaves the
+                # model with nothing to act on.  Fetch the outline in the same
+                # client session -- a second round trip to the browser costs
+                # far less than the turn the model would otherwise spend
+                # asking for it.
+                try:
+                    state = await client.get_state()
+                    snapshot = render_markdown(state)
+                except RuntimeError as exc:
+                    # Navigation succeeded; only the snapshot failed.  Say so
+                    # and let the model call browser_get_state itself rather
+                    # than failing a navigation that worked.
+                    logger.info(
+                        "browser_navigate: snapshot failed after navigating "
+                        "to %s: %s", result.get("url"), exc,
+                    )
     except RuntimeError as exc:
         return json.dumps({"error": "navigate_failed", "detail": str(exc)})
-    return json.dumps({"url": result["url"], "title": result["title"]})
+
+    payload: dict[str, Any] = {"url": result["url"], "title": result["title"]}
+    if snapshot is None:
+        payload["snapshot_error"] = (
+            "Page outline unavailable. Call browser_get_state to read the page."
+        )
+    else:
+        payload["snapshot"], truncated = _truncate_snapshot(snapshot)
+        if truncated:
+            payload["snapshot_truncated"] = (
+                "Outline cut at a line boundary. Call browser_get_state with "
+                "'selector' to scope to a region, or 'interactive_only' for "
+                "just the controls."
+            )
+    return json.dumps(payload)
 
 
 GET_STATE_SCHEMA = {
@@ -384,6 +425,28 @@ async def _browser_get_state_handler(
     if arguments.get("format", "markdown") == "json":
         return json.dumps(state)
     return render_markdown(state)
+
+
+# Cap on the page outline attached to a navigation.  Smaller than the
+# evaluate cap because the model did not ask for this one -- it rides along
+# on every navigation, so it has to stay affordable.  Cutting at a line
+# boundary keeps the '- role @eN "name"' refs intact; a mid-line cut would
+# hand the model a ref it cannot use.
+_MAX_NAVIGATE_SNAPSHOT_CHARS: int = 8_000
+
+
+def _truncate_snapshot(markdown: str) -> tuple[str, bool]:
+    """Return (outline, was_truncated), cut on a line boundary."""
+    if len(markdown) <= _MAX_NAVIGATE_SNAPSHOT_CHARS:
+        return markdown, False
+    kept: list[str] = []
+    budget = 0
+    for line in markdown.splitlines():
+        if budget + len(line) + 1 > _MAX_NAVIGATE_SNAPSHOT_CHARS:
+            break
+        kept.append(line)
+        budget += len(line) + 1
+    return "\n".join(kept), True
 
 
 # Cap on a single evaluate result.  Matches ``_MAX_TOOL_RESULT_CHARS`` in
@@ -998,8 +1061,13 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_navigate",
             description=(
-                "Navigate the agent's browser to a URL and return the final URL "
-                "and page title."
+                "Navigate the agent's browser to a URL. Returns the final URL, "
+                "the page title, and a 'snapshot': the page outline with "
+                "'@eN' refs for browser_click and browser_type — the same "
+                "shape browser_get_state returns, so you can usually act on "
+                "the page directly without a second call. Large pages are cut "
+                "at a line boundary; browser_get_state with 'selector' or "
+                "'interactive_only' gets the rest."
             ),
             parameters=NAVIGATE_SCHEMA,
         ),
