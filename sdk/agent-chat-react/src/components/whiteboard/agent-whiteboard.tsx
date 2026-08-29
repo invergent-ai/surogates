@@ -786,6 +786,8 @@ export function WhiteboardSurface({
           ? handleAt(selBounds, logical, view.zoom)
           : null;
         if (selBounds && grabbed) {
+          // Resizing it makes the selection the user's, as moving does.
+          userSelected.current = true;
           gestureBaseline.current = doc;
           resize.current = {
             anchor: oppositeCorner(selBounds, grabbed),
@@ -876,11 +878,22 @@ export function WhiteboardSurface({
         const now = screenToLogical(localPoint(e), view);
         const spanX = start.x - anchor.x;
         const spanY = start.y - anchor.y;
-        // Degenerate spans would divide by zero; leave that axis alone.
-        const sx = Math.abs(spanX) < 1e-6 ? 1 : (now.x - anchor.x) / spanX;
-        const sy = Math.abs(spanY) < 1e-6 ? 1 : (now.y - anchor.y) / spanY;
-        setDoc((d) => mapSelected(d, (o) => scaleObject(o, sx, sy, anchor)));
-        resize.current = { anchor, start: now };
+        // The whole gesture's factors, applied to the document as it
+        // stood when the handle was grabbed -- not one sample's ratio
+        // applied to the last sample's result. A real diagonal drag
+        // arrives as alternating horizontal and vertical steps; scaled
+        // step by step, type (which takes one factor for both axes)
+        // saw min(1.05, 1) every time and never grew. Degenerate spans
+        // would divide by zero; leave that axis alone. Never below
+        // zero: crossing the anchor must not mirror the object.
+        const factor = (span: number, d: number) =>
+          Math.abs(span) < 1e-6 ? 1 : Math.max(0.05, d / span);
+        const sx = factor(spanX, now.x - anchor.x);
+        const sy = factor(spanY, now.y - anchor.y);
+        const base = gestureBaseline.current;
+        setDoc((d) =>
+          mapSelected(base ?? d, (o) => scaleObject(o, sx, sy, anchor)),
+        );
         return;
       }
 

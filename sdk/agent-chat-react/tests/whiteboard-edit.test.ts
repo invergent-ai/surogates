@@ -93,11 +93,26 @@ describe("scaleObject", () => {
     expect(scaled.maxWidth).toBe(600);
   });
 
-  it("scales glyphs uniformly rather than distorting them", () => {
+  it("takes the text's font from the vertical factor", () => {
     const [obj] = applyCommands(emptyDoc(), [text], 1).objects;
-    const scaled = scaleObject(obj, 4, 1, anchor) as { fontSize: number };
-    // Uniform takes the smaller factor: 1, not 4.
-    expect(scaled.fontSize).toBe(32);
+    // A horizontal pull reflows; it does not stretch the glyphs.
+    expect((scaleObject(obj, 4, 1, anchor) as { fontSize: number }).fontSize)
+      .toBe(32);
+    // A vertical pull is what makes the type bigger.
+    expect((scaleObject(obj, 1, 2, anchor) as { fontSize: number }).fontSize)
+      .toBe(64);
+  });
+
+  it("resizes a formula along whichever axis moved most", () => {
+    const [obj] = applyCommands(emptyDoc(), [{
+      tool: "draw_formula", x: 0, y: 0, latex: "x^2", fontSize: 40,
+    }], 1).objects;
+    const size = (sx: number, sy: number) =>
+      (scaleObject(obj, sx, sy, anchor) as { fontSize: number }).fontSize;
+    // A one-axis pull used to be min(sx, sy) = 1: nothing happened.
+    expect(size(2, 1)).toBe(80);
+    expect(size(1, 2)).toBe(80);
+    expect(size(0.5, 1.1)).toBe(20);
   });
 
   it("resizes an artifact box on both axes", () => {

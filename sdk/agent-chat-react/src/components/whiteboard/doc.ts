@@ -495,9 +495,12 @@ export function translateObject(
 /**
  * Scale one object about *anchor* by independent x/y factors.
  *
- * Kinds with an intrinsic type size scale that instead of their box:
- * a formula has no meaningful width to stretch, and text reflows by
- * wrap width rather than distorting its glyphs.
+ * Kinds with an intrinsic type size scale that instead of their box,
+ * so the glyphs are never stretched on one axis. Text takes its font
+ * from the vertical factor and its wrap width from the horizontal one:
+ * the box then follows the corner on both axes. A formula has no width
+ * to stretch, so it follows whichever axis the pointer moved most --
+ * pulling a handle in any direction resizes it.
  */
 export function scaleObject(
   obj: WbObject,
@@ -507,9 +510,12 @@ export function scaleObject(
 ): WbObject {
   const px = (v: number) => anchor.x + (v - anchor.x) * sx;
   const py = (v: number) => anchor.y + (v - anchor.y) * sy;
-  // Type scales uniformly: stretching glyphs on one axis looks broken
-  // and is never what dragging a corner is asking for.
   const uniform = Math.max(0.05, Math.min(sx, sy));
+  const dominant =
+    Math.abs(Math.log(Math.max(sx, 1e-6))) >=
+    Math.abs(Math.log(Math.max(sy, 1e-6)))
+      ? sx
+      : sy;
 
   switch (obj.kind) {
     case "ink":
@@ -536,14 +542,14 @@ export function scaleObject(
         // Width is the wrap width, so it takes the horizontal factor;
         // the glyphs themselves scale uniformly.
         maxWidth: Math.max(16, obj.maxWidth * sx),
-        fontSize: Math.max(4, obj.fontSize * uniform),
+        fontSize: Math.max(4, obj.fontSize * sy),
       };
     case "formula":
       return {
         ...obj,
         x: px(obj.x),
         y: py(obj.y),
-        fontSize: Math.max(4, obj.fontSize * uniform),
+        fontSize: Math.max(4, obj.fontSize * dominant),
       };
     case "artifact":
     case "slot":

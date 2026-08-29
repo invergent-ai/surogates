@@ -1409,6 +1409,39 @@ describe("what counts as the user's selection", () => {
     expect(metadataOf(send)?.selection).toBeDefined();
   });
 
+  it("grows the agent's text when its corner is dragged out step by step", async () => {
+    // The object sits at logical (600,40)-(772,105), on screen
+    // (1000,340)-(1172,405); grab the south-east handle and pull it
+    // out the way a mouse does: one axis per sample. Scaled sample by
+    // sample, type took min(sx, sy) = 1 each time and never grew.
+    const { el, canvas, send } = await boardAfterReply();
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 1172, clientY: 405, bubbles: true, cancelable: true,
+      }));
+    });
+    let x = 1172;
+    let y = 405;
+    for (let i = 0; i < 20; i++) {
+      if (i % 2 === 0) x += 10; else y += 10;
+      await act(async () => {
+        canvas.dispatchEvent(new PointerEvent("pointermove", {
+          clientX: x, clientY: y, bubbles: true,
+        }));
+      });
+    }
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
+    const sel = metadataOf(send)?.selection as { w: number; h: number };
+    expect(sel).toBeDefined();
+    // The pointer went 100px out on each axis: the box follows it.
+    expect(sel.h).toBeGreaterThan(65 * 1.8);
+    expect(sel.w).toBeGreaterThan(172 * 1.4);
+  });
+
   it("drops the selection when the user starts drawing", async () => {
     const { el, canvas, send } = await boardAfterReply();
     await act(async () => {
