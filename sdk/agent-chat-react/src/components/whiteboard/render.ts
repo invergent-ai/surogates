@@ -232,6 +232,7 @@ export function objectBounds(
       return { x: obj.x, y: obj.y, w, h };
     }
     case "artifact":
+    case "slot":
       return { x: obj.x, y: obj.y, w: obj.w, h: obj.h };
     case "erase":
       return null;
@@ -373,6 +374,35 @@ function paintArtifactFrame(
   ctx.restore();
 }
 
+function paintSlot(
+  ctx: CanvasRenderingContext2D,
+  obj: Extract<WbObject, { kind: "slot" }>,
+): void {
+  // Reserved space: a dashed amber box the model sees on the atlas
+  // exactly as the user does. The label tag is painted with the marks.
+  ctx.save();
+  ctx.setLineDash([8, 6]);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(217, 119, 6, 0.85)";
+  ctx.fillStyle = "rgba(217, 119, 6, 0.06)";
+  ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+  ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+  // The robot says what the box is for, on the canvas and on the atlas
+  // alike: the answer goes here.
+  const glyph = Math.max(12, Math.min(obj.h * 0.5, obj.w * 0.3, 40));
+  ctx.font = `${glyph}px system-ui, sans-serif`;
+  ctx.textBaseline = "top";
+  ctx.fillStyle = "rgba(180, 83, 9, 0.9)";
+  ctx.fillText("\u{1F916}", obj.x + glyph * 0.3, obj.y + (obj.h - glyph) / 2);
+  if (obj.hint) {
+    const size = Math.max(10, Math.min(obj.h * 0.3, (obj.w - glyph * 1.6) / Math.max(obj.hint.length, 1) / 0.6, 22));
+    ctx.font = `italic ${size}px system-ui, sans-serif`;
+    ctx.fillStyle = "rgba(180, 83, 9, 0.8)";
+    ctx.fillText(obj.hint, obj.x + glyph * 1.6, obj.y + (obj.h - size) / 2);
+  }
+  ctx.restore();
+}
+
 function paintErase(
   ctx: CanvasRenderingContext2D,
   obj: Extract<WbObject, { kind: "erase" }>,
@@ -468,6 +498,9 @@ export function renderDoc(
         break;
       case "artifact":
         paintArtifactFrame(ctx, obj);
+        break;
+      case "slot":
+        paintSlot(ctx, obj);
         break;
       case "erase":
         paintErase(ctx, obj);

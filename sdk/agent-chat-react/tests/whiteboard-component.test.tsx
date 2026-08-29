@@ -176,13 +176,19 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Pen")?.getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("offers both speeds", async () => {
+  it("offers the four actions and Work it out", async () => {
     const { adapter } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
-    expect(byLabel(el, "Ask")).not.toBeNull();
-    expect(byLabel(el, "Think harder")).not.toBeNull();
+    for (const a of ["Answer", "Continue", "Explain", "Hint"]) {
+      const b = byLabel(el, a);
+      expect(b).not.toBeNull();
+      expect(b?.getAttribute("data-slot")).toBe("tooltip-trigger");
+    }
+    const deep = byLabel(el, "Work it out");
+    expect(deep?.getAttribute("role")).toBe("checkbox");
+    expect(deep?.getAttribute("aria-checked")).toBe("false");
   });
 
   it("sends an image and whiteboard metadata on Ask", async () => {
@@ -191,7 +197,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const payload = sendMessage.mock.calls[0][0] as unknown as {
@@ -209,7 +215,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { mode?: string } };
@@ -217,13 +223,16 @@ describe("AgentWhiteboard", () => {
     expect(payload.metadata?.whiteboard?.mode).toBe("sketch");
   });
 
-  it("sends mode deep from Think harder", async () => {
+  it("sends mode deep with Work it out checked", async () => {
     const { adapter, sendMessage } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Think harder")?.click();
+      byLabel(el, "Work it out")?.click();
+    });
+    await act(async () => {
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { mode?: string } };
@@ -378,7 +387,7 @@ describe("AgentWhiteboard", () => {
     );
     await typeOnBoard(el, "integral of x squared");
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { typedInput?: string } };
@@ -396,7 +405,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: Record<string, unknown> };
@@ -412,11 +421,11 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
-    expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
+    expect(byLabel(el, "Answer")).toHaveProperty("disabled", true);
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
@@ -862,7 +871,7 @@ describe("AgentWhiteboard", () => {
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" disabled />,
     );
-    expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
+    expect(byLabel(el, "Answer")).toHaveProperty("disabled", true);
     expect(byLabel(el, "Pen")).toHaveProperty("disabled", true);
   });
 });
@@ -991,11 +1000,11 @@ describe("the restoring indicator", () => {
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(true);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(true);
 
     release();
     await act(async () => { await Promise.resolve(); });
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("says nothing when the load is quick", async () => {
@@ -1365,7 +1374,7 @@ describe("what counts as the user's selection", () => {
     canvas.setPointerCapture = () => undefined;
     canvas.getBoundingClientRect = () =>
       ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(false);
     return { el, canvas, send };
   }
 
@@ -1378,7 +1387,7 @@ describe("what counts as the user's selection", () => {
     // leak into the next Ask as "the user lassoed this", and the model
     // read its own answer as the user's question.
     const { el, send } = await boardAfterReply();
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeUndefined();
   });
@@ -1395,9 +1404,42 @@ describe("what counts as the user's selection", () => {
       }));
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeDefined();
+  });
+
+  it("grows the agent's text when its corner is dragged out step by step", async () => {
+    // The object sits at logical (600,40)-(772,105), on screen
+    // (1000,340)-(1172,405); grab the south-east handle and pull it
+    // out the way a mouse does: one axis per sample. Scaled sample by
+    // sample, type took min(sx, sy) = 1 each time and never grew.
+    const { el, canvas, send } = await boardAfterReply();
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 1172, clientY: 405, bubbles: true, cancelable: true,
+      }));
+    });
+    let x = 1172;
+    let y = 405;
+    for (let i = 0; i < 20; i++) {
+      if (i % 2 === 0) x += 10; else y += 10;
+      await act(async () => {
+        canvas.dispatchEvent(new PointerEvent("pointermove", {
+          clientX: x, clientY: y, bubbles: true,
+        }));
+      });
+    }
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
+    const sel = metadataOf(send)?.selection as { w: number; h: number };
+    expect(sel).toBeDefined();
+    // The pointer went 100px out on each axis: the box follows it.
+    expect(sel.h).toBeGreaterThan(65 * 1.8);
+    expect(sel.w).toBeGreaterThan(172 * 1.4);
   });
 
   it("drops the selection when the user starts drawing", async () => {
@@ -1411,8 +1453,160 @@ describe("what counts as the user's selection", () => {
       }));
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeUndefined();
+  });
+});
+
+describe("the action buttons", () => {
+  async function board() {
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    return { el, send };
+  }
+  const metadataOf = (send: ReturnType<typeof vi.fn>) =>
+    (send.mock.calls[0]?.[3] as { whiteboard?: Record<string, unknown> })?.whiteboard;
+
+  it.each(["answer", "continue", "explain", "hint"])(
+    "the %s button sends its action with the turn",
+    async (id) => {
+      const { el, send } = await board();
+      const label = id[0].toUpperCase() + id.slice(1);
+      await act(async () => { byLabel(el, label)?.click(); });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(metadataOf(send)?.action).toBe(id);
+    },
+  );
+
+  it("Enter in the question box answers", async () => {
+    const { el, send } = await board();
+    const input = el.querySelector<HTMLInputElement>("input[placeholder]");
+    await act(async () => {
+      input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(metadataOf(send)?.action).toBe("answer");
+  });
+});
+
+
+describe("placing the answer box", () => {
+  async function board() {
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    return { el, canvas, send };
+  }
+  const marksOf = (send: ReturnType<typeof vi.fn>) =>
+    ((send.mock.calls[0]?.[3] as { whiteboard?: { marks?: { id: string; kind: string }[] } })
+      ?.whiteboard?.marks ?? []);
+
+  it("offers an Answer box tool with the robot", async () => {
+    const { el } = await board();
+    expect(byLabel(el, "Answer box")).not.toBeNull();
+  });
+
+  it("right-click drops an answer box with the pen in hand", async () => {
+    const { el, canvas, send } = await board();
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 500, clientY: 300, button: 2, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(marksOf(send).some((m) => m.kind === "slot" && m.id === "S1")).toBe(true);
+  });
+
+  it("keeps the browser's context menu off the canvas", async () => {
+    const { canvas } = await board();
+    const menu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    await act(async () => { canvas.dispatchEvent(menu); });
+    expect(menu.defaultPrevented).toBe(true);
+  });
+
+  it("the Answer box tool drops a box on click and asks for a hint", async () => {
+    const { el, canvas } = await board();
+    await act(async () => { byLabel(el, "Answer box")?.click(); });
+    // Separate acts: the drag state set on pointerdown must flush before
+    // pointerup reads it, as it does between real browser events.
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 500, clientY: 300, bubbles: true, cancelable: true,
+      }));
+    });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    expect(el.querySelector('textarea[aria-label="Text"]')).not.toBeNull();
+  });
+});
+
+
+describe("selecting the answer box", () => {
+  it("selects only the box, not the first stroke", async () => {
+    // Strokes and slots used to draw ids from separate counters, so the
+    // first slot was `local:1` -- the first stroke's id -- and selecting
+    // one selected both.
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [], isRunning: false, send } as never}
+      />,
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+
+    // One pen stroke on the left...
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 100, clientY: 100, bubbles: true, cancelable: true }));
+      canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: 160, clientY: 140, bubbles: true }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    // ...an answer box on the right...
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 500, clientY: 300, button: 2, bubbles: true, cancelable: true }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    // ...select the box.
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: 540, clientY: 300, bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
+    const calls = (send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const meta = (calls[0]?.[3] as { whiteboard?: { selection?: { w: number } } })?.whiteboard;
+    // The reported selection is the box's size, not a union with the stroke.
+    expect(meta?.selection).toBeDefined();
+    expect(meta!.selection!.w).toBeLessThan(400);
   });
 });

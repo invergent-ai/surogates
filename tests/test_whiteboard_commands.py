@@ -473,3 +473,80 @@ def test_rejects_an_essay_as_a_reading():
 
 def test_rejects_a_non_list():
     assert validate_readings({"mark": "A1", "text": "x"}) is not None
+
+
+# ---------------------------------------------------------------------
+# Slots: side 'in', intent, and the unfilled-slot check
+# ---------------------------------------------------------------------
+
+from surogates.whiteboard.commands import unfilled_slots, validate_intent
+
+
+def test_accepts_a_fill_into_a_slot():
+    assert validate_commands([
+        {"tool": "write_text", "text": "O", "anchor": "S1", "side": "in"},
+    ]) is None
+
+
+def test_accepts_a_sketch_into_a_slot_without_an_origin():
+    assert validate_commands([
+        {"tool": "draw", "anchor": "S1", "side": "in",
+         "types": ["circle"], "items": [[500, 500, 400]]},
+    ]) is None
+
+
+def test_rejects_a_sketch_anchored_anywhere_but_a_slot():
+    error = validate_commands([
+        {"tool": "draw", "anchor": "latest", "side": "right",
+         "types": ["circle"], "items": [[500, 500, 400]]},
+    ])
+    assert error is not None and "slot" in error
+
+
+def test_intent_is_optional_but_closed():
+    assert validate_intent(None) is None
+    assert validate_intent("fill") is None
+    assert validate_intent("ponder") is not None
+
+
+def test_unfilled_slots_names_what_the_call_missed():
+    cmds = [{"tool": "write_text", "text": "hi", "anchor": "latest"}]
+    assert unfilled_slots(cmds, frozenset({"S1", "S2"})) == ["S1", "S2"]
+
+
+def test_unfilled_slots_is_empty_once_filled():
+    cmds = [{"tool": "write_text", "text": "O", "anchor": "S1", "side": "in"}]
+    assert unfilled_slots(cmds, frozenset({"S1"})) == []
+
+
+def test_unfilled_slots_is_empty_without_slots():
+    assert unfilled_slots([{"tool": "erase", "mode": "path", "points": [[0, 0], [1, 1]]}], frozenset()) == []
+
+
+# ---------------------------------------------------------------------
+# draw_formula spelled with text/formula/tex instead of latex
+#
+# From a real session: a deep turn's first draw was rejected with
+# "missing required field(s): latex", and the user watched the retry.
+# ---------------------------------------------------------------------
+
+
+def test_draw_formula_accepts_text_for_latex():
+    assert validate_commands([
+        {"tool": "draw_formula", "text": "x^2", "anchor": "latest", "side": "right"},
+    ]) is None
+
+
+def test_draw_formula_accepts_formula_and_tex_for_latex():
+    for key in ("formula", "tex"):
+        assert validate_commands([
+            {"tool": "draw_formula", key: "x^2", "x": 0, "y": 0, "fontSize": 40},
+        ]) is None
+
+
+def test_draw_formula_still_rejects_without_any_latex():
+    error = validate_commands([
+        {"tool": "draw_formula", "anchor": "latest", "side": "right"},
+    ])
+    assert error is not None
+    assert "latex" in error

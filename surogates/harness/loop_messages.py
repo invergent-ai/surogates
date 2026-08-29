@@ -96,6 +96,36 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             f"imageX=(globalX-sourceRect.x)*imageScale."
         )
 
+    # The user's action button, when pressed: PenEcho's userAction.  It
+    # settles what to do before anything is inferred from the ink, and
+    # it outranks the inference.  Unknown values are ignored -- the
+    # client sends only these, and a typo must not become an instruction.
+    action = payload.get("action")
+    meaning = {
+        "answer": (
+            "produce the result -- the value, the missing piece, the "
+            "requested drawing -- on the board, filling any slot with it"
+        ),
+        "continue": (
+            "continue the user's newest work in kind: the next line, the "
+            "next step, the next stroke -- not commentary on it"
+        ),
+        "explain": (
+            "explain the newest content, or what their box or arrow "
+            "points at, in short prose placed beside it"
+        ),
+        "hint": (
+            "give one short clue that moves the user toward the answer "
+            "without giving the answer; never write the result itself"
+        ),
+    }.get(action) if isinstance(action, str) else None
+    if meaning:
+        lines.append(
+            f"The user pressed {str(action).upper()}: {meaning}. This is "
+            f"their instruction for the turn and outranks anything you "
+            f"would otherwise infer from the ink."
+        )
+
     latest = _rect(payload.get("latestInput"))
     if latest:
         lines.append(
@@ -239,6 +269,7 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     if isinstance(marks, list) and marks:
         rows = []
         fresh_ids = []
+        slot_ids = []
         for entry in marks:
             if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
                 continue
@@ -248,9 +279,16 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 f" (call {origin})" if isinstance(origin, str) and origin else ""
             )
             label = str(entry.get("label") or "").strip()
-            what = f'"{label}"' if label else (
-                "the user's ink" if entry.get("kind") == "ink" else "your object"
-            )
+            kind = entry.get("kind")
+            if kind == "slot":
+                hint = str(entry.get("hint") or "").strip()
+                what = "EMPTY SLOT the user drew for your answer"
+                if hint:
+                    what += f' (they wrote: "{hint}")'
+            else:
+                what = f'"{label}"' if label else (
+                    "the user's ink" if kind == "ink" else "your object"
+                )
             if entry.get("removed"):
                 rows.append(f"- {mid}{handle}: {what} -- no longer on the board")
                 continue
@@ -271,6 +309,9 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             elif entry.get("kind") == "ink" and not entry.get("fresh"):
                 # NEW already says it has not been read.
                 row += " -- unread"
+            if kind == "slot":
+                row += " -- fill it: anchor:'" + mid + "', side:'in'"
+                slot_ids.append(mid)
             if entry.get("fresh"):
                 row += " -- NEW since your last turn"
                 fresh_ids.append(mid)
@@ -287,6 +328,12 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 f" What the user just wrote is {', '.join(fresh_ids)}."
                 if fresh_ids else ""
             )
+            if slot_ids:
+                newest += (
+                    f" The user reserved {', '.join(slot_ids)} for the "
+                    f"answer: fill each slot first, with the thing that "
+                    f"belongs there, before doing anything else."
+                )
             lines.append(
                 f"Labelled marks on the image (amber boxes; the label sits "
                 f"at each box's top-left corner): A-marks are the user's "

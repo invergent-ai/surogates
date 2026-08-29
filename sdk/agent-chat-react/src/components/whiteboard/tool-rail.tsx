@@ -1,4 +1,5 @@
 import {
+  Bot,
   Eraser,
   Hand,
   Maximize2,
@@ -11,7 +12,7 @@ import {
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 
-export type WbTool = "pen" | "eraser" | "text" | "select" | "pan";
+export type WbTool = "pen" | "eraser" | "text" | "slot" | "select" | "pan";
 
 export const INK_COLORS = [
   "#111827",
@@ -27,6 +28,9 @@ const TOOLS: { id: WbTool; label: string; Icon: typeof Pen }[] = [
   { id: "pen", label: "Pen", Icon: Pen },
   { id: "eraser", label: "Eraser", Icon: Eraser },
   { id: "text", label: "Text", Icon: Type },
+  // Where the agent should answer: click to place an answer box, or
+  // drag one. The id stays "slot" -- that is what the object is.
+  { id: "slot", label: "Answer box", Icon: Bot },
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type WbDoc,
   applyCommands,
@@ -6,7 +6,10 @@ import {
   correctReading,
   emptyDoc,
   foldToolCalls,
+  makeSlotObject,
   readingKey,
+  scaleObject,
+  translateObject,
 } from "@/components/whiteboard/doc";
 import type { AgentChatMessage } from "@/types";
 
@@ -261,6 +264,25 @@ describe("deleting an agent's object", () => {
 });
 
 
+describe("draw_formula spelled text instead of latex", () => {
+  it("draws the formula the validator let through", () => {
+    const doc = applyCommands(emptyDoc(), [
+      { tool: "draw_formula", text: "x^2", x: 0, y: 0, fontSize: 40 },
+    ], 1);
+    expect(doc.objects[0]).toMatchObject({ kind: "formula", latex: "x^2" });
+  });
+
+  it("hands the resolver the aliased command, so sizing sees the latex", () => {
+    const resolve = vi.fn((_doc, cmds: unknown[]) => cmds);
+    foldToolCalls(emptyDoc(), [
+      message("m1", "whiteboard_draw", {
+        commands: [{ tool: "draw_formula", text: "x^2", anchor: "latest", side: "right" }],
+      }),
+    ], resolve as never);
+    expect(resolve.mock.calls[0][1][0]).toMatchObject({ latex: "x^2" });
+  });
+});
+
 describe("width/height where the schema says w/h", () => {
   // From a real session: the model wrote a wrong correction, tried twice
   // to erase it with `width`/`height`, and was rejected. The validator
@@ -457,5 +479,32 @@ describe("a draw the server rejected", () => {
   it("leaves an accepted call alone", () => {
     const doc = foldToolCalls(emptyDoc(), [call("Drew 1 object on the canvas")]);
     expect(doc.objects).toHaveLength(1);
+  });
+});
+
+describe("slots", () => {
+  it("moves and scales like any object", () => {
+    const slot = makeSlotObject({ x: 10, y: 20, w: 30, h: 40 }, "the cat");
+    const moved = translateObject(slot, 5, 5) as { x: number; y: number };
+    expect([moved.x, moved.y]).toEqual([15, 25]);
+    const scaled = scaleObject(slot, 2, 2, { x: 10, y: 20 }) as { w: number; h: number };
+    expect([scaled.w, scaled.h]).toEqual([60, 80]);
+    expect((slot as { hint?: string }).hint).toBe("the cat");
+  });
+});
+
+
+describe("object ids", () => {
+  it("never collide across strokes, slots and text", async () => {
+    const { StrokeBuilder } = await import("@/components/whiteboard/input");
+    const builder = new StrokeBuilder("#000", 4);
+    builder.begin({ x: 0, y: 0 });
+    builder.extend({ x: 10, y: 10 });
+    builder.extend({ x: 20, y: 20 });
+    const stroke = builder.finish();
+    const slot = makeSlotObject({ x: 0, y: 0, w: 10, h: 10 });
+    const ids = new Set([stroke?.id, slot.id]);
+    expect(ids.size).toBe(2);
+    expect(slot.id.startsWith("local:")).toBe(true);
   });
 });

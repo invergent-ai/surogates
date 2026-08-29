@@ -485,3 +485,38 @@ def test_replay_keeps_every_image_of_the_newest_canvas_turn():
     pruned = prune_superseded_canvas_images([two_image_turn(1), two_image_turn(2)])
     urls = [img["image_url"]["url"] for img in _images(pruned)]
     assert urls == ["data:over2", "data:crop2"]
+
+
+# --- slots ----------------------------------------------------------------
+
+def test_renders_a_slot_as_an_instruction_to_fill():
+    note = _whiteboard_note_from_metadata(_meta(marks=[
+        {"id": "S1", "kind": "slot", "x": 140, "y": 20, "w": 60, "h": 70,
+         "hint": "a letter"},
+    ]))
+    assert 'S1: EMPTY SLOT the user drew for your answer (they wrote: "a letter")' in note
+    assert "fill it: anchor:'S1', side:'in'" in note
+    assert "reserved S1 for the answer: fill each slot first" in note
+
+
+# --- the user's action button ------------------------------------------
+
+def test_renders_the_pressed_action_as_the_turns_instruction():
+    note = _whiteboard_note_from_metadata(_meta(action="hint"))
+    assert "The user pressed HINT" in note
+    assert "never write the result itself" in note
+    assert "outranks anything you would otherwise infer" in note
+
+
+def test_each_action_has_a_meaning():
+    for action in ("answer", "continue", "explain", "hint"):
+        assert f"The user pressed {action.upper()}" in _whiteboard_note_from_metadata(
+            _meta(action=action),
+        )
+
+
+def test_ignores_an_unknown_or_absent_action():
+    assert "pressed" not in _whiteboard_note_from_metadata(_meta())
+    assert "pressed" not in _whiteboard_note_from_metadata(_meta(action="auto"))
+    assert "pressed" not in _whiteboard_note_from_metadata(_meta(action="destroy"))
+    assert "pressed" not in (_whiteboard_note_from_metadata(_meta(action=7)) or "")

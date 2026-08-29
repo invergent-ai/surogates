@@ -60,6 +60,20 @@ export type WbObject = WbBase &
         version?: number;
       }
     | {
+        /**
+         * Empty space the user reserved for the answer. The universal
+         * "where": maths (`∫…dx = [slot]`), text (`H [slot] USE`), a
+         * drawing ("the cat goes here"). Filling it removes it.
+         */
+        kind: "slot";
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        /** What the user typed about what belongs here, if anything. */
+        hint?: string;
+      }
+    | {
         kind: "erase";
         mode: "rect" | "path";
         x?: number;
@@ -180,10 +194,25 @@ export function correctReading(
   return { ...doc, readings };
 }
 
+/**
+ * Object ids are unique across everything that mints them and across
+ * page loads. Two counters used to run side by side -- strokes in
+ * `input.ts`, slots and text here -- so the first slot on a board was
+ * `local:1`, the same id as the first stroke, and selecting one
+ * selected both. And a counter restarts on reload, so new objects
+ * collided with the saved board too. The per-load token is what keeps
+ * ids stable once persisted and distinct across sessions.
+ */
+const LOAD_TOKEN = Math.random().toString(36).slice(2, 8);
 let localCounter = 0;
 function nextId(origin: string): string {
   localCounter += 1;
-  return `${origin}:${localCounter}`;
+  return `${origin}:${LOAD_TOKEN}${localCounter}`;
+}
+
+/** A fresh id for a user-authored object: strokes, slots, text. */
+export function nextLocalId(): string {
+  return nextId("local");
 }
 
 /**
@@ -198,6 +227,22 @@ function nextId(origin: string): string {
 function size(cmd: Record<string, unknown>, key: "w" | "h"): unknown {
   const alias = key === "w" ? "width" : "height";
   return cmd[key] ?? cmd[alias];
+}
+
+/**
+ * A formula the model spelled `text`/`formula`/`tex` instead of `latex`.
+ *
+ * The validator accepts the aliases; this is the half that makes the
+ * command draw and size. Applied before the resolver, which measures
+ * the formula to size it against its anchor, and again in the fold for
+ * callers that skip the resolver.
+ */
+function withLatexAlias(cmd: unknown): unknown {
+  if (!cmd || typeof cmd !== "object") return cmd;
+  const c = cmd as Record<string, unknown>;
+  if (c.tool !== "draw_formula" || c.latex !== undefined) return cmd;
+  const latex = c.formula ?? c.tex ?? c.text;
+  return latex === undefined ? cmd : { ...c, latex };
 }
 
 /** Convert one command into an object, or null to skip it. */
@@ -299,7 +344,7 @@ export function applyCommands(
   const superseded = new Set<string>();
   for (const cmd of commands) {
     if (typeof cmd !== "object" || cmd === null) continue;
-    const record = cmd as Record<string, unknown>;
+    const record = withLatexAlias(cmd) as Record<string, unknown>;
     const obj = toObject(record, origin);
     if (obj) added.push(obj);
     // Honoured even when the command itself was unusable: the intent to
@@ -310,12 +355,24 @@ export function applyCommands(
       superseded.add(record.replaces);
     }
   }
+  // A command that filled a slot takes the slot with it: the space was
+  // reserved for exactly this, and an empty box left behind would read
+  // as still waiting for an answer.
+  const filled = new Set<string>();
+  for (const cmd of commands) {
+    if (cmd && typeof cmd === "object") {
+      const f = (cmd as Record<string, unknown>).fillsSlot;
+      if (typeof f === "string" && f) filled.add(f);
+    }
+  }
   // Advance the cursor even when nothing survived validation, or the
   // persistence tail replays the same dead call on every load.
-  if (added.length === 0 && superseded.size === 0) {
+  if (added.length === 0 && superseded.size === 0 && filled.size === 0) {
     return { ...doc, lastEventId: nextEventId };
   }
-  const kept = doc.objects.filter((o) => !superseded.has(o.origin));
+  const kept = doc.objects.filter(
+    (o) => !superseded.has(o.origin) && !(o.kind === "slot" && filled.has(o.id)),
+  );
   return {
     ...doc,
     version: 1,
@@ -395,8 +452,9 @@ export function foldToolCalls(
       } catch {
         continue;
       }
-      const rawCommands = (parsed as { commands?: unknown } | null)?.commands;
-      if (!Array.isArray(rawCommands)) continue;
+      const raw = (parsed as { commands?: unknown } | null)?.commands;
+      if (!Array.isArray(raw)) continue;
+      const rawCommands = raw.map(withLatexAlias);
       const commands = resolve
         ? resolve(next, rawCommands, turnMetadata)
         : rawCommands;
@@ -439,6 +497,7 @@ export function translateObject(
     case "text":
     case "formula":
     case "artifact":
+    case "slot":
       return { ...obj, x: obj.x + dx, y: obj.y + dy };
     case "erase":
       return {
@@ -453,9 +512,12 @@ export function translateObject(
 /**
  * Scale one object about *anchor* by independent x/y factors.
  *
- * Kinds with an intrinsic type size scale that instead of their box:
- * a formula has no meaningful width to stretch, and text reflows by
- * wrap width rather than distorting its glyphs.
+ * Kinds with an intrinsic type size scale that instead of their box,
+ * so the glyphs are never stretched on one axis. Text takes its font
+ * from the vertical factor and its wrap width from the horizontal one:
+ * the box then follows the corner on both axes. A formula has no width
+ * to stretch, so it follows whichever axis the pointer moved most --
+ * pulling a handle in any direction resizes it.
  */
 export function scaleObject(
   obj: WbObject,
@@ -465,9 +527,12 @@ export function scaleObject(
 ): WbObject {
   const px = (v: number) => anchor.x + (v - anchor.x) * sx;
   const py = (v: number) => anchor.y + (v - anchor.y) * sy;
-  // Type scales uniformly: stretching glyphs on one axis looks broken
-  // and is never what dragging a corner is asking for.
   const uniform = Math.max(0.05, Math.min(sx, sy));
+  const dominant =
+    Math.abs(Math.log(Math.max(sx, 1e-6))) >=
+    Math.abs(Math.log(Math.max(sy, 1e-6)))
+      ? sx
+      : sy;
 
   switch (obj.kind) {
     case "ink":
@@ -494,16 +559,22 @@ export function scaleObject(
         // Width is the wrap width, so it takes the horizontal factor;
         // the glyphs themselves scale uniformly.
         maxWidth: Math.max(16, obj.maxWidth * sx),
-        fontSize: Math.max(4, obj.fontSize * uniform),
+        fontSize: Math.max(4, obj.fontSize * sy),
       };
     case "formula":
+      // Position takes the same factor as the type, not sx/sy: a
+      // formula's box grows uniformly, so moving it by a different
+      // factor per axis let it overflow the corner the drag was
+      // anchored to, and the selection rectangle breathed as the
+      // overflow changed with every sample.
       return {
         ...obj,
-        x: px(obj.x),
-        y: py(obj.y),
-        fontSize: Math.max(4, obj.fontSize * uniform),
+        x: anchor.x + (obj.x - anchor.x) * dominant,
+        y: anchor.y + (obj.y - anchor.y) * dominant,
+        fontSize: Math.max(4, obj.fontSize * dominant),
       };
     case "artifact":
+    case "slot":
       return {
         ...obj,
         x: px(obj.x),
@@ -523,6 +594,24 @@ export function scaleObject(
   }
 }
 
+/** A slot the user reserved for the answer, covering *rect*. */
+export function makeSlotObject(
+  rect: { x: number; y: number; w: number; h: number },
+  hint?: string,
+): WbObject {
+  return {
+    id: nextId("local"),
+    origin: "local",
+    selected: false,
+    kind: "slot",
+    x: rect.x,
+    y: rect.y,
+    w: rect.w,
+    h: rect.h,
+    ...(hint?.trim() ? { hint: hint.trim() } : {}),
+  };
+}
+
 /** A user-authored text object placed at *pt*. */
 export function makeTextObject(
   pt: { x: number; y: number },
@@ -530,9 +619,8 @@ export function makeTextObject(
   fontSize: number,
   maxWidth: number,
 ): WbObject {
-  localCounter += 1;
   return {
-    id: `local:text${localCounter}`,
+    id: nextId("local"),
     origin: "local",
     selected: false,
     kind: "text",

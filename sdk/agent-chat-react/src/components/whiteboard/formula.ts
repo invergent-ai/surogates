@@ -125,33 +125,44 @@ export interface RasterFormula {
  * `null`, starts the conversion and decode, and calls `onReady` when the
  * glyphs are available so the caller can schedule one repaint. Drawing a
  * formula is therefore never on the critical path of a pen stroke.
+ *
+ * Keyed by the latex alone. The raster is an SVG image drawn at an
+ * explicit size, so one entry serves every font size -- and it has to,
+ * because dragging a resize handle walks the font size through a new
+ * value on every pointer sample. Keyed by size as well, each of those
+ * samples missed: the formula fell back to painting its own source
+ * while the glyphs decoded, its bounds fell back to a character-count
+ * estimate, and each frame queued another MathJax conversion that was
+ * stale before it landed -- a flickering formula inside a selection
+ * rectangle that jumped between the estimate and the truth.
  */
 export class FormulaCache {
-  private readonly entries = new Map<string, RasterFormula>();
+  private readonly entries = new Map<
+    string,
+    { image: HTMLImageElement; widthEm: number; heightEm: number }
+  >();
   private readonly pending = new Set<string>();
 
   constructor(private readonly onReady: () => void) {}
 
-  private static key(latex: string, fontSize: number): string {
-    return `${fontSize}|${latex}`;
-  }
-
   get(latex: string, fontSize: number): RasterFormula | null {
-    const key = FormulaCache.key(latex, fontSize);
-    const hit = this.entries.get(key);
-    if (hit) return hit;
-    if (!this.pending.has(key)) {
-      this.pending.add(key);
-      void this.load(key, latex, fontSize);
+    const hit = this.entries.get(latex);
+    if (hit) {
+      return {
+        image: hit.image,
+        w: hit.widthEm * fontSize,
+        h: hit.heightEm * fontSize,
+      };
+    }
+    if (!this.pending.has(latex)) {
+      this.pending.add(latex);
+      void this.load(latex);
     }
     return null;
   }
 
-  private async load(
-    key: string,
-    latex: string,
-    fontSize: number,
-  ): Promise<void> {
+  private async load(latex: string): Promise<void> {
+    const key = latex;
     const { svg, widthEm, heightEm } = await latexToSvg(latex);
     if (!svg) {
       this.pending.delete(key);
@@ -169,11 +180,7 @@ export class FormulaCache {
         const oldest = this.entries.keys().next().value;
         if (oldest !== undefined) this.entries.delete(oldest);
       }
-      this.entries.set(key, {
-        image,
-        w: widthEm * fontSize,
-        h: heightEm * fontSize,
-      });
+      this.entries.set(key, { image, widthEm, heightEm });
       this.onReady();
     };
     image.onload = () => settle(true);
@@ -188,8 +195,10 @@ export class FormulaCache {
    * frame and simply tighten on the next repaint.
    */
   measure(latex: string, fontSize: number): { w: number; h: number } {
-    const hit = this.entries.get(FormulaCache.key(latex, fontSize));
-    if (hit) return { w: hit.w, h: hit.h };
+    const hit = this.entries.get(latex);
+    if (hit) {
+      return { w: hit.widthEm * fontSize, h: hit.heightEm * fontSize };
+    }
     return {
       w: Math.max(1, latex.length * ESTIMATED_EM_PER_CHAR * fontSize),
       h: ESTIMATED_HEIGHT_EM * fontSize,

@@ -169,3 +169,61 @@ def test_schema_declares_readings():
     props = schema.parameters["properties"]
     assert "readings" in props
     assert props["readings"]["items"]["required"] == ["mark", "text"]
+
+
+# --- slots --------------------------------------------------------------
+
+def test_rejects_a_call_that_leaves_the_users_slot_empty():
+    """Session 1231fab2: `H ? USE`, the model knew the answer was O and
+    replied in prose beside the board. A slot is the user's own answer
+    to "where does it go"; a call that ignores it is rejected before the
+    client folds anything, so the retry cannot land beside a miss."""
+    from surogates.whiteboard.turn import current_slots
+
+    token = current_slots.set(frozenset({"S1"}))
+    try:
+        out = _call(_registry(), {"commands": [
+            {"tool": "write_text", "text": "Did you mean HOUSE?",
+             "anchor": "latest", "side": "below"},
+        ]})
+    finally:
+        current_slots.reset(token)
+    assert out.startswith("Error:")
+    assert "S1" in out and "side:'in'" in out
+
+
+def test_accepts_a_call_that_fills_the_slot():
+    from surogates.whiteboard.turn import current_slots
+
+    token = current_slots.set(frozenset({"S1"}))
+    try:
+        out = _call(_registry(), {"commands": [
+            {"tool": "write_text", "text": "O", "anchor": "S1", "side": "in"},
+        ], "intent": "fill"})
+    finally:
+        current_slots.reset(token)
+    assert out.startswith("Drew 1 object")
+    assert '"O" filling S1' in out
+
+
+def test_rejects_an_unknown_intent():
+    out = _call(_registry(), {"commands": [
+        {"tool": "write_text", "text": "O", "anchor": "latest"},
+    ], "intent": "ponder"})
+    assert out.startswith("Error:")
+
+
+def test_schema_declares_intent():
+    props = _registry().get("whiteboard_draw").schema.parameters["properties"]
+    assert props["intent"]["enum"] == ["fill", "continue", "transform", "respond"]
+
+
+def test_slots_come_from_the_turn_metadata():
+    from surogates.whiteboard.turn import slots_from_metadata
+
+    meta = {"whiteboard": {"marks": [
+        {"id": "A1", "kind": "ink"}, {"id": "S1", "kind": "slot"},
+        {"id": "S2", "kind": "slot"}, "junk",
+    ]}}
+    assert slots_from_metadata(meta) == frozenset({"S1", "S2"})
+    assert slots_from_metadata(None) == frozenset()

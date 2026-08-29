@@ -17,9 +17,12 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.whiteboard.commands import (
     COORD_LIMIT,
     MAX_COMMANDS,
+    unfilled_slots,
     validate_commands,
+    validate_intent,
     validate_readings,
 )
+from surogates.whiteboard.turn import current_slots
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +39,17 @@ _DESCRIPTION = (
     "explanation under it, sized to read.\n"
     "- {tool:'draw_formula', latex, replaces:'<call id>'} -- a revision: "
     "takes the replaced object's place, the old one is removed.\n"
+    "- {tool:'write_text', text, anchor:'S1', side:'in'} -- FILL A SLOT: "
+    "the user drew an empty box (S1, S2, ...) where the result goes; "
+    "side 'in' fits your content into it and the box disappears. A "
+    "slot is the user's instruction: fill every slot before anything "
+    "else, with the thing that belongs there -- the missing letter, the "
+    "result, the requested sketch -- never with a question about it.\n"
     "Anchors: a label from the image and turn note -- A1, A2, ... are "
-    "the user's ink, B1, B2, ... are your own earlier objects -- or "
-    "'latest' (the user's newest ink) or 'selection' (their lasso). "
-    "Sides: right (default), below, above, left. replaces takes a "
-    "B-label or a call id. Anchored commands omit x/y/fontSize/maxWidth; "
+    "the user's ink, B1, B2, ... are your own earlier objects, S1, S2, "
+    "... are slots -- or 'latest' (the user's newest ink) or "
+    "'selection' (their lasso). Sides: right (default), below, above, "
+    "left, in (slots only). replaces takes a B-label or a call id. Anchored commands omit x/y/fontSize/maxWidth; "
     "a formula or short answer is sized to the anchor's handwriting, "
     "prose gets a readable size and width.\n\n"
     "Commands:\n"
@@ -53,8 +62,10 @@ _DESCRIPTION = (
     "or fewer primitives. types and items must be the same length. "
     "Encodings: line/smooth [x1,y1,x2,y2,...]; rect [x,y,w,h]; ellipse "
     "[cx,cy,rx,ry]; circle [cx,cy,r]; arc [cx,cy,rx,ry,startDeg,sweepDeg]. "
-    "Item coordinates are integer offsets from origin. Sketches are "
-    "always absolute.\n"
+    "Item coordinates are integer offsets from origin. Into a slot "
+    "(anchor:'S1', side:'in') omit origin and draw in a 1000x1000 local "
+    "box that the client scales to the slot; elsewhere sketches are "
+    "absolute.\n"
     "- erase {tool,mode:'rect',x,y,w,h} or {tool,mode:'path',points,size} "
     "-- for the user's ink only. Never erase your own objects: to remove "
     "or change one, draw the replacement with replaces:'B1' (or just "
@@ -68,6 +79,12 @@ _DESCRIPTION = (
     "Explicit x/y (global canvas units, freely negative, never image "
     "pixels) always wins over an anchor: it is the escape hatch for "
     "placements no relation describes.\n\n"
+    "INTENT. Say what you are doing with intent: 'fill' (a slot), "
+    "'continue' (extend what the user wrote -- after the =, the next "
+    "line, the next stroke), 'transform' (the user drew an operation "
+    "around your object: brackets, an exponent, a strike-through), or "
+    "'respond' (prose, only when asked). If you can produce the thing, "
+    "produce it on the board; ask only when you cannot.\n\n"
     "READINGS PERSIST. Alongside commands, pass readings: "
     "[{mark:'A2', text:'2x + 1 = 7'}] -- your transcription of each ink "
     "mark you read this turn. It is stored with that ink and handed back "
@@ -115,6 +132,15 @@ def register(registry: ToolRegistry) -> None:
                             },
                             "additionalProperties": True,
                         },
+                    },
+                    "intent": {
+                        "type": "string",
+                        "enum": ["fill", "continue", "transform", "respond"],
+                        "description": (
+                            "What this call does: fill a slot, continue "
+                            "the user's work, transform your own object "
+                            "as their ink asks, or respond in prose."
+                        ),
                     },
                     "readings": {
                         "type": "array",
@@ -172,6 +198,23 @@ async def _whiteboard_draw_handler(
     error = validate_readings(readings)
     if error:
         return f"Error: {error}"
+    error = validate_intent(arguments.get("intent"))
+    if error:
+        return f"Error: {error}"
+    # A slot is the user's own answer to "where does the result go".
+    # Rejected here, before the client folds anything: an accepted call
+    # is drawn, a rejected one is skipped, and a retry that fills the
+    # slot must not land beside an earlier answer that missed it.
+    empty = unfilled_slots(commands, current_slots.get())
+    if empty:
+        first = empty[0]
+        return (
+            f"Error: {first} is an empty slot the user drew for your "
+            f"answer, and this call leaves it empty. Put what belongs "
+            f"there into it -- anchor:'{first}', side:'in' -- before "
+            f"anything else. If the slot needs something you cannot "
+            f"produce, fill it with one short line saying what you need."
+        )
 
     count = len(commands)
     logger.info("whiteboard_draw accepted %d command(s)", count)
@@ -232,7 +275,10 @@ def _placement_summary(commands: list[Any]) -> str:
         if _is_number(x) and _is_number(y):
             spots.append(f"{named} at ({x}, {y})")
         elif isinstance(anchor, str) and anchor.strip():
-            spots.append(f"{named} placed {cmd.get('side') or 'right'} of {anchor}")
+            if cmd.get("side") == "in":
+                spots.append(f"{named} filling {anchor}")
+            else:
+                spots.append(f"{named} placed {cmd.get('side') or 'right'} of {anchor}")
         elif isinstance(replaces, str) and replaces.strip():
             spots.append(f"{named} in place of call {replaces}")
     if not spots:

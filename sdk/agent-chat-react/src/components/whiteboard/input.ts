@@ -1,4 +1,5 @@
 import type { WbObject } from "./doc";
+import { nextLocalId } from "./doc";
 import type { View, ViewportSize } from "./render";
 
 // open-pencil's range. Wide on purpose: on an infinite canvas the only
@@ -143,7 +144,6 @@ export function strokePointsFromEvent(event: PointerEvent): Point[] {
 // Stroke building
 // ---------------------------------------------------------------------
 
-let strokeCounter = 0;
 
 /**
  * Accumulates one freehand stroke as a flat point list.
@@ -188,9 +188,8 @@ export class StrokeBuilder {
   /** The finished stroke, or `null` if it never became a line. */
   finish(): WbObject | null {
     if (this.pts.length < 4) return null;
-    strokeCounter += 1;
     return {
-      id: `local:${strokeCounter}`,
+      id: nextLocalId(),
       origin: "local",
       selected: false,
       kind: "ink",

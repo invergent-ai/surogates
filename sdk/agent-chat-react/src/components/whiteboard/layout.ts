@@ -47,8 +47,11 @@ export interface TurnAnchors {
   selection?: Rect;
   /** Median stroke height of the user's handwriting, in canvas units. */
   inkHeight?: number;
-  /** Labelled marks by id: `A3` → its rect; `B1` → rect + call id. */
-  marks?: Record<string, { rect: Rect | null; origin?: string }>;
+  /** Labelled marks by id: `A3` → rect; `B1` → rect + call id; `S1` → rect + slot object. */
+  marks?: Record<
+    string,
+    { rect: Rect | null; origin?: string; objectId?: string }
+  >;
 }
 
 function rectOf(value: unknown): Rect | null {
@@ -86,6 +89,7 @@ export function turnAnchorsFromMetadata(
       marks[m.id] = {
         rect: rectOf(m),
         ...(typeof m.origin === "string" ? { origin: m.origin } : {}),
+        ...(typeof m.objectId === "string" ? { objectId: m.objectId } : {}),
       };
     }
     anchors.marks = marks;
@@ -188,7 +192,11 @@ function sizingUnit(target: Rect, anchors: TurnAnchors | null): number {
 }
 
 /** Fill in fontSize / maxWidth for an anchored command that omits them. */
-function applySizing(cmd: Record<string, unknown>, unit: number): void {
+function applySizing(
+  cmd: Record<string, unknown>,
+  unit: number,
+  services: RenderServices,
+): void {
   const isProse =
     cmd.tool === "write_text" &&
     (String(cmd.text ?? "").length > SHORT_ANSWER_CHARS ||
@@ -197,6 +205,15 @@ function applySizing(cmd: Record<string, unknown>, unit: number): void {
     cmd.fontSize = isProse
       ? clamp(unit * 0.45, PROSE_MIN_FONT, PROSE_MAX_FONT)
       : clamp(unit, 16, 220);
+    // A formula's height is not its font size: a stacked fraction at
+    // handwriting size renders two and a half lines tall and dwarfs
+    // the expression it answers. Cap the rendered height instead.
+    if (cmd.tool === "draw_formula") {
+      const font = cmd.fontSize as number;
+      const { h } = services.formula(String(cmd.latex ?? ""), font);
+      const ceiling = unit * 1.6;
+      if (h > ceiling) cmd.fontSize = Math.max(12, font * (ceiling / h));
+    }
   }
   if (cmd.tool === "write_text" && typeof cmd.maxWidth !== "number") {
     // Wide enough to read across: ~42 characters a line, never a tower.
@@ -279,6 +296,91 @@ function overlaps(a: Rect, b: Rect): boolean {
   );
 }
 
+/** Scale a `draw` command's items from a 1000×1000 local box into *slot*. */
+function scaleDrawInto(cmd: Record<string, unknown>, slot: Rect): void {
+  const sx = slot.w / 1000;
+  const sy = slot.h / 1000;
+  const types = Array.isArray(cmd.types) ? (cmd.types as string[]) : [];
+  const items = Array.isArray(cmd.items) ? (cmd.items as number[][]) : [];
+  cmd.origin = [Math.round(slot.x), Math.round(slot.y)];
+  cmd.items = items.map((item, i) => {
+    const kind = types[i];
+    if (!Array.isArray(item)) return item;
+    if (kind === "circle") {
+      const [cx, cy, r] = item;
+      return [Math.round(cx * sx), Math.round(cy * sy), Math.round(r * Math.min(sx, sy))];
+    }
+    if (kind === "arc") {
+      const [cx, cy, rx, ry, ...rest] = item;
+      return [Math.round(cx * sx), Math.round(cy * sy), Math.round(rx * sx), Math.round(ry * sy), ...rest];
+    }
+    // line/smooth pairs, rect [x,y,w,h], ellipse [cx,cy,rx,ry]: x-ish at
+    // even indices, y-ish at odd.
+    return item.map((v, j) => Math.round(v * (j % 2 === 0 ? sx : sy)));
+  });
+}
+
+/**
+ * Fit a command into a slot: centred, sized to the box, never outside it.
+ *
+ * The slot is the user's answer to "where" and its size is their answer
+ * to "how big", so both are taken from it rather than from the
+ * handwriting. Text shrinks until its estimated block fits the width.
+ */
+function fitInto(
+  cmd: Record<string, unknown>,
+  slot: Rect,
+  services: RenderServices,
+): void {
+  if (cmd.tool === "place_artifact") {
+    cmd.x = Math.round(slot.x * 100) / 100;
+    cmd.y = Math.round(slot.y * 100) / 100;
+    cmd.w = Math.round(slot.w * 100) / 100;
+    cmd.h = Math.round(slot.h * 100) / 100;
+    return;
+  }
+  if (cmd.tool === "draw") {
+    scaleDrawInto(cmd, slot);
+    return;
+  }
+  const isProse =
+    cmd.tool === "write_text" &&
+    String(cmd.text ?? "").length > SHORT_ANSWER_CHARS;
+  if (cmd.tool === "write_text" && typeof cmd.maxWidth !== "number") {
+    cmd.maxWidth = Math.max(16, slot.w * 0.95);
+  }
+  if (typeof cmd.fontSize !== "number") {
+    cmd.fontSize = isProse
+      ? clamp(slot.h * 0.3, 10, PROSE_MAX_FONT)
+      : clamp(slot.h * 0.7, 8, 400);
+  }
+  // A short answer must fit on one line: the renderer wraps only at
+  // spaces, so a single word that "fits" by wrapping overflows the box.
+  const unbroken = () => {
+    const font = cmd.fontSize as number;
+    if (cmd.tool === "draw_formula") {
+      return services.formula(String(cmd.latex ?? ""), font).w;
+    }
+    const longest = Math.max(
+      ...String(cmd.text ?? "").split(/\s+/).map((w) => w.length),
+      0,
+    );
+    return longest * font * GLYPH_ADVANCE;
+  };
+  let est = estimateSize(cmd, services);
+  for (
+    let i = 0;
+    i < 16 &&
+    (est.w > slot.w * 0.95 || est.h > slot.h * 0.95 || unbroken() > slot.w * 0.95);
+    i++
+  ) {
+    cmd.fontSize = (cmd.fontSize as number) * 0.88;
+    est = estimateSize(cmd, services);
+  }
+  cmd.x = Math.round((slot.x + (slot.w - est.w) / 2) * 100) / 100;
+  cmd.y = Math.round((slot.y + (slot.h - est.h) / 2) * 100) / 100;
+}
+
 /**
  * Resolve anchored commands into absolute ones.
  *
@@ -326,7 +428,8 @@ export function resolveCommands(
       if (mark?.origin) cmd.replaces = mark.origin;
     }
     const positioned =
-      typeof cmd.x === "number" && typeof cmd.y === "number";
+      (typeof cmd.x === "number" && typeof cmd.y === "number") ||
+      (cmd.tool === "draw" && Array.isArray(cmd.origin) && cmd.side !== "in");
     const wantsAnchor =
       (typeof cmd.anchor === "string" && cmd.anchor) ||
       (!positioned && typeof cmd.replaces === "string" && cmd.replaces);
@@ -344,8 +447,23 @@ export function resolveCommands(
       continue;
     }
 
+    // Into a slot: the box is the placement, the size and the answer to
+    // "is this taken" all at once, so none of the rules below apply.
+    if (cmd.side === "in") {
+      fitInto(cmd, target, services);
+      const slotObject =
+        typeof cmd.anchor === "string"
+          ? anchors?.marks?.[cmd.anchor]?.objectId
+          : undefined;
+      if (slotObject) cmd.fillsSlot = slotObject;
+      delete cmd.anchor;
+      delete cmd.side;
+      resolved.push(cmd);
+      continue;
+    }
+
     const unit = sizingUnit(target, anchors);
-    applySizing(cmd, unit);
+    applySizing(cmd, unit, services);
     const est = estimateSize(cmd, services);
     const gap = clamp(unit * 0.4, 12, 60);
     // Right/left continue a line, so they align to the line's trailing

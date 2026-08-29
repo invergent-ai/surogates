@@ -181,7 +181,7 @@ def test_a_sketch_turn_stops_once_it_has_drawn():
 
 
 def test_a_deep_turn_keeps_going():
-    # "Think harder" is many round-trips by design.
+    # "Work it out" is many round-trips by design.
     calls, results = _drew()
     assert not _whiteboard_sketch_turn_done(
         calls, results, _sketch_meta("deep"), has_whiteboard=True,

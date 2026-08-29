@@ -59,7 +59,7 @@ _RELATIONAL_TOOLS = frozenset({"write_text", "draw_formula", "place_artifact"})
 _NAMED_ANCHORS = frozenset({"latest", "selection"})
 
 #: Where an anchored command sits relative to its anchor.
-_SIDES = frozenset({"right", "below", "above", "left"})
+_SIDES = frozenset({"right", "below", "above", "left", "in"})
 
 #: What an anchored command still has to say itself.  Geometry and
 #: sizing come from the anchor; the content cannot.
@@ -67,7 +67,15 @@ _REQUIRED_ANCHORED: dict[str, tuple[str, ...]] = {
     "write_text": ("text",),
     "draw_formula": ("latex",),
     "place_artifact": ("artifact_id", "w", "h"),
+    # Into a slot only: the sketch is drawn in a 1000x1000 local box and
+    # the client scales it in, so there is no origin to give.
+    "draw": ("types", "items"),
 }
+
+#: The intents a call may declare.  Declared, not inferred: it makes the
+#: model's reading of the situation inspectable and lets the tool push
+#: back when the board disagrees.
+INTENTS = frozenset({"fill", "continue", "transform", "respond"})
 
 
 def _is_anchored(cmd: dict[str, Any]) -> bool:
@@ -93,7 +101,13 @@ def _validate_relational(
     """Shape-check ``anchor``/``side``; both are optional."""
     anchor = cmd.get("anchor")
     if anchor is not None:
-        if tool not in _RELATIONAL_TOOLS:
+        if tool == "draw" and cmd.get("side") != "in":
+            return (
+                f"command[{idx}] (draw): a sketch is anchored only into a "
+                f"slot -- anchor:'S1', side:'in', with items in a "
+                f"1000x1000 local box. Elsewhere give origin."
+            )
+        if tool not in _RELATIONAL_TOOLS and tool != "draw":
             return (
                 f"command[{idx}] ({tool}): anchor is not supported here. "
                 f"Anchored placement: {', '.join(sorted(_RELATIONAL_TOOLS))}."
@@ -154,6 +168,23 @@ def _with_size_aliases(cmd: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+#: Keys a model reaches for when it means ``latex`` on ``draw_formula``:
+#: ``text`` is the neighbouring command's key, the others are what the
+#: field is.  Aliased for the same reason as the sizes -- the intent is
+#: unambiguous and the rejection cost a whole round-trip.
+_LATEX_ALIASES = ("formula", "tex", "text")
+
+
+def _with_latex_alias(cmd: dict[str, Any]) -> dict[str, Any]:
+    """*cmd* with ``latex`` filled in from its aliases (a copy)."""
+    if "latex" in cmd:
+        return cmd
+    for alias in _LATEX_ALIASES:
+        if alias in cmd:
+            return {**cmd, "latex": cmd[alias]}
+    return cmd
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -182,7 +213,8 @@ def _is_int(value: Any, lo: int, hi: int) -> bool:
 
 def _validate_draw(cmd: dict[str, Any], idx: int) -> str | None:
     origin = cmd.get("origin")
-    if not (
+    into_slot = cmd.get("side") == "in" and _is_anchored(cmd)
+    if not into_slot and not (
         isinstance(origin, list)
         and len(origin) == 2
         and all(_in_canvas(v) for v in origin)
@@ -423,6 +455,8 @@ def validate_commands(commands: Any) -> str | None:
 
         if tool in _ALIASING_TOOLS:
             cmd = _with_size_aliases(cmd)
+        if tool == "draw_formula":
+            cmd = _with_latex_alias(cmd)
 
         err = _validate_relational(cmd, idx, tool)
         if err:
@@ -433,7 +467,7 @@ def validate_commands(commands: Any) -> str | None:
         # from the anchor's height.  Requiring x/y/fontSize here would
         # force the model back into the coordinate arithmetic that
         # relational placement exists to end.
-        anchored = _is_anchored(cmd) and tool in _RELATIONAL_TOOLS
+        anchored = _is_anchored(cmd) and tool in _REQUIRED_ANCHORED
         required = _REQUIRED_ANCHORED[tool] if anchored else _REQUIRED[tool]
         missing = [k for k in required if k not in cmd]
         if missing:
@@ -509,3 +543,33 @@ def validate_readings(readings: Any) -> str | None:
                 f"{MAX_READING_CHARS}."
             )
     return None
+
+
+def validate_intent(intent: Any) -> str | None:
+    """Shape-check the optional top-level ``intent`` of a draw call."""
+    if intent is None:
+        return None
+    if not (isinstance(intent, str) and intent in INTENTS):
+        return (
+            f"intent must be one of {', '.join(sorted(INTENTS))} "
+            f"(got {intent!r})."
+        )
+    return None
+
+
+def unfilled_slots(commands: Any, slots: frozenset[str]) -> list[str]:
+    """Slots the user reserved that *commands* leave empty.
+
+    A slot is the user's own answer to "where does the result go", and
+    an unfilled one means the model answered somewhere else -- or in
+    prose.  Returned in label order so the message names the first.
+    """
+    if not slots or not isinstance(commands, list):
+        return sorted(slots) if slots else []
+    filled = {
+        cmd.get("anchor")
+        for cmd in commands
+        if isinstance(cmd, dict) and cmd.get("side") == "in"
+        and isinstance(cmd.get("anchor"), str)
+    }
+    return sorted(slot for slot in slots if slot not in filled)

@@ -868,6 +868,16 @@ describe("close-ups of new ink", () => {
     expect(rec.size()?.h).toBeGreaterThan(100);
   });
 
+  it("always magnifies when it is sent at all", () => {
+    // Session 661ecc5b: 118px handwriting got a close-up at scale 1 --
+    // the overview again, which helped nothing.
+    const rec = drawing();
+    const crop = buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 400, h: 120 } }, rec.services, 118,
+    );
+    expect(crop?.scale).toBeGreaterThanOrEqual(1.5);
+  });
+
   it("never shrinks below 1:1 for large handwriting that fits", () => {
     const rec = drawing();
     const crop = buildRegionCrop(
@@ -937,5 +947,36 @@ describe("close-ups of new ink", () => {
       crops: [{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }],
     });
     expect(meta.crops).toEqual([{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }]);
+  });
+});
+
+describe("slot marks", () => {
+  const slotDoc = () =>
+    ({
+      ...emptyDoc(),
+      objects: [{ id: "local:9", origin: "local", selected: false, kind: "slot",
+                  x: 140, y: 20, w: 60, h: 70, hint: "a letter" }],
+    }) as never;
+
+  it("labels a slot S1 with its hint and object id", () => {
+    const marks = boardMarks(slotDoc(), services, { unit: 40 });
+    expect(marks).toEqual([
+      expect.objectContaining({ id: "S1", kind: "slot", objectId: "local:9", hint: "a letter" }),
+    ]);
+  });
+
+  it("does not count a slot as occupied space", () => {
+    // Reserved emptiness is the opposite of occupied.
+    expect(occupancyCells(slotDoc(), { x: 0, y: 0, w: 1600, h: 1600 }, services)).toEqual([]);
+  });
+
+  it("carries hint and object id in the turn metadata", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      marks: boardMarks(slotDoc(), services, { unit: 40 }),
+    });
+    expect((meta.marks as Record<string, unknown>[])[0]).toMatchObject({
+      id: "S1", kind: "slot", hint: "a letter", objectId: "local:9",
+    });
   });
 });

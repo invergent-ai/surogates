@@ -1,4 +1,3 @@
-import { Brain, Send } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -14,10 +13,22 @@ import type {
   AgentChatViewMode,
 } from "../../types";
 import { Button } from "../ui/button";
+import { ButtonGroup } from "../ui/button-group";
+import { Checkbox } from "../ui/checkbox";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 import { Spinner } from "../ui/spinner";
 import {
   type AtlasExtras,
   type Rect,
+  type UserAction,
+  USER_ACTIONS,
   atlasMetadata,
   boardMarks,
   buildAtlas,
@@ -38,6 +49,7 @@ import {
   correctReading,
   emptyDoc,
   foldToolCalls,
+  makeSlotObject,
   makeTextObject,
   mapSelected,
   scaleObject,
@@ -100,6 +112,8 @@ const RESTORE_HINT_DELAY_MS = 250;
 
 /** `PointerEvent.button` for the middle button / wheel click. */
 const MIDDLE_BUTTON = 1;
+/** `PointerEvent.button` for the right button: place an answer box. */
+const RIGHT_BUTTON = 2;
 
 /** Mirrors the composer's segments so the two switches read alike. */
 const VIEW_MODE_LABELS: Record<AgentChatViewMode, string> = {
@@ -179,6 +193,8 @@ export function WhiteboardSurface({
     x: number;
     y: number;
     reading?: { strokeIds: string[] };
+    /** Naming what belongs in a slot just drawn. */
+    slot?: { id: string };
   } | null>(null);
   const [editorText, setEditorText] = useState("");
   const [marquee, setMarquee] = useState<
@@ -191,6 +207,11 @@ export function WhiteboardSurface({
   // round-trips and worth naming; `sketch` is one and should not
   // advertise a wait that is about to be over.
   const [askMode, setAskMode] = useState<"sketch" | "deep">("sketch");
+  // "Work it out": the next send takes the deep path, where the agent
+  // has its whole tool catalogue and several passes instead of one
+  // drawing tool and a single round-trip. Sticky for the session; the
+  // pill names the wait.
+  const [deep, setDeep] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -489,6 +510,18 @@ export function WhiteboardSurface({
     [doc, services, liveUnit],
   );
 
+  // An answer-sized box at a point: a line of handwriting tall, a few
+  // words wide, its left edge at the point -- so placing it just after
+  // an equals sign lands it where the answer reads. Resize later with
+  // the select tool.
+  const answerBoxAt = useCallback(
+    (at: { x: number; y: number }) => {
+      const h = liveUnit * 1.6;
+      return { x: at.x, y: at.y - h / 2, w: liveUnit * 5, h };
+    },
+    [liveUnit],
+  );
+
   const paint = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -701,6 +734,31 @@ export function WhiteboardSurface({
         }));
       }
 
+      // Right-click: drop an answer box at the pen tip, whatever tool
+      // is in hand. Placing the answer is the commonest thing to do
+      // after writing, and it should not cost a trip to the rail.
+      if (e.button === RIGHT_BUTTON) {
+        e.preventDefault();
+        const slot = makeSlotObject(answerBoxAt(logical));
+        commit((prev) => ({
+          ...prev,
+          objects: [
+            ...prev.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
+            slot,
+          ],
+        }));
+        return;
+      }
+
+      if (tool === "slot") {
+        // Reserve space: drag a box where the answer should go. The
+        // marquee does the dragging; pointerup turns it into a slot.
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setMarquee({ from: logical, to: logical });
+        return;
+      }
+
       if (tool === "text") {
         // No pointer capture and no default action. The browser focuses
         // the canvas on the click that follows this pointerdown, which
@@ -730,6 +788,8 @@ export function WhiteboardSurface({
           ? handleAt(selBounds, logical, view.zoom)
           : null;
         if (selBounds && grabbed) {
+          // Resizing it makes the selection the user's, as moving does.
+          userSelected.current = true;
           gestureBaseline.current = doc;
           resize.current = {
             anchor: oppositeCorner(selBounds, grabbed),
@@ -778,7 +838,7 @@ export function WhiteboardSurface({
     },
     [
       disabled, localPoint, view, tool, doc, services, commit, color, width,
-      noteDirty, liveMarks, liveUnit,
+      noteDirty, liveMarks, liveUnit, answerBoxAt,
     ],
   );
 
@@ -820,11 +880,22 @@ export function WhiteboardSurface({
         const now = screenToLogical(localPoint(e), view);
         const spanX = start.x - anchor.x;
         const spanY = start.y - anchor.y;
-        // Degenerate spans would divide by zero; leave that axis alone.
-        const sx = Math.abs(spanX) < 1e-6 ? 1 : (now.x - anchor.x) / spanX;
-        const sy = Math.abs(spanY) < 1e-6 ? 1 : (now.y - anchor.y) / spanY;
-        setDoc((d) => mapSelected(d, (o) => scaleObject(o, sx, sy, anchor)));
-        resize.current = { anchor, start: now };
+        // The whole gesture's factors, applied to the document as it
+        // stood when the handle was grabbed -- not one sample's ratio
+        // applied to the last sample's result. A real diagonal drag
+        // arrives as alternating horizontal and vertical steps; scaled
+        // step by step, type (which takes one factor for both axes)
+        // saw min(1.05, 1) every time and never grew. Degenerate spans
+        // would divide by zero; leave that axis alone. Never below
+        // zero: crossing the anchor must not mirror the object.
+        const factor = (span: number, d: number) =>
+          Math.abs(span) < 1e-6 ? 1 : Math.max(0.05, d / span);
+        const sx = factor(spanX, now.x - anchor.x);
+        const sy = factor(spanY, now.y - anchor.y);
+        const base = gestureBaseline.current;
+        setDoc((d) =>
+          mapSelected(base ?? d, (o) => scaleObject(o, sx, sy, anchor)),
+        );
         return;
       }
 
@@ -855,6 +926,31 @@ export function WhiteboardSurface({
 
   const onPointerUp = useCallback(() => {
     panFrom.current = null;
+
+    if (marquee && tool === "slot") {
+      const dragged = rectFromCorners(marquee.from, marquee.to);
+      setMarquee(null);
+      // A click without a drag drops an answer-sized box at the pen tip:
+      // a line of handwriting tall, a few words wide, its left edge where
+      // the user clicked -- so "click after the equals sign" lands the
+      // box where the answer reads. Drag to size it otherwise; resize
+      // later with the select tool.
+      const rect =
+        dragged.w < 8 && dragged.h < 8 ? answerBoxAt(marquee.from) : dragged;
+      const slot = makeSlotObject(rect);
+      commit((prev) => ({
+        ...prev,
+        objects: [
+          ...prev.objects.map((o) => (o.selected ? { ...o, selected: false } : o)),
+          slot,
+        ],
+      }));
+      // Optional hint: what belongs here. Enter with nothing leaves it
+      // to the board to say.
+      setEditor({ x: rect.x, y: rect.y + rect.h, slot: { id: slot.id } });
+      setEditorText("");
+      return;
+    }
 
     if (marquee) {
       const rect = rectFromCorners(marquee.from, marquee.to);
@@ -903,7 +999,7 @@ export function WhiteboardSurface({
           } as unknown as WbObject)
         : stroke;
     commit((prev) => ({ ...prev, objects: [...prev.objects, object] }));
-  }, [tool, width, commit, pushHistory, marquee, doc, services]);
+  }, [tool, width, commit, pushHistory, marquee, doc, services, answerBoxAt]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
@@ -923,6 +1019,18 @@ export function WhiteboardSurface({
     setEditor(null);
     setEditorText("");
     if (!at) return;
+    if (at.slot) {
+      const { id } = at.slot;
+      if (body) {
+        commit((prev) => ({
+          ...prev,
+          objects: prev.objects.map((o) =>
+            o.id === id && o.kind === "slot" ? { ...o, hint: body } : o,
+          ),
+        }));
+      }
+      return;
+    }
     if (at.reading) {
       // An empty correction clears the reading, so the ink reads as
       // unread again and the model transcribes it afresh.
@@ -975,8 +1083,9 @@ export function WhiteboardSurface({
   // ------------------------------------------------------------------
 
   const ask = useCallback(
-    async (mode: "sketch" | "deep") => {
+    async (action: UserAction) => {
       if (!canvasRef.current) return;
+      const mode = deep ? "deep" : "sketch";
       setAskMode(mode);
       const latest = dirtyRef.current;
       const plan = planAtlas(doc, latest, view, size, services);
@@ -1001,11 +1110,18 @@ export function WhiteboardSurface({
       // The overview is for context and placement; these are for
       // reading -- the misreads all came from glyphs a few dozen
       // pixels tall.
-      const crops = cropRegions(marks, unit ?? 40)
-        .map((r) => buildRegionCrop(doc, r, services, unit ?? 40))
-        .filter((c): c is NonNullable<typeof c> => c !== null);
+      // No close-up when the handwriting already renders large on the
+      // overview -- the crop exists for glyphs a few dozen pixels tall.
+      // PenEcho's threshold: skip only when the writing is already big.
+      const legible = (unit ?? 40) * plan.imageScale >= 180;
+      const crops = legible
+        ? []
+        : cropRegions(marks, unit ?? 40)
+            .map((r) => buildRegionCrop(doc, r, services, unit ?? 40))
+            .filter((c): c is NonNullable<typeof c> => c !== null);
       const extras: AtlasExtras = {
         mode,
+        action,
         inkHeight: unit,
         occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
@@ -1049,7 +1165,7 @@ export function WhiteboardSurface({
         { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
       );
     },
-    [doc, view, size, services, question, runtime],
+    [doc, view, size, services, question, runtime, deep],
   );
 
   // ------------------------------------------------------------------
@@ -1149,6 +1265,9 @@ export function WhiteboardSurface({
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerCancel={onPointerUp}
+            // The right button places an answer box; the menu would
+            // land on top of it.
+            onContextMenu={(e) => e.preventDefault()}
             onPointerLeave={() => {
               // Otherwise the ring stays frozen wherever the pointer
               // left the canvas.
@@ -1180,7 +1299,7 @@ export function WhiteboardSurface({
                   <Spinner className="size-4 shrink-0" />
                   <span className="truncate">
                     {progress ??
-                      (askMode === "deep" ? "Thinking harder…" : "Thinking…")}
+                      (askMode === "deep" ? "Working it out…" : "Thinking…")}
                   </span>
                 </span>
               </div>
@@ -1269,8 +1388,8 @@ export function WhiteboardSurface({
             Copilot button. Everything now packs left and the corner
             stays clear. `min-w-0` keeps it shrinking on a narrow
             window instead of forcing the buttons off the end. */}
-        <input
-          className="w-64 min-w-0 shrink rounded border bg-background px-2 py-1 text-sm"
+        <Input
+          className="w-64 min-w-0 shrink"
           placeholder="Ask about the board (optional)"
           value={question}
           disabled={busy}
@@ -1278,29 +1397,52 @@ export function WhiteboardSurface({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              void ask("sketch");
+              void ask("answer");
             }
           }}
         />
-        <Button
-          type="button"
-          disabled={busy}
-          aria-label="Ask"
-          onClick={() => void ask("sketch")}
-        >
-          <Send className="size-4" />
-          Ask
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={busy}
-          aria-label="Think harder"
-          onClick={() => void ask("deep")}
-        >
-          <Brain className="size-4" />
-          Think harder
-        </Button>
+        {/* PenEcho's action menu as the send buttons: the click says
+            what the user wants, so nothing is left for the board to
+            infer. Answer is the common case and reads as the default. */}
+        <TooltipProvider>
+          <ButtonGroup aria-label="Actions">
+            {USER_ACTIONS.map((a) => (
+              <Tooltip key={a.id}>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant={a.id === "answer" ? "default" : "outline"}
+                    disabled={busy}
+                    aria-label={a.label}
+                    onClick={() => void ask(a.id)}
+                  >
+                    {a.label}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">{a.hint}</TooltipContent>
+              </Tooltip>
+            ))}
+          </ButtonGroup>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="flex items-center gap-2 px-1">
+                <Checkbox
+                  id="wb-work-it-out"
+                  aria-label="Work it out"
+                  checked={deep}
+                  disabled={busy}
+                  onCheckedChange={(v) => setDeep(v === true)}
+                />
+                <Label htmlFor="wb-work-it-out">Work it out</Label>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Let the agent search, compute and build before it draws,
+              over several passes. Slower; for what the board alone
+              cannot settle. Off, it answers your ink in one pass.
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         {onNewBoard ? (
           <Button
             type="button"
