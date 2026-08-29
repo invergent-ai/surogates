@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 import os
 import traceback
@@ -324,6 +325,17 @@ def _slash_command_name(content: str | None) -> str | None:
     if parse_deep_research_command(content) is not None:
         return "deep-research"
     return None
+
+
+def _carries_information(text: str) -> bool:
+    """True when *text* contains at least one letter or digit.
+
+    Used to tell a real answer from a response that is only punctuation --
+    an ellipsis, a lone dash.  Deliberately unicode-aware: an
+    answer in Greek, Cyrillic or CJK carries information just as a Latin one
+    does, and an ASCII-only test would discard it.
+    """
+    return bool(re.search(r"[^\W_]", text, re.UNICODE))
 
 
 class AgentHarness(
@@ -2184,6 +2196,21 @@ class AgentHarness(
                 # Check if response only has thinking blocks with no actual
                 # content after them.
                 visible_content = THINK_RE.sub("", final_content).strip() if final_content else ""
+
+                # A response made only of punctuation ("...", "......") carries
+                # no information, but it is not empty, so it used to sail past
+                # the ladder below and complete the session as if it were the
+                # final answer.  Observed on GAIA dev-018: six sessions ended
+                # on a 2-token "..." after turns of successful tool use, each
+                # scored as a wrong answer rather than a failure.  Treat it as
+                # empty so the existing retry/escalate/fail ladder engages.
+                if visible_content and not _carries_information(visible_content):
+                    logger.info(
+                        "Session %s: final response is punctuation only (%r); "
+                        "treating as empty",
+                        session.id, visible_content[:20],
+                    )
+                    visible_content = ""
 
                 if not visible_content:
                     # If the previous turn already delivered real content

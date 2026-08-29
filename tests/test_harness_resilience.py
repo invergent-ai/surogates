@@ -1658,3 +1658,26 @@ class TestEmptyResponseProEscalation:
         )
         assert client is None
         assert used is False
+
+
+class TestPunctuationOnlyFinalResponse:
+    """A final response of only punctuation is not an answer.
+
+    Observed on GAIA dev-018: six sessions ended on a 2-token "..." after
+    several turns of successful tool use. The content was non-empty, so it
+    passed the empty-response ladder untouched and completed the session --
+    scoring as a wrong answer rather than surfacing as a failure.
+    """
+
+    def test_punctuation_only_is_not_information(self) -> None:
+        from surogates.harness.loop import _carries_information
+
+        for text in ("...", "......", "…", "-", "  ", "!?", "***"):
+            assert _carries_information(text) is False, text
+
+    def test_real_content_is_information(self) -> None:
+        from surogates.harness.loop import _carries_information
+
+        # Non-Latin answers must not be mistaken for punctuation.
+        for text in ("42", "Paris", "Αθήνα", "北京", "Москва", "...done"):
+            assert _carries_information(text) is True, text
