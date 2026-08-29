@@ -186,6 +186,75 @@ class ArtifactStore:
 
         return meta
 
+    async def update(
+        self, artifact_id: UUID, *, name: str, kind: ArtifactKind, spec: dict,
+    ) -> ArtifactMeta:
+        """Write a new version of an existing artifact.
+
+        The whole payload is replaced -- an artifact version is a
+        snapshot, not a diff -- and the previous ``v{n}.json`` is left in
+        place, which is what makes the version history in the key layout
+        real rather than nominal.
+
+        The per-session artifact cap is deliberately not re-checked: a
+        revision consumes an index slot that is already spent, and
+        refusing to revise at the cap would strand the user on a wrong
+        artifact with no way to fix it.
+
+        Raises :class:`ArtifactNotFoundError` if the artifact does not
+        exist, and :class:`ArtifactLimitError` if the new payload is over
+        the per-artifact byte limit.
+        """
+        previous = await self.get_meta(artifact_id)
+
+        payload = json.dumps({"kind": kind.value, "spec": spec})
+        size = len(payload.encode("utf-8"))
+        if size > MAX_ARTIFACT_BYTES:
+            raise ArtifactLimitError(
+                f"artifact payload {size} bytes exceeds limit {MAX_ARTIFACT_BYTES}",
+            )
+
+        version = previous.version + 1
+        meta = ArtifactMeta(
+            artifact_id=artifact_id,
+            session_id=self._session_id,
+            name=name,
+            kind=kind,
+            version=version,
+            size=size,
+            # Creation time is a property of the artifact, not of the
+            # revision; the UI orders the thread by event, not by this.
+            created_at=previous.created_at,
+        )
+
+        await asyncio.gather(
+            self._backend.write_text(
+                self._bucket,
+                self._key(self._version_key(artifact_id, version)),
+                payload,
+            ),
+            self._backend.write_text(
+                self._bucket,
+                self._key(self._meta_key(artifact_id)),
+                meta.model_dump_json(),
+            ),
+        )
+
+        index = await self._read_index()
+        entry = meta.model_dump(mode="json")
+        for position, existing in enumerate(index):
+            if str(existing.get("artifact_id")) == str(artifact_id):
+                index[position] = entry
+                break
+        else:
+            # Metadata exists but the index lost the entry (a corrupted
+            # index resets to empty). Re-add rather than silently
+            # dropping the artifact from the UI's enumeration.
+            index.append(entry)
+        await self._write_index(index)
+
+        return meta
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

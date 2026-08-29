@@ -325,15 +325,25 @@ class TestArtifactStoreRead:
 class _StubAPIClient:
     """Records calls so tests can assert on the forwarded payload."""
 
-    def __init__(self, response: str = '{"success": true, "artifact_id": "abc"}'):
+    def __init__(
+        self,
+        response: str = '{"success": true, "artifact_id": "abc"}',
+        stored: dict[str, Any] | None = None,
+    ):
         self.response = response
+        self.stored = stored
         self.calls: list[dict[str, Any]] = []
 
     async def create_artifact(
-        self, *, name: str, kind: str, spec: dict,
+        self, *, name: str, kind: str, spec: dict, artifact_id: str | None = None,
     ) -> str:
-        self.calls.append({"name": name, "kind": kind, "spec": spec})
+        self.calls.append({
+            "name": name, "kind": kind, "spec": spec, "artifact_id": artifact_id,
+        })
         return self.response
+
+    async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        return self.stored
 
 
 class TestCreateArtifactHandler:
@@ -359,7 +369,7 @@ class TestCreateArtifactHandler:
         }
         out = await _create_artifact_handler(args, api_client=client)
         assert json.loads(out)["success"] is True
-        assert client.calls == [args]
+        assert client.calls == [{**args, "artifact_id": None}]
 
     async def test_missing_name_or_kind_rejected_locally(self):
         client = _StubAPIClient()
@@ -590,7 +600,10 @@ class TestCreateArtifactHandler:
         assert json.loads(out)["success"] is True
         # The recovered dict — not the raw string — is what reaches the API.
         assert client.calls == [
-            {"name": "Bitcoin Price", "kind": "chart", "spec": spec_obj}
+            {
+                "name": "Bitcoin Price", "kind": "chart", "spec": spec_obj,
+                "artifact_id": None,
+            }
         ]
 
     async def test_unparseable_string_spec_returns_precise_error(self):
@@ -1035,3 +1048,225 @@ class TestArtifactGuidance:
         assert default_library().get("guidance/artifact") in section
         assert default_library().get("guidance/memory") in section
         assert default_library().get("guidance/skills") in section
+
+
+class TestArtifactStoreUpdate:
+    """Revisions bump the version in place instead of forking a new artifact."""
+
+    async def test_update_bumps_version_and_keeps_id(self, store):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        updated = await store.update(
+            created.artifact_id,
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v2"},
+        )
+        assert updated.artifact_id == created.artifact_id
+        assert updated.version == 2
+
+    async def test_update_preserves_history(self, store, backend, bucket):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        await store.update(
+            created.artifact_id,
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v2"},
+        )
+        base = f"sessions/{created.session_id}/_artifacts/{created.artifact_id}"
+        v1 = json.loads(await backend.read_text(bucket, f"{base}/v1.json"))
+        v2 = json.loads(await backend.read_text(bucket, f"{base}/v2.json"))
+        assert v1["spec"] == {"content": "v1"}
+        assert v2["spec"] == {"content": "v2"}
+
+    async def test_latest_payload_is_the_new_version(self, store):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        await store.update(
+            created.artifact_id,
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v2"},
+        )
+        assert (await store.get_payload(created.artifact_id))["spec"] == {
+            "content": "v2",
+        }
+
+    async def test_update_does_not_add_an_index_entry(self, store):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        await store.update(
+            created.artifact_id,
+            name="renamed", kind=ArtifactKind.MARKDOWN, spec={"content": "v2"},
+        )
+        entries = await store.list()
+        assert len(entries) == 1, "a revision must not appear as a second artifact"
+        assert entries[0].name == "renamed"
+        assert entries[0].version == 2
+
+    async def test_update_can_change_kind(self, store):
+        created = await store.create(
+            name="thing", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        updated = await store.update(
+            created.artifact_id,
+            name="thing", kind=ArtifactKind.TABLE,
+            spec={"columns": ["a"], "rows": [{"a": 1}]},
+        )
+        assert updated.kind == ArtifactKind.TABLE
+        assert (await store.get_payload(created.artifact_id))["kind"] == "table"
+
+    async def test_update_keeps_original_created_at(self, store):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        updated = await store.update(
+            created.artifact_id,
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v2"},
+        )
+        assert updated.created_at == created.created_at
+
+    async def test_update_unknown_artifact_raises(self, store):
+        with pytest.raises(ArtifactNotFoundError):
+            await store.update(
+                uuid4(),
+                name="ghost", kind=ArtifactKind.MARKDOWN, spec={"content": "x"},
+            )
+
+    async def test_update_rejects_oversized_payload(self, store):
+        created = await store.create(
+            name="report", kind=ArtifactKind.MARKDOWN, spec={"content": "v1"},
+        )
+        with pytest.raises(ArtifactLimitError):
+            await store.update(
+                created.artifact_id,
+                name="report", kind=ArtifactKind.MARKDOWN,
+                spec={"content": "x" * (MAX_ARTIFACT_BYTES + 1)},
+            )
+        # The rejected revision must not have disturbed the stored version.
+        assert (await store.get_payload(created.artifact_id))["spec"] == {
+            "content": "v1",
+        }
+
+    async def test_update_at_the_session_cap_still_works(self, store):
+        """A revision spends no new index slot, so the cap must not block it."""
+        from surogates.artifacts import models as m
+
+        created = await store.create(
+            name="first", kind=ArtifactKind.MARKDOWN, spec={"content": "1"},
+        )
+        for i in range(m.MAX_ARTIFACTS_PER_SESSION - 1):
+            await store.create(
+                name=f"filler{i}", kind=ArtifactKind.MARKDOWN,
+                spec={"content": "x"},
+            )
+        with pytest.raises(ArtifactLimitError):
+            await store.create(
+                name="one too many", kind=ArtifactKind.MARKDOWN,
+                spec={"content": "x"},
+            )
+        updated = await store.update(
+            created.artifact_id,
+            name="first", kind=ArtifactKind.MARKDOWN, spec={"content": "revised"},
+        )
+        assert updated.version == 2
+
+
+class TestCreateArtifactHandlerRevision:
+    """artifact_id turns a create into an in-place revision."""
+
+    _SPEC = {"content": "# revised"}
+
+    async def test_artifact_id_is_forwarded(self):
+        client = _StubAPIClient()
+        await _create_artifact_handler(
+            {
+                "name": "r", "kind": "markdown", "spec": self._SPEC,
+                "artifact_id": "abc-123",
+            },
+            api_client=client,
+        )
+        assert client.calls[0]["artifact_id"] == "abc-123"
+
+    async def test_absent_artifact_id_forwards_none(self):
+        client = _StubAPIClient()
+        await _create_artifact_handler(
+            {"name": "r", "kind": "markdown", "spec": self._SPEC},
+            api_client=client,
+        )
+        assert client.calls[0]["artifact_id"] is None
+
+    async def test_empty_artifact_id_is_treated_as_absent(self):
+        """An empty string must create, not attempt a revision of ''."""
+        client = _StubAPIClient()
+        await _create_artifact_handler(
+            {
+                "name": "r", "kind": "markdown", "spec": self._SPEC,
+                "artifact_id": "",
+            },
+            api_client=client,
+        )
+        assert client.calls[0]["artifact_id"] is None
+
+    async def test_failed_revision_returns_the_stored_spec(self):
+        client = _StubAPIClient(
+            response='{"success": false, "error": "payload too large"}',
+            stored={
+                "meta": {"version": 3},
+                "kind": "markdown",
+                "spec": {"content": "# the version on the server"},
+            },
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "r", "kind": "markdown", "spec": self._SPEC,
+                "artifact_id": "abc-123",
+            },
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert data["current"]["spec"] == {"content": "# the version on the server"}
+        assert data["current"]["version"] == 3
+        assert "abc-123" in data["hint"]
+
+    async def test_failed_create_does_not_fetch_anything(self):
+        """No artifact_id means nothing to fetch back."""
+        client = _StubAPIClient(
+            response='{"success": false, "error": "nope"}',
+            stored={"kind": "markdown", "spec": {"content": "x"}},
+        )
+        out = await _create_artifact_handler(
+            {"name": "r", "kind": "markdown", "spec": self._SPEC},
+            api_client=client,
+        )
+        assert "current" not in json.loads(out)
+
+    async def test_failed_revision_survives_an_unreadable_artifact(self):
+        client = _StubAPIClient(
+            response='{"success": false, "error": "nope"}', stored=None,
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "r", "kind": "markdown", "spec": self._SPEC,
+                "artifact_id": "abc-123",
+            },
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is False
+        assert "current" not in data
+
+    async def test_successful_revision_passes_the_result_through(self):
+        client = _StubAPIClient(
+            response='{"success": true, "artifact_id": "abc-123", "version": 2}',
+        )
+        out = await _create_artifact_handler(
+            {
+                "name": "r", "kind": "markdown", "spec": self._SPEC,
+                "artifact_id": "abc-123",
+            },
+            api_client=client,
+        )
+        data = json.loads(out)
+        assert data["success"] is True
+        assert data["version"] == 2
