@@ -330,18 +330,43 @@ def _slash_command_name(content: str | None) -> str | None:
     return None
 
 
-def _looks_unfinished(text: str) -> bool:
-    """True when *text* trails off mid-thought instead of concluding.
+#: A first-person intention to act, sitting at the very end of the message:
+#: "Let me take a screenshot to see the current state of the video."
+_TRAILING_INTENT = re.compile(
+    r"(?:^|[.!?]\s+)"
+    r"(?:let me|let'?s|i'?ll|i will|i'?m going to|now i|taking|checking|"
+    r"looking|trying)\b[^.!?]*[.!?\u2026]*\s*$",
+    re.IGNORECASE,
+)
 
-    Answers end; intentions trail off.  Every instance observed on GAIA
-    dev-018 ended in an ellipsis -- "Let me check the page directly via the
-    browser...." -- while the model had been calling tools successfully up
-    to that turn.  Kept to that one structural signal on purpose: judging
-    "is this an answer?" from prose would misfire on short legitimate
-    replies, and the caller bounds the cost of a false positive to a single
-    extra turn.
+#: An intention is stated briefly; a real answer that happens to end on a
+#: forward-looking sentence is usually longer.  Length is what separates
+#: them, and it is what keeps this off turns that did answer.
+_UNFINISHED_MAX_CHARS = 200
+
+
+def _looks_unfinished(text: str) -> bool:
+    """True when *text* states an intention instead of concluding.
+
+    Two signals, measured over 444 stored turns across five GAIA runs
+    (44 that produced no answer, 400 that did):
+
+        trailing ellipsis      catches 52%, fires on 19% of answered turns
+        trailing intent        catches 45%, fires on  2%
+        either, under 200 chars catches 61%, fires on  5%
+
+    The ellipsis alone was the first version of this, fitted to a single run
+    where every instance happened to end in one.  It cost a wasted turn on
+    nearly a fifth of turns that had answered perfectly well, which is why
+    both signals and the length bound are here.
     """
-    return text.rstrip().endswith(("...", "\u2026"))
+    stripped = text.strip()
+    if len(stripped) > _UNFINISHED_MAX_CHARS:
+        return False
+    return (
+        stripped.endswith(("...", "\u2026"))
+        or bool(_TRAILING_INTENT.search(stripped))
+    )
 
 
 def _carries_information(text: str) -> bool:

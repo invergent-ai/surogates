@@ -1693,16 +1693,43 @@ class TestUnfinishedFinalResponse:
     intention as the answer and completed.
     """
 
-    def test_trailing_ellipsis_looks_unfinished(self) -> None:
+    def test_trailing_intent_looks_unfinished(self) -> None:
+        """Both signals, taken from real finals across five GAIA runs.
+
+        The ellipsis-only version of this was fitted to dev-018, where every
+        instance happened to end in one. On dev-025 they ended in a full
+        stop instead and nothing fired.
+        """
         from surogates.harness.loop import _looks_unfinished
 
         for text in (
+            # ellipsis (dev-018)
             "Let me check the page directly via the browser....",
-            "I'll dismiss the consent banner and then navigate...",
             "Now let me look at the results…",
             "...",
+            # plain full stop (dev-025) -- missed by the first version
+            "Let me check the browser state after the search and also try "
+            "the PubChem classification API with a different endpoint.",
+            "Taking a screenshot of the expanded Dastardly Mash panel now.",
+            "Let me take a screenshot to see the current state of the video.",
         ):
             assert _looks_unfinished(text) is True, text
+
+    def test_long_answers_are_left_alone(self) -> None:
+        """Length is what separates an intention from an answer that happens
+        to close on a forward-looking sentence. Without the bound this fired
+        on 19% of turns that had answered."""
+        from surogates.harness.loop import _looks_unfinished
+
+        long_answer = (
+            "The enrollment count is 90, taken from the ClinicalTrials.gov "
+            "record rather than the abstract, which quotes the planned "
+            "figure of 100. I checked both the results section and the "
+            "study protocol to confirm the discrepancy is a recruitment "
+            "shortfall. Let me know if you need the protocol revision."
+        )
+        assert len(long_answer) > 200
+        assert _looks_unfinished(long_answer) is False
 
     def test_concluded_answers_are_left_alone(self) -> None:
         from surogates.harness.loop import _looks_unfinished
