@@ -114,6 +114,7 @@ from surogates.harness.loop_attachments import (
     _attachments_note,  # noqa: F401
     _render_inlined_attachments,  # noqa: F401
 )
+from surogates.harness.loop_conclusion import conclude_from_transcript
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
@@ -329,18 +330,43 @@ def _slash_command_name(content: str | None) -> str | None:
     return None
 
 
-def _looks_unfinished(text: str) -> bool:
-    """True when *text* trails off mid-thought instead of concluding.
+#: A first-person intention to act, sitting at the very end of the message:
+#: "Let me take a screenshot to see the current state of the video."
+_TRAILING_INTENT = re.compile(
+    r"(?:^|[.!?]\s+)"
+    r"(?:let me|let'?s|i'?ll|i will|i'?m going to|now i|taking|checking|"
+    r"looking|trying)\b[^.!?]*[.!?\u2026]*\s*$",
+    re.IGNORECASE,
+)
 
-    Answers end; intentions trail off.  Every instance observed on GAIA
-    dev-018 ended in an ellipsis -- "Let me check the page directly via the
-    browser...." -- while the model had been calling tools successfully up
-    to that turn.  Kept to that one structural signal on purpose: judging
-    "is this an answer?" from prose would misfire on short legitimate
-    replies, and the caller bounds the cost of a false positive to a single
-    extra turn.
+#: An intention is stated briefly; a real answer that happens to end on a
+#: forward-looking sentence is usually longer.  Length is what separates
+#: them, and it is what keeps this off turns that did answer.
+_UNFINISHED_MAX_CHARS = 200
+
+
+def _looks_unfinished(text: str) -> bool:
+    """True when *text* states an intention instead of concluding.
+
+    Two signals, measured over 444 stored turns across five GAIA runs
+    (44 that produced no answer, 400 that did):
+
+        trailing ellipsis      catches 52%, fires on 19% of answered turns
+        trailing intent        catches 45%, fires on  2%
+        either, under 200 chars catches 61%, fires on  5%
+
+    The ellipsis alone was the first version of this, fitted to a single run
+    where every instance happened to end in one.  It cost a wasted turn on
+    nearly a fifth of turns that had answered perfectly well, which is why
+    both signals and the length bound are here.
     """
-    return text.rstrip().endswith(("...", "\u2026"))
+    stripped = text.strip()
+    if len(stripped) > _UNFINISHED_MAX_CHARS:
+        return False
+    return (
+        stripped.endswith(("...", "\u2026"))
+        or bool(_TRAILING_INTENT.search(stripped))
+    )
 
 
 def _carries_information(text: str) -> bool:
@@ -2313,29 +2339,47 @@ class AgentHarness(
                             )
                             continue
 
-                        logger.error(
-                            "Session %s: LLM returned empty response %d "
-                            "times; emitting session.fail",
-                            session.id, _MAX_EMPTY_RESPONSE_RETRIES,
+                        # Before failing: the model stopped producing text,
+                        # but the turn may already contain the finding. A
+                        # recovered conclusion ends the turn properly; a
+                        # NOT_FOUND leaves the failure exactly as it was.
+                        concluded = await conclude_from_transcript(
+                            self._summary_client, self._summary_model,
+                            question=_latest_user_event_text(all_events or []),
+                            messages=messages,
                         )
-                        await self._store.emit_event(
-                            session.id,
-                            EventType.SESSION_FAIL,
-                            {
-                                "reason": "empty_llm_response",
-                                "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
-                            },
-                        )
-                        try:
-                            await self._store.update_session_status(
-                                session.id, "failed",
+                        if concluded:
+                            logger.info(
+                                "Session %s: recovered a conclusion from the "
+                                "transcript after %d empty responses",
+                                session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                        except Exception:
-                            logger.warning(
-                                "Failed to update session status to failed "
-                                "for %s", session.id, exc_info=True,
+                            assistant_message["content"] = concluded
+                            visible_content = concluded
+                        else:
+                            logger.error(
+                                "Session %s: LLM returned empty response %d "
+                                "times; emitting session.fail",
+                                session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                        return
+                            await self._store.emit_event(
+                                session.id,
+                                EventType.SESSION_FAIL,
+                                {
+                                    "reason": "empty_llm_response",
+                                    "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
+                                },
+                            )
+                            try:
+                                await self._store.update_session_status(
+                                    session.id, "failed",
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to update session status to "
+                                    "failed for %s", session.id, exc_info=True,
+                                )
+                            return
 
                 # The model announced an action, made no tool call, and its
                 # text trails off ("Let me check the page directly via the
@@ -2366,6 +2410,26 @@ class AgentHarness(
                         "content": _UNFINISHED_RESPONSE_NUDGE,
                     })
                     continue
+
+                # The nudge is spent and the model is still trailing off. Its
+                # own text is not an answer, but the work it did may contain
+                # one -- ask the cheap model for the conclusion the transcript
+                # supports, and keep the original text if there is none.
+                if _looks_unfinished(visible_content):
+                    concluded = await conclude_from_transcript(
+                        self._summary_client, self._summary_model,
+                        question=_latest_user_event_text(all_events or []),
+                        messages=messages,
+                    )
+                    if concluded:
+                        logger.info(
+                            "Session %s: recovered a conclusion from the "
+                            "transcript after the turn trailed off",
+                            session.id,
+                        )
+                        assistant_message["content"] = concluded
+                        final_content = concluded
+                        visible_content = concluded
 
                 # Pop thinking-only prefill message(s) before appending
                 # the final response.  This avoids consecutive assistant
@@ -2696,8 +2760,28 @@ class AgentHarness(
                     self._iters_since_skill = 0
 
             # 7b. Layer 3: enforce aggregate turn budget -- persist oversized results.
-            from surogates.tools.utils.tool_result_storage import enforce_turn_budget
-            tool_results = enforce_turn_budget(tool_results)
+            #     Spills go through the sandbox when tools run there, so the
+            #     path handed to the model is one ``read_file`` can open.
+            from surogates.tools.utils.tool_result_storage import (
+                enforce_turn_budget,
+                make_sandbox_writer,
+            )
+            if self._sandbox_pool is not None:
+                from surogates.sandbox.pool import sandbox_session_key
+                _spill_writer = make_sandbox_writer(
+                    self._sandbox_pool, sandbox_session_key(session),
+                )
+            else:
+                _spill_writer = None
+            # A tool result message carries no tool name, so hand the
+            # budget the id -> name map or it cannot honour the pins.
+            _tc_names = {
+                tc.get("id"): tc.get("function", {}).get("name", "")
+                for tc in (tool_calls_raw or [])
+            }
+            tool_results = await enforce_turn_budget(
+                tool_results, writer=_spill_writer, tool_names=_tc_names,
+            )
 
             # 7c. Budget pressure warning -- inject into the last tool result.
             tool_results = inject_budget_warning(tool_results, self._budget)

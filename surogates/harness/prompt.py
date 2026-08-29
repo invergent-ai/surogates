@@ -239,6 +239,23 @@ class PromptBuilder:
         """
         parts: list[str] = []
 
+        # The streaming executor already fans concurrency-safe tools out
+        # and even dispatches them during the LLM stream, but nothing ever
+        # asked the model to emit a batch: measured over 30 days of DEV
+        # traffic, 74% of iterations carried exactly one tool call and
+        # only 11% carried more, while ~24% of all calls sat in runs of
+        # consecutive read-only lookups that had no need to be serial.
+        # Gated on two or more of the parallel set being present, since
+        # with one such tool there is nothing to batch it with.
+        #
+        # Imported here, not at module scope: tool_exec transitively
+        # imports this module, so a top-level import closes a cycle and
+        # leaves whichever module loses the race half-initialised. It
+        # surfaced as unrelated tests failing on import order.
+        from surogates.harness.tool_exec import CONCURRENCY_SAFE_TOOLS
+
+        if len(CONCURRENCY_SAFE_TOOLS & self._available_tools) >= 2:
+            parts.append(self._prompts.get("guidance/parallel_tools"))
         if "memory" in self._available_tools:
             parts.append(self._prompts.get("guidance/memory"))
         if "session_search" in self._available_tools:

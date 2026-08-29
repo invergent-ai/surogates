@@ -94,11 +94,6 @@ _HUB_WIKI_PREFIX = "wiki/"
 # to ``main``, so reading any other branch would always 404.
 _HUB_BRANCH = "main"
 
-# Cap returned content per call. Wiki pages are typically small (a few
-# KB), but a malformed compile could produce a huge index page. The
-# cap protects the LLM context window from accidental flooding.
-_MAX_PAGE_BYTES = 200_000
-
 
 def _agent_id_from_kwargs(kwargs: dict[str, Any]) -> str:
     """Resolve the per-session agent_id from the tool-dispatch context.
@@ -333,6 +328,61 @@ async def _kb_list_pages_handler(
     )
 
 
+# One kb_read_page call returns at most this many characters.  Sized to
+# sit well under the layer-2 persistence threshold so a page read never
+# needs spilling to disk -- the agent pages through with ``offset``
+# instead, which is retrievable where a spill file was not.
+_PAGE_LIMIT_DEFAULT = 50_000
+_PAGE_LIMIT_MAX = 80_000
+
+
+def _clamp_offset(raw: Any) -> int:
+    """Coerce a caller-supplied offset to a non-negative int."""
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clamp_page_limit(raw: Any) -> int:
+    """Coerce a caller-supplied limit into the allowed window size."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _PAGE_LIMIT_DEFAULT
+    if value <= 0:
+        return _PAGE_LIMIT_DEFAULT
+    return min(value, _PAGE_LIMIT_MAX)
+
+
+def _format_page_window(
+    title: str, content: str, offset: int, limit: int,
+) -> str:
+    """Render one window of a page, telling the agent how to get the rest.
+
+    A page that fits whole is returned exactly as before -- no note, so
+    the common case reads identically to an unpaginated tool.
+    """
+    total = len(content)
+    if total and offset >= total:
+        return (
+            f"# {title}\n\n"
+            f"_Error: offset {offset} is past the end of this page "
+            f"({total} characters)._"
+        )
+
+    window = content[offset:offset + limit]
+    end = offset + len(window)
+    if offset == 0 and end == total:
+        return f"# {title}\n\n{content}"
+
+    note = f"_Showing characters {offset}-{end} of {total}."
+    note += (
+        f" Continue with offset={end}._" if end < total else " End of page._"
+    )
+    return f"# {title}\n\n{note}\n\n{window}"
+
+
 async def _kb_read_page_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
@@ -346,6 +396,9 @@ async def _kb_read_page_handler(
     path = (arguments.get("path") or "").strip()
     if not kb_id or not path:
         return "Error: both kb_id and path are required."
+
+    offset = _clamp_offset(arguments.get("offset"))
+    limit = _clamp_page_limit(arguments.get("limit"))
 
     agent_id = _agent_id_from_kwargs(kwargs)
     denied = _kb_plan_denied(kb_id, kwargs)
@@ -409,17 +462,9 @@ async def _kb_read_page_handler(
     except KBHubError as exc:
         return f"Error reading wiki page: {exc}"
 
-    if len(raw) > _MAX_PAGE_BYTES:
-        truncated = raw[:_MAX_PAGE_BYTES].decode("utf-8", errors="replace")
-        return (
-            f"# {page.title}\n\n"
-            f"_Note: page truncated to {_MAX_PAGE_BYTES} bytes (full "
-            f"size {page.size_bytes} bytes)._\n\n"
-            f"{truncated}"
-        )
-
-    content = raw.decode("utf-8", errors="replace")
-    return f"# {page.title}\n\n{content}"
+    return _format_page_window(
+        page.title, raw.decode("utf-8", errors="replace"), offset, limit,
+    )
 
 
 # Ranked-search caps. The result is a triage list, not a corpus: 10
@@ -657,6 +702,21 @@ _KB_READ_PAGE_PARAMS = {
                 "and slash-sensitive."
             ),
         },
+        "offset": {
+            "type": "integer",
+            "description": (
+                "Character offset to start reading from. Omit for the "
+                "start of the page. A long page reports the offset to "
+                "pass to read the next section."
+            ),
+        },
+        "limit": {
+            "type": "integer",
+            "description": (
+                f"Maximum characters to return (default "
+                f"{_PAGE_LIMIT_DEFAULT}, max {_PAGE_LIMIT_MAX})."
+            ),
+        },
     },
     "required": ["kb_id", "path"],
 }
@@ -695,8 +755,9 @@ def register(registry: ToolRegistry) -> None:
             name="kb_read_page",
             description=(
                 "Read the markdown content of a single wiki page from "
-                "a knowledge base. Returns the page's title and full "
-                "content. Pages over 200KB are truncated."
+                "a knowledge base. Returns the page's title and content. "
+                "A page longer than the limit comes back in sections -- "
+                "the response reports the offset to pass for the next one."
             ),
             parameters=_KB_READ_PAGE_PARAMS,
         ),

@@ -92,6 +92,10 @@ def _stamp_turn_meta(
     return payload
 
 
+# Only used when no compressor is attached; a compressor always knows the
+# real window for its model.
+_FALLBACK_CONTEXT_WINDOW: int = 128_000
+
 # Retry constants
 MAX_LLM_RETRIES: int = 3
 
@@ -681,9 +685,9 @@ async def call_llm_with_retry(
                 if isinstance(m, dict)
             )
             context_window = int(
-                getattr(context_compressor, "_context_window", 200_000)
+                context_compressor.context_length
                 if context_compressor is not None
-                else 200_000
+                else _FALLBACK_CONTEXT_WINDOW
             )
             classified = classify_api_error(
                 exc,
@@ -772,9 +776,8 @@ async def call_llm_with_retry(
                     and compress_context is not None
                 ):
                     _reduced_ctx = 200_000
-                    old_ctx = getattr(context_compressor, "_context_window", 0)
-                    if old_ctx > _reduced_ctx:
-                        context_compressor._context_window = _reduced_ctx
+                    old_ctx = context_compressor.context_length
+                    if context_compressor.set_context_length(_reduced_ctx):
                         logger.warning(
                             "Anthropic long-context tier requires extra usage "
                             "-- reducing context: %d -> %d tokens",
@@ -930,18 +933,14 @@ async def call_llm_with_retry(
                 # Try to parse the actual limit from the error message
                 # and step down the context window.
                 if context_compressor is not None:
-                    old_ctx = getattr(
-                        context_compressor, "_context_window",
-                        128_000,
-                    )
+                    old_ctx = context_compressor.context_length
                     parsed_limit = parse_context_limit_from_error(error_msg)
                     if parsed_limit and parsed_limit < old_ctx:
                         new_ctx = parsed_limit
                     else:
                         new_ctx = get_next_probe_tier(old_ctx)
 
-                    if new_ctx and new_ctx < old_ctx:
-                        context_compressor._context_window = new_ctx
+                    if new_ctx and context_compressor.set_context_length(new_ctx):
                         logger.warning(
                             "Context length exceeded -- stepping down: "
                             "%d -> %d tokens",
