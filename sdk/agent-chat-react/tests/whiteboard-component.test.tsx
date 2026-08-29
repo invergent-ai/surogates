@@ -1567,7 +1567,8 @@ describe("selecting the answer box", () => {
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
     await act(async () => { byLabel(el, "Ask")?.click(); });
-    const meta = (send.mock.calls[0]?.[3] as { whiteboard?: { selection?: { w: number } } })?.whiteboard;
+    const calls = (send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const meta = (calls[0]?.[3] as { whiteboard?: { selection?: { w: number } } })?.whiteboard;
     // The reported selection is the box's size, not a union with the stroke.
     expect(meta?.selection).toBeDefined();
     expect(meta!.selection!.w).toBeLessThan(400);
