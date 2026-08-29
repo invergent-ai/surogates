@@ -165,7 +165,25 @@ describe("objectBounds", () => {
     const [obj] = applyCommands(emptyDoc(), [text], 1).objects;
     const bounds = objectBounds(obj, measure);
     expect(bounds).not.toBeNull();
-    expect(bounds!.w).toBe(300);
+    // The ink's estimated width, never wider than the wrap width: a
+    // one-word label used to claim its whole maxWidth.
+    expect(bounds!.w).toBeGreaterThan(0);
+    expect(bounds!.w).toBeLessThanOrEqual(300);
+  });
+
+  it("gives wrapped text the height of all its lines", () => {
+    // It used to report one line whatever the text; the collision nudge
+    // then cleared a two-line answer's first line and the next answer
+    // was placed straight onto its second.
+    const [obj] = applyCommands(emptyDoc(), [{
+      tool: "write_text", x: 0, y: 0, fontSize: 20, maxWidth: 120,
+      lineHeight: 1.5,
+      text: "a sentence long enough to wrap onto several lines here",
+    }], 1).objects;
+    const bounds = objectBounds(obj, measure)!;
+    // 54 glyphs at 12 units each is ~648 wide: at least five lines of 30.
+    expect(bounds.h).toBeGreaterThanOrEqual(5 * 30);
+    expect(bounds.w).toBeLessThanOrEqual(120);
   });
 
   it("computes bounds for an ink object from its points", () => {

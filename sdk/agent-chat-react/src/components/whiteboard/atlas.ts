@@ -274,38 +274,6 @@ export function planAtlas(
  * {@link mapHotspots}, so the model reads one spatial vocabulary rather
  * than two.
  */
-/**
- * What an object actually covers, for occupancy purposes.
- *
- * {@link objectBounds} reports a text object's width as its `maxWidth`,
- * which is the wrap width the author asked for, not the ink it produced.
- * A one-glyph answer written with `maxWidth: 800` would claim eight
- * cells it does not use, and the model would then route around canvas
- * that is free -- getting steadily worse as its own generous wrap widths
- * accumulate.
- *
- * Estimated from the glyph count rather than measured: measuring needs a
- * canvas context, and being a little wrong about the width of a word is
- * cheaper than threading one through. The estimate is deliberately
- * slightly wide, so it errs toward keeping clear.
- *
- * ponytail: 0.6em per glyph, near the average for a proportional face;
- * swap for a real measure if a service ever carries one.
- */
-function occupiedBounds(
-  obj: WbObject,
-  services: RenderServices,
-): Rect | null {
-  const b = objectBounds(obj, services);
-  if (!b || obj.kind !== "text") return b;
-  const longest = Math.max(
-    ...obj.text.split("\n").map((line) => line.length),
-    0,
-  );
-  const inked = Math.max(obj.fontSize, longest * obj.fontSize * 0.6);
-  return { ...b, w: Math.min(b.w, inked) };
-}
-
 export function occupancyCells(
   doc: WbDoc,
   sourceRect: Rect,
@@ -318,7 +286,7 @@ export function occupancyCells(
   const cellH = sourceRect.h / OCCUPANCY_GRID;
 
   for (const obj of doc.objects) {
-    const b = occupiedBounds(obj, services);
+    const b = objectBounds(obj, services);
     if (!b) continue;
     const c0 = Math.floor((b.x - sourceRect.x) / cellW);
     const c1 = Math.floor((b.x + b.w - sourceRect.x) / cellW);
@@ -652,6 +620,132 @@ export function paintMarks(
   ctx.restore();
 }
 
+/** Target height of the handwriting in a close-up, in pixels. */
+const CROP_INK_PX = 110;
+/** Longest side a close-up may have. */
+const CROP_MAX_PX = 1536;
+/** Close-ups per turn. Readings persist, so it is normally one. */
+export const MAX_CROPS = 2;
+
+/** One close-up: the marks it shows and the board rect it covers. */
+export interface CropRegion {
+  ids: string[];
+  rect: Rect;
+}
+
+export interface InkCrop {
+  ids: string[];
+  canvas: HTMLCanvasElement;
+  scale: number;
+}
+
+function unionRect(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return {
+    x,
+    y,
+    w: Math.max(a.x + a.w, b.x + b.w) - x,
+    h: Math.max(a.y + a.h, b.y + b.h) - y,
+  };
+}
+
+/**
+ * What to show close up this turn: the new, unread ink -- together with
+ * whatever it was written on.
+ *
+ * A crop of the new ink alone is the wrong picture when the ink is an
+ * operation on something already there. A user wrapping the agent's
+ * answer in `( )²` produces a new mark holding just `)²`, which read
+ * alone is a `?`; the meaning is only visible with the answer inside
+ * the brackets. So a fresh mark pulls in the agent objects it touches
+ * and any other fresh marks near it, and the region is cropped whole.
+ */
+export function cropRegions(marks: BoardMark[], unit: number): CropRegion[] {
+  const fresh = marks.filter(
+    (m) => m.kind === "ink" && m.rect && m.fresh && !m.reading,
+  );
+  if (fresh.length === 0) return [];
+  const touched = marks.filter((m) => m.kind === "agent" && m.rect && m.touched);
+  const reach = Math.max(unit, 8);
+
+  let regions: CropRegion[] = fresh.map((m) => ({
+    ids: [m.id],
+    rect: m.rect as Rect,
+  }));
+  for (const agent of touched) {
+    const near = regions.find((r) => overlaps(grow(r.rect, reach), agent.rect as Rect));
+    if (near) {
+      near.ids.push(agent.id);
+      near.rect = unionRect(near.rect, agent.rect as Rect);
+    }
+  }
+  // Merge regions that now overlap each other, until none do.
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < regions.length && !merged; i++) {
+      for (let j = i + 1; j < regions.length; j++) {
+        if (overlaps(grow(regions[i].rect, reach), regions[j].rect)) {
+          regions[i] = {
+            ids: [...regions[i].ids, ...regions[j].ids],
+            rect: unionRect(regions[i].rect, regions[j].rect),
+          };
+          regions.splice(j, 1);
+          merged = true;
+          break;
+        }
+      }
+    }
+  }
+  regions = regions.slice(0, MAX_CROPS);
+  for (const r of regions) {
+    r.ids.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+  return regions;
+}
+
+/**
+ * Render one region large enough to read.
+ *
+ * Every misread so far came from glyphs a few dozen pixels tall on the
+ * overview: `1)` and `√(` are hard to tell apart at that size. The
+ * overview still carries context and placement; this carries
+ * legibility. Scaled so the handwriting is about CROP_INK_PX tall,
+ * never below 1:1 unless the region is too wide for the cap, and
+ * framed with a margin of one line.
+ */
+export function buildRegionCrop(
+  doc: WbDoc,
+  region: CropRegion,
+  services: RenderServices,
+  unit: number,
+): InkCrop | null {
+  const margin = Math.max(unit * 0.6, 8);
+  const area = grow(region.rect, margin);
+  let scale = Math.max(1, CROP_INK_PX / Math.max(unit, 1));
+  scale = Math.min(scale, CROP_MAX_PX / area.w, CROP_MAX_PX / area.h);
+  scale = Math.max(scale, 0.25);
+  const size = {
+    w: Math.max(1, Math.ceil(area.w * scale)),
+    h: Math.max(1, Math.ceil(area.h * scale)),
+  };
+  const canvas = services.createCanvas(size.w, size.h);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, size.w, size.h);
+  renderDoc(
+    ctx,
+    { ...doc, objects: doc.objects.map((o) => ({ ...o, selected: false })) },
+    { x: area.x, y: area.y, zoom: scale },
+    size,
+    services,
+  );
+  return { ids: region.ids, canvas, scale: Math.round(scale * 100) / 100 };
+}
+
 /**
  * Which way the board continues past the capture.
  *
@@ -831,6 +925,8 @@ export interface AtlasExtras {
   agentObjects?: AgentObjectReport[];
   /** See {@link boardMarks}. */
   marks?: BoardMark[];
+  /** Close-ups attached after the overview: which marks, which image. */
+  crops?: { marks: string[]; imageIndex: number; scale: number }[];
 }
 
 /**
@@ -893,6 +989,7 @@ export function atlasMetadata(
       ...(m.reading ? { reading: m.reading, readBy: m.readBy } : {}),
     }));
   }
+  if (extras.crops?.length) meta.crops = extras.crops;
   if (extras.agentObjects?.length) {
     meta.agentObjects = extras.agentObjects.map((o) => ({
       origin: o.origin,

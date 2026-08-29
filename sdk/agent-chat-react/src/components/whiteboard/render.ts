@@ -31,6 +31,11 @@ export interface RenderServices {
   createCanvas(w: number, h: number): HTMLCanvasElement;
 }
 
+/** Average glyph advance as a fraction of font size, for estimating
+ *  text extents without a context. Matches `layout.ts`, the atlas and
+ *  the server-side wrap check. */
+const TEXT_GLYPH_ADVANCE = 0.6;
+
 /** Ink colour applied to agent-authored geometry. */
 const AGENT_COLOR = "#2563eb";
 const TEXT_COLOR = "#111827";
@@ -199,14 +204,27 @@ export function objectBounds(
       return normalized ? normalized._draw.bounds : null;
     }
     case "text": {
-      const lineHeight = obj.fontSize * obj.lineHeight;
-      // Height is refined at paint time once the text is wrapped; this
-      // is the conservative single-line floor.
+      // Estimated from the glyph count with the same average advance
+      // every other estimate in the board uses. It used to report one
+      // line whatever the text: a two-line answer then had a one-line
+      // box, the collision nudge cleared only its first line, and the
+      // next answer was placed straight onto its second. Nothing here
+      // has a canvas context to measure with, and being a little wrong
+      // about a line's width is far cheaper than being a whole line
+      // wrong about its height.
+      const step = Math.max(obj.fontSize * obj.lineHeight, obj.fontSize);
+      let lines = 0;
+      let widest = 0;
+      for (const paragraph of obj.text.split("\n")) {
+        const width = paragraph.length * obj.fontSize * TEXT_GLYPH_ADVANCE;
+        lines += Math.max(1, Math.ceil(width / obj.maxWidth));
+        widest = Math.max(widest, Math.min(width, obj.maxWidth));
+      }
       return {
         x: obj.x,
         y: obj.y,
-        w: obj.maxWidth,
-        h: Math.max(lineHeight, obj.fontSize),
+        w: Math.max(widest, obj.fontSize),
+        h: Math.max(1, lines) * step,
       };
     }
     case "formula": {

@@ -522,7 +522,14 @@ def prune_superseded_canvas_images(
     if len(image_positions) <= 1:
         return messages
 
-    superseded = set(image_positions[:-1])
+    # Superseded by *message*, not by image part: a canvas turn carries
+    # the overview plus close-ups of the new ink, and keeping only the
+    # last part would drop the overview of the very turn being answered
+    # while keeping its crop.
+    newest_message = image_positions[-1][0]
+    superseded = {pos for pos in image_positions if pos[0] != newest_message}
+    if not superseded:
+        return messages
     pruned: list[dict] = []
     for m_idx, message in enumerate(messages):
         content = message.get("content")

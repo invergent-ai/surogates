@@ -135,3 +135,12 @@ def test_guidance_forbids_reading_symbols_from_the_hotspot_trail():
     """
     text = _library().get("guidance/whiteboard")
     assert "never read characters or symbols out of it" in text
+
+
+def test_guidance_treats_ink_around_the_agents_object_as_an_operation():
+    """Two sessions in a row: the user wrapped the answer in `( )²` and
+    the model explained the answer instead of squaring it."""
+    text = _library().get("guidance/whiteboard")
+    assert "an operation on\nit" in text or "an operation on it" in text
+    assert "(ln|x| + C)²" in text
+    assert "never\ntranscribe them into a reading" in text or "never transcribe them into a reading" in text

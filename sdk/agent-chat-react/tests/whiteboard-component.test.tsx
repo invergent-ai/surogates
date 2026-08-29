@@ -1258,3 +1258,161 @@ describe("progress while the agent works", () => {
     expect(canvas.className).not.toContain("pointer-events-none");
   });
 });
+
+describe("correcting a reading", () => {
+  // A board with one stroke at logical (0,0)-(100,60) whose reading is
+  // stored, loaded from the workspace. The initial view puts logical
+  // (x, y) at screen (x + 400, y + 300).
+  const strokeIds = ["local:1"];
+  const saved = () => ({
+    version: 1,
+    lastEventId: 0,
+    folded: [],
+    objects: [{
+      id: "local:1", origin: "local", selected: false, kind: "ink",
+      pts: [0, 0, 100, 60], width: 0, color: "#000",
+    }],
+    readings: {
+      [strokeIds.join("|")]: { text: "2x", source: "agent", strokeIds },
+    },
+  });
+
+  async function boardWith(doc: unknown) {
+    const { adapter } = makeAdapter({
+      getWorkspaceFile: vi.fn(async () => ({
+        path: "_whiteboard/canvas.json",
+        content: JSON.stringify(doc),
+        size: 1,
+        encoding: "utf-8" as const,
+        truncated: false,
+      })),
+    });
+    const el = await render(<AgentWhiteboard adapter={adapter} sessionId="s1" />);
+    await act(async () => { await Promise.resolve(); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    return { el, canvas };
+  }
+
+  const editorOf = (el: HTMLElement) =>
+    el.querySelector<HTMLTextAreaElement>('textarea[aria-label="Text"]');
+
+  const click = (canvas: HTMLCanvasElement, x: number, y: number) =>
+    act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: x, clientY: y, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+
+  it("does not open when drawing beneath the ink with the pen", async () => {
+    // The bug: drawing the next line under an integral opened an editor
+    // instead of a stroke.
+    const { el, canvas } = await boardWith(saved());
+    await click(canvas, 420, 368);
+    expect(editorOf(el)).toBeNull();
+  });
+
+  it("opens on the reading text with the select tool, prefilled", async () => {
+    const { el, canvas } = await boardWith(saved());
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await click(canvas, 410, 368);
+    const area = editorOf(el);
+    expect(area).not.toBeNull();
+    expect(area?.value).toBe("2x");
+  });
+
+  it("does not open beneath unread ink even with the select tool", async () => {
+    const doc = { ...saved(), readings: {} };
+    const { el, canvas } = await boardWith(doc);
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    await click(canvas, 410, 368);
+    expect(editorOf(el)).toBeNull();
+  });
+});
+
+
+describe("what counts as the user's selection", () => {
+  const drawMessage = {
+    id: "m1", role: "assistant" as const, content: "",
+    toolCalls: [{
+      id: "call1", toolName: "whiteboard_draw",
+      args: JSON.stringify({ commands: [{
+        tool: "write_text", x: 600, y: 40, text: "ANSWER",
+        fontSize: 48, maxWidth: 200,
+      }] }),
+      status: "complete",
+    }],
+  };
+
+  async function boardAfterReply() {
+    const send = vi.fn(async () => undefined);
+    const { adapter } = makeAdapter();
+    const el = await render(
+      <WhiteboardSurface
+        adapter={adapter}
+        sessionId="s1"
+        runtime={{ messages: [drawMessage], isRunning: false, send } as never}
+      />,
+    );
+    // The load resolves over several ticks; Ask is disabled until it
+    // does, and a click on a disabled Ask sends nothing -- which made
+    // an earlier version of these tests pass by asserting on nothing.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const canvas = byLabel(el, "Whiteboard canvas") as HTMLCanvasElement;
+    canvas.setPointerCapture = () => undefined;
+    canvas.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
+    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+    return { el, canvas, send };
+  }
+
+  const metadataOf = (send: ReturnType<typeof vi.fn>) =>
+    (send.mock.calls[0]?.[3] as { whiteboard?: Record<string, unknown> })
+      ?.whiteboard;
+
+  it("does not report the agent's freshly drawn object as a lasso", async () => {
+    // The object arrives selected so it can be dragged; that used to
+    // leak into the next Ask as "the user lassoed this", and the model
+    // read its own answer as the user's question.
+    const { el, send } = await boardAfterReply();
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(metadataOf(send)?.selection).toBeUndefined();
+  });
+
+  it("reports a selection the user made with the select tool", async () => {
+    const { el, canvas, send } = await boardAfterReply();
+    await act(async () => { byLabel(el, "Select")?.click(); });
+    // The object sits at logical (600,40)-(772,105); the initial view
+    // puts that at screen (1000,340)-(1172,405). Click well inside it:
+    // near a corner is a resize handle, not a select.
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 1080, clientY: 370, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(metadataOf(send)?.selection).toBeDefined();
+  });
+
+  it("drops the selection when the user starts drawing", async () => {
+    const { el, canvas, send } = await boardAfterReply();
+    await act(async () => {
+      canvas.dispatchEvent(new PointerEvent("pointerdown", {
+        clientX: 100, clientY: 100, bubbles: true, cancelable: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointermove", {
+        clientX: 160, clientY: 140, bubbles: true,
+      }));
+      canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+    });
+    await act(async () => { byLabel(el, "Ask")?.click(); });
+    expect(send).toHaveBeenCalled();
+    expect(metadataOf(send)?.selection).toBeUndefined();
+  });
+});

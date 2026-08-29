@@ -6,10 +6,15 @@ import {
   atlasMetadata,
   buildAtlas,
   AGENT_OBJECT_LIMIT,
+  MAX_CROPS,
   MAX_MARKS,
   OCCUPANCY_GRID,
   agentObjectReport,
+  type BoardMark,
+  type Rect,
   boardMarks,
+  buildRegionCrop,
+  cropRegions,
   inkClusters,
   contentBeyond,
   contentBounds,
@@ -543,7 +548,8 @@ describe("never cropping an expression in half", () => {
     const { sourceRect } = planAtlas(doc, null, scrolled, wide, services);
 
     expect(sourceRect.x).toBeLessThanOrEqual(-150);
-    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(800);
+    // "tail" is four glyphs at 40: ~96 units of ink, not its 100 maxWidth.
+    expect(sourceRect.x + sourceRect.w).toBeGreaterThanOrEqual(700 + 96);
   });
 
   it("falls back to the viewport once the board outgrows the frame", () => {
@@ -812,5 +818,124 @@ describe("clustering the user's ink into the things they wrote", () => {
     ]);
     const labels = calls.filter((c) => c[0] === "fillText").map((c) => c[1]);
     expect(labels).toContain("A1");
+  });
+});
+
+describe("close-ups of new ink", () => {
+  const stroke = (id: string, x: number, y: number, w: number, h: number) => ({
+    id, origin: "local", selected: false, kind: "ink" as const,
+    pts: [x, y, x + w, y + h], width: 0, color: "#000",
+  });
+  const board = (...objects: unknown[]) =>
+    ({ ...emptyDoc(), objects }) as never;
+  const drawing = () => {
+    const calls: unknown[][] = [];
+    const ctx = new Proxy({} as Record<string, unknown>, {
+      get: (_t, p) =>
+        p === "measureText"
+          ? () => ({ width: 20 })
+          : (...args: unknown[]) => { calls.push([p, ...args]); },
+      set: () => true,
+    });
+    let made: { w: number; h: number } | null = null;
+    return {
+      calls,
+      size: () => made,
+      services: {
+        ...services,
+        createCanvas: (w: number, h: number) => {
+          made = { w, h };
+          return { width: w, height: h, getContext: () => ctx } as unknown as
+            HTMLCanvasElement;
+        },
+      },
+    };
+  };
+  const ink = (id: string, rect: Rect, over: Partial<BoardMark> = {}): BoardMark =>
+    ({ id, kind: "ink", rect, fresh: true, ...over });
+
+  it("renders the region large enough to read", () => {
+    // 60-unit handwriting arrives ~110px tall instead of the few dozen
+    // pixels it gets on the overview.
+    const rec = drawing();
+    const crop = buildRegionCrop(
+      board(stroke("s", 0, 0, 300, 60)),
+      { ids: ["A1"], rect: { x: 0, y: 0, w: 300, h: 60 } },
+      rec.services,
+      60,
+    );
+    expect(crop?.scale).toBeGreaterThan(1.5);
+    expect(rec.size()?.h).toBeGreaterThan(100);
+  });
+
+  it("never shrinks below 1:1 for large handwriting that fits", () => {
+    const rec = drawing();
+    const crop = buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 600, h: 250 } }, rec.services, 250,
+    );
+    expect(crop?.scale).toBeGreaterThanOrEqual(1);
+  });
+
+  it("caps the image size for a very wide region", () => {
+    const rec = drawing();
+    buildRegionCrop(
+      board(), { ids: ["A1"], rect: { x: 0, y: 0, w: 4000, h: 60 } }, rec.services, 60,
+    );
+    expect(rec.size()?.w).toBeLessThanOrEqual(1536);
+  });
+
+  it("crops new unread ink together with the agent object it touches", () => {
+    // `( ln|x|+C )²`: the `)²` alone reads as a `?`; with the answer
+    // inside the brackets it reads as squaring it.
+    const marks: BoardMark[] = [
+      ink("A2", { x: 896, y: 185, w: 222, h: 217 }),
+      { id: "B1", kind: "agent", rect: { x: 617, y: 274, w: 289, h: 70 },
+        origin: "c1", label: "ln|x| + C", touched: true },
+    ];
+    const [region] = cropRegions(marks, 69);
+    expect(region.ids).toEqual(["A2", "B1"]);
+    expect(region.rect.x).toBeLessThanOrEqual(617);
+    expect(region.rect.x + region.rect.w).toBeGreaterThanOrEqual(896 + 222);
+  });
+
+  it("keeps far-apart new marks as separate close-ups", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 100, h: 50 }),
+      ink("A2", { x: 5000, y: 5000, w: 100, h: 50 }),
+    ];
+    expect(cropRegions(marks, 40)).toHaveLength(2);
+  });
+
+  it("merges new marks that sit close together", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 100, h: 50 }),
+      ink("A2", { x: 120, y: 0, w: 100, h: 50 }),
+    ];
+    const regions = cropRegions(marks, 40);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].ids).toEqual(["A1", "A2"]);
+  });
+
+  it("skips ink that already has a reading, and old ink", () => {
+    const marks = [
+      ink("A1", { x: 0, y: 0, w: 1, h: 1 }, { reading: "known" }),
+      ink("A2", { x: 0, y: 0, w: 1, h: 1 }, { fresh: false }),
+      ink("A3", { x: 9000, y: 9000, w: 1, h: 1 }),
+    ];
+    expect(cropRegions(marks, 40).map((r) => r.ids)).toEqual([["A3"]]);
+  });
+
+  it("is bounded per turn", () => {
+    const marks = Array.from({ length: 5 }, (_, i) =>
+      ink(`A${i + 1}`, { x: i * 5000, y: 0, w: 1, h: 1 }));
+    expect(cropRegions(marks, 40)).toHaveLength(MAX_CROPS);
+  });
+
+  it("rides on the turn metadata with its image index", () => {
+    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
+    const meta = atlasMetadata(plan, null, [], {
+      crops: [{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }],
+    });
+    expect(meta.crops).toEqual([{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }]);
   });
 });
