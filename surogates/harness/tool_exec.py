@@ -1642,13 +1642,25 @@ async def execute_single_tool(
         if hints:
             result_content += hints
 
-    # Layer 2: persist oversized results to disk instead of truncating.
-    from surogates.tools.utils.tool_result_storage import maybe_persist_tool_result
+    # Layer 2: persist oversized results instead of truncating.  The spill
+    # must land where ``read_file`` will run -- in the sandbox when there is
+    # one, otherwise on this filesystem.
+    from surogates.tools.utils.tool_result_storage import (
+        make_sandbox_writer,
+        maybe_persist_tool_result,
+    )
 
-    result_content = maybe_persist_tool_result(
+    if sandbox_pool is not None:
+        from surogates.sandbox.pool import sandbox_session_key
+        spill_writer = make_sandbox_writer(sandbox_pool, sandbox_session_key(session))
+    else:
+        spill_writer = None
+
+    result_content = await maybe_persist_tool_result(
         content=result_content,
         tool_name=tool_name,
         tool_use_id=tool_call_id,
+        writer=spill_writer,
     )
 
     # Sanitise the event payload — frontend SSE consumers must not see

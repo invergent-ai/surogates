@@ -2696,8 +2696,22 @@ class AgentHarness(
                     self._iters_since_skill = 0
 
             # 7b. Layer 3: enforce aggregate turn budget -- persist oversized results.
-            from surogates.tools.utils.tool_result_storage import enforce_turn_budget
-            tool_results = enforce_turn_budget(tool_results)
+            #     Spills go through the sandbox when tools run there, so the
+            #     path handed to the model is one ``read_file`` can open.
+            from surogates.tools.utils.tool_result_storage import (
+                enforce_turn_budget,
+                make_sandbox_writer,
+            )
+            if self._sandbox_pool is not None:
+                from surogates.sandbox.pool import sandbox_session_key
+                _spill_writer = make_sandbox_writer(
+                    self._sandbox_pool, sandbox_session_key(session),
+                )
+            else:
+                _spill_writer = None
+            tool_results = await enforce_turn_budget(
+                tool_results, writer=_spill_writer,
+            )
 
             # 7c. Budget pressure warning -- inject into the last tool result.
             tool_results = inject_budget_warning(tool_results, self._budget)
