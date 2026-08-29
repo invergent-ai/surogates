@@ -118,31 +118,57 @@ export function applyAgentChatEvent(
       ]);
 
     case "artifact.created":
-    case "artifact.updated":
-      return withMessages(nextState, [
-        ...nextState.messages,
-        {
-          id: `evt-${event.eventId}`,
-          role: "system",
-          content: stringValue(event.data.name),
-          createdAt: new Date(),
-          status: "complete",
-          systemKind: "artifact",
-          systemMeta: {
-            artifact_id: event.data.artifact_id,
-            name: event.data.name,
-            kind: event.data.kind,
-            version: event.data.version,
-            size: event.data.size,
-            // Propagated artifacts (a delegated child's report
-            // surfacing on the parent's chat thread) carry this
-            // field; without it the ArtifactBlock fetches via the
-            // chat's own session id and 404s because the spec lives
-            // under the writer's S3 prefix, not the parent's.
-            originating_session_id: event.data.originating_session_id,
-          },
+    case "artifact.updated": {
+      const artifactMessage: AgentChatMessage = {
+        id: `evt-${event.eventId}`,
+        role: "system",
+        content: stringValue(event.data.name),
+        createdAt: new Date(),
+        status: "complete",
+        systemKind: "artifact",
+        systemMeta: {
+          artifact_id: event.data.artifact_id,
+          name: event.data.name,
+          kind: event.data.kind,
+          version: event.data.version,
+          size: event.data.size,
+          // Propagated artifacts (a delegated child's report
+          // surfacing on the parent's chat thread) carry this
+          // field; without it the ArtifactBlock fetches via the
+          // chat's own session id and 404s because the spec lives
+          // under the writer's S3 prefix, not the parent's.
+          originating_session_id: event.data.originating_session_id,
         },
-      ]);
+      };
+
+      // A revision supersedes the panel it revises rather than adding a
+      // second one. ArtifactBlock always fetches the artifact's LATEST
+      // payload, so leaving the earlier marker in place would render two
+      // panels showing identical content and the reader would have to
+      // guess which is current. Keep the original marker's position in
+      // the thread -- the artifact was introduced at that point in the
+      // conversation -- and bump it to the new version, which is what
+      // drives the block's re-fetch.
+      const artifactId = event.data.artifact_id;
+      if (artifactId) {
+        const existing = nextState.messages.findIndex(
+          (m) =>
+            m.systemKind === "artifact" &&
+            m.systemMeta?.artifact_id === artifactId,
+        );
+        if (existing !== -1) {
+          const merged = [...nextState.messages];
+          merged[existing] = {
+            ...merged[existing],
+            content: artifactMessage.content,
+            systemMeta: artifactMessage.systemMeta,
+          };
+          return withMessages(nextState, merged);
+        }
+      }
+
+      return withMessages(nextState, [...nextState.messages, artifactMessage]);
+    }
 
     case "browser.provisioned":
       return applyBrowserEvent(nextState, event, {

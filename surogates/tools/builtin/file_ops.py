@@ -696,6 +696,39 @@ def _init_task_data(task_id: str) -> dict:
         return task_data
 
 
+def seed_read_timestamps(
+    timestamps: dict[str, float],
+    task_id: str = "default",
+) -> None:
+    """Install *timestamps* as the read record for *task_id*.
+
+    The sandbox executor forks a child per tool call, so anything a
+    handler records in ``_read_tracker`` dies with that child. The parent
+    daemon keeps the record instead and seeds it here before each
+    dispatch, which is what makes "has this session read the file?"
+    answerable at all inside a sandbox.
+    """
+    if not timestamps:
+        return
+    task_data = _init_task_data(task_id)
+    with _read_tracker_lock:
+        task_data.setdefault("read_timestamps", {}).update(timestamps)
+        _cap_read_tracker_data(task_data)
+
+
+def has_read(filepath: str, task_id: str = "default") -> bool:
+    """Whether *filepath* was read by *task_id* during this session."""
+    try:
+        resolved = str(Path(filepath).expanduser().resolve())
+    except (OSError, ValueError):
+        return False
+    with _read_tracker_lock:
+        task_data = _read_tracker.get(task_id)
+        if not task_data:
+            return False
+        return resolved in task_data.get("read_timestamps", {})
+
+
 def get_read_files_summary(task_id: str = "default") -> list:
     """Return a list of files read in this session for the given task.
 
@@ -903,6 +936,10 @@ WRITE_FILE_SCHEMA = ToolSchema(
         "existing content. Use this instead of echo/cat heredoc in "
         "terminal. Creates parent directories automatically. OVERWRITES "
         "the entire file — use 'patch' for targeted edits.\n\n"
+        "Creating a new file needs no preparation. Overwriting a file that "
+        "already exists requires reading it first in this session — the "
+        "call is refused otherwise, because a blind overwrite discards "
+        "content you never saw.\n\n"
         "Use `write_file` when the user is editing a project on disk — "
         "adding to or modifying a codebase they will run, import, or "
         "commit. If the user instead asks for a **standalone demo, "
@@ -938,6 +975,9 @@ PATCH_SCHEMA = ToolSchema(
         "terminal. Whitespace and indentation differences won't break the match, "
         "but old_string must identify exactly one place in the file. Returns a "
         "unified diff. Auto-runs syntax checks after editing.\n\n"
+        "The edit FAILS if old_string is not unique. When that happens, add the "
+        "minimum extra context needed to disambiguate, or set replace_all=true to "
+        "change every instance — do not retry the same old_string unchanged.\n\n"
         "Replace mode (default): find a unique string and replace it.\n"
         "Patch mode: apply V4A multi-file patches for bulk changes."
     ),
@@ -1572,6 +1612,20 @@ async def _write_file_handler(
 
     try:
         resolved = _resolve_user_path(path, workspace_path)
+
+        # Refuse a blind overwrite. Creating a file is free; replacing one
+        # whose content was never read discards work the agent cannot
+        # describe, and the recovery -- read it, then write -- costs one
+        # call. Existence is checked here rather than in the harness
+        # because this is the side that has the filesystem.
+        if os.path.exists(resolved) and not has_read(resolved, task_id):
+            return _tool_error(
+                f"Refusing to overwrite '{path}': it already exists and has "
+                "not been read in this session. Call read_file on it first, "
+                "then write. To replace it wholesale without reading, delete "
+                "it first."
+            )
+
         stale_warning = _check_file_staleness(resolved, task_id)
 
         # Create parent directories automatically

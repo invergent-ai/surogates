@@ -175,6 +175,13 @@ def register(registry: ToolRegistry) -> None:
                 "Use for: visuals, interactive previews, or long "
                 "standalone documents the user will want to see, copy, "
                 "save, or refer back to.\n\n"
+                "Revising: the result carries an `artifact_id`. To change "
+                "an artifact you already made, call this tool again with "
+                "that `artifact_id` and the COMPLETE updated spec — it "
+                "replaces the content in place as a new version instead "
+                "of leaving a second, stale copy in the conversation. "
+                "Omit `artifact_id` only when you mean to make a genuinely "
+                "new artifact.\n\n"
                 "Do NOT use for: short answers, files the user is editing "
                 "on disk (use write_file instead), or data the user asked "
                 "for as raw JSON/CSV (return as a code block in the "
@@ -201,6 +208,15 @@ def register(registry: ToolRegistry) -> None:
                         "description": (
                             "Rendering kind. Determines which fields of "
                             "`spec` are required."
+                        ),
+                    },
+                    "artifact_id": {
+                        "type": "string",
+                        "description": (
+                            "Omit to create a new artifact. To revise one "
+                            "you already created, pass the `artifact_id` "
+                            "returned by that call, plus the complete "
+                            "replacement spec."
                         ),
                     },
                     "spec": {
@@ -319,12 +335,39 @@ _SHAPE_EXAMPLE_BY_KIND: dict[str, str] = {
 }
 
 
-def _error(message: str, *, hint: str | None = None) -> str:
+def _error(
+    message: str,
+    *,
+    hint: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str:
     """Format a compact, LLM-friendly error response."""
     body: dict[str, Any] = {"success": False, "error": message}
     if hint:
         body["hint"] = hint
+    if extra:
+        body.update(extra)
     return json.dumps(body, ensure_ascii=False)
+
+
+def _failed(result: str) -> bool:
+    """Whether an API-client result string reports a failure."""
+    try:
+        parsed = json.loads(result)
+    except (TypeError, ValueError):
+        return True
+    return not (isinstance(parsed, dict) and parsed.get("success"))
+
+
+def _error_text(result: str) -> str:
+    """Best-effort error message out of an API-client result string."""
+    try:
+        parsed = json.loads(result)
+    except (TypeError, ValueError):
+        return str(result)[:200]
+    if isinstance(parsed, dict):
+        return str(parsed.get("error") or parsed.get("detail") or parsed)[:200]
+    return str(parsed)[:200]
 
 
 def _format_validation_error(exc: ValidationError, kind: str) -> str:
@@ -482,4 +525,33 @@ async def _create_artifact_handler(
         if citation_error is not None:
             return citation_error
 
-    return await api_client.create_artifact(name=name, kind=kind, spec=spec)
+    artifact_id = arguments.get("artifact_id") or None
+    if artifact_id is not None and not isinstance(artifact_id, str):
+        artifact_id = str(artifact_id)
+
+    result = await api_client.create_artifact(
+        name=name, kind=kind, spec=spec, artifact_id=artifact_id,
+    )
+
+    # A failed revision would otherwise cost the agent the artifact's
+    # content: it sent a full replacement, the server rejected it, and
+    # the old spec may be long gone from context. Hand the stored
+    # version back so the next attempt can merge rather than reconstruct.
+    if artifact_id is not None and _failed(result):
+        stored = await api_client.get_artifact(artifact_id)
+        if stored is not None:
+            return _error(
+                f"Could not update artifact {artifact_id}: "
+                f"{_error_text(result)}",
+                hint=(
+                    "The artifact's current content is in `current`. "
+                    "Merge your change into it and call create_artifact "
+                    f"again with artifact_id='{artifact_id}'."
+                ),
+                extra={"current": {
+                    "kind": stored.get("kind"),
+                    "spec": stored.get("spec"),
+                    "version": (stored.get("meta") or {}).get("version"),
+                }},
+            )
+    return result

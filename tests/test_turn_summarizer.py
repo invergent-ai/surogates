@@ -12,6 +12,7 @@ from surogates.harness.turn_summarizer import (
     TurnArtifact,
     TurnSummarizer,
     TurnSummary,
+    _duplicates_prior_caption,
     _normalize_caption,
     _valid_iteration_summary,
 )
@@ -923,3 +924,80 @@ async def test_recap_disabled_makes_no_call_but_keeps_iterations() -> None:
     )
     assert line == "one-liner"
     assert summary.chat.completions.calls, "iteration one-liner was suppressed"
+
+
+class TestDuplicateCaptionSuppression:
+    """A caption that would render as a repeat of an earlier row is dropped.
+
+    Short git-subject captions make similar steps collapse onto the same
+    words; measured on real DEV transcripts this raised the repeat rate
+    by ~8pp and no prompt wording fixed it. The client falls back to its
+    deterministic tool-derived label for a suppressed row.
+    """
+
+    def test_exact_repeat_is_a_duplicate(self):
+        assert _duplicates_prior_caption(
+            "Opened the arXiv page", ["Opened the arXiv page"],
+        )
+
+    def test_rephrasing_is_a_duplicate(self):
+        assert _duplicates_prior_caption(
+            "Opened arXiv page", ["Opened the arXiv page"],
+        )
+
+    def test_same_verb_different_object_is_not_a_duplicate(self):
+        assert not _duplicates_prior_caption(
+            "Searched for the AGILE time profile",
+            ["Searched for the 2020 burst paper, no match"],
+        )
+
+    def test_checks_every_prior_not_just_the_last(self):
+        assert _duplicates_prior_caption(
+            "Listed two skills: test-expert and image",
+            [
+                "Listed two skills: test-expert and image",
+                "Read the art styles reference guide",
+            ],
+        )
+
+    def test_no_priors_is_never_a_duplicate(self):
+        assert not _duplicates_prior_caption("Opened the arXiv page", [])
+
+    def test_stopword_only_caption_is_not_a_duplicate(self):
+        """No content words means nothing to compare — never suppress."""
+        assert not _duplicates_prior_caption("of the and", ["of the and"])
+
+    def test_empty_prior_is_skipped(self):
+        assert not _duplicates_prior_caption("Opened the arXiv page", ["", "  "])
+
+    @pytest.mark.asyncio
+    async def test_summarize_iteration_drops_a_duplicate(self):
+        summ = _iteration_summarizer(
+            _StubClient('{"caption": "Opened the arXiv page"}'), "cheap")
+        out = await summ.summarize_iteration(
+            iteration_id="i1",
+            reasoning="thinking",
+            tool_calls=[{
+                "id": "c1",
+                "function": {"name": "browser_navigate", "arguments": "{}"},
+            }],
+            prior_iteration_summaries=["Opened the arXiv page"],
+            tool_results=[{"tool_call_id": "c1", "content": "ok"}],
+        )
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_summarize_iteration_keeps_a_distinct_caption(self):
+        summ = _iteration_summarizer(
+            _StubClient('{"caption": "Extracted the radio flux table"}'), "cheap")
+        out = await summ.summarize_iteration(
+            iteration_id="i1",
+            reasoning="thinking",
+            tool_calls=[{
+                "id": "c1",
+                "function": {"name": "browser_navigate", "arguments": "{}"},
+            }],
+            prior_iteration_summaries=["Opened the arXiv page"],
+            tool_results=[{"tool_call_id": "c1", "content": "ok"}],
+        )
+        assert out == "Extracted the radio flux table"

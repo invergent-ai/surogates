@@ -316,13 +316,16 @@ class HarnessAPIClient:
         name: str,
         kind: str,
         spec: dict[str, Any],
+        artifact_id: str | None = None,
     ) -> str:
-        """Create an artifact in the current session.  Returns JSON string.
+        """Create or revise an artifact in the session.  Returns JSON string.
 
-        Requires ``session_id`` to be set on the client (set by the
-        harness when wiring the per-session client).  The API server
-        emits an ``artifact.created`` event as part of the POST, so the
-        harness does not need to emit one itself.
+        With *artifact_id* this PUTs a new version of that artifact
+        instead of creating a second one.  Requires ``session_id`` to be
+        set on the client (set by the harness when wiring the
+        per-session client).  The API server emits ``artifact.created``
+        or ``artifact.updated`` as part of the request, so the harness
+        does not need to emit one itself.
         """
         if self._session_id is None:
             return json.dumps({
@@ -332,14 +335,31 @@ class HarnessAPIClient:
                     "session_id is not set."
                 ),
             }, ensure_ascii=False)
+        body = {"name": name, "kind": kind, "spec": spec}
+        base = f"/v1/sessions/{self._session_id}/artifacts"
         try:
-            data = await self._post(
-                f"/v1/sessions/{self._session_id}/artifacts",
-                body={"name": name, "kind": kind, "spec": spec},
-            )
+            if artifact_id:
+                data = await self._put(f"{base}/{artifact_id}", body=body)
+            else:
+                data = await self._post(base, body=body)
             return json.dumps({"success": True, **data}, ensure_ascii=False)
         except httpx.HTTPStatusError as exc:
             return _error_response(exc)
+
+    async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        """Return ``{meta, kind, spec}`` for *artifact_id*, or ``None``.
+
+        Used to hand the stored spec back when a revision fails, so a
+        bad update does not cost the agent the artifact's content.
+        """
+        if self._session_id is None:
+            return None
+        try:
+            return await self._get(
+                f"/v1/sessions/{self._session_id}/artifacts/{artifact_id}",
+            )
+        except (httpx.HTTPStatusError, httpx.HTTPError):
+            return None
 
     async def fetch_channel_file(self, file_id: str) -> str:
         """Fetch a file shared earlier in this session's channel.

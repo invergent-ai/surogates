@@ -246,5 +246,72 @@ async def create_artifact(
             "size": meta.size,
         },
     )
+    return meta
+
+
+@router.put(
+    "/sessions/{session_id}/artifacts/{artifact_id}",
+    response_model=ArtifactMeta,
+)
+async def update_artifact(
+    session_id: UUID,
+    artifact_id: UUID,
+    body: ArtifactSpec,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> ArtifactMeta:
+    """Replace an artifact's payload and emit ``artifact.updated``.
+
+    A revision is a full replacement, so the body is the same
+    :class:`ArtifactSpec` a create takes. The event mirrors
+    ``artifact.created`` because the UI reducer already treats the two
+    identically -- it re-resolves the card from ``artifact_id``, so the
+    updated version supersedes the old rendering without a second card.
+    """
+    store = _get_session_store(request)
+    session, bucket = await _resolve_storage_bucket(request, store, session_id, tenant)
+
+    try:
+        body.validate_spec()
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.errors(),
+        )
+
+    artifact_store = ArtifactStore(
+        _get_storage(request),
+        session_id=session_id,
+        bucket=bucket,
+        key_prefix=boundary_workspace_prefix(
+            session.config, session, workspace_root_id(session),
+        ),
+    )
+    try:
+        meta = await artifact_store.update(
+            artifact_id, name=body.name, kind=body.kind, spec=body.spec,
+        )
+    except ArtifactNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact {artifact_id} not found.",
+        )
+    except ArtifactLimitError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=str(exc),
+        )
+
+    await store.emit_event(
+        session_id,
+        EventType.ARTIFACT_UPDATED,
+        {
+            "artifact_id": str(meta.artifact_id),
+            "name": meta.name,
+            "kind": meta.kind.value,
+            "version": meta.version,
+            "size": meta.size,
+        },
+    )
 
     return meta

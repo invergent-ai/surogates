@@ -49,6 +49,51 @@ _MP = multiprocessing.get_context("fork")
 # children read it via module global.
 _REGISTRY: Any = None
 
+# Resolved path -> mtime at the moment the agent read it. Lives in the
+# parent because the children are forked per call and never write back:
+# a tracker entry a handler makes is discarded with the child that made
+# it. One daemon serves one sandbox, so a single unkeyed map is the whole
+# session's read record.
+_READ_TIMESTAMPS: dict[str, float] = {}
+
+# Reads recorded per sandbox, bounding the map for a long session. Same
+# order as the in-handler tracker cap.
+_MAX_READ_TIMESTAMPS = 1024
+
+# Tools whose success means the agent has now seen the file's content.
+_READ_TOOL_NAMES = frozenset({"read_file", "write_file", "patch"})
+
+
+def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
+    """Note that *args["path"]* has been seen, if the call succeeded.
+
+    Writes count as reads: after write_file or patch the agent knows the
+    content, so a follow-up overwrite is not blind. Failures record
+    nothing -- a refused write must not authorise the retry.
+    """
+    if name not in _READ_TOOL_NAMES:
+        return
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return
+    try:
+        if json.loads(result).get("error"):
+            return
+    except (TypeError, ValueError, AttributeError):
+        return
+    try:
+        resolved = os.path.realpath(
+            os.path.expanduser(path)
+            if path.startswith("~") or os.path.isabs(path)
+            else os.path.join(workspace, path)
+        )
+        mtime = os.path.getmtime(resolved)
+    except OSError:
+        return
+    if len(_READ_TIMESTAMPS) >= _MAX_READ_TIMESTAMPS:
+        _READ_TIMESTAMPS.clear()
+    _READ_TIMESTAMPS[resolved] = mtime
+
 
 def init_registry() -> Any:
     """Import and build the tool registry (the expensive part, run once)."""
@@ -130,12 +175,26 @@ def _run_checkpoint(args: dict, workspace: str) -> str:
     })
 
 
-def run_tool(name: str, args: dict, workspace: str) -> str:
+def run_tool(
+    name: str,
+    args: dict,
+    workspace: str,
+    read_timestamps: dict | None = None,
+) -> str:
     """Dispatch one tool call through the real handlers.
 
     Runs inside the forked child — blocking calls and CPU burn are fine
     here.  Result shapes mirror the old CLI exactly.
+
+    *read_timestamps* is the parent's record of files read this session,
+    seeded into the child's tracker so read-dependent guards (blind
+    overwrite, staleness) can see reads that happened in earlier forks.
     """
+    if read_timestamps:
+        from surogates.tools.builtin.file_ops import seed_read_timestamps
+
+        seed_read_timestamps(read_timestamps)
+
     if name == "_checkpoint":
         return _run_checkpoint(args, workspace)
     if name == "_code":
@@ -177,7 +236,13 @@ def _timed_out_result() -> str:
     })
 
 
-def _child_main(conn: Any, name: str, args: dict, workspace: str) -> None:
+def _child_main(
+    conn: Any,
+    name: str,
+    args: dict,
+    workspace: str,
+    read_timestamps: dict | None = None,
+) -> None:
     """Entry point of the forked child: run the tool, ship the result."""
     # The forked thread inherits the parent's "running event loop"
     # marker; clear it so run_tool's asyncio.run() can start a fresh
@@ -185,7 +250,7 @@ def _child_main(conn: Any, name: str, args: dict, workspace: str) -> None:
     # this line is belt-and-braces against that hook changing.
     asyncio._set_running_loop(None)
     try:
-        result = run_tool(name, args, workspace)
+        result = run_tool(name, args, workspace, read_timestamps)
     except BaseException as exc:  # never die without reporting
         result = json.dumps({"exit_code": 1, "output": "", "error": str(exc)})
     try:
@@ -207,7 +272,9 @@ async def execute_in_child(
     """
     parent_conn, child_conn = _MP.Pipe(duplex=False)
     proc = _MP.Process(
-        target=_child_main, args=(child_conn, name, args, workspace), daemon=True,
+        target=_child_main,
+        args=(child_conn, name, args, workspace, dict(_READ_TIMESTAMPS)),
+        daemon=True,
     )
     proc.start()
     child_conn.close()
@@ -222,6 +289,9 @@ async def execute_in_child(
             return _timed_out_result()
         try:
             data = await asyncio.to_thread(parent_conn.recv_bytes)
+            result = data.decode("utf-8")
+            _record_read(name, args, workspace, result)
+            return result
         except EOFError:
             await asyncio.to_thread(proc.join, 5)
             logger.error(
@@ -233,7 +303,6 @@ async def execute_in_child(
                 "output": "",
                 "error": f"Tool process died unexpectedly (exit code {proc.exitcode})",
             })
-        return data.decode("utf-8")
     finally:
         parent_conn.close()
         if proc.is_alive():

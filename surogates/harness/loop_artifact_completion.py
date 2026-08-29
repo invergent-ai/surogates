@@ -446,7 +446,12 @@ class ArtifactCompletionMixin:
             # query cheap on long-running sessions with deep event logs.
             events = await self._store.get_events(
                 session_id,
+                # ARTIFACT_UPDATED matters as much as ARTIFACT_CREATED: a
+                # turn that revises an artifact emits only the former, and
+                # without it that turn's card falls back to the name-keyed
+                # candidate below, whose ref never resolves to a panel.
                 types=[EventType.TOOL_CALL, EventType.ARTIFACT_CREATED,
+                       EventType.ARTIFACT_UPDATED,
                        EventType.LLM_REQUEST, EventType.LLM_RESPONSE],
             )
         except Exception:
@@ -506,7 +511,10 @@ class ArtifactCompletionMixin:
                     cmd = args.get("command") or ""
                     if isinstance(cmd, str) and cmd:
                         terminal_commands.append(cmd)
-            elif etype_str == EventType.ARTIFACT_CREATED.value:
+            elif etype_str in (
+                EventType.ARTIFACT_CREATED.value,
+                EventType.ARTIFACT_UPDATED.value,
+            ):
                 artifact_id = str(
                     data.get("artifact_id") or data.get("id") or "",
                 )
@@ -517,6 +525,23 @@ class ArtifactCompletionMixin:
                             kind="artifact", label=name, ref=artifact_id,
                         ),
                     )
+
+        # The tool-call branch keys an artifact candidate by name, because
+        # the id only exists once the API has answered. When the event did
+        # land, that placeholder is a second row for the same artifact
+        # whose ref resolves to nothing -- drop it in favour of the id.
+        resolved = {
+            a.label for a in out
+            if a.kind == "artifact" and a.ref != a.label
+        }
+        out = [
+            a for a in out
+            if not (
+                a.kind == "artifact"
+                and a.ref == a.label
+                and a.label in resolved
+            )
+        ]
 
         # Workspace mtime scan — surfaces files created indirectly
         # (terminal scripts, execute_code) that don't show up in the

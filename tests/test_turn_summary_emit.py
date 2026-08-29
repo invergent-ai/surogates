@@ -455,8 +455,23 @@ def test_internal_workspace_paths_are_not_candidates() -> None:
     assert _is_internal_workspace_path(".env")
     assert _is_internal_workspace_path("uploads/123-datasheet.pdf")
 
+    # _artifacts/ is ArtifactStore's own version files. Surfacing them
+    # offered the user a raw v3.json download next to the rendered chart
+    # panel it backs -- the same artifact, twice, one of them unreadable.
+    # _whiteboard/ is the canvas behind the whiteboard surface.
+    assert _is_internal_workspace_path(
+        "_artifacts/6cd21b91-e301-4bf1-b275-198c1f4edb17/v3.json",
+    )
+    assert _is_internal_workspace_path("_artifacts/abc/meta.json")
+    assert _is_internal_workspace_path("_artifacts/index.json")
+    assert _is_internal_workspace_path("_whiteboard/canvas.json")
+
     assert not _is_internal_workspace_path("report.pdf")
     assert not _is_internal_workspace_path("docs/strategy.md")
+    # A leading underscore alone is not internal: hiding a Jekyll site's
+    # own files would drop real deliverables off the card.
+    assert not _is_internal_workspace_path("_posts/2026-01-01-launch.md")
+    assert not _is_internal_workspace_path("_config.yml")
 
 
 @pytest.mark.asyncio
@@ -635,3 +650,57 @@ async def test_nothing_emitted_when_a_turn_produced_nothing() -> None:
         c for c in store.emit_event.await_args_list
         if c.args[1] == EventType.TURN_SUMMARY
     ]
+
+
+@pytest.mark.asyncio
+async def test_revised_artifact_resolves_to_its_id_not_its_name() -> None:
+    """A turn that REVISES an artifact emits artifact.updated, not .created.
+
+    The candidate scan used to ask only for ARTIFACT_CREATED, so a
+    revision turn fell back to the tool-call candidate whose ref is the
+    artifact's *name* -- a card row that resolves to no panel. Observed
+    live: turns 2 and 3 of a three-version chart both carried
+    ref="Regional Revenue" instead of the artifact id.
+    """
+    store = AsyncMock()
+    store.get_events = AsyncMock(return_value=[
+        SimpleNamespace(
+            type="tool.call",
+            data={
+                "turn_id": "turn-X",
+                "name": "create_artifact",
+                "arguments": {
+                    "name": "Regional Revenue",
+                    "kind": "chart",
+                    "artifact_id": "6cd21b91",
+                },
+            },
+        ),
+        SimpleNamespace(
+            type="artifact.updated",
+            data={
+                "turn_id": "turn-X",
+                "artifact_id": "6cd21b91",
+                "name": "Regional Revenue",
+                "version": 3,
+            },
+        ),
+    ])
+    store.get_session = AsyncMock(return_value=SimpleNamespace(
+        id=uuid4(), config={"storage_bucket": "bucket-1"},
+    ))
+
+    harness = _make_loop_harness(session_store=store, turn_summarizer=None)
+    harness._storage = None
+
+    candidates, _ = await harness._collect_candidate_artifacts(
+        session_id=uuid4(), turn_id="turn-X",
+    )
+
+    artifacts = [c for c in candidates if c.kind == "artifact"]
+    assert artifacts, "a revised artifact must still be a deliverable"
+    assert [a.ref for a in artifacts] == ["6cd21b91"], (
+        "the revision must resolve to the artifact id, and the name-keyed "
+        "placeholder must not survive alongside it"
+    )
+    assert artifacts[0].label == "Regional Revenue"

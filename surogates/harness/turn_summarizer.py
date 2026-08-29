@@ -74,20 +74,69 @@ class TurnSummary:
     artifacts: list[TurnArtifact] = field(default_factory=list)
 
 
+# Demonstrated rather than specified. The rule-list version of this
+# prompt forbade a narrator opener and got one anyway in 6.6% of
+# replies; a style this small is cheaper to show than to legislate, and
+# the examples fix the tense, the length and the voice at once. The
+# stated shape is the row's real shape -- IterationGroup renders it in a
+# single truncating line -- so the model can reason about the budget
+# instead of counting to a word limit it was never shown.
 _ITERATION_PROMPT = (
-    "You write one short sentence describing what the agent learned or "
-    "accomplished in this iteration. Each tool call is paired with a "
-    "short snippet of its result — use the result, not just the call, "
-    "to decide the label. Two consecutive calls that look identical "
-    "(e.g. several `python3 -c \"...Presentation...\"` commands) often "
-    "do different things; distinguish them by their result. If a call "
-    "failed, say so (e.g. 'Find pdftotext fails — falling back to "
-    "pypdf'). Be specific and concrete. No quotes, no period at the "
-    "end, no leading 'The agent', max 12 words.\n"
-    "You are an observer writing a caption, not the agent. Never "
-    "continue the agent's work, never speak as the agent ('I will…', "
-    "'Let me…'), and never call a tool, and never repeat the "
-    "transcript lines you were given.\n"
+    "You caption one step of an agent's work for someone watching it "
+    "happen.\n"
+    # Deliberately NOT the git-commit-subject framing Claude Code uses.
+    # That wording cut clipped captions from ~45 to ~8 per 140 steps, but
+    # compressed similar steps onto the same words: after de-duplication
+    # it surfaced 94 rows where this wording surfaces 107. A row that
+    # exists and gets clipped was judged more useful than no row at all,
+    # so length stays loose and the distinctness instruction does the
+    # work. Do not "tighten" this back up without re-measuring row yield.
+    "The caption is one line, past tense, leading with the most "
+    "distinctive noun. Keep the detail that makes this step "
+    "recognisable — a row identical to the one above it is worse than a "
+    "long one. Around 12 words. No quotes, no trailing period.\n"
+    "Each tool call comes with a snippet of its result. Caption what the "
+    "result showed, not what the call attempted — two calls that look "
+    "identical often do different things. When a call failed, that is "
+    "the news: say so.\n"
+    # The research examples are load-bearing. With only file/code
+    # examples the model mirrored the voice of whatever it had just read:
+    # on a web_search turn it wrote the source's headline in the present
+    # tense ("JWST reveals a secondary atmosphere on 55 Cancri e") rather
+    # than what the step found. Showing the shape on a research step is
+    # what pins the tense there.
+    "Examples:\n"
+    "- Read the grading rubric from uploads\n"
+    "- pdftotext missing, fell back to pypdf\n"
+    "- Found three failing cases in test_parser\n"
+    "- Rewrote the hero paragraph around the brain/hands metaphor\n"
+    "- Slide render crashed on an empty title\n"
+    "- Searched for the invoice template, no match\n"
+    "- Searched for 55 Cancri e, found a secondary atmosphere\n"
+    "- Pulled the ESA release, no 2024 figures in it\n"
+    "- Read the WASP-107b paper, methane implies a large core\n"
+    "When the result is an article, a paper or a search hit, caption what "
+    "the step turned up — never restate the source's own headline, and "
+    "never borrow its present tense. 'JWST reveals a new atmosphere' is "
+    "the article's title; 'Found a secondary atmosphere on 55 Cancri e' "
+    "is the caption.\n"
+    "You are an observer writing a caption, never the agent: no 'I "
+    "will…', no 'Let me…', never continue the work, never call a tool, "
+    "and never repeat the transcript lines you were given.\n"
+    # Brevity and distinctiveness pull against each other: asking for
+    # short git-subject captions measurably raised the repeat rate on
+    # real transcripts. This paragraph, a bare "say something NEW", and
+    # a word-count ceiling were each measured and none of them fixed it
+    # -- _duplicates_prior_caption does. Kept because it costs nothing
+    # and shapes what a non-duplicate caption says; do not mistake it
+    # for the guard.
+    "When earlier captions from this turn are listed, this caption must "
+    "read differently from all of them. Steps often repeat an action; "
+    "the caption carries what CHANGED — the file, the query, the page, "
+    "the number, the outcome — not the verb they share. Three searches "
+    "become 'Searched for the 2020 burst paper, no match', 'Found the "
+    "AGILE time profile', 'Pulled the radio flux table' — never the "
+    "same line three times.\n"
     'Return ONLY a JSON object: {"caption": "<the one line>"}.'
 )
 
@@ -268,19 +317,87 @@ def _valid_iteration_summary(text: str) -> bool:
     return True
 
 
+#: Words too common to make a caption distinctive. Dropped before
+#: comparing two captions so "Searched for X" and "Searched for Y" are
+#: judged on X and Y.
+_CAPTION_STOPWORDS = frozenset({
+    "the", "a", "an", "for", "to", "in", "of", "and", "on", "with",
+    "from", "no", "not", "found", "its", "at", "by", "was", "were",
+})
+
+#: Overlap at or above which two captions read as the same row. Tuned
+#: against real DEV transcripts: 0.7 catches rephrasings ("Opened the
+#: arXiv page" / "Opened arXiv page") without merging genuinely
+#: different steps that share a verb.
+_CAPTION_DUPLICATE_THRESHOLD = 0.7
+
+
+def _caption_content_words(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9_./-]+", text.lower())
+        if w not in _CAPTION_STOPWORDS and len(w) > 2
+    }
+
+
+def _duplicates_prior_caption(text: str, priors: list[str]) -> bool:
+    """True when *text* would render as a repeat of a caption already shown.
+
+    Asking the model for short git-subject captions measurably improves
+    truncation and voice, and measurably increases repetition: two
+    similar steps collapse to the same eight words. Three prompt-level
+    attempts to fix that failed, so it is settled here instead, where the
+    other caption failure modes already are.
+
+    Dropping the caption is not the same as showing nothing: the client
+    falls back to its deterministic tool-derived label, which for a step
+    that resembles the previous one is the more honest row anyway.
+    """
+    words = _caption_content_words(text)
+    if not words:
+        return False
+    for prior in priors:
+        prior_words = _caption_content_words(prior)
+        if not prior_words:
+            continue
+        overlap = len(words & prior_words) / len(words | prior_words)
+        if overlap >= _CAPTION_DUPLICATE_THRESHOLD:
+            return True
+    return False
+
+
+#: Server-internal workspace directories, mirroring
+#: ``surogates.api.routes.workspace._RESERVED_PREFIXES`` and
+#: ``_HIDDEN_PREFIXES``. These hold the storage behind a rendered
+#: surface, not files the user asked for: ``_artifacts/`` is where
+#: ArtifactStore keeps ``v1.json``, ``v2.json`` … for an artifact that is
+#: already shown as its own panel, and ``_whiteboard/`` holds the canvas.
+#:
+#: Listed explicitly rather than filtering every ``_``-prefixed path: a
+#: Jekyll site's ``_posts/`` and ``_config.yml`` are real deliverables,
+#: and hiding a user's work is a worse failure than showing one extra row.
+_INTERNAL_WORKSPACE_PREFIXES: tuple[str, ...] = ("_artifacts", "_whiteboard")
+
+
 def _is_internal_workspace_path(path: str) -> bool:
     """True for workspace paths that are never user deliverables.
 
     Any hidden path segment marks agent-internal state (``.agents/``
-    skill context files, ``.claude/`` config, ``.cache/`` …), and
+    skill context files, ``.claude/`` config, ``.cache/`` …),
     ``uploads/`` holds user-provided attachments — inputs, not
-    outputs. Filtered deterministically so they never reach the
-    summary LLM as candidates nor the user-visible download card.
+    outputs — and the underscore directories above are storage for a
+    surface the chat already renders. Filtered deterministically so they
+    never reach the summary LLM as candidates nor the user-visible
+    download card.
     """
     segments = [s for s in path.split("/") if s]
     if any(s.startswith(".") for s in segments):
         return True
-    return bool(segments) and segments[0] == "uploads"
+    if not segments:
+        return False
+    return (
+        segments[0] == "uploads"
+        or segments[0] in _INTERNAL_WORKSPACE_PREFIXES
+    )
 
 
 class TurnSummarizer:
@@ -411,6 +528,13 @@ class TurnSummarizer:
         if not _valid_iteration_summary(text):
             logger.warning(
                 "discarding malformed iteration summary for %s: %r",
+                iteration_id,
+                text[:200],
+            )
+            return None
+        if _duplicates_prior_caption(text, prior_iteration_summaries):
+            logger.debug(
+                "discarding duplicate iteration summary for %s: %r",
                 iteration_id,
                 text[:200],
             )
