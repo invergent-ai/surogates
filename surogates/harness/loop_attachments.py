@@ -30,6 +30,36 @@ _ATTACHMENT_SKIP_HINTS: dict[str, str] = {
         " when you actually need this file's content"
     ),
 }
+#: Attachment kinds the platform cannot turn into text, keyed by mime prefix.
+#: The generic note tells the agent its file tools can read the attachment;
+#: for these that is false, and the agent has no way to discover it except by
+#: trying. On GAIA dev-021 an mp3 task did try -- ``whisper: not installed``
+#: -- and then answered anyway, inventing a shopping list from the question's
+#: wording. A capability we do not have must be stated, not discovered, or the
+#: model fills the gap with plausible invention.
+_UNREADABLE_ATTACHMENT_KINDS: dict[str, str] = {
+    "audio/": (
+        "audio — this platform has NO transcription capability. You cannot"
+        " learn what is spoken or played in this file, and no tool or package"
+        " will give you that. Say plainly that you cannot access the audio;"
+        " never infer its contents from the filename or the request."
+    ),
+    "video/": (
+        "video — this platform has NO transcription or frame-extraction"
+        " capability. Say plainly that you cannot access it; never infer its"
+        " contents."
+    ),
+}
+
+
+def _unreadable_kind_note(mime: str) -> str | None:
+    """Return the capability note for *mime*, or ``None`` when readable."""
+    for prefix, note in _UNREADABLE_ATTACHMENT_KINDS.items():
+        if mime.startswith(prefix):
+            return note
+    return None
+
+
 def _attachments_note(events: list[Any]) -> str | None:
     """Return a per-turn system note describing path-only attachments.
 
@@ -66,11 +96,8 @@ def _attachments_note_from_data(data: Any) -> str | None:
     attachments_section: str | None = None
     attachments = data.get("attachments")
     if isinstance(attachments, list) and attachments:
-        lines = [
-            "The user attached the following files to this message. They are"
-            " available in the workspace and you can read them with your file"
-            " tools:",
-        ]
+        lines: list[str] = []          # header prepended once the kinds are known
+        any_unreadable = False
         for item in attachments:
             if not isinstance(item, dict):
                 continue
@@ -89,14 +116,32 @@ def _attachments_note_from_data(data: Any) -> str | None:
             else:
                 size_str = "unknown size"
             line = f"- {path} ({mime}, {size_str}) — \"{filename}\""
-            skip_reason = item.get("inline_skip_reason")
-            if skip_reason:
-                hint = _ATTACHMENT_SKIP_HINTS.get(skip_reason, "use read_file")
-                line += f" (inline skipped: {skip_reason} — {hint})"
+            unreadable = _unreadable_kind_note(mime)
+            if unreadable:
+                any_unreadable = True
+                line += f"\n  CANNOT BE READ: {unreadable}"
+            else:
+                skip_reason = item.get("inline_skip_reason")
+                if skip_reason:
+                    hint = _ATTACHMENT_SKIP_HINTS.get(skip_reason, "use read_file")
+                    line += f" (inline skipped: {skip_reason} — {hint})"
             lines.append(line)
 
-        if len(lines) > 1:
-            attachments_section = "\n".join(lines)
+        if lines:
+            # The caveat is only mentioned when something actually carries it;
+            # otherwise every ordinary attachment pays for prose about a case
+            # that does not apply to it.
+            header = (
+                "The user attached the following files to this message. They"
+                " are in the workspace and readable with your file tools,"
+                " EXCEPT any marked CANNOT BE READ — for those the content is"
+                " unavailable to you and no tool will change that:"
+                if any_unreadable else
+                "The user attached the following files to this message. They"
+                " are available in the workspace and you can read them with"
+                " your file tools:"
+            )
+            attachments_section = "\n".join([header, *lines])
 
     # Section 2: channel file ids from source.files (additive, never raises).
     files_section: str | None = None

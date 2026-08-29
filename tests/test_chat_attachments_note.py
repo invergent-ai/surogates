@@ -360,3 +360,49 @@ def test_attachments_note_inserts_adjacent_to_user_when_view_context_also_presen
     ]
     assert api_messages[1]["content"] == view_note
     assert api_messages[2]["content"] == att_note
+
+
+class TestUnreadableAttachmentKinds:
+    """A capability we do not have must be stated, not discovered.
+
+    GAIA dev-021: an mp3 task tried `whisper` in the terminal, got
+    `openai-whisper: not installed`, and then answered anyway -- inventing a
+    shopping list from the question's wording. The note had told it the file
+    was readable with its file tools.
+    """
+
+    def test_audio_is_marked_unreadable(self) -> None:
+        from surogates.harness.loop_attachments import _attachments_note_from_data
+
+        note = _attachments_note_from_data({"attachments": [
+            {"path": "__WORKSPACE__/a.mp3", "filename": "a.mp3",
+             "mime_type": "audio/mpeg", "size": 1024},
+        ]})
+        assert "CANNOT BE READ" in note
+        assert "NO transcription capability" in note
+        # It must be told not to guess, which is the failure being prevented.
+        assert "never infer its contents" in note
+
+    def test_readable_kinds_are_untouched(self) -> None:
+        from surogates.harness.loop_attachments import _attachments_note_from_data
+
+        note = _attachments_note_from_data({"attachments": [
+            {"path": "__WORKSPACE__/a.png", "filename": "a.png",
+             "mime_type": "image/png", "size": 1024},
+            {"path": "__WORKSPACE__/b.csv", "filename": "b.csv",
+             "mime_type": "text/csv", "size": 1024},
+        ]})
+        assert "CANNOT BE READ" not in note
+        assert "a.png" in note and "b.csv" in note
+
+    def test_skip_reason_hint_still_shown_for_readable_files(self) -> None:
+        """The unreadable branch must not swallow the existing fallback hint."""
+        from surogates.harness.loop_attachments import _attachments_note_from_data
+
+        note = _attachments_note_from_data({"attachments": [
+            {"path": "__WORKSPACE__/c.pdf", "filename": "c.pdf",
+             "mime_type": "application/pdf", "size": 4096,
+             "inline_skip_reason": "oversize_output"},
+        ]})
+        assert "oversize_output" in note
+        assert "offset/limit" in note
