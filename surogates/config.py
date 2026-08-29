@@ -342,6 +342,12 @@ class LLMSettings(BaseSettings):
     prune_browser_state: bool = True
     browser_state_keep_last: int = 2
 
+    # Fraction of the model's context window at which compaction fires.
+    # The default deliberately leaves room for the response plus the
+    # compaction call itself; raise it to trade a larger working context
+    # for a tighter margin before an overflow.
+    compression_threshold: float = Field(default=0.50, gt=0.0, le=0.95)
+
     summary_model: str = ""  # cheap model for context compression summaries
     summary_base_url: str = ""  # optional auxiliary endpoint for summaries
     summary_api_key: str = ""  # optional auxiliary API key for summaries
