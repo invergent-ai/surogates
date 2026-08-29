@@ -19,6 +19,7 @@ capability problem.
 | 2026-08-29 | `dev-018` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 62 | **56.4%** |
 | 2026-08-29 | `dev-021` | local harness, agent `gaia-h5iiol` | claude-sonnet-5 | 110 | 66 | **60.0%** |
 | 2026-08-29 | `dev-022` | local harness, agent `gaia2-tbmpuz` | claude-sonnet-5 | 110 | 68 | **61.8%** |
+| 2026-08-29 | `dev-023` | local harness, agent `gaiaopus-xg75cy` | claude-opus-5 | 110 | 68 | **61.8%** |
 
 > **The 2026-08-27 run is `dev-001` in its own `report.md`.** Run ids auto-
 > increment from the contents of `runs/`, and it was produced against a fresh
@@ -113,6 +114,47 @@ Three touched the browser, and one of those was a real regression this run
 caught: navigate snapshots were not being pruned as superseded state, so a
 34-call session reached 324,700 input tokens against a 262,144 window. Fixed;
 not yet re-measured.
+
+## opus-5 vs sonnet-5: a tie at 4.6x the cost
+
+`dev-023` is the cleanest comparison in this file. `gaiaopus-xg75cy` differs
+from `gaia2-tbmpuz` in exactly one field — `model_id: surogate-pro` against
+`surogate` — so same tools, same flags, same project, no custom prompt, same
+harness commit. One variable.
+
+| | sonnet-5 (`dev-022`) | opus-5 (`dev-023`) |
+| --- | --- | --- |
+| Strict | 68/110 (61.8%) | 68/110 (61.8%) |
+| L1 / L2 / L3 | 23 / 37 / 8 | 22 / 39 / 7 |
+| `no_tool_use` | 8 | 9 |
+| `no_final_answer` | 5 | 5 |
+| `empty_llm_response` | 1 | 3 |
+| **Cost** | **$72.94** | **$335.75** |
+| LLM calls | 1,223 | 1,223 |
+| Input tokens | 123.9M (79% cached) | 408.0M (93% cached) |
+| Output tokens | 186,553 | 168,422 |
+
+Identical score. Eight tasks flipped each way, five of the eight regressions
+carrying no failure flag, and the two models agree on 94/110 (85%) — so the
+16 that differ read as coin-flips rather than capability.
+
+The cost is the result. Opus spent **3.3x the input tokens for the same
+number of calls**, meaning materially larger contexts per request, and landed
+at 4.6x the spend — well past the 2.5x its per-token rates imply, because
+token volume rose alongside the rate.
+
+A tie needs no statistical precision: the +/-3-point variance band that
+qualifies every other row here does not apply when the difference is zero.
+**On this benchmark, at this harness version, opus-5 buys nothing.**
+
+Two caveats. One run each, so opus could be a point either side. And the
+sentinel context-window problem below applies to `surogate-pro` too — opus
+ran much larger contexts, so it may be paying that mis-sizing harder than
+sonnet did, and fixing it could move opus more.
+
+(Both runs made exactly 1,223 LLM calls. Verified as coincidence, not a
+measurement artefact: the per-task distributions differ — 61 vs 65 max turns
+— and the token totals are nothing alike.)
 
 ## dev-021 → dev-022: snapshot pruning
 
