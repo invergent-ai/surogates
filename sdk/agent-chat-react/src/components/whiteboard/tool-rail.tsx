@@ -30,7 +30,7 @@ const TOOLS: { id: WbTool; label: string; Icon: typeof Pen }[] = [
   { id: "text", label: "Text", Icon: Type },
   // Where the agent should answer: click to place an answer box, or
   // drag one. The id stays "slot" -- that is what the object is.
-  { id: "slot", label: "Answer", Icon: Bot },
+  { id: "slot", label: "Answer box", Icon: Bot },
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];

@@ -951,21 +951,36 @@ export interface AtlasExtras {
   marks?: BoardMark[];
   /** Close-ups attached after the overview: which marks, which image. */
   crops?: { marks: string[]; imageIndex: number; scale: number }[];
-  /** What the user asked for with the action selector; absent = auto. */
+  /** Which action button sent the turn; absent only for API callers. */
   action?: UserAction;
 }
 
 /**
- * The user's own answer to "what do you want": PenEcho's action menu.
- * `auto` sends nothing and leaves it to the board and the model.
+ * The user's own answer to "what do you want": PenEcho's action menu,
+ * as the board's send buttons. `hint` is the tooltip.
  */
-export type UserAction = "auto" | "answer" | "continue" | "explain" | "hint";
-export const USER_ACTIONS: { id: UserAction; label: string }[] = [
-  { id: "auto", label: "Auto" },
-  { id: "answer", label: "Answer" },
-  { id: "continue", label: "Continue" },
-  { id: "explain", label: "Explain" },
-  { id: "hint", label: "Hint" },
+export type UserAction = "answer" | "continue" | "explain" | "hint";
+export const USER_ACTIONS: { id: UserAction; label: string; hint: string }[] = [
+  {
+    id: "answer",
+    label: "Answer",
+    hint: "Solve or complete what is on the board and write the result: into the answer box if you placed one, otherwise next to your ink.",
+  },
+  {
+    id: "continue",
+    label: "Continue",
+    hint: "Pick up where your drawing or text stops and extend it in the same style.",
+  },
+  {
+    id: "explain",
+    label: "Explain",
+    hint: "Explain what is on the board in words, without changing it.",
+  },
+  {
+    id: "hint",
+    label: "Hint",
+    hint: "Give a clue toward the answer, never the answer itself.",
+  },
 ];
 
 /**
@@ -1031,7 +1046,7 @@ export function atlasMetadata(
     }));
   }
   if (extras.crops?.length) meta.crops = extras.crops;
-  if (extras.action && extras.action !== "auto") meta.action = extras.action;
+  if (extras.action) meta.action = extras.action;
   if (extras.agentObjects?.length) {
     meta.agentObjects = extras.agentObjects.map((o) => ({
       origin: o.origin,

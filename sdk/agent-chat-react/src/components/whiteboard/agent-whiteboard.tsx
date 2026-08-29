@@ -1,4 +1,3 @@
-import { Brain, Send } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -14,6 +13,16 @@ import type {
   AgentChatViewMode,
 } from "../../types";
 import { Button } from "../ui/button";
+import { ButtonGroup } from "../ui/button-group";
+import { Checkbox } from "../ui/checkbox";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
 import { Spinner } from "../ui/spinner";
 import {
   type AtlasExtras,
@@ -198,10 +207,9 @@ export function WhiteboardSurface({
   // round-trips and worth naming; `sketch` is one and should not
   // advertise a wait that is about to be over.
   const [askMode, setAskMode] = useState<"sketch" | "deep">("sketch");
-  // What the user wants from the next Ask, when they care to say:
-  // answer it, continue it, explain it, or only hint. Sticky for the
-  // session; "auto" sends nothing and leaves it to the board.
-  const [action, setAction] = useState<UserAction>("auto");
+  // "Think harder": the next send takes the deep, many-round-trip
+  // path. Sticky for the session; the pill above names the wait.
+  const [deep, setDeep] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -1060,8 +1068,9 @@ export function WhiteboardSurface({
   // ------------------------------------------------------------------
 
   const ask = useCallback(
-    async (mode: "sketch" | "deep") => {
+    async (action: UserAction) => {
       if (!canvasRef.current) return;
+      const mode = deep ? "deep" : "sketch";
       setAskMode(mode);
       const latest = dirtyRef.current;
       const plan = planAtlas(doc, latest, view, size, services);
@@ -1141,7 +1150,7 @@ export function WhiteboardSurface({
         { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
       );
     },
-    [doc, view, size, services, question, runtime, action],
+    [doc, view, size, services, question, runtime, deep],
   );
 
   // ------------------------------------------------------------------
@@ -1364,8 +1373,8 @@ export function WhiteboardSurface({
             Copilot button. Everything now packs left and the corner
             stays clear. `min-w-0` keeps it shrinking on a narrow
             window instead of forcing the buttons off the end. */}
-        <input
-          className="w-64 min-w-0 shrink rounded border bg-background px-2 py-1 text-sm"
+        <Input
+          className="w-64 min-w-0 shrink"
           placeholder="Ask about the board (optional)"
           value={question}
           disabled={busy}
@@ -1373,44 +1382,51 @@ export function WhiteboardSurface({
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              void ask("sketch");
+              void ask("answer");
             }
           }}
         />
-        {/* PenEcho's action menu, compact: the user's own answer to
-            "what do you want", when the board alone would not say. */}
-        <select
-          aria-label="Intent"
-          className="h-9 rounded border bg-background px-2 text-sm"
-          value={action}
-          disabled={busy}
-          onChange={(e) => setAction(e.target.value as UserAction)}
-        >
-          {USER_ACTIONS.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.label}
-            </option>
-          ))}
-        </select>
-        <Button
-          type="button"
-          disabled={busy}
-          aria-label="Ask"
-          onClick={() => void ask("sketch")}
-        >
-          <Send className="size-4" />
-          Ask
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={busy}
-          aria-label="Think harder"
-          onClick={() => void ask("deep")}
-        >
-          <Brain className="size-4" />
-          Think harder
-        </Button>
+        {/* PenEcho's action menu as the send buttons: the click says
+            what the user wants, so nothing is left for the board to
+            infer. Answer is the common case and reads as the default. */}
+        <TooltipProvider>
+          <ButtonGroup aria-label="Actions">
+            {USER_ACTIONS.map((a) => (
+              <Tooltip key={a.id}>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant={a.id === "answer" ? "default" : "outline"}
+                    disabled={busy}
+                    aria-label={a.label}
+                    onClick={() => void ask(a.id)}
+                  >
+                    {a.label}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">{a.hint}</TooltipContent>
+              </Tooltip>
+            ))}
+          </ButtonGroup>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="flex items-center gap-2 px-1">
+                <Checkbox
+                  id="wb-think-harder"
+                  aria-label="Think harder"
+                  checked={deep}
+                  disabled={busy}
+                  onCheckedChange={(v) => setDeep(v === true)}
+                />
+                <Label htmlFor="wb-think-harder">Think harder</Label>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Take several passes over the board before answering. Slower;
+              for hard problems.
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
         {onNewBoard ? (
           <Button
             type="button"

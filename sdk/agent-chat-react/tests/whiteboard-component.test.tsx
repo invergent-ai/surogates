@@ -176,13 +176,19 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Pen")?.getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("offers both speeds", async () => {
+  it("offers the four actions and Think harder", async () => {
     const { adapter } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
-    expect(byLabel(el, "Ask")).not.toBeNull();
-    expect(byLabel(el, "Think harder")).not.toBeNull();
+    for (const a of ["Answer", "Continue", "Explain", "Hint"]) {
+      const b = byLabel(el, a);
+      expect(b).not.toBeNull();
+      expect(b?.getAttribute("data-slot")).toBe("tooltip-trigger");
+    }
+    const deep = byLabel(el, "Think harder");
+    expect(deep?.getAttribute("role")).toBe("checkbox");
+    expect(deep?.getAttribute("aria-checked")).toBe("false");
   });
 
   it("sends an image and whiteboard metadata on Ask", async () => {
@@ -191,7 +197,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
     const payload = sendMessage.mock.calls[0][0] as unknown as {
@@ -209,7 +215,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { mode?: string } };
@@ -217,13 +223,16 @@ describe("AgentWhiteboard", () => {
     expect(payload.metadata?.whiteboard?.mode).toBe("sketch");
   });
 
-  it("sends mode deep from Think harder", async () => {
+  it("sends mode deep with Think harder checked", async () => {
     const { adapter, sendMessage } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
       byLabel(el, "Think harder")?.click();
+    });
+    await act(async () => {
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { mode?: string } };
@@ -378,7 +387,7 @@ describe("AgentWhiteboard", () => {
     );
     await typeOnBoard(el, "integral of x squared");
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: { typedInput?: string } };
@@ -396,7 +405,7 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     const payload = sendMessage.mock.calls[0][0] as unknown as {
       metadata?: { whiteboard?: Record<string, unknown> };
@@ -412,11 +421,11 @@ describe("AgentWhiteboard", () => {
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
-    expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
+    expect(byLabel(el, "Answer")).toHaveProperty("disabled", true);
     await act(async () => {
-      byLabel(el, "Ask")?.click();
+      byLabel(el, "Answer")?.click();
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
   });
@@ -862,7 +871,7 @@ describe("AgentWhiteboard", () => {
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" disabled />,
     );
-    expect(byLabel(el, "Ask")).toHaveProperty("disabled", true);
+    expect(byLabel(el, "Answer")).toHaveProperty("disabled", true);
     expect(byLabel(el, "Pen")).toHaveProperty("disabled", true);
   });
 });
@@ -991,11 +1000,11 @@ describe("the restoring indicator", () => {
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(true);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(true);
 
     release();
     await act(async () => { await Promise.resolve(); });
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("says nothing when the load is quick", async () => {
@@ -1365,7 +1374,7 @@ describe("what counts as the user's selection", () => {
     canvas.setPointerCapture = () => undefined;
     canvas.getBoundingClientRect = () =>
       ({ left: 0, top: 0, width: 800, height: 600 }) as DOMRect;
-    expect((byLabel(el, "Ask") as HTMLButtonElement).disabled).toBe(false);
+    expect((byLabel(el, "Answer") as HTMLButtonElement).disabled).toBe(false);
     return { el, canvas, send };
   }
 
@@ -1378,7 +1387,7 @@ describe("what counts as the user's selection", () => {
     // leak into the next Ask as "the user lassoed this", and the model
     // read its own answer as the user's question.
     const { el, send } = await boardAfterReply();
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeUndefined();
   });
@@ -1395,7 +1404,7 @@ describe("what counts as the user's selection", () => {
       }));
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeDefined();
   });
@@ -1411,13 +1420,13 @@ describe("what counts as the user's selection", () => {
       }));
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(metadataOf(send)?.selection).toBeUndefined();
   });
 });
 
-describe("the action selector", () => {
+describe("the action buttons", () => {
   async function board() {
     const send = vi.fn(async () => undefined);
     const { adapter } = makeAdapter();
@@ -1434,30 +1443,24 @@ describe("the action selector", () => {
   const metadataOf = (send: ReturnType<typeof vi.fn>) =>
     (send.mock.calls[0]?.[3] as { whiteboard?: Record<string, unknown> })?.whiteboard;
 
-  it("offers PenEcho's actions", async () => {
-    const { el } = await board();
-    const select = byLabel(el, "Intent") as HTMLSelectElement;
-    expect(Array.from(select.options).map((o) => o.value)).toEqual([
-      "auto", "answer", "continue", "explain", "hint",
-    ]);
-  });
+  it.each(["answer", "continue", "explain", "hint"])(
+    "the %s button sends its action with the turn",
+    async (id) => {
+      const { el, send } = await board();
+      const label = id[0].toUpperCase() + id.slice(1);
+      await act(async () => { byLabel(el, label)?.click(); });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(metadataOf(send)?.action).toBe(id);
+    },
+  );
 
-  it("sends nothing on auto", async () => {
+  it("Enter in the question box answers", async () => {
     const { el, send } = await board();
-    await act(async () => { byLabel(el, "Ask")?.click(); });
-    expect(send).toHaveBeenCalled();
-    expect(metadataOf(send)?.action).toBeUndefined();
-  });
-
-  it("sends the chosen action with the turn", async () => {
-    const { el, send } = await board();
-    const select = byLabel(el, "Intent") as HTMLSelectElement;
+    const input = el.querySelector<HTMLInputElement>("input[placeholder]");
     await act(async () => {
-      select.value = "hint";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
+      input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
-    expect(metadataOf(send)?.action).toBe("hint");
+    expect(metadataOf(send)?.action).toBe("answer");
   });
 });
 
@@ -1484,9 +1487,9 @@ describe("placing the answer box", () => {
     ((send.mock.calls[0]?.[3] as { whiteboard?: { marks?: { id: string; kind: string }[] } })
       ?.whiteboard?.marks ?? []);
 
-  it("offers an Answer tool with the robot", async () => {
+  it("offers an Answer box tool with the robot", async () => {
     const { el } = await board();
-    expect(byLabel(el, "Answer")).not.toBeNull();
+    expect(byLabel(el, "Answer box")).not.toBeNull();
   });
 
   it("right-click drops an answer box with the pen in hand", async () => {
@@ -1497,7 +1500,7 @@ describe("placing the answer box", () => {
       }));
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     expect(send).toHaveBeenCalled();
     expect(marksOf(send).some((m) => m.kind === "slot" && m.id === "S1")).toBe(true);
   });
@@ -1509,9 +1512,9 @@ describe("placing the answer box", () => {
     expect(menu.defaultPrevented).toBe(true);
   });
 
-  it("the Answer tool drops a box on click and asks for a hint", async () => {
+  it("the Answer box tool drops a box on click and asks for a hint", async () => {
     const { el, canvas } = await board();
-    await act(async () => { byLabel(el, "Answer")?.click(); });
+    await act(async () => { byLabel(el, "Answer box")?.click(); });
     // Separate acts: the drag state set on pointerdown must flush before
     // pointerup reads it, as it does between real browser events.
     await act(async () => {
@@ -1566,7 +1569,7 @@ describe("selecting the answer box", () => {
     await act(async () => {
       canvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
     });
-    await act(async () => { byLabel(el, "Ask")?.click(); });
+    await act(async () => { byLabel(el, "Answer")?.click(); });
     const calls = (send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     const meta = (calls[0]?.[3] as { whiteboard?: { selection?: { w: number } } })?.whiteboard;
     // The reported selection is the box's size, not a union with the stroke.
