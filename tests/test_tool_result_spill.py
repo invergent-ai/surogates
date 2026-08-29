@@ -6,6 +6,8 @@ outside the session workspace, so ``read_file`` refused it and the model
 lost the output it was told it could page through.
 """
 
+import json
+
 import pytest
 
 from surogates.harness.context import ContextCompressor
@@ -122,3 +124,45 @@ def test_compression_threshold_is_configurable():
     assert LLMSettings(compression_threshold=0.8).compression_threshold == 0.8
     with pytest.raises(ValueError):
         LLMSettings(compression_threshold=1.5)
+
+
+async def test_turn_budget_never_spills_a_pinned_tool():
+    """The persist -> read -> persist loop the pin exists to stop.
+
+    ``read_file`` is pinned so its result is never persisted -- otherwise
+    reading a spill file produces a large result, which gets spilled to a
+    new file, which the model reads again.  Layer 2 honoured the pin;
+    layer 3 could not see it, because a tool result carries no tool name.
+    """
+    pool = _FakePool()
+    writer = make_sandbox_writer(pool, "owner-3")
+    messages = [
+        {"tool_call_id": "r1", "content": "r" * 300_000},   # read_file: pinned
+        {"tool_call_id": "k1", "content": "k" * 300_000},   # kb_read_page: pinned
+        {"tool_call_id": "s1", "content": "s" * 300_000},   # spillable
+    ]
+    tool_names = {
+        "r1": "read_file",
+        "k1": "kb_read_page",
+        "s1": "search_files",
+    }
+
+    await enforce_turn_budget(messages, writer=writer, tool_names=tool_names)
+
+    # Only the unpinned result may be spilled, even though all three are
+    # over budget and the pinned ones are the largest candidates.
+    written = [json.loads(c[2])["path"] for c in pool.calls]
+    assert written == [f"{WORKSPACE_STORAGE_DIR}/s1.txt"]
+    assert messages[0]["content"] == "r" * 300_000
+    assert messages[1]["content"] == "k" * 300_000
+
+
+async def test_turn_budget_without_names_still_spills():
+    """Absent a name map the pins cannot apply; budget must still hold."""
+    pool = _FakePool()
+    writer = make_sandbox_writer(pool, "owner-4")
+    messages = [{"tool_call_id": "x", "content": "x" * 300_000}]
+
+    await enforce_turn_budget(messages, writer=writer)
+
+    assert len(pool.calls) == 1

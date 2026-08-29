@@ -8,10 +8,13 @@ Per-tool resolution: pinned > config overrides > default.
 from dataclasses import dataclass, field
 from typing import Dict
 
-# Tools whose thresholds must never be overridden.
-# read_file=inf prevents infinite persist->read->persist loops.
+# Tools whose thresholds must never be overridden.  Both of these page
+# through their own output on request, so persisting a result would only
+# produce a file the model has to read back -- the persist -> read ->
+# persist loop.  Honoured by layer 2 and layer 3 alike.
 PINNED_THRESHOLDS: Dict[str, float] = {
     "read_file": float("inf"),
+    "kb_read_page": float("inf"),
 }
 
 # Defaults matching the current hardcoded values in tool_result_storage.py.

@@ -206,23 +206,34 @@ async def enforce_turn_budget(
     tool_messages: list[dict],
     config: BudgetConfig = DEFAULT_BUDGET,
     writer: ResultWriter | None = None,
+    tool_names: dict[str, str] | None = None,
 ) -> list[dict]:
     """Layer 3: enforce aggregate budget across all tool results in a turn.
 
     If total chars exceed budget, persist the largest non-persisted results
-    first (via disk write) until under budget. Already-persisted results
-    are skipped.
+    first until under budget.  Already-persisted results are skipped, as are
+    tools pinned never to persist -- persisting a ``read_file`` result is
+    what creates the persist -> read -> persist loop the pin exists to
+    prevent, and layer 3 is just as capable of starting it as layer 2.
+
+    *tool_names* maps tool_call_id to tool name; without it the pins cannot
+    be honoured, because a tool result message carries no tool name.
 
     Mutates the list in-place and returns it.
     """
+    tool_names = tool_names or {}
     candidates = []
     total_size = 0
     for i, msg in enumerate(tool_messages):
         content = msg.get("content", "")
         size = len(content)
         total_size += size
-        if PERSISTED_OUTPUT_TAG not in content:
-            candidates.append((i, size))
+        if PERSISTED_OUTPUT_TAG in content:
+            continue
+        name = tool_names.get(msg.get("tool_call_id", ""), "")
+        if name and config.resolve_threshold(name) == float("inf"):
+            continue
+        candidates.append((i, size))
 
     if total_size <= config.turn_budget:
         return tool_messages
@@ -242,9 +253,14 @@ async def enforce_turn_budget(
 
         replacement = await maybe_persist_tool_result(
             content=content,
-            tool_name=_BUDGET_TOOL_NAME,
+            tool_name=tool_names.get(
+                msg.get("tool_call_id", ""), _BUDGET_TOOL_NAME,
+            ),
             tool_use_id=tool_use_id,
             config=config,
+            # Forced: the aggregate is over budget, so the per-tool
+            # threshold does not get a say.  Pinned tools were already
+            # excluded from the candidate list above.
             threshold=0,
             writer=writer,
         )

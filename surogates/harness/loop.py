@@ -2773,8 +2773,14 @@ class AgentHarness(
                 )
             else:
                 _spill_writer = None
+            # A tool result message carries no tool name, so hand the
+            # budget the id -> name map or it cannot honour the pins.
+            _tc_names = {
+                tc.get("id"): tc.get("function", {}).get("name", "")
+                for tc in (tool_calls_raw or [])
+            }
             tool_results = await enforce_turn_budget(
-                tool_results, writer=_spill_writer,
+                tool_results, writer=_spill_writer, tool_names=_tc_names,
             )
 
             # 7c. Budget pressure warning -- inject into the last tool result.
