@@ -207,8 +207,10 @@ export function WhiteboardSurface({
   // round-trips and worth naming; `sketch` is one and should not
   // advertise a wait that is about to be over.
   const [askMode, setAskMode] = useState<"sketch" | "deep">("sketch");
-  // "Think harder": the next send takes the deep, many-round-trip
-  // path. Sticky for the session; the pill above names the wait.
+  // "Work it out": the next send takes the deep path, where the agent
+  // has its whole tool catalogue and several passes instead of one
+  // drawing tool and a single round-trip. Sticky for the session; the
+  // pill names the wait.
   const [deep, setDeep] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1297,7 +1299,7 @@ export function WhiteboardSurface({
                   <Spinner className="size-4 shrink-0" />
                   <span className="truncate">
                     {progress ??
-                      (askMode === "deep" ? "Thinking harder…" : "Thinking…")}
+                      (askMode === "deep" ? "Working it out…" : "Thinking…")}
                   </span>
                 </span>
               </div>
@@ -1425,18 +1427,19 @@ export function WhiteboardSurface({
             <TooltipTrigger asChild>
               <span className="flex items-center gap-2 px-1">
                 <Checkbox
-                  id="wb-think-harder"
-                  aria-label="Think harder"
+                  id="wb-work-it-out"
+                  aria-label="Work it out"
                   checked={deep}
                   disabled={busy}
                   onCheckedChange={(v) => setDeep(v === true)}
                 />
-                <Label htmlFor="wb-think-harder">Think harder</Label>
+                <Label htmlFor="wb-work-it-out">Work it out</Label>
               </span>
             </TooltipTrigger>
             <TooltipContent side="top">
-              Take several passes over the board before answering. Slower;
-              for hard problems.
+              Let the agent search, compute and build before it draws,
+              over several passes. Slower; for what the board alone
+              cannot settle. Off, it answers your ink in one pass.
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

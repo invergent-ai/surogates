@@ -4594,7 +4594,7 @@ def _whiteboard_sketch_filter(
     speeds run on the session's configured model, deliberately: the two
     speeds are a latency control, not an entitlement one.  They must not
     be pinned to the base/pro tiers or otherwise made to depend on the
-    caller's plan, or "think harder" becomes a paywall on a button that
+    caller's plan, or "work it out" becomes a paywall on a button that
     reads as a UI affordance.  Plan-based limits belong where the other
     ones already live -- the entitlement exclusions applied downstream.
     """

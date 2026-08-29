@@ -176,7 +176,7 @@ describe("AgentWhiteboard", () => {
     expect(byLabel(el, "Pen")?.getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("offers the four actions and Think harder", async () => {
+  it("offers the four actions and Work it out", async () => {
     const { adapter } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
@@ -186,7 +186,7 @@ describe("AgentWhiteboard", () => {
       expect(b).not.toBeNull();
       expect(b?.getAttribute("data-slot")).toBe("tooltip-trigger");
     }
-    const deep = byLabel(el, "Think harder");
+    const deep = byLabel(el, "Work it out");
     expect(deep?.getAttribute("role")).toBe("checkbox");
     expect(deep?.getAttribute("aria-checked")).toBe("false");
   });
@@ -223,13 +223,13 @@ describe("AgentWhiteboard", () => {
     expect(payload.metadata?.whiteboard?.mode).toBe("sketch");
   });
 
-  it("sends mode deep with Think harder checked", async () => {
+  it("sends mode deep with Work it out checked", async () => {
     const { adapter, sendMessage } = makeAdapter();
     const el = await render(
       <AgentWhiteboard adapter={adapter} sessionId="s1" />,
     );
     await act(async () => {
-      byLabel(el, "Think harder")?.click();
+      byLabel(el, "Work it out")?.click();
     });
     await act(async () => {
       byLabel(el, "Answer")?.click();
