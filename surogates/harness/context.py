@@ -233,15 +233,8 @@ class ContextCompressor:
         self._prune_browser_state = prune_browser_state
         self._browser_state_keep_last = browser_state_keep_last
 
-        self.threshold_tokens = int(self.context_length * threshold_percent)
         self.compression_count = 0
-
-        # Derive token budgets: ratio is relative to the threshold, not total context.
-        target_tokens = int(self.threshold_tokens * self.summary_target_ratio)
-        self.tail_token_budget = target_tokens
-        self.max_summary_tokens = min(
-            int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
-        )
+        self._derive_budgets()
 
         if not quiet_mode:
             logger.info(
@@ -262,6 +255,34 @@ class ContextCompressor:
         # Stores the previous compaction summary for iterative updates.
         self._previous_summary: Optional[str] = None
         self._summary_failure_cooldown_until: float = 0.0
+
+    def _derive_budgets(self) -> None:
+        """Recompute every budget derived from the context window.
+
+        Called from ``__init__`` and again whenever the window is revised
+        downwards, so the threshold and summary budgets never keep
+        referring to a window the provider has already rejected.
+        """
+        self.threshold_tokens = int(self.context_length * self.threshold_percent)
+        # Ratio is relative to the threshold, not to total context.
+        self.tail_token_budget = int(self.threshold_tokens * self.summary_target_ratio)
+        self.max_summary_tokens = min(
+            int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
+        )
+
+    def set_context_length(self, context_length: int) -> bool:
+        """Shrink the assumed context window and re-derive budgets.
+
+        Returns ``True`` if the window actually moved.  Only shrinking is
+        allowed: the caller reaches here because the provider rejected a
+        request as too long, so a larger value would be the guess that
+        just failed.
+        """
+        if context_length <= 0 or context_length >= self.context_length:
+            return False
+        self.context_length = context_length
+        self._derive_budgets()
+        return True
 
     # ------------------------------------------------------------------
     # Token tracking
