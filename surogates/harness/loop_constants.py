@@ -37,6 +37,12 @@ _MAX_EMPTY_RESPONSE_RETRIES: int = 3
 #: One is deliberate: the content may genuinely be the answer, so the guard
 #: gives the model a single chance to act and then accepts what it has.
 _MAX_UNFINISHED_RETRIES: int = 1
+
+#: Retries for a provider that returns finish_reason="error" and no content.
+#: Low because the common cause is not transient -- an over-sized request
+#: fails identically however many times it is re-sent -- so the value of the
+#: retry is covering a genuine blip, not grinding against a hard limit.
+_MAX_PROVIDER_ERROR_RETRIES: int = 2
 # Retries for a provider that ends a response before the tool-call JSON is
 # complete.  This retry refunds the iteration budget, so without a cap the
 # wake loop's ``remaining > 0`` guard never advances and a provider stuck

@@ -124,6 +124,7 @@ from surogates.harness.loop_constants import (
     _LENGTH_CONTINUATION_PROMPT,
     _MAX_CONSECUTIVE_INVALID_TOOL_CALLS,
     _MAX_EMPTY_RESPONSE_RETRIES,
+    _MAX_PROVIDER_ERROR_RETRIES,
     _MAX_UNFINISHED_RETRIES,
     _MAX_LENGTH_CONTINUATIONS,
     _MAX_PARTIAL_TOOL_CALL_RETRIES,
@@ -1520,6 +1521,7 @@ class AgentHarness(
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         unfinished_retries = 0    # nudges for a turn that trails off without acting
+        provider_error_retries = 0  # bounded retries for finish_reason='error'
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
         # the planner ends a turn with no tool calls AND has never
@@ -2203,6 +2205,62 @@ class AgentHarness(
                     cost_tracker=cost_tracker,
                     turn_id=turn_id,
                 )
+                return
+
+            # A provider that fails mid-call can return a well-formed choice
+            # carrying finish_reason="error" and nothing else, rather than
+            # raising. Nothing downstream reads finish_reason, so that turn
+            # looked exactly like a turn with nothing to say: it fell into the
+            # empty-content ladder, which could hand back an EARLIER turn's
+            # content as the final answer -- so a failed call could end the
+            # session with a confident-looking reply the model never made.
+            #
+            # Seen on GAIA dev-026: a request of 362,319 tokens came back
+            # error/1-token, was billed $0.26, and the session completed with
+            # nothing. Same shape as the prod reports of sessions ending on an
+            # llm.request that never got a response, marked completed.
+            #
+            # Retry bounded, then fail: a failure the user can see beats a
+            # silent completion.
+            if (
+                finish_reason == "error"
+                and not (assistant_message.get("content") or "").strip()
+                and not assistant_message.get("tool_calls")
+            ):
+                if provider_error_retries < _MAX_PROVIDER_ERROR_RETRIES:
+                    provider_error_retries += 1
+                    logger.warning(
+                        "Session %s: provider returned finish_reason='error' "
+                        "with no content (%d input tokens); retrying (%d/%d)",
+                        session.id, input_tokens, provider_error_retries,
+                        _MAX_PROVIDER_ERROR_RETRIES,
+                    )
+                    if streaming_executor is not None:
+                        streaming_executor.discard()
+                    self._budget.refund()
+                    continue
+
+                logger.error(
+                    "Session %s: provider returned finish_reason='error' "
+                    "with no content %d times; failing the session",
+                    session.id, _MAX_PROVIDER_ERROR_RETRIES,
+                )
+                await self._store.emit_event(
+                    session.id,
+                    EventType.SESSION_FAIL,
+                    {
+                        "reason": "provider_error",
+                        "attempts": _MAX_PROVIDER_ERROR_RETRIES,
+                        "input_tokens": input_tokens,
+                    },
+                )
+                try:
+                    await self._store.update_session_status(session.id, "failed")
+                except Exception:
+                    logger.warning(
+                        "Failed to update session status to failed for %s",
+                        session.id, exc_info=True,
+                    )
                 return
 
             if finish_reason == "length" and length_continuation_count < _MAX_LENGTH_CONTINUATIONS:

@@ -1748,3 +1748,50 @@ class TestUnfinishedFinalResponse:
         from surogates.harness.loop_constants import _MAX_UNFINISHED_RETRIES
 
         assert _MAX_UNFINISHED_RETRIES == 1
+
+
+class TestProviderErrorFinishReason:
+    """A failed call must not look like a turn with nothing to say.
+
+    A provider that fails mid-call can return a well-formed choice carrying
+    finish_reason="error" and no content instead of raising. Nothing in the
+    loop read finish_reason, so the turn fell into the empty-content ladder
+    -- which can substitute an EARLIER turn's content as the final answer.
+    A failed call could therefore end the session with a confident-looking
+    reply the model never made.
+
+    GAIA dev-026, task 624cbf11: a 362,319-token request returned
+    error/1-token, billed $0.26, and the session completed with nothing.
+    """
+
+    def test_retry_budget_is_small(self) -> None:
+        """The usual cause -- an over-sized request -- fails identically
+        however many times it is re-sent, so the retry covers a blip rather
+        than grinding against a hard limit."""
+        from surogates.harness.loop_constants import _MAX_PROVIDER_ERROR_RETRIES
+
+        assert 1 <= _MAX_PROVIDER_ERROR_RETRIES <= 3
+
+    def test_error_finish_reason_is_acted_on(self) -> None:
+        """Pins that the loop branches on finish_reason == 'error' at all --
+        the original bug was that it was recorded on the event and never
+        read."""
+        import inspect
+
+        from surogates.harness.loop import AgentHarness
+
+        src = inspect.getsource(AgentHarness)
+        assert 'finish_reason == "error"' in src
+        assert "provider_error" in src
+
+    def test_a_failed_call_is_not_treated_as_an_answer(self) -> None:
+        """The guard requires BOTH no content and no tool calls, so an error
+        alongside a real partial response is left to the normal path."""
+        import inspect
+
+        from surogates.harness.loop import AgentHarness
+
+        src = inspect.getsource(AgentHarness)
+        i = src.index('finish_reason == "error"')
+        window = src[i : i + 320]
+        assert "content" in window and "tool_calls" in window
