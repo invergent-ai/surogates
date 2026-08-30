@@ -18,6 +18,13 @@ applies_when: web_search or web_extract tool loaded
 - Don't repeat a near-identical query; it returns the same results. Change strategy instead.
 - Scale effort to the question: one search for a simple fact; several for open-ended research or comparisons. If two consecutive searches return overlapping results, you have enough — switch to synthesizing.
 - Search snippets are often too brief to support conclusions; use `web_extract` to read the full page before relying on a result.
+- A URL ending in `.pdf` is a document, not a page. `web_extract` returns a
+  truncated flattening of it, and on roughly a quarter of PDFs it returns
+  almost nothing at all. Download it to the workspace with `terminal`
+  (`curl -L -o paper.pdf <url>`) and open it with `read_file`, which parses
+  PDFs natively and paginates with `offset`/`limit` — so an answer buried
+  past the first few pages is reachable at all. The same holds for `.docx`,
+  `.xlsx` and `.pptx` links.
 
 ## Weighing results
 - Believe surprising results on factual matters (deaths, elections, releases, incidents) — on current events your prior is stale by definition.
