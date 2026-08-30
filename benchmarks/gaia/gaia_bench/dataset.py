@@ -15,6 +15,25 @@ HF_CONFIG = "2023_all"
 DEFAULT_SEED = 20260726
 
 
+#: Attachment types no configured tool can turn into text. A task whose
+#: answer is only in the audio is unanswerable here, and running it buys
+#: nothing: measured 0/2 on dev-022, and one of the two invented an answer
+#: from the question's wording rather than reporting that it could not
+#: listen. Excluding them keeps the money and removes a fabrication prompt.
+#:
+#: This is a capability boundary, not a difficulty filter. Widening it to
+#: anything the agent merely finds hard would make the score meaningless.
+UNSUPPORTED_ATTACHMENT_SUFFIXES: tuple[str, ...] = (
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma",
+)
+
+
+def needs_unsupported_capability(task: "Task") -> bool:
+    """True when the task's attachment needs a capability we do not have."""
+    name = (task.file_name or task.file_path or "").lower()
+    return name.endswith(UNSUPPORTED_ATTACHMENT_SUFFIXES)
+
+
 @dataclass(frozen=True)
 class Task:
     task_id: str

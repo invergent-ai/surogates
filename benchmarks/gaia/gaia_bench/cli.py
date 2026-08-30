@@ -30,7 +30,7 @@ import pathlib
 
 from gaia_bench.attribute import attribute, format_trajectory
 from gaia_bench.client import Event, HarnessClient
-from gaia_bench.dataset import load_tasks
+from gaia_bench.dataset import load_tasks, needs_unsupported_capability
 from gaia_bench.detectors import detect
 from gaia_bench.judge import make_openai_complete
 from gaia_bench.report import TaskOutcome, render
@@ -140,6 +140,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
     tasks = select_tasks(tasks, args.tasks)
 
+    # Tasks needing a capability we do not have are skipped rather than run.
+    # They stay in the denominator: a task we cannot do is a task we failed,
+    # and dropping it from the total would inflate the score against every
+    # earlier run and against the leaderboard.
+    skipped = [t for t in tasks if needs_unsupported_capability(t)]
+    if skipped and not args.tasks:
+        tasks = [t for t in tasks if not needs_unsupported_capability(t)]
+        print(
+            f"skipping {len(skipped)} task(s) needing an unsupported "
+            f"capability (audio): {', '.join(t.task_id[:8] for t in skipped)}"
+        )
+        print("  they remain scored as failures -- see RESULTS.md")
+
     if args.limit:
         tasks = tasks[: args.limit]
 
@@ -183,9 +196,24 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             flags=detect(r, task.level),
         ))
 
+    # Skipped tasks are recorded as failures so the denominator matches every
+    # other run. A capability we lack is a task we got wrong, not a task that
+    # does not count.
+    for t in skipped:
+        outcomes.append(TaskOutcome(
+            task_id=t.task_id,
+            level=t.level,
+            strict_pass=False,
+            lenient_pass=False,
+            flags=["unsupported_capability"],
+            evidence=f"not run: {t.file_name} needs a capability this harness lacks",
+        ))
+
     save_outcomes(str(out_dir / "outcomes.json"), outcomes)
     passed = sum(1 for o in outcomes if o.strict_pass)
     print(f"run {run_id}: {passed}/{len(outcomes)} strict pass")
+    if skipped:
+        print(f"  ({len(skipped)} scored as failures without running: unsupported capability)")
     print(f"next: gaia-bench analyze {run_id}")
     return 0
 

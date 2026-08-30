@@ -93,3 +93,24 @@ def test_task_is_frozen():
     )
     assert t.level == 1
     assert not t.file_name
+
+
+class TestUnsupportedCapability:
+    """Audio tasks are skipped from execution but not from the denominator."""
+
+    def _task(self, file_name: str):
+        from gaia_bench.dataset import Task
+        return Task(task_id="t", question="q", level=1, final_answer="a",
+                    file_name=file_name, file_path="")
+
+    def test_audio_attachments_are_unsupported(self) -> None:
+        from gaia_bench.dataset import needs_unsupported_capability
+        for name in ("a.mp3", "b.WAV", "c.m4a", "d.flac"):
+            assert needs_unsupported_capability(self._task(name)) is True, name
+
+    def test_everything_else_is_supported(self) -> None:
+        """This is a capability boundary, not a difficulty filter -- widening
+        it to anything the agent finds hard would make the score meaningless."""
+        from gaia_bench.dataset import needs_unsupported_capability
+        for name in ("a.pdf", "b.xlsx", "c.png", "d.zip", "e.pdb", "", "f.jsonld"):
+            assert needs_unsupported_capability(self._task(name)) is False, name
