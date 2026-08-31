@@ -1,5 +1,4 @@
 import {
-  Bot,
   Eraser,
   Hand,
   Maximize2,
@@ -9,8 +8,10 @@ import {
   Type,
   Undo2,
 } from "lucide-react";
+import type { ComponentType } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { RabbitMark } from "../ui/rabbit-mark";
 
 export type WbTool = "pen" | "eraser" | "text" | "slot" | "select" | "pan";
 
@@ -24,13 +25,20 @@ export const INK_COLORS = [
 
 export const INK_WIDTHS = [2, 4, 8, 16] as const;
 
-const TOOLS: { id: WbTool; label: string; Icon: typeof Pen }[] = [
+// `Icon` is any glyph taking a className -- the lucide set, plus our
+// own brand mark, which is not a lucide icon and must not be typed as
+// one.
+const TOOLS: {
+  id: WbTool;
+  label: string;
+  Icon: ComponentType<{ className?: string }>;
+}[] = [
   { id: "pen", label: "Pen", Icon: Pen },
   { id: "eraser", label: "Eraser", Icon: Eraser },
   { id: "text", label: "Text", Icon: Type },
   // Where the agent should answer: click to place an answer box, or
   // drag one. The id stays "slot" -- that is what the object is.
-  { id: "slot", label: "Answer box", Icon: Bot },
+  { id: "slot", label: "Answer box", Icon: RabbitMark },
   { id: "select", label: "Select", Icon: MousePointer2 },
   { id: "pan", label: "Pan", Icon: Hand },
 ];

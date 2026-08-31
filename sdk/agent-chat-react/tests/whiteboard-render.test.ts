@@ -345,3 +345,40 @@ describe("device pixel ratio", () => {
     expect(transformOf(ctx)).toEqual([1, 0, 0, 1, -10, -20]);
   });
 });
+
+
+describe("the answer box's mark", () => {
+  /** A board with one answer box on it. */
+  function boardWithSlot(): WbDoc {
+    const doc = emptyDoc();
+    return {
+      ...doc,
+      objects: [{
+        id: "s1", origin: "local", selected: false, kind: "slot",
+        x: 0, y: 0, w: 200, h: 80,
+      } as WbObject],
+    };
+  }
+
+  it("is the brand rabbit, not the robot emoji", () => {
+    const ctx = recordingContext();
+    renderDoc(ctx, boardWithSlot(), view, size, measure);
+    const texts = (ctx as unknown as { calls: unknown[][] }).calls
+      .filter((c) => c[0] === "fillText")
+      .map((c) => String(c[1]));
+    expect(texts.some((t) => t.includes("\u{1F916}"))).toBe(false);
+  });
+
+  it("still draws the box and its hint", () => {
+    const ctx = recordingContext();
+    const doc = boardWithSlot();
+    (doc.objects[0] as { hint?: string }).hint = "the missing letter";
+    renderDoc(ctx, doc, view, size, measure);
+    const calls = (ctx as unknown as { calls: unknown[][] }).calls;
+    expect(calls.some((c) => c[0] === "strokeRect")).toBe(true);
+    expect(
+      calls.filter((c) => c[0] === "fillText")
+        .some((c) => String(c[1]).includes("missing letter")),
+    ).toBe(true);
+  });
+});
