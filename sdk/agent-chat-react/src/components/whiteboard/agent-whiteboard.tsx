@@ -37,9 +37,7 @@ import {
   contentBeyond,
   contentBounds,
   inkHeight,
-  mapHotspots,
   OCCUPANCY_GRID,
-  occupancyCells,
   paintMarks,
   planAtlas,
 } from "./atlas";
@@ -242,7 +240,6 @@ export function WhiteboardSurface({
   // The document as it stood before the current gesture. Undo has to
   // step back to this, not to the last pointer sample.
   const gestureBaseline = useRef<WbDoc | null>(null);
-  const hotspotsRef = useRef<{ x: number; y: number }[]>([]);
   // Text the user typed since the last Ask. Sent verbatim as
   // transcription ground truth so the model never has to read its own
   // rendering of it back out of the atlas.
@@ -651,7 +648,6 @@ export function WhiteboardSurface({
   // ------------------------------------------------------------------
 
   const noteDirty = useCallback((pt: { x: number; y: number }) => {
-    hotspotsRef.current.push(pt);
     const d = dirtyRef.current;
     dirtyRef.current = d
       ? {
@@ -1105,7 +1101,6 @@ export function WhiteboardSurface({
         ),
       });
       const atlas = buildAtlas(doc, plan, services, marks);
-      const hotspots = mapHotspots(plan.sourceRect, hotspotsRef.current);
       // Close-ups of the new, unread ink, attached after the overview.
       // The overview is for context and placement; these are for
       // reading -- the misreads all came from glyphs a few dozen
@@ -1123,7 +1118,6 @@ export function WhiteboardSurface({
         mode,
         action,
         inkHeight: unit,
-        occupied: occupancyCells(doc, plan.sourceRect, services),
         beyond: contentBeyond(doc, plan.sourceRect, services),
         marks,
         crops: crops.map((c, i) => ({
@@ -1146,7 +1140,6 @@ export function WhiteboardSurface({
 
       // Clear the attention accumulators before awaiting: whatever the
       // user draws while the agent is thinking belongs to the next turn.
-      hotspotsRef.current = [];
       dirtyRef.current = null;
       typedRef.current = [];
       const text = question;
@@ -1162,7 +1155,7 @@ export function WhiteboardSurface({
           })),
         ],
         undefined,
-        { whiteboard: atlasMetadata(plan, latest, hotspots, extras) },
+        { whiteboard: atlasMetadata(plan, latest, extras) },
       );
     },
     [doc, view, size, services, question, runtime, deep],

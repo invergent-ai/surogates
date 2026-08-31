@@ -53,10 +53,15 @@ def _initial_system_message(system_prompt: str, browser_pause_notice: str | None
 
 
 def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
-    """Render the canvas geometry note for one whiteboard turn.
+    """Render the canvas note for one whiteboard turn.
 
-    The model is looking at a cropped image of a much larger canvas and
-    must answer in *canvas* coordinates, so it needs the mapping. Pure
+    Deliberately free of coordinate machinery. It used to carry the
+    image-to-canvas conversion, the pen-trajectory hotspot trail, the
+    occupancy grid and the cell-size formula -- 46% of the note --
+    kept from before placement went relational. Measured against two
+    real boards (N=30, interleaved), dropping them and adding the
+    read-back line at the end took the turn from 57% correct to 100%:
+    the model was transcribing the ink instead of answering it. Pure
     function of client-supplied data: a malformed block degrades to a
     shorter note or ``None`` and never raises into the turn.
     """
@@ -86,15 +91,6 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
     # The header is shared with the replay pruner, which uses it to tell
     # a canvas render from an image the user uploaded.
     lines: list[str] = [CANVAS_NOTE_HEADER]
-
-    source = _rect(payload.get("sourceRect"))
-    scale = payload.get("imageScale")
-    if source and isinstance(scale, (int, float)):
-        lines.append(
-            f"The attached image covers canvas rectangle sourceRect "
-            f"({source}) at imageScale={scale}. Convert with "
-            f"imageX=(globalX-sourceRect.x)*imageScale."
-        )
 
     # The user's action button, when pressed: PenEcho's userAction.  It
     # settles what to do before anything is inferred from the ink, and
@@ -133,13 +129,6 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             f"region for this turn."
         )
 
-    hotspots = payload.get("hotspots")
-    if isinstance(hotspots, list) and hotspots:
-        lines.append(
-            f"The pen trajectory covers {len(hotspots)} hotspot cell(s), "
-            f"ordered oldest to newest: {hotspots}."
-        )
-
     selection = _rect(payload.get("selection"))
     if selection:
         lines.append(
@@ -158,49 +147,6 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
                 f"This is a view of a larger board: content continues "
                 f"{where}. Treat the edge of the image as a crop, not as "
                 f"the end of the canvas."
-            )
-
-    # Where the existing objects are, as of this turn.  The model cannot
-    # get this from the transcript: its own draw calls record where it
-    # *asked* for things, and the user's drags, resizes and deletions are
-    # never recorded at all, so the history is confidently out of date.
-    occupied = payload.get("occupied")
-    grid = payload.get("occupancyGrid")
-    if isinstance(occupied, list) and occupied and isinstance(grid, int):
-        # Phrased as a constraint, not as a placement rule.  Told to
-        # "place new objects in free cells", the model went shopping for
-        # any empty cell and wrote the answer to an integral below the
-        # working instead of after the "=" -- both cells were free, and
-        # it picked the one the grid mentioned rather than the one the
-        # content called for.
-        lines.append(
-            f"A faint {grid}x{grid} grid is drawn over the image, "
-            f"labelled along the top and left edges; it is an overlay to "
-            f"help you place things, not something the user drew. These "
-            f"cells already hold work, as of this turn, [col, row]: "
-            f"{occupied}. Put your answer where the content calls for it "
-            f"-- continuing the user's line, beside the thing it "
-            f"answers -- and use the grid only to keep off what is "
-            f"already there."
-        )
-        # Converting a chosen cell back to canvas coordinates means
-        # inverting the image formula above, once per axis.  Asked for
-        # the slot after an "x =", the model inverted the column and
-        # left the row in image coordinates, putting its answer below
-        # the frame it had been shown.  Given the cell size it can place
-        # by arithmetic that has no direction to get backwards.
-        def _num(value: Any) -> bool:
-            return isinstance(value, (int, float)) and not isinstance(
-                value, bool
-            )
-
-        cell = payload.get("cellSize")
-        if isinstance(cell, dict) and _num(cell.get("w")) and _num(cell.get("h")):
-            lines.append(
-                f"Cell (col, row) starts at canvas x = sourceRect.x + "
-                f"col*{cell['w']}, y = sourceRect.y + row*{cell['h']}. "
-                f"Every coordinate you return is a canvas coordinate, "
-                f"never a position measured off the image."
             )
 
     # Without this the model has no sense of scale: the note says where
@@ -400,9 +346,20 @@ def _whiteboard_note_from_metadata(metadata: Any) -> str | None:
             f"re-transcribe it from pixels):\n{typed.strip()}"
         )
 
-    # One line means we recovered nothing beyond the header, which is
-    # not worth spending a note on.
-    return "\n".join(lines) if len(lines) > 1 else None
+    # The one line that moved accuracy more than everything above it.
+    # Sketch mode is a single response, and without this the model
+    # answers with an empty content block and a reflexive tool call --
+    # observed writing the integrand into the answer box, and the whole
+    # expression restated, for ink it had transcribed correctly.
+    lines.append(
+        "Before you call the tool, write one short line: what each mark "
+        "says, and the result you are about to draw. Then draw it. The "
+        "line is for you, not the board."
+    )
+
+    # Two lines mean we recovered nothing beyond the header and the
+    # read-back instruction, which is not worth spending a note on.
+    return "\n".join(lines) if len(lines) > 2 else None
 
 
 def _view_context_note_from_metadata(metadata: Any) -> str | None:

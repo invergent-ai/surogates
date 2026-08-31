@@ -166,7 +166,7 @@ def _prompt(tools):
 def test_a_board_session_prompt_carries_the_canvas_contract():
     prompt = _prompt({"whiteboard_draw"})
     assert "Whiteboard canvas" in prompt
-    assert "sourceRect" in prompt
+    assert "latestInput" in prompt
     assert "infinite" in prompt
 
 
@@ -189,7 +189,6 @@ def test_the_user_message_carries_both_the_note_and_the_image():
         b.get("text", "") for b in blocks
         if isinstance(b, dict) and b.get("type") == "text"
     )
-    assert "sourceRect" in text
     assert "latestInput" in text
     assert "what is this" in text
     assert any(b.get("type") == "image_url" for b in blocks)
@@ -282,6 +281,8 @@ def test_a_command_list_in_negative_space_is_accepted():
 
 
 def test_the_note_renders_negative_geometry():
+    # A board panned far into negative space: the rects the note still
+    # carries have to survive the round trip with their signs intact.
     msg = build_user_message_dict({
         "content": "what is this",
         "metadata": {"whiteboard": {
@@ -291,7 +292,6 @@ def test_the_note_renders_negative_geometry():
             "mode": "sketch",
         }},
     })
-    assert "-9000" in msg["content"]
     assert "-8800" in msg["content"]
 
 

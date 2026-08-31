@@ -28,10 +28,20 @@ def test_returns_none_without_whiteboard_metadata():
     assert _whiteboard_note_from_metadata("nonsense") is None
 
 
-def test_renders_the_source_rect_and_scale():
+def test_carries_no_coordinate_machinery():
+    """The geometry blocks predate relational placement and are gone.
+
+    Measured on two real boards (N=30, interleaved): with the
+    conversion formula, hotspot trail, occupancy grid and cell-size
+    lines the model answered a trivial integral correctly 57% of the
+    time, transcribing the ink instead of solving it the rest; without
+    them, plus the read-back line, 100%.
+    """
     note = _whiteboard_note_from_metadata(_meta())
-    assert "1000" in note and "2000" in note
-    assert "0.5" in note
+    assert "sourceRect" not in note
+    assert "hotspot" not in note.lower()
+    assert "grid" not in note.lower()
+    assert "col*" not in note
 
 
 def test_renders_the_latest_input_rect():
@@ -40,13 +50,15 @@ def test_renders_the_latest_input_rect():
     assert "1200" in note
 
 
-def test_renders_hotspots_when_present():
-    assert "hotspot" in _whiteboard_note_from_metadata(_meta()).lower()
+def test_ends_with_the_read_back_instruction():
+    """The line that moved accuracy more than every geometry block.
 
-
-def test_omits_hotspots_when_empty():
-    note = _whiteboard_note_from_metadata(_meta(hotspots=[]))
-    assert "hotspot" not in note.lower()
+    Sketch mode is one response; without it the model answers with an
+    empty content block and a reflexive tool call.
+    """
+    note = _whiteboard_note_from_metadata(_meta())
+    assert note.rstrip().endswith("The line is for you, not the board.")
+    assert "what each mark says" in note
 
 
 def test_renders_a_selection_when_present():
@@ -87,7 +99,7 @@ def test_the_note_reaches_the_replayed_user_message():
     text = content if isinstance(content, str) else "".join(
         part.get("text", "") for part in content if isinstance(part, dict)
     )
-    assert "sourceRect" in text
+    assert "latestInput" in text
     assert "what is this" in text
 
 
@@ -197,45 +209,6 @@ def test_ignores_a_nonsense_handwriting_scale():
 
 # --- what is already on the board -------------------------------------
 
-def test_renders_the_occupancy_grid():
-    """The model cannot get this from the transcript.
-
-    Its own draw calls record where it *asked* for things, and the user's
-    drags, resizes and deletions are never recorded at all -- so history
-    is not merely incomplete about the board, it is out of date.
-    """
-    note = _whiteboard_note_from_metadata(
-        _meta(occupied=[[0, 3], [1, 3]], occupancyGrid=16),
-    )
-    assert "16x16 grid" in note
-    assert "[[0, 3], [1, 3]]" in note
-    # The grid is drawn on the image too, and must not be read as ink.
-    assert "not something the user drew" in note
-
-
-def test_the_grid_is_a_constraint_not_a_placement_rule():
-    """Told to "place new objects in free cells", the model shopped.
-
-    On a real board it wrote the answer to an integral below the working
-    rather than after the "=" -- both cells were free, and it picked the
-    one the grid mentioned over the one the content called for.
-    """
-    note = _whiteboard_note_from_metadata(
-        _meta(occupied=[[0, 3]], occupancyGrid=16),
-    )
-    assert "where the content calls for it" in note
-    assert "only to keep off" in note
-
-
-def test_omits_occupancy_on_an_empty_board():
-    assert "grid over sourceRect" not in _whiteboard_note_from_metadata(_meta())
-
-
-def test_ignores_occupancy_without_a_grid_size():
-    # The cells are meaningless without the divisor.
-    note = _whiteboard_note_from_metadata(_meta(occupied=[[0, 3]]))
-    assert "grid over sourceRect" not in note
-
 
 def test_says_the_image_is_a_crop_of_a_larger_board():
     # Unsaid, the empty margin reads as free canvas and work lands on
@@ -247,37 +220,6 @@ def test_says_the_image_is_a_crop_of_a_larger_board():
 
 def test_omits_the_crop_note_when_the_frame_holds_everything():
     assert "continues" not in _whiteboard_note_from_metadata(_meta())
-
-
-def test_gives_the_cell_to_canvas_mapping():
-    """Inverting the image formula by hand went wrong once per axis.
-
-    Asked for the slot after an "x =", the model converted the column
-    and left the row in image coordinates, landing its answer below the
-    frame it had been shown -- row 17 of a 16-row grid.
-    """
-    note = _whiteboard_note_from_metadata(
-        _meta(occupied=[[0, 3]], occupancyGrid=16,
-              cellSize={"w": 82.0, "h": 53.18}),
-    )
-    assert "col*82.0" in note
-    assert "row*53.18" in note
-    assert "never a position measured off the image" in note
-
-
-def test_omits_the_mapping_without_a_cell_size():
-    note = _whiteboard_note_from_metadata(
-        _meta(occupied=[[0, 3]], occupancyGrid=16),
-    )
-    assert "sourceRect.x + col" not in note
-
-
-def test_ignores_a_malformed_cell_size():
-    for bad in ({"w": "wide", "h": 10}, {"w": True, "h": 10}, {"w": 10}, 7):
-        note = _whiteboard_note_from_metadata(
-            _meta(occupied=[[0, 3]], occupancyGrid=16, cellSize=bad),
-        )
-        assert "sourceRect.x + col" not in (note or "")
 
 
 # --- what became of the agent's own work ------------------------------

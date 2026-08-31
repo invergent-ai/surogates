@@ -4,7 +4,6 @@
  *
  * Ported from PenEcho's `src/client/app/ai-runtime.js` — `captureRectFor`
  * (553), `planViewportImage` (557), `buildViewportImage` (580) and
- * `mapHotspots` (523).
  *
  * The metadata keys here are a contract with the Python side: they are
  * read verbatim by `_whiteboard_note_from_metadata` in
@@ -18,9 +17,6 @@ import type { RenderServices, View, ViewportSize } from "./render";
 /** PenEcho's caps. Larger buys no accuracy and costs vision tokens. */
 export const MAX_ATLAS_WIDTH = 2048;
 export const MAX_ATLAS_HEIGHT = 1536;
-
-/** The attention grid is 8x8, matching the prompt's description. */
-export const HOTSPOT_GRID = 8;
 
 /**
  * Minimum logical span of a capture, so a single small stroke still
@@ -255,57 +251,6 @@ export function planAtlas(
   };
 }
 
-/**
- * Which cells of the capture already hold something.
- *
- * The model cannot be told to keep off existing work by looking: on a
- * busy board its own earlier answers are a few pixels tall, and the user
- * may have dragged, resized or deleted them since -- edits that exist
- * only in the document, never in the transcript. So the transcript is
- * not merely incomplete about the board, it is confidently out of date,
- * and this is the correction.
- *
- * A grid rather than a list of rectangles because the cost has to stay
- * flat: three objects and three hundred produce the same handful of
- * cells, where a rectangle list grows with the board until it dwarfs
- * everything else in the turn.
- *
- * Cells are returned as `[col, row]`, the same shape as
- * {@link mapHotspots}, so the model reads one spatial vocabulary rather
- * than two.
- */
-export function occupancyCells(
-  doc: WbDoc,
-  sourceRect: Rect,
-  services: RenderServices,
-): number[][] {
-  if (sourceRect.w <= 0 || sourceRect.h <= 0) return [];
-  const seen = new Set<number>();
-  const cells: number[][] = [];
-  const cellW = sourceRect.w / OCCUPANCY_GRID;
-  const cellH = sourceRect.h / OCCUPANCY_GRID;
-
-  for (const obj of doc.objects) {
-    if (obj.kind === "slot") continue;
-    const b = objectBounds(obj, services);
-    if (!b) continue;
-    const c0 = Math.floor((b.x - sourceRect.x) / cellW);
-    const c1 = Math.floor((b.x + b.w - sourceRect.x) / cellW);
-    const r0 = Math.floor((b.y - sourceRect.y) / cellH);
-    const r1 = Math.floor((b.y + b.h - sourceRect.y) / cellH);
-    for (let r = Math.max(0, r0); r <= Math.min(OCCUPANCY_GRID - 1, r1); r++) {
-      for (let c = Math.max(0, c0); c <= Math.min(OCCUPANCY_GRID - 1, c1); c++) {
-        const key = r * OCCUPANCY_GRID + c;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        cells.push([c, r]);
-      }
-    }
-  }
-  // Reading order, so a run of free space is easy to spot.
-  cells.sort((a, b) => a[1] - b[1] || a[0] - b[0]);
-  return cells;
-}
 
 /** How many of the agent's own objects the turn note lists. */
 export const AGENT_OBJECT_LIMIT = 8;
@@ -817,47 +762,6 @@ export function contentBeyond(
   return out;
 }
 
-/**
- * Project pen positions onto an 8x8 grid over *sourceRect*.
- *
- * Points outside the rectangle are dropped and consecutive duplicates
- * collapsed, but a revisited cell that is not consecutive is kept: the
- * trajectory is the point, and doubling back is real information about
- * reading order.
- */
-export function mapHotspots(
-  sourceRect: Rect,
-  points: { x: number; y: number }[],
-): number[][] {
-  if (sourceRect.w <= 0 || sourceRect.h <= 0) return [];
-  const cells: number[][] = [];
-  for (const p of points) {
-    if (
-      p.x < sourceRect.x ||
-      p.x > sourceRect.x + sourceRect.w ||
-      p.y < sourceRect.y ||
-      p.y > sourceRect.y + sourceRect.h
-    ) {
-      continue;
-    }
-    // Clamp: a point exactly on the far edge divides to HOTSPOT_GRID,
-    // one past the last index.
-    const col = clamp(
-      Math.floor(((p.x - sourceRect.x) / sourceRect.w) * HOTSPOT_GRID),
-      0,
-      HOTSPOT_GRID - 1,
-    );
-    const row = clamp(
-      Math.floor(((p.y - sourceRect.y) / sourceRect.h) * HOTSPOT_GRID),
-      0,
-      HOTSPOT_GRID - 1,
-    );
-    const last = cells[cells.length - 1];
-    if (last && last[0] === col && last[1] === row) continue;
-    cells.push([col, row]);
-  }
-  return cells;
-}
 
 /**
  * Render the board into a white-background canvas at the planned scale.
@@ -963,8 +867,6 @@ export interface AtlasExtras {
   typedInput?: string;
   /** See {@link inkHeight}. Omitted when the board carries no ink. */
   inkHeight?: number | null;
-  /** See {@link occupancyCells}. */
-  occupied?: number[][];
   /** See {@link contentBeyond}. */
   beyond?: string[];
   /** See {@link agentObjectReport}. Superseded by `marks`. */
@@ -1015,7 +917,6 @@ export const USER_ACTIONS: { id: UserAction; label: string; hint: string }[] = [
 export function atlasMetadata(
   plan: AtlasPlan,
   latest: Rect | null,
-  hotspots: number[][],
   extras: AtlasExtras,
 ): Record<string, unknown> {
   const meta: Record<string, unknown> = {
@@ -1026,23 +927,10 @@ export function atlasMetadata(
     mode: extras.mode === "deep" ? "deep" : "sketch",
   };
   if (latest) meta.latestInput = latest;
-  if (hotspots.length > 0) meta.hotspots = hotspots;
   if (extras.selection) meta.selection = extras.selection;
   if (extras.typedInput?.trim()) meta.typedInput = extras.typedInput.trim();
   if (extras.inkHeight && extras.inkHeight > 0) {
     meta.inkHeight = Math.round(extras.inkHeight);
-  }
-  if (extras.occupied?.length) {
-    meta.occupied = extras.occupied;
-    meta.occupancyGrid = OCCUPANCY_GRID;
-    // So a chosen cell converts to canvas coordinates without inverting
-    // the image formula by hand. Asked for the slot after an `x =`, the
-    // model converted the column correctly and left the row in image
-    // coordinates, landing the answer below the frame it was shown.
-    meta.cellSize = {
-      w: round2(plan.sourceRect.w / OCCUPANCY_GRID),
-      h: round2(plan.sourceRect.h / OCCUPANCY_GRID),
-    };
   }
   if (extras.beyond?.length) meta.beyond = extras.beyond;
   if (extras.marks?.length) {
