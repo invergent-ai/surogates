@@ -1,3 +1,4 @@
+import { RABBIT_MARK_BOX, RABBIT_MARK_PATH } from "../ui/rabbit-mark";
 import {
   type DrawBounds,
   normalize as normalizeDraw,
@@ -374,6 +375,23 @@ function paintArtifactFrame(
   ctx.restore();
 }
 
+/**
+ * The brand mark as a canvas path, built once.
+ *
+ * `Path2D` is universal in browsers but absent from the headless DOM
+ * the tests render into, where there is no 2D context to draw on
+ * either. Returning `null` there costs the glyph and nothing else --
+ * the box, its dashes and its hint still paint and are still asserted.
+ */
+let rabbit: Path2D | null | undefined;
+function rabbitPath(): Path2D | null {
+  if (rabbit === undefined) {
+    rabbit =
+      typeof Path2D === "undefined" ? null : new Path2D(RABBIT_MARK_PATH);
+  }
+  return rabbit;
+}
+
 function paintSlot(
   ctx: CanvasRenderingContext2D,
   obj: Extract<WbObject, { kind: "slot" }>,
@@ -387,13 +405,22 @@ function paintSlot(
   ctx.fillStyle = "rgba(217, 119, 6, 0.06)";
   ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
   ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
-  // The robot says what the box is for, on the canvas and on the atlas
+  // The rabbit says what the box is for, on the canvas and on the atlas
   // alike: the answer goes here.
   const glyph = Math.max(12, Math.min(obj.h * 0.5, obj.w * 0.3, 40));
-  ctx.font = `${glyph}px system-ui, sans-serif`;
-  ctx.textBaseline = "top";
-  ctx.fillStyle = "rgba(180, 83, 9, 0.9)";
-  ctx.fillText("\u{1F916}", obj.x + glyph * 0.3, obj.y + (obj.h - glyph) / 2);
+  const mark = rabbitPath();
+  if (mark) {
+    const scale = glyph / RABBIT_MARK_BOX.h;
+    ctx.save();
+    ctx.translate(
+      obj.x + glyph * 0.3 - RABBIT_MARK_BOX.x * scale,
+      obj.y + (obj.h - glyph) / 2 - RABBIT_MARK_BOX.y * scale,
+    );
+    ctx.scale(scale, scale);
+    ctx.fillStyle = "rgba(180, 83, 9, 0.9)";
+    ctx.fill(mark);
+    ctx.restore();
+  }
   if (obj.hint) {
     const size = Math.max(10, Math.min(obj.h * 0.3, (obj.w - glyph * 1.6) / Math.max(obj.hint.length, 1) / 0.6, 22));
     ctx.font = `italic ${size}px system-ui, sans-serif`;
