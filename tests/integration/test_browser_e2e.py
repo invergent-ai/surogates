@@ -10,6 +10,7 @@ Requires Docker and the kernel-images Chromium image.
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 import pytest
 
@@ -65,3 +66,50 @@ async def test_screenshot_returns_png(browser) -> None:
         result = await client.screenshot()
         assert result["png_bytes"].startswith(b"\x89PNG")
         assert len(result["png_bytes"]) > 1000
+
+
+# A control inside an iframe offset 300px down and 100px across -- the shape of
+# every embedded payment field and consent frame.  The frame reports the button
+# at its own (30, 20); only the frame's origin makes that clickable.
+IFRAME_PAGE = (
+    "<body style='margin:0'>"
+    "<h1 style='margin:0;height:100px'>Checkout</h1>"
+    "<iframe style='position:absolute;top:300px;left:100px;width:400px;"
+    "height:200px;border:0' srcdoc=\""
+    "<body style='margin:0'>"
+    "<button style='position:absolute;top:20px;left:30px;width:100px;"
+    "height:40px' onclick='this.textContent=&quot;Paid&quot;'>Pay now</button>"
+    "</body>\"></iframe>"
+    "</body>"
+)
+
+
+async def test_get_state_reaches_into_iframes(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(IFRAME_PAGE))
+
+        state = await client.get_state()
+        button = next(
+            (n for n in state["tree"] if n["name"] == "Pay now"), None
+        )
+        assert button is not None, "iframe content missing from the snapshot"
+        # Root-space centre: frame origin (100, 300) + local (30, 20) + half
+        # the 100x40 button.  Nothing here should be off by the frame origin.
+        assert button["x"] == pytest.approx(180, abs=2)
+        assert button["y"] == pytest.approx(340, abs=2)
+
+
+async def test_click_ref_lands_inside_an_iframe(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(IFRAME_PAGE))
+
+        state = await client.get_state()
+        ref = next(n["ref"] for n in state["tree"] if n["name"] == "Pay now")
+        await client.click_ref(ref)
+
+        # The button rewrites its own label, so a click measured in the frame's
+        # coordinates instead of the root's misses it and the label stands.
+        after = await client.get_state()
+        assert any(n["name"] == "Paid" for n in after["tree"])
