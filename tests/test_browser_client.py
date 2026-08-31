@@ -147,7 +147,7 @@ class TestGetState:
                             "url": "u",
                             "title": "t",
                             "viewport": {"width": 1, "height": 1},
-                            "nodes": [],
+                            "frames": [],
                         },
                     },
                 )
@@ -161,9 +161,13 @@ class TestGetState:
         await client.get_state()
 
         code = captured[0]["code"]
-        assert "await page.evaluate" in code
-        assert code.index("await page.evaluate") < code.index("document.querySelector")
-        assert code.index("await page.evaluate") < code.index("root.querySelectorAll")
+        # The DOM walk is a collector run once per frame, never a bare
+        # page.evaluate -- that form only ever sees the main document.
+        assert "await __f.evaluate(__surogatesCollect" in code
+        assert "for (const __f of __targets)" in code
+        assert "await page.evaluate(" not in code
+        assert code.index("__surogatesCollect") < code.index("document.querySelector")
+        assert code.index("__surogatesCollect") < code.index("root.querySelectorAll")
 
     async def test_get_state_returns_tree_with_refs(
         self, client_with_transport
@@ -180,7 +184,7 @@ class TestGetState:
                         "url": "https://example.com/",
                         "title": "Example",
                         "viewport": {"width": 1280, "height": 800},
-                        "nodes": [
+                        "frames": [{"nodes": [
                             {
                                 "role": "link",
                                 "name": "Settings",
@@ -197,7 +201,7 @@ class TestGetState:
                                 "width": 120,
                                 "height": 36,
                             },
-                        ],
+                        ]}],
                     },
                 },
             )
@@ -225,7 +229,7 @@ class TestGetState:
                         "url": "u",
                         "title": "t",
                         "viewport": {"width": 100, "height": 100},
-                        "nodes": [
+                        "frames": [{"nodes": [
                             {
                                 "role": "button",
                                 "name": "Go",
@@ -235,7 +239,7 @@ class TestGetState:
                                 "height": 30,
                                 "backend_node_id": 42,
                             }
-                        ],
+                        ]}],
                     },
                 },
             )
@@ -264,7 +268,7 @@ class TestGetState:
                         "url": "u",
                         "title": "t",
                         "viewport": {"width": 100, "height": 100},
-                        "nodes": [
+                        "frames": [{"nodes": [
                             {
                                 "role": "button",
                                 "name": "Add",
@@ -291,7 +295,7 @@ class TestGetState:
                                 "width": 10,
                                 "height": 10,
                             },
-                        ],
+                        ]}],
                     },
                 },
             )
@@ -326,7 +330,7 @@ class TestGetState:
                         "url": "u",
                         "title": "t",
                         "viewport": {"width": 1, "height": 1},
-                        "nodes": [
+                        "frames": [{"nodes": [
                             {
                                 "role": "button",
                                 "name": "fresh",
@@ -335,7 +339,7 @@ class TestGetState:
                                 "width": 0,
                                 "height": 0,
                             }
-                        ],
+                        ]}],
                     },
                 },
             )
@@ -343,6 +347,133 @@ class TestGetState:
         await client.get_state()
         assert "@e9" not in client._snapshot_cache
         assert "@e1" in client._snapshot_cache
+
+
+class TestGetStateFrames:
+    """Iframe content is collected per frame and merged into one root-space tree."""
+
+    async def test_iframe_nodes_are_offset_into_root_coordinates(
+        self, client_with_transport
+    ) -> None:
+        client, handlers = client_with_transport
+        # A checkout page whose card field lives in a payment iframe mounted
+        # 400px down the page.  getBoundingClientRect inside that frame reports
+        # y=10 -- relative to the frame -- but page.mouse dispatches in root
+        # space, so an unoffset center clicks 400px too high.
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "https://shop.example/checkout",
+                        "title": "Checkout",
+                        "viewport": {"width": 1280, "height": 800},
+                        "frames": [
+                            {
+                                "x": 0,
+                                "y": 0,
+                                "nodes": [
+                                    {
+                                        "role": "heading",
+                                        "name": "Checkout",
+                                        "x": 40,
+                                        "y": 20,
+                                        "width": 200,
+                                        "height": 40,
+                                    }
+                                ],
+                            },
+                            {
+                                "x": 100,
+                                "y": 400,
+                                "nodes": [
+                                    {
+                                        "role": "textbox",
+                                        "name": "Card number",
+                                        "x": 8,
+                                        "y": 10,
+                                        "width": 200,
+                                        "height": 40,
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        state = await client.get_state()
+
+        card = next(e for e in state["tree"] if e["name"] == "Card number")
+        assert card["x"] == 100 + 8 + 200 // 2
+        assert card["y"] == 400 + 10 + 40 // 2
+        # The main frame is its own origin and must not be shifted.
+        heading = next(e for e in state["tree"] if e["name"] == "Checkout")
+        assert heading["x"] == 40 + 200 // 2
+        assert heading["y"] == 20 + 40 // 2
+
+    async def test_refs_stay_unique_across_frames(
+        self, client_with_transport
+    ) -> None:
+        client, handlers = client_with_transport
+        # Both frames number their own nodes from zero; without a global
+        # renumber the second frame's first node overwrites @e1.
+        handlers.append(
+            (
+                "POST",
+                "/playwright/execute",
+                200,
+                {
+                    "success": True,
+                    "result": {
+                        "url": "u",
+                        "title": "t",
+                        "viewport": {"width": 1280, "height": 800},
+                        "frames": [
+                            {
+                                "x": 0,
+                                "y": 0,
+                                "nodes": [
+                                    {
+                                        "role": "button",
+                                        "name": "Outer",
+                                        "x": 0,
+                                        "y": 0,
+                                        "width": 10,
+                                        "height": 10,
+                                        "backend_node_id": 11,
+                                    }
+                                ],
+                            },
+                            {
+                                "x": 0,
+                                "y": 300,
+                                "nodes": [
+                                    {
+                                        "role": "button",
+                                        "name": "Inner",
+                                        "x": 0,
+                                        "y": 0,
+                                        "width": 10,
+                                        "height": 10,
+                                        "backend_node_id": 22,
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                },
+            )
+        )
+        state = await client.get_state()
+
+        assert [e["ref"] for e in state["tree"]] == ["@e1", "@e2"]
+        assert client._snapshot_cache["@e1"]["backend_node_id"] == 11
+        assert client._snapshot_cache["@e2"]["backend_node_id"] == 22
+        assert client._snapshot_cache["@e2"]["y"] == 300 + 10 // 2
 
 
 class TestGetStateFilters:
@@ -354,7 +485,7 @@ class TestGetStateFilters:
                 "url": "u",
                 "title": "t",
                 "viewport": {"width": 1, "height": 1},
-                "nodes": [
+                "frames": [{"nodes": [
                     {
                         "role": "generic",
                         "name": "",
@@ -387,7 +518,7 @@ class TestGetStateFilters:
                         "width": 1,
                         "height": 1,
                     },
-                ],
+                ]}],
             },
         }
 
@@ -418,12 +549,12 @@ class TestGetStateFilters:
             "success": True,
             "result": {
                 **deep_response["result"],
-                "nodes": [
+                "frames": [{"nodes": [
                     {**node, "depth": depth}
                     for node, depth in zip(
-                        deep_response["result"]["nodes"], [0, 1, 1, 3]
+                        deep_response["result"]["frames"][0]["nodes"], [0, 1, 1, 3]
                     )
-                ],
+                ]}],
             },
         }
         handlers.append(("POST", "/playwright/execute", 200, deep_response))
@@ -446,7 +577,7 @@ class TestGetStateFilters:
                         "url": "https://example.test/",
                         "title": "Example",
                         "viewport": {"width": 1280, "height": 720},
-                        "nodes": [
+                        "frames": [{"nodes": [
                             {
                                 "role": "link",
                                 "name": "Economy",
@@ -474,7 +605,7 @@ class TestGetStateFilters:
                                 "height": 40,
                                 "depth": 14,
                             },
-                        ],
+                        ]}],
                     },
                 },
             )
@@ -542,7 +673,7 @@ class TestClickType:
         assert "314" in code
         assert "Accessibility.getFullAXTree" in code
         assert "elementFromPoint" in code
-        assert "page.mouse.click(res.cx, res.cy" in code
+        assert "page.mouse.click(cx, cy" in code
         # The ref path must not invalidate the cache so a follow-up type works.
         assert "@e3" in client._snapshot_cache
 
@@ -613,6 +744,40 @@ class TestClickType:
         client, _ = client_with_transport
         with pytest.raises(KeyError, match="@e99"):
             await client.click_ref("@e99")
+
+    async def test_click_ref_measures_click_point_in_root_coordinates(
+        self, client_with_transport
+    ) -> None:
+        client, _handlers = client_with_transport
+        client._snapshot_cache["@e1"] = {
+            "x": 150,
+            "y": 420,
+            "role": "textbox",
+            "name": "Card number",
+            "backend_node_id": 77,
+            "nth": 0,
+        }
+        captured: list[dict[str, Any]] = []
+
+        class CapturingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx.Request
+            ) -> httpx.Response:
+                captured.append(json.loads(request.content))
+                return httpx.Response(200, json={"success": True, "result": True})
+
+        client._http = httpx.AsyncClient(
+            base_url=client.rest_url, transport=CapturingTransport()
+        )
+        await client.click_ref("@e1")
+        code = captured[0]["code"]
+        # DOM.resolveNode on a node inside an iframe resolves into that frame's
+        # execution context, so getBoundingClientRect there is frame-relative
+        # while page.mouse dispatches in root space.  DOM.getBoxModel returns
+        # the quad already in root space, which is the only measurement the
+        # mouse may use.
+        assert "DOM.getBoxModel" in code
+        assert "page.mouse.click(res.cx, res.cy" not in code
 
     async def test_click_waits_for_network_after_request(
         self, client_with_transport
@@ -1056,6 +1221,51 @@ class TestSnapshotScriptShape:
         assert KernelBrowserClient._SNAPSHOT_SCRIPT.count(
             "window.getComputedStyle"
         ) == 1
+
+    @pytest.mark.parametrize("script_name", ["snapshot", "click"])
+    def test_injected_js_parses(self, tmp_path, script_name: str) -> None:
+        """Parse the injected JS with node, since only the browser ever runs it.
+
+        A syntax error in either string is invisible to Python and breaks every
+        browser session at runtime, which is the most expensive place to find
+        out.  Both are async function bodies, so they are wrapped to parse.
+        """
+
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+
+        from surogates.browser.client import KernelBrowserClient
+
+        if script_name == "snapshot":
+            body = KernelBrowserClient._SNAPSHOT_SCRIPT.replace(
+                "__SUROGATES_SELECTOR__", "null"
+            )
+        else:
+            body = KernelBrowserClient(
+                rest_url="http://browser-test:10001"
+            )._build_ref_click_js(
+                {
+                    "backend_node_id": 1,
+                    "role": "button",
+                    "name": "Go",
+                    "nth": 0,
+                    "ref": "@e1",
+                },
+                "left",
+                1,
+            )
+        source = tmp_path / f"{script_name}.mjs"
+        source.write_text(f"async function __check(page) {{{body}}}")
+        result = subprocess.run(
+            [node, "--check", str(source)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
 
 
 class TestEvaluate:

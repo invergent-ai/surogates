@@ -69,7 +69,7 @@ class KernelBrowserClient:
 
     _SNAPSHOT_SCRIPT = """
 const __surogatesSelector = __SUROGATES_SELECTOR__;
-const __surogatesSnapshot = await page.evaluate((selector) => {
+const __surogatesCollect = ({selector, base}) => {
 function roleOf(el) {
   const explicit = el.getAttribute('role');
   if (explicit) return explicit;
@@ -168,7 +168,8 @@ for (const el of __els) {
   if (style.visibility === 'hidden' || style.display === 'none') continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
-  el.setAttribute('data-sg-i', String(out.length));
+  const idx = base + out.length;
+  el.setAttribute('data-sg-i', String(idx));
   const role = roleOf(el);
   let textBlock = '';
   if (__INTERACTIVE.has(role)) {
@@ -195,7 +196,7 @@ for (const el of __els) {
     height: Math.round(bbox.height),
     depth: depthOf(el),
     children_count: el.children ? el.children.length : 0,
-    idx: out.length,
+    idx: idx,
     text_block: textBlock,
   };
   if (role === 'heading') entry.heading_level = headingLevelOf(el);
@@ -205,17 +206,52 @@ return {
   viewport: {width: window.innerWidth, height: window.innerHeight},
   nodes: out,
 };
-}, __surogatesSelector);
+};
+// One collector run per frame.  Every frame measures in its own viewport, so
+// each result carries the frame's origin in root space -- page.mouse and the
+// screenshot overlay only ever speak root coordinates.  A selector narrows the
+// main document to one subtree, so that mode stays single-frame.
+const __mainFrame = page.mainFrame();
+const __targets = __surogatesSelector === null ? page.frames() : [__mainFrame];
+const __frames = [];
+let __viewport = null;
+let __base = 0;
+for (const __f of __targets) {
+  let __ox = 0, __oy = 0;
+  if (__f !== __mainFrame) {
+    // frameElement() is a Playwright-side lookup, so it resolves across
+    // origins where window.frameElement would be blocked, and boundingBox()
+    // already accumulates the offsets of every ancestor frame.
+    let __box = null;
+    try {
+      const __fe = await __f.frameElement();
+      __box = __fe ? await __fe.boundingBox() : null;
+    } catch (e) { __box = null; }
+    // Detached, display:none or zero-size frame: nothing clickable inside.
+    if (!__box) continue;
+    __ox = Math.round(__box.x); __oy = Math.round(__box.y);
+  }
+  let __r = null;
+  try {
+    __r = await __f.evaluate(__surogatesCollect, {
+      selector: __f === __mainFrame ? __surogatesSelector : null,
+      base: __base,
+    });
+  } catch (e) { continue; }
+  if (__f === __mainFrame) __viewport = __r.viewport;
+  __base += __r.nodes.length;
+  __frames.push({x: __ox, y: __oy, nodes: __r.nodes});
+}
 const __cdp = await page.context().newCDPSession(page);
 const __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true});
 const __map = {};
 (function walk(n){ if(!n) return; const a=n.attributes||[]; for(let i=0;i<a.length;i+=2){ if(a[i]==='data-sg-i'){ __map[a[i+1]] = n.backendNodeId; } } for(const c of (n.children||[])) walk(c); if(n.contentDocument) walk(n.contentDocument); })(__doc.root);
-for (const node of __surogatesSnapshot.nodes) { node.backend_node_id = (node.idx!=null && __map[String(node.idx)]!=null) ? __map[String(node.idx)] : null; }
+for (const __fr of __frames) { for (const node of __fr.nodes) { node.backend_node_id = (node.idx!=null && __map[String(node.idx)]!=null) ? __map[String(node.idx)] : null; } }
 return {
   url: page.url(),
   title: await page.title(),
-  viewport: page.viewportSize() || __surogatesSnapshot.viewport,
-  nodes: __surogatesSnapshot.nodes,
+  viewport: page.viewportSize() || __viewport || {width: 0, height: 0},
+  frames: __frames,
 };
 """
 
@@ -345,7 +381,7 @@ return {
         """Return a DOM-derived page tree with stable refs and cached centers."""
 
         raw = await self._playwright_execute(self._snapshot_script(selector))
-        nodes = raw.get("nodes", [])
+        nodes = self._merge_frame_nodes(raw.get("frames", []))
         full_tree, new_cache = self._build_tree_and_cache(nodes)
         tree = [
             entry
@@ -705,7 +741,7 @@ const probe = await cdp.send('Runtime.callFunctionOn', {{
         + (hit.id ? '#' + hit.id : '')
         + (cls ? '.' + cls : '');
     }}
-    return {{ok: true, cx: cx, cy: cy, cover: cover}};
+    return {{ok: true, cover: cover}};
   }}.toString(),
 }});
 const res = (probe && probe.result && probe.result.value) ? probe.result.value : {{ok: false}};
@@ -715,10 +751,53 @@ if (!res.ok) {{
 if (res.cover) {{
   throw new Error("ref click blocked: covered by <" + res.cover + ">. Dismiss that element, then browser_get_state and retry.");
 }}
-await page.mouse.click(res.cx, res.cy, {click_opts});
+// The probe measured inside the node's own frame, which is right for
+// elementFromPoint and wrong for the mouse: DOM.resolveNode on a node in an
+// iframe resolves into that frame's context, so its rect is frame-relative
+// while page.mouse dispatches in root space. getBoxModel returns the quad
+// already in root coordinates. Read it after scrollIntoView, not before.
+let box = null;
+try {{
+  box = await cdp.send('DOM.getBoxModel', {{objectId: objectId}});
+}} catch (e) {{ box = null; }}
+const quad = (box && box.model && box.model.content) ? box.model.content : null;
+if (!quad) {{
+  throw new Error("ref element not measurable; call browser_get_state to refresh refs");
+}}
+const cx = Math.round((quad[0] + quad[2] + quad[4] + quad[6]) / 4);
+const cy = Math.round((quad[1] + quad[3] + quad[5] + quad[7]) / 4);
+await page.mouse.click(cx, cy, {click_opts});
 await page.waitForTimeout(150);
 return true;
 """
+
+    @staticmethod
+    def _merge_frame_nodes(
+        frames: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Flatten per-frame node lists into one root-space list.
+
+        Each frame measured its nodes against its own viewport and reports the
+        origin it sits at in the root frame; adding the two makes every
+        coordinate comparable, and clickable, because ``page.mouse`` dispatches
+        in root space only.
+
+        ponytail: ``depth`` stays frame-local, so ``max_depth`` treats each
+        frame as its own root and under-filters iframe content. Carry the
+        iframe element's own depth as a base if that ever matters.
+        """
+
+        merged: list[dict[str, Any]] = []
+        for frame in frames:
+            origin_x = int(frame.get("x", 0))
+            origin_y = int(frame.get("y", 0))
+            for node in frame.get("nodes", []):
+                merged.append({
+                    **node,
+                    "x": int(node.get("x", 0)) + origin_x,
+                    "y": int(node.get("y", 0)) + origin_y,
+                })
+        return merged
 
     def _build_tree_and_cache(
         self,
