@@ -51,7 +51,9 @@ harness-side either way is the sender's pinned plan entitlement
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 from collections import Counter
 from itertools import zip_longest
@@ -383,6 +385,75 @@ def _format_page_window(
     return f"# {title}\n\n{note}\n\n{window}"
 
 
+_PAGE_RANGE_RE = re.compile(r"^\s*(\d+)\s*(?:[-–]\s*(\d+))?\s*$")
+# A page range is a window into one document, not a way to pull a whole
+# corpus into context. Long PDFs run to hundreds of pages; this bounds one
+# call, and the agent can ask for the next span.
+_MAX_RANGE_PAGES = 40
+
+
+def _parse_page_range(raw: Any) -> tuple[int, int] | None:
+    """``"7-11"``, ``"7–11"`` or ``"7"`` -> ``(7, 11)``; junk -> ``None``.
+
+    Accepts the en dash because that is what the summary pages print --
+    ``# Riscuri acoperite (pages 7–11)`` -- so an agent copying the range
+    it just read gets what it asked for.
+    """
+    if raw is None:
+        return None
+    match = _PAGE_RANGE_RE.match(str(raw))
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2)) if match.group(2) else start
+    if start < 1 or end < start:
+        return None
+    return start, min(end, start + _MAX_RANGE_PAGES - 1)
+
+
+def _format_page_range(
+    title: str, raw: bytes, start: int, end: int,
+) -> str:
+    """Render pages ``start``..``end`` of a ``sources/*.json`` page array."""
+    try:
+        pages = json.loads(raw.decode("utf-8", errors="replace"))
+    except (ValueError, TypeError):
+        return (
+            f"Error: {title!r} is not a readable page array, so a page "
+            f"range cannot be taken from it. Omit `pages` to read it whole."
+        )
+    if not isinstance(pages, list):
+        return (
+            f"Error: {title!r} does not hold a list of pages. Omit `pages` "
+            f"to read it whole."
+        )
+
+    # Page numbers are the document's own, as printed in the summary tree,
+    # so select by the stored page number rather than by list position --
+    # they diverge if extraction ever drops a page.
+    selected = [
+        p for p in pages
+        if isinstance(p, dict) and start <= int(p.get("page", 0) or 0) <= end
+    ]
+    if not selected:
+        available = [
+            int(p.get("page", 0) or 0) for p in pages if isinstance(p, dict)
+        ]
+        span = (
+            f"{min(available)}-{max(available)}" if available else "none"
+        )
+        return (
+            f"# {title}\n\n_No pages {start}-{end} in this document "
+            f"(it has pages {span})._"
+        )
+
+    body = "\n\n".join(
+        f"## Page {p.get('page')}\n\n{p.get('content') or ''}".rstrip()
+        for p in selected
+    )
+    return f"# {title}\n\n_Pages {start}-{end}._\n\n{body}"
+
+
 async def _kb_read_page_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
@@ -391,11 +462,24 @@ async def _kb_read_page_handler(
     Returns the markdown content of a single wiki page. The path must
     match a row in ``kb_wiki_pages`` for this KB; we don't accept
     arbitrary Hub paths.
+
+    With ``pages``, returns just that span of a ``sources/*.json`` page
+    array instead. That is the one step the tools could not express: a
+    summary page names its sections with the pages they cover
+    (``# Riscuri acoperite (pages 7-11)``), but the source text behind them
+    carries no embedding, so it is reachable only by asking for it directly.
     """
     kb_id = (arguments.get("kb_id") or "").strip()
     path = (arguments.get("path") or "").strip()
     if not kb_id or not path:
         return "Error: both kb_id and path are required."
+
+    page_range = _parse_page_range(arguments.get("pages"))
+    if arguments.get("pages") and page_range is None:
+        return (
+            "Error: `pages` must be a page number or range, such as "
+            "\"7\" or \"7-11\"."
+        )
 
     offset = _clamp_offset(arguments.get("offset"))
     limit = _clamp_page_limit(arguments.get("limit"))
@@ -461,6 +545,9 @@ async def _kb_read_page_handler(
         )
     except KBHubError as exc:
         return f"Error reading wiki page: {exc}"
+
+    if page_range is not None:
+        return _format_page_range(page.title, raw, *page_range)
 
     return _format_page_window(
         page.title, raw.decode("utf-8", errors="replace"), offset, limit,
@@ -700,6 +787,17 @@ _KB_READ_PAGE_PARAMS = {
                 "(e.g. 'index.md', 'sources/d1.md', "
                 "'concepts/photosynthesis.md'). Wiki paths are case- "
                 "and slash-sensitive."
+            ),
+        },
+        "pages": {
+            "type": "string",
+            "description": (
+                "Optional. For a `sources/...json` page, return only "
+                "this span of the original document, e.g. \"7-11\" or "
+                "\"7\". Use the page range a summary page prints beside "
+                "a section heading (\"# Riscuri acoperite (pages 7-11)\") "
+                "to read that section's exact wording. Ignored for "
+                "markdown pages."
             ),
         },
         "offset": {
