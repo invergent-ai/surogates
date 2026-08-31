@@ -736,6 +736,33 @@ export function cropRegions(marks: BoardMark[], unit: number): CropRegion[] {
  * never below 1:1 unless the region is too wide for the cap, and
  * framed with a margin of one line.
  */
+/**
+ * Paint an opaque ground *behind* everything already drawn.
+ *
+ * Every image built here is offscreen and goes straight to the model,
+ * so it has to be opaque -- but painting white first does not survive:
+ * `renderDoc` opens with a `clearRect`, which the live canvas needs to
+ * wipe the previous frame and which takes the caller's background with
+ * it, and every `erase` stroke punches alpha out of whatever sits
+ * under it. The atlas therefore shipped ~99% transparent, and how the
+ * board looked to the model came down to what its provider happened to
+ * composite alpha against: white read perfectly, black left dark ink
+ * on a dark ground and barely legible. `destination-over` puts the
+ * ground underneath after the fact, so erased holes fill in too.
+ */
+function fillBackdrop(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+): void {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = "destination-over";
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
 export function buildRegionCrop(
   doc: WbDoc,
   region: CropRegion,
@@ -757,9 +784,6 @@ export function buildRegionCrop(
   const canvas = services.createCanvas(size.w, size.h);
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, size.w, size.h);
   renderDoc(
     ctx,
     { ...doc, objects: doc.objects.map((o) => ({ ...o, selected: false })) },
@@ -767,6 +791,7 @@ export function buildRegionCrop(
     size,
     services,
   );
+  fillBackdrop(ctx, size.w, size.h);
   return { ids: region.ids, canvas, scale: Math.round(scale * 100) / 100 };
 }
 
@@ -851,10 +876,6 @@ export function buildAtlas(
   const ctx = canvas.getContext("2d");
   if (!ctx) return canvas;
 
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, plan.imageSize.w, plan.imageSize.h);
-
   renderDoc(
     ctx,
     // Selection chrome is interface, not content: the model must not see
@@ -879,6 +900,7 @@ export function buildAtlas(
     13,
     1.5,
   );
+  fillBackdrop(ctx, plan.imageSize.w, plan.imageSize.h);
   return canvas;
 }
 

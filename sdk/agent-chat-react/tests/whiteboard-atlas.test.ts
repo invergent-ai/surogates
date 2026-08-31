@@ -980,3 +980,86 @@ describe("slot marks", () => {
     });
   });
 });
+
+
+// ---------------------------------------------------------------------
+// The images sent to the model must be opaque
+//
+// From a real session: the atlas and its close-up both arrived ~99%
+// transparent. `renderDoc` opens with a clearRect -- the live canvas
+// needs it to wipe the previous frame -- which also wiped the white
+// background both builders painted immediately before calling it. How
+// the board looked to the model then depended entirely on what its
+// provider composited alpha against; against black, dark ink on a dark
+// ground is barely legible.
+// ---------------------------------------------------------------------
+
+describe("an opaque ground", () => {
+  /** The shared stub has no 2D context; record the calls instead. */
+  function recordingServices() {
+    const ctx = new Proxy({ calls: [] as unknown[][] } as Record<string, unknown>, {
+      get(target, property) {
+        if (property in target) return target[property as string];
+        if (property === "measureText") {
+          return (t: string) => ({ width: t.length * 8 });
+        }
+        return (...args: unknown[]) =>
+          (target.calls as unknown[][]).push([property, ...args]);
+      },
+      set(target, property, value) {
+        target[property as string] = value;
+        return true;
+      },
+    }) as unknown as CanvasRenderingContext2D & {
+      calls: unknown[][];
+      globalCompositeOperation: string;
+    };
+    return {
+      ctx,
+      services: {
+        ...services,
+        createCanvas: (w: number, h: number) =>
+          ({ width: w, height: h, getContext: () => ctx }) as unknown as
+            HTMLCanvasElement,
+      },
+    };
+  }
+
+  const board = () =>
+    applyCommands(emptyDoc(), [
+      { tool: "draw_formula", x: 0, y: 0, latex: "x^2", fontSize: 40 },
+    ], 1);
+
+  it("backs the overview after painting, not before", () => {
+    const { ctx, services: rec } = recordingServices();
+    const doc = board();
+    buildAtlas(doc, planAtlas(doc, null, view, viewport, rec), rec);
+    const calls = ctx.calls.map((c) => String(c[0]));
+    // A ground painted before the clear is a ground that is wiped.
+    expect(calls.lastIndexOf("clearRect")).toBeGreaterThanOrEqual(0);
+    expect(calls.lastIndexOf("fillRect")).toBeGreaterThan(
+      calls.lastIndexOf("clearRect"),
+    );
+  });
+
+  it("puts the ground underneath rather than over the ink", () => {
+    const { ctx, services: rec } = recordingServices();
+    const doc = board();
+    buildAtlas(doc, planAtlas(doc, null, view, viewport, rec), rec);
+    expect(ctx.globalCompositeOperation).toBe("destination-over");
+  });
+
+  it("backs the close-up too", () => {
+    const { ctx, services: rec } = recordingServices();
+    const doc = board();
+    const marks = boardMarks(doc, rec, { unit: 40, newLocalIds: new Set() });
+    const [region] = cropRegions(marks, 40);
+    if (region) {
+      buildRegionCrop(doc, region, rec, 40);
+      const calls = ctx.calls.map((c) => String(c[0]));
+      expect(calls.lastIndexOf("fillRect")).toBeGreaterThan(
+        calls.lastIndexOf("clearRect"),
+      );
+    }
+  });
+});
