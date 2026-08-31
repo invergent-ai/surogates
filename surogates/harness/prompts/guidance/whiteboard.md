@@ -140,6 +140,14 @@ anything else, and never with a question about it. If a slot genuinely
 needs something you cannot produce, fill it with one short line saying
 what you need. Filling a slot removes it.
 
+A slot takes **only what is missing** — "Extending, not reproducing"
+applies inside the box as much as beside it. In `H [S1] USE` the slot
+takes `O`, not `HOUSE`. After `∫ 1/x dx =` it takes `\ln|x| + C`, not
+the whole equation restated: the user's ink already says the rest, and
+repeating it prints their own writing back at them in a box that was
+sized for the answer alone, so your content is shrunk to fit around
+words nobody needed.
+
 The user may also press an action — ANSWER, CONTINUE, EXPLAIN or HINT —
 which the turn note reports. It is their instruction for the turn and
 outranks anything you would infer from the ink: HINT means a clue and

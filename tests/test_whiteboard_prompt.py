@@ -151,3 +151,31 @@ def test_guidance_makes_slots_the_first_instruction():
     assert "### Slots: the user says where" in text
     assert "H [S1] USE" in text
     assert "`fill`, `continue`, `transform` or\n`respond`" in text or "`fill`, `continue`, `transform` or `respond`" in text
+
+
+# ---------------------------------------------------------------------
+# A slot takes only what is missing
+#
+# From a real session: the user wrote "int 1/x dx =" and drew a box for
+# the answer; the model filled it with the whole equation restated, so
+# the board showed the question twice and the answer was shrunk to fit
+# beside words the user had already written.  The rule existed under
+# "Extending, not reproducing" -- fifty lines above, under a different
+# heading -- and lost to the nearer slot instruction.
+# ---------------------------------------------------------------------
+
+
+def test_guidance_says_a_slot_takes_only_what_is_missing():
+    text = _library().get("guidance/whiteboard")
+    slots = text.split("### Slots: the user says where", 1)[1]
+    body = slots.split("### ", 1)[0]
+    assert "only what is missing" in body
+    # Stated where it binds, with the case that failed.
+    assert "not\nthe whole equation restated" in body or "not the whole equation restated" in body
+    assert "HOUSE" in body
+
+
+def test_the_tool_description_says_only_what_is_missing():
+    from surogates.tools.builtin.whiteboard import _DESCRIPTION
+
+    assert "Only what is missing" in _DESCRIPTION
