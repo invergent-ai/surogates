@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  HOTSPOT_GRID,
   MAX_ATLAS_HEIGHT,
   MAX_ATLAS_WIDTH,
   atlasMetadata,
@@ -19,8 +18,6 @@ import {
   contentBeyond,
   contentBounds,
   inkHeight,
-  mapHotspots,
-  occupancyCells,
   planAtlas,
 } from "@/components/whiteboard/atlas";
 import { applyCommands, emptyDoc } from "@/components/whiteboard/doc";
@@ -137,60 +134,6 @@ describe("atlas planning", () => {
   });
 });
 
-describe("hotspot grid", () => {
-  const rect = { x: 0, y: 0, w: 800, h: 800 };
-
-  it("maps a point to its grid cell", () => {
-    expect(mapHotspots(rect, [{ x: 50, y: 50 }])).toEqual([[0, 0]]);
-  });
-
-  it("maps the far corner to the last cell", () => {
-    expect(mapHotspots(rect, [{ x: 799, y: 799 }]))
-      .toEqual([[HOTSPOT_GRID - 1, HOTSPOT_GRID - 1]]);
-  });
-
-  it("clamps a point exactly on the far edge into the last cell", () => {
-    // 800/800*8 == 8, one past the last index; without the clamp this
-    // emits a cell that does not exist.
-    expect(mapHotspots(rect, [{ x: 800, y: 800 }]))
-      .toEqual([[HOTSPOT_GRID - 1, HOTSPOT_GRID - 1]]);
-  });
-
-  it("drops points outside the rectangle", () => {
-    expect(mapHotspots(rect, [{ x: -5, y: 10 }, { x: 900, y: 10 }]))
-      .toEqual([]);
-  });
-
-  it("preserves order oldest to newest", () => {
-    const cells = mapHotspots(rect, [
-      { x: 50, y: 50 }, { x: 750, y: 750 }, { x: 400, y: 50 },
-    ]);
-    expect(cells[0]).toEqual([0, 0]);
-    expect(cells[1]).toEqual([7, 7]);
-  });
-
-  it("collapses consecutive duplicates", () => {
-    expect(mapHotspots(rect, [
-      { x: 10, y: 10 }, { x: 12, y: 12 }, { x: 750, y: 750 },
-    ])).toHaveLength(2);
-  });
-
-  it("keeps a revisited cell that is not consecutive", () => {
-    // The trajectory matters: returning to a cell is real information.
-    expect(mapHotspots(rect, [
-      { x: 10, y: 10 }, { x: 750, y: 750 }, { x: 10, y: 10 },
-    ])).toHaveLength(3);
-  });
-
-  it("returns an empty array for no points", () => {
-    expect(mapHotspots(rect, [])).toEqual([]);
-  });
-
-  it("tolerates a zero-area rectangle", () => {
-    expect(() => mapHotspots({ x: 0, y: 0, w: 0, h: 0 }, [{ x: 0, y: 0 }]))
-      .not.toThrow();
-  });
-});
 
 describe("atlas metadata", () => {
   const plan = planAtlas(
@@ -198,7 +141,7 @@ describe("atlas metadata", () => {
   );
 
   it("carries the geometry the prompt reads", () => {
-    const meta = atlasMetadata(plan, { x: 0, y: 0, w: 100, h: 100 }, [], {});
+    const meta = atlasMetadata(plan, { x: 0, y: 0, w: 100, h: 100 }, {});
     expect(meta).toHaveProperty("sourceRect");
     expect(meta).toHaveProperty("imageScale");
     expect(meta).toHaveProperty("latestInput");
@@ -210,42 +153,34 @@ describe("atlas metadata", () => {
     // These differ whenever the capture is scaled, and labelling the
     // image size as the viewport would tell the model the user is
     // looking at a region they are not.
-    const meta = atlasMetadata(plan, null, [], {});
+    const meta = atlasMetadata(plan, null, {});
     expect(meta.viewport).toEqual({ x: 0, y: 0, w: 800, h: 600 });
   });
 
   it("shapes rectangles as x/y/w/h", () => {
     // The Python note builder reads exactly these keys and renders a
     // shorter note if any is missing.
-    const meta = atlasMetadata(plan, { x: 1, y: 2, w: 3, h: 4 }, [], {});
+    const meta = atlasMetadata(plan, { x: 1, y: 2, w: 3, h: 4 }, {});
     expect(meta.latestInput).toEqual({ x: 1, y: 2, w: 3, h: 4 });
     expect(Object.keys(meta.sourceRect as object).sort())
       .toEqual(["h", "w", "x", "y"]);
   });
 
   it("defaults mode to sketch", () => {
-    expect(atlasMetadata(plan, null, [], {}).mode).toBe("sketch");
+    expect(atlasMetadata(plan, null, {}).mode).toBe("sketch");
   });
 
   it("carries an explicit deep mode", () => {
-    expect(atlasMetadata(plan, null, [], { mode: "deep" }).mode).toBe("deep");
-  });
-
-  it("omits an empty hotspot list", () => {
-    expect(atlasMetadata(plan, null, [], {})).not.toHaveProperty("hotspots");
-  });
-
-  it("includes a non-empty hotspot list", () => {
-    expect(atlasMetadata(plan, null, [[0, 0]], {}).hotspots).toEqual([[0, 0]]);
+    expect(atlasMetadata(plan, null, { mode: "deep" }).mode).toBe("deep");
   });
 
   it("omits latestInput when there is none", () => {
-    expect(atlasMetadata(plan, null, [], {}))
+    expect(atlasMetadata(plan, null, {}))
       .not.toHaveProperty("latestInput");
   });
 
   it("carries an optional selection and typed input", () => {
-    const meta = atlasMetadata(plan, null, [], {
+    const meta = atlasMetadata(plan, null, {
       selection: { x: 5, y: 6, w: 7, h: 8 },
       typedInput: "integral of x^2",
     });
@@ -254,20 +189,14 @@ describe("atlas metadata", () => {
   });
 
   it("omits selection and typedInput when absent", () => {
-    const meta = atlasMetadata(plan, null, [], {});
+    const meta = atlasMetadata(plan, null, {});
     expect(meta).not.toHaveProperty("selection");
     expect(meta).not.toHaveProperty("typedInput");
   });
 
   it("stays under the server's 64KB metadata cap", () => {
-    // A full grid is 64 cells; the server rejects the whole turn above
-    // 65536 bytes, so the worst realistic payload must clear it easily.
-    const many = Array.from({ length: HOTSPOT_GRID * HOTSPOT_GRID }, (_, i) => [
-      i % HOTSPOT_GRID,
-      Math.floor(i / HOTSPOT_GRID),
-    ]);
     const size = new TextEncoder().encode(
-      JSON.stringify(atlasMetadata(plan, null, many, {
+      JSON.stringify(atlasMetadata(plan, null, {
         typedInput: "x".repeat(2000),
       })),
     ).length;
@@ -360,13 +289,13 @@ describe("telling the model how big the writing is", () => {
 
   it("rides on the turn metadata, rounded", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], { inkHeight: 251.7 });
+    const meta = atlasMetadata(plan, null, { inkHeight: 251.7 });
     expect(meta.inkHeight).toBe(252);
   });
 
   it("is omitted when there is no ink to measure", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    expect(atlasMetadata(plan, null, [], { inkHeight: null }))
+    expect(atlasMetadata(plan, null, { inkHeight: null }))
       .not.toHaveProperty("inkHeight");
   });
 });
@@ -419,56 +348,6 @@ describe("a bounded view of an unbounded board", () => {
   });
 });
 
-describe("occupancy", () => {
-  const rect = { x: 0, y: 0, w: 1600, h: 1600 };   // 16x16 cells of 100
-
-  const textAt = (x: number, y: number) => ({
-    tool: "write_text", x, y, text: "a", fontSize: 40, maxWidth: 100,
-  });
-
-  it("marks the cells an object covers", () => {
-    const doc = applyCommands(emptyDoc(), [textAt(250, 350)], 1);
-    const cells = occupancyCells(doc, rect, services);
-    expect(cells).toContainEqual([2, 3]);
-  });
-
-  it("costs the same whatever the board holds", () => {
-    // The whole reason for a grid: a rectangle list would grow without
-    // bound, and these notes stay in the context for the rest of the
-    // session.
-    const many = Array.from({ length: 300 }, (_, i) =>
-      textAt((i % 16) * 100, Math.floor(i / 16) * 100));
-    const cells = occupancyCells(applyCommands(emptyDoc(), many, 1),
-      rect, services);
-    expect(cells.length).toBeLessThanOrEqual(OCCUPANCY_GRID * OCCUPANCY_GRID);
-  });
-
-  it("reports each cell once however many objects share it", () => {
-    const doc = applyCommands(emptyDoc(),
-      [textAt(10, 10), textAt(20, 20), textAt(30, 30)], 1);
-    const cells = occupancyCells(doc, rect, services);
-    expect(cells.filter(([c, r]) => c === 0 && r === 0)).toHaveLength(1);
-  });
-
-  it("ignores objects outside the frame", () => {
-    const doc = applyCommands(emptyDoc(), [textAt(50000, 50000)], 1);
-    expect(occupancyCells(doc, rect, services)).toEqual([]);
-  });
-
-  it("is empty for an empty board", () => {
-    expect(occupancyCells(emptyDoc(), rect, services)).toEqual([]);
-  });
-
-  it("rides on the turn metadata with its grid size", () => {
-    const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], {
-      occupied: [[1, 2]], beyond: ["right"],
-    });
-    expect(meta.occupied).toEqual([[1, 2]]);
-    expect(meta.occupancyGrid).toBe(OCCUPANCY_GRID);
-    expect(meta.beyond).toEqual(["right"]);
-  });
-});
 
 describe("the grid drawn on the picture", () => {
   /** A canvas that records what was drawn into it. */
@@ -568,38 +447,6 @@ describe("never cropping an expression in half", () => {
   });
 });
 
-describe("occupancy measures ink, not the wrap width", () => {
-  const rect = { x: 0, y: 0, w: 1600, h: 1600 };   // 100-unit cells
-
-  it("does not claim the whole wrap width for one glyph", () => {
-    // objectBounds reports maxWidth, the width the author asked to wrap
-    // at. A one-glyph answer with maxWidth 800 claimed eight cells it
-    // never touched, and the model routed around free canvas.
-    const doc = applyCommands(emptyDoc(), [{
-      tool: "write_text", x: 0, y: 0, text: "5", fontSize: 40, maxWidth: 800,
-    }], 1);
-    expect(occupancyCells(doc, rect, services).length).toBeLessThanOrEqual(2);
-  });
-
-  it("still covers a long line that really is wide", () => {
-    const doc = applyCommands(emptyDoc(), [{
-      tool: "write_text", x: 0, y: 0, text: "1222 + 5000 = 6222",
-      fontSize: 55, maxWidth: 800,
-    }], 1);
-    const cells = occupancyCells(doc, rect, services);
-    // ~18 glyphs at 0.6em of 55 is ~590 units: six cells, not one.
-    expect(cells.length).toBeGreaterThanOrEqual(6);
-  });
-
-  it("never claims more than the wrap width", () => {
-    const doc = applyCommands(emptyDoc(), [{
-      tool: "write_text", x: 0, y: 0, text: "wrapped onto several lines",
-      fontSize: 40, maxWidth: 100,
-    }], 1);
-    const cols = occupancyCells(doc, rect, services).map(([c]) => c);
-    expect(Math.max(...cols)).toBeLessThanOrEqual(1);
-  });
-});
 
 describe("what became of the agent's own work", () => {
   const drawn = (origin: string, x: number, y: number, text: string) => ({
@@ -680,7 +527,7 @@ describe("what became of the agent's own work", () => {
 
   it("rides on the turn metadata", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], {
+    const meta = atlasMetadata(plan, null, {
       agentObjects: [
         { origin: "c1", label: "five", bounds: null },
         { origin: "c2", label: "six",
@@ -786,7 +633,7 @@ describe("clustering the user's ink into the things they wrote", () => {
 
   it("rides on the turn metadata", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], {
+    const meta = atlasMetadata(plan, null, {
       marks: [
         { id: "A1", kind: "ink", rect: { x: 1, y: 2, w: 3, h: 4 }, fresh: true },
         { id: "B1", kind: "agent", rect: null, origin: "c1", label: "gone" },
@@ -943,7 +790,7 @@ describe("close-ups of new ink", () => {
 
   it("rides on the turn metadata with its image index", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], {
+    const meta = atlasMetadata(plan, null, {
       crops: [{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }],
     });
     expect(meta.crops).toEqual([{ marks: ["A2", "B1"], imageIndex: 1, scale: 1.59 }]);
@@ -965,14 +812,9 @@ describe("slot marks", () => {
     ]);
   });
 
-  it("does not count a slot as occupied space", () => {
-    // Reserved emptiness is the opposite of occupied.
-    expect(occupancyCells(slotDoc(), { x: 0, y: 0, w: 1600, h: 1600 }, services)).toEqual([]);
-  });
-
   it("carries hint and object id in the turn metadata", () => {
     const plan = planAtlas(emptyDoc(), null, view, viewport, services);
-    const meta = atlasMetadata(plan, null, [], {
+    const meta = atlasMetadata(plan, null, {
       marks: boardMarks(slotDoc(), services, { unit: 40 }),
     });
     expect((meta.marks as Record<string, unknown>[])[0]).toMatchObject({

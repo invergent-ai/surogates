@@ -16,25 +16,12 @@ The attached image is a clean white-background rendering of canvas
 content around the newest input. It may come from outside the user's
 current viewport.
 
-`sourceRect` is the image's full-resolution global canvas rectangle and
-`imageScale` maps global units to image pixels:
-
-    imageX = (globalX - sourceRect.x) * imageScale
-    imageY = (globalY - sourceRect.y) * imageScale
-
 `latestInput` is the AUTHORITATIVE attention region for this turn. Read
 the newest user input inside it first. Older content may overlap that
-rectangle, so use the hotspot trajectory and visible stroke continuity to
-tell the newest writing apart. Pixels outside it are older context or
-your own earlier output — do not fold them into what you are answering
-unless the latest input visually refers to them.
-
-`hotspots` contains only the current unconsumed writing segment, ordered
-oldest to newest. Use it to refine reading order inside `latestInput`,
-nothing more. It is a coarse grid path traced by the pen, not a
-transcription: never read characters or symbols out of it. What was
-written is in the image and nowhere else. Its absence is not evidence
-that there is no new input.
+rectangle, so use visible stroke continuity to tell the newest writing
+apart. Pixels outside it are older context or your own earlier output —
+do not fold them into what you are answering unless the latest input
+visually refers to them.
 
 Handwriting in a logographic script needs deliberate character-by-
 character inspection: examine stroke groups, radicals, spacing and
@@ -192,8 +179,8 @@ Explicit coordinates remain available for the placements no relation
 describes — a `draw` sketch, or a spot with nothing to anchor to. They
 are global canvas units, freely negative, never image pixels: the canvas
 is infinite, 0,0 is not a corner, and an answer at 0,0 is somewhere the
-user is probably not looking. When you must use them, convert with
-`sourceRect` from the turn note.
+user is probably not looking. Take them from the rectangles the note
+gives you — `latestInput` and the marks — never by measuring the image.
 
 ### Choosing a command
 

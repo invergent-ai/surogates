@@ -27,8 +27,6 @@ def test_the_fragment_names_the_tool():
 
 @pytest.mark.parametrize("rule", [
     "latestInput",          # the authoritative attention region
-    "sourceRect",           # image <-> global coordinate mapping
-    "imageScale",
     "extend",               # extend the document, never reproduce it
     "arrow",                # spatial gesture reading
 ])
@@ -127,15 +125,16 @@ def test_guidance_covers_handwritten_maths_ambiguity():
     assert "well-formed expression" in text
 
 
-def test_guidance_forbids_reading_symbols_from_the_hotspot_trail():
-    """The model said it was "reading from the hotspot trajectory".
+def test_guidance_teaches_no_coordinate_conversion():
+    """The note carries no sourceRect, so the guidance must not use it.
 
-    That trail is a coarse grid path of the pen; characters cannot be
-    recovered from it, and trying produced an invented expression.
+    The image-to-canvas formula, the hotspot trail and the occupancy
+    grid all predate relational placement. Guidance that still reaches
+    for them sends the model after values the turn no longer carries.
     """
     text = _library().get("guidance/whiteboard")
-    assert "never read characters or symbols out of it" in text
-
+    for gone in ("sourceRect", "imageScale", "hotspot"):
+        assert gone not in text
 
 def test_guidance_treats_ink_around_the_agents_object_as_an_operation():
     """Two sessions in a row: the user wrapped the answer in `( )²` and
