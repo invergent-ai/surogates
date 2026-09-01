@@ -287,6 +287,14 @@ git commit -m "feat(browser): add a direct CDP client"
 
 The pure core, and where every security test lives.
 
+> **Shipped — the code below is the first draft, not what landed.** Executing it
+> found two defects: `translate` returned one `(method, params)` pair, which
+> cannot express a click's press *and* release or a keystroke's down *and* up;
+> and `key` accepted any string, which would have admitted F12 and so devtools.
+> The shipped signature returns a list, and `NAMED_KEYS` is an allowlist with
+> no letters and no function keys. `surogates/browser/shell.py` and
+> `tests/test_browser_shell.py` are authoritative; read them, not these blocks.
+
 **Files:**
 - Create: `surogates/browser/shell.py`
 - Test: `tests/test_browser_shell.py`
@@ -295,9 +303,10 @@ The pure core, and where every security test lives.
 - Consumes: nothing at runtime (pure).
 - Produces:
   - `COMMAND_TYPES: frozenset[str]` — the message types the lease gates.
-  - `translate(message: dict, *, viewport: tuple[int, int]) -> tuple[str, dict]` returning `(cdp_method, cdp_params)`.
+  - `translate(message: dict, *, viewport: tuple[int, int]) -> list[tuple[str, dict]]` — the CDP calls that carry the message out, **in order**. A list rather than one pair: a click is a press *and* a release, a keystroke a down *and* an up, and collapsing either leaves the page mid-gesture. Task 3 issues them in sequence.
   - `ShellProtocolError(Exception)` with `.reason`.
   - `SCREENCAST_PARAMS: dict` — the capped screencast configuration.
+  - `NAMED_KEYS: dict[str, int]` — the keys `key` accepts, with virtual key codes. An allowlist, not a convenience: no letters means no Ctrl+Shift+I, and no function keys means no F12, so devtools — JavaScript execution — stays unreachable. Text goes through `type`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -610,7 +619,7 @@ Add to `surogates/api/routes/browser.py`, modelled on `proxy_live_view_ws`:
 2. `GET {cdp_url→http}/json/version` for `webSocketDebuggerUrl`, connect a `CdpClient`.
 3. `targets()` → pick the active page → `attach_page()` → `Page.enable` → `Page.startScreencast(SCREENCAST_PARAMS, session=...)`. **In that order**: starting the screencast after a navigate is refused (see Global Constraints), so it starts once at attach time and the viewer's `navigate` messages simply happen underneath it. The same applies on `switch_tab` — start the new target's screencast before anything navigates it.
 4. Register handlers: `Page.screencastFrame` → `base64.b64decode` → `websocket.send_bytes` → `Page.screencastFrameAck`; `Page.frameNavigated` → `nav`; `Target.targetCreated/InfoChanged/Destroyed` → `tabs`; `Page.javascriptDialogOpening` → `dialog`.
-5. Receive loop: reject frames over `MAX_WS_MESSAGE`; parse JSON; if `t in COMMAND_TYPES` and the lease is not held, drop and continue; `switch_tab` → stop old screencast, drain, re-attach, start new; `back`/`forward` → `Page.getNavigationHistory` then `Page.navigateToHistoryEntry`; otherwise `translate()` and `call()`.
+5. Receive loop: reject frames over `MAX_WS_MESSAGE`; parse JSON; if `t in COMMAND_TYPES` and the lease is not held, drop and continue; `switch_tab` → stop old screencast, drain, re-attach, start new; `back`/`forward` → `Page.getNavigationHistory` then `Page.navigateToHistoryEntry`; otherwise `translate()` and issue **every** returned call in order — a click that stops after `mousePressed` leaves the page in a drag.
 6. `ShellProtocolError` → drop the message, count it, keep the socket open.
 7. On CDP socket loss → close the client socket with a distinct code.
 
