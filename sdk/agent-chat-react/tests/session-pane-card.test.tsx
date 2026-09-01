@@ -87,6 +87,36 @@ describe("SessionPaneCard", () => {
     expect(container?.textContent).not.toContain("0");
   });
 
+  it("shows an expand chevron when it is an accordion header", () => {
+    const node = render(
+      <SessionPaneCard title="Files" expanded={false} onOpen={vi.fn()} />,
+    );
+    expect(node.querySelector("button")?.getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    expect(
+      node.querySelector('[data-testid="session-pane-card-chevron"]'),
+    ).not.toBeNull();
+
+    act(() => {
+      root?.render(<SessionPaneCard title="Files" expanded onOpen={vi.fn()} />);
+    });
+    expect(node.querySelector("button")?.getAttribute("aria-expanded")).toBe(
+      "true",
+    );
+
+    act(() => {
+      root?.render(<SessionPaneCard title="Browser" onOpen={vi.fn()} />);
+    });
+    // Not an accordion: no chevron and no expanded state to announce.
+    expect(
+      node.querySelector('[data-testid="session-pane-card-chevron"]'),
+    ).toBeNull();
+    expect(node.querySelector("button")?.hasAttribute("aria-expanded")).toBe(
+      false,
+    );
+  });
+
   it("is a real button, so it is reachable by keyboard", () => {
     const node = render(<SessionPaneCard title="Files" onOpen={vi.fn()} />);
     const button = node.querySelector("button");

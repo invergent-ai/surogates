@@ -149,7 +149,16 @@ interface ChatThreadProps {
       thumbnail?: string | null;
       onOpen: () => void;
     } | null;
-    files?: { count?: number; onOpen: () => void } | null;
+    /**
+     * Files are an accordion, not a drawer: the card is the header and
+     * `panel` (the workspace) expands in place between it and the composer.
+     */
+    files?: {
+      count?: number;
+      open: boolean;
+      onToggle: () => void;
+      panel: React.ReactNode;
+    } | null;
   };
 
   // Pane toggle wiring — forwarded to the composer's tools row. AgentChat
@@ -2059,14 +2068,28 @@ export function ChatThread({
             />
           )}
           {paneCards.files && (
-            <SessionPaneCard
-              testId="session-pane-card-files"
-              title="Files"
-              icon={FolderIcon}
-              count={paneCards.files.count}
-              onOpen={paneCards.files.onOpen}
-              className="w-auto rounded-t-xl border-b-0 -mb-px"
-            />
+            <>
+              <SessionPaneCard
+                testId="session-pane-card-files"
+                title="Files"
+                icon={FolderIcon}
+                count={paneCards.files.count}
+                expanded={paneCards.files.open}
+                onOpen={paneCards.files.onToggle}
+                className="w-auto rounded-t-xl border-b-0 -mb-px"
+              />
+              {paneCards.files.open && (
+                <div
+                  data-testid="files-accordion"
+                  // A fixed height, not content height: the workspace scrolls
+                  // inside it, and the composer must stay put when a folder
+                  // with a hundred files expands.
+                  className="-mb-px flex h-72 min-h-0 flex-col overflow-hidden border border-b-0 border-line"
+                >
+                  {paneCards.files.panel}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

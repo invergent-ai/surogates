@@ -62,13 +62,19 @@ afterEach(() => {
   container = null;
 });
 
-function mount(node: ReactElement, adapter: AgentChatAdapter): HTMLDivElement {
+function mount(
+  node: ReactElement,
+  adapter: AgentChatAdapter,
+  onFileSelect?: (path: string) => void,
+): HTMLDivElement {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root?.render(
-      <AgentChatAdapterProvider value={{ adapter, sessionId: "s-1" }}>
+      <AgentChatAdapterProvider
+        value={{ adapter, sessionId: "s-1", onFileSelect }}
+      >
         <TooltipProvider>{node}</TooltipProvider>
       </AgentChatAdapterProvider>,
     );
@@ -115,8 +121,9 @@ describe("WorkspaceFileCard", () => {
     });
   });
 
-  it("clicking the Download anchor does NOT trigger the preview dialog", () => {
+  it("clicking the Download anchor does NOT open the pane viewer", () => {
     const adapter = adapterStub();
+    const onFileSelect = vi.fn();
     const dom = mount(
       <WorkspaceFileCard
         sessionId="s-1"
@@ -124,6 +131,7 @@ describe("WorkspaceFileCard", () => {
         label="x"
       />,
       adapter,
+      onFileSelect,
     );
     const anchor = dom.querySelector("a")!;
     // Synthesize a click that bubbles — the card body's onClick would
@@ -131,20 +139,15 @@ describe("WorkspaceFileCard", () => {
     act(() => {
       anchor.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    // The preview Dialog uses a Radix Portal — its content lands on
-    // body, not inside our container. Searching the whole document.
-    expect(document.querySelector("[role='dialog']")).toBeNull();
+    expect(onFileSelect).not.toHaveBeenCalled();
   });
 
-  it("clicking the card body opens the preview dialog and fetches the file", async () => {
-    const getWorkspaceFile = vi.fn().mockResolvedValue({
-      path: "x.txt",
-      content: "hello",
-      size: 5,
-      encoding: "utf-8",
-      truncated: false,
-    });
+  it("clicking the card body opens the pane viewer, never a dialog", async () => {
+    // One viewer in the product: the right-column drawer the workspace
+    // uses. The card's old private Dialog viewer duplicated it.
+    const getWorkspaceFile = vi.fn();
     const adapter = adapterStub({ getWorkspaceFile });
+    const onFileSelect = vi.fn();
     const dom = mount(
       <WorkspaceFileCard
         sessionId="s-1"
@@ -152,20 +155,16 @@ describe("WorkspaceFileCard", () => {
         label="x"
       />,
       adapter,
+      onFileSelect,
     );
     const card = dom.querySelector("[role='button']")!;
     act(() => {
       (card as HTMLElement).click();
     });
-    // Dialog should be visible (Radix portals into body).
-    expect(document.querySelector("[role='dialog']")).not.toBeNull();
-    // Wait for the async fetch + setState.
-    await act(async () => { await Promise.resolve(); });
-    await act(async () => { await Promise.resolve(); });
-    expect(getWorkspaceFile).toHaveBeenCalledWith({
-      sessionId: "s-1",
-      path: "x.txt",
-    });
+    expect(onFileSelect).toHaveBeenCalledWith("x.txt");
+    // No dialog portal, and no fetch of its own — the drawer owns loading.
+    expect(document.querySelector("[role='dialog']")).toBeNull();
+    expect(getWorkspaceFile).not.toHaveBeenCalled();
   });
 
   it("falls back to the generic 'File' type label for unknown extensions", () => {

@@ -1,7 +1,6 @@
 import {
 	AlertCircleIcon,
 	DownloadIcon,
-	FolderOpenIcon,
 	Loader2Icon,
 	RefreshCwIcon,
 	TrashIcon,
@@ -20,7 +19,6 @@ import { cn } from "../../lib/utils";
 import type {
 	AgentChatAdapter,
 	AgentChatWorkspaceEntry,
-	AgentChatWorkspaceFile,
 } from "../../types";
 import {
 	FileTree,
@@ -39,7 +37,6 @@ import {
 import { ScrollArea } from "../ui/scroll-area";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-import { FileViewer } from "./file-viewer";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
 const DEFAULT_WIDTH = 400;
@@ -51,6 +48,11 @@ interface WorkspacePanelProps {
 	sessionId: string | null;
 	selectedPath: string | null;
 	onSelectedPathChange: (path: string | null) => void;
+	/**
+	 * Called when a file row is picked. The panel is a tree and nothing more;
+	 * the preview itself lives in the right-column drawer the caller owns.
+	 */
+	onOpenFile?: (path: string) => void;
 	refreshSignal?: number;
 	disabled?: boolean;
 	fillParent?: boolean;
@@ -166,7 +168,7 @@ function RenderEntries({
 								title="Download"
 								aria-label={`Download ${fileName}`}
 							>
-								<DownloadIcon className="size-3" />
+								<DownloadIcon className="size-5" />
 							</a>
 							<button
 								type="button"
@@ -178,7 +180,7 @@ function RenderEntries({
 								title="Delete"
 								aria-label={`Delete ${fileName}`}
 							>
-								<TrashIcon className="size-3" />
+								<TrashIcon className="size-5" />
 							</button>
 						</div>
 					</FileTreeFile>
@@ -193,6 +195,7 @@ export function WorkspacePanel({
 	sessionId,
 	selectedPath,
 	onSelectedPathChange,
+	onOpenFile,
 	refreshSignal = 0,
 	disabled = false,
 	fillParent = false,
@@ -201,9 +204,6 @@ export function WorkspacePanel({
 	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
 	const [treeLoading, setTreeLoading] = useState(false);
 	const [treeError, setTreeError] = useState<string | null>(null);
-	const [file, setFile] = useState<AgentChatWorkspaceFile | null>(null);
-	const [fileLoading, setFileLoading] = useState(false);
-	const [fileError, setFileError] = useState<string | null>(null);
 	const [notice, setNotice] = useState<string | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
@@ -251,32 +251,6 @@ export function WorkspacePanel({
 		}
 	}, [adapter, sessionId]);
 
-	const fetchFile = useCallback(
-		async (path: string) => {
-			if (!sessionId) return;
-			const requestedSessionId = sessionId;
-			setFileLoading(true);
-			setFileError(null);
-			try {
-				const nextFile = await adapter.getWorkspaceFile({
-					sessionId: requestedSessionId,
-					path,
-				});
-				if (sessionIdRef.current !== requestedSessionId) return;
-				setFile(nextFile);
-			} catch (error) {
-				if (sessionIdRef.current !== requestedSessionId) return;
-				setFile(null);
-				setFileError((error as Error).message);
-			} finally {
-				if (sessionIdRef.current === requestedSessionId) {
-					setFileLoading(false);
-				}
-			}
-		},
-		[adapter, sessionId],
-	);
-
 	useEffect(() => {
 		void fetchTree();
 	}, [fetchTree]);
@@ -291,8 +265,6 @@ export function WorkspacePanel({
 
 	useEffect(() => {
 		if (!sessionId) {
-			setFile(null);
-			setFileError(null);
 			onSelectedPathChange(null);
 		}
 	}, [onSelectedPathChange, sessionId]);
@@ -312,23 +284,15 @@ export function WorkspacePanel({
 		});
 	}, [selectedPath]);
 
-	useEffect(() => {
-		if (!selectedPath || !sessionId || entries.length === 0) return;
-		const entry = findEntry(entries, selectedPath);
-		if (entry?.kind === "file" && file?.path !== selectedPath) {
-			void fetchFile(selectedPath);
-		}
-	}, [entries, fetchFile, file?.path, selectedPath, sessionId]);
-
 	const handleSelect = useCallback(
 		(path: string) => {
 			onSelectedPathChange(path);
 			const entry = findEntry(entries, path);
 			if (entry?.kind === "file") {
-				void fetchFile(path);
+				onOpenFile?.(path);
 			}
 		},
-		[entries, fetchFile, onSelectedPathChange],
+		[entries, onOpenFile, onSelectedPathChange],
 	);
 
 	const handleUpload = useCallback(
@@ -366,8 +330,6 @@ export function WorkspacePanel({
 				await adapter.deleteWorkspaceFile({ sessionId, path });
 				if (selectedPath === path) {
 					onSelectedPathChange(null);
-					setFile(null);
-					setFileError(null);
 				}
 				setNotice(`Deleted ${path.split("/").pop() ?? path}`);
 				await fetchTree();
@@ -425,7 +387,10 @@ export function WorkspacePanel({
 		<aside
 			data-testid="workspace-panel"
 			className={cn(
-				"relative z-10 flex h-full min-h-0 flex-col overflow-hidden border-l border-muted-foreground/20 bg-card",
+				"relative z-10 flex h-full min-h-0 flex-col overflow-hidden bg-card",
+				// Filling a parent means the parent draws the frame; a border
+				// here would double against it.
+				!fillParent && "border-l border-muted-foreground/20",
 				(fillParent || narrow) && "w-full",
 			)}
 			style={
@@ -451,13 +416,9 @@ export function WorkspacePanel({
 				}}
 			/>
 
-			<div className="flex min-h-14 items-center gap-2 border-b border-line px-3 py-3">
-				<FolderOpenIcon className="size-4 shrink-0 text-amber-500" />
-				<div className="min-w-0 flex-1">
-					<div className="truncate text-sm font-medium text-foreground">
-						{disabled ? "Workspace - Read-only" : "Workspace"}
-					</div>
-				</div>
+			{/* No icon or title: the Files accordion card is the header. Only
+			    the actions remain, tucked into the right edge. */}
+			<div className="flex items-center justify-end gap-2 border-b border-line px-3 py-1.5">
 				<Tooltip>
 					<TooltipTrigger asChild>
 						<Button
@@ -560,26 +521,6 @@ export function WorkspacePanel({
 					)}
 				</div>
 			</ScrollArea>
-
-			<FileViewer
-				file={file}
-				loading={fileLoading}
-				error={fileError}
-				downloadUrl={
-					file && sessionId
-						? adapter.getWorkspaceDownloadUrl({
-								sessionId,
-								path: file.path,
-							})
-						: null
-				}
-				onDelete={file && !disabled ? () => setDeleteTarget(file.path) : null}
-				onClose={() => {
-					onSelectedPathChange(null);
-					setFile(null);
-					setFileError(null);
-				}}
-			/>
 
 			<ConfirmDialog
 				open={deleteTarget !== null}

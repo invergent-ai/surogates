@@ -1,4 +1,4 @@
-import { GlobeIcon, type LucideIcon } from "lucide-react";
+import { ChevronDownIcon, GlobeIcon, type LucideIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
 
 /**
@@ -23,6 +23,11 @@ interface SessionPaneCardProps {
   testId?: string;
   /** Lets a caller restyle the shape when cards are stacked into one surface. */
   className?: string;
+  /**
+   * Defined when the card is an accordion header: it gets a trailing chevron
+   * and announces its state, and onOpen becomes a toggle.
+   */
+  expanded?: boolean;
 }
 
 export function SessionPaneCard({
@@ -34,12 +39,14 @@ export function SessionPaneCard({
   onOpen,
   testId = "session-pane-card",
   className,
+  expanded,
 }: SessionPaneCardProps) {
   return (
     <button
       type="button"
       data-testid={testId}
       aria-label={`Open ${title}`}
+      aria-expanded={expanded === undefined ? undefined : expanded}
       onClick={onOpen}
       className={cn(
         // No radius here: the caller sets it. Declaring rounded-xl in the base
@@ -79,6 +86,16 @@ export function SessionPaneCard({
           </span>
         )}
       </span>
+      {expanded !== undefined && (
+        <ChevronDownIcon
+          data-testid="session-pane-card-chevron"
+          className={cn(
+            "ml-auto size-4 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-180",
+          )}
+          aria-hidden="true"
+        />
+      )}
     </button>
   );
 }
