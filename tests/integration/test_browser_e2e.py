@@ -222,3 +222,51 @@ async def test_containers_are_not_named_by_their_contents(browser) -> None:
         generics = [n for n in state["tree"] if n["role"] == "generic"]
         assert generics, "fixture should produce at least one generic container"
         assert all("Paragraph one" not in n["name"] for n in generics)
+
+
+CLICKABLE_PAGE = (
+    "<body style='margin:0'>"
+    "<div onclick='void 0' style='width:80px;height:30px'>Add to cart</div>"
+    "<span tabindex='0' style='display:block;width:80px;height:30px'>Menu</span>"
+    "<div style='cursor:pointer;width:80px;height:30px'>Dismiss</div>"
+    "<div style='width:80px;height:30px'>Just a label</div>"
+    "<a href='/x' style='display:block;width:80px;height:30px'>"
+    "<span>Inside a link</span></a>"
+    "<div tabindex='-1' style='width:80px;height:30px'>Scroll target</div>"
+    "</body>"
+)
+
+
+async def test_clickable_divs_become_addressable(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(CLICKABLE_PAGE))
+
+        state = await client.get_state(interactive_only=True)
+        names = [n["name"] for n in state["tree"]]
+        assert "Add to cart" in names
+        assert "Menu" in names
+        assert "Dismiss" in names
+        # A plain div stays plain -- promoting everything floods the tree.
+        assert "Just a label" not in names
+
+
+async def test_promotion_does_not_leak_into_links_or_scroll_targets(
+    browser,
+) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(CLICKABLE_PAGE))
+
+        buttons = [
+            n for n in (await client.get_state())["tree"]
+            if n["role"] == "button"
+        ]
+        names = [n["name"] for n in buttons]
+        # cursor:pointer inherits, so every span inside every link looked
+        # clickable: this turned 13 Wikipedia buttons into 618 and every one
+        # of Hacker News' 59 promotions was a span inside an anchor.
+        assert "Inside a link" not in names
+        # A negative tabindex means focusable by script but deliberately NOT
+        # reachable by the user -- how pages mark scroll targets.
+        assert "Scroll target" not in names

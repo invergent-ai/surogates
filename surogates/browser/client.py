@@ -245,9 +245,28 @@ for (const el of __els) {
   if (el.closest('[aria-hidden="true"]')) continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
-  const role = roleOf(el);
+  let role = roleOf(el);
   // input[type=hidden] carries no box, but an explicit role="hidden" does.
   if (role === 'hidden') continue;
+  // A generic element the page has wired for clicking is a control in every
+  // way that matters to the agent, and needs a ref.  Three bounds, each of
+  // which cost real over-promotion when it was missing:
+  //   - generic only, so an onclick on a <section> cannot demote a landmark;
+  //   - not already covered, i.e. not inside a control that was emitted
+  //     earlier in document order.  Both cursor:pointer and the pointer
+  //     cursor's inheritance make every <span> inside every <a> look
+  //     clickable, which is what turned 13 Wikipedia buttons into 618;
+  //   - tabindex >= 0.  A negative tabindex means focusable by script but
+  //     deliberately NOT reachable by the user, which is the opposite of
+  //     interactive, and it is how pages mark scroll targets and headings.
+  if (role === 'generic' && !covered.has(el)) {
+    const tabindex = Number(el.getAttribute('tabindex'));
+    if (el.hasAttribute('onclick')
+        || (el.hasAttribute('tabindex') && Number.isFinite(tabindex) && tabindex >= 0)
+        || (style && style.cursor === 'pointer' && isTextBlock(el))) {
+      role = 'button';
+    }
+  }
   const idx = base + out.length;
   el.setAttribute('data-sg-i', String(idx));
   let textBlock = '';
