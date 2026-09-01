@@ -19,6 +19,7 @@
 - Frontend: `cd sdk/agent-chat-react && npm test`.
 - **Page commands require a flat session.** `Page.*`, `Runtime.*` and `Input.*` return `'Page.enable' wasn't found` without one, because upstream's `devtoolsproxy` fronts 9222. Always `Target.attachToTarget({flatten: true})` and pass `sessionId`.
 - **Screencast frames must be acked** (`Page.screencastFrameAck`) or Chrome stalls the stream.
+- **Start the screencast before navigating, never after.** `Page.startScreencast` issued while a navigation is in flight is refused with `Not attached to an active page`. Measured against a real pod while building Task 1: straight after `Page.enable` it succeeds, immediately after `Page.navigate` it fails, and after a 1.5s settle or a `Page.bringToFront` it succeeds again. Attach → `Page.enable` → `startScreencast` → navigate freely.
 - **Cap screencast dimensions.** `maxWidth: 1280, maxHeight: 800, format: "jpeg", quality: 70`. Uncapped, the native 1890×1984 viewport yields 366 KB frames instead of 74 KB.
 - **This plan does not remove `BrowserEndpoint.live_view_url`.** Registry entries outlive a deploy, so that field goes in a follow-up change after the new image is in production. Removing it here breaks in-flight sessions.
 
@@ -607,7 +608,7 @@ Add to `surogates/api/routes/browser.py`, modelled on `proxy_live_view_ws`:
 
 1. Resolve the session and tenant exactly as `proxy_live_view_ws` does; reject unknown sessions before opening any CDP socket.
 2. `GET {cdp_url→http}/json/version` for `webSocketDebuggerUrl`, connect a `CdpClient`.
-3. `targets()` → pick the active page → `attach_page()` → `Page.enable` → `Page.startScreencast(SCREENCAST_PARAMS, session=...)`.
+3. `targets()` → pick the active page → `attach_page()` → `Page.enable` → `Page.startScreencast(SCREENCAST_PARAMS, session=...)`. **In that order**: starting the screencast after a navigate is refused (see Global Constraints), so it starts once at attach time and the viewer's `navigate` messages simply happen underneath it. The same applies on `switch_tab` — start the new target's screencast before anything navigates it.
 4. Register handlers: `Page.screencastFrame` → `base64.b64decode` → `websocket.send_bytes` → `Page.screencastFrameAck`; `Page.frameNavigated` → `nav`; `Target.targetCreated/InfoChanged/Destroyed` → `tabs`; `Page.javascriptDialogOpening` → `dialog`.
 5. Receive loop: reject frames over `MAX_WS_MESSAGE`; parse JSON; if `t in COMMAND_TYPES` and the lease is not held, drop and continue; `switch_tab` → stop old screencast, drain, re-attach, start new; `back`/`forward` → `Page.getNavigationHistory` then `Page.navigateToHistoryEntry`; otherwise `translate()` and `call()`.
 6. `ShellProtocolError` → drop the message, count it, keep the socket open.
