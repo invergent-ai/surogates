@@ -2038,9 +2038,13 @@ export function ChatThread({
         </div>
       )}
       {(paneCards?.browser || paneCards?.files) && (
+        // One connected surface sitting flush on the prompt box, rather than
+        // separate floating pills: the cards read as layers stacked on the
+        // composer, so the container owns the border and the rounding and the
+        // cards inside it are square and borderless.
         <div
           data-testid="session-pane-cards"
-          className="mb-2 flex flex-col gap-1.5"
+          className="flex flex-col divide-y divide-line overflow-hidden rounded-t-xl border border-b-0 border-line"
         >
           {paneCards.browser && (
             <SessionPaneCard
@@ -2050,6 +2054,7 @@ export function ChatThread({
               subtitle={paneCards.browser.subtitle}
               thumbnail={paneCards.browser.thumbnail}
               onOpen={paneCards.browser.onOpen}
+              className="rounded-none border-0"
             />
           )}
           {paneCards.files && (
@@ -2059,6 +2064,7 @@ export function ChatThread({
               icon={FolderIcon}
               count={paneCards.files.count}
               onOpen={paneCards.files.onOpen}
+              className="rounded-none border-0"
             />
           )}
         </div>

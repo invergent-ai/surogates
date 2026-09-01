@@ -1,4 +1,5 @@
 import { GlobeIcon, type LucideIcon } from "lucide-react";
+import { cn } from "../../lib/utils";
 
 /**
  * A resource the session has produced, offered above the composer.
@@ -20,6 +21,8 @@ interface SessionPaneCardProps {
   icon?: LucideIcon;
   onOpen: () => void;
   testId?: string;
+  /** Lets a caller restyle the shape when cards are stacked into one surface. */
+  className?: string;
 }
 
 export function SessionPaneCard({
@@ -30,6 +33,7 @@ export function SessionPaneCard({
   icon: Icon = GlobeIcon,
   onOpen,
   testId = "session-pane-card",
+  className,
 }: SessionPaneCardProps) {
   return (
     <button
@@ -37,7 +41,10 @@ export function SessionPaneCard({
       data-testid={testId}
       aria-label={`Open ${title}`}
       onClick={onOpen}
-      className="flex w-full items-center gap-3 rounded-xl border border-line bg-card px-3 py-2.5 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className={cn(
+        "flex w-full items-center gap-3 rounded-xl border border-line bg-card px-3 py-2.5 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        className,
+      )}
     >
       {thumbnail ? (
         <img
