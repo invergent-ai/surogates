@@ -886,13 +886,26 @@ class PromptBuilder:
                 out.extend(f"  {line}" for line in tree.splitlines())
             return out
 
+        # Three modes, two axes: how hard to lean on the KB, and whether to
+        # show evidence inline. "grounding_nocite" is authoritative exactly
+        # like "grounding" -- same must-consult, same decline-when-uncovered
+        # -- and differs only in dropping the quote-your-evidence contract,
+        # for deployments that want a clean prose answer. Measured cost of
+        # dropping it is small: requiring citations moved grounded-answer
+        # accuracy 0.94 -> 0.96 on the 54-query sonnet-5 set, inside the
+        # ~0.05 run-to-run spread. What is lost is verifiability, not
+        # correctness.
+        def _mode(kb: dict) -> str:
+            return kb.get("mode") or "grounding"
+
         grounding = [
             kb for kb in self._available_kbs
-            if (kb.get("mode") or "grounding") == "grounding"
+            if _mode(kb).startswith("grounding")
         ]
+        cite = any(_mode(kb) == "grounding" for kb in grounding)
         reference = [
             kb for kb in self._available_kbs
-            if (kb.get("mode") or "grounding") != "grounding"
+            if not _mode(kb).startswith("grounding")
         ]
 
         # Wording below is A/B-measured, not stylistic. Against a 54-query
@@ -948,15 +961,28 @@ class PromptBuilder:
             # grounding failure measured was an over-claim on a page that WAS
             # correctly retrieved and read -- misattributing a quote, misfiling
             # a category -- which no coverage- or retrieval-level check can see.
-            lines.append(
-                "Show your evidence. After a factual claim, name the page "
-                "it came from and quote the words that support it, like "
-                "`[summaries/01-intro.md] \"quoted words from the page\"`. "
-                "Quote verbatim -- do not paraphrase inside the quotation "
-                "marks, and never quote text you did not read. If you "
-                "cannot find words that support a sentence, leave the "
-                "sentence out."
-            )
+            if cite:
+                lines.append(
+                    "Show your evidence. After a factual claim, name the "
+                    "page it came from and quote the words that support it, "
+                    "like `[summaries/01-intro.md] \"quoted words from the "
+                    "page\"`. Quote verbatim -- do not paraphrase inside the "
+                    "quotation marks, and never quote text you did not read. "
+                    "If you cannot find words that support a sentence, leave "
+                    "the sentence out."
+                )
+            else:
+                # No inline citations, but the grounding requirement is
+                # unchanged -- the claim still has to come from a page that
+                # was read. Saying so explicitly matters: without it, "you
+                # need not quote" reads as "you need not check".
+                lines.append(
+                    "Answer in plain prose, without inline citations or "
+                    "quotations. This changes only the presentation: every "
+                    "factual claim must still come from a page you actually "
+                    "read, and a sentence you cannot support from one must "
+                    "be left out."
+                )
             for kb in grounding:
                 lines.append("")
                 lines.extend(_render_kb(kb))

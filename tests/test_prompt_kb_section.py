@@ -120,3 +120,56 @@ def test_citation_contract_is_grounding_only(tmp_path: Path):
         _make_tenant(tmp_path), available_kbs=[REFERENCE_KB],
     )._kb_section()
     assert "Quote verbatim" not in referenced
+
+
+# --- grounding_nocite -----------------------------------------------------
+#
+# Some deployments want a clean prose answer with no inline quotations. That
+# is a presentation choice, and it must not silently become a grounding
+# choice: the KB stays authoritative and an uncovered question is still
+# declined. Requiring citations was measured at 0.94 -> 0.96 grounded-answer
+# accuracy (inside run-to-run spread), so what is traded away is
+# verifiability, not correctness.
+
+NOCITE_KB = {
+    "id": "kb-nocite", "name": "eurolife", "display_name": "Eurolife",
+    "description": "Insurance conditions", "mode": "grounding_nocite",
+}
+
+
+def _section(tmp_path, kbs):
+    return PromptBuilder(_make_tenant(tmp_path), available_kbs=kbs)._kb_section()
+
+
+def test_nocite_drops_the_quote_contract(tmp_path):
+    out = _section(tmp_path, [NOCITE_KB])
+    assert "Quote verbatim" not in out
+    assert "quoted words from the page" not in out
+    assert "without inline citations" in out
+
+
+def test_nocite_is_still_authoritative_and_still_declines(tmp_path):
+    out = _section(tmp_path, [NOCITE_KB])
+    # Listed as authoritative, not as optional reference material.
+    assert "## Authoritative (consult first)" in out
+    assert "Reference (consult when relevant)" not in out
+    # The decline instruction and the anti-over-decline counterweight both
+    # survive -- dropping either is the measured regression.
+    assert "does not address the question" in out
+    assert "do not reach for that too quickly" in out
+    # And grounding itself is unchanged.
+    assert "must still come from a page you actually read" in out
+
+
+def test_grounding_still_cites(tmp_path):
+    out = _section(tmp_path, [GROUNDING_KB])
+    assert "Quote verbatim" in out
+
+
+def test_one_citing_kb_keeps_citations_for_the_turn(tmp_path):
+    # Mixed attachment: the contract is per-turn, not per-page, and the
+    # agent cannot cite one KB while silently not citing another. Presence
+    # of any citing KB keeps the contract on.
+    out = _section(tmp_path, [NOCITE_KB, GROUNDING_KB])
+    assert "Quote verbatim" in out
+    assert "without inline citations" not in out
