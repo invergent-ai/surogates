@@ -353,19 +353,41 @@ export function BrowserShell({
           className="flex min-h-[34px] items-center gap-0.5 border-b border-line bg-card px-1.5"
         >
           {tabs.map((tab) => (
-            <button
+            // A div, not a button: the close control nests inside, and a
+            // button inside a button is invalid markup.
+            <div
               key={tab.id}
-              type="button"
+              role="tab"
+              tabIndex={0}
+              aria-selected={tab.active}
               data-testid="browser-shell-tab"
               onClick={() => send({ t: "switch_tab", id: tab.id })}
-              className={`flex h-6 max-w-33 items-center gap-1.5 truncate rounded px-2 text-[11px] ${
+              onKeyDown={(event) => {
+                if (event.key === "Enter") send({ t: "switch_tab", id: tab.id });
+              }}
+              className={`flex h-6 max-w-33 cursor-pointer items-center gap-1 truncate rounded px-2 text-[11px] ${
                 tab.active
                   ? "bg-secondary text-foreground"
                   : "text-muted-foreground hover:text-foreground"
               }`}
             >
               <span className="truncate">{tab.title || tab.url}</span>
-            </button>
+              {hasControl && (
+                <button
+                  type="button"
+                  data-testid="browser-shell-tab-close"
+                  aria-label={`Close ${tab.title || tab.url}`}
+                  onClick={(event) => {
+                    // Closing is not switching.
+                    event.stopPropagation();
+                    command({ t: "close_tab", id: tab.id });
+                  }}
+                  className="flex size-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  <XSmall />
+                </button>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -458,6 +480,13 @@ const Pointer = () => (
   <svg {...svg}>
     <path d="M12.586 12.586 19 19" />
     <path d="M3.688 3.037a.497.497 0 0 0-.651.651l6.5 15.999a.501.501 0 0 0 .947-.062l1.569-6.083a2 2 0 0 1 1.448-1.479l6.124-1.579a.5.5 0 0 0 .063-.947z" />
+  </svg>
+);
+
+const XSmall = () => (
+  <svg {...svg} width={10} height={10}>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
   </svg>
 );
 

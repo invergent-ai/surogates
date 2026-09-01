@@ -180,10 +180,68 @@ class TestBadInput:
 
 
 class TestTabs:
+    async def test_start_turns_on_target_discovery(self) -> None:
+        # The targetCreated/Destroyed/InfoChanged handlers are dead code
+        # unless discovery is enabled: Chrome sends none of those events by
+        # default, so the tab strip would be a snapshot from connect time —
+        # stale ids, and a close that seems to take the wrong tab.
+        _session_obj, cdp, _client = await _session()
+        assert ("Target.setDiscoverTargets", {"discover": True}, None) in cdp.calls
+        await _session_obj.close()
+
     async def test_target_changes_push_a_fresh_tab_list(self) -> None:
         session, cdp, client = await _session()
         client.text.clear()
         cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "t2"}})
         await asyncio.sleep(0.05)
         assert any(msg.get("t") == "tabs" for msg in client.text)
+        await session.close()
+
+
+class TestCloseTab:
+    def _two_tabs(self) -> FakeCdp:
+        return FakeCdp({
+            "Page.getLayoutMetrics": _layout(),
+            "__targets__": [
+                {"targetId": "t1", "url": "u1"},
+                {"targetId": "t2", "url": "u2"},
+            ],
+        })
+
+    async def test_close_tab_reaches_the_browser(self) -> None:
+        session, cdp, _client = await _session(cdp=self._two_tabs())
+        await session.handle(json.dumps({"t": "close_tab", "id": "t2"}))
+        assert ("Target.closeTarget", {"targetId": "t2"}, None) in cdp.calls
+        await session.close()
+
+    async def test_close_tab_requires_the_lease(self) -> None:
+        # Closing a tab mutates the agent's browser, unlike switching what
+        # the viewer watches — so it is gated like every other command.
+        session, cdp, _client = await _session(lease=False, cdp=self._two_tabs())
+        await session.handle(json.dumps({"t": "close_tab", "id": "t2"}))
+        assert "Target.closeTarget" not in cdp.methods()
+        await session.close()
+
+    async def test_closing_the_active_tab_moves_the_stream_to_a_survivor(
+        self,
+    ) -> None:
+        session, cdp, _client = await _session(cdp=self._two_tabs())
+        cdp.calls.clear()
+        await session.handle(json.dumps({"t": "close_tab", "id": "t1"}))
+        methods = cdp.methods()
+        assert "Target.closeTarget" in methods
+        # The screencast died with its target; the viewer must not be left
+        # on a dead stream.
+        assert ("Target.attachToTarget", {"targetId": "t2"}, None) in cdp.calls
+        assert methods.index("Target.closeTarget") < methods.index(
+            "Target.attachToTarget"
+        )
+        await session.close()
+
+    async def test_the_last_tab_cannot_be_closed(self) -> None:
+        session, cdp, _client = await _session()
+        await session.handle(json.dumps({"t": "close_tab", "id": "t1"}))
+        # The last tab is the browser; closing it would leave nothing to
+        # stream and nothing for the agent to come back to.
+        assert "Target.closeTarget" not in cdp.methods()
         await session.close()

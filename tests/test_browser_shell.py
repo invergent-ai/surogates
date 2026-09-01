@@ -157,6 +157,7 @@ class TestLeaseSurface:
             "back",
             "forward",
             "reload",
+            "close_tab",
         }
 
     def test_switch_tab_is_not_lease_gated(self) -> None:

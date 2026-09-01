@@ -138,6 +138,35 @@ describe("BrowserShell", () => {
     });
   });
 
+  it("closes a tab from its close button, without switching to it", async () => {
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    await push({ t: "tabs", tabs: TABS });
+
+    const closes = node.querySelectorAll<HTMLButtonElement>(
+      "[data-testid='browser-shell-tab-close']",
+    );
+    expect(closes).toHaveLength(2);
+
+    await act(async () => {
+      closes[1].click();
+    });
+    const messages = FakeSocket.last?.messages() ?? [];
+    expect(messages).toContainEqual({ t: "close_tab", id: "t2" });
+    // The ✕ must not double as a switch.
+    expect(messages.filter((m) => m.t === "switch_tab")).toHaveLength(0);
+  });
+
+  it("offers no tab close buttons to a viewer without control", async () => {
+    // Closing a tab mutates the agent's browser; watching never does.
+    const node = await render(
+      <BrowserShell src="wss://x/shell" hasControl={false} />,
+    );
+    await push({ t: "tabs", tabs: TABS });
+    expect(
+      node.querySelectorAll("[data-testid='browser-shell-tab-close']"),
+    ).toHaveLength(0);
+  });
+
   it("hides the tab strip when there is only one tab", async () => {
     // The common case: 44px of chrome instead of 78px.
     const node = await render(<BrowserShell src="wss://x/shell" hasControl />);

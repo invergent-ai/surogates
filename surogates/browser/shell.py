@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 # Message types that act on the page, and so require the control lease.
 # ``switch_tab`` is deliberately absent: it changes what a viewer watches, not
 # the page, so a viewer without the lease may still look at another tab.
+# ``close_tab`` is present: it mutates the agent's browser.
 COMMAND_TYPES: frozenset[str] = frozenset({
     "click", "scroll", "type", "key",
-    "navigate", "back", "forward", "reload",
+    "navigate", "back", "forward", "reload", "close_tab",
 })
 
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
@@ -290,6 +291,9 @@ class ShellSession:
             "Target.targetInfoChanged",
         ):
             self._cdp.on(event, self._on_targets_changed)
+        # Chrome sends none of those events until discovery is on; without
+        # this the tab strip is a snapshot from connect time.
+        await self._cdp.call("Target.setDiscoverTargets", {"discover": True})
         self._pump = asyncio.create_task(self._pump_frames())
         await self._attach(pages[0]["targetId"])
         await self._push_tabs()
@@ -324,6 +328,8 @@ class ShellSession:
         try:
             if kind == "switch_tab":
                 await self._switch_tab(message.get("id"))
+            elif kind == "close_tab":
+                await self._close_tab(message.get("id"))
             elif kind in {"back", "forward"}:
                 await self._history(kind)
             else:
@@ -353,6 +359,29 @@ class ShellSession:
             await self._cdp.call("Page.stopScreencast", session=self._session)
             self._drain_frames()
         await self._attach(target_id)
+        await self._push_tabs()
+
+    async def _close_tab(self, target_id: object) -> None:
+        if not isinstance(target_id, str) or not target_id:
+            raise ShellProtocolError("close_tab needs a target id")
+        pages = await self._cdp.targets()
+        if len(pages) <= 1:
+            # The last tab is the browser: closing it leaves nothing to
+            # stream and nothing for the agent to come back to.
+            raise ShellProtocolError("cannot close the last tab")
+        survivors = [
+            page["targetId"]
+            for page in pages
+            if page.get("targetId") != target_id
+        ]
+        if len(survivors) == len(pages):
+            raise ShellProtocolError("unknown tab")
+        await self._cdp.call("Target.closeTarget", {"targetId": target_id})
+        if target_id == self._target:
+            # The screencast died with its target; move to a survivor
+            # rather than leaving the viewer on a dead stream.
+            self._drain_frames()
+            await self._attach(survivors[0])
         await self._push_tabs()
 
     async def _history(self, direction: str) -> None:
