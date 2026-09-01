@@ -27,6 +27,8 @@ INTERACTIVE_ROLES: frozenset[str] = frozenset({
     "searchbox",
     "slider",
     "spinbutton",
+    "option",
+    "file-input",
 })
 
 # Cap on emitted nodes.  Deliberately not a tool parameter: ``browser_evaluate``

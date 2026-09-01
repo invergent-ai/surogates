@@ -186,3 +186,20 @@ class TestEmptyPage:
     def test_empty_tree_yields_header_only(self) -> None:
         out = render_markdown(_state([]))
         assert "no visible elements" in out
+
+
+class TestRoleSetSync:
+    def test_interactive_roles_match_the_client(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+        from surogates.browser.serialize import INTERACTIVE_ROLES
+
+        # The serializer keeps its own copy so it need not import the HTTP
+        # client.  A role in one set and not the other renders a control as
+        # plain text with no @eN: the model can read it and cannot click it.
+        assert INTERACTIVE_ROLES == KernelBrowserClient._INTERACTIVE_ROLES
+
+    def test_option_role_renders_addressable(self) -> None:
+        out = render_markdown(_state([
+            {"role": "option", "ref": "@e1", "name": "Standard delivery"},
+        ]))
+        assert '- option @e1 "Standard delivery"' in out
