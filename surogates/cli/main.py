@@ -47,6 +47,10 @@ def _configure_logging(level: str) -> None:
         "s3transfer",
     ):
         logging.getLogger(name).setLevel(logging.WARNING)
+    # Uvicorn hands this logger to its websockets protocol, which traces
+    # every frame at DEBUG — one line per forwarded screencast JPEG. INFO
+    # keeps startup messages and errors.
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
     # Suppress urllib3's InsecureRequestWarning / connection warnings so
     # they don't spam stderr outside the logging machinery.
@@ -76,7 +80,11 @@ def cmd_api(args: argparse.Namespace) -> None:
         host=settings.api.host,
         port=settings.api.port,
         workers=settings.api.workers,
-        log_level=settings.log_level.lower(),
+        # No uvicorn dictConfig: it would re-level uvicorn's loggers over
+        # the clamps _configure_logging just set (a DEBUG dev config turns
+        # uvicorn.error into a per-frame websocket trace). With no config
+        # of its own, uvicorn propagates to the root logging set up above.
+        log_config=None,
     )
 
 
@@ -118,7 +126,8 @@ def cmd_mcp_proxy(args: argparse.Namespace) -> None:
         host=settings.host,
         port=settings.port,
         workers=settings.workers,
-        log_level=settings.log_level.lower(),
+        # See cmd_api: uvicorn's own dictConfig would override the clamps.
+        log_config=None,
     )
 
 
