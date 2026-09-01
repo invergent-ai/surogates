@@ -3,11 +3,12 @@
 //
 // WorkspaceFileCard — Claude-style downloadable card rendered for
 // each file artifact in the TurnSummaryCard. Clicking the card body
-// opens a preview dialog (without disturbing the workspace pane);
-// clicking the Download button triggers a same-origin download via
+// opens the file in the same right-column viewer the workspace uses —
+// one viewer in the product, never a second dialog-shaped one.
+// Clicking the Download button triggers a same-origin download via
 // the adapter's getWorkspaceDownloadUrl.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import {
   CodeIcon,
   DownloadIcon,
@@ -25,14 +26,6 @@ import {
 
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { cn } from "../../lib/utils";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
-import { FileViewer } from "../workspace/file-viewer";
-import type { AgentChatWorkspaceFile } from "../../types";
 
 export interface WorkspaceFileCardProps {
   sessionId: string;
@@ -131,149 +124,59 @@ export function WorkspaceFileCard({
   path,
   label,
 }: WorkspaceFileCardProps) {
-  const { adapter } = useAgentChatAdapterContext();
+  const { adapter, onFileSelect } = useAgentChatAdapterContext();
   const kind = _fileKindFor(path);
   const Icon = kind.icon;
   const downloadUrl = adapter.getWorkspaceDownloadUrl({ sessionId, path });
   const downloadName = _basename(path) || label;
 
-  const [previewOpen, setPreviewOpen] = useState(false);
-
   const handleCardClick = useCallback(() => {
-    setPreviewOpen(true);
-  }, []);
+    onFileSelect?.(path);
+  }, [onFileSelect, path]);
 
   return (
-    <>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={handleCardClick}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            handleCardClick();
-          }
-        }}
-        className={cn(
-          "group/file flex items-center gap-3 rounded-lg border border-border",
-          "bg-muted/20 px-3 py-2 text-left transition-colors",
-          "cursor-pointer hover:bg-muted/40",
-        )}
-      >
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-background">
-          <Icon className="size-5 text-muted-foreground" aria-hidden />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-foreground">
-            {label}
-          </div>
-          <div className="truncate text-xs text-muted-foreground">
-            {kind.typeLabel}
-          </div>
-        </div>
-        <a
-          href={downloadUrl}
-          download={downloadName}
-          // Stop the click from triggering the card's preview dialog.
-          onClick={(e) => e.stopPropagation()}
-          className={cn(
-            "shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border",
-            "bg-background px-2.5 py-1.5 text-xs font-medium text-foreground",
-            "transition-colors hover:bg-muted",
-          )}
-          aria-label={`Download ${downloadName}`}
-        >
-          <DownloadIcon className="size-3.5" aria-hidden />
-          Download
-        </a>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={handleCardClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          handleCardClick();
+        }
+      }}
+      className={cn(
+        "group/file flex items-center gap-3 rounded-lg border border-border",
+        "bg-muted/20 px-3 py-2 text-left transition-colors",
+        "cursor-pointer hover:bg-muted/40",
+      )}
+    >
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-md border border-border bg-background">
+        <Icon className="size-5 text-muted-foreground" aria-hidden />
       </div>
-      <WorkspaceFilePreviewDialog
-        open={previewOpen}
-        onOpenChange={setPreviewOpen}
-        sessionId={sessionId}
-        path={path}
-        downloadUrl={downloadUrl}
-      />
-    </>
-  );
-}
-
-interface WorkspaceFilePreviewDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  sessionId: string;
-  path: string;
-  downloadUrl: string;
-}
-
-function WorkspaceFilePreviewDialog({
-  open,
-  onOpenChange,
-  sessionId,
-  path,
-  downloadUrl,
-}: WorkspaceFilePreviewDialogProps) {
-  const { adapter } = useAgentChatAdapterContext();
-  const [file, setFile] = useState<AgentChatWorkspaceFile | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setFile(null);
-    adapter
-      .getWorkspaceFile({ sessionId, path })
-      .then((result) => {
-        if (cancelled) return;
-        setFile(result);
-        setLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const message = err instanceof Error
-          ? err.message
-          : "Failed to load file";
-        setError(message);
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [adapter, sessionId, path, open]);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[85vh] w-[95vw] max-w-350! flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="flex flex-row items-center gap-2 border-b border-line px-4 py-3">
-          <DialogTitle className="min-w-0 flex-1 truncate text-sm">
-            {_basename(path)}
-          </DialogTitle>
-          <a
-            href={downloadUrl}
-            download={_basename(path)}
-            className="mr-8 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-            aria-label={`Download ${_basename(path)}`}
-          >
-            <DownloadIcon className="size-3.5" aria-hidden />
-            Download
-          </a>
-        </DialogHeader>
-        <div className="flex min-h-0 flex-1 flex-col">
-          <FileViewer
-            file={file}
-            loading={loading}
-            error={error}
-            downloadUrl={downloadUrl}
-            onDelete={null}
-            onClose={() => onOpenChange(false)}
-            hideHeader
-          />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-foreground">
+          {label}
         </div>
-      </DialogContent>
-    </Dialog>
+        <div className="truncate text-xs text-muted-foreground">
+          {kind.typeLabel}
+        </div>
+      </div>
+      <a
+        href={downloadUrl}
+        download={downloadName}
+        // Stop the click from opening the pane viewer.
+        onClick={(e) => e.stopPropagation()}
+        className={cn(
+          "shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border",
+          "bg-background px-2.5 py-1.5 text-xs font-medium text-foreground",
+          "transition-colors hover:bg-muted",
+        )}
+        aria-label={`Download ${downloadName}`}
+      >
+        <DownloadIcon className="size-4" aria-hidden />
+        Download
+      </a>
+    </div>
   );
 }

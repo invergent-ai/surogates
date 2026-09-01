@@ -500,7 +500,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
 
     from surogates.channels.delivery import DeliveryService
     from surogates.db.engine import async_engine_from_settings, async_session_factory
-    from surogates.runtime import ChannelRoutingCache, PlatformClient
+    from surogates.runtime import PlatformClient
     from surogates.session.store import SessionStore
     from surogates.tenant.credentials import CredentialVault
 
@@ -603,7 +603,9 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         app,
         host="0.0.0.0",
         port=port,
-        log_level=settings.log_level.lower(),
+        # No uvicorn dictConfig: it would re-level uvicorn's loggers over
+        # the clamps the CLI's logging setup applied.
+        log_config=None,
     )
     server = uvicorn.Server(config)
 

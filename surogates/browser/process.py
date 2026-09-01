@@ -198,13 +198,19 @@ class ProcessBrowserBackend:
         return workspace
 
     async def status(self, browser_id: str) -> BrowserStatus:
-        if browser_id not in self._entries:
-            return BrowserStatus.TERMINATED
+        # Ask docker, never the in-memory map: containers are detached and
+        # registry entries persist, so the normal case after a worker restart
+        # is a live container this backend instance never created. Reporting
+        # those TERMINATED made the pool's reattach path discard live
+        # browsers' entries -- "the browser is gone and nobody closed it".
         code, stdout, _stderr = await self._docker.run(
             ["inspect", "--format", "{{.State.Status}}", browser_id]
         )
         if code != 0:
-            return BrowserStatus.FAILED
+            # Docker not knowing the id means there is nothing to reattach
+            # to, which is TERMINATED rather than FAILED: failed implies a
+            # container that exists and is broken.
+            return BrowserStatus.TERMINATED
         status = stdout.decode().strip()
         if status == "running":
             return BrowserStatus.RUNNING
@@ -215,18 +221,24 @@ class ProcessBrowserBackend:
         return BrowserStatus.FAILED
 
     async def destroy(self, browser_id: str) -> None:
-        if browser_id not in self._entries:
-            return
+        # By id against docker, whether or not this instance created it:
+        # cleanup has to work across worker restarts, or stale containers
+        # from a previous process leak as orphans no one can remove.
         await self._docker.run(["stop", browser_id])
         await self._docker.run(["rm", browser_id])
-        del self._entries[browser_id]
+        self._entries.pop(browser_id, None)
         logger.info("Destroyed browser container %s", browser_id)
 
     async def destroy_for_session(self, session_id: str) -> None:
+        # Both filters, not just the session: sandbox containers carry the
+        # same surogates.session_id label, and a sweep keyed on the session
+        # alone would stop the session's sandbox along with its browser.
         code, stdout, stderr = await self._docker.run(
             [
                 "ps",
                 "-aq",
+                "--filter",
+                "label=app=surogates-browser",
                 "--filter",
                 f"label=surogates.session_id={session_id}",
             ]

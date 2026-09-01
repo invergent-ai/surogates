@@ -13,7 +13,6 @@ import signal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from openai import AsyncOpenAI
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -2230,6 +2229,21 @@ async def run_worker(settings: Settings) -> None:
         name="board-maintenance-sweeper",
     )
 
+    # Browsers die without the server hearing (host kills, OOM, external
+    # cleanup), leaving registry entries that every consumer then trips over
+    # separately. The reaper probes each entry, prunes the provably dead, and
+    # emits the browser.destroyed the death never produced -- the UI and the
+    # pool both correct themselves off that event.
+    from surogates.jobs.browser_reaper import run_browser_reaper_loop
+    browser_reaper_task = asyncio.create_task(
+        run_browser_reaper_loop(
+            registry=browser_registry,
+            redis=redis_client,
+            emit=_emit_browser_event,
+        ),
+        name="browser-registry-reaper",
+    )
+
     health_server = await start_health_server(
         settings.health_port,
         lambda: infrastructure_readiness(redis_client, session_factory),
@@ -2267,8 +2281,18 @@ async def run_worker(settings: Settings) -> None:
             await board_maintenance_task
         except asyncio.CancelledError:
             pass
+        browser_reaper_task.cancel()
+        try:
+            await browser_reaper_task
+        except asyncio.CancelledError:
+            pass
         await health_server.stop()
-        await browser_pool.destroy_all()
+        # Deliberately NOT destroying browsers here. Containers are detached
+        # and registry entries persist, so sessions -- which outlive workers in
+        # shared-runtime mode -- reattach to their live browser on the next
+        # tool call now that the backend asks docker instead of its own
+        # memory. Destroying on shutdown made every runtime restart a browser
+        # massacre, and the registry reaper owns cleanup of the truly dead.
         await sandbox_pool.destroy_all()
         # K8sSandbox holds an aiohttp session for the executor daemons;
         # ProcessSandbox has no aclose, hence the getattr guard.

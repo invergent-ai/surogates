@@ -47,6 +47,31 @@ class BrowserResolver:
         self._registry = registry
         self._backend = backend
 
+    async def forget_unreachable(self, session_id: str) -> None:
+        """Drop a registry entry a caller has just proven it cannot reach.
+
+        Nothing else prunes this map: a browser can die without the server
+        emitting ``browser.destroyed``, and the entry then outlives it
+        indefinitely. Every consumer that trusts ``resolve`` — the preview
+        endpoint, the browser shell, the UI deciding whether to offer a
+        browser at all — is left discovering the truth by timing out.
+
+        A request that has just failed to reach the endpoint is proof the
+        entry is wrong now, so removing it is safe and makes the next
+        ``resolve`` answer honestly. Never raises: this runs on a path that
+        is already returning an error, and a second failure there would
+        replace a clear browser error with a confusing registry one.
+        """
+
+        try:
+            await self._registry.delete(session_id)
+        except Exception:  # noqa: BLE001 - a courtesy, never the caller's problem
+            logger.warning(
+                "Could not prune unreachable browser %s from the registry",
+                session_id,
+                exc_info=True,
+            )
+
     async def resolve(
         self,
         session_id: str,

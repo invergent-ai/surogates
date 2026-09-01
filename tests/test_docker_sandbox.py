@@ -34,14 +34,17 @@ class FakeDocker:
             self._containers[cid] = {"running": True, "labels": labels}
             return 0, cid.encode() + b"\n", b""
         if args[:2] == ["ps", "-aq"]:
-            label = ""
+            # Real docker ANDs repeated --filter flags; honoring only the
+            # last one would hide exactly the bug these tests exist to
+            # catch (a sweep matching every container of the session).
+            wanted: list[tuple[str, str]] = []
             for idx, arg in enumerate(args):
                 if arg == "--filter" and idx + 1 < len(args):
-                    label = args[idx + 1].removeprefix("label=")
-            key, _, value = label.partition("=")
+                    key, _, value = args[idx + 1].removeprefix("label=").partition("=")
+                    wanted.append((key, value))
             matches = [
                 cid for cid, st in self._containers.items()
-                if st.get("labels", {}).get(key) == value
+                if all(st.get("labels", {}).get(k) == v for k, v in wanted)
             ]
             return 0, ("\n".join(matches) + ("\n" if matches else "")).encode(), b""
         if args[0] == "inspect":
@@ -108,9 +111,15 @@ class TestProvision:
 
     async def test_reaps_stale_session_containers_before_provision(self, healthz_transport):
         docker = FakeDocker()
-        # Pre-seed a stale container labelled for the same session.
+        # Pre-seed a stale container labelled the way provision labels them
+        # (app + session); the sweep requires both so it can never take the
+        # session's browser container.
         docker._containers["stale"] = {
-            "running": True, "labels": {"surogates.session_id": "root-1"},
+            "running": True,
+            "labels": {
+                "app": "surogates-sandbox",
+                "surogates.session_id": "root-1",
+            },
         }
         backend = _backend(docker, healthz_transport)
         await backend.provision(SandboxSpec(session_id="root-1"))
@@ -243,6 +252,25 @@ class TestStatusAndDestroy:
         await backend.destroy_for_session("root-1")
         assert any(c[:2] == ["ps", "-aq"] for c in docker.calls)
         assert any(c[0] == "rm" for c in docker.calls)
+        await backend.aclose()
+
+    async def test_destroy_for_session_spares_the_browser(self, healthz_transport):
+        # Browser containers carry the same surogates.session_id label. A
+        # sweep keyed on the session label alone stops them too — which is
+        # how every completed session silently killed its own live browser.
+        docker = FakeDocker()
+        backend = _backend(docker, healthz_transport)
+        await backend.provision(SandboxSpec(session_id="root-1"))
+        docker._containers["browser-1"] = {
+            "running": True,
+            "labels": {
+                "app": "surogates-browser",
+                "surogates.session_id": "root-1",
+            },
+        }
+        await backend.destroy_for_session("root-1")
+        assert "browser-1" in docker._containers
+        assert not any(c[:2] == ["stop", "browser-1"] for c in docker.calls)
         await backend.aclose()
 
 

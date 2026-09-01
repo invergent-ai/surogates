@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import "pdfjs-dist/web/pdf_viewer.css";
 import { formatFileSize, getLanguageHint } from "../../lib/format";
+import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
@@ -46,6 +47,7 @@ interface FileViewerProps {
   /** Hide the built-in filename/download/close header. Use when the
    *  parent (e.g. a Dialog) already renders its own title bar. */
   hideHeader?: boolean;
+  className?: string;
 }
 
 export function FileViewer({
@@ -56,6 +58,7 @@ export function FileViewer({
   onDelete,
   onClose,
   hideHeader = false,
+  className,
 }: FileViewerProps) {
   const visible = loading || file !== null || error !== null;
   if (!visible) return null;
@@ -70,13 +73,13 @@ export function FileViewer({
   const HeaderIcon = isImage ? ImageIcon : FileTextIcon;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col border-t border-line">
+    <div className={cn("flex min-h-0 flex-1 flex-col border-t border-line", className)}>
       {!hideHeader && (
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-          <HeaderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+          <HeaderIcon className="size-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-xs font-medium">{fileName}</div>
-            <div className="truncate text-[10px] text-muted-foreground">
+            <div className="truncate font-medium">{fileName}</div>
+            <div className="truncate text-sm text-muted-foreground">
               {file?.path ?? "Loading..."}
               {file && (
                 <span className="ml-1.5">
@@ -94,7 +97,7 @@ export function FileViewer({
               aria-label={`Download ${fileName}`}
               title="Download"
             >
-              <DownloadIcon className="size-3.5" />
+              <DownloadIcon className="size-4" />
             </a>
           )}
           {onDelete && (
@@ -105,7 +108,7 @@ export function FileViewer({
               aria-label={`Delete ${fileName}`}
               title="Delete"
             >
-              <TrashIcon className="size-3.5" />
+              <TrashIcon className="size-4" />
             </button>
           )}
           <button
@@ -114,7 +117,7 @@ export function FileViewer({
             className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="Close file"
           >
-            <XIcon className="size-3.5" />
+            <XIcon className="size-4" />
           </button>
         </div>
       )}
@@ -162,7 +165,7 @@ export function FileViewer({
           )}
 
           {file && !isImage && !isPdf && (
-            <pre className="wrap-break-word whitespace-pre-wrap p-3 text-[11px] leading-relaxed text-foreground">
+            <pre className="wrap-break-word whitespace-pre-wrap p-3 text-base leading-relaxed text-foreground">
               <code data-language={lang}>{file.content}</code>
             </pre>
           )}

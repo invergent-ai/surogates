@@ -10,6 +10,7 @@ import { TerminalToolBlock } from "./tools/terminal-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import { ExecuteCodeToolBlock } from "./tools/execute-code-tool";
 import {
+  KnowledgeBaseToolBlock,
   MCPToolBlock,
   ResearchMemoryBlock,
   SessionSearchBlock,
@@ -73,6 +74,11 @@ export function ToolCallBlock({
     case "web_search":
     case "web_crawl":
       return <WebToolBlock tc={tc} />;
+
+    case "kb_search_pages":
+    case "kb_list_pages":
+    case "kb_read_page":
+      return <KnowledgeBaseToolBlock tc={tc} />;
 
     case "vision_analyze":
       return <VisionAnalyzeBlock tc={tc} />;

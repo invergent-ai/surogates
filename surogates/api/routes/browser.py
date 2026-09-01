@@ -6,10 +6,7 @@ import asyncio
 import contextlib
 import logging
 from typing import Any
-from urllib.parse import urlencode
 from uuid import UUID
-
-logger = logging.getLogger(__name__)
 
 import httpx
 import websockets
@@ -18,16 +15,18 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
-from surogates.browser.rfb import RFBClientMessageGate
+from surogates.browser.shell import ShellSession
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
-    LIVE_VIEW_TOKEN_COOKIE,
     authenticate_websocket_tenant,
     get_current_tenant,
 )
 from surogates.tenant.context import TenantContext
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -47,50 +46,68 @@ def _route_prefix(request: Request) -> str:
     return "/v1/api" if request.url.path.startswith("/v1/api/") else "/v1"
 
 
-async def _proxy_live_view_request(method: str, url: str, **kwargs) -> httpx.Response:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await client.request(method, url, **kwargs)
-
-
 def _browser_preview_client(rest_url: str) -> KernelBrowserClient:
     return KernelBrowserClient(rest_url)
 
 
-async def _connect_live_view_ws(url: str):
-    return await websockets.connect(url, subprotocols=["binary"])
+# Screencast frames arrive base64-encoded, so a capped 74 KB JPEG crosses the
+# CDP socket at ~99 KB. Bounded well above that, and well below "unbounded".
+MAX_CDP_FRAME = 32 * 1024 * 1024
 
 
-def _live_view_client_payload(message: dict[str, Any]) -> str | bytes | None:
-    if message.get("bytes") is not None:
-        return message["bytes"]
-    if message.get("text") is not None:
-        return message["text"]
-    return None
+# How long to let a freshly provisioned browser finish opening its debug port.
+# The backend's readiness check polls the kernel REST API on :10001, and Chrome
+# binds :9222 after that, so a viewer who opens the pane during provisioning
+# arrives before CDP is listening. Bounded: a browser that is genuinely gone
+# must not hold a viewer's socket open indefinitely.
+CDP_READY_TIMEOUT = 20.0
+CDP_POLL_INTERVAL = 0.25
 
 
-async def _send_live_view_frame_to_client(
-    websocket: WebSocket,
-    frame: str | bytes,
-) -> None:
-    if isinstance(frame, str):
-        await websocket.send_text(frame)
-        return
-    await websocket.send_bytes(frame)
+async def _poll_cdp_version(
+    http: httpx.AsyncClient,
+    base: str,
+    timeout: float,
+) -> str:
+    """Read ``/json/version``, waiting out a port that is not open yet.
+
+    Only transport errors are retried. A reachable endpoint answering the
+    wrong shape is a broken browser rather than a slow one, and retrying
+    would delay a failure that will not fix itself.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            response = await http.get(f"{base}/json/version")
+            return response.json()["webSocketDebuggerUrl"]
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if loop.time() >= deadline:
+                raise
+            await asyncio.sleep(CDP_POLL_INTERVAL)
 
 
-_LIVE_VIEW_STRIPPED_PARAMS = frozenset({"token", "owner_user_id"})
+async def _cdp_browser_ws_url(
+    cdp_url: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+    timeout: float = CDP_READY_TIMEOUT,
+) -> str:
+    """Resolve the pod's browser-level DevTools socket from its CDP endpoint.
 
+    The URL in the registry is the port, not the socket: Chrome mints a fresh
+    ``/devtools/browser/<uuid>`` path per launch, so it has to be read from
+    ``/json/version`` rather than assumed.
+    """
 
-def _live_view_query_pairs(query_params: Any) -> list[tuple[str, str]]:
-    if hasattr(query_params, "multi_items"):
-        items = query_params.multi_items()
-    else:
-        items = query_params.items()
-    return [
-        (key, value)
-        for key, value in items
-        if key not in _LIVE_VIEW_STRIPPED_PARAMS
-    ]
+    base = cdp_url.replace("ws://", "http://", 1).replace(
+        "wss://", "https://", 1
+    ).rstrip("/")
+    if client is not None:
+        return await _poll_cdp_version(client, base, timeout)
+    async with httpx.AsyncClient(timeout=10.0) as owned:
+        return await _poll_cdp_version(owned, base, timeout)
 
 
 def _effective_live_view_user(
@@ -111,47 +128,6 @@ def _effective_live_view_user(
         if candidate:
             return str(candidate)
     return None
-
-
-def _live_view_upstream_ws_url(
-    live_view_url: str,
-    path: str,
-    query_params: Any | None = None,
-) -> str:
-    upstream_base = live_view_url.rstrip("/")
-    upstream_path = path.lstrip("/")
-    upstream_url = (
-        f"{upstream_base}/{upstream_path}" if upstream_path else f"{upstream_base}/"
-    )
-    if query_params is None:
-        return upstream_url
-    query = urlencode(_live_view_query_pairs(query_params))
-    return f"{upstream_url}?{query}" if query else upstream_url
-
-
-async def _ensure_live_view_control(
-    *,
-    session_id: str,
-    tenant: TenantContext,
-    control,
-    request: Request,
-) -> None:
-    effective = _effective_live_view_user(
-        tenant=tenant,
-        path=request.url.path,
-        query_params=request.query_params,
-    )
-    if effective is None:
-        raise HTTPException(
-            status_code=403,
-            detail="Browser live view requires browser control.",
-        )
-    holder = await control.held_by(session_id)
-    if holder != effective:
-        raise HTTPException(
-            status_code=403,
-            detail="Browser live view requires browser control.",
-        )
 
 
 async def _require_session_agent(
@@ -385,7 +361,25 @@ async def get_browser_preview(
     try:
         async with _browser_preview_client(resolved.endpoint.rest_url) as client:
             screenshot = await client.screenshot()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # Nothing ANSWERED at the address the registry gave -- connection
+        # refused or nothing listening -- so the entry is wrong: drop it and
+        # report the browser as absent. Deliberately narrower than
+        # TransportError: ReadTimeout is a subclass, and a screenshot of a
+        # page mid-load times out on read while the browser is entirely
+        # alive. Classifying that as "unreachable" deleted live browsers'
+        # entries, which is how a working session came to say
+        # "Browser disconnected".
+        await resolver.forget_unreachable(str(session_id))
+        raise HTTPException(
+            status_code=404,
+            detail="No browser for session",
+        ) from exc
     except Exception as exc:
+        # Reached the browser and it failed anyway -- a page mid-navigation, a
+        # slow render, a screenshot timeout. That is not evidence the browser
+        # is gone, and pruning here would delete a healthy browser's entry and
+        # take the pane down with it.
         raise HTTPException(
             status_code=502,
             detail="Browser preview is unreachable.",
@@ -398,93 +392,18 @@ async def get_browser_preview(
     )
 
 
-@router.api_route(
-    "/api/sessions/{session_id}/browser/live/{path:path}",
-    methods=["GET", "POST", "OPTIONS"],
-)
-@router.api_route(
-    "/sessions/{session_id}/browser/live/{path:path}",
-    methods=["GET", "POST", "OPTIONS"],
-)
-async def proxy_live_view(
-    session_id: UUID,
-    path: str,
-    request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> Response:
-    resolver = request.app.state.browser_resolver
-    control = request.app.state.browser_control
-    await _require_session_agent(request.app.state, session_id, tenant)
-    resolved = await resolver.resolve(
-        str(session_id),
-        expected_org_id=str(tenant.org_id),
-    )
-    if resolved is None:
-        raise HTTPException(status_code=404, detail="No browser for session")
-    await _ensure_live_view_control(
-        session_id=str(session_id),
-        tenant=tenant,
-        control=control,
-        request=request,
-    )
+@router.websocket("/api/sessions/{session_id}/browser/shell")
+@router.websocket("/sessions/{session_id}/browser/shell")
+async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
+    """Stream one tab to a viewer, and carry their commands back.
 
-    upstream_base = (
-        resolved.endpoint.live_view_url.replace("ws://", "http://", 1)
-        .replace("wss://", "https://", 1)
-        .rstrip("/")
-    )
-    upstream_url = f"{upstream_base}/{path}" if path else f"{upstream_base}/"
-    forward_headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower()
-        not in {"host", "authorization", "cookie", "connection", "content-length"}
-    }
-    forward_params = _live_view_query_pairs(request.query_params)
+    Unlike ``proxy_live_view_ws``, holding the control lease is NOT required to
+    connect: frames always flow and only the command half is gated, so a viewer
+    watches live instead of falling back to a still preview. The lease is
+    re-checked per message rather than at connect time, so it expiring
+    mid-session quietly turns the viewer into a spectator.
+    """
 
-    try:
-        upstream = await _proxy_live_view_request(
-            request.method,
-            upstream_url,
-            headers=forward_headers,
-            params=forward_params,
-            content=await request.body(),
-        )
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Browser live view is unreachable.",
-        ) from exc
-
-    response_headers = {
-        key: value
-        for key, value in upstream.headers.items()
-        if key.lower() not in {"connection", "transfer-encoding", "content-encoding"}
-    }
-    response = Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        headers=response_headers,
-    )
-    token = request.query_params.get("token")
-    if token:
-        response.set_cookie(
-            LIVE_VIEW_TOKEN_COOKIE,
-            token,
-            max_age=30 * 60,
-            httponly=True,
-            samesite="lax",
-        )
-    return response
-
-
-@router.websocket("/api/sessions/{session_id}/browser/live/{path:path}")
-@router.websocket("/sessions/{session_id}/browser/live/{path:path}")
-async def proxy_live_view_ws(
-    websocket: WebSocket,
-    session_id: UUID,
-    path: str,
-) -> None:
     try:
         tenant = await authenticate_websocket_tenant(
             websocket.app,
@@ -494,6 +413,9 @@ async def proxy_live_view_ws(
             authorization=websocket.headers.get("authorization"),
         )
     except HTTPException:
+        # Starlette turns every close-before-accept into HTTP 403, so the
+        # client cannot tell these apart. Log which one fired.
+        logger.warning("browser shell rejected: unauthenticated")
         await websocket.close(code=4401, reason="unauthenticated")
         return
 
@@ -502,8 +424,10 @@ async def proxy_live_view_ws(
     try:
         await _require_session_agent(websocket.app.state, session_id, tenant)
     except HTTPException:
-        # A WebSocket cannot answer with a status code; close with the same
-        # "nothing here" meaning the HTTP routes give.
+        logger.warning(
+            "browser shell rejected: session %s is not this token's agent",
+            session_id,
+        )
         await websocket.close(code=4404, reason="no browser")
         return
     resolved = await resolver.resolve(
@@ -511,88 +435,74 @@ async def proxy_live_view_ws(
         expected_org_id=str(tenant.org_id),
     )
     if resolved is None:
+        logger.warning(
+            "browser shell rejected: no browser registered for session %s in org %s",
+            session_id,
+            tenant.org_id,
+        )
         await websocket.close(code=4404, reason="no browser")
         return
+
     effective = _effective_live_view_user(
         tenant=tenant,
         path=websocket.url.path,
         query_params=websocket.query_params,
     )
-    if effective is None or await control.held_by(str(session_id)) != effective:
-        await websocket.close(code=4403, reason="browser control required")
-        return
 
-    upstream_url = _live_view_upstream_ws_url(
-        resolved.endpoint.live_view_url,
-        path,
-        websocket.query_params,
-    )
+    async def lease_held() -> bool:
+        # Keyed on ``effective`` rather than ``tenant.user_id``, which is None
+        # for the ops proxy's service-account connection and would make every
+        # viewer a spectator.
+        return (
+            effective is not None
+            and await control.held_by(str(session_id)) == effective
+        )
+
     try:
-        upstream = await _connect_live_view_ws(upstream_url)
-    except Exception:
+        upstream_url = await _cdp_browser_ws_url(resolved.endpoint.cdp_url)
+        upstream = await websockets.connect(upstream_url, max_size=MAX_CDP_FRAME)
+    except Exception as exc:
+        logger.warning(
+            "browser shell rejected: cannot reach CDP at %s",
+            resolved.endpoint.cdp_url,
+            exc_info=True,
+        )
+        # Prune only when nothing was LISTENING after the full readiness
+        # window -- a refused connection is a stale entry, but a reachable
+        # browser that answered strangely (bad /json/version, an envoy hiccup)
+        # is still a browser, and deleting its entry would kill a live one.
+        if isinstance(
+            exc, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError, OSError)
+        ):
+            await resolver.forget_unreachable(str(session_id))
         await websocket.close(code=4502, reason="upstream unavailable")
         return
 
-    requested_protocols = websocket.headers.get("sec-websocket-protocol", "")
-    await websocket.accept(
-        subprotocol="binary" if "binary" in requested_protocols else None,
-    )
-
-    rfb_gate = RFBClientMessageGate()
-
-    async def client_to_upstream() -> None:
-        try:
+    await websocket.accept()
+    session: ShellSession | None = None
+    try:
+        async with CdpClient(upstream) as cdp:
+            session = ShellSession(cdp, websocket, lease_held=lease_held)
+            await session.start()
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
                     return
-                frame = _live_view_client_payload(message)
-                if frame is None:
+                raw = message.get("text")
+                if raw is None:
+                    # The client half of this protocol is JSON only; binary is
+                    # the server's direction.
                     continue
-                if isinstance(frame, bytes):
-                    # Gate input across WS frame boundaries: websockify may split
-                    # or coalesce RFB messages, so parse the client byte stream and
-                    # drop KeyEvent/PointerEvent/ClientCutText when control is no
-                    # longer held (e.g. after the control lease's TTL expires).
-                    # Key on ``effective`` (the live-view identity validated at
-                    # connect time) — NOT ``tenant.user_id``, which is None for the
-                    # ops proxy's service-account connection and would drop all
-                    # input, making the live view read-only.
-                    input_allowed = (
-                        await control.held_by(str(session_id)) == effective
-                    )
-                    for chunk in rfb_gate.filter_client_bytes(
-                        frame,
-                        input_allowed=input_allowed,
-                    ):
-                        await upstream.send(chunk)
-                    continue
-                await upstream.send(frame)
-        except WebSocketDisconnect:
-            return
-
-    async def upstream_to_client() -> None:
-        async for frame in upstream:
-            await _send_live_view_frame_to_client(websocket, frame)
-
-    tasks = [
-        asyncio.create_task(client_to_upstream()),
-        asyncio.create_task(upstream_to_client()),
-    ]
-    try:
-        done, pending = await asyncio.wait(
-            tasks,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        for task in done:
-            task.result()
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+                await session.handle(raw)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        logger.exception("browser shell session failed")
         with contextlib.suppress(Exception):
-            await upstream.close()
+            await websocket.close(code=4500, reason="shell failed")
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                await session.close()
         with contextlib.suppress(Exception):
             await websocket.close()

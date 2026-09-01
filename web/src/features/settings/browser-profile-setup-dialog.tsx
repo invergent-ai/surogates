@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { BrowserLiveView } from "@invergent/agent-chat-react";
+import { BrowserShell } from "@invergent/agent-chat-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -96,7 +96,7 @@ export function BrowserProfileSetupDialog({
 
   // The readiness gate already took the control lease; renew it here every 25s
   // (the lease is 60s) so input doesn't go read-only mid-login — this dialog
-  // renders BrowserLiveView directly, without BrowserPane's control bar.
+  // renders the shell directly, without BrowserPane's control affordances.
   useEffect(() => {
     if (!sessionId || phase !== "ready") return;
     const beat = () => {
@@ -128,9 +128,9 @@ export function BrowserProfileSetupDialog({
     return () => window.clearInterval(h);
   }, [expiresAt]);
 
-  const liveViewUrl = useMemo(
+  const shellUrl = useMemo(
     () =>
-      sessionId ? surogatesWebChatAdapter.browserLiveViewUrl(sessionId) : "",
+      sessionId ? surogatesWebChatAdapter.browserShellUrl(sessionId) : "",
     [sessionId],
   );
 
@@ -178,10 +178,13 @@ export function BrowserProfileSetupDialog({
           </div>
         </DialogHeader>
         <div className="min-h-0 flex-1 bg-black">
-          {phase === "ready" && liveViewUrl ? (
-            <BrowserLiveView
-              src={liveViewUrl}
-              testId="browser-profile-setup-rfb"
+          {phase === "ready" && shellUrl ? (
+            <BrowserShell
+              src={shellUrl}
+              testId="browser-profile-setup-shell"
+              // Profile capture is the whole point of this dialog: the user is
+              // logging in by hand, so they always hold control here.
+              hasControl
               onDisconnect={() => setPhase("starting")}
             />
           ) : (

@@ -4,15 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 
-vi.mock("@novnc/novnc", () => ({
-  default: vi.fn().mockImplementation(() => ({
-    disconnect: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    viewOnly: false,
-    scaleViewport: false,
-  })),
-}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -33,10 +24,29 @@ const liveAdapter = {
   async getBrowserPreviewSnapshot() {
     return { src: "data:image/png;base64,cHJldmlldw==" };
   },
-  browserLiveViewUrl() {
-    return "about:blank#browser-live";
+  browserShellUrl() {
+    return "ws://browser.test/shell";
   },
 };
+
+// The shell opens a socket on mount; happy-dom would try to dial it.
+class StubSocket {
+  static OPEN = 1;
+  readyState = 1;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onclose: ((event: { wasClean: boolean }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  sent: string[] = [];
+  constructor(public url: string) {}
+  send(payload: string) {
+    this.sent.push(payload);
+  }
+  close() {}
+}
+vi.stubGlobal("WebSocket", StubSocket);
+URL.createObjectURL = vi.fn(() => "blob:frame") as typeof URL.createObjectURL;
+URL.revokeObjectURL = vi.fn() as typeof URL.revokeObjectURL;
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -50,6 +60,27 @@ afterEach(() => {
   container = null;
 });
 
+/** The take/return-control toggle: one icon button, state in aria-pressed. */
+function controlToggle(node: ParentNode): HTMLButtonElement | null {
+  return node.querySelector<HTMLButtonElement>(
+    '[data-testid="browser-shell-control"]',
+  );
+}
+
+/** Close and Maximize live behind the shell's overflow menu now. */
+async function openOverflow(node: ParentNode): Promise<void> {
+  const more = node.querySelector<HTMLButtonElement>('button[aria-label="More"]');
+  await act(async () => {
+    more?.click();
+  });
+}
+
+function menuItem(node: ParentNode, label: string): HTMLButtonElement | undefined {
+  return Array.from(node.querySelectorAll<HTMLButtonElement>("button")).find(
+    (button) => button.textContent?.trim() === label,
+  );
+}
+
 function renderPane(element: React.ReactElement) {
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -60,15 +91,10 @@ function renderPane(element: React.ReactElement) {
   return container;
 }
 
-async function flushPreview() {
-  await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-}
-
 describe("BrowserPane", () => {
-  it("renders a passive screenshot preview without mounting the live-view iframe", async () => {
+  it("streams the shell even when this viewer holds no control", async () => {
+    // Replaces the passive-preview test: the shell is live for anyone who can
+    // see the session, so there is no still-image fallback to fall back to.
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -77,27 +103,15 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.querySelector('[data-testid="browser-rfb"]')).toBeNull();
-
-    await flushPreview();
-
-    const preview = node.querySelector<HTMLImageElement>(
-      '[data-testid="browser-preview-image"]',
-    );
-    const iframe = node.querySelector<HTMLDivElement>(
-      '[data-testid="browser-rfb"]',
-    );
-    expect(preview?.getAttribute("src")).toBe(
-      "data:image/png;base64,cHJldmlldw==",
-    );
-    expect(preview?.className).toContain("object-contain");
-    expect(iframe).toBeNull();
+    expect(node.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
+    expect(controlToggle(node)?.getAttribute("aria-pressed")).toBe("false");
+    // No still-image fallback exists any more.
     expect(
-      node.querySelector('button[aria-label="Open browser preview"]'),
+      node.querySelector('[data-testid="browser-preview-image"]'),
     ).toBeNull();
   });
 
-  it("opens passive preview in a full-page dialog without mounting live view", async () => {
+  it("maximizes into a full-page dialog carrying the shell", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -105,35 +119,22 @@ describe("BrowserPane", () => {
         adapter={liveAdapter}
       />,
     );
-    await flushPreview();
 
-    const maximizeButton = node.querySelector<HTMLButtonElement>(
-      'button[aria-label="Maximize browser"]',
-    );
-    expect(maximizeButton).not.toBeNull();
-
+    await openOverflow(node);
+    const maximize = menuItem(node, "Maximize");
+    expect(maximize).not.toBeUndefined();
     await act(async () => {
-      maximizeButton?.click();
+      maximize?.click();
     });
 
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
-    const preview = document.body.querySelector<HTMLImageElement>(
-      '[data-testid="browser-fullscreen-preview-image"]',
-    );
-    const iframe = document.body.querySelector<HTMLDivElement>(
-      '[data-testid="browser-fullscreen-rfb"]',
-    );
-
     expect(dialog).not.toBeNull();
-    expect(dialog?.textContent).toContain("Browser");
-    expect(preview?.getAttribute("src")).toBe(
-      "data:image/png;base64,cHJldmlldw==",
-    );
-    expect(preview?.className).toContain("object-contain");
-    expect(iframe).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="browser-fullscreen-shell"]'),
+    ).not.toBeNull();
   });
 
-  it("does not mount live view from replayed user-control state after refresh", async () => {
+  it("does not claim control from replayed user-control state after refresh", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -142,20 +143,14 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toContain("user-A has control");
-    expect(node.textContent).toContain("Take control");
-    expect(
-      node.querySelector<HTMLDivElement>('[data-testid="browser-rfb"]'),
-    ).toBeNull();
-    await flushPreview();
-    expect(
-      node.querySelector<HTMLImageElement>(
-        '[data-testid="browser-preview-image"]',
-      ),
-    ).not.toBeNull();
+    // Server-reported control belongs to someone else; this tab must not
+    // think it holds the lease just because the session says someone does.
+    expect(controlToggle(node)?.getAttribute("aria-pressed")).toBe("false");
+    expect(controlToggle(node)?.getAttribute("aria-label")).toBe("Take control");
+    expect(node.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
   });
 
-  it("shows Take control button in live state", async () => {
+  it("offers the take-control toggle in live state", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -163,12 +158,11 @@ describe("BrowserPane", () => {
         adapter={liveAdapter}
       />,
     );
-    await flushPreview();
-
-    expect(node.textContent).toContain("Take control");
+    expect(controlToggle(node)).not.toBeNull();
+    expect(controlToggle(node)?.getAttribute("aria-label")).toBe("Take control");
   });
 
-  it("opens the live-view dialog after this tab acquires control", async () => {
+  it("opens the fullscreen dialog after this tab acquires control", async () => {
     let resolveAcquire:
       | ((value: { outcome: "granted"; ownerUserId: string }) => void)
       | null = null;
@@ -191,9 +185,7 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const takeControlButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.includes("Take control"));
+    const takeControlButton = controlToggle(node);
     expect(takeControlButton).not.toBeNull();
 
     await act(async () => {
@@ -210,15 +202,14 @@ describe("BrowserPane", () => {
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain("Browser");
     expect(
-      document.body.querySelector('[data-testid="browser-fullscreen-rfb"]'),
+      document.body.querySelector('[data-testid="browser-fullscreen-shell"]'),
     ).not.toBeNull();
   });
 
   it("does NOT release browser control when the fullscreen dialog closes", async () => {
-    // Control and fullscreen are orthogonal: the inline live view also
-    // requires control, so closing the fullscreen dialog (Esc / click
-    // outside / close button) must not tear down the held lease.
-    // Releasing control is the user's job via "Return control".
+    // Control and fullscreen are orthogonal: closing the dialog (Esc /
+    // click outside / close button) must not tear down the held lease.
+    // Returning control is the user's job, via the shell's toggle.
     let releaseCount = 0;
     const controlledAdapter = {
       ...liveAdapter,
@@ -235,9 +226,7 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const takeControlButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.includes("Take control"));
+    const takeControlButton = controlToggle(node);
 
     await act(async () => {
       takeControlButton?.click();
@@ -245,21 +234,17 @@ describe("BrowserPane", () => {
 
     expect(document.body.querySelector<HTMLElement>('[role="dialog"]')).not.toBeNull();
 
-    const closeButton = Array.from(
-      document.body.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.includes("Close"));
+    const closeButton = document.body.querySelector<HTMLButtonElement>(
+      '[role="dialog"] [data-slot="dialog-close"]',
+    );
     expect(closeButton).not.toBeNull();
 
     await act(async () => {
       closeButton?.click();
     });
 
-    // Inline live view must still be mounted (default testid).
-    expect(
-      node.querySelector<HTMLDivElement>(
-        '[data-testid="browser-rfb"]',
-      ),
-    ).not.toBeNull();
+    // Inline shell must still be mounted.
+    expect(node.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
     // And no release was issued.
     expect(releaseCount).toBe(0);
   });
@@ -284,9 +269,7 @@ describe("BrowserPane", () => {
         />,
       );
 
-      const takeControlButton = Array.from(
-        node.querySelectorAll<HTMLButtonElement>("button"),
-      ).find((button) => button.textContent?.includes("Take control"));
+      const takeControlButton = controlToggle(node);
 
       await act(async () => {
         takeControlButton?.click();
@@ -352,9 +335,8 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const closeButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.trim() === "Close");
+    await openOverflow(node);
+    const closeButton = menuItem(node, "Close browser");
     await act(async () => {
       closeButton?.click();
     });
@@ -400,17 +382,14 @@ describe("BrowserPane", () => {
     );
 
     // Acquire control first so the release-before-close branch runs.
-    const takeControlButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.includes("Take control"));
+    const takeControlButton = controlToggle(node);
     await act(async () => {
       takeControlButton?.click();
     });
 
     // Click Close → open confirm.
-    const closeButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.trim() === "Close");
+    await openOverflow(node);
+    const closeButton = menuItem(node, "Close browser");
     await act(async () => {
       closeButton?.click();
     });
@@ -450,9 +429,8 @@ describe("BrowserPane", () => {
       />,
     );
 
-    const closeButton = Array.from(
-      node.querySelectorAll<HTMLButtonElement>("button"),
-    ).find((button) => button.textContent?.trim() === "Close");
+    await openOverflow(node);
+    const closeButton = menuItem(node, "Close browser");
     await act(async () => {
       closeButton?.click();
     });
@@ -481,10 +459,13 @@ describe("BrowserPane", () => {
       />,
     );
 
-    await flushPreview();
-
-    expect(node.textContent).toContain("Take control");
-    expect(node.textContent).not.toContain("Return control");
+    // Replayed control belongs to user-A, so this tab is still offered
+    // "Take control" -- never "Return control", which would imply it holds a
+    // lease it does not have.
+    expect(controlToggle(node)?.getAttribute("aria-label")).toBe("Take control");
+    expect(controlToggle(node)?.getAttribute("aria-label")).not.toBe(
+      "Return control",
+    );
   });
 
   it("shows skeleton in provisioning state", () => {
@@ -508,12 +489,8 @@ describe("BrowserPane", () => {
       />,
     );
 
-    expect(node.textContent).toMatch(/browser preview is unavailable/i);
-    expect(node.querySelector('[data-testid="browser-rfb"]')).toBeNull();
-    expect(
-      node.querySelector('button[aria-label="Open browser preview"]'),
-    ).toBeNull();
-    expect(node.querySelector('button[aria-label="Maximize browser"]')).toBeNull();
+    expect(node.textContent).toMatch(/browser view is unavailable/i);
+    expect(node.querySelector('[data-testid="browser-shell"]')).toBeNull();
     expect(node.textContent).not.toContain("Take control");
   });
 });
