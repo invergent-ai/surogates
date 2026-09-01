@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from typing import Any
@@ -54,7 +55,45 @@ def _browser_preview_client(rest_url: str) -> KernelBrowserClient:
 MAX_CDP_FRAME = 32 * 1024 * 1024
 
 
-async def _cdp_browser_ws_url(cdp_url: str) -> str:
+# How long to let a freshly provisioned browser finish opening its debug port.
+# The backend's readiness check polls the kernel REST API on :10001, and Chrome
+# binds :9222 after that, so a viewer who opens the pane during provisioning
+# arrives before CDP is listening. Bounded: a browser that is genuinely gone
+# must not hold a viewer's socket open indefinitely.
+CDP_READY_TIMEOUT = 20.0
+CDP_POLL_INTERVAL = 0.25
+
+
+async def _poll_cdp_version(
+    http: httpx.AsyncClient,
+    base: str,
+    timeout: float,
+) -> str:
+    """Read ``/json/version``, waiting out a port that is not open yet.
+
+    Only transport errors are retried. A reachable endpoint answering the
+    wrong shape is a broken browser rather than a slow one, and retrying
+    would delay a failure that will not fix itself.
+    """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            response = await http.get(f"{base}/json/version")
+            return response.json()["webSocketDebuggerUrl"]
+        except (httpx.TransportError, httpx.HTTPStatusError):
+            if loop.time() >= deadline:
+                raise
+            await asyncio.sleep(CDP_POLL_INTERVAL)
+
+
+async def _cdp_browser_ws_url(
+    cdp_url: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+    timeout: float = CDP_READY_TIMEOUT,
+) -> str:
     """Resolve the pod's browser-level DevTools socket from its CDP endpoint.
 
     The URL in the registry is the port, not the socket: Chrome mints a fresh
@@ -62,10 +101,13 @@ async def _cdp_browser_ws_url(cdp_url: str) -> str:
     ``/json/version`` rather than assumed.
     """
 
-    base = cdp_url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        version = (await http.get(f"{base.rstrip('/')}/json/version")).json()
-    return version["webSocketDebuggerUrl"]
+    base = cdp_url.replace("ws://", "http://", 1).replace(
+        "wss://", "https://", 1
+    ).rstrip("/")
+    if client is not None:
+        return await _poll_cdp_version(client, base, timeout)
+    async with httpx.AsyncClient(timeout=10.0) as owned:
+        return await _poll_cdp_version(owned, base, timeout)
 
 
 def _effective_live_view_user(
@@ -353,6 +395,9 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
             authorization=websocket.headers.get("authorization"),
         )
     except HTTPException:
+        # Starlette turns every close-before-accept into HTTP 403, so the
+        # client cannot tell these apart. Log which one fired.
+        logger.warning("browser shell rejected: unauthenticated")
         await websocket.close(code=4401, reason="unauthenticated")
         return
 
@@ -361,6 +406,10 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
     try:
         await _require_session_agent(websocket.app.state, session_id, tenant)
     except HTTPException:
+        logger.warning(
+            "browser shell rejected: session %s is not this token's agent",
+            session_id,
+        )
         await websocket.close(code=4404, reason="no browser")
         return
     resolved = await resolver.resolve(
@@ -368,6 +417,11 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
         expected_org_id=str(tenant.org_id),
     )
     if resolved is None:
+        logger.warning(
+            "browser shell rejected: no browser registered for session %s in org %s",
+            session_id,
+            tenant.org_id,
+        )
         await websocket.close(code=4404, reason="no browser")
         return
 
@@ -390,6 +444,11 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
         upstream_url = await _cdp_browser_ws_url(resolved.endpoint.cdp_url)
         upstream = await websockets.connect(upstream_url, max_size=MAX_CDP_FRAME)
     except Exception:
+        logger.warning(
+            "browser shell rejected: cannot reach CDP at %s",
+            resolved.endpoint.cdp_url,
+            exc_info=True,
+        )
         await websocket.close(code=4502, reason="upstream unavailable")
         return
 
