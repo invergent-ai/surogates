@@ -35,6 +35,9 @@ def _configure_logging(level: str) -> None:
         "httpx",
         "hpack",
         "openai",
+        # Logs every keepalive ping and every forwarded screencast frame at
+        # DEBUG — one line per JPEG.
+        "websockets",
         "sse_starlette",
         "kubernetes_asyncio",
         "botocore",

@@ -107,5 +107,14 @@ def configure_logging(
     # AWS/HTTP client libraries are pathologically chatty at DEBUG (~40
     # lines per S3 call). Clamp them to WARNING so they can never flood
     # the worker log regardless of the root level.
-    for noisy in ("botocore", "aiobotocore", "boto3", "urllib3", "s3transfer"):
+    # websockets logs every keepalive ping and every forwarded screencast
+    # frame at DEBUG — one line per JPEG.
+    for noisy in (
+        "botocore",
+        "aiobotocore",
+        "boto3",
+        "urllib3",
+        "s3transfer",
+        "websockets",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
