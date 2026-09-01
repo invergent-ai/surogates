@@ -43,6 +43,8 @@ export type { BrandBeamProps } from "./components/ui/brand-beam";
 export type { BorderBeamSize } from "./components/ui/border-beam";
 export { MessageResponse } from "./components/ai-elements/message";
 export { BrowserLiveView } from "./components/browser/browser-live-view";
+export { BrowserShell } from "./components/browser/browser-shell";
+export { useBrowserControl } from "./components/browser/use-browser-control";
 export { ComposioConnectCard } from "./components/connections/composio-connect-card";
 export type { ComposioConnectCardProps } from "./components/connections/composio-connect-card";
 export { IntegrationsBand } from "./components/connections/integrations-band";

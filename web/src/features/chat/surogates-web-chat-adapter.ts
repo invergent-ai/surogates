@@ -323,6 +323,16 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return { events: page.events, hasMore: page.hasMore };
   },
 
+  browserShellUrl(sessionId) {
+    const url = new URL(
+      `/api/v1/sessions/${sessionId}/browser/shell`,
+      window.location.origin,
+    );
+    const token = getAuthToken();
+    if (token) url.searchParams.set("token", token);
+    return url.pathname + url.search;
+  },
+
   browserLiveViewUrl(sessionId) {
     const url = new URL(
       `/api/v1/sessions/${sessionId}/browser/live/`,

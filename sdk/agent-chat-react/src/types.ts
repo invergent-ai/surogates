@@ -994,6 +994,8 @@ export interface AgentChatAdapter {
   acquireBrowserControl(sessionId: string): Promise<AgentChatBrowserControlResponse>;
   releaseBrowserControl(sessionId: string): Promise<void>;
   browserLiveViewUrl(sessionId: string): string;
+  /** WebSocket URL of the session's browser shell endpoint. */
+  browserShellUrl(sessionId: string): string;
   /** List the caller's saved browser profiles (optional capability). */
   listBrowserProfiles?(): Promise<AgentChatBrowserProfile[]>;
   /**

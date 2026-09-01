@@ -20,6 +20,7 @@ export const NO_BROWSER_ADAPTER: Pick<
   | "acquireBrowserControl"
   | "releaseBrowserControl"
   | "browserLiveViewUrl"
+  | "browserShellUrl"
 > = {
   async getBrowserState() {
     return null;
@@ -32,6 +33,9 @@ export const NO_BROWSER_ADAPTER: Pick<
   },
   async releaseBrowserControl() {
     // Releasing unsupported browser control is intentionally a no-op.
+  },
+  browserShellUrl() {
+    return "";
   },
   browserLiveViewUrl() {
     return "";
