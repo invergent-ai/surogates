@@ -29,6 +29,8 @@ class KernelBrowserClient:
             "searchbox",
             "slider",
             "spinbutton",
+            "option",
+            "file-input",
         }
     )
     # Casual / xdotool key names a model is likely to emit, mapped to the
@@ -70,27 +72,55 @@ class KernelBrowserClient:
     _SNAPSHOT_SCRIPT = """
 const __surogatesSelector = __SUROGATES_SELECTOR__;
 const __surogatesCollect = ({selector, base}) => {
+const __ROLE_BY_TAG = {
+  a: 'link', button: 'button', textarea: 'textbox', select: 'combobox',
+  h1: 'heading', h2: 'heading', h3: 'heading', h4: 'heading',
+  h5: 'heading', h6: 'heading',
+  img: 'img', p: 'paragraph',
+  ul: 'list', ol: 'list', dl: 'list', li: 'listitem',
+  dt: 'term', dd: 'definition',
+  table: 'table', tr: 'row', td: 'cell', th: 'columnheader',
+  thead: 'rowgroup', tbody: 'rowgroup', tfoot: 'rowgroup',
+  nav: 'navigation', main: 'main', aside: 'complementary',
+  article: 'article', section: 'region', form: 'form', dialog: 'dialog',
+  option: 'option', summary: 'button', details: 'group',
+  fieldset: 'group', label: 'label', legend: 'legend',
+  iframe: 'iframe', video: 'video', audio: 'audio',
+  progress: 'progressbar', hr: 'separator',
+};
+
+const __ROLE_BY_INPUT_TYPE = {
+  button: 'button', submit: 'button', reset: 'button', image: 'button',
+  checkbox: 'checkbox', radio: 'radio', range: 'slider',
+  file: 'file-input', hidden: 'hidden',
+  search: 'searchbox', number: 'spinbutton',
+};
+
 function roleOf(el) {
+  // An explicit role wins, and the attribute is a space-separated fallback
+  // list of which only the first token applies.
   const explicit = el.getAttribute('role');
-  if (explicit) return explicit;
-  const tag = el.tagName.toLowerCase();
-  const type = (el.getAttribute('type') || '').toLowerCase();
-  if (tag === 'button') return 'button';
-  if (tag === 'a' && el.hasAttribute('href')) return 'link';
-  if (tag === 'textarea') return 'textbox';
-  if (tag === 'select') return 'combobox';
-  if (tag === 'input') {
-    if (type === 'checkbox') return 'checkbox';
-    if (type === 'radio') return 'radio';
-    if (type === 'range') return 'slider';
-    if (type === 'number') return 'spinbutton';
-    if (type === 'search') return 'searchbox';
-    return 'textbox';
+  if (explicit) {
+    const first = explicit.trim().split(/\\s+/)[0];
+    if (first) return first;
   }
-  if (/^h[1-6]$/.test(tag)) return 'heading';
-  if (tag === 'img') return 'img';
-  if (tag === 'p') return 'paragraph';
-  return 'generic';
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'input') {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    return __ROLE_BY_INPUT_TYPE[type] || 'textbox';
+  }
+  // A bare anchor is a jump target, not a link.
+  if (tag === 'a') return el.hasAttribute('href') ? 'link' : 'generic';
+  const editable = el.getAttribute('contenteditable');
+  if (editable === '' || editable === 'true') return 'textbox';
+  // header/footer are only landmarks at the top level; inside an article or
+  // section they are that section's own header, not the page banner.
+  if (tag === 'header' || tag === 'footer') {
+    return el.closest('article, section, aside, nav')
+      ? 'generic'
+      : (tag === 'header' ? 'banner' : 'contentinfo');
+  }
+  return __ROLE_BY_TAG[tag] || 'generic';
 }
 
 function nameOf(el) {
@@ -120,7 +150,8 @@ function isBlockLevel(el) {
 }
 
 const __INTERACTIVE = new Set(['button','link','textbox','combobox','checkbox',
-  'radio','menuitem','tab','switch','searchbox','slider','spinbutton']);
+  'radio','menuitem','tab','switch','searchbox','slider','spinbutton',
+  'option','file-input']);
 
 function isTextBlock(el) {
   // A text block is an element whose subtree holds no interactive element and
@@ -172,9 +203,11 @@ for (const el of __els) {
   if (el.closest('[aria-hidden="true"]')) continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
+  const role = roleOf(el);
+  // input[type=hidden] carries no box, but an explicit role="hidden" does.
+  if (role === 'hidden') continue;
   const idx = base + out.length;
   el.setAttribute('data-sg-i', String(idx));
-  const role = roleOf(el);
   let textBlock = '';
   if (__INTERACTIVE.has(role)) {
     // Text inside a control belongs to the control: nameOf already carries it

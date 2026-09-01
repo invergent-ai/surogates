@@ -143,3 +143,37 @@ async def test_aria_hidden_subtrees_are_skipped(browser) -> None:
             for n in state["tree"]
         )
         assert not any(t.strip() == "Decorative duplicate" for t in texts)
+
+
+ROLES_PAGE = (
+    "<body style='margin:0'>"
+    "<nav><a href='/x'>Home</a></nav>"
+    "<main>"
+    "<table><tr><th>Plan</th><td>Pro</td></tr></table>"
+    "<ul><li>First</li></ul>"
+    "<details><summary>More</summary><p>Body</p></details>"
+    "<div contenteditable='true'>Notes</div>"
+    "<input type='file'>"
+    "</main>"
+    "</body>"
+)
+
+
+async def test_structural_tags_get_real_roles(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(ROLES_PAGE))
+
+        tree = (await client.get_state())["tree"]
+        roles = {n["role"] for n in tree}
+        assert {"navigation", "main", "table", "row", "columnheader",
+                "cell", "list", "listitem"} <= roles
+        # <summary> behaves as a button; contenteditable is a textbox.
+        assert "button" in roles
+        assert "textbox" in roles
+        assert "file-input" in roles
+        # "generic" must no longer be the answer for a table header cell.
+        assert not any(
+            n["role"] == "generic" and n.get("text_block") == "Plan"
+            for n in tree
+        )
