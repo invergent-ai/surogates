@@ -34,7 +34,8 @@ The spec left the `<select>` gap open. **Accept it for v1.** `key` already carri
 | `surogates/browser/shell.py` *(new)* | Protocol types, validation, and message→CDP translation. Pure: no sockets, no I/O. All security tests live here. |
 | `surogates/api/routes/browser.py` | New `shell` WebSocket endpoint. Session resolution, tenant check, lease plumbing, the pump. |
 | `sdk/agent-chat-react/src/components/browser/browser-shell.tsx` *(new)* | Tab strip, address bar, viewport canvas, input capture. |
-| `sdk/agent-chat-react/src/components/browser/browser-pane.tsx` | Swap `BrowserLiveView` → `BrowserShell`. |
+| `sdk/agent-chat-react/src/components/browser/browser-pane.tsx` | Swap `BrowserLiveView` → `BrowserShell`, and give up its own header and control bar — the shell is the chrome now. |
+| `sdk/agent-chat-react/src/components/browser/use-browser-control.ts` *(new)* | The take/return-control logic lifted out of `browser-control-bar.tsx`, which the shell can no longer own because it renders no dialogs. |
 | `web/src/features/settings/browser-profile-setup-dialog.tsx` | Same swap. |
 
 `cdp.py` and `shell.py` are separate because one does I/O and the other is pure — the split that makes `serialize.py` testable without a browser while `client.py` needs one.
@@ -702,9 +703,12 @@ Read `tests/browser-live-view.test.tsx` for the mocking style, then assert:
 ```
 - binary messages render to the canvas
 - the tab strip lists tabs from a `tabs` message; clicking one sends switch_tab
+- the tab strip is ABSENT at one tab and present at two
 - a click on the viewport sends NORMALIZED coordinates (0-1), not pixels
 - with hasControl=false the address bar and viewport are inert:
   no command message is sent
+- the take-control icon renders the held state when hasControl=true,
+  and keeps the same glyph in both states
 - an unexpected socket close calls onDisconnect(false)
 ```
 
@@ -716,7 +720,36 @@ Run: `cd sdk/agent-chat-react && npm test -- browser-shell`
 
 - [ ] **Step 3: Implement**
 
-Chrome (tab strip, back/forward/reload, address bar) plus a `<canvas>`. Binary frames become an `ImageBitmap` via `createImageBitmap(blob)` and are drawn scaled to fit; pointer and keyboard handlers divide by the canvas's rendered size to normalize. Do **not** reuse noVNC's zoom approach — the scaling bug it works around does not exist here, because coordinates are normalized rather than pixel-mapped.
+The layout is settled — see *Shell chrome* in the spec and the [canvas](https://claude.ai/code/artifact/3e9cda62-2a1e-4534-9f8a-8f2d52f79709). Build exactly that:
+
+```
+44px toolbar   ‹  ›  ⟳  ⊹   [ ● en.wikipedia.org/wiki/Kubernetes ]  ⋯
+34px tab strip [ Wikipedia ] [ Stripe Docs ] [ Inbox ]     ← only when tabs > 1
+     canvas
+```
+
+Measurements, matching the components it replaces: bars `bg-card` with
+`border-line`, `px-2.5`, `gap-1.5`; icon buttons 26px with 14px lucide glyphs;
+the URL field 28px, `rounded-md`, `bg-background`, `border-line`, `text-[11px]`
+with the origin in `text-foreground` and the path in `text-muted-foreground`;
+tabs 24px, `rounded`, `text-[11px]`, `max-w-33`, active tab `bg-secondary`.
+
+Three states carry real behaviour:
+
+- **Take control** keeps the `MousePointer2` glyph in both states and fills
+  amber (`bg-primary text-primary-foreground`) when held. Do **not** swap to
+  `RotateCcw` as `browser-control-bar.tsx` does — beside Reload it reads as a
+  second refresh button.
+- **Control held** also puts a 2px amber inset ring on the canvas and a
+  "You have control · click to return" pill at the foot of the page area.
+- **Tab strip** renders only at two or more tabs. The viewport jumps 34px when
+  it appears; that is accepted, not a bug to smooth over.
+
+Binary frames become an `ImageBitmap` via `createImageBitmap(blob)`, drawn
+scaled to fit; pointer and keyboard handlers divide by the canvas's rendered
+size to normalize. Do **not** reuse noVNC's zoom approach — the scaling bug it
+works around does not exist here, because coordinates are normalized rather
+than pixel-mapped.
 
 - [ ] **Step 4: Run tests**
 
@@ -732,27 +765,41 @@ git commit -m "feat(browser): add the browser shell component"
 
 ---
 
-### Task 6: Move both consumers
+### Task 6: Move both consumers, and absorb the pane's chrome
+
+The chosen layout removes the pane's header row and its control bar — the shell
+is now the chrome. Their **logic** must survive the markup: `browser-control-bar.tsx`
+owns `toggleControl()` with its adapter calls, pending and error state, and the
+Close `ConfirmDialog`, and none of that is presentation.
 
 **Files:**
-- Modify: `sdk/agent-chat-react/src/components/browser/browser-pane.tsx` (two `BrowserLiveView` sites, lines ~219 and ~276)
+- Create: `sdk/agent-chat-react/src/components/browser/use-browser-control.ts` — the hook lifted out of `browser-control-bar.tsx`: `{hasControl, pending, error, toggleControl}`
+- Modify: `sdk/agent-chat-react/src/components/browser/browser-pane.tsx` — drop the header row and `<BrowserControlBar>`, render `<BrowserShell>` in the full pane, keep the Close `ConfirmDialog` and `fullscreenOpen` state here
 - Modify: `web/src/features/settings/browser-profile-setup-dialog.tsx`
 - Modify: `sdk/agent-chat-react/src/index.ts` — export `BrowserShell`
-- Test: existing `tests/browser-pane.test.tsx`
+- Delete: `sdk/agent-chat-react/src/components/browser/browser-control-bar.tsx` (only consumer is the pane, verified)
+- Test: `tests/browser-pane.test.tsx`, `tests/browser-control-bar.test.tsx` if present
 
-**Interfaces:** consumes `<BrowserShell>` from Task 5.
+**Interfaces:**
+- Consumes `<BrowserShell>` from Task 5, extended with `onToggleControl`, `onClose` and `onMaximize` — the `⋯` menu items and the take-control icon call these; the shell renders no dialogs of its own.
+- Produces `useBrowserControl(adapter, sessionId)`.
 
 - [ ] **Step 1: Update the pane test to expect the shell**
 
-Change `browser-pane.test.tsx` to assert the shell renders where the live view did. Run it, watch it fail.
+Assert the shell renders, the old header and control bar do not, and that
+`⋯` → Close still opens the confirm dialog. Run it, watch it fail.
 
-- [ ] **Step 2: Swap both call sites**
+- [ ] **Step 2: Lift the hook, then swap both call sites**
 
-The shell takes a WebSocket URL; both consumers already build a live-view URL from `liveViewPath`, so build the shell URL the same way against the new route. `BrowserShell` needs `hasControl`, which `browser-pane.tsx` already tracks for the control bar.
+Move the control logic verbatim into `use-browser-control.ts` — do not rewrite
+it while moving it, or a behaviour change hides inside a refactor. The shell
+takes a WebSocket URL; both consumers already build a live-view URL from
+`liveViewPath`, so build the shell URL the same way against the new route.
 
 - [ ] **Step 3: Run both suites**
 
-`cd sdk/agent-chat-react && npm test`, then the web app's typecheck. Per the SDK symlink, `web` needs an SDK build before its typecheck resolves the new export.
+`cd sdk/agent-chat-react && npm test`, then the web app's typecheck. Per the SDK
+symlink, `web` needs an SDK build before its typecheck resolves the new export.
 
 - [ ] **Step 4: Commit**
 
@@ -794,7 +841,7 @@ Expected: green, including the pre-existing screenshot and iframe cases — they
 - [ ] **Step 3: Confirm nothing still references the removed pieces**
 
 ```bash
-grep -rn "novnc\|x11vnc\|websockify\|RFBClientMessageGate\|BrowserLiveView" \
+grep -rn "novnc\|x11vnc\|websockify\|RFBClientMessageGate\|BrowserLiveView\|BrowserControlBar" \
   --include=*.py --include=*.ts --include=*.tsx --include=*.json \
   --include=Dockerfile --include=*.conf \
   surogates/ sdk/ web/src/ images/ tests/ | grep -v node_modules

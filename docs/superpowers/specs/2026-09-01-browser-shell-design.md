@@ -121,12 +121,42 @@ without a browser.
 makes the page path behave like a browser session. Every page command must go
 through `Target.attachToTarget({flatten: true})` and carry its `sessionId`.
 
+### Shell chrome
+
+Settled visually against three candidates ([canvas](https://claude.ai/code/artifact/3e9cda62-2a1e-4534-9f8a-8f2d52f79709)).
+The pane today spends 84px on a header and a control bar; adding a tab strip
+and an address bar naively would have made it 158px, a quarter of a 520×660
+pane before any page pixels.
+
+**One toolbar, 44px:** back, forward, reload, take control, URL field, overflow.
+The pane header and the control bar both disappear into it; Close and Maximize
+move behind `⋯`. The tab strip is a second 34px row that renders **only when a
+second tab exists**, so the common case is 44px of chrome.
+
+Two consequences that are decisions, not details:
+
+- **Take control is an icon, so colour carries the mode.** It keeps the same
+  pointer glyph in both states and fills amber when held — the existing control
+  bar swaps to a counter-clockwise arrow for "Return control", which one slot
+  from Reload would read as a second refresh button. Amber appears nowhere else
+  in the toolbar, the viewport takes a 2px amber inset while control is held,
+  and a "You have control · click to return" pill sits at the foot of the page
+  area as the plain-language backstop.
+- **The viewport jumps 34px when the strip appears.** Accepted: reserving the
+  row permanently would give up most of what the single-tab case wins, and the
+  shift is honest feedback that the agent opened a tab.
+
 ### Deletions
 
-Once the shell ships: `browser-live-view.tsx` and the `@novnc/novnc`
-dependency, `surogates/browser/rfb.py` with `RFBClientMessageGate`, and
-`x11vnc.conf`, `websockify.conf` and the `x11vnc websockify` apt line from
-`images/browser/Dockerfile`.
+Once the shell ships: `browser-live-view.tsx`, the `@novnc/novnc` dependency
+(declared in **both** `sdk/agent-chat-react/package.json` and
+`web/package.json` — the api-image web-build installs only web's lockfile, so
+both must go) and the `sdk/agent-chat-react/src/novnc.d.ts` type shim;
+`surogates/browser/rfb.py` with `RFBClientMessageGate`; and `x11vnc.conf`,
+`websockify.conf` and the `x11vnc websockify` apt line from
+`images/browser/Dockerfile`. `images/browser/test_live_view_rfb.py` asserts
+x11vnc and websockify are running, so it is deleted (or replaced by a shell
+equivalent) in the same change as the image edit, not later.
 
 Deleting x11vnc removes the *viewer*, not the display: Chrome still runs headful
 in Xorg `:1`, and the agent's own `screenshot()` goes through Playwright's
