@@ -7,7 +7,7 @@
 // - Vision analyze
 // - Research memory
 
-import { BookOpenIcon, EyeIcon, SearchIcon } from "lucide-react";
+import { BookOpenIcon, EyeIcon, LibraryIcon, SearchIcon } from "lucide-react";
 import type { ToolCallInfo } from "../../../types";
 import { formatMcpToolLabel } from "../../../lib/format";
 import { parseArgs } from "./shared";
@@ -168,6 +168,37 @@ function hostname(url: string): string {
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+// ── Knowledge base ──────────────────────────────────────────────────
+
+export function KnowledgeBaseToolBlock({ tc }: { tc: ToolCallInfo }) {
+  const args = parseArgs<{ query?: string; path?: string; pages?: string }>(tc.args) ?? {};
+
+  const label = {
+    kb_search_pages: "KB Search",
+    kb_list_pages: "KB Browse",
+    kb_read_page: "KB Read",
+  }[tc.toolName] ?? tc.toolName;
+
+  let detail = "";
+  if (tc.toolName === "kb_search_pages" && args.query) {
+    detail = `“${truncate(args.query, 60)}”`;
+  } else if (tc.toolName === "kb_read_page" && args.path) {
+    detail = args.pages ? `${args.path} · pages ${args.pages}` : args.path;
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-sm py-0.5">
+      <LibraryIcon className="size-3.5 text-muted-foreground/60 shrink-0" />
+      <span className="font-medium text-foreground">{label}</span>
+      {detail && (
+        <span className="text-muted-foreground/70 truncate text-xs">
+          {detail}
+        </span>
+      )}
+    </div>
+  );
 }
 
 // ── Vision analyze ──────────────────────────────────────────────────
