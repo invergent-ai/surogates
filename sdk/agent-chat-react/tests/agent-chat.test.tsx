@@ -43,12 +43,18 @@ class FakeEventStream implements AgentChatEventStream {
   }
 }
 
+/** A live preview means the browser card is offered; null would hide it. */
+async function livePreview() {
+  return { src: "data:image/png;base64,cHJldmlldw==" };
+}
+
 function createAdapter(
   stream: FakeEventStream,
   options: { session?: AgentChatSession } = {},
 ) {
   return {
     ...NO_BROWSER_ADAPTER,
+    getBrowserPreviewSnapshot: livePreview,
     async listSessions() {
       return { sessions: [], total: 0 };
     },
@@ -536,7 +542,7 @@ describe("AgentChat", () => {
     // element so responsive classes can reference it via var().
     expect(
       (layout as HTMLElement | null)?.style.getPropertyValue("--right-stack-w"),
-    ).toBe("440px");
+    ).toBe("50%");
     // Desktop two-pane layout is `md:`-prefixed (mobile-first single column).
     expect(layout?.className).toContain("md:relative");
     expect(chatPanel?.className).toContain("md:absolute");

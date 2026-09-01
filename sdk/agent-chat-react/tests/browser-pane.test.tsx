@@ -21,6 +21,9 @@ const liveAdapter = {
     return { outcome: "granted" as const, ownerUserId: "u" };
   },
   async releaseBrowserControl() {},
+  async getBrowserPreviewSnapshot() {
+    return { src: "data:image/png;base64,cHJldmlldw==" };
+  },
   browserShellUrl() {
     return "ws://browser.test/shell";
   },

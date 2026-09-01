@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgentChatAdapterProvider } from "./adapter-context";
 import { BrowserPane } from "./components/browser/browser-pane";
+import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
 import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { TooltipProvider } from "./components/ui/tooltip";
@@ -100,7 +101,10 @@ export interface AgentChatProps {
 // CSS variable controlling the desktop right-stack width. Inlined as a style
 // so it stays component-local; arbitrary-value Tailwind classes read it.
 const RIGHT_STACK_STYLE = {
-  ["--right-stack-w" as string]: "440px",
+  // Both the column's width and the chat panel's right offset read this, so
+  // one value keeps them complementary. 50%: the browser shell renders a real
+  // page, and page layouts are unusable in a 440px strip.
+  ["--right-stack-w" as string]: "50%",
 } as React.CSSProperties;
 
 /** The panes the phone layout shows one at a time. */
@@ -218,6 +222,24 @@ export function AgentChat({
   const workspaceAvailable = !!sessionId;
   const workspaceVisible = workspaceAvailable && openPane === "workspace";
   const rightStackVisible = browserVisible || workspaceVisible;
+
+  // The card is visible whether or not the pane is, so its thumbnail comes
+  // from the preview endpoint rather than the shell's live frames.
+  const browserPreview = useBrowserPreview({
+    adapter,
+    sessionId,
+    enabled: browserAvailable,
+  });
+  // Session state says a browser exists; the preview says whether it really
+  // does. Waiting for a confirmed yes rather than showing on "not yet known":
+  // being optimistic meant a dead browser's card appeared and vanished within
+  // a second, and a flash of a control is worse than showing it a beat late.
+  // The card trusts session state, exactly as the old live view did:
+  // browser.provisioned shows it, browser.destroyed / a 404 from
+  // getBrowserState hides it. The registry self-heals server-side now, so
+  // that state is honest; probing liveness from the client on top of it is
+  // what caused the flashing and the missing-card bugs.
+  const browserRunning = browserAvailable;
 
   // A pane that goes away while it is the open one must not leave the column
   // parked on nothing: the browser can be destroyed mid-session.
@@ -392,11 +414,12 @@ export function AgentChat({
               canShowBrowser={browserAvailable}
               canShowWorkspace={workspaceAvailable}
               paneCards={{
-                browser: browserAvailable
+                browser: browserRunning
                   ? {
                       subtitle: browserState?.controlOwner
                         ? `${browserState.controlOwner} has control`
                         : undefined,
+                      thumbnail: browserPreview,
                       onOpen: handleOpenBrowserPane,
                     }
                   : null,
@@ -459,7 +482,11 @@ export function AgentChat({
                 <div
                   data-testid="workspace-panel-frame"
                   data-mobile-view={activeMobilePane}
-                  className="min-h-0 h-full w-full overflow-hidden"
+                  // No w-full: the right column is md:w-auto when the workspace
+                  // is the open pane, so stretching here makes it swallow the
+                  // whole width. WorkspacePanel sizes itself via its resize
+                  // handle instead, which is what fillParent turns off.
+                  className="min-h-0 h-full"
                 >
                   <WorkspacePanel
                     adapter={adapter}
@@ -468,7 +495,7 @@ export function AgentChat({
                     onSelectedPathChange={setWorkspacePath}
                     refreshSignal={runtime.workspaceRefreshKey}
                     disabled={effectiveDisabled}
-                    fillParent
+                    fillParent={false}
                   />
                 </div>
               )}

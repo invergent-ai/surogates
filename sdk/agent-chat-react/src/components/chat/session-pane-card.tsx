@@ -42,7 +42,11 @@ export function SessionPaneCard({
       aria-label={`Open ${title}`}
       onClick={onOpen}
       className={cn(
-        "flex w-full items-center gap-3 rounded-xl border border-line bg-card px-3 py-2.5 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        // No radius here: the caller sets it. Declaring rounded-xl in the base
+        // and cancelling the bottom from a className leaves both rules live,
+        // and which corner wins comes down to stylesheet order rather than
+        // intent -- which is how the stacked cards kept round bottoms.
+        "flex w-full items-center gap-3 border border-line px-3 py-3.5 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
     >
@@ -54,12 +58,11 @@ export function SessionPaneCard({
           className="h-11 w-16 shrink-0 rounded-md border border-line object-cover object-top"
         />
       ) : (
-        <span
+        <Icon
           data-testid="session-pane-card-icon"
-          className="flex h-11 w-16 shrink-0 items-center justify-center rounded-md border border-line bg-background"
-        >
-          <Icon className="size-4 text-muted-foreground" aria-hidden="true" />
-        </span>
+          className="size-5 shrink-0 text-muted-foreground"
+          aria-hidden="true"
+        />
       )}
       <span className="flex min-w-0 flex-col">
         <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
