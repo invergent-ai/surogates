@@ -465,29 +465,41 @@ export function useAgentChatRuntime({
       .catch(() => undefined);
 
     // Replayed events alone aren't enough to know whether the browser is
-    // currently alive. The server emits `browser.provisioned` but doesn't
-    // always emit a matching `destroyed` when the browser is reaped, so
-    // session history can show a "live" browser that no longer exists.
-    // Ask the live API for the actual current state when the session opens
-    // and use that as the source of truth (a 404 collapses to null and
-    // hides the pane).
-    void adapter
-      .getBrowserState(sessionId)
-      .then((browserState) => {
-        if (sessionIdRef.current !== sessionId) return;
-        setState((prev) => ({
-          ...prev,
-          browser: browserState
-            ? {
-                status: browserState.status,
-                controlOwner: browserState.controlOwner ?? null,
-              }
-            : null,
-        }));
-      })
-      .catch(() => undefined);
+    // currently alive or held. The server emits `browser.provisioned` but
+    // doesn't always emit a matching `destroyed` when the browser is reaped,
+    // and a control lease that expires by TTL emits no `control_returned` at
+    // all — so session history can show a live browser that no longer
+    // exists, or a control holder who long since lapsed. Ask the live API
+    // for the actual current state (a 404 collapses to null and hides the
+    // pane).
+    const hydrateBrowserState = () => {
+      void adapter
+        .getBrowserState(sessionId)
+        .then((browserState) => {
+          if (sessionIdRef.current !== sessionId) return;
+          setState((prev) => ({
+            ...prev,
+            browser: browserState
+              ? {
+                  status: browserState.status,
+                  controlOwner: browserState.controlOwner ?? null,
+                }
+              : null,
+          }));
+        })
+        .catch(() => undefined);
+    };
+    // Twice: once now for a fast first paint, and once after the SSE replay
+    // has settled — the first answer races the replay, and a replayed
+    // control grant landing after it would resurrect a lapsed lease.
+    hydrateBrowserState();
+    const browserSettleTimer = window.setTimeout(
+      hydrateBrowserState,
+      RECONCILE_FIRST_DELAY,
+    );
 
     return () => {
+      window.clearTimeout(browserSettleTimer);
       clearReconnectTimer();
       closeStream();
     };

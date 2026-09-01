@@ -1,6 +1,6 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { AgentChat } from "../src/agent-chat";
 import type {
@@ -427,6 +427,51 @@ describe("AgentChat", () => {
       container.querySelector('[data-testid="session-pane-card-browser"]'),
     ).toBeNull();
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
+  });
+
+  it("drops a replayed control grant once live control state settles", async () => {
+    // A control lease expires server-side in silence (nothing emits
+    // browser.control_returned), so replayed history can end on a grant
+    // that no longer holds. The live-state fetch is the truth, but it
+    // races the replay — a second look after the replay settles must win.
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeEventStream();
+      const adapter = {
+        ...createAdapter(stream),
+        async getBrowserState() {
+          return { status: "live" as const, controlOwner: null };
+        },
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+
+      await act(async () => {
+        root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+        await Promise.resolve();
+      });
+      await act(async () => {
+        stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+        stream.emit("browser.control_granted", 11, {
+          session_id: "s-1",
+          owner_user_id: "surogate",
+        });
+        await Promise.resolve();
+      });
+
+      const cardText = () =>
+        container?.querySelector('[data-testid="session-pane-card-browser"]')
+          ?.textContent ?? "";
+      expect(cardText()).toContain("surogate has control");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(cardText()).not.toContain("has control");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("toggles the browser pane from its card", async () => {
