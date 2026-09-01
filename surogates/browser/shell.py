@@ -15,8 +15,15 @@ enough to test without a browser:
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import logging
 import math
+from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 # Message types that act on the page, and so require the control lease.
 # ``switch_tab`` is deliberately absent: it changes what a viewer watches, not
@@ -55,6 +62,12 @@ _MODIFIER_BITS: dict[str, int] = {"alt": 1, "ctrl": 2, "meta": 4, "shift": 8}
 MAX_TEXT = 8192
 MAX_CLICKS = 3
 MAX_SCROLL_DELTA = 10_000
+# An Input.insertText carrying megabytes is a trivial denial of service, and a
+# frame this large is never a legitimate command.
+MAX_WS_MESSAGE = 64 * 1024
+# Used until the first Page.getLayoutMetrics answers, so an early click scales
+# against something sane rather than dividing by zero.
+DEFAULT_VIEWPORT = (1280, 800)
 
 Call = tuple[str, dict]
 
@@ -204,3 +217,235 @@ def translate(message: dict, *, viewport: tuple[int, int]) -> list[Call]:
         # not the viewer's to set, and the latter is script injection.
         return [("Page.reload", {})]
     raise ShellProtocolError(f"unsupported message type {kind!r}")
+
+
+class _Cdp(Protocol):
+    """The slice of :class:`~surogates.browser.cdp.CdpClient` a session uses."""
+
+    async def call(
+        self,
+        method: str,
+        params: dict | None = ...,
+        *,
+        session: str | None = ...,
+        timeout: float = ...,
+    ) -> dict: ...
+    def on(self, method: str, handler: Callable[[dict], None]) -> None: ...
+    async def targets(self) -> list[dict]: ...
+    async def attach_page(self, target_id: str) -> str: ...
+
+
+class _Client(Protocol):
+    """The slice of a Starlette WebSocket a session writes to."""
+
+    async def send_bytes(self, payload: bytes) -> None: ...
+    async def send_text(self, payload: str) -> None: ...
+
+
+class ShellSession:
+    """Drives one viewer's connection: CDP in one hand, the client in the other.
+
+    Dependencies are injected rather than dialled, so the whole pump — the
+    lease gate, frame ordering, the switch-tab sequence — is testable without a
+    browser. Two rules it exists to enforce:
+
+    * Frames always flow; only the command half is gated. A viewer who does not
+      hold the lease still watches.
+    * The screencast starts at attach time and never after a navigation.
+      ``Page.startScreencast`` is refused with "Not attached to an active page"
+      while one is in flight.
+    """
+
+    def __init__(
+        self,
+        cdp: _Cdp,
+        client: _Client,
+        *,
+        lease_held: Callable[[], Awaitable[bool]],
+        max_message: int = MAX_WS_MESSAGE,
+    ) -> None:
+        self._cdp = cdp
+        self._client = client
+        self._lease_held = lease_held
+        self._max_message = max_message
+        self._session: str | None = None
+        self._target: str | None = None
+        self._viewport: tuple[int, int] = DEFAULT_VIEWPORT
+        # Frames are queued rather than sent from the CDP event handler: the
+        # handler is synchronous, and spawning a task per frame would let two
+        # sends interleave and paint a stale image.
+        self._frames: asyncio.Queue[tuple[bytes, str]] = asyncio.Queue()
+        self._pump: asyncio.Task | None = None
+        self._dropped = 0
+
+    async def start(self) -> None:
+        pages = await self._cdp.targets()
+        if not pages:
+            raise RuntimeError("browser has no page target")
+        self._cdp.on("Page.screencastFrame", self._on_frame)
+        self._cdp.on("Page.frameNavigated", self._on_navigated)
+        for event in (
+            "Target.targetCreated",
+            "Target.targetDestroyed",
+            "Target.targetInfoChanged",
+        ):
+            self._cdp.on(event, self._on_targets_changed)
+        self._pump = asyncio.create_task(self._pump_frames())
+        await self._attach(pages[0]["targetId"])
+        await self._push_tabs()
+
+    async def close(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            self._pump = None
+
+    async def handle(self, raw: str | bytes) -> None:
+        """Act on one client frame. Never raises for bad input — drops it."""
+
+        if len(raw) > self._max_message:
+            self._drop("oversized message")
+            return
+        try:
+            message = json.loads(raw)
+        except (ValueError, TypeError):
+            self._drop("malformed json")
+            return
+        if not isinstance(message, dict):
+            self._drop("message is not an object")
+            return
+
+        kind = message.get("t")
+        if kind in COMMAND_TYPES and not await self._lease_held():
+            # Dropped, not an error: the lease expiring mid-session is normal,
+            # and the viewer keeps watching either way.
+            self._drop("no control lease")
+            return
+
+        try:
+            if kind == "switch_tab":
+                await self._switch_tab(message.get("id"))
+            elif kind in {"back", "forward"}:
+                await self._history(kind)
+            else:
+                for method, params in translate(message, viewport=self._viewport):
+                    await self._cdp.call(method, params, session=self._session)
+        except ShellProtocolError as exc:
+            self._drop(exc.reason)
+        except Exception:  # noqa: BLE001 - one bad command never kills a viewer
+            logger.exception("browser shell command failed")
+
+    async def _attach(self, target_id: str) -> None:
+        self._target = target_id
+        self._session = await self._cdp.attach_page(target_id)
+        await self._cdp.call("Page.enable", session=self._session)
+        await self._refresh_viewport()
+        # Last, and before anything navigates: see the class docstring.
+        await self._cdp.call(
+            "Page.startScreencast", dict(SCREENCAST_PARAMS), session=self._session
+        )
+
+    async def _switch_tab(self, target_id: object) -> None:
+        if not isinstance(target_id, str) or not target_id:
+            raise ShellProtocolError("switch_tab needs a target id")
+        if self._session is not None:
+            # Stop and drain before re-attaching, so a frame from the old
+            # target cannot arrive after the switch and paint the wrong page.
+            await self._cdp.call("Page.stopScreencast", session=self._session)
+            self._drain_frames()
+        await self._attach(target_id)
+        await self._push_tabs()
+
+    async def _history(self, direction: str) -> None:
+        history = await self._cdp.call(
+            "Page.getNavigationHistory", session=self._session
+        )
+        entries = history.get("entries", [])
+        index = int(history.get("currentIndex", 0)) + (
+            -1 if direction == "back" else 1
+        )
+        if not 0 <= index < len(entries):
+            return
+        await self._cdp.call(
+            "Page.navigateToHistoryEntry",
+            {"entryId": entries[index]["id"]},
+            session=self._session,
+        )
+
+    async def _refresh_viewport(self) -> None:
+        metrics = await self._cdp.call(
+            "Page.getLayoutMetrics", session=self._session
+        )
+        visual = metrics.get("cssVisualViewport") or {}
+        width = int(visual.get("clientWidth") or 0)
+        height = int(visual.get("clientHeight") or 0)
+        if width > 0 and height > 0:
+            self._viewport = (width, height)
+
+    async def _push_tabs(self) -> None:
+        pages = await self._cdp.targets()
+        await self._send({
+            "t": "tabs",
+            "tabs": [
+                {
+                    "id": page.get("targetId"),
+                    "title": page.get("title", ""),
+                    "url": page.get("url", ""),
+                    "active": page.get("targetId") == self._target,
+                }
+                for page in pages
+            ],
+        })
+
+    def _on_frame(self, params: dict) -> None:
+        try:
+            payload = base64.b64decode(params["data"])
+        except Exception:  # noqa: BLE001 - a malformed frame is not fatal
+            return
+        self._frames.put_nowait((payload, params.get("sessionId", "")))
+
+    def _on_navigated(self, params: dict) -> None:
+        frame = params.get("frame") or {}
+        if frame.get("parentId"):
+            return  # a subframe navigating is not the address bar's business
+        asyncio.create_task(self._after_navigation(frame))
+
+    def _on_targets_changed(self, _params: dict) -> None:
+        asyncio.create_task(self._push_tabs())
+
+    async def _after_navigation(self, frame: dict) -> None:
+        try:
+            await self._refresh_viewport()
+            await self._send({
+                "t": "nav",
+                "url": frame.get("url", ""),
+                "title": frame.get("name", ""),
+            })
+        except Exception:  # noqa: BLE001 - background task, never fatal
+            logger.exception("browser shell navigation update failed")
+
+    async def _pump_frames(self) -> None:
+        while True:
+            payload, screencast_session = await self._frames.get()
+            try:
+                await self._client.send_bytes(payload)
+                # An unacked stream stalls by design.
+                await self._cdp.call(
+                    "Page.screencastFrameAck",
+                    {"sessionId": screencast_session},
+                    session=self._session,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a dropped frame is not fatal
+                logger.debug("browser shell frame forward failed", exc_info=True)
+
+    def _drain_frames(self) -> None:
+        while not self._frames.empty():
+            self._frames.get_nowait()
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        await self._client.send_text(json.dumps(message))
+
+    def _drop(self, reason: str) -> None:
+        self._dropped += 1
+        logger.debug("browser shell dropped a message: %s", reason)

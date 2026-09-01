@@ -9,8 +9,6 @@ from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
 
-logger = logging.getLogger(__name__)
-
 import httpx
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
@@ -18,9 +16,11 @@ from fastapi import WebSocketDisconnect
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.control import AcquireOutcome
 from surogates.browser.rfb import RFBClientMessageGate
+from surogates.browser.shell import ShellSession
 from surogates.session.events import EventType
 from surogates.tenant.auth.middleware import (
     LIVE_VIEW_TOKEN_COOKIE,
@@ -28,6 +28,8 @@ from surogates.tenant.auth.middleware import (
     get_current_tenant,
 )
 from surogates.tenant.context import TenantContext
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -58,6 +60,25 @@ def _browser_preview_client(rest_url: str) -> KernelBrowserClient:
 
 async def _connect_live_view_ws(url: str):
     return await websockets.connect(url, subprotocols=["binary"])
+
+
+# Screencast frames arrive base64-encoded, so a capped 74 KB JPEG crosses the
+# CDP socket at ~99 KB. Bounded well above that, and well below "unbounded".
+MAX_CDP_FRAME = 32 * 1024 * 1024
+
+
+async def _cdp_browser_ws_url(cdp_url: str) -> str:
+    """Resolve the pod's browser-level DevTools socket from its CDP endpoint.
+
+    The URL in the registry is the port, not the socket: Chrome mints a fresh
+    ``/devtools/browser/<uuid>`` path per launch, so it has to be read from
+    ``/json/version`` rather than assumed.
+    """
+
+    base = cdp_url.replace("ws://", "http://", 1).replace("wss://", "https://", 1)
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        version = (await http.get(f"{base.rstrip('/')}/json/version")).json()
+    return version["webSocketDebuggerUrl"]
 
 
 def _live_view_client_payload(message: dict[str, Any]) -> str | bytes | None:
@@ -594,5 +615,96 @@ async def proxy_live_view_ws(
                 task.cancel()
         with contextlib.suppress(Exception):
             await upstream.close()
+        with contextlib.suppress(Exception):
+            await websocket.close()
+
+
+@router.websocket("/api/sessions/{session_id}/browser/shell")
+@router.websocket("/sessions/{session_id}/browser/shell")
+async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
+    """Stream one tab to a viewer, and carry their commands back.
+
+    Unlike ``proxy_live_view_ws``, holding the control lease is NOT required to
+    connect: frames always flow and only the command half is gated, so a viewer
+    watches live instead of falling back to a still preview. The lease is
+    re-checked per message rather than at connect time, so it expiring
+    mid-session quietly turns the viewer into a spectator.
+    """
+
+    try:
+        tenant = await authenticate_websocket_tenant(
+            websocket.app,
+            path=websocket.url.path,
+            token=websocket.query_params.get("token"),
+            cookies=websocket.cookies,
+            authorization=websocket.headers.get("authorization"),
+        )
+    except HTTPException:
+        await websocket.close(code=4401, reason="unauthenticated")
+        return
+
+    resolver = websocket.app.state.browser_resolver
+    control = websocket.app.state.browser_control
+    try:
+        await _require_session_agent(websocket.app.state, session_id, tenant)
+    except HTTPException:
+        await websocket.close(code=4404, reason="no browser")
+        return
+    resolved = await resolver.resolve(
+        str(session_id),
+        expected_org_id=str(tenant.org_id),
+    )
+    if resolved is None:
+        await websocket.close(code=4404, reason="no browser")
+        return
+
+    effective = _effective_live_view_user(
+        tenant=tenant,
+        path=websocket.url.path,
+        query_params=websocket.query_params,
+    )
+
+    async def lease_held() -> bool:
+        # Keyed on ``effective`` rather than ``tenant.user_id``, which is None
+        # for the ops proxy's service-account connection and would make every
+        # viewer a spectator.
+        return (
+            effective is not None
+            and await control.held_by(str(session_id)) == effective
+        )
+
+    try:
+        upstream_url = await _cdp_browser_ws_url(resolved.endpoint.cdp_url)
+        upstream = await websockets.connect(upstream_url, max_size=MAX_CDP_FRAME)
+    except Exception:
+        await websocket.close(code=4502, reason="upstream unavailable")
+        return
+
+    await websocket.accept()
+    session: ShellSession | None = None
+    try:
+        async with CdpClient(upstream) as cdp:
+            session = ShellSession(cdp, websocket, lease_held=lease_held)
+            await session.start()
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                raw = message.get("text")
+                if raw is None:
+                    # The client half of this protocol is JSON only; binary is
+                    # the server's direction.
+                    continue
+                await session.handle(raw)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        logger.exception("browser shell session failed")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=4500, reason="shell failed")
+    finally:
+        if session is not None:
+            with contextlib.suppress(Exception):
+                await session.close()
         with contextlib.suppress(Exception):
             await websocket.close()
