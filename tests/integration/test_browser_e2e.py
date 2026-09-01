@@ -9,14 +9,21 @@ Requires Docker and the kernel-images Chromium image.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import pytest
+import websockets
 
+from surogates.api.routes.browser import MAX_CDP_FRAME, _cdp_browser_ws_url
 from surogates.browser.base import BrowserSpec
+from surogates.browser.cdp import CdpClient
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.process import ProcessBrowserBackend
+from surogates.browser.shell import ShellSession
 
 
 pytestmark = pytest.mark.browser_e2e
@@ -270,3 +277,141 @@ async def test_promotion_does_not_leak_into_links_or_scroll_targets(
         # A negative tabindex means focusable by script but deliberately NOT
         # reachable by the user -- how pages mark scroll targets.
         assert "Scroll target" not in names
+
+
+# --- browser shell -----------------------------------------------------------
+
+
+class RecordingShellClient:
+    """Stands in for the viewer's WebSocket: keeps frames and JSON messages."""
+
+    def __init__(self) -> None:
+        self.binary: list[bytes] = []
+        self.text: list[dict] = []
+
+    async def send_bytes(self, payload: bytes) -> None:
+        self.binary.append(payload)
+
+    async def send_text(self, payload: str) -> None:
+        self.text.append(json.loads(payload))
+
+
+@asynccontextmanager
+async def shell_for(endpoint, *, lease: bool = True):
+    """Yield a started ShellSession against a real pod, plus a probe session.
+
+    The probe is a SECOND flat session on the same target, used to read the
+    page back without going through the shell -- the shell deliberately has no
+    verb that could.
+    """
+
+    url = await _cdp_browser_ws_url(endpoint.cdp_url)
+    state = {"lease": lease}
+
+    async def lease_held() -> bool:
+        return state["lease"]
+
+    async with websockets.connect(url, max_size=MAX_CDP_FRAME) as socket:
+        async with CdpClient(socket) as cdp:
+            pages = await cdp.targets()
+            probe = await cdp.attach_page(pages[0]["targetId"])
+            client = RecordingShellClient()
+            session = ShellSession(cdp, client, lease_held=lease_held)
+            await session.start()
+            try:
+                yield session, cdp, client, probe, state
+            finally:
+                await session.close()
+
+
+async def _read(cdp, probe: str, expression: str):
+    result = await cdp.call(
+        "Runtime.evaluate",
+        {"expression": expression, "returnByValue": True},
+        session=probe,
+    )
+    return result.get("result", {}).get("value")
+
+
+# A button at 20% across and 40% down, 200x60. A click sent as (0.25, 0.43)
+# is inside it only if the server scaled the normalized point by the live
+# viewport; getting that wrong misses and the label stays "miss".
+SHELL_BUTTON = (
+    "document.body.innerHTML = \"<button id='b' style='position:absolute;"
+    "left:20%;top:40%;width:200px;height:60px' "
+    "onclick='this.textContent=\\\"HIT\\\"'>miss</button>\""
+)
+
+
+async def test_shell_click_lands_at_a_normalized_coordinate(browser) -> None:
+    _browser_id, endpoint = browser
+    async with shell_for(endpoint) as (session, cdp, _client, probe, _state):
+        await session.handle(json.dumps({"t": "navigate", "url": "https://example.com/"}))
+        await asyncio.sleep(3.0)
+        await cdp.call("Runtime.evaluate", {"expression": SHELL_BUTTON}, session=probe)
+
+        await session.handle(json.dumps({"t": "click", "x": 0.25, "y": 0.43}))
+        await asyncio.sleep(1.5)
+
+        assert await _read(cdp, probe, "document.getElementById('b').textContent") == "HIT"
+
+
+async def test_shell_drops_commands_without_the_lease(browser) -> None:
+    _browser_id, endpoint = browser
+    async with shell_for(endpoint) as (session, cdp, _client, probe, state):
+        await session.handle(json.dumps({"t": "navigate", "url": "https://example.com/"}))
+        await asyncio.sleep(3.0)
+        await cdp.call("Runtime.evaluate", {"expression": SHELL_BUTTON}, session=probe)
+
+        state["lease"] = False
+        await session.handle(json.dumps({"t": "click", "x": 0.25, "y": 0.43}))
+        await asyncio.sleep(1.5)
+
+        # Watching is never gated; acting is.
+        assert await _read(cdp, probe, "document.getElementById('b').textContent") == "miss"
+
+
+async def test_shell_navigate_rejects_file_scheme(browser) -> None:
+    _browser_id, endpoint = browser
+    async with shell_for(endpoint) as (session, cdp, _client, probe, _state):
+        await session.handle(json.dumps({"t": "navigate", "url": "https://example.com/"}))
+        await asyncio.sleep(3.0)
+
+        # The unit test proves translate() raises; this proves nothing
+        # downstream re-admits it.
+        await session.handle(json.dumps({"t": "navigate", "url": "file:///etc/passwd"}))
+        await asyncio.sleep(1.5)
+
+        assert await _read(cdp, probe, "location.protocol") == "https:"
+
+
+async def test_shell_streams_frames_while_the_page_changes(browser) -> None:
+    _browser_id, endpoint = browser
+    async with shell_for(endpoint) as (session, cdp, client, probe, _state):
+        await session.handle(json.dumps({"t": "navigate", "url": "https://example.com/"}))
+        await asyncio.sleep(3.0)
+        assert client.binary, "no screencast frames reached the viewer"
+        assert all(frame.startswith(b"\xff\xd8") for frame in client.binary), (
+            "frames must be decoded JPEG, not base64 text"
+        )
+        assert any(message.get("t") == "nav" for message in client.text)
+
+
+async def test_shell_switch_tab_drains_the_previous_stream(browser) -> None:
+    _browser_id, endpoint = browser
+    async with shell_for(endpoint) as (session, cdp, client, _probe, _state):
+        created = await cdp.call(
+            "Target.createTarget", {"url": "https://example.com/"}
+        )
+        await asyncio.sleep(2.0)
+
+        client.binary.clear()
+        await session.handle(
+            json.dumps({"t": "switch_tab", "id": created["targetId"]})
+        )
+        await asyncio.sleep(2.0)
+
+        tabs = [m for m in client.text if m.get("t") == "tabs"]
+        assert tabs, "switching tabs must push a fresh tab list"
+        active = [t for t in tabs[-1]["tabs"] if t["active"]]
+        assert active and active[0]["id"] == created["targetId"]
