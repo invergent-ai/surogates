@@ -25,8 +25,8 @@ interface BrowserShellProps {
   onClose?: () => void;
   onMaximize?: () => void;
   /**
-   * Called when the socket drops *unexpectedly* — not on unmount. Mirrors
-   * `BrowserLiveView`'s contract so the pane's handling is unchanged.
+   * Called when the socket drops *unexpectedly* — not on unmount, so an
+   * intentional teardown never looks like a failure to the pane.
    */
   onDisconnect?: (clean: boolean) => void;
   testId?: string;

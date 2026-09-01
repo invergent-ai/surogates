@@ -27,7 +27,7 @@ interface BrowserPaneProps {
   adapter: BrowserPaneAdapter;
   /**
    * Optional close handler. When supplied, a "Close" button is
-   * rendered in the BrowserControlBar next to "Take control". The
+   * offered in the shell's overflow menu. The
    * parent decides what closing means — typically hiding the pane.
    * If the user holds browser control at close time, the bar releases
    * it before invoking onClose so the agent can reclaim immediately.
@@ -72,10 +72,9 @@ export function BrowserPane({
 
   // Closing the fullscreen dialog must NOT release browser control.
   // Control is a separate, user-driven concern (toggled via
-  // BrowserControlBar's "Take/Return control" button). The inline live
-  // view also requires control, so blindly releasing here would tear
-  // down both RFB live views and trigger 4403 close codes on every
-  // subsequent reconnect inside the 60s TTL window.
+  // the shell's take-control toggle). The shell streams without the
+  // lease, so releasing here would cost the user their control for no
+  // reason and hand the page back to the agent mid-edit.
   const handleFullscreenOpenChange = useCallback(
     (open: boolean) => {
       setFullscreenOpen(open);

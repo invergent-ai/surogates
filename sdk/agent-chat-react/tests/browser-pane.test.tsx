@@ -4,15 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BrowserPane } from "../src/components/browser/browser-pane";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 
-vi.mock("@novnc/novnc", () => ({
-  default: vi.fn().mockImplementation(() => ({
-    disconnect: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    viewOnly: false,
-    scaleViewport: false,
-  })),
-}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -30,12 +21,6 @@ const liveAdapter = {
     return { outcome: "granted" as const, ownerUserId: "u" };
   },
   async releaseBrowserControl() {},
-  async getBrowserPreviewSnapshot() {
-    return { src: "data:image/png;base64,cHJldmlldw==" };
-  },
-  browserLiveViewUrl() {
-    return "about:blank#browser-live";
-  },
   browserShellUrl() {
     return "ws://browser.test/shell";
   },
@@ -117,6 +102,7 @@ describe("BrowserPane", () => {
 
     expect(node.querySelector('[data-testid="browser-shell"]')).not.toBeNull();
     expect(controlToggle(node)?.getAttribute("aria-pressed")).toBe("false");
+    // No still-image fallback exists any more.
     expect(
       node.querySelector('[data-testid="browser-preview-image"]'),
     ).toBeNull();
@@ -145,7 +131,7 @@ describe("BrowserPane", () => {
     ).not.toBeNull();
   });
 
-  it("does not mount live view from replayed user-control state after refresh", async () => {
+  it("does not claim control from replayed user-control state after refresh", async () => {
     const node = renderPane(
       <BrowserPane
         sessionId="s"
@@ -173,7 +159,7 @@ describe("BrowserPane", () => {
     expect(controlToggle(node)?.getAttribute("aria-label")).toBe("Take control");
   });
 
-  it("opens the live-view dialog after this tab acquires control", async () => {
+  it("opens the fullscreen dialog after this tab acquires control", async () => {
     let resolveAcquire:
       | ((value: { outcome: "granted"; ownerUserId: string }) => void)
       | null = null;
@@ -218,10 +204,9 @@ describe("BrowserPane", () => {
   });
 
   it("does NOT release browser control when the fullscreen dialog closes", async () => {
-    // Control and fullscreen are orthogonal: the inline live view also
-    // requires control, so closing the fullscreen dialog (Esc / click
-    // outside / close button) must not tear down the held lease.
-    // Releasing control is the user's job via "Return control".
+    // Control and fullscreen are orthogonal: closing the dialog (Esc /
+    // click outside / close button) must not tear down the held lease.
+    // Returning control is the user's job, via the shell's toggle.
     let releaseCount = 0;
     const controlledAdapter = {
       ...liveAdapter,

@@ -333,16 +333,6 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return url.pathname + url.search;
   },
 
-  browserLiveViewUrl(sessionId) {
-    const url = new URL(
-      `/api/v1/sessions/${sessionId}/browser/live/`,
-      window.location.origin,
-    );
-    const token = getAuthToken();
-    if (token) url.searchParams.set("token", token);
-    return url.pathname + url.search;
-  },
-
   async listBrowserProfiles() {
     const response = await authFetch("/api/v1/browser-profiles");
     if (!response.ok) throw new Error("Failed to list browser profiles");

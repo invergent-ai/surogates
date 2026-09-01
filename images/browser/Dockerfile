@@ -2,10 +2,9 @@
 #
 # Additions on top of upstream onkernel/chromium-headful:
 #   - zstd for profile sync compression
-#   - x11vnc + websockify: RFB-over-WebSocket live view on :8080
 #   - neko disabled — its WebRTC live view needs UDP/TURN the cluster cannot
-#     provide; x11vnc attaches to the existing Xorg :1 and websockify bridges it
-#     to the :8080 WebSocket the harness already proxies as live_view_url
+#     provide, and the browser shell streams the page over CDP instead, so
+#     nothing in this image serves a remote view of the desktop
 #   - Surogates OCI labels
 
 ARG UPSTREAM=docker.io/onkernel/chromium-headful@sha256:b7c0151ee94df4b5a5873605389727db456dbd7c98da74efa29c40eb238ac573
@@ -20,10 +19,10 @@ ENV CHROMIUM_FLAGS="--no-sandbox"
 
 USER root
 
-# zstd for profile sync; x11vnc + websockify for the RFB-over-WebSocket live
-# view. neko is forced off so it cannot contend for :8080 (websockify binds it).
+# zstd for profile sync. neko is forced off: the shell reads the page over
+# CDP, so no service in this image exposes the X display remotely.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zstd x11vnc websockify \
+    && apt-get install -y --no-install-recommends zstd \
     && mkdir -p /var/log/supervisord \
         /etc/envoy/certs \
         /usr/local/share/ca-certificates \
@@ -42,9 +41,6 @@ RUN apt-get update \
     && sed -i 's/^autostart=.*$/autostart=false/' \
         /etc/supervisor/conf.d/services/neko.conf \
     && rm -rf /var/lib/apt/lists/*
-
-COPY images/browser/supervisor/x11vnc.conf /etc/supervisor/conf.d/services/x11vnc.conf
-COPY images/browser/supervisor/websockify.conf /etc/supervisor/conf.d/services/websockify.conf
 
 # Keep the upstream runtime user. The headful wrapper starts supervisord as root
 # and the Chromium launcher drops privileges internally with runuser.
