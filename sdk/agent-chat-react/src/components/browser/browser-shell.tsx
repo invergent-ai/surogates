@@ -156,8 +156,14 @@ export function BrowserShell({
       } catch {
         return;
       }
-      if (message.t === "tabs") setTabs((message.tabs as Tab[]) ?? []);
-      else if (message.t === "nav") {
+      if (message.t === "tabs") {
+        const next = (message.tabs as Tab[]) ?? [];
+        setTabs(next);
+        // The tabs snapshot is the only address the server sends at connect
+        // and after a tab switch — nav messages only arrive on navigation.
+        const active = next.find((tab) => tab.active);
+        if (active) setNav({ url: active.url, title: active.title });
+      } else if (message.t === "nav") {
         setNav({
           url: String(message.url ?? ""),
           title: String(message.title ?? ""),
@@ -275,7 +281,7 @@ export function BrowserShell({
           onClick={onToggleControl}
           className={
             hasControl
-              ? "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] bg-primary text-primary-foreground"
+              ? "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] bg-[#F5A524] text-black"
               : ICON
           }
         >
@@ -366,7 +372,7 @@ export function BrowserShell({
 
       <div
         className={`relative min-h-0 flex-1 bg-black ${
-          hasControl ? "ring-2 ring-inset ring-primary" : ""
+          hasControl ? "ring-2 ring-inset ring-[#F5A524]" : ""
         }`}
         tabIndex={hasControl ? 0 : -1}
         onKeyDown={handleKeyDown}

@@ -147,6 +147,16 @@ describe("BrowserShell", () => {
     ).toBeNull();
   });
 
+  it("seeds the address bar from the active tab", async () => {
+    // On connect the server sends `tabs`, not `nav` — a nav message only
+    // arrives on the next navigation. The bar must not sit empty until then,
+    // nor keep the previous tab's address after a switch.
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    await push({ t: "tabs", tabs: TABS });
+    const field = node.querySelector("[data-testid='browser-shell-url']");
+    expect(field?.textContent).toContain("en.wikipedia.org");
+  });
+
   it("shows the url from a nav message", async () => {
     const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
     await push({ t: "nav", url: "https://example.com/page", title: "Example" });
