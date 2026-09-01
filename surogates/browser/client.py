@@ -166,6 +166,10 @@ for (const el of __els) __style.set(el, window.getComputedStyle(el));
 for (const el of __els) {
   const style = __style.get(el);
   if (style.visibility === 'hidden' || style.display === 'none') continue;
+  // aria-hidden marks a subtree decorative: icon glyphs, duplicated mobile
+  // nav, screen-reader spacers.  closest() covers the subtree, since the
+  // attribute applies to every descendant in the accessibility tree.
+  if (el.closest('[aria-hidden="true"]')) continue;
   const bbox = el.getBoundingClientRect();
   if (!bbox || bbox.width <= 0 || bbox.height <= 0) continue;
   const idx = base + out.length;

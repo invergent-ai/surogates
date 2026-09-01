@@ -113,3 +113,33 @@ async def test_click_ref_lands_inside_an_iframe(browser) -> None:
         # coordinates instead of the root's misses it and the label stands.
         after = await client.get_state()
         assert any(n["name"] == "Paid" for n in after["tree"])
+
+
+ARIA_HIDDEN_PAGE = (
+    "<body style='margin:0'>"
+    "<p>Real content</p>"
+    "<div aria-hidden='true'><p>Decorative duplicate</p>"
+    "<button>Ghost button</button></div>"
+    "</body>"
+)
+
+
+async def test_aria_hidden_subtrees_are_skipped(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(ARIA_HIDDEN_PAGE))
+
+        state = await client.get_state()
+        texts = [n.get("text_block", "") for n in state["tree"]]
+
+        assert any("Real content" in t for t in texts)
+        # aria-hidden hides the whole subtree, not just the marked element, so
+        # neither the button nor the paragraph inside it becomes a node.
+        # Asserted per node rather than across every name: until Task 3 lands,
+        # <body> is still named by its own innerText and carries every string
+        # on the page, which would mask this.
+        assert not any(
+            n["role"] == "button" and "Ghost" in n.get("name", "")
+            for n in state["tree"]
+        )
+        assert not any(t.strip() == "Decorative duplicate" for t in texts)
