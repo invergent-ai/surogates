@@ -429,6 +429,36 @@ describe("AgentChat", () => {
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
   });
 
+  it("toggles the browser pane from its card", async () => {
+    const stream = new FakeEventStream();
+    const adapter = {
+      ...createAdapter(stream),
+      browserLiveViewUrl() {
+        return "about:blank#browser-live";
+      },
+    };
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      stream.emit("browser.provisioned", 10, { session_id: "s-1" });
+      await Promise.resolve();
+    });
+
+    await openPane(container, "browser");
+    expect(container.querySelector('[data-testid="browser-panel"]')).not.toBeNull();
+
+    // The same card hides it again — show and hide live on one button.
+    await openPane(container, "browser");
+    expect(container.querySelector('[data-testid="browser-panel"]')).toBeNull();
+    expect(container.querySelector('[data-testid="right-stack"]')).toBeNull();
+  });
+
   it("expands the files accordion in the chat column, not a drawer", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

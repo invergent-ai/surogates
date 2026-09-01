@@ -300,11 +300,6 @@ export function AgentChat({
     [handleOpenFilePreview, onFileSelect],
   );
 
-  const handleOpenBrowserPane = useCallback(() => {
-    setOpenPane("browser");
-    setMobileView("browser");
-  }, []);
-
   const handleToggleBrowser = useCallback(() => {
     setOpenPane((prev) => (prev === "browser" ? null : "browser"));
     setMobileView("browser");
@@ -447,7 +442,9 @@ export function AgentChat({
                         ? `${browserState.controlOwner} has control`
                         : undefined,
                       thumbnail: browserPreview,
-                      onOpen: handleOpenBrowserPane,
+                      // Show and hide on the same card, like the Files
+                      // accordion header and the composer's Tools item.
+                      onOpen: handleToggleBrowser,
                     }
                   : null,
                 files: workspaceAvailable
