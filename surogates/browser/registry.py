@@ -69,3 +69,21 @@ class BrowserRegistry:
 
     async def delete(self, session_id: str) -> None:
         await self._redis.hdel(REGISTRY_HASH_KEY, session_id)
+
+    async def entries(self) -> dict[str, BrowserEntry]:
+        """Every registered browser, keyed by session id.
+
+        A row that no longer parses is skipped rather than raised: the reaper
+        reads this, and one corrupt entry must not shield the rest of the
+        fleet from being swept.
+        """
+
+        raw = await self._redis.hgetall(REGISTRY_HASH_KEY)
+        out: dict[str, BrowserEntry] = {}
+        for key, value in raw.items():
+            session_id = key.decode() if isinstance(key, bytes) else key
+            try:
+                out[session_id] = BrowserEntry.from_json(value)
+            except Exception:  # noqa: BLE001 - skip garbage, keep sweeping
+                continue
+        return out

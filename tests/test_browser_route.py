@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 from surogates.browser.base import BrowserEndpoint
@@ -23,6 +24,11 @@ USER_1 = UUID("10000000-0000-0000-0000-000000000001")
 class StubResolver:
     def __init__(self) -> None:
         self.entries: dict[str, ResolvedBrowser] = {}
+        self.forgotten: list[str] = []
+
+    async def forget_unreachable(self, session_id: str) -> None:
+        self.forgotten.append(session_id)
+        self.entries.pop(session_id, None)
 
     async def resolve(
         self,
@@ -511,6 +517,102 @@ class TestPreviewEndpoint:
         assert response.content == b"\x89PNG\r\n\x1a\npreview"
         assert seen == ["http://browser-x.svc:10001"]
         assert screenshot_kwargs == [{}]
+
+    async def test_preview_unreachable_browser_404s_and_forgets_it(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        """An entry nothing answers is absent, not a bad gateway.
+
+        502 reads as "retry later", so a polling client loops on it forever
+        and fills the proxy log. 404 is a verdict the caller can act on, and
+        the stale entry goes with it so the next resolve answers honestly.
+        """
+
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        class DeadPreviewClient:
+            def __init__(self, rest_url: str) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                return None
+
+            async def screenshot(self, **_kwargs):
+                raise httpx.ConnectError("All connection attempts failed")
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_browser_preview_client",
+            DeadPreviewClient,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/preview.png")
+
+        assert response.status_code == 404
+        assert sid in resolver.forgotten
+
+    async def test_preview_slow_screenshot_502s_and_keeps_the_entry(
+        self,
+        app_factory,
+        monkeypatch,
+    ) -> None:
+        """A read timeout is a browser that answered slowly, not one that is gone.
+
+        ReadTimeout subclasses TransportError, and classifying it as
+        "unreachable" deleted live browsers' registry entries whenever a
+        screenshot of a page mid-load ran long -- a working session then said
+        "Browser disconnected". Only a refused connection may prune.
+        """
+
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        class SlowPreviewClient:
+            def __init__(self, rest_url: str) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                return None
+
+            async def screenshot(self, **_kwargs):
+                raise httpx.ReadTimeout("screenshot ran long")
+
+        monkeypatch.setattr(
+            browser_routes,
+            "_browser_preview_client",
+            SlowPreviewClient,
+            raising=False,
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=build()),
+            base_url="http://test",
+        ) as client:
+            response = await client.get(f"/v1/sessions/{sid}/browser/preview.png")
+
+        assert response.status_code == 502
+        assert resolver.forgotten == []
+        assert sid in resolver.entries
 
     async def test_preview_unknown_session_returns_404(self, app_factory) -> None:
         build, _resolver, _control = app_factory

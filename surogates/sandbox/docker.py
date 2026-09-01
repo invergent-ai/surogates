@@ -247,8 +247,18 @@ class DockerSandbox:
         logger.info("Destroyed docker sandbox %s", sandbox_id)
 
     async def destroy_for_session(self, session_id: str) -> None:
+        # Both filters, not just the session: browser containers carry the
+        # same surogates.session_id label, and a sweep keyed on the session
+        # alone stops the session's live browser at every completion.
         code, stdout, stderr = await self._docker.run(
-            ["ps", "-aq", "--filter", f"label=surogates.session_id={session_id}"],
+            [
+                "ps",
+                "-aq",
+                "--filter",
+                "label=app=surogates-sandbox",
+                "--filter",
+                f"label=surogates.session_id={session_id}",
+            ],
         )
         if code != 0:
             logger.warning(

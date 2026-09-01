@@ -361,7 +361,25 @@ async def get_browser_preview(
     try:
         async with _browser_preview_client(resolved.endpoint.rest_url) as client:
             screenshot = await client.screenshot()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        # Nothing ANSWERED at the address the registry gave -- connection
+        # refused or nothing listening -- so the entry is wrong: drop it and
+        # report the browser as absent. Deliberately narrower than
+        # TransportError: ReadTimeout is a subclass, and a screenshot of a
+        # page mid-load times out on read while the browser is entirely
+        # alive. Classifying that as "unreachable" deleted live browsers'
+        # entries, which is how a working session came to say
+        # "Browser disconnected".
+        await resolver.forget_unreachable(str(session_id))
+        raise HTTPException(
+            status_code=404,
+            detail="No browser for session",
+        ) from exc
     except Exception as exc:
+        # Reached the browser and it failed anyway -- a page mid-navigation, a
+        # slow render, a screenshot timeout. That is not evidence the browser
+        # is gone, and pruning here would delete a healthy browser's entry and
+        # take the pane down with it.
         raise HTTPException(
             status_code=502,
             detail="Browser preview is unreachable.",
@@ -443,12 +461,20 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
     try:
         upstream_url = await _cdp_browser_ws_url(resolved.endpoint.cdp_url)
         upstream = await websockets.connect(upstream_url, max_size=MAX_CDP_FRAME)
-    except Exception:
+    except Exception as exc:
         logger.warning(
             "browser shell rejected: cannot reach CDP at %s",
             resolved.endpoint.cdp_url,
             exc_info=True,
         )
+        # Prune only when nothing was LISTENING after the full readiness
+        # window -- a refused connection is a stale entry, but a reachable
+        # browser that answered strangely (bad /json/version, an envoy hiccup)
+        # is still a browser, and deleting its entry would kill a live one.
+        if isinstance(
+            exc, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError, OSError)
+        ):
+            await resolver.forget_unreachable(str(session_id))
         await websocket.close(code=4502, reason="upstream unavailable")
         return
 
