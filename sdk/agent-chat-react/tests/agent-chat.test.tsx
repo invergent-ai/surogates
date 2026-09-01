@@ -126,6 +126,20 @@ function createAdapter(
   } satisfies AgentChatAdapter;
 }
 
+/** The right column starts closed; a card above the composer opens it. */
+async function openPane(
+  node: HTMLElement,
+  which: "browser" | "files",
+): Promise<void> {
+  const card = node.querySelector<HTMLButtonElement>(
+    `[data-testid="session-pane-card-${which}"]`,
+  );
+  if (!card) throw new Error(`no ${which} card to open the pane with`);
+  await act(async () => {
+    card.click();
+  });
+}
+
 function session(
   id: string,
   overrides: Partial<AgentChatSession> = {},
@@ -366,6 +380,7 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     expect(container.textContent).toContain("Workspace");
     expect(container.textContent).toContain("main.py");
 
@@ -397,11 +412,16 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     expect(container.querySelector('[data-testid="workspace-panel"]')).not.toBeNull();
+    // No browser in this session, so no browser card and no browser pane.
+    expect(
+      container.querySelector('[data-testid="session-pane-card-browser"]'),
+    ).toBeNull();
     expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
   });
 
-  it("offers one phone tab per live pane, and falls back when one goes away", async () => {
+  it("offers a phone tab for the open pane, and closes when it goes away", async () => {
     const stream = new FakeEventStream();
     const adapter = {
       ...createAdapter(stream),
@@ -425,14 +445,21 @@ describe("AgentChat", () => {
         ) ?? [],
       ).map((button) => button.textContent);
 
-    // Workspace only, so far.
+    // Closed column: nothing to toggle between, so no toggle at all.
+    expect(tabLabels()).toEqual([]);
+
+    await openPane(container!, "files");
     expect(tabLabels()).toEqual(["Chat", "Workspace"]);
 
     await act(async () => {
       stream.emit("browser.provisioned", 10, { session_id: "s-1" });
       await Promise.resolve();
     });
-    expect(tabLabels()).toEqual(["Chat", "Browser", "Workspace"]);
+    // One pane at a time now: provisioning a browser does not add a third tab,
+    // it offers a card. Opening it swaps which pane the column holds.
+    expect(tabLabels()).toEqual(["Chat", "Workspace"]);
+    await openPane(container!, "browser");
+    expect(tabLabels()).toEqual(["Chat", "Browser"]);
 
     // Park the layout on the browser tab, then close the browser: the tab it
     // was showing no longer exists, so it must not be left on a blank pane.
@@ -455,7 +482,9 @@ describe("AgentChat", () => {
       stream.emit("browser.destroyed", 11, { session_id: "s-1" });
       await Promise.resolve();
     });
-    expect(tabLabels()).toEqual(["Chat", "Workspace"]);
+    // The open pane vanished, so the column closes rather than showing a
+    // blank tab, and the layout falls back to the chat.
+    expect(tabLabels()).toEqual([]);
     expect(
       container
         ?.querySelector('[data-testid="chat-panel"]')
@@ -463,7 +492,7 @@ describe("AgentChat", () => {
     ).toBe("chat");
   });
 
-  it("stacks BrowserPane above WorkspacePanel when browser is live", async () => {
+  it("gives the column to whichever pane a card opened", async () => {
     const stream = new FakeEventStream();
     const adapter = {
       ...createAdapter(stream),
@@ -485,6 +514,10 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    // Closed until a card opens it -- the panes are tabs, never both at once.
+    expect(container.querySelector('[data-testid="browser-pane"]')).toBeNull();
+    await openPane(container, "browser");
+
     const browserPane = container.querySelector('[data-testid="browser-pane"]');
     const layout = container.querySelector('[data-testid="agent-chat-layout"]');
     const chatPanel = container.querySelector('[data-testid="chat-panel"]');
@@ -495,6 +528,9 @@ describe("AgentChat", () => {
       '[data-testid="workspace-panel-frame"]',
     );
     expect(browserPane).not.toBeNull();
+    // One pane at a time: the workspace is a tab away, not stacked below.
+    expect(workspacePanel).toBeNull();
+    expect(workspacePanelFrame).toBeNull();
     expect((layout as HTMLElement | null)?.style.direction).toBe("ltr");
     // Right-stack width is exposed as a CSS custom property on the layout
     // element so responsive classes can reference it via var().
@@ -512,22 +548,12 @@ describe("AgentChat", () => {
     expect(rightStack?.className).toContain("md:absolute");
     expect(rightStack?.className).toContain("md:right-0");
     expect(rightStack?.className).toContain("md:w-(--right-stack-w,440px)");
+    // The open pane owns the whole column now, at every width -- there is no
+    // half to share, because the other pane is behind a tab.
     expect(browserPanel?.className).toContain("w-full");
-    // The 50/50 split is a desktop arrangement; a phone shows whichever pane
-    // the toggle selects, full height.
-    expect(browserPanel?.className).toContain("md:h-1/2");
     expect(browserPanel?.className).toContain("h-full");
     expect(browserPanel?.className).toContain("overflow-hidden");
-    expect(workspacePanel?.className).toContain("w-full");
-    expect(workspacePanelFrame?.className).toContain("md:h-1/2");
-    expect(workspacePanelFrame?.className).toContain("h-full");
-    expect(workspacePanelFrame?.className).toContain("w-full");
-    expect(workspacePanelFrame?.className).toContain("overflow-hidden");
-    expect(workspacePanel).not.toBeNull();
-    expect(
-      browserPane!.compareDocumentPosition(workspacePanel!) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(browserPanel?.className).not.toContain("md:h-1/2");
   });
 
   it("renders PDF workspace files without using the image preview", async () => {
@@ -568,6 +594,7 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     const fileButton = Array.from(
       container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
     ).find((element) => element.textContent?.includes("report.pdf"));
@@ -629,6 +656,7 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     const fileButton = Array.from(
       container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
     ).find((element) => element.textContent?.includes("broken.pdf"));
@@ -685,6 +713,7 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     const fileButton = Array.from(
       container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
     ).find((element) => element.textContent?.includes("broken.pdf"));
@@ -714,6 +743,7 @@ describe("AgentChat", () => {
       await Promise.resolve();
     });
 
+    await openPane(container, "files");
     const fileButton = Array.from(
       container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
     )
@@ -761,6 +791,7 @@ describe("AgentChat", () => {
     expect(composer).not.toBeNull();
     expect(composer!.disabled).toBe(true);
 
+    await openPane(container, "files");
     const uploadButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Upload files"]',
     );

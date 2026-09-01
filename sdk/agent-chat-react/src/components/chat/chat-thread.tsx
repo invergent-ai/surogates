@@ -63,6 +63,7 @@ import {
 import { ChatMessage } from "./chat-message";
 import { renderInlineMarkdown } from "./inline-markdown";
 import { ChatComposer } from "./chat-composer";
+import { SessionPaneCard } from "./session-pane-card";
 import { IntegrationsBand } from "../connections/integrations-band";
 import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
@@ -84,6 +85,7 @@ import {
   ClockIcon,
   FileEditIcon,
   FileTextIcon,
+  FolderIcon,
   GlobeIcon,
   ListIcon,
   MessageSquareIcon,
@@ -137,6 +139,18 @@ interface ChatThreadProps {
   // SDK does not ship a toast subsystem; callers (e.g. surogate-ops)
   // wire their own.
   onComposerError?: (err: ChatComposerError) => void;
+  /**
+   * Resources this session has produced, offered as cards above the composer.
+   * The right column starts closed, so these are how a viewer opens it.
+   */
+  paneCards?: {
+    browser?: {
+      subtitle?: string;
+      thumbnail?: string | null;
+      onOpen: () => void;
+    } | null;
+    files?: { count?: number; onOpen: () => void } | null;
+  };
 
   // Pane toggle wiring — forwarded to the composer's tools row. AgentChat
   // owns the visibility state; the composer renders the buttons.
@@ -1899,6 +1913,7 @@ export function ChatThread({
   retryIndicator,
   onRetry,
   onComposerError,
+  paneCards,
   showBrowser = false,
   onToggleBrowser,
   showWorkspace = false,
@@ -2020,6 +2035,32 @@ export function ChatThread({
       {researchSources.length > 0 && (
         <div className="mb-2">
           <ResearchSourcesPanel sources={researchSources} />
+        </div>
+      )}
+      {(paneCards?.browser || paneCards?.files) && (
+        <div
+          data-testid="session-pane-cards"
+          className="mb-2 flex flex-col gap-1.5"
+        >
+          {paneCards.browser && (
+            <SessionPaneCard
+              testId="session-pane-card-browser"
+              title="Browser"
+              icon={GlobeIcon}
+              subtitle={paneCards.browser.subtitle}
+              thumbnail={paneCards.browser.thumbnail}
+              onOpen={paneCards.browser.onOpen}
+            />
+          )}
+          {paneCards.files && (
+            <SessionPaneCard
+              testId="session-pane-card-files"
+              title="Files"
+              icon={FolderIcon}
+              count={paneCards.files.count}
+              onOpen={paneCards.files.onOpen}
+            />
+          )}
         </div>
       )}
       <ChatComposer

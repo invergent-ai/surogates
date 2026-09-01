@@ -143,15 +143,12 @@ export function AgentChat({
   // give each pane ~200px on a phone, which is not a file tree or a browser
   // so much as a rumour of one.
   const [mobileView, setMobileView] = useState<MobilePane>("chat");
-  // User-controlled visibility for the desktop right-stack panes.
-  // Expert mode defaults both visible (the long-standing behavior);
-  // Simple mode hides the workspace pane so the conversation stays
-  // the centerpiece. The composer's toggle buttons still flip both
-  // in either mode, and a manual toggle is preserved across renders
-  // (the mode-sync effect below only fires when viewMode actually
-  // changes).
-  const [showBrowser, setShowBrowser] = useState(true);
-  const [showWorkspace, setShowWorkspace] = useState(true);
+  // Which right-stack pane is open, if any. The column starts closed and
+  // is opened from the cards above the composer; the composer's toggles
+  // drive the same state, so the two affordances cannot disagree about
+  // what is showing. One pane at a time -- the panes are tabs now, not
+  // stacked halves.
+  const [openPane, setOpenPane] = useState<MobilePane | null>(null);
 
   const runtime = useAgentChatRuntime({
     adapter,
@@ -165,7 +162,9 @@ export function AgentChat({
   // Only fires on viewMode transitions, so manual toggles within a
   // mode aren't clobbered.
   useEffect(() => {
-    setShowWorkspace(runtime.viewMode === "expert");
+    // Switching modes closes the column rather than choosing a pane for
+    // the user: the cards make re-opening one click.
+    setOpenPane(null);
   }, [runtime.viewMode]);
   const readOnly = readOnlyReasonForSession(runtime.session);
   // The canvas view is offered only on a session that was created as a
@@ -215,11 +214,17 @@ export function AgentChat({
   // BrowserPane would otherwise render an empty "preview unavailable" panel.
   const browserAvailable =
     browserState !== null && browserState.status !== "closed" && !!sessionId;
-  const browserVisible = browserAvailable && showBrowser;
+  const browserVisible = browserAvailable && openPane === "browser";
   const workspaceAvailable = !!sessionId;
-  const workspaceVisible = workspaceAvailable && showWorkspace;
+  const workspaceVisible = workspaceAvailable && openPane === "workspace";
   const rightStackVisible = browserVisible || workspaceVisible;
-  const bothPanesVisible = browserVisible && workspaceVisible;
+
+  // A pane that goes away while it is the open one must not leave the column
+  // parked on nothing: the browser can be destroyed mid-session.
+  useEffect(() => {
+    if (openPane === "browser" && !browserAvailable) setOpenPane(null);
+    if (openPane === "workspace" && !workspaceAvailable) setOpenPane(null);
+  }, [openPane, browserAvailable, workspaceAvailable]);
 
   useEffect(() => {
     onMessagesChange?.(runtime.messages);
@@ -232,18 +237,30 @@ export function AgentChat({
       // front so the user can see the file they just opened. Also force
       // the workspace pane visible if the user had hidden it.
       setMobileView("workspace");
-      setShowWorkspace(true);
+      setOpenPane("workspace");
       onFileSelect?.(path);
     },
     [onFileSelect],
   );
 
+  const handleOpenBrowserPane = useCallback(() => {
+    setOpenPane("browser");
+    setMobileView("browser");
+  }, []);
+
+  const handleOpenWorkspacePane = useCallback(() => {
+    setOpenPane("workspace");
+    setMobileView("workspace");
+  }, []);
+
   const handleToggleBrowser = useCallback(() => {
-    setShowBrowser((prev) => !prev);
+    setOpenPane((prev) => (prev === "browser" ? null : "browser"));
+    setMobileView("browser");
   }, []);
 
   const handleToggleWorkspace = useCallback(() => {
-    setShowWorkspace((prev) => !prev);
+    setOpenPane((prev) => (prev === "workspace" ? null : "workspace"));
+    setMobileView("workspace");
   }, []);
 
   // The phone toggle offers exactly the panes that currently exist, so it
@@ -368,12 +385,25 @@ export function AgentChat({
               onSelectBrowserProfile={onSelectBrowserProfile}
               browserProfilesEnabled={browserProfilesEnabled}
               browserProfileLocked={!!sessionId}
-              showBrowser={showBrowser}
+              showBrowser={openPane === "browser"}
               onToggleBrowser={handleToggleBrowser}
-              showWorkspace={showWorkspace}
+              showWorkspace={openPane === "workspace"}
               onToggleWorkspace={handleToggleWorkspace}
               canShowBrowser={browserAvailable}
               canShowWorkspace={workspaceAvailable}
+              paneCards={{
+                browser: browserAvailable
+                  ? {
+                      subtitle: browserState?.controlOwner
+                        ? `${browserState.controlOwner} has control`
+                        : undefined,
+                      onOpen: handleOpenBrowserPane,
+                    }
+                  : null,
+                files: workspaceAvailable
+                  ? { onOpen: handleOpenWorkspacePane }
+                  : null,
+              }}
               viewMode={viewMode}
               onViewModeChange={runtime.setViewMode}
               deepResearchEnabled={deepResearchEnabled}
@@ -415,21 +445,13 @@ export function AgentChat({
                 <div
                   data-testid="browser-panel"
                   data-mobile-view={activeMobilePane}
-                  className={cn(
-                    "min-h-0 w-full overflow-hidden",
-                    // With both panes the desktop splits the column in half.
-                    // A phone gives whichever pane is selected the whole
-                    // height instead — see the mobile toggle above.
-                    bothPanesVisible
-                      ? "h-full data-[mobile-view=workspace]:hidden md:block! md:h-1/2 md:border-b md:border-line"
-                      : "h-full",
-                  )}
+                  className="min-h-0 h-full w-full overflow-hidden"
                 >
                   <BrowserPane
                     sessionId={sessionId}
                     state={browserState}
                     adapter={adapter}
-                    onClose={() => setShowBrowser(false)}
+                    onClose={() => setOpenPane(null)}
                   />
                 </div>
               )}
@@ -437,11 +459,7 @@ export function AgentChat({
                 <div
                   data-testid="workspace-panel-frame"
                   data-mobile-view={activeMobilePane}
-                  className={
-                    bothPanesVisible
-                      ? "h-full min-h-0 w-full overflow-hidden data-[mobile-view=browser]:hidden md:block! md:h-1/2"
-                      : "min-h-0 h-full"
-                  }
+                  className="min-h-0 h-full w-full overflow-hidden"
                 >
                   <WorkspacePanel
                     adapter={adapter}
@@ -450,7 +468,7 @@ export function AgentChat({
                     onSelectedPathChange={setWorkspacePath}
                     refreshSignal={runtime.workspaceRefreshKey}
                     disabled={effectiveDisabled}
-                    fillParent={bothPanesVisible}
+                    fillParent
                   />
                 </div>
               )}
