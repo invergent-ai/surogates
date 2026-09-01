@@ -1222,6 +1222,18 @@ class TestSnapshotScriptShape:
             "window.getComputedStyle"
         ) == 1
 
+    def test_name_from_content_is_not_a_universal_fallback(self) -> None:
+        from surogates.browser.client import KernelBrowserClient
+
+        script = KernelBrowserClient._SNAPSHOT_SCRIPT
+        # innerText forces layout.  It is affordable for the handful of roles
+        # ARIA names from content and for text_block derivation -- and nowhere
+        # else.  Restoring a contents fallback for containers would put the
+        # per-element layout cost back and quietly rename every wrapper on the
+        # page after its own subtree, which is what poisons ref healing.
+        assert "__NAME_FROM_CONTENT.has(role)" in script
+        assert script.count("el.innerText") <= 2
+
     @pytest.mark.parametrize("script_name", ["snapshot", "click"])
     def test_injected_js_parses(self, tmp_path, script_name: str) -> None:
         """Parse the injected JS with node, since only the browser ever runs it.

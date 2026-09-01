@@ -177,3 +177,48 @@ async def test_structural_tags_get_real_roles(browser) -> None:
             n["role"] == "generic" and n.get("text_block") == "Plan"
             for n in tree
         )
+
+
+NAMES_PAGE = (
+    "<body style='margin:0'>"
+    "<label for='em'>Email address</label>"
+    "<input id='em' placeholder='you@example.com'>"
+    "<label>Postcode <input id='pc'></label>"
+    "<span id='lbl'>Delivery notes</span>"
+    "<textarea aria-labelledby='lbl'></textarea>"
+    "<div id='wrap'><p>Paragraph one</p><p>Paragraph two</p></div>"
+    "<img src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' alt='Logo'"
+    " style='width:20px;height:20px'>"
+    "</body>"
+)
+
+
+async def test_controls_take_their_label_as_name(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(NAMES_PAGE))
+        by_role: dict[str, list] = {}
+        for node in (await client.get_state())["tree"]:
+            by_role.setdefault(node["role"], []).append(node)
+
+        names = [n["name"] for n in by_role["textbox"]]
+        # <label for>, a wrapping <label>, and aria-labelledby all win over
+        # the placeholder, which is only the last resort.
+        assert "Email address" in names
+        assert any(n.startswith("Postcode") for n in names)
+        assert "Delivery notes" in names
+        assert "you@example.com" not in names
+        assert by_role["img"][0]["name"] == "Logo"
+
+
+async def test_containers_are_not_named_by_their_contents(browser) -> None:
+    _browser_id, endpoint = browser
+    async with KernelBrowserClient(rest_url=endpoint.rest_url) as client:
+        await client.navigate("data:text/html," + quote(NAMES_PAGE))
+
+        state = await client.get_state()
+        # A wrapper swallowing its subtree's text as a "name" is what poisons
+        # tier-2 ref healing, which re-locates a lost ref by role + name.
+        generics = [n for n in state["tree"] if n["role"] == "generic"]
+        assert generics, "fixture should produce at least one generic container"
+        assert all("Paragraph one" not in n["name"] for n in generics)

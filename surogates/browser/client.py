@@ -123,16 +123,58 @@ function roleOf(el) {
   return __ROLE_BY_TAG[tag] || 'generic';
 }
 
-function nameOf(el) {
-  const direct = el.getAttribute('aria-label')
-    || el.getAttribute('title')
-    || el.getAttribute('alt')
-    || el.getAttribute('placeholder')
-    || el.value
-    || el.innerText
-    || el.textContent
-    || '';
-  return String(direct).replace(/\\s+/g, ' ').trim().slice(0, 240);
+// Roles whose accessible name comes from their own text content.  Everything
+// else -- main, nav, form, region, list, generic -- is a container: naming it
+// by its contents swallows the page into one string, which then poisons the
+// role+name ref healing that reads these names back.  Roles that merely
+// CARRY text (cell, listitem, paragraph) are deliberately absent: their text
+// reaches the model through text_block, and naming them too would restore the
+// per-element innerText layout cost this set exists to avoid.
+const __NAME_FROM_CONTENT = new Set(['button','link','heading','option','tab',
+  'menuitem','menuitemcheckbox','menuitemradio','switch','label','legend']);
+
+function clean240(s) {
+  return String(s || '').replace(/\\s+/g, ' ').trim().slice(0, 240);
+}
+
+function nameOf(el, role) {
+  const aria = el.getAttribute('aria-label');
+  if (aria) return clean240(aria);
+  const labelledby = el.getAttribute('aria-labelledby');
+  if (labelledby) {
+    const parts = [];
+    for (const id of labelledby.trim().split(/\\s+/)) {
+      const target = document.getElementById(id);
+      if (target) parts.push(target.innerText || target.textContent || '');
+    }
+    const joined = clean240(parts.join(' '));
+    if (joined) return joined;
+  }
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'img') return clean240(el.getAttribute('alt') || '');
+  if (tag === 'iframe') {
+    return clean240(el.getAttribute('title') || el.getAttribute('name') || '');
+  }
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+    // el.labels is the platform's own answer for both <label for=...> and a
+    // wrapping <label>, so there is nothing to walk by hand.
+    const labels = el.labels ? Array.from(el.labels) : [];
+    if (labels.length) {
+      const named = clean240(
+        labels.map((l) => l.innerText || l.textContent || '').join(' ')
+      );
+      if (named) return named;
+    }
+    return clean240(el.getAttribute('placeholder')
+      || el.getAttribute('title')
+      || el.getAttribute('name')
+      || '');
+  }
+  if (__NAME_FROM_CONTENT.has(role)) {
+    return clean240(el.innerText || el.textContent || '');
+  }
+  // Containers: an explicit label only, never their contents.
+  return clean240(el.getAttribute('title') || '');
 }
 
 function depthOf(el) {
@@ -226,7 +268,7 @@ for (const el of __els) {
   }
   const entry = {
     role: role,
-    name: nameOf(el),
+    name: nameOf(el, role),
     x: Math.round(bbox.x),
     y: Math.round(bbox.y),
     width: Math.round(bbox.width),
