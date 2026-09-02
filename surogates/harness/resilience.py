@@ -1,9 +1,9 @@
-"""Credential rotation, fallback activation, invalid tool recovery, and budget warnings.
+"""Fallback activation, invalid tool recovery, and budget warnings.
 
 Provides standalone functions for production-hardening features that
 the harness delegates to:
-- Credential pool rotation on 401/402/429 errors
 - Fallback provider chain activation
+- Pro-tier escalation on repeated empty responses
 - Invalid tool call detection (unknown tools, malformed JSON)
 - Budget pressure warning injection
 - Fuzzy tool name repair
@@ -17,13 +17,14 @@ import json
 import logging
 import re
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
 
     from surogates.harness.budget import IterationBudget
-    from surogates.harness.credentials import CredentialPool
+    from surogates.harness.session_llm import ResolvedLLM
     from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -33,65 +34,6 @@ logger = logging.getLogger(__name__)
 #   - Warning  (90% used): urgent, must respond now.
 BUDGET_CAUTION_THRESHOLD: float = 0.7   # 70% of budget used
 BUDGET_WARNING_THRESHOLD: float = 0.9   # 90% of budget used
-
-
-def try_rotate_credential(
-    credential_pool: CredentialPool | None,
-    llm_client: AsyncOpenAI,
-    status_code: int,
-    exc: Exception,
-    *,
-    error_context: dict[str, Any] | None = None,
-) -> tuple[AsyncOpenAI | None, bool]:
-    """Try to rotate to the next credential in the pool.
-
-    Returns ``(new_client, True)`` if rotation succeeded, or
-    ``(None, False)`` if no rotation was possible.
-
-    On 401, first attempts ``try_refresh_current()`` before rotating.
-    This gives the current credential a second chance (e.g. after an
-    OAuth token refresh) before marking it as exhausted.
-    """
-    if credential_pool is None:
-        return None, False
-
-    if status_code == 429 and credential_pool.available_count() <= 1:
-        logger.info(
-            "Credential rotation skipped for 429: only one available credential"
-        )
-        return None, False
-
-    # On 401, try refreshing the current credential first.
-    if status_code == 401:
-        refreshed = credential_pool.try_refresh_current()
-        if refreshed is not None:
-            from openai import AsyncOpenAI as _AsyncOpenAI
-            new_client = _AsyncOpenAI(
-                api_key=refreshed.runtime_api_key,
-                base_url=refreshed.runtime_base_url or str(llm_client.base_url),
-            )
-            logger.info(
-                "Credential refreshed (status=401) for %s",
-                refreshed.label or refreshed.id[:8],
-            )
-            return new_client, True
-
-    next_cred = credential_pool.mark_exhausted_and_rotate(
-        status_code, str(exc)[:500], error_context=error_context,
-    )
-    if next_cred is None:
-        return None, False
-    # Swap the OpenAI client
-    from openai import AsyncOpenAI as _AsyncOpenAI
-    new_client = _AsyncOpenAI(
-        api_key=next_cred.runtime_api_key,
-        base_url=next_cred.runtime_base_url or str(llm_client.base_url),
-    )
-    logger.info(
-        "Credential rotated (status=%d) to %s",
-        status_code, next_cred.label or next_cred.id[:8],
-    )
-    return new_client, True
 
 
 def try_activate_pro_fallback(
@@ -126,50 +68,44 @@ def try_activate_pro_fallback(
 
 
 def try_activate_fallback(
-    fallback_chain: list[dict],
+    fallback_chain: Sequence[ResolvedLLM],
     fallback_index: int,
     llm_client: AsyncOpenAI,
     primary_config: dict | None,
     current_model: str | None,
     fallback_activated: bool,
-) -> tuple[AsyncOpenAI | None, str | None, int, dict | None, bool]:
-    """Switch to the next fallback in the chain.
+) -> tuple[Any | None, str | None, int, dict | None, bool]:
+    """Move the session onto the next provider in the chain.
 
-    Returns ``(new_client, new_model, new_index, primary_config, fallback_activated)``
-    where ``new_client`` is ``None`` if no fallback was available.
+    The entries are slots the session's LLM bundle already resolved and
+    owns, so activation is a swap rather than a client built mid-flight:
+    the key came from the vault at wake, and the connection pool is closed
+    with the rest of the bundle at session end.
+
+    Client and model move together — a fallback is a different provider,
+    so a bare model-string swap would misroute the request.
+
+    Returns ``(new_client, new_model, new_index, primary_config,
+    fallback_activated)``; ``new_client`` is ``None`` when the chain is
+    exhausted.
     """
     if fallback_index >= len(fallback_chain):
         return None, None, fallback_index, primary_config, fallback_activated
 
-    fb = fallback_chain[fallback_index]
+    slot = fallback_chain[fallback_index]
     new_index = fallback_index + 1
 
-    provider = fb.get("provider", "").strip()
-    model = fb.get("model", "").strip()
-    if not provider or not model:
-        # skip invalid, try next recursively
-        return try_activate_fallback(
-            fallback_chain, new_index, llm_client,
-            primary_config, current_model, fallback_activated,
-        )
-
-    # Save primary config on first fallback
+    # Remember the primary the first time we leave it, so a caller can
+    # tell which provider the session actually started on.
     new_primary_config = primary_config
     if not fallback_activated:
-        new_primary_config = {
-            "llm_client": llm_client,
-            "model": current_model,
-        }
+        new_primary_config = {"llm_client": llm_client, "model": current_model}
 
-    # Create new client for fallback
-    from openai import AsyncOpenAI as _AsyncOpenAI
-    api_key = fb.get("api_key") or llm_client.api_key
-    base_url = fb.get("base_url") or str(llm_client.base_url)
-
-    new_client = _AsyncOpenAI(api_key=api_key, base_url=base_url)
-
-    logger.info("Fallback activated: %s via %s", model, provider)
-    return new_client, model, new_index, new_primary_config, True
+    logger.info(
+        "Fallback activated: %s (%d of %d)",
+        slot.model, new_index, len(fallback_chain),
+    )
+    return slot.client, slot.model, new_index, new_primary_config, True
 
 
 def repair_tool_name(name: str, registry: ToolRegistry) -> str | None:

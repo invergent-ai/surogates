@@ -55,7 +55,11 @@ async def test_session_llm_clients_aclose_tolerates_none_slots():
 def test_session_llm_clients_is_frozen():
     """Immutable so the harness cannot accidentally swap clients
     mid-turn (which would silently route a continuation through a
-    different LLM than the turn started on)."""
+    different LLM than the turn started on).
+
+    ``fallbacks`` is the one sanctioned exception: the harness does move
+    off ``main`` onto one of those, but only once the primary has failed
+    hard, and only onto a slot this bundle resolved and closes."""
     import dataclasses
     from surogates.harness.session_llm import SessionLLMClients
 
@@ -63,7 +67,7 @@ def test_session_llm_clients_is_frozen():
     fields = dataclasses.fields(SessionLLMClients)
     assert SessionLLMClients.__dataclass_params__.frozen is True
     assert {f.name for f in fields} == {
-        "main", "summary", "vision", "advisor", "image",
+        "main", "summary", "vision", "advisor", "image", "fallbacks",
     }
 
 

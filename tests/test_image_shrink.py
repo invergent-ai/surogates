@@ -268,7 +268,6 @@ async def test_llm_retry_shrinks_image_after_provider_error(monkeypatch) -> None
         store=SimpleNamespace(emit_event=lambda *_args, **_kwargs: None),
         streaming_enabled=False,
         interrupt_check=lambda: False,
-        rotate_credential=lambda *_args, **_kwargs: False,
         activate_fallback=lambda: False,
         get_current_model=lambda: "test-model",
         set_streaming_enabled=lambda _enabled: None,

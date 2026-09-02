@@ -369,7 +369,6 @@ async def _run_with_retry(
             store=AsyncMock(),
             streaming_enabled=True,
             interrupt_check=interrupt_check or (lambda: False),
-            rotate_credential=lambda *a, **k: False,
             activate_fallback=activate_fallback,
             get_current_model=get_current_model,
             set_streaming_enabled=lambda _enabled: None,

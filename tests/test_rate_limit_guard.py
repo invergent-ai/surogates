@@ -81,7 +81,6 @@ async def test_active_guard_skips_provider_call() -> None:
             store=AsyncMock(),
             streaming_enabled=False,
             interrupt_check=lambda: False,
-            rotate_credential=lambda *_args, **_kwargs: False,
             activate_fallback=lambda: False,
             get_current_model=lambda: "test-model",
             set_streaming_enabled=lambda _enabled: None,

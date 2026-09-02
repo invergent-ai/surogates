@@ -17,7 +17,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from surogates.harness.budget import IterationBudget
-from surogates.harness.credentials import CredentialPool, PooledCredential
 from surogates.harness.llm_call import (
     extract_retry_after as _extract_retry_after,
     extract_status_code as _extract_status_code,
@@ -25,7 +24,6 @@ from surogates.harness.llm_call import (
     is_transient_error as _is_transient_error,
 )
 from surogates.harness.loop import AgentHarness
-from surogates.harness.resilience import try_rotate_credential
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.models import Session, SessionLease
 
@@ -111,26 +109,6 @@ class TestExtractRetryAfter:
             headers={"retry-after": "not-a-number"},
         )
         assert _extract_retry_after(exc) is None
-
-
-class TestCredentialRotation:
-    def test_single_credential_rate_limit_does_not_mark_exhausted(self) -> None:
-        pool = CredentialPool([PooledCredential(id="only", api_key="sk-only")])
-        llm_client = SimpleNamespace(base_url="https://api.example.com")
-
-        new_client, rotated = try_rotate_credential(
-            pool,
-            llm_client,  # type: ignore[arg-type]
-            429,
-            Exception("rate limited"),
-        )
-
-        assert rotated is False
-        assert new_client is None
-        current = pool.current()
-        assert current is not None
-        assert current.id == "only"
-        assert current.status == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -1504,77 +1482,12 @@ class TestInjectBudgetWarning:
         assert "[BUDGET WARNING:" in out[1]["content"]
 
 
-class TestTryActivateFallback:
-    """Tests for _try_activate_fallback."""
-
-    def test_no_fallbacks_returns_false(self) -> None:
-        harness = _make_harness()
-        assert harness._try_activate_fallback() is False
-
-    def test_activates_first_fallback(self) -> None:
-        harness = _make_harness()
-        harness._fallback_chain = [
-            {"provider": "anthropic", "model": "claude-sonnet-4-20250514", "api_key": "sk-fb"},
-        ]
-        result = harness._try_activate_fallback()
-        assert result is True
-        assert harness._current_model == "claude-sonnet-4-20250514"
-        assert harness._fallback_activated is True
-
-    def test_skips_invalid_fallback(self) -> None:
-        harness = _make_harness()
-        harness._fallback_chain = [
-            {"provider": "", "model": ""},  # invalid
-            {"provider": "openai", "model": "gpt-4o-mini"},
-        ]
-        result = harness._try_activate_fallback()
-        assert result is True
-        assert harness._current_model == "gpt-4o-mini"
-
-    def test_exhausted_fallbacks_returns_false(self) -> None:
-        harness = _make_harness()
-        harness._fallback_chain = [
-            {"provider": "anthropic", "model": "claude-sonnet-4-20250514"},
-        ]
-        harness._try_activate_fallback()  # consume the only fallback
-        assert harness._try_activate_fallback() is False
-
-
-class TestTryRotateCredential:
-    """Tests for _try_rotate_credential."""
-
-    def test_no_pool_returns_false(self) -> None:
-        harness = _make_harness()
-        assert harness._try_rotate_credential(429, Exception("rate limited")) is False
-
-    def test_rotates_to_next_credential(self) -> None:
-        harness = _make_harness()
-        harness._credential_pool = CredentialPool([
-            PooledCredential(id="a", api_key="sk-a", label="key-a"),
-            PooledCredential(id="b", api_key="sk-b", label="key-b"),
-        ])
-        result = harness._try_rotate_credential(429, Exception("rate limited"))
-        assert result is True
-
-    def test_no_more_credentials_returns_false(self) -> None:
-        harness = _make_harness()
-        harness._credential_pool = CredentialPool([
-            PooledCredential(id="a", api_key="sk-a"),
-        ])
-        result = harness._try_rotate_credential(429, Exception("rate limited"))
-        assert result is False
-
-
 class TestHarnessInitNewFields:
     """Verify that new __init__ fields are properly initialized."""
 
-    def test_credential_pool_default_none(self) -> None:
-        harness = _make_harness()
-        assert harness._credential_pool is None
-
     def test_fallback_chain_default_empty(self) -> None:
         harness = _make_harness()
-        assert harness._fallback_chain == []
+        assert harness._fallback_chain == ()
 
     def test_fallback_index_default_zero(self) -> None:
         harness = _make_harness()
