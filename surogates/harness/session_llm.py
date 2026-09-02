@@ -62,6 +62,11 @@ class SessionLLMClients:
     vision: ResolvedLLM | None
     advisor: ResolvedLLM | None
     image: ResolvedLLM | None = None
+    #: Ordered providers the harness moves the session onto when the
+    #: primary fails hard.  Resolved up front so failover is a swap
+    #: between clients this bundle owns and closes, rather than a client
+    #: built mid-flight from a key nobody else can see.
+    fallbacks: tuple[ResolvedLLM, ...] = ()
 
     async def aclose(self) -> None:
         """Close every wrapped client's connection pool.
@@ -71,6 +76,7 @@ class SessionLLMClients:
         slots still work."""
         for slot in (
             self.main, self.summary, self.vision, self.advisor, self.image,
+            *self.fallbacks,
         ):
             if slot is None:
                 continue
@@ -240,6 +246,7 @@ async def build_session_llm_clients(
         image = await _opt(ctx.llm_image)
         if image is None:
             image = _settings_image()
+        fallbacks = tuple([await _resolve(e) for e in ctx.llm_fallbacks])
     except BaseException:
         await _close_partial_bundle(resolved)
         raise
@@ -250,6 +257,7 @@ async def build_session_llm_clients(
         vision=vision,
         advisor=advisor,
         image=image,
+        fallbacks=fallbacks,
     )
 
 

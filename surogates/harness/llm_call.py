@@ -2,7 +2,7 @@
 
 Provides standalone async functions for calling LLMs with:
 - Jittered exponential backoff on transient errors
-- Rate-limit (429) handling with credential rotation and provider fallback
+- Rate-limit (429) handling with provider failover
 - Streaming with delta event emission and automatic non-streaming fallback
 - Response shape validation
 - Helper functions for HTTP status extraction and transient error detection
@@ -471,7 +471,6 @@ async def call_llm_with_retry(
     store: SessionStore,
     streaming_enabled: bool,
     interrupt_check: Callable[[], bool],
-    rotate_credential: Callable[..., bool],
     activate_fallback: Callable[[], bool],
     get_current_model: Callable[[], str | None],
     set_streaming_enabled: Callable[[bool], None],
@@ -485,13 +484,12 @@ async def call_llm_with_retry(
     turn_id: str | None = None,
     iteration_index: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Call the LLM with retry, backoff, rate-limit handling, and credential rotation.
+    """Call the LLM with retry, backoff, rate-limit and failover handling.
 
     Production-hardening features:
 
     - Jittered exponential backoff on transient errors (429, 500, 502, 503, 529)
-    - Credential rotation on 401/402/429 via *rotate_credential*
-    - Fallback provider chain via *activate_fallback*
+    - Fallback provider chain on 402 and repeated 429 via *activate_fallback*
     - Context-length error detection (400/413 with context-related phrases) --
       triggers context compression via *compress_context* callback
     - Thinking-block signature recovery (Anthropic 400 with "signature" +
@@ -514,7 +512,6 @@ async def call_llm_with_retry(
 
     Returns ``(assistant_message_dict, usage_data_dict)``.
     """
-    has_retried_429 = False
     thinking_sig_retry_attempted = False
     compression_attempts = 0
     max_compression_attempts = 3
@@ -779,44 +776,24 @@ async def call_llm_with_retry(
                             continue
                     # Fall through to normal 429 handling.
 
-                if not has_retried_429:
-                    has_retried_429 = True
-                    # First 429: retry with same credential
-                else:
-                    # Second 429: try credential rotation
-                    if rotate_credential(status_code, exc, error_context):
-                        has_retried_429 = False
-                        continue
-                    # Try fallback provider
-                    if activate_fallback():
-                        has_retried_429 = False
-                        current_model = get_current_model()
-                        if current_model:
-                            create_kwargs["model"] = current_model
-                        continue
-
-                # Eager fallback for rate-limit errors when credential
-                # pool has no more keys.
+                # Rate limited: move to the next provider if one is
+                # configured. Waiting out a retry-after (up to two
+                # minutes) is worse for the session than finishing it
+                # somewhere else. With no chain, fall through to the
+                # backoff retry below.
                 if activate_fallback():
-                    has_retried_429 = False
                     current_model = get_current_model()
                     if current_model:
                         create_kwargs["model"] = current_model
                     continue
 
-            # Billing exhausted (402)
+            # Billing exhausted (402) — retrying the same provider cannot
+            # help, so move on immediately if there is somewhere to go.
             elif status_code == 402:
-                if rotate_credential(status_code, exc, error_context):
-                    continue
                 if activate_fallback():
                     current_model = get_current_model()
                     if current_model:
                         create_kwargs["model"] = current_model
-                    continue
-
-            # Auth failure (401)
-            elif status_code == 401:
-                if rotate_credential(status_code, exc, error_context):
                     continue
 
             # ── Oversized image recovery ────────────────────────────

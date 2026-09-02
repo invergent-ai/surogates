@@ -21,7 +21,6 @@ from surogates.harness.context_files import (
     truncate_context,
 )
 from surogates.harness.cost_tracker import SessionCostTracker
-from surogates.harness.credentials import CredentialPool, PooledCredential
 from surogates.harness.llm_call import (
     DEVELOPER_ROLE_MODELS,
     STREAM_STALE_TIMEOUT,
@@ -89,7 +88,6 @@ from surogates.harness.resilience import (
     repair_tool_name,
     summarize_api_error,
     try_activate_fallback,
-    try_rotate_credential,
 )
 from surogates.harness.retry import jittered_backoff
 from surogates.harness.sanitize import (
@@ -123,14 +121,12 @@ __all__ = [
     "APIMode",
     "AgentHarness",
     "ContextCompressor",
-    "CredentialPool",
     "DEVELOPER_ROLE_MODELS",
     "LEGACY_SUMMARY_PREFIX",
     "IterationBudget",
     "MODEL_CATALOG",
     "MODELS_REQUIRING_DISCIPLINE",
     "ModelInfo",
-    "PooledCredential",
     "PromptBuilder",
     "PromptLibrary",
     "default_library",
@@ -200,5 +196,4 @@ __all__ = [
     "strip_budget_warnings",
     "strip_think_blocks",
     "try_activate_fallback",
-    "try_rotate_credential",
 ]

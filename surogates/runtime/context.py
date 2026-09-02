@@ -143,6 +143,11 @@ class AgentRuntimeContext:
     # Absent for BYO-model agents.
     llm_tier_basic: LLMEndpoint | None = None
     llm_tier_pro: LLMEndpoint | None = None
+    # Ordered providers to move the session onto when the primary fails
+    # hard (rate-limited past retry, billing exhausted, auth rejected).
+    # Each entry is a full endpoint because a fallback is a different
+    # provider, not a different model name on the same one.
+    llm_fallbacks: tuple[LLMEndpoint, ...] = ()
 
     mcp_server_ids: tuple[str, ...] = ()
     governance: dict = field(default_factory=dict)

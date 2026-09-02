@@ -97,7 +97,6 @@ async def test_midstream_partial_tool_call_drop_retries_stream(monkeypatch):
         store=store,
         streaming_enabled=True,
         interrupt_check=lambda: False,
-        rotate_credential=lambda *args, **kwargs: False,
         activate_fallback=lambda: False,
         get_current_model=lambda: "gpt-4o",
         set_streaming_enabled=lambda _enabled: None,

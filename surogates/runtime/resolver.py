@@ -113,6 +113,13 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         llm_video=_opt_llm(payload.get("llm_video")),
         llm_tier_basic=_opt_llm(payload.get("llm_tier_basic")),
         llm_tier_pro=_opt_llm(payload.get("llm_tier_pro")),
+        llm_fallbacks=tuple(
+            endpoint
+            for endpoint in (
+                _opt_llm(blob) for blob in (payload.get("llm_fallbacks") or ())
+            )
+            if endpoint is not None
+        ),
         mcp_server_ids=tuple(payload.get("mcp_server_ids") or ()),
         repos=tuple(dict(repo) for repo in (payload.get("repos") or ())),
         ssh_targets=tuple(dict(t) for t in (payload.get("ssh_targets") or ())),

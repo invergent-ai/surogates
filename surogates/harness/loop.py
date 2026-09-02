@@ -34,7 +34,6 @@ from surogates.harness.agent_resolver import (
 )
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
-from surogates.harness.credentials import CredentialPool
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
@@ -59,7 +58,6 @@ from surogates.harness.resilience import (
     inject_budget_warning,
     try_activate_fallback,
     try_activate_pro_fallback,
-    try_rotate_credential,
 )
 from surogates.harness.sanitize import (
     cap_delegate_calls,
@@ -469,6 +467,7 @@ class AgentHarness(
         acting_principal: Any | None = None,
         platform_client: Any | None = None,
         entitlement_excluded_tools: frozenset[str] = frozenset(),
+        fallback_chain: tuple[Any, ...] = (),
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -654,9 +653,6 @@ class AgentHarness(
         # Memory manager (optional).
         self._memory_manager: MemoryManager | None = memory_manager
 
-        # Credential pool (optional -- for multi-key resilience).
-        self._credential_pool: CredentialPool | None = None
-
         # Memory / skill nudge counters.
         # Memory nudge: after N user turns without a memory write, remind the
         # model to review memory.  Skill nudge: after N tool-calling iterations
@@ -669,8 +665,9 @@ class AgentHarness(
         self._iters_since_skill: int = 0
         self._user_turn_count: int = 0
 
-        # Fallback provider chain.
-        self._fallback_chain: list[dict] = []
+        # Fallback provider chain: slots the session's LLM bundle already
+        # resolved, walked in order when the primary provider fails hard.
+        self._fallback_chain: tuple[Any, ...] = tuple(fallback_chain)
         self._fallback_index: int = 0
         self._fallback_activated: bool = False
         self._primary_config: dict | None = None
@@ -1931,7 +1928,6 @@ class AgentHarness(
                     store=self._store,
                     streaming_enabled=self._streaming_enabled,
                     interrupt_check=self._check_interrupt,
-                    rotate_credential=self._try_rotate_credential,
                     activate_fallback=self._try_activate_fallback,
                     get_current_model=lambda: self._current_model,
                     set_streaming_enabled=self._set_streaming_enabled,
@@ -3190,22 +3186,6 @@ class AgentHarness(
     # Credential rotation and fallback (delegates to resilience module)
     # ------------------------------------------------------------------
 
-    def _try_rotate_credential(
-        self,
-        status_code: int,
-        exc: Exception,
-        error_context: dict[str, Any] | None = None,
-    ) -> bool:
-        """Try to rotate to the next credential in the pool."""
-        new_client, rotated = try_rotate_credential(
-            self._credential_pool, self._llm, status_code, exc,
-            error_context=error_context,
-        )
-        if rotated and new_client is not None:
-            self._llm = new_client
-            return True
-        return False
-
     def _try_activate_fallback(self) -> bool:
         """Switch to the next fallback in the chain. Returns True if activated."""
         new_client, new_model, new_index, primary_config, activated = try_activate_fallback(
@@ -4232,7 +4212,6 @@ class AgentHarness(
                 store=self._store,
                 streaming_enabled=self._streaming_enabled,
                 interrupt_check=self._check_interrupt,
-                rotate_credential=self._try_rotate_credential,
                 activate_fallback=self._try_activate_fallback,
                 get_current_model=lambda: self._current_model,
                 set_streaming_enabled=self._set_streaming_enabled,
