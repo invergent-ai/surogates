@@ -440,7 +440,7 @@ describe("AgentChat", () => {
       const adapter = {
         ...createAdapter(stream),
         async getBrowserState() {
-          return { status: "live" as const, controlOwner: null };
+          return { status: "live" as const, controlOwner: null, liveViewPath: "" };
         },
       };
       container = document.createElement("div");
