@@ -27,7 +27,6 @@ from surogates.coding_agents.repo_checkout import fix_branch_name
 from surogates.coding_agents.repo_resolve import resolve_git_pat, select_repo
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.tools.registry import ToolRegistry, ToolSchema
-from surogates.tools.utils.interrupt import is_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -169,9 +168,9 @@ async def _run_coding_agent_handler(arguments: dict[str, Any], **kwargs: Any) ->
         read_only=False,
         ensure_sandbox=_build_ensure(sandbox_pool, session, tenant, owner, vault),
         execute=_execute,
-        # Poll the global interrupt so a session/mission cancel stops the run
-        # promptly (kills the pod-side CLI) instead of polling to completion.
-        should_cancel=lambda: is_interrupted(),
+        # Poll this session's interrupt so a cancel stops the run promptly
+        # (kills the pod-side CLI) instead of polling to completion.
+        should_cancel=kwargs.get("interrupt_check") or (lambda: False),
         repo=repo, git_pat=pat, branch=branch,
         summary_client=kwargs.get("summary_llm_client"),
         summary_model=kwargs.get("summary_model"),

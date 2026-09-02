@@ -60,7 +60,7 @@ class OutcomeCommandMixin:
             )
             return False
 
-    async def _mission_has_pending_work(self, session_id: UUID) -> bool:
+    async def _mission_has_pending_work(self, session: Session) -> bool:
         """True iff the session's mission is in a non-terminal status.
 
         The session is owned by the mission's lifecycle: while the
@@ -83,17 +83,21 @@ class OutcomeCommandMixin:
         """
         if self._session_factory is None:
             return False
+        # ``active_mission_id`` is cleared from the config at a terminal
+        # verdict, so a session without it has no mission to query for.
+        if not (session.config or {}).get("active_mission_id"):
+            return False
         try:
             from surogates.missions.store import MissionStore
 
             store = MissionStore(self._session_factory)
-            active = await store.get_active_for_session(session_id)
+            active = await store.get_active_for_session(session.id)
             return active is not None
         except Exception:
             logger.debug(
                 "Mission pending-work check failed for session %s; "
                 "falling back to completing session",
-                session_id, exc_info=True,
+                session.id, exc_info=True,
             )
             return False
 

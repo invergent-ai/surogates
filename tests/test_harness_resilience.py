@@ -1785,13 +1785,13 @@ class TestProviderErrorFinishReason:
         assert "provider_error" in src
 
     def test_a_failed_call_is_not_treated_as_an_answer(self) -> None:
-        """The guard requires BOTH no content and no tool calls, so an error
-        alongside a real partial response is left to the normal path."""
+        """The guard keys on the finish reason alone (tool calls aside): a
+        stream that died with partial text is retried, not accepted."""
         import inspect
 
         from surogates.harness.loop import AgentHarness
 
         src = inspect.getsource(AgentHarness)
         i = src.index('finish_reason == "error"')
-        window = src[i : i + 320]
-        assert "content" in window and "tool_calls" in window
+        window = src[i : i + 120]
+        assert "tool_calls_raw" in window and "content" not in window

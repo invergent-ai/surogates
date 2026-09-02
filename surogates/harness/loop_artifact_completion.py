@@ -1079,6 +1079,113 @@ class ArtifactCompletionMixin:
                 session.id,
             )
 
+    async def _fail_session(
+        self,
+        session: Session,
+        messages: list[dict],
+        lease: SessionLease,
+        *,
+        reason: str,
+        cost_tracker: SessionCostTracker | None = None,
+        **data: Any,
+    ) -> None:
+        """Emit SESSION_FAIL and run the same teardown as a completion.
+
+        A failure that returns from the loop without this leaves the
+        session looking alive to everything downstream: the parent that
+        delegated it never wakes, a scheduled run never reports, the
+        dynamic loop is never rescheduled, and the failed prompt stays past
+        the cursor where the stranded-message check resurrects it.
+        """
+        fail_data: dict[str, Any] = {
+            "reason": reason, "worker_id": self._worker_id, **data,
+        }
+        if cost_tracker is not None:
+            fail_data["cost_summary"] = cost_tracker.summary()
+        fail_event_id = await self._store.emit_event(
+            session.id, EventType.SESSION_FAIL, fail_data,
+        )
+        error = f"{reason}: {data}" if data else reason
+
+        loop_result_parent = None
+        try:
+            loop_result_parent = await self._resolve_loop_result_parent(session)
+        except Exception:
+            logger.debug(
+                "Failed to resolve loop.result parent for %s", session.id, exc_info=True,
+            )
+        if loop_result_parent is not None:
+            try:
+                await self._store.emit_event(
+                    loop_result_parent.id,
+                    EventType.LOOP_RESULT,
+                    {
+                        "run_session_id": str(session.id),
+                        "scheduled_session_id": str(
+                            (session.config or {}).get("scheduled_session_id") or ""
+                        ),
+                        "content": error,
+                        "outcome": "failed",
+                        "duration_seconds": _seconds_since(session.created_at),
+                        "run_completed_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to emit loop.result on parent %s for run %s",
+                    loop_result_parent.id, session.id, exc_info=True,
+                )
+        elif _is_scheduled_run(session) or raises_completion_inbox_item(session):
+            await self._store.emit_event(
+                session.id,
+                EventType.INBOX_TASK_COMPLETE,
+                {
+                    "outcome": "failed",
+                    "summary": _last_assistant_message_excerpt(messages),
+                    "duration_seconds": _seconds_since(session.created_at),
+                    "session_title": session.title or "Task failed",
+                    "error": error,
+                },
+            )
+
+        try:
+            await self._store.update_session_status(session.id, "failed")
+        except Exception:
+            logger.warning(
+                "Failed to update session status to failed for %s",
+                session.id, exc_info=True,
+            )
+
+        if _should_notify_parent_on_completion(session):
+            from surogates.harness.worker_notify import notify_parent_on_failure
+            try:
+                await notify_parent_on_failure(
+                    session_store=self._store,
+                    worker_session_id=session.id,
+                    parent_session_id=session.parent_id,
+                    org_id=str(session.org_id),
+                    agent_id=session.agent_id,
+                    error=error,
+                    redis=self._redis,
+                    task_id=getattr(session, "task_id", None),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to notify parent %s of worker %s failure",
+                    session.parent_id, session.id, exc_info=True,
+                )
+
+        await self._finalize_dynamic_loop_if_needed(session)
+
+        try:
+            await self._store.advance_harness_cursor(
+                session.id, fail_event_id, lease.lease_token,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to advance cursor after session failure for %s", session.id,
+            )
+
     async def _finalize_dynamic_loop_if_needed(self, session: Session) -> None:
         if not session.config.get("scheduled_dynamic_loop"):
             return

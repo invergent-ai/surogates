@@ -425,7 +425,7 @@ async def test_mission_has_pending_work_returns_false_without_session_factory(
     # _make_harness leaves session_factory unset; assert the helper
     # short-circuits without trying to import MissionStore.
     assert (
-        await harness._mission_has_pending_work(uuid4()) is False
+        await harness._mission_has_pending_work(_session()) is False
     )
 
 
@@ -614,7 +614,9 @@ async def test_mission_has_pending_work_false_when_no_active_mission(
         fake_get_active_for_session,
     )
     assert (
-        await harness._mission_has_pending_work(uuid4()) is False
+        await harness._mission_has_pending_work(
+            _session({"active_mission_id": "m-1"}),
+        ) is False
     )
 
 
