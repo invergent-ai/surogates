@@ -230,7 +230,6 @@ async def test_handler_requires_prompt():
 async def test_handler_cancels_on_interrupt(monkeypatch):
     import surogates.tools.builtin.coding_agent as mod
 
-    monkeypatch.setattr(mod, "is_interrupted", lambda: True)
     session = _session()
     store = _FakeStore(session)
     vault = _anthropic_vault(git_pat="github_pat_abc")
@@ -253,6 +252,7 @@ async def test_handler_cancels_on_interrupt(monkeypatch):
         tenant=_tenant(), session_id=str(session.id), session_store=store,
         sandbox_pool=SimpleNamespace(execute=execute, ensure=ensure),
         credential_vault=vault,
+        interrupt_check=lambda: True,
     )
     # Checkout ran, then the run was cancelled and surfaced as an error.
     assert "cancel" in calls

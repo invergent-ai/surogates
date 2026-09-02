@@ -559,8 +559,8 @@ class TestSiblingAbort:
         tools.dispatch = mock_dispatch
 
         executor = _make_executor(store=store, tools=tools)
-        executor.add_tool(_make_tool_call("terminal", call_id="tc_1"))
-        executor.add_tool(_make_tool_call("terminal", call_id="tc_2"))
+        executor.add_tool(_make_tool_call("terminal", {"command": "ls"}, call_id="tc_1"))
+        executor.add_tool(_make_tool_call("terminal", {"command": "pwd"}, call_id="tc_2"))
 
         results = await executor.get_all_results()
 
@@ -590,8 +590,8 @@ class TestSiblingAbort:
         tools.dispatch = mock_dispatch
 
         executor = _make_executor(store=store, tools=tools)
-        executor.add_tool(_make_tool_call("terminal", call_id="tc_1"))
-        executor.add_tool(_make_tool_call("terminal", call_id="tc_2"))
+        executor.add_tool(_make_tool_call("terminal", {"command": "ls"}, call_id="tc_1"))
+        executor.add_tool(_make_tool_call("terminal", {"command": "pwd"}, call_id="tc_2"))
 
         await executor.get_all_results()
 
@@ -1151,32 +1151,26 @@ class TestStreamingExecutorGuardrails:
         assert "guardrail" in blocked_results[-1].args[2].get("content", "")
 
     @pytest.mark.asyncio
-    async def test_duplicate_signatures_in_batch_run_sequentially(self) -> None:
-        """Identical concurrency-safe calls in one batch must not overlap,
-        so ``after_call`` state from the first is visible to the second's
-        ``before_call`` (mirrors tool_exec's duplicate-signature rule)."""
-        from surogates.harness.tool_guardrails import ToolGuardrails
-
-        timeline: list[str] = []
+    async def test_identical_calls_in_one_batch_run_once(self) -> None:
+        """An identical (name, args) repeat is dropped on add, before it can
+        start; the non-streaming path applies the same rule."""
+        tools = _make_registry("read_file")
+        calls: list[str] = []
 
         async def mock_dispatch(name, args, **kwargs):
-            timeline.append("start")
-            await asyncio.sleep(0.01)
-            timeline.append("end")
+            calls.append(kwargs.get("tool_call_id", ""))
             return json.dumps({"error": "not found"})
 
-        guardrails = ToolGuardrails()
-        tools = _make_registry("read_file")
         tools.dispatch = mock_dispatch
-        executor = _make_executor(tools=tools, tool_guardrails=guardrails)
+        executor = _make_executor(tools=tools)
 
         executor.add_tool(_make_tool_call("read_file", {"path": "x"}, call_id="tc_1"))
         executor.add_tool(_make_tool_call("read_file", {"path": "x"}, call_id="tc_2"))
 
         results = await executor.get_all_results()
 
-        assert len(results) == 2
-        assert timeline == ["start", "end", "start", "end"]
+        assert len(results) == 1
+        assert calls == ["tc_1"]
 
     @pytest.mark.asyncio
     async def test_no_guardrails_keeps_existing_behaviour(self) -> None:

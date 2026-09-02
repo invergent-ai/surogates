@@ -62,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 # Concurrency classification constants live in tool_exec (single source of
 # truth for all tool execution policy).  Import here for use by the executor.
+from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING block
+    cap_delegate_calls,
+    deduplicate_tool_calls,
+)
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
     SIBLING_ABORT_TOOLS,
     is_parallelizable,
@@ -212,6 +216,13 @@ class StreamingToolExecutor:
         if self._discarded:
             return
 
+        # Apply the batch rules the non-streaming path applies after the
+        # stream ends -- here, before anything starts.  A duplicate or an
+        # over-cap delegate that was already dispatched cannot be undone.
+        batch =[t.tool_call for t in self._tracked] + [tool_call]
+        if len(cap_delegate_calls(deduplicate_tool_calls(batch))) == len(self._tracked):
+            return
+
         fn = tool_call.get("function", {})
         tool_name = fn.get("name", "")
 
@@ -317,15 +328,6 @@ class StreamingToolExecutor:
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]
         if not executing:
             return True
-        if self._tool_guardrails is not None and any(
-            _same_call_signature(t.tool_call, tool.tool_call) for t in executing
-        ):
-            # Duplicate identical calls are a model loop pattern that
-            # ToolGuardrails breaks via successive after_call/before_call
-            # state updates; running them concurrently would fire both
-            # before either after_call ran (same rule as tool_exec's
-            # _batch_has_duplicate_signatures).
-            return False
         if tool.is_parallelizable and all(t.is_parallelizable for t in executing):
             return True
         return False
@@ -411,7 +413,8 @@ class StreamingToolExecutor:
                 bundle=self._bundle,
                 turn_gate=self._turn_gate,
                 platform_client=self._platform_client,
-            expert_transcript=self._expert_transcript,
+                expert_transcript=self._expert_transcript,
+                interrupt_check=self._interrupt_check,
             )
             if guardrails is not None:
                 after = guardrails.after_call(
@@ -584,15 +587,6 @@ class StreamingToolExecutor:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _same_call_signature(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """Return ``True`` if two tool calls share name and raw arguments."""
-    fa, fb = a.get("function", {}), b.get("function", {})
-    return (
-        fa.get("name", "") == fb.get("name", "")
-        and fa.get("arguments", "") == fb.get("arguments", "")
-    )
 
 
 def _is_error_result(result: dict[str, Any]) -> bool:

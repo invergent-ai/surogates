@@ -23,7 +23,7 @@ import logging
 import os
 import traceback
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
 from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
@@ -344,6 +344,22 @@ _TRAILING_INTENT = re.compile(
 #: forward-looking sentence is usually longer.  Length is what separates
 #: them, and it is what keeps this off turns that did answer.
 _UNFINISHED_MAX_CHARS = 200
+
+
+def _to_api_message(msg: dict) -> dict:
+    """Copy *msg* with the harness-only fields stripped for the wire.
+
+    Assistant reasoning is passed back as ``reasoning_content`` for
+    multi-turn reasoning continuity (Moonshot AI, Novita, OpenRouter);
+    ``reasoning_details`` is kept as-is because OpenRouter reads it.
+    """
+    api_msg = msg.copy()
+    if msg.get("role") == "assistant" and msg.get("reasoning"):
+        api_msg["reasoning_content"] = msg["reasoning"]
+    api_msg.pop("reasoning", None)
+    api_msg.pop("finish_reason", None)
+    api_msg.pop("_advisor", None)
+    return api_msg
 
 
 def _looks_unfinished(text: str) -> bool:
@@ -681,18 +697,17 @@ class AgentHarness(
         before every tool execution.  If *message* is provided it is
         stored so the next ``wake()`` can log why the loop was stopped.
 
-        Also sets the global interrupt event so that tools polling
-        :func:`surogates.tools.utils.interrupt.is_interrupted` see the
-        signal immediately, and discards the active streaming executor
-        (if any) so in-flight tool tasks are cancelled now rather than
-        waiting on their own timeout. Without this, a follow-up user
-        message can sit unread for minutes while a sandbox exec or
-        browser action runs to its tool-level timeout.
+        Tools that poll for cancellation read this harness's flag through
+        the ``interrupt_check`` kwarg they are dispatched with, so one
+        session's stop never reaches another session on the same worker.
+        Also discards the active streaming executor (if any) so in-flight
+        tool tasks are cancelled now rather than waiting on their own
+        timeout. Without this, a follow-up user message can sit unread for
+        minutes while a sandbox exec or browser action runs to its
+        tool-level timeout.
         """
         self._interrupt_requested = True
         self._interrupt_message = message
-        from surogates.tools.utils.interrupt import set_interrupt
-        set_interrupt(True)
         executor = self._active_executor
         if executor is not None:
             executor.discard()
@@ -705,8 +720,6 @@ class AgentHarness(
         """Reset the interrupt flag (called after handling)."""
         self._interrupt_requested = False
         self._interrupt_message = None
-        from surogates.tools.utils.interrupt import set_interrupt
-        set_interrupt(False)
 
     async def _has_stranded_user_message(self, session_id: UUID) -> bool:
         """Return True if a real user message landed past the harness cursor.
@@ -1780,50 +1793,41 @@ class AgentHarness(
                 session=session,
                 browser_control=self._browser_control,
             )
-            api_messages: list[dict] = [
-                _initial_system_message(system_prompt, browser_pause_notice),
-            ]
-            # Prefilled context (few-shot examples, planning context)
-            if prefill_messages:
-                api_messages.extend(prefill_messages)
-            # Memory context (prefetched once before loop)
-            if memory_context:
-                api_messages.append({
-                    "role": "user",
-                    "content": f"[Recalled memory context]\n{memory_context}",
-                })
-                api_messages.append({
-                    "role": "assistant",
-                    "content": "Understood, I have the memory context.",
-                })
-            for msg in messages:
-                api_msg = msg.copy()
-                # For assistant messages, pass reasoning back to the API
-                # via reasoning_content for multi-turn reasoning continuity
-                # (Moonshot AI, Novita, OpenRouter).
-                if msg.get("role") == "assistant":
-                    reasoning_text = msg.get("reasoning")
-                    if reasoning_text:
-                        api_msg["reasoning_content"] = reasoning_text
-                # Strip internal-only fields not accepted by any API.
-                api_msg.pop("reasoning", None)
-                api_msg.pop("finish_reason", None)
-                api_msg.pop("_thinking_prefill", None)
-                api_msg.pop("_advisor", None)
-                # Keep reasoning_details -- OpenRouter uses this for multi-turn
-                # reasoning context with signature fields.
-                api_messages.append(api_msg)
+            async def _build_api_messages(msgs: list[dict]) -> list[dict]:
+                """Wire-format list for *msgs*: fixed head plus scrubbed turns.
 
-            await _prepare_messages_for_model_vision_support(
-                api_messages,
-                model_id=model_id,
-                llm_client=self._llm,
-                vision_client=self._vision_client,
-                vision_model_override=self._vision_model,
-            )
+                Also used by the error-recovery compaction callback so the
+                retry after a context-length error is assembled the same
+                way as every other request.
+                """
+                api: list[dict] = [
+                    _initial_system_message(system_prompt, browser_pause_notice),
+                ]
+                # Prefilled context (few-shot examples, planning context)
+                if prefill_messages:
+                    api.extend(prefill_messages)
+                # Memory context (prefetched once before loop)
+                if memory_context:
+                    api.append({
+                        "role": "user",
+                        "content": f"[Recalled memory context]\n{memory_context}",
+                    })
+                    api.append({
+                        "role": "assistant",
+                        "content": "Understood, I have the memory context.",
+                    })
+                api.extend(_to_api_message(m) for m in msgs)
+                await _prepare_messages_for_model_vision_support(
+                    api,
+                    model_id=model_id,
+                    llm_client=self._llm,
+                    vision_client=self._vision_client,
+                    vision_model_override=self._vision_model,
+                )
+                # Developer role swap for models that prefer it (e.g. GPT-5, Codex).
+                return apply_developer_role(api, model_id)
 
-            # Developer role swap for models that prefer it (e.g. GPT-5, Codex).
-            api_messages = apply_developer_role(api_messages, model_id)
+            api_messages = await _build_api_messages(messages)
 
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
@@ -1915,6 +1919,7 @@ class AgentHarness(
                     set_streaming_enabled=self._set_streaming_enabled,
                     compress_context=self._compress_context_callback(
                         session, messages, system_prompt, lease,
+                        build_api_messages=_build_api_messages,
                     ),
                     context_compressor=self._compressor,
                     on_tool_call_complete=on_tool_call_cb,
@@ -2126,11 +2131,23 @@ class AgentHarness(
 
             response_data["turn_id"] = turn_id
             response_data["iteration_index"] = turn_iteration_index
-            event_id = await self._store.emit_event(
-                session.id,
-                EventType.LLM_RESPONSE,
-                response_data,
-            )
+
+            # The response is persisted once its content is settled. The
+            # recovery paths below (length continuation, transcript
+            # conclusion, cached fallback) revise ``assistant_message``,
+            # and the stored event must carry what the user is shown and
+            # what the next wake replays.
+            event_id: int | None = None
+
+            async def _persist_response() -> int:
+                nonlocal event_id
+                if event_id is None:
+                    event_id = await self._store.emit_event(
+                        session.id,
+                        EventType.LLM_RESPONSE,
+                        response_data,
+                    )
+                return event_id
 
             if tool_calls_raw and usage_data.get("partial_tool_call"):
                 # This retry refunds the iteration, so the cap is the only
@@ -2152,6 +2169,7 @@ class AgentHarness(
                     if streaming_executor is not None:
                         streaming_executor.discard()
                     self._budget.refund()
+                    await _persist_response()
                     messages.append(assistant_message)
                     messages.extend(
                         build_partial_tool_call_recovery_results(tool_calls_raw)
@@ -2166,6 +2184,7 @@ class AgentHarness(
                 )
                 if streaming_executor is not None:
                     streaming_executor.discard()
+                await _persist_response()
                 messages.append(assistant_message)
                 messages.extend(
                     build_partial_tool_call_recovery_results(tool_calls_raw)
@@ -2186,6 +2205,7 @@ class AgentHarness(
             # (thinking budget exhaustion), continuation retries are pointless.
             if (
                 finish_reason == "length"
+                and not tool_calls_raw
                 and is_thinking_budget_exhausted(assistant_message)
             ):
                 logger.warning(
@@ -2198,6 +2218,7 @@ class AgentHarness(
                     "and had none left for the actual response. "
                     "Try lowering reasoning effort or increasing max_tokens."
                 )
+                await _persist_response()
                 messages.append(assistant_message)
                 await self._complete_session(
                     session, messages, lease, reason="thinking_budget_exhausted",
@@ -2222,16 +2243,17 @@ class AgentHarness(
             #
             # Retry bounded, then fail: a failure the user can see beats a
             # silent completion.
-            if (
-                finish_reason == "error"
-                and not (assistant_message.get("content") or "").strip()
-                and not assistant_message.get("tool_calls")
-            ):
+            #
+            # A stream that died part-way carries the same finish_reason
+            # with whatever text arrived before the cut; that is not an
+            # answer either, so it takes the same retry ladder.
+            if finish_reason == "error" and not tool_calls_raw:
+                await _persist_response()
                 if provider_error_retries < _MAX_PROVIDER_ERROR_RETRIES:
                     provider_error_retries += 1
                     logger.warning(
                         "Session %s: provider returned finish_reason='error' "
-                        "with no content (%d input tokens); retrying (%d/%d)",
+                        "(%d input tokens); retrying (%d/%d)",
                         session.id, input_tokens, provider_error_retries,
                         _MAX_PROVIDER_ERROR_RETRIES,
                     )
@@ -2242,28 +2264,23 @@ class AgentHarness(
 
                 logger.error(
                     "Session %s: provider returned finish_reason='error' "
-                    "with no content %d times; failing the session",
+                    "%d times in a row; failing the session",
                     session.id, _MAX_PROVIDER_ERROR_RETRIES,
                 )
-                await self._store.emit_event(
-                    session.id,
-                    EventType.SESSION_FAIL,
-                    {
-                        "reason": "provider_error",
-                        "attempts": _MAX_PROVIDER_ERROR_RETRIES,
-                        "input_tokens": input_tokens,
-                    },
+                await self._fail_session(
+                    session, messages, lease, reason="provider_error",
+                    cost_tracker=cost_tracker,
+                    attempts=_MAX_PROVIDER_ERROR_RETRIES,
+                    input_tokens=input_tokens,
                 )
-                try:
-                    await self._store.update_session_status(session.id, "failed")
-                except Exception:
-                    logger.warning(
-                        "Failed to update session status to failed for %s",
-                        session.id, exc_info=True,
-                    )
                 return
+            provider_error_retries = 0  # the ladder counts consecutive errors
 
-            if finish_reason == "length" and length_continuation_count < _MAX_LENGTH_CONTINUATIONS:
+            if (
+                finish_reason == "length"
+                and not tool_calls_raw
+                and length_continuation_count < _MAX_LENGTH_CONTINUATIONS
+            ):
                 partial_content = assistant_message.get("content", "") or ""
                 length_continuation_prefix += partial_content
                 logger.info(
@@ -2274,6 +2291,7 @@ class AgentHarness(
                 )
                 # Append the partial assistant message so the model sees
                 # what it already produced.
+                await _persist_response()
                 messages.append(assistant_message)
                 messages.append({"role": "user", "content": _LENGTH_CONTINUATION_PROMPT})
                 length_continuation_count += 1
@@ -2331,29 +2349,6 @@ class AgentHarness(
                         ).strip()
                         content_with_tools_cache.clear()
                     else:
-                        # Thinking-only prefill continuation -- the model
-                        # produced structured reasoning (via API fields)
-                        # but no visible text content.  Rather than giving
-                        # up, append the assistant message as-is and
-                        # continue -- the model will see its own reasoning
-                        # on the next turn and produce the text portion.
-                        _has_structured = bool(
-                            assistant_message.get("reasoning")
-                            or assistant_message.get("reasoning_content")
-                            or assistant_message.get("reasoning_details")
-                        )
-                        if _has_structured and thinking_prefill_retries < 2:
-                            thinking_prefill_retries += 1
-                            logger.info(
-                                "Session %s: thinking-only final response, "
-                                "prefilling to continue (%d/2)",
-                                session.id, thinking_prefill_retries,
-                            )
-                            interim_msg = dict(assistant_message)
-                            interim_msg["_thinking_prefill"] = True
-                            messages.append(interim_msg)
-                            continue
-
                         # Truly empty response -- no content, no tool calls,
                         # no structured reasoning.  Some models (observed
                         # with gpt-5.4-mini) stall on complex asks like SVG
@@ -2369,6 +2364,7 @@ class AgentHarness(
                                 empty_response_retries,
                                 _MAX_EMPTY_RESPONSE_RETRIES,
                             )
+                            await _persist_response()
                             messages.append({
                                 "role": "user",
                                 "content": _EMPTY_RESPONSE_NUDGE,
@@ -2395,6 +2391,7 @@ class AgentHarness(
                                     "model": self._current_model,
                                 },
                             )
+                            await _persist_response()
                             continue
 
                         # Before failing: the model stopped producing text,
@@ -2413,6 +2410,7 @@ class AgentHarness(
                                 session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
                             assistant_message["content"] = concluded
+                            final_content = concluded
                             visible_content = concluded
                         else:
                             logger.error(
@@ -2420,23 +2418,13 @@ class AgentHarness(
                                 "times; emitting session.fail",
                                 session.id, _MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                            await self._store.emit_event(
-                                session.id,
-                                EventType.SESSION_FAIL,
-                                {
-                                    "reason": "empty_llm_response",
-                                    "attempts": _MAX_EMPTY_RESPONSE_RETRIES,
-                                },
+                            await _persist_response()
+                            await self._fail_session(
+                                session, messages, lease,
+                                reason="empty_llm_response",
+                                cost_tracker=cost_tracker,
+                                attempts=_MAX_EMPTY_RESPONSE_RETRIES,
                             )
-                            try:
-                                await self._store.update_session_status(
-                                    session.id, "failed",
-                                )
-                            except Exception:
-                                logger.warning(
-                                    "Failed to update session status to "
-                                    "failed for %s", session.id, exc_info=True,
-                                )
                             return
 
                 # The model announced an action, made no tool call, and its
@@ -2462,6 +2450,7 @@ class AgentHarness(
                         session.id, visible_content[-40:],
                         unfinished_retries, _MAX_UNFINISHED_RETRIES,
                     )
+                    await _persist_response()
                     messages.append({"role": "assistant", "content": final_content})
                     messages.append({
                         "role": "user",
@@ -2489,17 +2478,7 @@ class AgentHarness(
                         final_content = concluded
                         visible_content = concluded
 
-                # Pop thinking-only prefill message(s) before appending
-                # the final response.  This avoids consecutive assistant
-                # messages which break strict-alternation providers
-                # (Anthropic Messages API) and keeps history clean.
-                while (
-                    messages
-                    and isinstance(messages[-1], dict)
-                    and messages[-1].get("_thinking_prefill")
-                ):
-                    messages.pop()
-
+                event_id = await _persist_response()
                 messages.append(assistant_message)
 
                 # If the model emitted an SVG / HTML as a fenced code
@@ -2545,7 +2524,7 @@ class AgentHarness(
                 # would set status=completed, and the next wake would bail
                 # at the top of process_wake_cycle, leaving the mission
                 # active forever even after its verifier task finishes.
-                if await self._mission_has_pending_work(session.id):
+                if await self._mission_has_pending_work(session):
                     logger.debug(
                         "Session %s: mission has in-flight tasks; deferring completion",
                         session.id,
@@ -2667,13 +2646,17 @@ class AgentHarness(
                         session.id, len(tool_calls_raw), invalid_json_retries,
                     )
                     self._budget.refund()  # don't count this iteration
+                    await _persist_response()
                     continue  # re-enter the loop without appending anything
                 invalid_json_retries = 0  # reset on a turn with valid args
 
-            # 5b. Deduplicate tool calls and cap delegate_task calls.
+            # 5b. Deduplicate tool calls and cap delegate_task calls.  The
+            # streaming executor already applied both rules on add, so the
+            # persisted message matches what executes on either path.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
             tool_calls_raw = cap_delegate_calls(tool_calls_raw)
             assistant_message["tool_calls"] = tool_calls_raw
+            event_id = await _persist_response()
 
             # 5c. Invalid tool call recovery — check for unknown tools
             # or malformed JSON before executing (with fuzzy name repair).
@@ -2710,17 +2693,7 @@ class AgentHarness(
                 else:
                     consecutive_invalid_tool_calls = 0
 
-            # 6. Pop thinking-only prefill message(s) before appending
-            # the tool-call assistant message (same rationale as the
-            # final-response path).
-            while (
-                messages
-                and isinstance(messages[-1], dict)
-                and messages[-1].get("_thinking_prefill")
-            ):
-                messages.pop()
-
-            # Append assistant message to the in-memory message list.
+            # 6. Append assistant message to the in-memory message list.
             messages.append(assistant_message)
 
             # 7. Execute tool calls.
@@ -2981,7 +2954,7 @@ class AgentHarness(
                         "compacted_messages": compressed,
                     },
                 )
-                messages = compressed
+                messages[:] = compressed
                 # Invalidate system prompt cache -- conversation shape changed.
                 self._system_prompt_cache.invalidate(session.id)
                 self._memory_snapshot_cache.pop(session.id, None)
@@ -4094,27 +4067,32 @@ class AgentHarness(
         messages: list[dict],
         system_prompt: str,
         lease: SessionLease,
+        *,
+        build_api_messages: Callable[[list[dict]], Awaitable[list[dict]]],
     ) -> Callable:
-        """Return an async callable that compresses context in place.
+        """Return an async callable that compresses *messages* in place.
 
         The callback is passed to :func:`call_llm_with_retry` so it can
         trigger compression on 413 / context-length errors without coupling
         the retry module to the full harness.
 
-        Returns the compressed message list on success, or ``None`` if
+        It compresses the harness's own conversation list, never the wire
+        list it is handed: the wire list starts with the system message and
+        memory pseudo-turns, and persisting that as the compaction snapshot
+        made the next wake replay a stale system prompt under a fresh one.
+        *messages* is updated in place so the loop continues from the
+        compacted history, and the wire list for the retry is rebuilt with
+        *build_api_messages*.
+
+        Returns the rebuilt wire list on success, or ``None`` if
         compression could not reduce the context further.
         """
-        async def _compress(api_messages: list[dict]) -> list[dict] | None:
-            original_len = len(api_messages)
-            if not self._compressor.should_compress(api_messages, system_prompt):
-                # Force compress even if under threshold -- we're in error recovery.
-                pass
+        async def _compress(_api_messages: list[dict]) -> list[dict] | None:
             compressed, summary_data = await self._compressor.compress(
-                api_messages, self._llm,
+                messages, self._llm,
             )
-            if len(compressed) >= original_len:
+            if len(compressed) >= len(messages):
                 return None  # Compression didn't help.
-            # Emit event.
             try:
                 await self._store.emit_event(
                     session.id,
@@ -4128,7 +4106,8 @@ class AgentHarness(
                 self._memory_snapshot_cache.pop(session.id, None)
             except Exception:
                 logger.debug("Failed to emit CONTEXT_COMPACT event", exc_info=True)
-            return compressed
+            messages[:] = compressed
+            return await build_api_messages(messages)
         return _compress
 
     # ------------------------------------------------------------------
@@ -4195,31 +4174,19 @@ class AgentHarness(
         model_id = self._current_model or session.model or self._default_model
 
         try:
-            api_messages: list[dict] = [
-                {"role": "system", "content": system_prompt},
-            ]
-            # Clean internal-only fields before sending to API
-            # (same treatment as the main loop).
-            for msg in messages:
-                api_msg = msg.copy()
-                if msg.get("role") == "assistant":
-                    reasoning_text = msg.get("reasoning")
-                    if reasoning_text:
-                        api_msg["reasoning_content"] = reasoning_text
-                api_msg.pop("reasoning", None)
-                api_msg.pop("finish_reason", None)
-                api_msg.pop("_thinking_prefill", None)
-                api_msg.pop("_advisor", None)
-                api_messages.append(api_msg)
-            await _prepare_messages_for_model_vision_support(
-                api_messages,
-                model_id=model_id,
-                llm_client=self._llm,
-                vision_client=self._vision_client,
-                vision_model_override=self._vision_model,
-            )
+            async def _build_api_messages(msgs: list[dict]) -> list[dict]:
+                api = [{"role": "system", "content": system_prompt}]
+                api.extend(_to_api_message(m) for m in msgs)
+                await _prepare_messages_for_model_vision_support(
+                    api,
+                    model_id=model_id,
+                    llm_client=self._llm,
+                    vision_client=self._vision_client,
+                    vision_model_override=self._vision_model,
+                )
+                return apply_developer_role(api, model_id)
 
-            api_messages = apply_developer_role(api_messages, model_id)
+            api_messages = await _build_api_messages(messages)
 
             create_kwargs: dict[str, Any] = {
                 "model": model_id,
@@ -4245,6 +4212,7 @@ class AgentHarness(
                 set_streaming_enabled=self._set_streaming_enabled,
                 compress_context=self._compress_context_callback(
                     session, messages, system_prompt, lease,
+                    build_api_messages=_build_api_messages,
                 ),
                 context_compressor=self._compressor,
                 rate_limit_guard=self._provider_rate_limit_guard(),

@@ -930,7 +930,8 @@ async def execute_tool_calls_sequential(
             bundle=bundle,
             turn_gate=turn_gate,
             platform_client=platform_client,
-        expert_transcript=expert_transcript,
+            expert_transcript=expert_transcript,
+            interrupt_check=interrupt_check,
         )
         if tool_guardrails is not None:
             after = tool_guardrails.after_call(
@@ -1051,7 +1052,8 @@ async def execute_tool_calls_concurrent(
                 bundle=bundle,
                 turn_gate=turn_gate,
                 platform_client=platform_client,
-        expert_transcript=expert_transcript,
+                expert_transcript=expert_transcript,
+                interrupt_check=interrupt_check,
             )
 
     # Pre-pass: apply ``before_call`` sequentially so guardrail blocking
@@ -1159,8 +1161,12 @@ async def execute_single_tool(
     turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
 ) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
+
+    *interrupt_check* is this session's stop flag; it is handed to the tool
+    handler so long-running tools can poll it without a process-wide signal.
 
     When *log_policy_allowed* is True, every governance check that passes
     also emits a ``policy.allowed`` event.  Off by default because each
@@ -1577,7 +1583,8 @@ async def execute_single_tool(
                 bundle=bundle,
                 turn_gate=turn_gate,
                 platform_client=platform_client,
-        expert_transcript=expert_transcript,
+                expert_transcript=expert_transcript,
+                interrupt_check=interrupt_check,
             )
     except KeyError:
         tool_failed = True
