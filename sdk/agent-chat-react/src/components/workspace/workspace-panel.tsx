@@ -12,8 +12,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import type { MouseEvent, ReactNode } from "react";
-import { useIsMobile } from "../../lib/use-is-mobile";
+import type { ReactNode } from "react";
 import { formatFileSize } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import type {
@@ -39,9 +38,6 @@ import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 const SKELETON_WIDTHS = [75, 60, 90, 65, 80, 70, 85, 55];
-const DEFAULT_WIDTH = 400;
-const MIN_WIDTH = 300;
-const MAX_WIDTH = 900;
 
 interface WorkspacePanelProps {
 	adapter: AgentChatAdapter;
@@ -55,7 +51,6 @@ interface WorkspacePanelProps {
 	onOpenFile?: (path: string) => void;
 	refreshSignal?: number;
 	disabled?: boolean;
-	fillParent?: boolean;
 }
 
 function collectExpandedPaths(
@@ -198,7 +193,6 @@ export function WorkspacePanel({
 	onOpenFile,
 	refreshSignal = 0,
 	disabled = false,
-	fillParent = false,
 }: WorkspacePanelProps) {
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [entries, setEntries] = useState<AgentChatWorkspaceEntry[]>([]);
@@ -208,17 +202,7 @@ export function WorkspacePanel({
 	const [uploading, setUploading] = useState(false);
 	const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
-	const [width, setWidth] = useState(DEFAULT_WIDTH);
-	// Below md the panel is the whole screen, so the resizable inline width
-	// does not apply: DEFAULT_WIDTH is 400px and MIN_WIDTH 300px, which on a
-	// 375px phone made the panel wider than the viewport and offered a
-	// col-resize handle no finger can use. Inline styles cannot be
-	// media-queried, so the breakpoint is read here.
-	const narrow = useIsMobile();
 	const sessionIdRef = useRef(sessionId);
-	const isResizing = useRef(false);
-	const startX = useRef(0);
-	const startWidth = useRef(DEFAULT_WIDTH);
 
 	sessionIdRef.current = sessionId;
 
@@ -349,62 +333,15 @@ export function WorkspacePanel({
 		],
 	);
 
-	const onResizeStart = useCallback(
-		(event: MouseEvent) => {
-			event.preventDefault();
-			isResizing.current = true;
-			startX.current = event.clientX;
-			startWidth.current = width;
-			document.body.style.cursor = "col-resize";
-			document.body.style.userSelect = "none";
-		},
-		[width],
-	);
-
-	useEffect(() => {
-		const onMouseMove = (event: globalThis.MouseEvent) => {
-			if (!isResizing.current) return;
-			const delta = startX.current - event.clientX;
-			setWidth(
-				Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta)),
-			);
-		};
-		const onMouseUp = () => {
-			if (!isResizing.current) return;
-			isResizing.current = false;
-			document.body.style.cursor = "";
-			document.body.style.userSelect = "";
-		};
-		window.addEventListener("mousemove", onMouseMove);
-		window.addEventListener("mouseup", onMouseUp);
-		return () => {
-			window.removeEventListener("mousemove", onMouseMove);
-			window.removeEventListener("mouseup", onMouseUp);
-		};
-	}, []);
-
 	return (
+		// Always fills its parent: the panel is the body of the Files
+		// accordion, which owns the frame and the height. The side-drawer
+		// it used to be — resize handle, min/max width, its own left
+		// border — went away with the drawer.
 		<aside
 			data-testid="workspace-panel"
-			className={cn(
-				"relative z-10 flex h-full min-h-0 flex-col overflow-hidden bg-card",
-				// Filling a parent means the parent draws the frame; a border
-				// here would double against it.
-				!fillParent && "border-l border-muted-foreground/20",
-				(fillParent || narrow) && "w-full",
-			)}
-			style={
-				fillParent || narrow
-					? undefined
-					: { width, minWidth: MIN_WIDTH, maxWidth: MAX_WIDTH }
-			}
+			className="relative z-10 flex h-full min-h-0 w-full flex-col overflow-hidden"
 		>
-			{!(fillParent || narrow) && (
-				<div
-					className="absolute inset-y-0 left-0 z-20 w-1.5 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/30"
-					onMouseDown={onResizeStart}
-				/>
-			)}
 			<input
 				ref={fileInputRef}
 				type="file"
