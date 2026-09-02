@@ -189,13 +189,32 @@ class TestTabs:
         assert ("Target.setDiscoverTargets", {"discover": True}, None) in cdp.calls
         await _session_obj.close()
 
-    async def test_target_changes_push_a_fresh_tab_list(self) -> None:
+    async def test_an_unchanged_tab_list_is_not_resent(self) -> None:
+        # Target discovery fires targetInfoChanged for every title, favicon
+        # and loading-state change, which on a live page is constant: a
+        # single tab produced ~57 pushes in 20s, each a getTargets round
+        # trip and a client re-render. Only real changes are worth sending.
         session, cdp, client = await _session()
         client.text.clear()
+        for _ in range(5):
+            cdp.emit("Target.targetInfoChanged", {"targetInfo": {"targetId": "t1"}})
+        await asyncio.sleep(0.05)
+        assert client.text == []
+        await session.close()
+
+    async def test_a_changed_tab_list_is_still_pushed(self) -> None:
+        session, cdp, client = await _session()
+        client.text.clear()
+        cdp._results["__targets__"] = [
+            {"targetId": "t1", "url": "u"},
+            {"targetId": "t2", "url": "u2"},
+        ]
         cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "t2"}})
         await asyncio.sleep(0.05)
-        assert any(msg.get("t") == "tabs" for msg in client.text)
+        assert [m["t"] for m in client.text] == ["tabs"]
+        assert len(client.text[0]["tabs"]) == 2
         await session.close()
+
 
 
 class TestCloseTab:
@@ -245,3 +264,56 @@ class TestCloseTab:
         # stream and nothing for the agent to come back to.
         assert "Target.closeTarget" not in cdp.methods()
         await session.close()
+
+
+class TestVanishedViewer:
+    """A viewer that goes away mid-startup is routine, not an error.
+
+    React StrictMode double-mounts in dev, so the first socket is opened and
+    closed immediately; a user closing the pane during startup does the same
+    in production. Starlette flips the socket to DISCONNECTED after one failed
+    send and raises on every send after that, so the session must notice and
+    fall silent instead of raising through start().
+    """
+
+    class DeadClient:
+        """Starlette's behaviour once the peer is gone."""
+
+        def __init__(self) -> None:
+            self.sends = 0
+
+        async def send_bytes(self, payload: bytes) -> None:
+            self.sends += 1
+            raise RuntimeError(
+                'Cannot call "send" once a close message has been sent.'
+            )
+
+        async def send_text(self, payload: str) -> None:
+            self.sends += 1
+            raise RuntimeError(
+                'Cannot call "send" once a close message has been sent.'
+            )
+
+    async def test_start_survives_a_client_that_already_went_away(self) -> None:
+        cdp = FakeCdp({"Page.getLayoutMetrics": _layout()})
+        client = self.DeadClient()
+
+        async def lease_held() -> bool:
+            return True
+
+        session = ShellSession(cdp, client, lease_held=lease_held)
+        # The viewer is already gone; startup must complete quietly rather
+        # than raising a traceback out of the route handler.
+        await session.start()
+        await session.close()
+
+    async def test_background_pushes_stop_after_close(self) -> None:
+        # setDiscoverTargets makes Chrome announce every existing target at
+        # once, so a burst of _push_tabs tasks is in flight exactly when a
+        # StrictMode remount tears the session down. None may outlive it.
+        session, cdp, client = await _session()
+        cdp.emit("Target.targetCreated", {"targetInfo": {"targetId": "t2"}})
+        await session.close()
+        client.text.clear()
+        await asyncio.sleep(0.05)
+        assert client.text == []
