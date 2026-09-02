@@ -77,7 +77,7 @@ _SERVICE_ACCOUNT_PATH_PREFIX: str = "/v1/api/"
 
 _QUERY_TOKEN_PATH_RE = re.compile(
     r"^/v1/(api/)?sessions/[0-9a-fA-F-]{36}/"
-    r"(?:events|browser/live(?:/.*)?|workspace/download)$",
+    r"(?:events|browser/live(?:/.*)?|browser/shell|workspace/download)$",
 )
 _LIVE_VIEW_PATH_RE = re.compile(
     r"^/v1/(api/)?sessions/[0-9a-fA-F-]{36}/browser/live(?:/.*)?$",
@@ -101,9 +101,9 @@ def _allows_query_token(path: str) -> bool:
     """Return True when a path may authenticate with ``?token=``.
 
     Query-token auth is limited to browser primitives that cannot attach
-    custom headers: EventSource streams, live-view iframes/WebSockets, and
-    workspace file downloads initiated by an ``<a download>`` link. Regular
-    REST APIs must use the Authorization header.
+    custom headers: EventSource streams, live-view and browser-shell
+    WebSockets, and workspace file downloads initiated by an ``<a download>``
+    link. Regular REST APIs must use the Authorization header.
     """
     return bool(_QUERY_TOKEN_PATH_RE.match(path))
 

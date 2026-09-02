@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from surogates.tenant.auth.middleware import (
     LIVE_VIEW_TOKEN_COOKIE,
+    _allows_live_view_cookie,
     _allows_query_token,
     _query_or_live_view_cookie_token,
 )
@@ -30,6 +31,32 @@ def test_query_token_allowed_for_browser_live_view() -> None:
 def test_query_token_allowed_for_api_browser_live_view() -> None:
     assert _allows_query_token(
         "/v1/api/sessions/00000000-0000-0000-0000-000000000001/browser/live/ws",
+    )
+
+
+def test_query_token_allowed_for_browser_shell() -> None:
+    # The shell websocket is the live view's replacement and sits in the
+    # same category the allow-list exists for: a browser primitive that
+    # cannot attach an Authorization header. Omitting it 401'd every web
+    # SPA viewer while ops — which proxies with a service-account token in
+    # a header — worked, so the gap read as "only the SPA is broken".
+    assert _allows_query_token(
+        "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/shell",
+    )
+
+
+def test_query_token_allowed_for_api_browser_shell() -> None:
+    assert _allows_query_token(
+        "/v1/api/sessions/00000000-0000-0000-0000-000000000001/browser/shell",
+    )
+
+
+def test_browser_shell_does_not_accept_the_live_view_cookie() -> None:
+    # The cookie exists so live-view SUBRESOURCES (js/css the iframe pulls)
+    # authenticate without a query string. The shell is a single socket that
+    # always carries ?token=, so it needs no cookie surface.
+    assert not _allows_live_view_cookie(
+        "/v1/sessions/00000000-0000-0000-0000-000000000001/browser/shell",
     )
 
 
