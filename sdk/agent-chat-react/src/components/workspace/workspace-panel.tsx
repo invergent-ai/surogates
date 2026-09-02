@@ -340,7 +340,7 @@ export function WorkspacePanel({
 		// border — went away with the drawer.
 		<aside
 			data-testid="workspace-panel"
-			className="relative z-10 flex h-full min-h-0 w-full flex-col overflow-hidden"
+			className="relative z-10 flex h-full border-input border-[2px] pb-[10px] border-b-0 min-h-0 w-full flex-col overflow-hidden"
 		>
 			<input
 				ref={fileInputRef}

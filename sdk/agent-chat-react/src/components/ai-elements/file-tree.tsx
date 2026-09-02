@@ -81,7 +81,7 @@ export function FileTree({
   return (
     <FileTreeContext.Provider value={contextValue}>
       <div
-        className={cn("rounded-lg border bg-card text-base", className)}
+        className={cn("rounded-lg border text-base", className)}
         role="tree"
         {...props}
       >

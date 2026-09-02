@@ -53,7 +53,7 @@ export function SessionPaneCard({
         // and cancelling the bottom from a className leaves both rules live,
         // and which corner wins comes down to stylesheet order rather than
         // intent -- which is how the stacked cards kept round bottoms.
-        "flex w-full items-center gap-3 border border-line px-3 py-3.5 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "flex w-full items-center gap-3 border px-3 pt-3.5 pb-5 text-left transition-colors hover:border-t-3 hover:border-r-3 hover:border-l-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
     >

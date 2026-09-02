@@ -2064,7 +2064,7 @@ export function ChatThread({
               subtitle={paneCards.browser.subtitle}
               thumbnail={paneCards.browser.thumbnail}
               onOpen={paneCards.browser.onOpen}
-              className="w-auto rounded-t-xl border-b-0 -mb-px"
+              className="w-auto rounded-t-xl border-input border-[2px] border-b-0 -mb-[10px]"
             />
           )}
           {paneCards.files && (
@@ -2076,7 +2076,7 @@ export function ChatThread({
                 count={paneCards.files.count}
                 expanded={paneCards.files.open}
                 onOpen={paneCards.files.onToggle}
-                className="w-auto rounded-t-xl border-b-0 -mb-px"
+                className="w-auto rounded-t-xl border-input border-[2px] border-b-0 -mb-[10px]"
               />
               {paneCards.files.open && (
                 <div
@@ -2084,7 +2084,7 @@ export function ChatThread({
                   // A fixed height, not content height: the workspace scrolls
                   // inside it, and the composer must stay put when a folder
                   // with a hundred files expands.
-                  className="-mb-px flex h-72 min-h-0 flex-col overflow-hidden border border-b-0 border-line"
+                  className="-mb-[10px] flex h-72 min-h-0 flex-col overflow-hidden border border-b-0 border-line"
                 >
                   {paneCards.files.panel}
                 </div>
