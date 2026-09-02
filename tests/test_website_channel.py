@@ -208,9 +208,13 @@ class TestWebsiteSessionToken:
 
     def test_tampered_signature_rejected(self, claims_input):
         token = create_website_session_token(**claims_input)
-        # Flip a character in the signature half of the JWT.
+        # Flip the first signature character to a different one. Writing a
+        # fixed value over the end of the signature is a no-op whenever it
+        # already ends with that value, which left this test asserting that
+        # an untouched token is rejected about once in a thousand runs.
         head, body, sig = token.rsplit(".", 2)
-        tampered = f"{head}.{body}.{sig[:-2]}AA"
+        tampered = f"{head}.{body}.{'B' if sig[0] == 'A' else 'A'}{sig[1:]}"
+        assert tampered != token
         with pytest.raises(InvalidTokenError):
             decode_website_session_token(tampered)
 
