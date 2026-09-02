@@ -102,7 +102,7 @@ export function createExampleChatAdapter(baseUrl = "/api"): AgentChatAdapter {
     async releaseBrowserControl() {
       // The example app does not provision browser sessions.
     },
-    browserLiveViewUrl() {
+    browserShellUrl() {
       return "";
     },
   };
