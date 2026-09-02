@@ -15,6 +15,30 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def content_as_text(content: Any, *, sep: str = "") -> str:
+    """Flatten a message ``content`` field to plain text.
+
+    Content is either a string or the multimodal list of parts; a part
+    contributes its ``text`` when it has one, so an image or an audio part
+    drops out rather than rendering as a dict repr.  *sep* joins the parts:
+    the empty default reconstructs prose, while a caller building an
+    excerpt for a model to read passes a newline or a space.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return sep.join(parts)
+    return str(content) if content is not None else ""
+
+
 def message_texts(message: Any) -> Iterator[str]:
     """Non-empty reply-text channels of ``message``, in preference order.
 

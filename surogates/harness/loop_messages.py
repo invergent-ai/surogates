@@ -511,14 +511,15 @@ def _latest_user_event_data(events: list[Any]) -> dict | None:
     return None
 
 
-def _last_assistant_message_excerpt(
-    messages: list[dict[str, Any]],
-    limit: int = 500,
-) -> str:
-    """Return the latest assistant text as a compact summary."""
+def _latest_message_text(messages: list[dict[str, Any]], role: str) -> str | None:
+    """Latest *role* message as plain text, or ``None`` if there is none.
 
+    Only ``text``/``output_text`` parts count: these excerpts are read by
+    the summarizer, and a reasoning or tool-use part is neither something
+    the user said nor something the agent replied.
+    """
     for message in reversed(messages):
-        if message.get("role") != "assistant":
+        if message.get("role") != role:
             continue
         content = message.get("content") or ""
         if isinstance(content, list):
@@ -530,11 +531,23 @@ def _last_assistant_message_excerpt(
                     and part.get("type") in {"text", "output_text"}
                 )
             )
-        text = str(content).strip()
-        if len(text) <= limit:
-            return text
-        return text[: max(0, limit - 3)].rstrip() + "..."
-    return ""
+        return str(content).strip()
+    return None
+
+
+def _last_assistant_message_excerpt(
+    messages: list[dict[str, Any]],
+    limit: int = 500,
+) -> str:
+    """Return the latest assistant text as a compact summary."""
+    text = _latest_message_text(messages, "assistant")
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
 def _latest_user_message_text(
     messages: list[dict[str, Any]],
     limit: int = 1000,
@@ -542,26 +555,12 @@ def _latest_user_message_text(
     """Extract the latest user message's text content, capped at ``limit``.
 
     Used by the turn-summary path so the summarizer sees what the user
-    was asking for.  Mirrors the content-coercion logic in
-    :func:`_last_assistant_message_excerpt` so multimodal user messages
-    yield their text parts.
+    was asking for.
     """
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content") or ""
-        if isinstance(content, list):
-            content = " ".join(
-                str(part.get("text", ""))
-                for part in content
-                if (
-                    isinstance(part, dict)
-                    and part.get("type") in {"text", "output_text"}
-                )
-            )
-        text = str(content).strip()
-        return text[:limit] if limit and len(text) > limit else text
-    return ""
+    text = _latest_message_text(messages, "user")
+    if text is None:
+        return ""
+    return text[:limit] if limit and len(text) > limit else text
 
 
 def _seconds_since(value: Any) -> int:
