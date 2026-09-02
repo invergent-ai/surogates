@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import httpx
 
 from surogates.harness.message_utils import (
+    content_as_text,
     message_to_dict,
     reconstruct_message_from_deltas,
 )
@@ -245,20 +246,7 @@ def _estimate_message_tokens(messages: list[dict[str, Any]]) -> int:
     return chars // 4
 
 
-def _message_content_as_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return str(content) if content is not None else ""
+_message_content_as_text = content_as_text
 
 
 def _partial_tool_names_from_accumulator(

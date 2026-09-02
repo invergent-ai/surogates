@@ -6,6 +6,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from surogates.harness.message_utils import content_as_text
 from surogates.session.models import Session
 
 logger = logging.getLogger(__name__)
@@ -185,20 +186,7 @@ async def maybe_generate_session_title(
     return title if updated else None
 
 
-def _content_as_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return str(content) if content is not None else ""
+_content_as_text = content_as_text
 
 
 def _session_id(session: Any) -> UUID:

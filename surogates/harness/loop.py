@@ -39,6 +39,7 @@ from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
     coerce_message_content,
+    content_as_text,
     make_skipped_tool_result,
     message_texts,
 )
@@ -1610,6 +1611,94 @@ class AgentHarness(
                 should_review_memory = True
                 self._turns_since_memory = 0
 
+        # Tool filtering:
+        # - Coordinator sessions get all tools (soft mode — can delegate
+        #   or do work directly).
+        # - Worker sessions see all tools except coordinator tools
+        #   (prevents recursive spawning).
+        # - Normal sessions (no coordinator flag) also exclude coordinator
+        #   tools — they're useless without the coordinator prompt and
+        #   would confuse the LLM.
+        # - Sessions with explicit allowed_tools get exactly those.
+        #
+        # Resolved once per wake: every input is fixed for the wake (the
+        # session row, the prompt builder, and ``all_events``, which is
+        # read once above), so re-deriving it per iteration re-materialised
+        # the whole catalogue and re-took the shared registry lock tens of
+        # times a turn for a result that cannot change.
+        tool_filter = self._tool_filter_for_session(session)
+
+        # A whiteboard turn picks its own speed.  ``sketch`` -- the
+        # default -- leaves the model exactly one tool so it draws in
+        # a single round-trip; ``deep`` is the user explicitly asking
+        # for work before the drawing and keeps the full catalogue.
+        # Read from the turn's own user message, not the session row:
+        # the two speeds alternate freely within one conversation.
+        _turn_whiteboard_metadata = _latest_whiteboard_metadata(all_events)
+        tool_filter = _whiteboard_sketch_filter(
+            tool_filter,
+            _turn_whiteboard_metadata,
+            has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+        )
+        # The draw handler rejects a call that leaves the user's slot
+        # empty, and it can only know the slots from here.
+        from surogates.whiteboard.turn import (
+            current_slots as _wb_slots,
+            slots_from_metadata as _wb_slots_from,
+        )
+        _wb_slots.set(_wb_slots_from(_turn_whiteboard_metadata))
+
+        # user_reports exposes other end-users' data — its schema is
+        # only offered to operator (Studio ops-chat) sessions.  The
+        # cheap config-only owner-scope check suffices here because
+        # the handler independently re-proves the full DB-backed
+        # predicate before returning anything.
+        from surogates.tools.owner_scope import owner_scope_config_ok
+
+        if not owner_scope_config_ok(
+            session.service_account_id, session.config,
+        ):
+            if tool_filter is None:
+                tool_filter = set(self._tools.tool_names)
+            # Gate by toolset (same mechanism as the worker's prompt
+            # fragments) so future tools in the group stay covered.
+            tool_filter = tool_filter - {
+                e.name
+                for e in self._tools.get_all()
+                if e.toolset == "user_reports"
+            }
+
+        tool_schemas = filter_schemas_for_tenant(
+            self._tools.get_schemas(names=tool_filter),
+            has_agents=self._prompt.has_agents,
+        )
+        # Drop tools whose backing resource this agent does not have.
+        # Schemas ship on every request, so an unusable one is paid for
+        # on every turn of every session.
+        tool_schemas = drop_unusable_tools(
+            tool_schemas,
+            # Default to "has it" when the attribute is absent: an
+            # unknown resource must never cause a tool to vanish.
+            has_kbs=getattr(self._prompt, "has_kbs", True),
+            has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
+            is_scheduled=bool(
+                (getattr(session, "config", None) or {}).get(
+                    "scheduled_session_id")
+                or (getattr(session, "config", None) or {}).get(
+                    "scheduled_dynamic_loop")
+            ),
+            # The same fact that decided the prompt's whiteboard
+            # contract, so prose and schema cannot disagree.
+            is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+        )
+
+        # The browser pause notice costs a Redis read, and only a session
+        # that can drive a browser can ever be holding one.
+        has_browser_tools = any(
+            (s.get("function") or {}).get("name", "").startswith("browser_")
+            for s in tool_schemas
+        )
+
         while self._budget.remaining > 0:
             iteration += 1
             # Capture the iteration start so the per-iteration summary
@@ -1710,88 +1799,17 @@ class AgentHarness(
             )
 
             # 2. Call the LLM with retry (streaming or non-streaming).
-            # Tool filtering:
-            # - Coordinator sessions get all tools (soft mode — can delegate
-            #   or do work directly).
-            # - Worker sessions see all tools except coordinator tools
-            #   (prevents recursive spawning).
-            # - Normal sessions (no coordinator flag) also exclude coordinator
-            #   tools — they're useless without the coordinator prompt and
-            #   would confuse the LLM.
-            # - Sessions with explicit allowed_tools get exactly those.
-            tool_filter = self._tool_filter_for_session(session)
-
-            # A whiteboard turn picks its own speed.  ``sketch`` -- the
-            # default -- leaves the model exactly one tool so it draws in
-            # a single round-trip; ``deep`` is the user explicitly asking
-            # for work before the drawing and keeps the full catalogue.
-            # Read from the turn's own user message, not the session row:
-            # the two speeds alternate freely within one conversation.
-            _turn_whiteboard_metadata = _latest_whiteboard_metadata(all_events)
-            tool_filter = _whiteboard_sketch_filter(
-                tool_filter,
-                _turn_whiteboard_metadata,
-                has_whiteboard=getattr(self._prompt, "has_whiteboard", False),
-            )
-            # The draw handler rejects a call that leaves the user's slot
-            # empty, and it can only know the slots from here.
-            from surogates.whiteboard.turn import (
-                current_slots as _wb_slots,
-                slots_from_metadata as _wb_slots_from,
-            )
-            _wb_slots.set(_wb_slots_from(_turn_whiteboard_metadata))
-
-            # user_reports exposes other end-users' data — its schema is
-            # only offered to operator (Studio ops-chat) sessions.  The
-            # cheap config-only owner-scope check suffices here because
-            # the handler independently re-proves the full DB-backed
-            # predicate before returning anything.
-            from surogates.tools.owner_scope import owner_scope_config_ok
-
-            if not owner_scope_config_ok(
-                session.service_account_id, session.config,
-            ):
-                if tool_filter is None:
-                    tool_filter = set(self._tools.tool_names)
-                # Gate by toolset (same mechanism as the worker's prompt
-                # fragments) so future tools in the group stay covered.
-                tool_filter = tool_filter - {
-                    e.name
-                    for e in self._tools.get_all()
-                    if e.toolset == "user_reports"
-                }
-
-            tool_schemas = filter_schemas_for_tenant(
-                self._tools.get_schemas(names=tool_filter),
-                has_agents=self._prompt.has_agents,
-            )
-            # Drop tools whose backing resource this agent does not have.
-            # Schemas ship on every request, so an unusable one is paid for
-            # on every turn of every session.
-            tool_schemas = drop_unusable_tools(
-                tool_schemas,
-                # Default to "has it" when the attribute is absent: an
-                # unknown resource must never cause a tool to vanish.
-                has_kbs=getattr(self._prompt, "has_kbs", True),
-                has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
-                is_scheduled=bool(
-                    (getattr(session, "config", None) or {}).get(
-                        "scheduled_session_id")
-                    or (getattr(session, "config", None) or {}).get(
-                        "scheduled_dynamic_loop")
-                ),
-                # The same fact that decided the prompt's whiteboard
-                # contract, so prose and schema cannot disagree.
-                is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
-            )
-
             # Build the message list: system → prefill → memory → conversation.
             # Each message is cleaned for API compatibility: internal-only fields are stripped, reasoning
             # is passed back as ``reasoning_content`` for providers that need
             # it (Moonshot AI, Novita, OpenRouter).
-            browser_pause_notice = await maybe_inject_browser_pause(
-                session=session,
-                browser_control=self._browser_control,
+            browser_pause_notice = (
+                await maybe_inject_browser_pause(
+                    session=session,
+                    browser_control=self._browser_control,
+                )
+                if has_browser_tools
+                else None
             )
             async def _build_api_messages(msgs: list[dict]) -> list[dict]:
                 """Wire-format list for *msgs*: fixed head plus scrubbed turns.
@@ -2046,57 +2064,12 @@ class AgentHarness(
 
             # 4. Emit LLM_RESPONSE event with usage data.
             input_tokens = usage_data.get("input_tokens", 0)
-            output_tokens = usage_data.get("output_tokens", 0)
             finish_reason = usage_data.get("finish_reason", "stop")
 
-            reasoning_tokens = usage_data.get("reasoning_tokens", 0)
-            cache_read_tokens = usage_data.get("cache_read_tokens", 0)
-
-            response_data: dict[str, Any] = {
-                "message": assistant_message,
-                "model": usage_data.get("model", model_id),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "reasoning_tokens": reasoning_tokens,
-                "cache_read_tokens": cache_read_tokens,
-                "finish_reason": finish_reason,
-                "context_window": self._compressor.context_length,
-            }
-
-            # Compute cost estimate (cache reads billed at the discounted rate).
-            from surogates.harness.model_metadata import estimate_call_cost
-
-            cost, priced_model = estimate_call_cost(
-                model_id,
-                usage_data.get("model"),
-                input_tokens,
-                output_tokens,
-                cache_read_tokens=cache_read_tokens,
+            response_data = self._build_llm_response_payload(
+                assistant_message, usage_data,
+                model_id=model_id, cost_tracker=cost_tracker,
             )
-            if cost > 0:
-                response_data["cost_usd"] = cost
-            elif priced_model is None:
-                # No catalog rate for the model that served this call, so
-                # the session's estimated_cost_usd cannot move while its
-                # token counters do. Record the gap on the event instead of
-                # dropping it silently -- that silence is what let a
-                # 1.48M-token session read as costing nothing.
-                response_data["cost_unpriced_model"] = (
-                    usage_data.get("model") or model_id
-                )
-                self._warn_unpriced_model_once(
-                    usage_data.get("model") or model_id
-                )
-
-            # Record in session cost tracker.
-            if cost_tracker is not None:
-                cost_tracker.record_call(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost,
-                    cache_read_tokens=cache_read_tokens,
-                    reasoning_tokens=reasoning_tokens,
-                )
 
             if (
                 not tool_calls_raw
@@ -2932,8 +2905,15 @@ class AgentHarness(
                 )
                 return
 
-            # 9. Check if compression is needed.
-            if self._compressor.should_compress(messages, system_prompt):
+            # 9. Check if compression is needed.  The call just made
+            # reported its exact prompt size, so use that instead of
+            # re-walking the whole history to estimate it again.
+            if self._compressor.should_compress(
+                input_tokens
+                if input_tokens
+                else messages,
+                system_prompt,
+            ):
                 # Memory manager: extract insights before compression and feed
                 # them into the summary so they survive compaction.
                 pre_compress_text = ""
@@ -3244,6 +3224,68 @@ class AgentHarness(
         self._primary_config = primary_config
         self._fallback_activated = activated
         return True
+
+    def _build_llm_response_payload(
+        self,
+        assistant_message: dict[str, Any],
+        usage_data: dict[str, Any],
+        *,
+        model_id: str,
+        cost_tracker: SessionCostTracker | None,
+    ) -> dict[str, Any]:
+        """Build the LLM_RESPONSE payload and record the call's cost.
+
+        Every LLM call in the harness reports through this, so a field
+        added to the event contract reaches the budget-exhausted summary
+        as well as the main loop.
+        """
+        input_tokens = usage_data.get("input_tokens", 0)
+        output_tokens = usage_data.get("output_tokens", 0)
+        reasoning_tokens = usage_data.get("reasoning_tokens", 0)
+        cache_read_tokens = usage_data.get("cache_read_tokens", 0)
+
+        payload: dict[str, Any] = {
+            "message": assistant_message,
+            "model": usage_data.get("model", model_id),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "finish_reason": usage_data.get("finish_reason", "stop"),
+            "context_window": self._compressor.context_length,
+        }
+
+        # Cost estimate (cache reads billed at the discounted rate).
+        from surogates.harness.model_metadata import estimate_call_cost
+
+        cost, priced_model = estimate_call_cost(
+            model_id,
+            usage_data.get("model"),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read_tokens,
+        )
+        if cost > 0:
+            payload["cost_usd"] = cost
+        elif priced_model is None:
+            # No catalog rate for the model that served this call, so the
+            # session's estimated_cost_usd cannot move while its token
+            # counters do. Record the gap on the event instead of dropping
+            # it silently -- that silence is what let a 1.48M-token session
+            # read as costing nothing.
+            served = usage_data.get("model") or model_id
+            payload["cost_unpriced_model"] = served
+            self._warn_unpriced_model_once(served)
+
+        if cost_tracker is not None:
+            cost_tracker.record_call(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+                cache_read_tokens=cache_read_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+        return payload
 
     def _warn_unpriced_model_once(self, model: str) -> None:
         """Log a missing catalog rate once per model per session.
@@ -3671,23 +3713,7 @@ class AgentHarness(
 
     @staticmethod
     def _text_excerpt(value: Any, *, limit: int) -> str:
-        if isinstance(value, str):
-            text = value
-        elif isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        parts.append(str(item.get("text") or ""))
-                    elif item.get("text"):
-                        parts.append(str(item.get("text")))
-                else:
-                    parts.append(str(item))
-            text = "\n".join(parts)
-        else:
-            text = str(value or "")
-        return text[:limit]
-
+        return content_as_text(value, sep="\n")[:limit]
 
 
     def _ensure_always_available_tools(
@@ -4227,36 +4253,11 @@ class AgentHarness(
             coerce_message_content(assistant_message)
 
             # Emit the summary as an LLM_RESPONSE event.
-            input_tokens = usage_data.get("input_tokens", 0)
-            output_tokens = usage_data.get("output_tokens", 0)
-            cache_read_tokens = usage_data.get("cache_read_tokens", 0)
-
-            from surogates.harness.model_metadata import estimate_call_cost
-
-            cost, _priced_model = estimate_call_cost(
-                model_id,
-                usage_data.get("model"),
-                input_tokens,
-                output_tokens,
-                cache_read_tokens=cache_read_tokens,
+            final_payload = self._build_llm_response_payload(
+                assistant_message, usage_data,
+                model_id=model_id, cost_tracker=cost_tracker,
             )
-
-            if cost_tracker is not None:
-                cost_tracker.record_call(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cost_usd=cost,
-                )
-
-            final_payload: dict[str, Any] = {
-                "message": assistant_message,
-                "model": usage_data.get("model", model_id),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read_tokens,
-                "finish_reason": "budget_exhausted",
-            }
+            final_payload["finish_reason"] = "budget_exhausted"
             if turn_id is not None:
                 final_payload["turn_id"] = turn_id
                 final_payload["iteration_index"] = (
