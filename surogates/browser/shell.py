@@ -278,6 +278,18 @@ class ShellSession:
         self._frames: asyncio.Queue[tuple[bytes, str]] = asyncio.Queue()
         self._pump: asyncio.Task | None = None
         self._dropped = 0
+        # Background pushes (tab lists, navigation updates) tracked so close()
+        # can cancel them. Target discovery makes Chrome announce every
+        # existing target at once, so a burst of these is typically in flight
+        # exactly when a viewer remounts and tears the session down.
+        self._tasks: set[asyncio.Task] = set()
+        # Last tab list actually sent, so identical ones can be skipped.
+        self._last_tabs: list[dict] | None = None
+        # The viewer's socket is unusable. Starlette raises on every send once
+        # one has failed, so the first failure has to stop the rest: a viewer
+        # leaving is routine (React remounts in dev, a closed pane in prod)
+        # and must not raise out of start().
+        self._gone = False
 
     async def start(self) -> None:
         pages = await self._cdp.targets()
@@ -299,9 +311,23 @@ class ShellSession:
         await self._push_tabs()
 
     async def close(self) -> None:
+        self._gone = True
         if self._pump is not None:
             self._pump.cancel()
             self._pump = None
+        for task in list(self._tasks):
+            task.cancel()
+        self._tasks.clear()
+
+    def _spawn(self, coro) -> None:
+        """Run a background update, tracked so :meth:`close` can cancel it."""
+
+        if self._gone:
+            coro.close()  # never awaited; closing it avoids a warning
+            return
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     async def handle(self, raw: str | bytes) -> None:
         """Act on one client frame. Never raises for bad input — drops it."""
@@ -412,18 +438,22 @@ class ShellSession:
 
     async def _push_tabs(self) -> None:
         pages = await self._cdp.targets()
-        await self._send({
-            "t": "tabs",
-            "tabs": [
-                {
-                    "id": page.get("targetId"),
-                    "title": page.get("title", ""),
-                    "url": page.get("url", ""),
-                    "active": page.get("targetId") == self._target,
-                }
-                for page in pages
-            ],
-        })
+        tabs = [
+            {
+                "id": page.get("targetId"),
+                "title": page.get("title", ""),
+                "url": page.get("url", ""),
+                "active": page.get("targetId") == self._target,
+            }
+            for page in pages
+        ]
+        # Discovery reports every title, favicon and loading-state change, so
+        # a single busy tab pushes dozens of identical lists a minute. Send
+        # only what actually differs -- each push is a client re-render.
+        if tabs == self._last_tabs:
+            return
+        self._last_tabs = tabs
+        await self._send({"t": "tabs", "tabs": tabs})
 
     def _on_frame(self, params: dict) -> None:
         try:
@@ -436,10 +466,10 @@ class ShellSession:
         frame = params.get("frame") or {}
         if frame.get("parentId"):
             return  # a subframe navigating is not the address bar's business
-        asyncio.create_task(self._after_navigation(frame))
+        self._spawn(self._after_navigation(frame))
 
     def _on_targets_changed(self, _params: dict) -> None:
-        asyncio.create_task(self._push_tabs())
+        self._spawn(self._push_tabs())
 
     async def _after_navigation(self, frame: dict) -> None:
         try:
@@ -455,8 +485,19 @@ class ShellSession:
     async def _pump_frames(self) -> None:
         while True:
             payload, screencast_session = await self._frames.get()
+            if self._gone:
+                continue
             try:
                 await self._client.send_bytes(payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the viewer left mid-stream
+                # Every later send would fail the same way; stop rather than
+                # spinning once per frame for the life of the session.
+                self._gone = True
+                logger.debug("browser shell viewer went away", exc_info=True)
+                return
+            try:
                 # An unacked stream stalls by design.
                 await self._cdp.call(
                     "Page.screencastFrameAck",
@@ -465,15 +506,24 @@ class ShellSession:
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - a dropped frame is not fatal
-                logger.debug("browser shell frame forward failed", exc_info=True)
+            except Exception:  # noqa: BLE001 - a dropped ack is not fatal
+                logger.debug("browser shell frame ack failed", exc_info=True)
 
     def _drain_frames(self) -> None:
         while not self._frames.empty():
             self._frames.get_nowait()
 
     async def _send(self, message: dict[str, Any]) -> None:
-        await self._client.send_text(json.dumps(message))
+        if self._gone:
+            return
+        # Serialized before the send so a genuine encoding bug still raises;
+        # only the write to the viewer is treated as survivable.
+        payload = json.dumps(message)
+        try:
+            await self._client.send_text(payload)
+        except Exception:  # noqa: BLE001 - the viewer left; that is not an error
+            self._gone = True
+            logger.debug("browser shell viewer went away", exc_info=True)
 
     def _drop(self, reason: str) -> None:
         self._dropped += 1
