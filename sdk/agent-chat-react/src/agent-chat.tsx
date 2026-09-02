@@ -460,7 +460,6 @@ export function AgentChat({
                           onOpenFile={handleOpenFilePreview}
                           refreshSignal={runtime.workspaceRefreshKey}
                           disabled={effectiveDisabled}
-                          fillParent
                         />
                       ),
                     }
