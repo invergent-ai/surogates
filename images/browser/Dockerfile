@@ -42,5 +42,34 @@ RUN apt-get update \
         /etc/supervisor/conf.d/services/neko.conf \
     && rm -rf /var/lib/apt/lists/*
 
+# A fresh browser must open on a blank page. Chromium is launched with no
+# start URL, so it opens a new tab -- and upstream's managed policy points
+# NewTabPageLocation at start.duckduckgo.com, which is what both the agent
+# and the viewer then see. Patched rather than layered as a second policy
+# file: Chromium merges every file in the managed directory and resolving a
+# conflicting key across two of them comes down to filename order.
+#
+# The DuckDuckGo *search provider* is deliberately left alone -- that is what
+# a typed query in the address bar should use; only the landing page changes.
+RUN python3 - <<'PY'
+import json
+
+path = "/etc/chromium/policies/managed/policy.json"
+with open(path) as handle:
+    policy = json.load(handle)
+
+policy.update({
+    "NewTabPageLocation": "about:blank",
+    "HomepageLocation": "about:blank",
+    "HomepageIsNewTabPage": False,
+    # 4 = "open a specific set of URLs" on startup.
+    "RestoreOnStartup": 4,
+    "RestoreOnStartupURLs": ["about:blank"],
+})
+
+with open(path, "w") as handle:
+    json.dump(policy, handle, indent=2)
+PY
+
 # Keep the upstream runtime user. The headful wrapper starts supervisord as root
 # and the Chromium launcher drops privileges internally with runuser.
