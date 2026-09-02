@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any
 from uuid import UUID
 
 from surogates.harness.loop_attachments import (
@@ -327,6 +325,30 @@ class ContextReplayMixin:
                     "role": "user",
                     "content": f"[Worker {worker_id} completed]\n{result}",
                 })
+
+            elif etype == EventType.BROWSER_DESTROYED.value:
+                # Without this the close is a UI-only event: the model keeps
+                # the screenshots and page text it already has, and its next
+                # browser call quietly provisions a fresh blank one. Nothing
+                # would mark the discontinuity, which is how an agent comes
+                # to describe a page it no longer has open.
+                note = {
+                    "role": "user",
+                    "content": (
+                        "[The browser was closed. Any page it had open is "
+                        "gone — using a browser tool again starts from a "
+                        "blank page.]"
+                    ),
+                }
+                # Deferred like a real user message when an iteration is
+                # open: a human closes the browser whenever they like,
+                # including between an assistant's tool_calls and its
+                # results, and a user-role message in that gap is rejected
+                # by the provider outright.
+                if iteration_open:
+                    deferred_users.append(note)
+                else:
+                    messages.append(note)
 
             elif etype == EventType.WORKER_FAILED.value:
                 worker_id = event.data.get("worker_id", "?")
