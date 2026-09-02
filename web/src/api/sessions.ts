@@ -320,6 +320,16 @@ export async function releaseBrowserControl(sessionId: string): Promise<void> {
   if (!response.ok) throw new Error("Failed to release browser control");
 }
 
+export async function closeBrowserSession(sessionId: string): Promise<void> {
+  // Idempotent server-side: 204 whether or not a browser was attached, so
+  // there is nothing to special-case when the pane is closed twice.
+  const response = await authFetch(
+    `/api/v1/sessions/${encodeURIComponent(sessionId)}/browser`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) throw new Error("Failed to close browser session");
+}
+
 export async function getSessionTree(
   sessionId: string,
 ): Promise<SessionTreeResponse> {

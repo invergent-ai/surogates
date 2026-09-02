@@ -106,7 +106,10 @@ for (const path of [
     "getBrowserState",
     "acquireBrowserControl",
     "releaseBrowserControl",
-    "browserLiveViewUrl",
+    "browserShellUrl",
+    // Optional on the adapter type, so its absence is silent: the SDK just
+    // skips the call and "Close browser" quietly becomes "hide the panel".
+    "closeBrowserSession",
   ]) {
     assert.match(
       adapterSource,
@@ -116,13 +119,8 @@ for (const path of [
   }
   assert.match(
     adapterSource,
-    /\/browser\/live\//,
-    "web chat adapter should point the browser iframe at the live-view root",
-  );
-  assert.match(
-    adapterSource,
-    /searchParams\.set\("pwd",\s*"admin"\)/,
-    "web chat adapter should pass Neko's auto-login password",
+    /\/browser\/shell/,
+    "web chat adapter should point the browser socket at the shell endpoint",
   );
 }
 
