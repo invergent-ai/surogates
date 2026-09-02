@@ -224,6 +224,13 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     await sessionsApi.releaseBrowserControl(sessionId);
   },
 
+  // Without this the shell's "Close browser" only hides the panel — the
+  // sandbox keeps running, and the confirm dialog says so. Implementing it
+  // is what makes the button mean what it says.
+  async closeBrowserSession(sessionId) {
+    await sessionsApi.closeBrowserSession(sessionId);
+  },
+
   async getArtifact(input) {
     return await getArtifact(input.sessionId, input.artifactId);
   },
