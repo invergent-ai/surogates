@@ -100,6 +100,19 @@ _FALLBACK_CONTEXT_WINDOW: int = 128_000
 # Retry constants
 MAX_LLM_RETRIES: int = 3
 
+#: Longest provider cooldown worth waiting out in-session rather than
+#: failing. Every cooldown seen on the workspace-bench prod run was under
+#: five minutes (6s to 291s), and the sessions that died had already spent
+#: up to 31 minutes of work -- so waiting is cheap next to what failing
+#: throws away. Past this the wait stops being a blip and the session is
+#: better off failing visibly.
+MAX_RATE_LIMIT_WAIT_SECONDS: float = 330.0
+
+#: Re-check the cooldown a little after it should have cleared; the guard
+#: stores an absolute reset time, and clocks between the worker and whoever
+#: recorded it need not agree to the second.
+_RATE_LIMIT_RECHECK_BUFFER_SECONDS: float = 2.0
+
 # Stale stream detection timeout (seconds).  If no real streaming chunk
 # arrives within this window the stream is considered stale and will be
 # cancelled.  Configurable via ``SUROGATES_STREAM_STALE_TIMEOUT`` env var.
@@ -440,6 +453,56 @@ def _rate_limit_cooldown_seconds(
     return None
 
 
+async def _wait_out_rate_limit(
+    rate_limit_guard: Any,
+    session: Any,
+    iteration: int,
+    interrupt_check: Any,
+) -> None:
+    """Sleep until the provider cooldown clears, or raise if it is too long.
+
+    Only reached when there is no fallback provider to move to -- switching
+    providers beats waiting, and the caller tries that first.
+
+    The guard knows exactly how long the provider wants us to wait -- it is
+    in the message it produces. This used to raise on the spot, and the
+    dispatcher then retried the whole session three times about seven
+    seconds apart, so a cooldown of any length at all killed the session
+    before the first of those retries could have helped.
+
+    On the workspace-bench prod run that cost 15 of 70 tasks: six died
+    before making a single tool call, over waits as short as 6 seconds, and
+    nine threw away work already done -- 99 minutes and roughly $27 of it,
+    including one session that lost 31 minutes and $9.57 to a 94-second
+    wait.
+
+    Waiting does not consume an attempt from ``MAX_LLM_RETRIES``: that
+    budget exists for calls that fail, and a cooldown is not a failure.
+    """
+    waited = 0.0
+    while True:
+        remaining = await rate_limit_guard.remaining_seconds()
+        if remaining is None:
+            return
+        if remaining > MAX_RATE_LIMIT_WAIT_SECONDS or waited >= MAX_RATE_LIMIT_WAIT_SECONDS:
+            raise RuntimeError(
+                "Provider is rate-limited for "
+                f"{int(remaining)} more seconds; skipping API call."
+            )
+        if callable(interrupt_check) and interrupt_check():
+            raise RuntimeError("Interrupted while waiting on a provider rate limit.")
+
+        nap = min(remaining + _RATE_LIMIT_RECHECK_BUFFER_SECONDS,
+                  MAX_RATE_LIMIT_WAIT_SECONDS - waited)
+        logger.info(
+            "Session %s iteration %d: provider rate-limited for %ds; "
+            "waiting it out (%.0fs waited so far)",
+            getattr(session, "id", "?"), iteration, int(remaining), waited,
+        )
+        await interruptible_sleep(nap, interrupt_check)
+        waited += nap
+
+
 async def interruptible_sleep(
     seconds: float,
     interrupt_flag_getter: Any,
@@ -525,13 +588,33 @@ async def call_llm_with_retry(
         sanitize_messages(create_kwargs["messages"])
         create_kwargs["messages"] = sanitize_tool_pairs(create_kwargs["messages"])
 
+    # Once a fallback provider is in use the guard is stale: it is keyed to
+    # the provider we just moved off, and the one now serving us is not the
+    # one being throttled.
+    rate_limit_fallback_active = False
+
     for attempt in range(1, MAX_LLM_RETRIES + 1):
-        if rate_limit_guard is not None:
+        if rate_limit_guard is not None and not rate_limit_fallback_active:
             remaining = await rate_limit_guard.remaining_seconds()
             if remaining is not None:
-                raise RuntimeError(
-                    "Provider is rate-limited for "
-                    f"{int(remaining)} more seconds; skipping API call."
+                # A fallback provider is not the one being throttled, so
+                # switching beats waiting -- same preference the empty-response
+                # and error-sentinel paths below already apply.
+                if activate_fallback():
+                    logger.info(
+                        "Session %s iteration %d: provider rate-limited for "
+                        "%ds; failing over instead of waiting",
+                        session.id, iteration, int(remaining),
+                    )
+                    rate_limit_fallback_active = True
+                    current_model = get_current_model()
+                    if current_model:
+                        create_kwargs["model"] = current_model
+                    continue
+                # No fallback configured or none left in the chain: wait the
+                # cooldown out rather than throwing the session away.
+                await _wait_out_rate_limit(
+                    rate_limit_guard, session, iteration, interrupt_check,
                 )
 
         try:

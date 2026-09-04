@@ -1708,3 +1708,122 @@ class TestProviderErrorFinishReason:
         i = src.index('finish_reason == "error"')
         window = src[i : i + 120]
         assert "tool_calls_raw" in window and "content" not in window
+
+
+class TestRateLimitWait:
+    """A provider cooldown is a wait, not a failure.
+
+    The guard raised on the spot, and the dispatcher then retried the whole
+    session three times about seven seconds apart -- so a cooldown of any
+    length killed the session before those retries could help. On the
+    workspace-bench prod run that cost 15 of 70 tasks, six of them before a
+    single tool call, over waits as short as 6 seconds.
+    """
+
+    async def test_waits_then_proceeds(self) -> None:
+        from surogates.harness.llm_call import _wait_out_rate_limit
+
+        seen = [12.0, None]           # cooldown, then clear
+        guard = SimpleNamespace(
+            remaining_seconds=AsyncMock(side_effect=lambda: seen.pop(0))
+        )
+        slept: list[float] = []
+
+        async def fake_sleep(sec, _flag):
+            slept.append(sec)
+
+        import surogates.harness.llm_call as m
+        orig, m.interruptible_sleep = m.interruptible_sleep, fake_sleep
+        try:
+            await _wait_out_rate_limit(guard, SimpleNamespace(id="s"), 1, lambda: False)
+        finally:
+            m.interruptible_sleep = orig
+
+        assert slept and slept[0] >= 12.0      # waited at least the cooldown
+        assert seen == []                      # re-checked and found it clear
+
+    async def test_no_cooldown_does_not_sleep(self) -> None:
+        from surogates.harness.llm_call import _wait_out_rate_limit
+
+        guard = SimpleNamespace(remaining_seconds=AsyncMock(return_value=None))
+        await _wait_out_rate_limit(guard, SimpleNamespace(id="s"), 1, lambda: False)
+        guard.remaining_seconds.assert_awaited_once()
+
+    async def test_absurdly_long_cooldown_still_fails(self) -> None:
+        """Past the cap a cooldown stops being a blip; fail visibly rather
+        than park a session for an unbounded stretch."""
+        from surogates.harness.llm_call import (
+            MAX_RATE_LIMIT_WAIT_SECONDS,
+            _wait_out_rate_limit,
+        )
+
+        guard = SimpleNamespace(
+            remaining_seconds=AsyncMock(return_value=MAX_RATE_LIMIT_WAIT_SECONDS + 1)
+        )
+        with pytest.raises(RuntimeError, match="rate-limited"):
+            await _wait_out_rate_limit(guard, SimpleNamespace(id="s"), 1, lambda: False)
+
+    async def test_interrupt_beats_the_wait(self) -> None:
+        """A user Stop must not be held hostage by a five-minute cooldown."""
+        from surogates.harness.llm_call import _wait_out_rate_limit
+
+        guard = SimpleNamespace(remaining_seconds=AsyncMock(return_value=30.0))
+        with pytest.raises(RuntimeError, match="Interrupted"):
+            await _wait_out_rate_limit(guard, SimpleNamespace(id="s"), 1, lambda: True)
+
+    async def test_fallback_is_preferred_over_waiting(self) -> None:
+        """A fallback provider is not the one being throttled, so switching
+        beats parking the session for minutes."""
+        from surogates.harness.llm_call import call_llm_with_retry
+
+        guard = SimpleNamespace(remaining_seconds=AsyncMock(return_value=200.0))
+        activated: list[bool] = []
+
+        def activate_fallback() -> bool:
+            activated.append(True)
+            return True
+
+        calls: list[dict] = []
+
+        async def fake_call(**kw):
+            calls.append(kw)
+            return ({"role": "assistant", "content": "ok"}, {})
+
+        import surogates.harness.llm_call as m
+        orig_ns, orig_sleep = m.call_llm_non_streaming, m.interruptible_sleep
+        slept: list[float] = []
+
+        async def fake_sleep(sec, _f):
+            slept.append(sec)
+
+        m.call_llm_non_streaming, m.interruptible_sleep = fake_call, fake_sleep
+        try:
+            msg, _ = await call_llm_with_retry(
+                session=SimpleNamespace(id=uuid4()),
+                create_kwargs={"model": "m", "messages": []},
+                iteration=1, llm_client=AsyncMock(), store=AsyncMock(),
+                streaming_enabled=False, interrupt_check=lambda: False,
+                activate_fallback=activate_fallback,
+                get_current_model=lambda: "fallback-model",
+                set_streaming_enabled=lambda _v: None,
+                compress_context=lambda *a, **k: None,
+                context_compressor=None,
+                rate_limit_guard=guard,
+            )
+        finally:
+            m.call_llm_non_streaming, m.interruptible_sleep = orig_ns, orig_sleep
+
+        assert activated, "should have tried the fallback provider"
+        assert not slept, "should not wait when a fallback is available"
+        assert msg["content"] == "ok"
+        # The guard is keyed to the provider we moved off; consulting it again
+        # after failing over would strand the session on a stale cooldown.
+        assert guard.remaining_seconds.await_count == 1
+        assert calls[-1]["create_kwargs"]["model"] == "fallback-model"
+
+    async def test_every_observed_prod_cooldown_is_waitable(self) -> None:
+        """The 15 failures ranged 6s to 291s; all must now be waited out."""
+        from surogates.harness.llm_call import MAX_RATE_LIMIT_WAIT_SECONDS
+
+        observed = [6, 16, 86, 94, 127, 201, 203, 213, 228, 267, 281, 283, 285, 287, 291]
+        assert max(observed) < MAX_RATE_LIMIT_WAIT_SECONDS
