@@ -1,0 +1,34 @@
+[project]
+name = "promptgepa"
+version = "0.1.0"
+description = "GEPA prompt-fragment optimiser scored through the GAIA benchmark"
+requires-python = ">=3.12"
+dependencies = [
+    "gepa[full]",
+    "httpx",
+    "pyyaml",
+    # The GAIA benchmark is used as a library, not over its CLI: its run ids
+    # auto-increment off the entry count of benchmarks/gaia/runs/, so the
+    # hundreds of evaluations in one optimisation would permanently shift
+    # every future run id. Importing it lets the traces land here instead.
+    "gaia-bench",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+promptgepa = "promptgepa.optimize:main"
+
+[tool.uv.sources]
+gaia-bench = { path = "../gaia", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["promptgepa*"]
