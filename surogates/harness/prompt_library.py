@@ -26,6 +26,7 @@ nothing else should embed prompt prose inline.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,16 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-PROMPTS_ROOT: Path = Path(__file__).parent / "prompts"
+# ``SUROGATES_PROMPTS_ROOT`` points the loader at an alternative fragment
+# tree.  Unset in every deployment: it exists so an experiment can put one
+# rewritten fragment in front of a worker without editing the shipped tree,
+# which is what the prompt optimiser in ``benchmarks/gepa`` does between
+# candidates.  The library caches bodies per path for the process lifetime
+# and is a process-wide singleton, so the variable is read once at import
+# and a fragment swap means restarting the worker, not re-reading the file.
+PROMPTS_ROOT: Path = Path(
+    os.environ.get("SUROGATES_PROMPTS_ROOT") or Path(__file__).parent / "prompts"
+)
 
 _FRONTMATTER_FENCE = "---"
 

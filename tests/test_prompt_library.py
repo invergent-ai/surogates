@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -192,6 +195,45 @@ class TestValidate:
 # ---------------------------------------------------------------------------
 # Bundled fragments sanity
 # ---------------------------------------------------------------------------
+
+
+class TestPromptsRootOverride:
+    """``SUROGATES_PROMPTS_ROOT`` redirects the loader at an alternate tree.
+
+    Read once at import, so the check runs in a subprocess: reloading the
+    module in-process would hand the rest of the session a second
+    ``PromptLibrary`` class.
+    """
+
+    SNIPPET = (
+        "from surogates.harness.prompt_library import PROMPTS_ROOT, PromptLibrary;"
+        "print(PROMPTS_ROOT);"
+        "print(PromptLibrary().get('guidance/x'))"
+    )
+
+    def test_env_var_redirects_the_root(self, tmp_path: Path) -> None:
+        (tmp_path / "guidance").mkdir()
+        (tmp_path / "guidance" / "x.md").write_text(
+            "---\nname: x\n---\nfrom the override\n", encoding="utf-8"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", self.SNIPPET],
+            env={**os.environ, "SUROGATES_PROMPTS_ROOT": str(tmp_path)},
+            capture_output=True, text=True, check=True,
+        )
+        assert str(tmp_path) in result.stdout
+        assert "from the override" in result.stdout
+
+    def test_unset_env_uses_the_bundled_tree(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "SUROGATES_PROMPTS_ROOT"}
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "from surogates.harness.prompt_library import PROMPTS_ROOT;"
+             "print(PROMPTS_ROOT)"],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        assert result.stdout.strip() == str(PROMPTS_ROOT)
+        assert PROMPTS_ROOT.name == "prompts"
 
 
 class TestBundledFragments:
