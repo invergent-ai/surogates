@@ -11,6 +11,7 @@ visible reason, which is the honest outcome.
 from __future__ import annotations
 
 import posixpath
+import zipfile
 
 _CODE_TEXT_EXTS = {
     ".md", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
@@ -143,11 +144,45 @@ def _extract_pdf(path: str, max_pages: int = 30) -> str:
     return "\n".join(parts)
 
 
+#: OOXML part that identifies which Office format a ``PK``-headed file is.
+_OOXML_MARKERS = (
+    ("word/document.xml", ".docx"),
+    ("xl/workbook.xml", ".xlsx"),
+    ("ppt/presentation.xml", ".pptx"),
+)
+
+
+def _sniffed_ext(local_path: str, ext: str) -> str:
+    """Return the real format when the extension lies.
+
+    A task that demands ``report.doc`` gets OOXML named ``.doc``: writing
+    legacy binary Word is impractical, so agents write docx under the
+    required name.  Dispatching on the extension alone handed the judge an
+    empty string and failed every rubric on a document that was there and
+    correct.  Trust the bytes over the name.
+    """
+    if ext in (".docx", ".xlsx", ".pptx"):
+        return ext
+    try:
+        with open(local_path, "rb") as fh:
+            if fh.read(4) != b"PK\x03\x04":
+                return ext
+        with zipfile.ZipFile(local_path) as zf:
+            names = set(zf.namelist())
+    except Exception:  # noqa: BLE001 - a bad zip is not our problem here
+        return ext
+    for marker, real in _OOXML_MARKERS:
+        if marker in names:
+            return real
+    return ext
+
+
 def extract_text(
     local_path: str, max_chars: int = DEFAULT_MAX_CHARS
 ) -> tuple[str, str | None]:
     """Return (text, note). ``note`` explains truncation or failure."""
     ext = posixpath.splitext(local_path.lower())[1]
+    ext = _sniffed_ext(local_path, ext)
     try:
         if ext == ".docx":
             return _truncate(_extract_docx(local_path), max_chars)

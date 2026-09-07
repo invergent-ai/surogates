@@ -84,6 +84,24 @@ def test_xlsx_reports_chart_metadata(tmp_path):
     assert note is None
 
 
+def test_ooxml_named_doc_is_sniffed(tmp_path):
+    """A task demanding `.doc` gets OOXML under that name; read the bytes.
+
+    Extension-only dispatch scored five fail-001 tasks 0/N on documents
+    that were present and correct.
+    """
+    import docx
+
+    doc = docx.Document()
+    doc.add_paragraph("legacy extension, modern bytes")
+    p = tmp_path / "manual.doc"
+    doc.save(str(p))
+
+    text, note = extract_text(str(p))
+    assert "legacy extension, modern bytes" in text
+    assert note is None
+
+
 def test_corrupt_office_file_degrades(tmp_path):
     p = tmp_path / "broken.docx"
     p.write_bytes(b"this is not a zip archive")
