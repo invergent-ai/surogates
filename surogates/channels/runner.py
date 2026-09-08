@@ -144,12 +144,18 @@ def _make_deps_factory(
             *args, storage=storage, settings=settings, **kwargs
         )
 
-    def _link_prompt(code: str) -> str:
-        where = (
-            f"{link_url_base.rstrip('/')}/link"
-            if link_url_base
-            else "Surogate Studio (Settings → Channels)"
-        )
+    def _link_prompt(code: str, base: str = "") -> str:
+        """Build the private link prompt.
+
+        *base* is the agent's own web host (``channel_routing.api_web_url``)
+        and takes precedence over the deployment-wide ``link_url_base``:
+        ``/auth/login`` resolves the org from the Host subdomain, so a code
+        redeemed on a shared host authenticates against the wrong org and the
+        sender can never sign in.  With neither, name Studio generically — a
+        link that dead-ends is worse than no link at all.
+        """
+        root = (base or link_url_base or "").rstrip("/")
+        where = f"{root}/link" if root else "Surogate Studio (Settings → Channels)"
         return (
             "To talk to me as your own Surogate assistant, link your account: "
             f"enter code {code} at {where}."
@@ -191,7 +197,7 @@ def _make_deps_factory(
                 sender_id=msg.platform_user_id,
                 chat_id=msg.identifier,
                 is_dm=msg.is_dm,
-                text=_link_prompt(code),
+                text=_link_prompt(code, getattr(routing, "api_web_url", "") or ""),
             )
             if not delivered:
                 # Private delivery failed (e.g. the user blocked the bot).  The

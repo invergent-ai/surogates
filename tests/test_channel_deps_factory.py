@@ -41,10 +41,11 @@ class _RecordingPlatform:
         return True
 
 
-def _routing(policy=None):
+def _routing(policy=None, api_web_url=""):
     config = {"identity_policy": policy} if policy else {}
     return SimpleNamespace(
         org_id="o1", agent_id="a1", platform="slack", identifier="A0", config=config,
+        api_web_url=api_web_url,
     )
 
 
@@ -67,6 +68,52 @@ async def test_factory_wires_pairing_producer_and_link_prompt():
     assert plat.sent and plat.sent[0]["sender_id"] == "U1"
     assert "CODE-123" in plat.sent[0]["text"]
     assert "https://studio.example/link" in plat.sent[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_link_prompt_prefers_the_per_agent_api_web_url():
+    """The link must point at the agent's own host, not a shared one.
+
+    Login resolves the org from the Host subdomain, so a code redeemed on a
+    generic host authenticates against the wrong org and the user can never
+    sign in.  ``api_web_url`` is the agent's own base URL and must win over
+    the global ``link_url_base``.
+    """
+    factory = _make_deps_factory(
+        session_store=object(), redis=_FakeRedis(), session_factory=object(),
+        link_url_base="https://studio.example",
+    )
+    plat = _RecordingPlatform()
+    routing = _routing("linked", api_web_url="https://acme.cloud.surogate.ai")
+    deps = factory("slack", routing, {"bot_token": "x"}, plat)
+
+    msg = SimpleNamespace(platform_user_id="U1", identifier="C1", is_dm=True)
+    await deps.pairing_sender("o1", "slack", msg, "CODE-123")
+
+    text = plat.sent[0]["text"]
+    assert "https://acme.cloud.surogate.ai/link" in text
+    assert "studio.example" not in text, "the shared host must not win"
+
+
+@pytest.mark.asyncio
+async def test_link_prompt_without_any_base_url_names_studio_generically():
+    """No per-agent URL and no configured base → no link at all.
+
+    A link to a host that cannot log the user in is worse than none, so the
+    fallback stays the generic instruction.
+    """
+    factory = _make_deps_factory(
+        session_store=object(), redis=_FakeRedis(), session_factory=object(),
+    )
+    plat = _RecordingPlatform()
+    deps = factory("slack", _routing("linked"), {"bot_token": "x"}, plat)
+
+    msg = SimpleNamespace(platform_user_id="U1", identifier="C1", is_dm=True)
+    await deps.pairing_sender("o1", "slack", msg, "CODE-123")
+
+    text = plat.sent[0]["text"]
+    assert "http" not in text
+    assert "Surogate Studio" in text
 
 
 class _FailingPlatform:

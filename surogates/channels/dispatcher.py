@@ -70,6 +70,11 @@ class _RoutingObject:
     # The channel's config blob (channel_routing.config) — the deps factory
     # reads ``identity_policy`` from it to pick the shadow vs linked resolver.
     config: dict = field(default_factory=dict)
+    # The agent's own web base URL (channel_routing.api_web_url).  The link
+    # prompt builds its account-link URL from this: login resolves the org
+    # from the Host subdomain, so only the agent's own host can sign the
+    # user in.  Empty when the routing record carries none.
+    api_web_url: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +286,7 @@ class ChannelWebhookDispatcher:
             platform=platform.kind,
             identifier=identifier,
             config=config,
+            api_web_url=resolved.get("api_web_url") or "",
         )
         return identifier, org_id, config, creds, routing, None
 
