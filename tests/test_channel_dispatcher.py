@@ -526,6 +526,32 @@ class TestHappyPath:
         call = pipeline.calls[0]
         assert call["routing"].platform == platform.kind
 
+    async def test_routing_object_carries_api_web_url(self):
+        """The per-agent base URL must survive onto the routing object.
+
+        ``_link_prompt`` builds the account-link URL from it, and login
+        resolves the org from the Host subdomain — so dropping it here sends
+        users to a host that cannot log them in.
+        """
+        cache = _FakeCache(data={
+            f"fake:{IDENTIFIER}": {
+                "org_id": ORG_ID,
+                "agent_id": AGENT_ID,
+                "config": {"require_mention": False},
+                "api_web_url": "https://acme.cloud.surogate.ai",
+            },
+        })
+        app, _, _, _, pipeline = _make_app(cache=cache)
+        await _post(app, KNOWN_URL)
+        call = pipeline.calls[0]
+        assert call["routing"].api_web_url == "https://acme.cloud.surogate.ai"
+
+    async def test_routing_object_api_web_url_defaults_to_empty(self):
+        """A routing record without api_web_url yields "", never an attribute error."""
+        app, _, _, _, pipeline = _make_app()
+        await _post(app, KNOWN_URL)
+        assert pipeline.calls[0]["routing"].api_web_url == ""
+
     async def test_config_passed_to_pipeline(self):
         """Resolved config is forwarded to pipeline.handle."""
         app, _, _, _, pipeline = _make_app()
