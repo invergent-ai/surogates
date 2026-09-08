@@ -1,366 +1,377 @@
+<div align="center">
+
 # Surogates
 
-Surogates is an open platform for running managed agents at scale. It is built
-around a durable session log, stateless agent workers, isolated execution
-sandboxes, and user-facing channels such as web chat, Slack, Telegram, website
-widgets, and programmatic API sessions.
+**The open runtime for managed AI agents.**
 
-The core idea is simple: keep the agent's reasoning loop, execution
-environment, and user interface decoupled so each part can fail, scale, and be
-governed independently.
+Durable sessions. Isolated execution. Governance on every tool call.
+Agents that survive a crash, a restart, and a bad decision.
 
-Read the full [documentation](docs/index.md).
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-2a102d.svg?style=flat-square)](LICENSE.AGPL-3.0)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-ffaf10.svg?style=flat-square)](https://www.python.org)
+[![Node 20+](https://img.shields.io/badge/Node-20.19+-2a102d.svg?style=flat-square)](https://nodejs.org)
+[![Stars](https://img.shields.io/github/stars/invergent-ai/surogates?style=flat-square&color=ffaf10)](https://github.com/invergent-ai/surogates/stargazers)
 
-![Surogates Web Chat UI](assets/webui.webp)
+[**Documentation**](docs/index.md) · [**Quick start**](#quick-start) · [**Architecture**](#architecture) · [**Watch it work**](#watch-it-work) · [**surogate.ai**](https://surogate.ai)
 
-## What Surogates Provides
+</div>
 
-### Managed Agent Runtime
+<br />
 
-- Durable sessions backed by a PostgreSQL append-only event log.
-- Stateless workers that can replay session state and recover after crashes.
-- A Redis-backed orchestrator that wakes sessions and distributes work.
-- Per-session leases so only one worker runs a session at a time.
-- Server-Sent Events for real-time web updates and replay from the event log.
-- Background jobs for session cleanup, idle-session reset, scheduled work, and
-  expert training export.
+![Surogates web chat](assets/webui.webp)
 
-### Isolated Execution
+<br />
 
-- A clear brain/hands split: workers run the LLM loop; sandboxes run untrusted
-  code and file operations.
-- Development sandboxes via local processes and production sandboxes via
-  Kubernetes pods.
-- Session-scoped workspaces mounted at `/workspace`.
-- S3-compatible storage for session files, tenant assets, skills, memory, and
-  MCP configuration.
-- Workspace browsing, file viewing, uploads, downloads, and artifact rendering
-  in the web UI.
+## Why Surogates
 
-### Multi-Tenancy
+Most agent frameworks are a loop around an LLM call. That is the easy part. It
+falls over the moment an agent has to run for an hour, touch a real system, or
+be trusted by someone other than the person who wrote it.
 
-- Orgs, users, and channel identities with database-backed authentication.
-- Per-org provider configuration (LLM endpoints, MCP servers, credentials).
-- Service-account tokens for programmatic and batch access.
-- Channel identity mapping (link Slack/Telegram users to internal accounts).
-- Tenant context and per-org credential vault for secret isolation.
+Surogates is the part that comes after the loop:
 
-See [Multi-Tenancy](docs/multi-tenancy/index.md).
+|  | |
+|---|---|
+| **It survives** | Every session is an append-only event log in PostgreSQL. Kill the worker mid-tool-call and the next one replays the log and carries on. Workers are stateless; any of them can serve any session. |
+| **It is contained** | A hard brain/hands split. Workers run the reasoning loop. Sandboxes — Kubernetes pods in production — run the untrusted code, with a session-scoped workspace and a network policy around them. |
+| **It is governed** | Every tool call passes a policy engine before it executes: allow-lists, deny-lists, ABAC rules, file-path containment. Policy is frozen per session, so a prompt injection mid-conversation cannot widen it. |
+| **It is multi-tenant** | Storage, credentials, skills, memory, MCP config, policy and rate limits are all tenant-scoped. Sandboxes never see tenant secrets — the MCP proxy injects credentials on the way out. |
+| **It goes where users are** | Web, Slack, Telegram, WhatsApp, an embeddable website widget, and an OpenAI-compatible API — the same agent, the same session store, six front doors. |
 
-### Channels
+## Watch it work
 
-- Web chat SPA with streaming events, workspace browsing, browser live view,
-  session tree navigation, scheduled work, missions panel, and agent inbox.
-- Slack and Telegram channel adapters for messaging workflows.
-- Website widget SDK for embedding public chat entry points.
-- API channel for non-interactive batch and pipeline use cases with
-  service-account tokens.
-- Shared delivery model through durable outbox rows and Redis nudges.
+Short, narrated walkthroughs of the runtime — missions, browser control, deep
+research, governance, and the session record.
 
-### Human-in-the-Loop Inbox
+**▶ [youtube.com/@Surogate_ai](https://www.youtube.com/@Surogate_ai)**
 
-The agent inbox is a per-user queue of items that need attention:
+<!-- TODO: replace the channel link above with per-video thumbnail cards once the
+     video IDs are in hand, e.g.
+     [![Research missions](https://img.youtube.com/vi/<ID>/hqdefault.jpg)](https://youtu.be/<ID>)
+     Candidates already rendered: hand-it-a-mission, use-a-browser,
+     deep-research, research-missions, coding-agents, loops, goals, approvals,
+     governance, read-a-session, put-it-in-slack. -->
 
-- `input_required` for text answers through the `clarify` flow.
-- `action_required` for browser login, MFA, OAuth approval, CAPTCHA, file
-  picker, consent, or other external user actions.
-- `task_complete` for completion summaries.
-- `governance_gate` for user-overridable policy decisions.
-- `progress_checkin` for long-running session updates.
+## Quick start
 
-Each inbox item can open the related session and can be deleted. Depending on
-the kind, users can submit answers, acknowledge informational updates, approve
-or reject governance gates, or mark external actions complete so the session can
-resume.
+One command builds a local Kubernetes cluster with everything Surogates needs —
+PostgreSQL, Redis, S3-compatible storage, ingress and TLS:
 
-See [Agent Inbox](docs/agent-inbox/index.md).
+```bash
+git clone https://github.com/invergent-ai/surogates
+cd surogates/k8s && ./setup-cluster.sh
+```
 
-### Browser Use
+It installs `kubectl`, `helm`, `k3d` and `mkcert` into `~/.surogates/bin/` if
+they are missing, then writes a filled-in `~/.surogates/config.yaml`.
 
-Agents can control a real session-scoped Chromium browser:
+Point it at any OpenAI-compatible model:
 
-- Navigate, click, type, scroll, inspect accessibility state, and capture
-  screenshots.
-- Share a workspace with sandbox tools.
-- Let the user take over for login, MFA, CAPTCHA, and other manual steps.
-- Continue from the same browser session after the user completes the action.
+```yaml
+llm:
+  model: "claude-sonnet-4-20250514"
+  base_url: "https://api.anthropic.com/v1"
+  api_key: "sk-ant-..."
+```
 
-See [Browser Use](docs/browser-use/index.md).
+Then run the control plane and a worker:
 
-### Tools and MCP
+```bash
+export SUROGATES_CONFIG=~/.surogates/config.yaml
+surogates api      # REST API + web chat UI
+surogates worker   # pulls sessions off Redis, runs the harness
+```
 
-Surogates includes built-in tools for:
+Full walkthrough: **[Getting Started](docs/getting-started/index.md)**.
 
-- Shell commands, file reads/writes, patching, code execution, and workspace
-  operations.
-- Web search, extraction, crawling, browser automation, and vision analysis.
-- Memory, skills, sub-agent delegation, session search, scheduled work, and
-  loop control.
-- MCP servers over stdio and HTTP, with OAuth 2.1 PKCE support.
-- MCP proxying with credential injection so sandboxes do not see tenant
-  secrets.
+## Drive it from code
 
-Every tool call passes through governance before execution.
+Sessions are REST. Create one, send it work, stream the result back:
 
-See [Tools](docs/tools/index.md) and
-[MCP Integration](docs/mcp-integration/index.md).
+```bash
+# Create a session
+curl -X POST https://your-host/v1/sessions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"system": "Answer only in SQL. Never write prose."}'
+# → {"session_id": "…", "status": "active"}
 
-### Skills, Sub-Agents, and Experts
+# Give it something to do
+curl -X POST https://your-host/v1/sessions/$SID/messages \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Which customers churned last quarter?"}'
+# → {"event_id": 42, "status": "processing"}
 
-- **Skills** are reusable prompt-based behaviors loaded from platform, org, and
-  user layers.
-- **Sub-agents** are declarative child-session presets with their own prompt,
-  tool envelope, model override, iteration cap, and optional governance policy
-  profile.
-- **Experts** are task-specialized models or scoped mini-loops that can be
-  selected for hard tasks and retrained from collected event data.
+# Watch it think, over SSE
+curl -N https://your-host/v1/sessions/$SID/events \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-See [Skills](docs/skills/index.md), [Sub-Agents](docs/sub-agents/index.md), and
-[Experts](docs/experts/index.md).
+The same endpoint replays from any point in the log, so a dropped connection
+costs nothing. Full surface: **[REST API Reference](docs/appendices/api-reference.md)**.
 
-### Commands and Goals
+## What it can do
 
-Slash commands shape the next harness turn without going through a tool call:
+### Long-horizon work
 
-- `/clear` — drop the current context and destroy the session sandbox while
-  keeping the durable event log intact.
-- `/compress` — force context compression on demand.
-- `/goal <description>` — define an outcome with optional rubric. Surogates
-  works the conversation, grades each final response against the rubric, and
-  appends synthetic continuations until the evaluator returns `satisfied`,
-  `blocked`, `failed`, or the iteration budget is reached.
-- `/loop [interval] <prompt>` — schedule recurring user-owned work. Supports
-  fixed intervals (`5m`, `1h`, `2d`) or dynamic self-pacing via `loop_wait`.
-- `/<skill-name> [args...]` — invoke any skill directly from chat.
+<details open>
+<summary><b>Missions, tasks and a DAG that remembers</b></summary>
 
-Programmatic clients can drive the same goal flow via `user.define_outcome` on
-the `/v1/sessions/{id}/events` endpoint.
+<br />
 
-See [Commands](docs/commands/index.md) and
-[Goals Quick Start](docs/goals/index.md).
+Tasks are database rows, not in-memory promises. Each wraps zero or more attempt
+sessions with a goal, optional `parents=[...]` for fan-in, structured results,
+and a `todo → ready → running → done/blocked/failed/cancelled` state machine. A
+5-second dispatcher promotes ready tasks, finalises attempts and retries crashes
+up to `max_attempts` — with the prior attempts injected into the retry's context
+so it does not repeat itself.
 
-### Tasks and Missions
+**Missions** sit on top: `/mission <description>` plus a written rubric. A
+coordinator decomposes the goal into work tasks and a verifier task, and an LLM
+judge grades the workstream whenever a task terminates — `satisfied`,
+`needs_revision`, `blocked` or `failed`. Pause, resume and cancel without losing
+in-flight workers.
 
-The **task layer** adds durable, DAG-aware coordination on top of
-`spawn_worker`:
+→ [Tasks and Missions](docs/tasks/index.md)
 
-- A task is a database row wrapping zero or more attempt sessions with a goal,
-  optional `parents=[...]` for fan-in dependencies, structured `result` /
-  `result_metadata`, and a `todo → ready → running → done/blocked/failed/cancelled`
-  state machine.
-- Six tools: `spawn_task`, `unblock_task`, `cancel_task`, `worker_complete`,
-  `worker_block`, `worker_context`.
-- A 5-second dispatcher tick promotes ready tasks, finalizes completed attempts,
-  retries on crash up to `max_attempts`, and enqueues new workers.
-- Retry attempts get a "Prior attempts on this task" section injected into the
-  initial user message, plus full structured access via `worker_context`.
+</details>
 
-**Missions** are long-running, rubric-judged objectives built on the task
-layer:
+<details>
+<summary><b>Research missions — a tree search over ideas</b></summary>
 
-- `/mission <description>` plus a written rubric defines criterion-driven work
-  (e.g. "satisfied when `result_metadata.accuracy >= 0.85`").
-- The coordinator agent decomposes the goal into work tasks and a verifier task
-  that records the measurable signal in `result_metadata`.
-- An LLM judge grades the workstream against the rubric whenever a task reaches
-  a terminal state, returning `satisfied`, `needs_revision`, `blocked`, or
-  `failed`.
-- `/mission pause`, `/mission resume`, `/mission cancel [--cascade]` control
-  the loop without losing in-flight workers.
-- A dedicated mission dashboard renders the rubric, current iteration, latest
-  verdict, task DAG, and live worker activity.
+<br />
 
-See [Tasks and Missions](docs/tasks/index.md).
+Turns "improve this benchmark" into a cumulative search. A coordinator grows a
+durable **Idea Tree** of hypotheses; ephemeral executors implement and evaluate
+each one in an isolated git worktree; a verified gain merges into a protected
+trunk **only after an independently re-run held-out evaluation**. Executors
+cannot merge their own claims, so progress cannot be faked.
 
-### Memory
+→ [Research Missions](docs/research-missions/index.md)
 
-Memory is stored as file-shaped assets:
+</details>
 
-- `MEMORY.md` for durable project or org knowledge.
-- `USER.md` for user-specific preferences and stable facts.
-- Frozen snapshots are injected at session start.
-- Updates are security-scanned and deduplicated before storage.
+<details>
+<summary><b>Deep research — planner and writer, with citations</b></summary>
 
-See [Memory](docs/memory/index.md).
+<br />
 
-### Governance, Security, and Audit
+A two-agent pipeline that turns an open-ended question into a long-form,
+citation-grounded report. Opt-in per agent, with guards against runaway
+iteration and dangling citations.
 
-- Tenant-scoped auth, storage, credentials, skills, memory, MCP config, and
-  policies.
-- Policy engine for allow-lists, deny-lists, ABAC rules, and file path
-  containment, with per-session immutability once a session is frozen.
-- Policy profiles that narrow child-session permissions.
-- MCP tool scanning for prompt injection, invisible unicode, schema abuse, and
-  rug-pull attacks (SHA-256 fingerprinting of tool definitions).
-- Sandbox network isolation via Kubernetes NetworkPolicy.
-- Credential vault, encrypted at rest, with per-org and per-user scoping.
-- Saga tracking for multi-step tool chains with automatic compensation on
-  failure.
-- Per-org and per-user sliding-window rate limiting.
-- Session event log, tenant audit log, and SQL views (typed projections) for
-  compliance, debugging, dashboards, and training data.
+→ [Deep Research](docs/deep-research/index.md)
 
-See [Governance and Security](docs/governance-and-security/index.md) and
-[Audit & Observability](docs/audit/index.md).
+</details>
+
+<details>
+<summary><b>The coordination board — parallel agents that aren't blind</b></summary>
+
+<br />
+
+When a session fans out, the whole tree shares one board of compact, typed
+notes. Workers post what they learn and every member — siblings, retries and the
+coordinator — reads it directly, instead of results dribbling upward one parent
+at a time. A dead end hit by worker 1 becomes a `FAIL` note that worker 2 reads
+*before* repeating it.
+
+→ [Coordination Board](docs/board/index.md)
+
+</details>
+
+<details>
+<summary><b>Goals and loops</b></summary>
+
+<br />
+
+`/goal <description>` defines an outcome with a rubric; Surogates works the
+conversation, grades each response and appends continuations until the evaluator
+returns `satisfied`, `blocked` or `failed`. `/loop [interval] <prompt>` schedules
+recurring work — a fixed `5m`/`1h`/`2d`, or dynamic self-pacing.
+
+→ [Goals](docs/goals/index.md) · [Commands](docs/commands/index.md)
+
+</details>
+
+### Hands on the real world
+
+<details>
+<summary><b>Browser control, with a human handoff</b></summary>
+
+<br />
+
+Agents drive a real session-scoped Chromium: navigate, click, type, scroll,
+read the accessibility tree, screenshot. When it hits a login, MFA or CAPTCHA it
+hands the browser to the user, waits, and continues in the same session.
+
+→ [Browser Use](docs/browser-use/index.md)
+
+</details>
+
+<details>
+<summary><b>Tools, and MCP that doesn't leak secrets</b></summary>
+
+<br />
+
+Built-in tools for shell, files, patching, code execution, web search,
+extraction, crawling, vision, memory, skills, delegation and scheduling. MCP
+servers over stdio and HTTP with OAuth 2.1 PKCE.
+
+The proxy injects credentials on the way out, so **sandboxes never see tenant
+secrets**. Tool definitions are scanned for prompt injection, invisible unicode
+and schema abuse, and SHA-256 fingerprinted to catch rug-pulls.
+
+→ [Tools](docs/tools/index.md) · [MCP Integration](docs/mcp-integration/index.md)
+
+</details>
+
+<details>
+<summary><b>Skills, sub-agents and experts</b></summary>
+
+<br />
+
+**Skills** are reusable prompt-based behaviours layered platform → org → user.
+**Sub-agents** are declarative child presets with their own prompt, tool
+envelope, model override, iteration cap and policy profile. **Experts** are
+task-specialised models or scoped mini-loops, retrainable from the event log
+the runtime already collects.
+
+→ [Skills](docs/skills/index.md) · [Sub-Agents](docs/sub-agents/index.md) · [Experts](docs/experts/index.md)
+
+</details>
+
+<details>
+<summary><b>Memory that is just files</b></summary>
+
+<br />
+
+`MEMORY.md` for durable project knowledge, `USER.md` for user preferences.
+Frozen snapshots are injected at session start; updates are security-scanned and
+deduplicated before storage.
+
+→ [Memory](docs/memory/index.md)
+
+</details>
+
+### Safe enough to hand to a customer
+
+<details>
+<summary><b>Governance, audit and the blast radius</b></summary>
+
+<br />
+
+A policy engine on every tool call — allow-lists, deny-lists, ABAC rules and
+file-path containment — immutable once a session is frozen. Policy profiles
+narrow what child sessions may do. Sandboxes are network-isolated by Kubernetes
+NetworkPolicy. Credentials live in a vault encrypted at rest, scoped per org and
+per user. Saga tracking compensates a multi-step tool chain when a later step
+fails. Sliding-window rate limits per org and per user.
+
+Everything lands in the session event log and a tenant audit log, with SQL views
+for compliance, debugging, dashboards and training data.
+
+→ [Governance and Security](docs/governance-and-security/index.md) · [Audit & Observability](docs/audit/index.md)
+
+</details>
+
+<details>
+<summary><b>Six ways in</b></summary>
+
+<br />
+
+| Channel | What it is |
+|---|---|
+| **Web** | Streaming chat UI with session management and workspace browsing |
+| **Slack** | Socket Mode — DMs, @mentions, threads, files, multi-workspace |
+| **Telegram** | DMs, groups, forum topics, media, fallback transport for restricted networks |
+| **WhatsApp** | Official Business Cloud API, per-tenant Meta app. Reactive by design, so the 24-hour window never applies |
+| **Website widget** | Embeddable widget for anonymous visitors — publishable-key auth, CORS allow-list, CSRF-protected sessions |
+| **API** | OpenAI-compatible chat completions plus fire-and-forget submission for batch pipelines |
+
+→ [Channels](docs/channels/index.md) · [Agent Inbox](docs/agent-inbox/index.md)
+
+</details>
 
 ## Architecture
 
-Surogates follows a three-component model:
+Three tiers, decoupled so each can fail, scale and be governed on its own.
 
-```
-Channels / API clients
-        |
-        v
-API server
-  - auth, tenant routing, REST APIs, web SPA
-  - tenant storage and credential access
-        |
-        v
-Redis orchestrator
-        |
-        v
-Workers
-  - stateless harness loop
-  - tool routing, governance, memory, skills, MCP proxy calls
-        |
-        v
-Sandboxes
-  - isolated terminal, file, patch, and code execution
-  - session-scoped workspace only
-        |
-        v
-PostgreSQL session store
-  - sessions, events, leases, inbox items, delivery outbox
+```mermaid
+flowchart TD
+    C["Web · Slack · Telegram · WhatsApp · Widget · API"]
+    C --> API["<b>API server</b><br/>auth · tenant routing · REST · SPA<br/><i>the trusted control plane</i>"]
+    API --> R[("Redis<br/>orchestrator")]
+    R --> W["<b>Workers</b> — stateless<br/>harness loop · tool routing · governance<br/>memory · skills · MCP proxy"]
+    W --> S["<b>Sandboxes</b> — isolated<br/>shell · files · patches · code<br/><i>session workspace only</i>"]
+    W --> DB[("PostgreSQL<br/>append-only event log<br/>sessions · leases · inbox · outbox")]
+    API --> DB
+    DB -. "replay after any crash" .-> W
 ```
 
-The API server is the trusted control plane. Workers are stateless and can serve
-any session. Sandboxes are isolated and receive only session-scoped workspace
-access. If a worker or sandbox fails, the next run resumes from the durable
-event log.
+Workers hold no state, so any worker can serve any session. Sandboxes get a
+session-scoped workspace and nothing else. If either dies, the next run resumes
+from the log.
 
-See [Architecture](docs/architecture/index.md).
+→ [Architecture](docs/architecture/index.md) · [Multi-Tenancy](docs/multi-tenancy/index.md)
 
-## Repository Layout
+## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `surogates/` | Python backend: API server, worker harness, tools, storage, governance, jobs. |
-| `web/` | React web application for the hosted chat UI. |
-| `sdk/agent-chat-react/` | Shared React chat and inbox components used by the web app and downstream apps. |
-| `sdk/website-widget/` | Embeddable website widget SDK. |
-| `docs/` | User, operator, and architecture documentation. |
-| `scripts/` | Development and release helper scripts. |
-| `tests/` | Backend unit and integration tests. |
+| `surogates/` | Python backend — API server, worker harness, tools, storage, governance, jobs |
+| `web/` | React web application for the hosted chat UI |
+| `sdk/agent-chat-react/` | Shared React chat and inbox components |
+| `sdk/website-widget/` | Embeddable website widget SDK |
+| `docs/` | User, operator and architecture documentation |
+| `k8s/` | Cluster setup script and manifests |
+| `tests/` | Backend unit and integration tests |
 
-## Quick Start
-
-For the complete local setup, follow [Getting Started](docs/getting-started/index.md).
-
-At a high level, a development environment needs:
-
-- Python 3.12+
-- Node 20.19+ or 22.12+
-- PostgreSQL
-- Redis
-- S3-compatible object storage for tenant assets and session workspaces
-- An LLM provider reachable through an OpenAI-compatible API
-
-Install and configure the Python package:
+## Development
 
 ```bash
-uv sync
-export SUROGATES_CONFIG=/path/to/config.yaml
+uv sync                                  # Python deps
+uv run pytest                            # backend tests
+cd web && npm run typecheck && npm run build
+cd sdk/agent-chat-react && npm test
 ```
 
-Run the API server and a worker:
+Some integration tests need PostgreSQL, Redis, Docker, browser images or
+Kubernetes, depending on the marker.
 
-```bash
-SUROGATES_CONFIG=$SUROGATES_CONFIG uv run surogates api
-SUROGATES_CONFIG=$SUROGATES_CONFIG uv run surogates worker
-```
+## Documentation
 
-Run the web UI in development:
+**Start here** — [Introduction](docs/intro/index.md) · [Getting Started](docs/getting-started/index.md) · [Architecture](docs/architecture/index.md) · [Glossary](docs/appendices/glossary.md)
 
-```bash
-cd web
-npm install
-npm run dev
-```
+**Build with it** — [Tools](docs/tools/index.md) · [Skills](docs/skills/index.md) · [Sub-Agents](docs/sub-agents/index.md) · [Experts](docs/experts/index.md) · [MCP](docs/mcp-integration/index.md) · [Memory](docs/memory/index.md) · [Commands](docs/commands/index.md)
 
-The detailed configuration reference is in
-[Appendix A: Configuration](docs/appendices/configuration.md).
+**Long-horizon work** — [Tasks and Missions](docs/tasks/index.md) · [Goals](docs/goals/index.md) · [Research Missions](docs/research-missions/index.md) · [Deep Research](docs/deep-research/index.md) · [Coordination Board](docs/board/index.md)
 
-## Development Checks
+**Reach users** — [Channels](docs/channels/index.md) · [Agent Inbox](docs/agent-inbox/index.md) · [Browser Use](docs/browser-use/index.md)
 
-Common backend checks:
-
-```bash
-uv run pytest
-python -m compileall -q surogates
-```
-
-Shared React SDK checks:
-
-```bash
-cd sdk/agent-chat-react
-npm run typecheck
-npm test
-```
-
-Web app checks:
-
-```bash
-cd web
-npm run typecheck
-npm run build
-```
-
-Some integration tests require PostgreSQL, Redis, Docker, browser images, or
-Kubernetes depending on the test marker.
-
-## Documentation Map
-
-- [Introduction](docs/intro/index.md)
-- [Getting Started](docs/getting-started/index.md)
-- [Architecture](docs/architecture/index.md)
-- [Multi-Tenancy](docs/multi-tenancy/index.md)
-- [Channels](docs/channels/index.md)
-- [Browser Use](docs/browser-use/index.md)
-- [Agent Inbox](docs/agent-inbox/index.md)
-- [Commands](docs/commands/index.md)
-- [Goals Quick Start](docs/goals/index.md)
-- [Tools](docs/tools/index.md)
-- [Skills](docs/skills/index.md)
-- [Sub-Agents](docs/sub-agents/index.md)
-- [Tasks and Missions](docs/tasks/index.md)
-- [Experts](docs/experts/index.md)
-- [MCP Integration](docs/mcp-integration/index.md)
-- [Memory](docs/memory/index.md)
-- [Governance and Security](docs/governance-and-security/index.md)
-- [Audit & Observability](docs/audit/index.md)
-- [Storage](docs/storage/index.md)
-- [Background Jobs](docs/background-jobs/index.md)
-- [Operations](docs/operations/index.md)
-- [REST API Reference](docs/appendices/api-reference.md)
-- [Configuration Reference](docs/appendices/configuration.md)
-- [Glossary](docs/appendices/glossary.md)
+**Run it** — [Multi-Tenancy](docs/multi-tenancy/index.md) · [Governance and Security](docs/governance-and-security/index.md) · [Audit](docs/audit/index.md) · [Storage](docs/storage/index.md) · [Background Jobs](docs/background-jobs/index.md) · [Operations](docs/operations/index.md) · [Configuration](docs/appendices/configuration.md) · [REST API](docs/appendices/api-reference.md)
 
 ## Contributing
 
-Surogates builds on ideas from managed-agent architecture, sandboxed execution,
-MCP, governance policy systems, and existing open agent projects. Notable
-influences and dependencies include:
+Contributions that improve reliability, security, documentation and
+interoperability are welcome. Surogates builds on ideas from:
 
-- [Anthropic Managed Agents](https://www.anthropic.com/engineering/building-effective-agents)
-- [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
-- [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit)
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent)
-- [OpenClaw](https://github.com/openclaw/openclaw)
-- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-
-Contributions that improve reliability, security, documentation, and
-interoperability are welcome.
+[Anthropic — Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents) ·
+[Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime) ·
+[Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) ·
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) ·
+[OpenClaw](https://github.com/openclaw/openclaw) ·
+[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
 
 ## License
 
-AGPL-3.0-only. See [LICENSE.AGPL-3.0](LICENSE.AGPL-3.0).
+[AGPL-3.0-only](LICENSE.AGPL-3.0).
+
+<div align="center">
+<br />
+
+**Built by [Invergent](https://invergent.ai)** · [surogate.ai](https://surogate.ai) · [Discord](https://discord.gg/HC3Vypejv9) · [X](https://x.com/surogate_ai)
+
+<sub>If Surogates is useful to you, a ⭐ helps other people find it.</sub>
+
+</div>
