@@ -1,0 +1,12 @@
+# Shared ignores for every benchmark directory: local credentials,
+# virtualenvs, run traces, vendored upstream checkouts and derived data.
+# Patterns without a leading slash apply at every depth below benchmarks/.
+.env
+.venv/
+runs/
+vendor/
+task-data/
+answer_key.json
+__pycache__/
+.pytest_cache/
+*.pyc
