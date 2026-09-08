@@ -12,13 +12,17 @@ Agents that survive a crash, a restart, and a bad decision.
 [![Node 20+](https://img.shields.io/badge/Node-20.19+-2a102d.svg?style=flat-square)](https://nodejs.org)
 [![Stars](https://img.shields.io/github/stars/invergent-ai/surogates?style=flat-square&color=ffaf10)](https://github.com/invergent-ai/surogates/stargazers)
 
-[**Documentation**](docs/index.md) · [**Quick start**](#quick-start) · [**Architecture**](#architecture) · [**Watch it work**](#watch-it-work) · [**surogate.ai**](https://surogate.ai)
+[**Documentation**](docs/index.md) · [**Quick start**](#quick-start) · [**Architecture**](#architecture) · [**surogate.ai**](https://surogate.ai)
 
 </div>
 
 <br />
 
-![Surogates web chat](assets/webui.webp)
+![Surogates agent chat — an agent cloning a repository, running shell commands, fetching a GitHub issue and working a task list, with its session workspace open alongside](assets/webui.webp)
+
+<div align="center">
+<sub>One session: the agent clones a repo, runs shell, fetches the issue, plans the work, and searches the tree — every tool call on the record, the workspace live beside it.</sub>
+</div>
 
 <br />
 
@@ -37,20 +41,6 @@ Surogates is the part that comes after the loop:
 | **It is governed** | Every tool call passes a policy engine before it executes: allow-lists, deny-lists, ABAC rules, file-path containment. Policy is frozen per session, so a prompt injection mid-conversation cannot widen it. |
 | **It is multi-tenant** | Storage, credentials, skills, memory, MCP config, policy and rate limits are all tenant-scoped. Sandboxes never see tenant secrets — the MCP proxy injects credentials on the way out. |
 | **It goes where users are** | Web, Slack, Telegram, WhatsApp, an embeddable website widget, and an OpenAI-compatible API — the same agent, the same session store, six front doors. |
-
-## Watch it work
-
-Short, narrated walkthroughs of the runtime — missions, browser control, deep
-research, governance, and the session record.
-
-**▶ [youtube.com/@Surogate_ai](https://www.youtube.com/@Surogate_ai)**
-
-<!-- TODO: replace the channel link above with per-video thumbnail cards once the
-     video IDs are in hand, e.g.
-     [![Research missions](https://img.youtube.com/vi/<ID>/hqdefault.jpg)](https://youtu.be/<ID>)
-     Candidates already rendered: hand-it-a-mission, use-a-browser,
-     deep-research, research-missions, coding-agents, loops, goals, approvals,
-     governance, read-a-session, put-it-in-slack. -->
 
 ## Quick start
 
@@ -300,7 +290,7 @@ Three tiers, decoupled so each can fail, scale and be governed on its own.
 ```mermaid
 flowchart TD
     C["Web · Slack · Telegram · WhatsApp · Widget · API"]
-    C --> API["<b>API server</b><br/>auth · tenant routing · REST · SPA<br/><i>the trusted control plane</i>"]
+    C --> API["<b>API server</b><br/>auth · tenant routing · REST · agent web app<br/><i>the trusted control plane</i>"]
     API --> R[("Redis<br/>orchestrator")]
     R --> W["<b>Workers</b> — stateless<br/>harness loop · tool routing · governance<br/>memory · skills · MCP proxy"]
     W --> S["<b>Sandboxes</b> — isolated<br/>shell · files · patches · code<br/><i>session workspace only</i>"]
