@@ -400,6 +400,37 @@ async def main(
                 now=_program_now(),
             )
 
+        # Mirror ops' active Programs. Unconfigured by default: with no
+        # ops endpoint the ticker still fires the schedules it already has,
+        # it just never learns about new ones or notices a pause.
+        _ops_base = getattr(settings.worker, "ops_base_url", "") or ""
+        _ops_key = getattr(settings.worker, "ops_runtime_key", "") or ""
+        _program_reconcile = None
+        if _ops_base and _ops_key:
+            import httpx
+
+            from surogates.programs.ops_projection import fetch_active_programs
+            from surogates.programs.reconcile import reconcile_programs
+
+            _ops_http = httpx.AsyncClient()
+
+            async def _program_reconcile():  # pragma: no cover - prod path
+                projected = await fetch_active_programs(
+                    _ops_http, base_url=_ops_base, runtime_key=_ops_key,
+                )
+                if projected is None:
+                    # An unreachable or refused ops is not "no Programs are
+                    # active". Reconciling on that would deactivate every
+                    # schedule in the fleet, so skip this tick entirely.
+                    return
+                await reconcile_programs(program_store, projected=projected)
+        else:
+            logger.info(
+                "[programs] ops projection not configured "
+                "(worker.ops_base_url / worker.ops_runtime_key); schedules "
+                "will not be reconciled",
+            )
+
         program_lock = RedisLeaderLock(
             redis, key="surogates:program_ticker:leader",
             ttl_seconds=lock_ttl, holder_id=holder_id,
@@ -409,10 +440,7 @@ async def main(
             session_factory=_session_factory(),
             materialize=_program_run_one,
             send_openers=_program_send_openers,
-            # reconcile is left unwired: fetching ops' projection needs an ops
-            # base URL and a runtime-scoped key, neither of which this process
-            # configures yet. Until it is supplied, schedules are refreshed
-            # only by whatever calls reconcile_programs directly.
+            reconcile=_program_reconcile,
             worker_id=worker_id,
             leader_lock=program_lock,
             tick_interval_seconds=tick_interval,

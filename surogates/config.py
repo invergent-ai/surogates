@@ -238,6 +238,16 @@ class WorkerSettings(BaseSettings):
     poll_timeout: int = 5
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
+    # Where the ops server lives, and a runtime-scoped API key for it. Used
+    # only by the check-in Program ticker, to mirror ops' active Programs.
+    #
+    # Both empty by default, and that is the honest default rather than a
+    # placeholder: with no ops endpoint configured the ticker still fires the
+    # schedules it already has, it simply never learns about new ones or
+    # notices a pause. Guessing a URL here would produce a worker that looks
+    # wired and silently reconciles nothing.
+    ops_base_url: str = ""
+    ops_runtime_key: str = ""
     # Per-iteration one-liners, written on the cheap summary model while
     # the turn is still running. They land during the turn rather than
     # after it, so they cost the tail little -- and they are what the
