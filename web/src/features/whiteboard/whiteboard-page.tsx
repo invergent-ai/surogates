@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/app-shell";
+import { SessionSidebar } from "@/components/navbar";
 import { useAppStore } from "@/stores/app-store";
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
@@ -40,7 +41,7 @@ export function WhiteboardPage() {
   }, [navigate]);
 
   return (
-    <AppShell>
+    <AppShell sidebar={<SessionSidebar />}>
       <div className="h-full w-full">
         <AgentWhiteboard
           adapter={whiteboardChatAdapter}

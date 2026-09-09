@@ -143,7 +143,11 @@ export class FormulaCache {
   >();
   private readonly pending = new Set<string>();
 
-  constructor(private readonly onReady: () => void) {}
+  private readonly onReady: () => void;
+
+  constructor(onReady: () => void) {
+    this.onReady = onReady;
+  }
 
   get(latex: string, fontSize: number): RasterFormula | null {
     const hit = this.entries.get(latex);

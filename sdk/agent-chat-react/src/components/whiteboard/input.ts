@@ -156,10 +156,13 @@ export class StrokeBuilder {
   private readonly pts: number[] = [];
   private started = false;
 
-  constructor(
-    private readonly color: string,
-    private readonly width: number,
-  ) {}
+  private readonly color: string;
+  private readonly width: number;
+
+  constructor(color: string, width: number) {
+    this.color = color;
+    this.width = width;
+  }
 
   begin(pt: Point): void {
     this.started = true;
