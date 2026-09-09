@@ -25,10 +25,9 @@ Architecture:
 kb_list_pages/kb_read_page read the read-only ops DB connection
 directly (see ``surogates/db/ops_engine.py``). kb_search_pages instead
 calls the runtime-scoped ``/agents/agents/{agent_id}/kb/search`` route
-over ``platform_client`` (a bearer-token-authed service call, not the
-JWT-authed Studio `/wiki/search` route) -- the fused lexical+vector
-query and its tsvector/embedding-model configuration live once on the
-ops side, so this tool never has its own copy to drift.
+over ``platform_client`` (a bearer-token-authed service call) -- the fused
+lexical+vector query and its tsvector/embedding-model configuration live
+once on the ops side, so this tool never has its own copy to drift.
 
 Both kb_list_pages/kb_read_page accept ``kb_id`` directly. We could
 rewrite to take a human-friendly name, but production agents are wired
@@ -52,6 +51,7 @@ harness-side either way is the sender's pinned plan entitlement
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import uuid
@@ -314,7 +314,7 @@ async def _kb_list_pages_handler(
 
         pages = list((await session.execute(
             sa.select(OpsKBWikiPage)
-            .where(OpsKBWikiPage.kb_id == kb_id)
+            .where(OpsKBWikiPage.kb_id == kb_id, OpsKBWikiPage.parent_path.is_(None))
             .order_by(OpsKBWikiPage.path.asc())
         )).scalars().all())
 
@@ -474,6 +474,7 @@ async def _kb_read_page_handler(
     if not kb_id or not path:
         return "Error: both kb_id and path are required."
 
+    passage_id = (arguments.get("passage_id") or "").strip()
     page_range = _parse_page_range(arguments.get("pages"))
     if arguments.get("pages") and page_range is None:
         return (
@@ -521,19 +522,21 @@ async def _kb_read_page_handler(
         if kb_row is None or not kb_row.hub_ref:
             return f"Error: knowledge base {kb_id!r} has no Hub repo."
 
-        page = (await session.execute(
-            sa.select(OpsKBWikiPage).where(
-                OpsKBWikiPage.kb_id == kb_id,
-                OpsKBWikiPage.path == path,
-            )
-        )).scalar_one_or_none()
+        selector = (
+            sa.and_(OpsKBWikiPage.id == passage_id, OpsKBWikiPage.parent_path == path)
+            if passage_id else
+            sa.and_(OpsKBWikiPage.path == path, OpsKBWikiPage.parent_path.is_(None))
+        )
+        page = (await session.execute(sa.select(OpsKBWikiPage).where(
+            OpsKBWikiPage.kb_id == kb_id, selector,
+        ))).scalar_one_or_none()
         if page is None:
             return (
                 f"Error: page {path!r} not found in this KB. Use "
                 f"`kb_list_pages` to see available paths."
             )
 
-    hub_path = _HUB_WIKI_PREFIX + path.lstrip("/")
+    hub_path = page.hub_object_path or _HUB_WIKI_PREFIX + path.lstrip("/")
     try:
         raw = await fetch_wiki_object(
             endpoint_url=cfg.kb_hub.endpoint_url,
@@ -546,10 +549,37 @@ async def _kb_read_page_handler(
     except KBHubError as exc:
         return f"Error reading wiki page: {exc}"
 
-    if page_range is not None:
-        return _format_page_range(page.title, raw, *page_range)
+    if page.content_sha256 and hashlib.sha256(raw).hexdigest() != page.content_sha256:
+        return "Error: published artifact hash mismatch. Retry after the knowledge base is repaired."
 
-    return _format_page_window(
+    provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
+    if passage_id:
+        content = raw.decode("utf-8", errors="replace")
+        if page.page_number is not None:
+            try:
+                content = next(p.get("content") or "" for p in json.loads(content)
+                               if int(p.get("page", 0)) == page.page_number)
+            except (ValueError, TypeError, StopIteration, AttributeError):
+                return "Error: indexed PDF page is missing from its published artifact."
+        if page.source_start is None or page.source_end is None:
+            return "Error: passage has no source offsets. Search again after rebuilding the KB."
+        if not 0 <= page.source_start < page.source_end <= len(content):
+            return "Error: indexed passage offsets do not match the published artifact."
+        evidence = content[page.source_start:page.source_end]
+        provenance += (f"; passage={passage_id}; page={page.page_number}; "
+                       f"characters={page.source_start}-{page.source_end}_")
+        return provenance + "\n\n" + _format_page_window(page.title, evidence, offset, limit)
+
+    provenance += "_"
+    if page_range is not None and path.endswith(".json"):
+        rendered = _format_page_range(page.title, raw, *page_range)
+        if rendered.startswith("Error:"):
+            return rendered
+        # Range requests obey the same character ceiling and pagination rules
+        # as Markdown. A dense 40-page span must not bypass the tool budget.
+        return provenance + "\n\n" + _format_page_window(page.title, rendered, offset, limit)
+
+    return provenance + "\n\n" + _format_page_window(
         page.title, raw.decode("utf-8", errors="replace"), offset, limit,
     )
 
@@ -609,6 +639,10 @@ def _format_search_hits(hits: list[dict[str, Any]], *, query: str) -> str:
             f"{index}. `{hit['path']}` -- {hit.get('title', '')} "
             f"[{hit.get('page_type', '')} | kb {kb_name} `{kb_id}`]"
         )
+        if hit.get("passage_id"):
+            lines.append(f"   passage_id: `{hit['passage_id']}`; "
+                         f"page: {hit.get('page_number')}; "
+                         f"characters: {hit.get('source_start')}-{hit.get('source_end')}")
         for text in (hit.get("brief"), hit.get("snippet")):
             flat = " ".join((text or "").split())
             if flat:
@@ -616,7 +650,7 @@ def _format_search_hits(hits: list[dict[str, Any]], *, query: str) -> str:
     lines.append("")
     lines.append(
         "Snippets are excerpts. Read the promising hits in full with "
-        "`kb_read_page(kb_id=..., path=...)` before answering."
+        "`kb_read_page(kb_id=..., path=..., passage_id=...)` using the returned passage_id before answering. Omit passage_id to expand to the parent document."
     )
     return "\n".join(lines)
 
@@ -789,6 +823,10 @@ _KB_READ_PAGE_PARAMS = {
                 "and slash-sensitive."
             ),
         },
+        "passage_id": {
+            "type": "string",
+            "description": "Optional. Copy from kb_search_pages to read that exact evidence passage. Omit to read/expand the parent artifact.",
+        },
         "pages": {
             "type": "string",
             "description": (
@@ -852,8 +890,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="kb_read_page",
             description=(
-                "Read the markdown content of a single wiki page from "
-                "a knowledge base. Returns the page's title and content. "
+                "Read a wiki page or original source from a knowledge base. "
+                "Use passage_id from search to read exact evidence, or pages "
+                "to select a range from a PDF source. Returns its title, "
+                "content and published version. "
                 "A page longer than the limit comes back in sections -- "
                 "the response reports the offset to pass for the next one."
             ),
@@ -878,9 +918,9 @@ def register(registry: ToolRegistry) -> None:
                 "so a natural-language question and a handful of "
                 "distinctive keywords both work well. If the embedding "
                 "provider is unavailable, ranking falls back to "
-                "keyword matching alone. Returns pages ranked by "
-                "relevance, each with its kb_id, path, title and the "
-                "matching snippet.\n\n"
+                "keyword matching alone. Returns source and wiki passages "
+                "ranked across the authorized KBs, each with its kb_id, path, "
+                "title, passage_id and matching snippet.\n\n"
                 "USE THIS FIRST for any question a knowledge base "
                 "could answer. The page tree in your system prompt may "
                 "be partial and each entry carries only a one-line "

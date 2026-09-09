@@ -898,7 +898,7 @@ async def _load_attached_kbs(
                 kb_ids = [kb["id"] for kb in kbs]
                 pages_result = await session.execute(
                     sa.select(OpsKBWikiPage)
-                    .where(OpsKBWikiPage.kb_id.in_(kb_ids))
+                    .where(OpsKBWikiPage.kb_id.in_(kb_ids), OpsKBWikiPage.parent_path.is_(None))
                     .order_by(OpsKBWikiPage.path.asc())
                 )
                 pages_by_kb = {kb_id: [] for kb_id in kb_ids}
