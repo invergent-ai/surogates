@@ -68,9 +68,8 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 #: Everything else (api, studio, task, delegation, worker, scheduled,
 #: ambient, browser_setup) must never mint a binding or count as
 #: end-user activity — ``studio`` in particular is the operator talking
-#: to their own agent, not a customer of it.  ``teams`` is pre-registered for the Phase-2 adapter
-#: (``channels/teams.py`` already pins ``channel='teams'``) so shipping
-#: it cannot silently split the roster from its stats.
+#: to their own agent, not a customer of it. ``teams`` remains reserved
+#: for a future adapter so its roster and activity stats stay aligned.
 END_USER_CHANNELS = frozenset(
     {"web", "website", "slack", "telegram", "teams", "whatsapp"}
 )

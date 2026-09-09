@@ -107,31 +107,6 @@ class ArtifactCompletionMixin:
                     session.id, lang, exc_info=True,
                 )
             return  # one artifact per response
-    async def _end_turn(
-        self,
-        session: Session,
-        lease: SessionLease,
-        *,
-        through_event_id: int,
-    ) -> None:
-        """End the current turn of a primary session.
-
-        Advances the harness cursor to ``through_event_id`` so a future wake()
-        replays from the right point, and returns.  The session stays in its
-        current status (typically 'active') so the user can send a follow-up.
-        The sandbox pod, memory manager, and cost tracker are deliberately
-        left alive — they belong to the session, not the turn.  The lease is
-        released by the outer wake() finally block.
-        """
-        try:
-            await self._store.advance_harness_cursor(
-                session.id, through_event_id, lease.lease_token,
-            )
-        except Exception:
-            logger.warning(
-                "Failed to advance cursor at end of turn for %s",
-                session.id,
-            )
 
     def _spawn_background(self, coro, *, name: str) -> None:
         """Run *coro* detached, but still inside the end-of-turn drain.

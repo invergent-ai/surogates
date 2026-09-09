@@ -350,34 +350,6 @@ class ResourceLoader:
         )
 
     # ------------------------------------------------------------------
-    # Conditional skill filtering
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def filter_skills(
-        skills: list[SkillDef],
-        available_tools: set[str],
-    ) -> list[SkillDef]:
-        """Filter skills based on conditional activation rules.
-
-        - If ``fallback_for_tools`` is set and ALL those tools are
-          available, skip the skill (it is only a fallback).
-        - If ``requires_tools`` is set and ANY are missing, skip.
-        """
-        filtered: list[SkillDef] = []
-        for skill in skills:
-            if skill.fallback_for_tools and all(
-                t in available_tools for t in skill.fallback_for_tools
-            ):
-                continue
-            if skill.requires_tools and not all(
-                t in available_tools for t in skill.requires_tools
-            ):
-                continue
-            filtered.append(skill)
-        return filtered
-
-    # ------------------------------------------------------------------
     # Sub-agent types
     # ------------------------------------------------------------------
 

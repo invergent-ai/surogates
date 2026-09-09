@@ -92,10 +92,6 @@ class ArtifactStore:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _dir_key(artifact_id: UUID) -> str:
-        return f"{_ARTIFACTS_PREFIX}{artifact_id}"
-
-    @staticmethod
     def _meta_key(artifact_id: UUID) -> str:
         return f"{_ARTIFACTS_PREFIX}{artifact_id}/meta.json"
 

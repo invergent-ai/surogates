@@ -92,99 +92,6 @@ def _is_backend_available(backend: str) -> bool:
 
 # ─── Generic helpers ─────────────────────────────────────────────────────────
 
-def _to_plain_object(value: Any) -> Any:
-    """Convert SDK objects to plain python data structures when possible."""
-    if value is None:
-        return None
-
-    if isinstance(value, (dict, list, str, int, float, bool)):
-        return value
-
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump()
-        except Exception:
-            pass
-
-    if hasattr(value, "__dict__"):
-        try:
-            return {k: v for k, v in value.__dict__.items() if not k.startswith("_")}
-        except Exception:
-            pass
-
-    return value
-
-
-def _normalize_result_list(values: Any) -> List[Dict[str, Any]]:
-    """Normalize mixed SDK/list payloads into a list of dicts."""
-    if not isinstance(values, list):
-        return []
-
-    normalized: List[Dict[str, Any]] = []
-    for item in values:
-        plain = _to_plain_object(item)
-        if isinstance(plain, dict):
-            normalized.append(plain)
-    return normalized
-
-
-def _extract_web_search_results(response: Any) -> List[Dict[str, Any]]:
-    """Extract search results across various API response shapes.
-
-    Handles multiple response structures:
-    - ``{data: [{...}]}`` (list of results in data)
-    - ``{data: {web: [...]}}`` (web results nested in data)
-    - ``{data: {results: [...]}}`` (results nested in data)
-    - ``{web: [...]}`` (top-level web results)
-    - ``{results: [...]}`` (top-level results)
-    - Object with ``.web`` attribute (SDK response)
-    """
-    response_plain = _to_plain_object(response)
-
-    if isinstance(response_plain, dict):
-        data = response_plain.get("data")
-        if isinstance(data, list):
-            return _normalize_result_list(data)
-
-        if isinstance(data, dict):
-            data_web = _normalize_result_list(data.get("web"))
-            if data_web:
-                return data_web
-            data_results = _normalize_result_list(data.get("results"))
-            if data_results:
-                return data_results
-
-        top_web = _normalize_result_list(response_plain.get("web"))
-        if top_web:
-            return top_web
-
-        top_results = _normalize_result_list(response_plain.get("results"))
-        if top_results:
-            return top_results
-
-    if hasattr(response, "web"):
-        return _normalize_result_list(getattr(response, "web", []))
-
-    return []
-
-
-def _extract_scrape_payload(scrape_result: Any) -> Dict[str, Any]:
-    """Normalize scrape payload shape across SDK and gateway variants.
-
-    If the result contains a nested ``data`` dict, return that inner dict.
-    Otherwise return the top-level dict.
-    """
-    result_plain = _to_plain_object(scrape_result)
-    if not isinstance(result_plain, dict):
-        return {}
-
-    nested = result_plain.get("data")
-    if isinstance(nested, dict):
-        return nested
-
-    return result_plain
-
-
 def _truncate_content(content: str, max_size: int = _MAX_OUTPUT_SIZE) -> str:
     """Truncate content to *max_size* characters with a trailing notice.
 
@@ -570,7 +477,6 @@ async def _web_search_handler(
             # Default: tavily
             response_data = await _tavily_search(query, limit)
 
-        results_count = len(response_data.get("data", {}).get("web", []))
         return _format_search_json(response_data)
 
     except httpx.HTTPStatusError as exc:

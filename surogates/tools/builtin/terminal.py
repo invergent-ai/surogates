@@ -30,7 +30,7 @@ from typing import Any, Optional
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
-from surogates.tools.utils.env_passthrough import get_all_passthrough, is_env_passthrough
+from surogates.tools.utils.env_passthrough import is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
 from surogates.tools.utils.tool_output_limits import get_max_bytes
 from surogates.tools.utils.workspace_sandbox import (
@@ -366,7 +366,6 @@ def _build_child_env() -> dict[str, str]:
     are not in the always-inherit set or the passthrough allowlist.  This
     prevents secrets from leaking into commands the model runs.
     """
-    passthrough = get_all_passthrough()
     env: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in _ALWAYS_INHERIT or is_env_passthrough(key):

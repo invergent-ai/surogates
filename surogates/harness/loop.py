@@ -39,7 +39,6 @@ from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
     coerce_message_content,
     content_as_text,
-    make_skipped_tool_result,
     message_texts,
 )
 from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
@@ -4056,14 +4055,6 @@ class AgentHarness(
         return False
 
     # ------------------------------------------------------------------
-    # Budget pressure warning (delegates to resilience module)
-    # ------------------------------------------------------------------
-
-    def _inject_budget_warning(self, tool_results: list[dict]) -> list[dict]:
-        """If budget is below threshold, append a warning to the last tool result."""
-        return inject_budget_warning(tool_results, self._budget)
-
-    # ------------------------------------------------------------------
     # Context compression callback (for LLM call retry module)
     # ------------------------------------------------------------------
 
@@ -4123,15 +4114,6 @@ class AgentHarness(
     def _set_streaming_enabled(self, enabled: bool) -> None:
         """Set the streaming flag (called by LLM call module on fallback)."""
         self._streaming_enabled = enabled
-
-    # ------------------------------------------------------------------
-    # Interrupt helper (delegates to message_utils)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _make_skipped_tool_result(tc: dict[str, Any]) -> dict:
-        """Return a synthetic tool result for a skipped (interrupted) call."""
-        return make_skipped_tool_result(tc)
 
     # ------------------------------------------------------------------
     # Message reconstruction from event log

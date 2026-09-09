@@ -7,7 +7,6 @@ Provides standalone async functions for calling LLMs with:
 - Response shape validation
 - Helper functions for HTTP status extraction and transient error detection
 - Mid-stream interrupt support (cancels HTTP stream on interrupt)
-- Provider API mode detection (chat_completions vs anthropic_messages)
 - Anthropic prompt caching (extra_body injection for cacheable models)
 """
 
@@ -36,7 +35,6 @@ from surogates.harness.model_metadata import (
     parse_context_limit_from_error,
 )
 from surogates.harness.prompt_cache import build_cache_extra_body, is_cacheable_model
-from surogates.harness.provider import APIMode, detect_api_mode
 from surogates.harness.resilience import extract_api_error_context, summarize_api_error
 from surogates.harness.retry import jittered_backoff
 from surogates.harness.sanitize import (
@@ -1063,14 +1061,6 @@ async def call_llm_with_retry(
                 raise  # Non-retryable
 
             # Transient server errors (500, 502, 503, 529)
-            is_rate_limited = (
-                status_code == 429
-                or "rate limit" in error_msg
-                or "too many requests" in error_msg
-                or "rate_limit" in error_msg
-                or "usage limit" in error_msg
-                or "quota" in error_msg
-            )
             is_retryable = (
                 classified.retryable
                 or
@@ -1246,12 +1236,6 @@ async def call_llm_streaming_inner(
         existing_extra = final_kwargs.get("extra_body") or {}
         merged = {**existing_extra, **cache_extra}
         final_kwargs["extra_body"] = merged
-
-    # Detect API mode (Phase 1: always chat_completions).
-    api_mode = detect_api_mode(model_id)
-    if api_mode != APIMode.CHAT_COMPLETIONS:
-        # Phase 2: route to call_anthropic_messages.
-        pass  # pragma: no cover
 
     response = await llm_client.chat.completions.create(
         **final_kwargs,

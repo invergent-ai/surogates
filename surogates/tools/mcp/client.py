@@ -904,24 +904,13 @@ class MCPServerTask:
         if _MCP_NOTIFICATION_TYPES and _MCP_MESSAGE_HANDLER_SUPPORTED:
             sampling_kwargs["message_handler"] = self._make_message_handler()
 
-        # Snapshot child PIDs before spawning so we can track the new one.
-        pids_before = _snapshot_child_pids()
         async with stdio_client(server_params) as (read_stream, write_stream):
-            # Capture the newly spawned subprocess PID for force-kill cleanup.
-            new_pids = _snapshot_child_pids() - pids_before
-            if new_pids:
-                with _lock:
-                    _stdio_pids.update(new_pids)
             async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
                 await session.initialize()
                 self.session = session
                 await self._discover_tools()
                 self._ready.set()
                 await self._shutdown_event.wait()
-        # Context exited cleanly -- subprocess was terminated by the SDK.
-        if new_pids:
-            with _lock:
-                _stdio_pids.difference_update(new_pids)
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
@@ -1130,40 +1119,8 @@ _servers: Dict[str, MCPServerTask] = {}
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
 
-# Protects _mcp_loop, _mcp_thread, _servers, and _stdio_pids.
+# Protects _mcp_loop, _mcp_thread, and _servers.
 _lock = threading.Lock()
-
-# PIDs of stdio MCP server subprocesses.  Tracked so we can force-kill
-# them on shutdown if the graceful cleanup (SDK context-manager teardown)
-# fails or times out.  PIDs are added after connection and removed on
-# normal server shutdown.
-_stdio_pids: set = set()
-
-
-def _snapshot_child_pids() -> set:
-    """Return a set of current child process PIDs.
-
-    Uses /proc on Linux, falls back to psutil, then empty set.
-    Used by _run_stdio to identify the subprocess spawned by stdio_client.
-    """
-    my_pid = os.getpid()
-
-    # Linux: read from /proc
-    try:
-        children_path = f"/proc/{my_pid}/task/{my_pid}/children"
-        with open(children_path) as f:
-            return {int(p) for p in f.read().split() if p.strip()}
-    except (FileNotFoundError, OSError, ValueError):
-        pass
-
-    # Fallback: psutil
-    try:
-        import psutil
-        return {c.pid for c in psutil.Process(my_pid).children()}
-    except Exception:
-        pass
-
-    return set()
 
 
 def _mcp_loop_exception_handler(loop, context):
@@ -1553,17 +1510,6 @@ def _make_get_prompt_handler(server_name: str, tool_timeout: float):
             })
 
     return _handler
-
-
-def _make_check_fn(server_name: str):
-    """Return a check function that verifies the MCP connection is alive."""
-
-    def _check() -> bool:
-        with _lock:
-            server = _servers.get(server_name)
-        return server is not None and server.session is not None
-
-    return _check
 
 
 # ---------------------------------------------------------------------------
@@ -2015,47 +1961,3 @@ def _existing_tool_names() -> List[str]:
             schema = _convert_mcp_schema(server.name, mcp_tool)
             names.append(schema["name"])
     return names
-
-
-def _kill_orphaned_mcp_children() -> None:
-    """Best-effort kill of MCP stdio subprocesses that survived loop shutdown.
-
-    After the MCP event loop is stopped, stdio server subprocesses *should*
-    have been terminated by the SDK's context-manager cleanup.  If the loop
-    was stuck or the shutdown timed out, orphaned children may remain.
-
-    Only kills PIDs tracked in ``_stdio_pids`` -- never arbitrary children.
-    """
-    import signal as _signal
-
-    with _lock:
-        pids = list(_stdio_pids)
-        _stdio_pids.clear()
-
-    for pid in pids:
-        try:
-            os.kill(pid, _signal.SIGKILL)
-            logger.debug("Force-killed orphaned MCP stdio process %d", pid)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass  # Already exited or inaccessible
-
-
-def _stop_mcp_loop():
-    """Stop the background event loop and join its thread."""
-    global _mcp_loop, _mcp_thread
-    with _lock:
-        loop = _mcp_loop
-        thread = _mcp_thread
-        _mcp_loop = None
-        _mcp_thread = None
-    if loop is not None:
-        loop.call_soon_threadsafe(loop.stop)
-        if thread is not None:
-            thread.join(timeout=5)
-        try:
-            loop.close()
-        except Exception:
-            pass
-        # After closing the loop, any stdio subprocesses that survived the
-        # graceful shutdown are now orphaned.  Force-kill them.
-        _kill_orphaned_mcp_children()

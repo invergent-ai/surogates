@@ -1554,7 +1554,6 @@ async def list_sessions(
     pagination still applies to roots only.
     """
     store = _get_session_store(request)
-    settings = request.app.state.settings
 
     if limit < 1:
         limit = 1

@@ -502,13 +502,9 @@ class TurnSummarizer:
             # validator.
             #
             # The latch is per-summarizer, which is per-session: the
-            # summary endpoint is resolved per tenant
-            # (build_summary_auxiliary_llm reads org overrides), so a
-            # process-wide latch would let one tenant's gateway disable
-            # JSON mode for every other tenant. If this is ever seen
-            # firing per-session in volume, the endpoint-keyed home for
-            # it is AuxiliaryLLM, which is shared by every auxiliary
-            # caller of the same provider.
+            # summary endpoint is resolved per tenant, so a process-wide
+            # latch would let one tenant's gateway disable JSON mode for
+            # every other tenant.
             logger.warning(
                 "summary provider rejected response_format; "
                 "falling back to plain-text captions",

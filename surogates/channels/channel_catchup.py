@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -44,23 +43,6 @@ _WATERMARK_SQL = text("""
     ORDER BY watermark DESC
     LIMIT 1
 """)
-
-
-def _watermark_from(source_ts: str | None, created_at: datetime | None) -> str | None:
-    """Pick the catch-up watermark for a conversation.
-
-    Prefers the exact stored Slack ``source.ts`` string; falls back to the latest
-    event's ``created_at`` rendered as a Slack-style ts (compatibility bridge for
-    events stored before ``source.ts`` existed); ``None`` when we have never
-    processed the conversation (first-run guard).
-    """
-    if source_ts:
-        return source_ts
-    if created_at is not None:
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        return f"{created_at.timestamp():.6f}"
-    return None
 
 
 async def latest_catchup_watermark(

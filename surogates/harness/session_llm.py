@@ -214,8 +214,7 @@ async def build_session_llm_clients(
     def _settings_image() -> ResolvedLLM | None:
         """Settings-based image slot fallback (raw key, no vault).
 
-        Mirrors ``auxiliary_client.build_summary_auxiliary_llm``: config
-        carries plaintext keys, so vault resolution does not apply.  The
+        Config carries plaintext keys, so vault resolution does not apply. The
         client joins ``resolved`` so a later slot failure still closes it.
         """
         if settings is None:
