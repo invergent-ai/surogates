@@ -51,6 +51,7 @@ from surogates.channels.platforms.whatsapp_api import (
 from surogates.channels.platforms.whatsapp_format import render_whatsapp
 from surogates.channels.registry import ChannelDescriptor, VerificationResult
 from surogates.channels.text_split import split_text
+from surogates.programs.delivery import schedule_status_apply
 
 __all__ = [
     "WhatsAppPlatform",
@@ -203,6 +204,16 @@ def verify(
 # ---------------------------------------------------------------------------
 
 
+def _status_error_text(status: dict) -> str | None:
+    """Meta's own wording for a failed delivery, if it gave any."""
+    for error in status.get("errors") or []:
+        if isinstance(error, dict):
+            text = error.get("title") or error.get("message")
+            if text:
+                return str(text)
+    return None
+
+
 def _log_statuses(value: dict, *, identifier: str) -> None:
     """Log delivery statuses and inbound errors.
 
@@ -228,6 +239,16 @@ def _log_statuses(value: dict, *, identifier: str) -> None:
                 "[whatsapp] delivery %s pnid=%s wamid=%s",
                 state, identifier, status.get("id"),
             )
+        # A check-in opener's fate lives on its invitation, not only in this
+        # log line: without recording it, a patient we never reached would be
+        # marked a non-responder when the deadline sweep runs.  Fire-and-forget
+        # because parsing is synchronous and a raise here would answer Meta
+        # non-200 and start a retry loop.
+        schedule_status_apply(
+            provider_message_id=str(status.get("id") or ""),
+            status=str(state or ""),
+            reason=_status_error_text(status),
+        )
     for error in value.get("errors") or []:
         logger.warning("[whatsapp] inbound error pnid=%s error=%s", identifier, error)
 
@@ -549,6 +570,33 @@ class WhatsAppPlatform:
             return SendResult(
                 success=False, error="missing whatsapp credentials or destination",
             )
+
+        template = item.payload.get("template")
+        if template:
+            # A scheduled opener is business-initiated: outside the 24-hour
+            # service window only an approved template may open the
+            # conversation.  Free-form text here comes back 131047, which is
+            # permanent, so the opener would be dropped with nothing surfaced
+            # to the operator.
+            wamid, error = await send_message(
+                self._http,
+                token=token,
+                phone_number_id=phone_number_id,
+                payload={
+                    "messaging_product": "whatsapp",
+                    "recipient_type": "individual",
+                    "to": wa_id,
+                    "type": "template",
+                    "template": {
+                        "name": template["name"],
+                        "language": {"code": template["language"]},
+                    },
+                },
+                api_version=api_version,
+            )
+            if wamid is None:
+                return SendResult(success=False, error=error or "send failed")
+            return SendResult(success=True, message_id=wamid)
 
         if item.payload.get("input_prompt"):
             text = _render_input_prompt(item.payload)

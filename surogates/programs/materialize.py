@@ -10,7 +10,7 @@ the record instead of being the thing the operator needs to see.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import sqlalchemy as sa
@@ -20,11 +20,15 @@ from surogates.db.models import (
     ChannelIdentity,
     ProgramInvitationRow,
     ProgramOccurrenceRow,
+    ProgramScheduleRow,
 )
 
 #: Response states meaning "this person is mid-check-in".  A patient in one of
 #: these must not be handed a second opener.
 _OPEN_RESPONSE_STATES = ("replied", "in_progress")
+
+#: Used when a Program's projected config carries no deadline of its own.
+_DEFAULT_DEADLINE_HOURS = 24
 
 
 def _permission(identity: Any) -> str:
@@ -135,6 +139,93 @@ async def materialize_occurrence(
             )
         await db.commit()
         return occ.id
+
+
+async def send_queued_openers(
+    session_factory: Any,
+    *,
+    identity_lookup: Any,
+    now: datetime,
+    enqueue: Any = None,
+) -> int:
+    """Re-check permission on every queued opener, then hand on the survivors.
+
+    The permission re-check is not belt-and-braces.  It is the only mechanism
+    by which a withdrawal reaches an opener that is already queued — ops never
+    calls into the runtime to cancel anything — and it closes the race where
+    permission is withdrawn between materialising the occurrence and sending.
+
+    *enqueue* is ``async (invitation) -> str | None`` returning the provider
+    message id.  It is optional so the cancellation pass can be exercised on
+    its own; when it is absent, survivors stay queued for the next tick rather
+    than being silently marked sent.
+
+    Returns the number of invitations cancelled.
+    """
+    cancelled = 0
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                sa.select(ProgramInvitationRow)
+                .where(ProgramInvitationRow.delivery_state == "queued")
+                .order_by(ProgramInvitationRow.created_at)
+            )
+        ).scalars().all()
+
+        survivors = []
+        for row in rows:
+            identity = await identity_lookup(
+                row.org_id, row.platform, row.user_id,
+            )
+            if identity is None or _permission(identity) != "granted":
+                row.delivery_state = "canceled"
+                row.reason = "Permission withdrawn before the opener was sent"
+                cancelled += 1
+                continue
+            survivors.append(row)
+        await db.commit()
+
+        if enqueue is None:
+            return cancelled
+
+        deadlines = await _deadline_hours_by_program(
+            db, {row.program_id for row in survivors},
+        )
+        for row in survivors:
+            provider_message_id = await enqueue(row)
+            if provider_message_id is None:
+                # The opener was not accepted; leave it queued so the next
+                # tick retries rather than starting a deadline nobody was
+                # asked to meet.
+                continue
+            row.provider_message_id = provider_message_id
+            row.delivery_state = "accepted"
+            row.response_state = "awaiting_reply"
+            row.deadline_at = now + timedelta(
+                hours=deadlines.get(row.program_id, _DEFAULT_DEADLINE_HOURS),
+            )
+        await db.commit()
+
+    return cancelled
+
+
+async def _deadline_hours_by_program(db, program_ids: set) -> dict:
+    """Each Program's response deadline, read from its projected config."""
+    if not program_ids:
+        return {}
+    rows = (
+        await db.execute(
+            sa.select(ProgramScheduleRow.program_id, ProgramScheduleRow.config)
+            .where(ProgramScheduleRow.program_id.in_(program_ids))
+        )
+    ).all()
+    return {
+        program_id: int(
+            (config or {}).get("response_deadline_hours")
+            or _DEFAULT_DEADLINE_HOURS
+        )
+        for program_id, config in rows
+    }
 
 
 def identity_lookup_from(session_factory: Any):

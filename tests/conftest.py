@@ -90,12 +90,79 @@ async def sf():
     tables = sqlite_tables(
         "program_schedules", "program_occurrences", "program_invitations",
         "inbox_items", "events", "sessions", "orgs", "users",
-        "channel_identities",
+        "channel_identities", "delivery_outbox",
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=tables)
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
+
+
+async def _make_program_invitation(
+    sf, *, delivery_state: str, response_state: str, **extra,
+):
+    """One occurrence carrying one invitation, for the delivery/sweep tests."""
+    from datetime import datetime, timezone
+
+    from surogates.db.models import ProgramInvitationRow, ProgramOccurrenceRow
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    async with sf() as db:
+        occ = ProgramOccurrenceRow(
+            org_id=uuid4(),
+            program_id=uuid4(),
+            agent_id="a1",
+            scheduled_for=now,
+            skill_ref="post-op",
+            template_name="daily",
+            template_language="en_US",
+            status="fired",
+        )
+        db.add(occ)
+        await db.flush()
+        row = ProgramInvitationRow(
+            occurrence_id=occ.id,
+            program_id=occ.program_id,
+            org_id=occ.org_id,
+            agent_id="a1",
+            user_id=uuid4(),
+            platform="whatsapp",
+            platform_user_id="40746148303",
+            delivery_state=delivery_state,
+            response_state=response_state,
+            escalation_state="none",
+            **extra,
+        )
+        db.add(row)
+        await db.commit()
+        return row
+
+
+async def _reload_program_invitation(sf, invitation_id):
+    from surogates.db.models import ProgramInvitationRow
+
+    async with sf() as db:
+        return await db.get(ProgramInvitationRow, invitation_id)
+
+
+@pytest.fixture
+def make_invitation(sf):
+    """``await make_invitation(delivery_state=..., response_state=..., ...)``."""
+
+    async def _make(**kwargs):
+        return await _make_program_invitation(sf, **kwargs)
+
+    return _make
+
+
+@pytest.fixture
+def reload_invitation(sf):
+    """``await reload_invitation(invitation_id)`` — re-read from the database."""
+
+    async def _reload(invitation_id):
+        return await _reload_program_invitation(sf, invitation_id)
+
+    return _reload
 
 
 @pytest.fixture()
