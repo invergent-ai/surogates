@@ -44,3 +44,19 @@ def test_frozen_split_matches_generator():
     split = frozen_split()
     assert dev == split["dev"]
     assert holdout == split["holdout"]
+
+
+def test_download_uses_pinned_revision_for_tasks_and_context(monkeypatch):
+    import huggingface_hub
+    from dabbench import dataset
+    monkeypatch.setenv('DABSTEP_DATASET_REVISION', 'b' * 40)
+    seen = {}
+
+    def download(**kwargs):
+        seen.update(kwargs)
+        return '/cache/pinned'
+
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', download)
+    assert dataset.download_dataset() == '/cache/pinned'
+    assert seen['revision'] == 'b' * 40
+    assert 'data/context/*' in seen['allow_patterns']

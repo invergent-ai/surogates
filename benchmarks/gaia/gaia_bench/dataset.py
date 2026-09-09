@@ -80,7 +80,7 @@ def resolve_attachment(task: Task, hf_token: str | None = None) -> str | None:
         return None
 
     # A caller may already have a real local file (fixtures, manual runs).
-    if task.file_path and os.path.exists(task.file_path):
+    if not os.environ.get("GAIA_DATASET_REVISION") and task.file_path and os.path.exists(task.file_path):
         return task.file_path
 
     import huggingface_hub
@@ -94,6 +94,7 @@ def resolve_attachment(task: Task, hf_token: str | None = None) -> str | None:
         repo_type="dataset",
         filename=remote,
         token=hf_token or os.environ.get("HF_TOKEN"),
+        revision=os.environ.get("GAIA_DATASET_REVISION"),
     )
 
 
@@ -113,7 +114,8 @@ def load_tasks(split: str = "all", hf_token: str | None = None) -> list[Task]:
             "https://huggingface.co/datasets/gaia-benchmark/GAIA"
         )
 
-    ds = load_dataset(HF_DATASET, HF_CONFIG, split="validation", token=token)
+    ds = load_dataset(HF_DATASET, HF_CONFIG, split="validation", token=token,
+                      revision=os.environ.get("GAIA_DATASET_REVISION"))
     tasks = [
         Task(
             task_id=row["task_id"],

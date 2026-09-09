@@ -1,0 +1,5 @@
+[
+  {"benchmark": "workspace_bench", "task_id": "100", "family": "example-files", "split": "search", "upstream_split": "dev"},
+  {"benchmark": "workspace_bench", "task_id": "107", "family": "example-files", "split": "selection", "upstream_split": "dev"},
+  {"benchmark": "workspace_bench", "task_id": "102", "family": "example-files", "split": "holdout", "upstream_split": "holdout", "sealed_holdout": true}
+]

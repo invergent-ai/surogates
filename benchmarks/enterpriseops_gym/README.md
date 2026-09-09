@@ -10,8 +10,8 @@ database tables and up to 34-step workflows) against a Surogate agent,
 verified by upstream's **hidden SQL checks on final database state**.
 Fully deterministic scoring — no judge.
 
-It is a measurement tool for the harness, not a test of the model —
-same philosophy as `benchmarks/claweval`, whose shape this follows:
+It measures the model, harness, tools and environment together,
+following the client structure of `benchmarks/claweval`:
 each domain gym is a live MCP server the platform's own mcp-proxy
 connects to, so scores reflect *our* MCP path, tool routing and context
 management. The number is therefore **not comparable to the public
@@ -38,7 +38,9 @@ Sequential by design (the MCP attachment is agent-scoped):
 2. **Expose + register.** A cloudflared quick tunnel (started once per
    run, same machinery as claweval) fronts the proxy; the ops registrar
    creates a per-task MCP row (`eog-<task>`) and attaches it to the
-   agent. Fresh name per task — nothing can leak tools across tasks.
+   agent. The proxy filters `tools/list` to the selected tool set minus
+   restricted tools, rejects other calls and administrative HTTP paths,
+   and forwards the task identity/auth context. Deactivated tasks fail closed.
 3. **Roll out.** One session: the task's policy system prompt plus its
    user prompt, streamed to a terminal state with the sibling
    benchmarks' reconnect discipline.
@@ -65,11 +67,31 @@ Sequential by design (the MCP attachment is agent-scoped):
 
 The public repo ships a per-domain sample under `data/revised/`
 (vendored; loaded by default — 13 tasks, 102 SQL verifiers, all
-`database_state`). The full 1,150-task set is on HuggingFace
-([ServiceNow-AI/EnterpriseOps-Gym](https://huggingface.co/datasets/ServiceNow-AI/EnterpriseOps-Gym));
-drop it into the same `<domain>/task_*.json` layout and point
-`EOG_TASKS_DIR` at it. Multi-gym *hybrid* tasks are refused loudly (out
-of scope until the proxy handles several gyms in one task).
+`database_state`). The public Hugging Face oracle configuration contains
+649 rows as of the 2026-09-09 survey, a subset of the full 1,150-task benchmark.
+Use `import-tasks` with an immutable dataset commit to convert a release into
+`<domain>/task_*.json` files. JSON-string columns are decoded and identity
+context, tool restrictions and SQL verifiers are preserved.
+
+```bash
+uv pip install --python .venv/bin/python -e '.[dev,data]'
+.venv/bin/eogbench import-tasks --revision "$EOG_DATASET_COMMIT" \
+  --mode oracle --output /path/to/private/eog-import
+```
+
+Set `EOG_TASKS_DIR` to the imported directory and `EOG_SEED_ROOT` to the root
+containing the referenced seed SQL paths (defaults to `EOG_HOME`). Import
+outputs include a hashed manifest, an identifier-only catalog and reasons for
+unsupported rows. Multi-gym tasks, empty tool allowlists and non-database
+verifiers are excluded explicitly. Imports refuse to overwrite existing data.
+The `plus_5_tools`, `plus_10_tools` and `plus_15_tools` configurations are
+related task variants, not independent additions to the evaluation pool.
+
+`run-config.json` records the imported mode and dataset revision. Verifier
+errors and unsuccessful database deletion remain explicit infrastructure
+errors. Offline fixture tests cover discovery/call restrictions, identity
+forwarding, task switches and cancellation cleanup; a live deployment still
+needs its own fidelity check.
 
 ## How to run
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,7 +79,7 @@ def seed_database(task: Task) -> str:
 
     seed = task.seed_database_file
     if seed and not os.path.isabs(seed):
-        seed = str(vendor.home() / seed)
+        seed = str(pathlib.Path(os.environ.get("EOG_SEED_ROOT") or vendor.home()) / seed)
     database_id = create_database_from_file(task.gym_url, seed)
     if not database_id:
         raise RuntimeError(
@@ -92,7 +93,8 @@ def drop_database(task: Task, database_id: str) -> None:
     vendor.pythonpath()
     from benchmark.mcp_client import delete_database  # type: ignore
 
-    delete_database(task.gym_url, database_id)
+    if not delete_database(task.gym_url, database_id):
+        raise RuntimeError("Gym did not confirm task database deletion")
 
 
 async def verify(task: Task, database_id: str) -> list[dict[str, Any]]:
@@ -106,6 +108,8 @@ async def verify(task: Task, database_id: str) -> list[dict[str, Any]]:
         base_url=task.gym_url,
         mcp_endpoint=task.mcp_endpoint,
         database_id=database_id,
+        context=task.context,
+        auth_config=task.auth_config or None,
     )
     # llm_client=None: every public task verifies via pure-SQL
     # database_state; a response_check task would fail loudly here
@@ -128,6 +132,8 @@ async def verify(task: Task, database_id: str) -> list[dict[str, Any]]:
             database_id=database_id,
             gym_name=config.gym_name or task.gym_name,
         )
+        if outcome.get("error") or not isinstance(outcome.get("passed"), bool):
+            raise RuntimeError("Verifier infrastructure failed or returned no boolean verdict")
         results.append({
             "name": spec.get("name"),
             "passed": bool(outcome.get("passed")),
@@ -178,40 +184,43 @@ async def run_task(
     server_id: str | None = None
 
     try:
-        result.database_id = seed_database(task)
-        proxy.set_database_id(result.database_id)
-        server_id = registrar.register(
-            task.task_id.replace("/", "-"),
-            f"{tunnel_url.rstrip('/')}{task.mcp_endpoint}",
-        )
-
-        (result.session_id, result.events,
-         result.terminal_status, result.error) = await run_session(
-            client, task, wall_clock_cap_s
-        )
-    except Exception as exc:  # noqa: BLE001 - recorded, never swallowed
-        result.error = f"{type(exc).__name__}: {exc}"
-        result.terminal_status = result.terminal_status or "error"
-    finally:
-        proxy.set_database_id(None)
-        if server_id is not None:
-            try:
-                registrar.remove(task.task_id.replace("/", "-"))
-            except Exception as exc:  # noqa: BLE001 - cleanup must not mask
-                result.error = result.error or f"cleanup: {exc}"
-
-    # Verify against whatever state exists -- a failed session grades as
-    # its verifiers find it, same as upstream's max-steps terminations.
-    if result.database_id:
         try:
-            result.verifier_results = await verify(task, result.database_id)
-        except Exception as exc:  # noqa: BLE001
-            result.verify_error = f"{type(exc).__name__}: {exc}"
+            result.database_id = seed_database(task)
+            proxy.configure_task(result.database_id, task.selected_tools, task.restricted_tools,
+                                 context=task.context, auth_config=task.auth_config, endpoint=task.mcp_endpoint)
+            server_id = registrar.register(
+                task.task_id.replace("/", "-"),
+                f"{tunnel_url.rstrip('/')}{task.mcp_endpoint}",
+            )
+
+            (result.session_id, result.events,
+             result.terminal_status, result.error) = await run_session(
+                client, task, wall_clock_cap_s
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded, never swallowed
+            result.error = f"{type(exc).__name__}: {exc}"
+            result.terminal_status = result.terminal_status or "error"
         finally:
+            proxy.set_database_id(None)
+            if server_id is not None:
+                try:
+                    registrar.remove(task.task_id.replace("/", "-"))
+                except Exception as exc:  # noqa: BLE001 - cleanup must not mask
+                    result.error = result.error or f"cleanup: {exc}"
+
+        # Verify against whatever state exists -- a failed session grades as
+        # its verifiers find it, same as upstream's max-steps terminations.
+        if result.database_id:
+            try:
+                result.verifier_results = await verify(task, result.database_id)
+            except Exception as exc:  # noqa: BLE001
+                result.verify_error = f"{type(exc).__name__}: {exc}"
+    finally:
+        if result.database_id:
             try:
                 drop_database(task, result.database_id)
-            except Exception:  # noqa: BLE001 - best-effort cleanup
-                pass
+            except Exception as exc:  # noqa: BLE001 - retain cleanup failure
+                result.error = result.error or f"database cleanup: {exc}"
 
     result.wall_clock_s = time.monotonic() - started
     return result
