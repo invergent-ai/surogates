@@ -60,7 +60,7 @@ async def evidence_db(monkeypatch):
     await engine.dispose()
 
 
-async def add_artifact(factory, raw, *, pdf=False, kb_id="kb"):
+async def add_artifact(factory, raw, *, pdf=False, kb_id="kb", file_id=None):
     path = "sources/manual.json" if pdf else "sources/manual.md"
     digest = hashlib.sha256(raw).hexdigest()
     async with factory() as s:
@@ -71,6 +71,7 @@ async def add_artifact(factory, raw, *, pdf=False, kb_id="kb"):
                 path=path,
                 title="Manual",
                 page_type="source",
+                source_file_id=file_id,
                 size_bytes=len(raw),
                 hub_object_path="wiki/.versions/published/manual",
                 content_sha256=digest,
@@ -84,6 +85,7 @@ async def add_artifact(factory, raw, *, pdf=False, kb_id="kb"):
                 parent_path=path,
                 title="Manual",
                 page_type="source",
+                source_file_id=file_id,
                 size_bytes=12,
                 hub_object_path="wiki/.versions/published/manual",
                 content_sha256=digest,
@@ -272,3 +274,99 @@ async def test_surrounding_obeys_pinned_plan(evidence_db, monkeypatch):
     )
     assert "not included" in out
     fetch.assert_not_called()
+
+
+def link_response(raw, *, resolution="matched"):
+    return {"status": "extracted", "artifact_sha256": hashlib.sha256(raw).hexdigest(), "links": [{
+        "relation": "amends", "target": "SPEC/71", "target_edition": "B", "resolution": resolution,
+        "documents": [{"kb_id": "kb", "path": "sources/spec.md"}] if resolution == "matched" else [],
+        "evidence": {"page": None, "start": 0, "end": len(raw), "quote": raw.decode()},
+    }]}
+
+
+async def test_source_reads_preview_links_and_full_read_preserves_condition(evidence_db, monkeypatch):
+    raw = b"For indoor units only, this notice amends SPEC/71 revision B."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
+    lookup = AsyncMock(return_value=link_response(raw))
+    client = SimpleNamespace(get_agent_kb_document_links=lookup)
+    preview = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "passage_id": "passage"},
+        agent_id="agent", platform_client=client)
+    assert "resolution=matched" in preview and "context='links'" in preview
+    assert "Supporting quote" not in preview
+    assert lookup.call_args.kwargs == dict(file_id="source", kb_ids=["kb"], expected_artifact_sha256=hashlib.sha256(raw).hexdigest())
+    full = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"},
+        agent_id="agent", platform_client=client)
+    assert "Supporting quote (source text): " + raw.decode() in full
+    assert "path=sources/spec.md" in full
+
+
+@pytest.mark.parametrize("status", ["not_found", "ambiguous", "conflict", "edition_unknown", "edition_mismatch", "self_reference"])
+async def test_unresolved_links_never_instruct_agent_to_read_a_selected_target(evidence_db, monkeypatch, status):
+    raw = b"Consult SPEC/71 revision B."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"},
+        agent_id="agent", platform_client=SimpleNamespace(get_agent_kb_document_links=AsyncMock(return_value=link_response(raw, resolution=status))))
+    assert f"resolution={status}" in out and "Read with kb_read_page" not in out
+    assert raw.decode() in out
+
+
+@pytest.mark.parametrize("digest", [None, "0" * 64])
+async def test_stale_or_unpinned_links_are_not_mixed_with_source(evidence_db, monkeypatch, digest):
+    raw = b"Consult SPEC/71."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
+    result = {**link_response(raw), "artifact_sha256": digest}
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"},
+        agent_id="agent", platform_client=SimpleNamespace(get_agent_kb_document_links=AsyncMock(return_value=result)))
+    assert "publication changed" in out and "SPEC/71" not in out
+
+
+async def test_link_service_failure_retains_source_without_leaking_exception(evidence_db, monkeypatch):
+    raw = b"Exact original source."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
+    client = SimpleNamespace(get_agent_kb_document_links=AsyncMock(side_effect=RuntimeError("private credential")))
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path}, agent_id="agent", platform_client=client)
+    assert raw.decode() in out and "private credential" not in out
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"}, agent_id="agent", platform_client=client)
+    assert "temporarily unavailable" in out and "private credential" not in out
+
+
+@pytest.mark.parametrize("agent,plan", [("agent", []), ("unattached", None)])
+async def test_link_reads_preserve_attachment_and_session_plan(evidence_db, monkeypatch, agent, plan):
+    raw = b"Consult SPEC/71."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    fetch, lookup = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", fetch)
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"},
+        agent_id=agent, session_config={"entitlements": {"kb_ids": plan}} if plan is not None else {},
+        platform_client=SimpleNamespace(get_agent_kb_document_links=lookup))
+    assert out.startswith("Error:")
+    fetch.assert_not_called()
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("argument", ["passage_id", "pages", "offset", "limit"])
+async def test_links_context_rejects_incompatible_read_arguments(argument):
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": "sources/doc.md", "context": "links", argument: "1"})
+    assert out.startswith("Error:") and "omit passage_id" in out
+
+
+@pytest.mark.parametrize("basis", [None, "identifier_in_edition"])
+async def test_candidates_are_readable_but_never_presented_as_verified_matches(evidence_db, monkeypatch, basis):
+    raw = b"Use this supplement with the pump wiring instructions, edition B."
+    path = await add_artifact(evidence_db, raw, file_id="source")
+    monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
+    response = link_response(raw, resolution="needs_review")
+    response["links"][0]["resolution_basis"] = basis
+    response["links"][0].update(documents=[{"kb_id": "kb", "path": "sources/pump.md", "filename": "pump.md", "identity_status": "conflict"}], truncated=True)
+    out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"}, agent_id="agent", platform_client=SimpleNamespace(get_agent_kb_document_links=AsyncMock(return_value=response)))
+    assert "path=sources/pump.md" in out and "identity=conflict" in out
+    assert "No target or edition has been selected" in out
+    if basis == "identifier_in_edition":
+        assert "extracted edition matches a document identifier" in out
+    assert "Candidate list is incomplete" in out
+    assert "Read with kb_read_page" not in out and "resolution=matched" not in out
+    assert raw.decode() in out

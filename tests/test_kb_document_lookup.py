@@ -77,3 +77,23 @@ async def test_client_document_lookup_never_sends_empty_allowlist():
     await client.find_agent_kb_documents("agent", query="DOC-1", kb_ids=["allowed"])
     assert client._client.get.call_args.args[0].endswith("/agent/kb/documents")
     assert client._client.get.call_args.kwargs["params"]["kb_ids"] == ["allowed"]
+
+
+@pytest.mark.asyncio
+async def test_client_links_preserves_scope_source_pin_and_auth_failures():
+    from surogates.runtime.platform_client import PlatformAuthError
+
+    client = object.__new__(PlatformClient)
+    client._client = SimpleNamespace(get=AsyncMock())
+    assert (await client.get_agent_kb_document_links("agent", file_id="file", kb_ids=[]))["links"] == []
+    client._client.get.assert_not_called()
+    client._client.get.return_value = httpx.Response(200, json={"links": []},
+        request=httpx.Request("GET", "https://unused.invalid"))
+    await client.get_agent_kb_document_links("agent", file_id="file", kb_ids=["allowed"],
+        expected_artifact_sha256="a" * 64)
+    assert client._client.get.call_args.args[0].endswith("/agent/kb/documents/file/links")
+    assert client._client.get.call_args.kwargs["params"] == {
+        "kb_ids": ["allowed"], "expected_artifact_sha256": "a" * 64, "limit": 16}
+    client._client.get.return_value = httpx.Response(401, request=httpx.Request("GET", "https://unused.invalid"))
+    with pytest.raises(PlatformAuthError):
+        await client.get_agent_kb_document_links("agent", file_id="file")

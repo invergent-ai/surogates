@@ -70,6 +70,7 @@ from surogates.db.ops_models import (
     agent_knowledge_bases,
 )
 from surogates.runtime.platform_client import PlatformAuthError
+from surogates.tools.builtin.kb_document_links import format_document_links
 from surogates.storage.kb_hub import KBHubError, fetch_wiki_object
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.builtin.kb_evidence import (
@@ -481,8 +482,10 @@ async def _kb_read_page_handler(
 
     passage_id = (arguments.get("passage_id") or "").strip()
     context = arguments.get("context", "exact")
-    if context not in ("exact", "surrounding"):
-        return "Error: `context` must be exact or surrounding."
+    if context not in ("exact", "surrounding", "links"):
+        return "Error: `context` must be exact, surrounding or links."
+    if context == "links" and any(arguments.get(key) is not None for key in ("passage_id", "pages", "offset", "limit")):
+        return "Error: context='links' lists document relationships; omit passage_id, pages, offset and limit."
     if context == "surrounding" and (
         not passage_id or arguments.get("pages") or arguments.get("offset")
     ):
@@ -568,6 +571,27 @@ async def _kb_read_page_handler(
     if page.content_sha256 and hashlib.sha256(raw).hexdigest() != page.content_sha256:
         return "Error: published artifact hash mismatch. Retry after the knowledge base is repaired."
 
+    link_text = ""
+    platform_client = kwargs.get("platform_client")
+    if platform_client and page.page_type == "source" and page.source_file_id and page.content_sha256:
+        try:
+            result = await platform_client.get_agent_kb_document_links(
+                agent_id, file_id=page.source_file_id, kb_ids=[kb_id],
+                expected_artifact_sha256=page.content_sha256,
+            )
+            if result.get("status") in ("extracted", "partial") and result.get("artifact_sha256") != page.content_sha256:
+                result = {"status": "stale"}
+            link_text = format_document_links(result, full=context == "links")
+        except Exception:
+            # Link navigation is optional; provider/API failures must not hide
+            # verified source evidence or expose service credentials in errors.
+            link_text = "Document links are temporarily unavailable." if context == "links" else ""
+    elif context == "links":
+        link_text = "Document links require a verified original source and a configured platform connection."
+    if context == "links":
+        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{link_text}"
+    link_suffix = "\n\n" + link_text if link_text else ""
+
     provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
     if context == "surrounding":
         if not page.content_sha256 or page.source_start is None or page.source_end is None:
@@ -583,7 +607,7 @@ async def _kb_read_page_handler(
             f"; passage={passage_id}; anchor_page={page.page_number}; "
             f"anchor_characters={page.source_start}-{page.source_end}; context=surrounding_"
         )
-        return provenance + f"\n\n# {page.title}\n\n" + render_surrounding(spans)
+        return provenance + f"\n\n# {page.title}\n\n" + render_surrounding(spans) + link_suffix
     if passage_id:
         content = raw.decode("utf-8", errors="replace")
         if page.page_number is not None:
@@ -599,7 +623,7 @@ async def _kb_read_page_handler(
         evidence = content[page.source_start:page.source_end]
         provenance += (f"; passage={passage_id}; page={page.page_number}; "
                        f"characters={page.source_start}-{page.source_end}_")
-        return provenance + "\n\n" + _format_page_window(page.title, evidence, offset, limit)
+        return provenance + "\n\n" + _format_page_window(page.title, evidence, offset, limit) + link_suffix
 
     provenance += "_"
     if page_range is not None and path.endswith(".json"):
@@ -608,11 +632,11 @@ async def _kb_read_page_handler(
             return rendered
         # Range requests obey the same character ceiling and pagination rules
         # as Markdown. A dense 40-page span must not bypass the tool budget.
-        return provenance + "\n\n" + _format_page_window(page.title, rendered, offset, limit)
+        return provenance + "\n\n" + _format_page_window(page.title, rendered, offset, limit) + link_suffix
 
     return provenance + "\n\n" + _format_page_window(
         page.title, raw.decode("utf-8", errors="replace"), offset, limit,
-    )
+    ) + link_suffix
 
 
 # Ranked-search caps. The result is a triage list, not a corpus: 10
@@ -901,13 +925,15 @@ _KB_READ_PAGE_PARAMS = {
         },
         "context": {
             "type": "string",
-            "enum": ["exact", "surrounding"],
+            "enum": ["exact", "surrounding", "links"],
             "description": (
                 "With passage_id: exact (default) reads the passage alone. "
                 "surrounding expands the matched PDF page, then its immediate "
                 "neighbors within limit; Markdown gets a window around the hit. "
                 "Use it to read table headings and continued clauses. Cannot "
-                "combine surrounding with pages or offset."
+                "combine surrounding with pages or offset. links lists this original "
+                "source's document relationships, quotations and exact target resolutions; "
+                "omit passage_id, pages, offset and limit for links."
             ),
         },
         "pages": {
@@ -981,6 +1007,8 @@ def register(registry: ToolRegistry) -> None:
                 "with passage_id to include nearby headings, table columns and "
                 "continued clauses within a character budget. Returns its title, "
                 "content and published version. "
+                "Source reads also preview document links. Use context='links' "
+                "on the original source to inspect their quotations and target editions. "
                 "A page longer than the limit comes back in sections -- "
                 "the response reports the offset to pass for the next one."
             ),
