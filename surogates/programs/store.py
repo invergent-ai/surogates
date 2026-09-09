@@ -71,10 +71,16 @@ class ProgramScheduleStore:
     ) -> ProgramSchedule:
         """Create or refresh the schedule mirroring one active ops Program.
 
-        ``next_run_at`` is written only when the row is new or the cadence
-        changed.  Reconcile runs on every ``program_changed`` publish and on a
-        timer, so unconditionally resetting the clock would push a due Program
-        forward on every unrelated save — forever, and it would never fire.
+        ``next_run_at`` is written only when the row is new, the cadence
+        changed, or the Program is coming back from paused.  Reconcile runs on
+        every ``program_changed`` publish and on a timer, so unconditionally
+        resetting the clock would push a due Program forward on every
+        unrelated save — forever, and it would never fire.
+
+        Resuming is the third case because a Program paused past its slot
+        still carries that stale instant: without recomputing, resuming it on
+        Wednesday would immediately fire Monday's missed check-in at every
+        patient.
         """
         async with self._sf() as db:
             row = (
@@ -99,11 +105,12 @@ class ProgramScheduleStore:
                 cadence_changed = any(
                     old.get(k) != config.get(k) for k in _CADENCE_KEYS
                 )
+                resuming = not row.active
                 row.org_id = org_id
                 row.agent_id = agent_id
                 row.config = config
                 row.active = True
-                if cadence_changed:
+                if cadence_changed or resuming:
                     row.next_run_at = next_run_at
 
             await db.commit()
