@@ -52,6 +52,7 @@ def download_dataset() -> str:
         repo_id=HF_DATASET,
         repo_type="dataset",
         allow_patterns=["data/tasks/*", "data/context/*"],
+        revision=os.environ.get("DABSTEP_DATASET_REVISION"),
     )
 
 

@@ -114,3 +114,32 @@ class TestUnsupportedCapability:
         from gaia_bench.dataset import needs_unsupported_capability
         for name in ("a.pdf", "b.xlsx", "c.png", "d.zip", "e.pdb", "", "f.jsonld"):
             assert needs_unsupported_capability(self._task(name)) is False, name
+
+
+def test_pinned_revision_applies_to_tasks_and_attachments(monkeypatch, tmp_path):
+    import sys
+    import types
+    from gaia_bench import dataset
+    revision = 'a' * 40
+    monkeypatch.setenv('GAIA_DATASET_REVISION', revision)
+    monkeypatch.setenv('HF_TOKEN', 'fixture')
+    seen = []
+
+    def load(*args, **kwargs):
+        seen.append(kwargs['revision'])
+        return []
+
+    def download(**kwargs):
+        seen.append(kwargs['revision'])
+        return '/cache/pinned.xlsx'
+
+    module = types.ModuleType('datasets')
+    module.load_dataset = load
+    monkeypatch.setitem(sys.modules, 'datasets', module)
+    monkeypatch.setattr('huggingface_hub.hf_hub_download', download)
+    assert dataset.load_tasks() == []
+    local = tmp_path / 'local.xlsx'
+    local.write_text('mutable')
+    task = dataset.Task('1', 'question', 1, 'answer', 'local.xlsx', str(local))
+    assert dataset.resolve_attachment(task) == '/cache/pinned.xlsx'
+    assert seen == [revision, revision]

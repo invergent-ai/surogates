@@ -1,0 +1,53 @@
+{
+  "repository": "../../..",
+  "revision": "HEAD",
+  "tasks": "tasks.json",
+  "dataset_revisions": {
+    "workspace_bench": "REPLACE_WORKSPACE_DATASET_COMMIT"
+  },
+  "models": {
+    "pro": {
+      "model": "zai-org/GLM-5.3-Flash",
+      "served_model": "REPLACE_PRO_RUNTIME_MODEL_ID",
+      "revision": "REPLACE_PRO_CHECKPOINT_REVISION",
+      "reasoning_effort": "high"
+    },
+    "standard": {
+      "model": "nex-agi/Nex-N2.5-mini",
+      "served_model": "REPLACE_STANDARD_RUNTIME_MODEL_ID",
+      "revision": "REPLACE_STANDARD_CHECKPOINT_REVISION",
+      "reasoning_effort": "medium"
+    }
+  },
+  "allowed_files": [
+    "surogates/harness/prompts/guidance/working_principles.md",
+    "surogates/harness/tool_schemas.py"
+  ],
+  "benchmark_pythons": {
+    "claweval": "../../claweval/.venv/bin/python",
+    "workspace_bench": "../../workspace_bench/.venv/bin/python"
+  },
+  "runtime": {
+    "start": ["{python}", "-m", "harness_evolution.compose_runtime", "start", "{request}", "{receipt}"],
+    "stop": ["{python}", "-m", "harness_evolution.compose_runtime", "stop", "{request}", "{receipt}"],
+    "boot_timeout_s": 600,
+    "stop_timeout_s": 120,
+    "task_timeout_s": 1800
+  },
+  "proposer": {
+    "base_url_env": "EVOLVE_PROPOSER_BASE_URL",
+    "api_key_env": "EVOLVE_PROPOSER_API_KEY",
+    "model": "REPLACE_PROPOSER_MODEL_ID",
+    "max_tokens": 16384,
+    "max_input_chars": 400000
+  },
+  "policy": {
+    "max_proposals": 10,
+    "repeats": 3,
+    "min_pro_gain": 0.01,
+    "max_standard_regression": 0.0,
+    "max_group_regression": 0.0,
+    "max_seconds_ratio": 1.25,
+    "max_wall_seconds": 28800
+  }
+}

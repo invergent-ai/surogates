@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("run_id")
 
     sub.add_parser("cleanup", help="Remove stray eog MCP rows after a crash")
+    collect = sub.add_parser("import-tasks", help="Import a pinned public dataset and inventory unsupported tasks")
+    collect.add_argument("--revision", required=True)
+    collect.add_argument("--mode", default="oracle", choices=["oracle", "plus_5_tools", "plus_10_tools", "plus_15_tools"])
+    collect.add_argument("--output", type=pathlib.Path, required=True)
 
     return parser
 
@@ -129,7 +133,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     commit = vendor.verify_pin()
     domains = tuple(d.strip() for d in args.domains.split(",")) \
         if args.domains else None
-    tasks = load_tasks(domains)
+    tasks = load_tasks(domains, tuple(t.strip() for t in args.tasks.split(",")) if args.tasks else None)
     tasks = select_tasks(tasks, args.tasks)
     if args.limit:
         tasks = tasks[: args.limit]
@@ -139,6 +143,10 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         RUNS_DIR, "smoke" if is_pilot else "full"
     )
     out_dir = _run_dir(run_id)
+    imported = pathlib.Path(os.environ.get("EOG_TASKS_DIR", "")) / "import.json"
+    if imported.is_file():
+        metadata = json.loads(imported.read_text())
+        (out_dir / "run-config.json").write_text(json.dumps({"mode": metadata["mode"], "dataset_revision": metadata["revision"]}) + "\n")
     print(f"run {run_id}: {len(tasks)} task(s), pin {commit[:12]}, sequential")
 
     gym_override = os.environ.get("EOG_GYM_URL")
@@ -228,6 +236,11 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_cmd_run(args))
     if args.command == "cleanup":
         return _cmd_cleanup()
+    if args.command == "import-tasks":
+        from eogbench.import_tasks import download
+        result = download(args.revision, args.mode, args.output)
+        print(f"Imported {len(result['accepted'])}/{result['rows']} tasks; {len(result['rejected'])} unsupported; inventory: {args.output / 'import.json'}")
+        return 0
     return _cmd_report(args)
 
 

@@ -1,0 +1,102 @@
+[
+  {
+    "benchmark": "workspace_bench",
+    "task_id": "100",
+    "family": "example-files",
+    "split": "search",
+    "upstream_split": "dev"
+  },
+  {
+    "benchmark": "workspace_bench",
+    "task_id": "107",
+    "family": "example-files",
+    "split": "selection",
+    "upstream_split": "dev"
+  },
+  {
+    "benchmark": "workspace_bench",
+    "task_id": "102",
+    "family": "example-files",
+    "split": "holdout",
+    "upstream_split": "holdout",
+    "sealed_holdout": true
+  },
+  {
+    "benchmark": "enterpriseops_gym",
+    "task_id": "csm/REPLACE_SEARCH_TASK",
+    "family": "example-enterprise",
+    "split": "search",
+    "upstream_split": "oracle"
+  },
+  {
+    "benchmark": "enterpriseops_gym",
+    "task_id": "csm/REPLACE_SELECTION_TASK",
+    "family": "example-enterprise",
+    "split": "selection",
+    "upstream_split": "oracle"
+  },
+  {
+    "benchmark": "enterpriseops_gym",
+    "task_id": "csm/REPLACE_HOLDOUT_TASK",
+    "family": "example-enterprise",
+    "split": "holdout",
+    "upstream_split": "oracle"
+  },
+  {
+    "benchmark": "claweval",
+    "task_id": "REPLACE_CLAW_SEARCH_TASK",
+    "family": "example-enterprise",
+    "split": "search",
+    "upstream_split": "general"
+  },
+  {
+    "benchmark": "claweval",
+    "task_id": "REPLACE_CLAW_SELECTION_TASK",
+    "family": "example-enterprise",
+    "split": "selection",
+    "upstream_split": "general"
+  },
+  {
+    "benchmark": "claweval",
+    "task_id": "REPLACE_CLAW_HOLDOUT_TASK",
+    "family": "example-enterprise",
+    "split": "holdout",
+    "upstream_split": "general"
+  },
+  {
+    "benchmark": "dabstep",
+    "task_id": "11",
+    "family": "example-analysis",
+    "split": "search",
+    "upstream_split": "dev"
+  },
+  {
+    "benchmark": "dabstep",
+    "task_id": "13",
+    "family": "example-analysis",
+    "split": "selection",
+    "upstream_split": "dev"
+  },
+  {
+    "benchmark": "dabstep",
+    "task_id": "1",
+    "family": "example-analysis",
+    "split": "holdout",
+    "upstream_split": "holdout"
+  },
+  {
+    "benchmark": "gaia",
+    "task_id": "17b5a6a3-bc87-42e8-b0fb-6ab0781ef2cc",
+    "family": "example-research",
+    "split": "selection",
+    "upstream_split": "dev",
+    "guard": true
+  },
+  {
+    "benchmark": "gaia",
+    "task_id": "56db2318-640f-477a-a82f-bc93ad13e882",
+    "family": "example-research",
+    "split": "holdout",
+    "upstream_split": "holdout"
+  }
+]

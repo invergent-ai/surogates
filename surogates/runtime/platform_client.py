@@ -741,6 +741,44 @@ class PlatformClient:
             f"/api/agents/agents/{agent_id}/allowance/debit", body,
         )
 
+    async def find_agent_kb_documents(
+        self, agent_id: str, *, query: str, kb_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Exact document lookup with the same narrowing and auth as KB search."""
+        if kb_ids is not None and not kb_ids:
+            return {"resolution": "not_found", "documents": [], "truncated": False}
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if kb_ids:
+            params["kb_ids"] = kb_ids
+        resp = await self._client.get(
+            f"/api/agents/agents/{agent_id}/kb/documents", params=params,
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError("Platform rejected runtime credentials")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_agent_kb_document_links(
+        self, agent_id: str, *, file_id: str, kb_ids: list[str] | None = None,
+        expected_artifact_sha256: str | None = None, limit: int = 16,
+    ) -> dict:
+        """Read links only inside attached KBs, optionally pinning source evidence."""
+        if kb_ids is not None and not kb_ids:
+            return {"status": "unavailable", "links": [], "truncated": False}
+        params: dict[str, Any] = {"limit": limit}
+        if kb_ids:
+            params["kb_ids"] = kb_ids
+        if expected_artifact_sha256:
+            params["expected_artifact_sha256"] = expected_artifact_sha256
+        resp = await self._client.get(
+            f"/api/agents/agents/{agent_id}/kb/documents/{file_id}/links", params=params,
+        )
+        if resp.status_code == 401:
+            raise PlatformAuthError("Platform rejected runtime credentials")
+        resp.raise_for_status()
+        return resp.json()
+
     async def search_agent_kb(
         self,
         agent_id: str,

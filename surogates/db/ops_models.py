@@ -94,6 +94,7 @@ class OpsKBWikiPage(OpsBase):
     kb_id: Mapped[str] = mapped_column(sa.String(36))
     path: Mapped[str] = mapped_column(sa.String(512))
     parent_path: Mapped[Optional[str]] = mapped_column(sa.String(512))
+    source_file_id: Mapped[Optional[str]] = mapped_column(sa.String(36))
     hub_object_path: Mapped[Optional[str]] = mapped_column(sa.String(1024))
     content_sha256: Mapped[Optional[str]] = mapped_column(sa.String(64))
     source_start: Mapped[Optional[int]] = mapped_column(sa.Integer)
