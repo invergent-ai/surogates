@@ -429,6 +429,25 @@ async def get_or_create_channel_session(
                 await session_store.update_session_config_key(
                     existing_id, "workspace_boundary", incoming_boundary,
                 )
+        # The channel's routing identifier can change under a live session —
+        # an operator repoints the channel at a different WhatsApp number, and
+        # the old identifier is deactivated. The session's copy is a
+        # creation-time snapshot, but the outbox destination is built from it
+        # and delivery resolves credentials by it, so a stale value addresses
+        # every reply to the dead identifier and the delivery loop drops it as
+        # "channel deprovisioned". The session key carries no identifier, so
+        # such a session resumes forever and never self-heals. Refresh from the
+        # live routing the same way the boundaries above are backfilled.
+        # Absent (a caller that carries no routing) leaves the stored value
+        # alone: blanking it would strand a session that was working.
+        incoming_identifier = str(config.get("channel_identifier") or "").strip()
+        if (
+            incoming_identifier
+            and _existing_config.get("channel_identifier") != incoming_identifier
+        ):
+            await session_store.update_session_config_key(
+                existing_id, "channel_identifier", incoming_identifier,
+            )
         if existing_status in ("completed", "paused"):
             await session_store.resume_session(existing_id, source="channel_message")
             logger.info(

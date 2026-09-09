@@ -120,6 +120,65 @@ async def test_no_backfill_when_multi_party_already_matches():
     assert store.config_updates == []
 
 
+async def test_refreshes_channel_identifier_on_resume():
+    # An operator repointing the channel at a different identifier (a new
+    # WhatsApp number) leaves live sessions pinned to the old one. Delivery
+    # builds the outbox destination from session config and resolves creds by
+    # that identifier, so every reply is dropped as "channel deprovisioned".
+    sid = uuid4()
+    store = _Store()
+    got = await _call_group(
+        store,
+        _SessionFactory(
+            SimpleNamespace(
+                id=sid, status="active",
+                config={"channel_identifier": "1326972397162150"},
+            )
+        ),
+        {"slack_channel_id": "C1", "channel_identifier": "1275764455611851"},
+    )
+    assert got == sid
+    assert store.config_updates == [
+        (sid, "channel_identifier", "1275764455611851"),
+    ]
+
+
+async def test_no_refresh_when_channel_identifier_matches():
+    sid = uuid4()
+    store = _Store()
+    got = await _call_group(
+        store,
+        _SessionFactory(
+            SimpleNamespace(
+                id=sid, status="active",
+                config={"channel_identifier": "A0"},
+            )
+        ),
+        {"slack_channel_id": "C1", "channel_identifier": "A0"},
+    )
+    assert got == sid
+    assert store.config_updates == []
+
+
+async def test_absent_incoming_identifier_never_clears_the_stored_one():
+    # Callers that do not carry routing (and any future one that forgets)
+    # must not blank a working destination.
+    sid = uuid4()
+    store = _Store()
+    got = await _call_group(
+        store,
+        _SessionFactory(
+            SimpleNamespace(
+                id=sid, status="active",
+                config={"channel_identifier": "A0"},
+            )
+        ),
+        {"slack_channel_id": "C1"},
+    )
+    assert got == sid
+    assert store.config_updates == []
+
+
 async def test_resumes_paused_session():
     # A paused session must also be re-activated on a new message — otherwise the
     # harness's paused branch is a hard stop and the message is stranded.
