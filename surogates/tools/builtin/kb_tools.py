@@ -72,6 +72,9 @@ from surogates.db.ops_models import (
 from surogates.runtime.platform_client import PlatformAuthError
 from surogates.storage.kb_hub import KBHubError, fetch_wiki_object
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.builtin.kb_evidence import (
+    CONTEXT_LIMIT_DEFAULT, CONTEXT_LIMIT_MAX, render_surrounding, surrounding_spans,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -346,15 +349,17 @@ def _clamp_offset(raw: Any) -> int:
         return 0
 
 
-def _clamp_page_limit(raw: Any) -> int:
+def _clamp_page_limit(
+    raw: Any, *, default: int = _PAGE_LIMIT_DEFAULT, maximum: int = _PAGE_LIMIT_MAX,
+) -> int:
     """Coerce a caller-supplied limit into the allowed window size."""
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        return _PAGE_LIMIT_DEFAULT
+        return default
     if value <= 0:
-        return _PAGE_LIMIT_DEFAULT
-    return min(value, _PAGE_LIMIT_MAX)
+        return default
+    return min(value, maximum)
 
 
 def _format_page_window(
@@ -475,6 +480,13 @@ async def _kb_read_page_handler(
         return "Error: both kb_id and path are required."
 
     passage_id = (arguments.get("passage_id") or "").strip()
+    context = arguments.get("context", "exact")
+    if context not in ("exact", "surrounding"):
+        return "Error: `context` must be exact or surrounding."
+    if context == "surrounding" and (
+        not passage_id or arguments.get("pages") or arguments.get("offset")
+    ):
+        return "Error: surrounding context requires passage_id and cannot be combined with pages or offset."
     page_range = _parse_page_range(arguments.get("pages"))
     if arguments.get("pages") and page_range is None:
         return (
@@ -484,6 +496,10 @@ async def _kb_read_page_handler(
 
     offset = _clamp_offset(arguments.get("offset"))
     limit = _clamp_page_limit(arguments.get("limit"))
+    if context == "surrounding":
+        limit = _clamp_page_limit(
+            arguments.get("limit"), default=CONTEXT_LIMIT_DEFAULT, maximum=CONTEXT_LIMIT_MAX,
+        )
 
     agent_id = _agent_id_from_kwargs(kwargs)
     denied = _kb_plan_denied(kb_id, kwargs)
@@ -553,6 +569,21 @@ async def _kb_read_page_handler(
         return "Error: published artifact hash mismatch. Retry after the knowledge base is repaired."
 
     provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
+    if context == "surrounding":
+        if not page.content_sha256 or page.source_start is None or page.source_end is None:
+            return "Error: surrounding context requires a verified passage. Rebuild the KB first."
+        try:
+            spans = surrounding_spans(
+                raw, page_number=page.page_number, start=page.source_start,
+                end=page.source_end, budget=limit,
+            )
+        except ValueError as exc:
+            return f"Error: {exc}."
+        provenance += (
+            f"; passage={passage_id}; anchor_page={page.page_number}; "
+            f"anchor_characters={page.source_start}-{page.source_end}; context=surrounding_"
+        )
+        return provenance + f"\n\n# {page.title}\n\n" + render_surrounding(spans)
     if passage_id:
         content = raw.decode("utf-8", errors="replace")
         if page.page_number is not None:
@@ -650,8 +681,29 @@ def _format_search_hits(hits: list[dict[str, Any]], *, query: str) -> str:
     lines.append("")
     lines.append(
         "Snippets are excerpts. Read the promising hits in full with "
-        "`kb_read_page(kb_id=..., path=..., passage_id=...)` using the returned passage_id before answering. Omit passage_id to expand to the parent document."
+        "`kb_read_page(kb_id=..., path=..., passage_id=...)` using the returned passage_id before answering. "
+        "Add context='surrounding' for table headings or continued clauses; omit passage_id for the parent document."
     )
+    return "\n".join(lines)
+
+
+def _format_document_matches(result, query):
+    docs = result.get("documents") or []
+    if not docs:
+        return (f"No exact document identity matched {query!r}. Identity metadata may be unavailable; "
+                "try kb_search_pages with mode='passages' to search document contents.")
+    lines = [f"Document identity lookup: {result.get('resolution', 'unknown')}."]
+    if result.get("resolution") in ("ambiguous", "conflict"):
+        lines.append("Keep these candidates separate. Read their source identity evidence before selecting an edition.")
+    for doc in docs:
+        identity = doc.get("identity") or {}
+        lines.append(f"- {doc['filename']}: kb_id={doc['kb_id']}; path={identity.get('artifact_path')}; identity={identity.get('status')}")
+        for claim in identity.get("claims", [])[:6]:
+            value = str(claim.get("value", ""))[:180].replace("\n", " ")
+            lines.append(f"  {claim['kind']} ({claim['origin']}): {value}")
+    if result.get("truncated"):
+        lines.append("More candidates exist; narrow the KB or use a more specific identifier.")
+    lines.append("Identity claims are extracted metadata. Use kb_read_page with the returned KB and path to verify original evidence before answering.")
     return "\n".join(lines)
 
 
@@ -678,6 +730,9 @@ async def _kb_search_pages_handler(
     query = (arguments.get("query") or "").strip()
     if not query:
         return "Error: query is required."
+    mode = arguments.get("mode", "passages")
+    if mode not in ("passages", "documents"):
+        return "Error: mode must be passages or documents."
     named_kb = (arguments.get("kb") or "").strip()
     limit = _clamp_limit(arguments.get("limit"))
 
@@ -731,6 +786,11 @@ async def _kb_search_pages_handler(
         kb_ids = sorted(allowed) if allowed is not None else None
 
     try:
+        if mode == "documents":
+            result = await platform_client.find_agent_kb_documents(
+                agent_id, query=query, kb_ids=kb_ids, limit=limit,
+            )
+            return _format_document_matches(result, query)
         hits = await platform_client.search_agent_kb(
             agent_id, query=query, kb_ids=kb_ids, limit=limit,
         )
@@ -751,10 +811,22 @@ async def _kb_search_pages_handler(
 _KB_SEARCH_PAGES_PARAMS = {
     "type": "object",
     "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["passages", "documents"],
+            "description": (
+                "passages (default) searches contents. documents looks up an exact "
+                "filename, title, document identifier or explicitly stated alias. "
+                "Use document lookup to distinguish editions or similarly named sources; "
+                "it returns ambiguity/conflicts explicitly. An unmatched identity does "
+                "not mean the document is absent: fall back to passage search."
+            ),
+        },
         "query": {
             "type": "string",
             "description": (
-                "What you are looking for. A natural-language question "
+                "For documents mode, an exact filename, title, identifier or alias. "
+                "For passages mode, what you are looking for. A natural-language question "
                 "and a short phrase of distinctive keywords both work "
                 "well -- semantic matching finds conceptually related "
                 "pages even without exact wording, and keyword matching "
@@ -827,6 +899,17 @@ _KB_READ_PAGE_PARAMS = {
             "type": "string",
             "description": "Optional. Copy from kb_search_pages to read that exact evidence passage. Omit to read/expand the parent artifact.",
         },
+        "context": {
+            "type": "string",
+            "enum": ["exact", "surrounding"],
+            "description": (
+                "With passage_id: exact (default) reads the passage alone. "
+                "surrounding expands the matched PDF page, then its immediate "
+                "neighbors within limit; Markdown gets a window around the hit. "
+                "Use it to read table headings and continued clauses. Cannot "
+                "combine surrounding with pages or offset."
+            ),
+        },
         "pages": {
             "type": "string",
             "description": (
@@ -850,7 +933,9 @@ _KB_READ_PAGE_PARAMS = {
             "type": "integer",
             "description": (
                 f"Maximum characters to return (default "
-                f"{_PAGE_LIMIT_DEFAULT}, max {_PAGE_LIMIT_MAX})."
+                f"{_PAGE_LIMIT_DEFAULT}, max {_PAGE_LIMIT_MAX}). For surrounding "
+                f"context: default {CONTEXT_LIMIT_DEFAULT}, max {CONTEXT_LIMIT_MAX} "
+                "source characters, plus location headers. Must fit the whole passage."
             ),
         },
     },
@@ -892,7 +977,9 @@ def register(registry: ToolRegistry) -> None:
             description=(
                 "Read a wiki page or original source from a knowledge base. "
                 "Use passage_id from search to read exact evidence, or pages "
-                "to select a range from a PDF source. Returns its title, "
+                "to select a range from a PDF source. Add context='surrounding' "
+                "with passage_id to include nearby headings, table columns and "
+                "continued clauses within a character budget. Returns its title, "
                 "content and published version. "
                 "A page longer than the limit comes back in sections -- "
                 "the response reports the offset to pass for the next one."
