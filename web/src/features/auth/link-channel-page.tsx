@@ -299,6 +299,9 @@ export function LinkChannelPage() {
               You can now message the assistant on {platformLabel} and it will
               recognize you as the same person.
             </p>
+            <p className="text-sm text-muted-foreground">
+              You can now close this window.
+            </p>
           </div>
         ) : (
           <form
