@@ -7,7 +7,14 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.schema import CheckConstraint
 
+from surogates.db.models import Base
 from surogates.tenant.context import TenantContext
 
 
@@ -25,8 +32,71 @@ os.environ.setdefault("SUROGATES_DOCUMENT_PARSE_USE_SUBPROCESS", "0")
 
 
 # ---------------------------------------------------------------------------
+# Running the surogates schema on in-memory SQLite
+#
+# Most of the metadata is Postgres-only: 26 columns are bare ``JSONB``, many
+# primary keys are bare ``postgresql.UUID``, and four tables carry a CHECK
+# constraint written with the Postgres-only ``::int`` cast.  The three hooks
+# below teach SQLite to render each of those, and ``sqlite_tables`` builds
+# only the tables a test names, because whole-metadata creation drags in
+# everything whether the test needs it or not.
+#
+# These hooks are process-global, but they only ever ADD capability: before
+# them, compiling any of these constructs against SQLite raised outright, so
+# no previously-passing test can change behaviour.
+# ---------------------------------------------------------------------------
+
+@compiles(JSONB, "sqlite")
+def _jsonb_on_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+
+@compiles(PGUUID, "sqlite")
+def _uuid_on_sqlite(type_, compiler, **kw):
+    return "CHAR(36)"
+
+
+@compiles(CheckConstraint, "sqlite")
+def _check_on_sqlite(element, compiler, **kw):
+    # SQLite has no ``::int`` cast and does not need one — a boolean there is
+    # already 0 or 1, so dropping the cast preserves the constraint's meaning.
+    return compiler.visit_check_constraint(element, **kw).replace("::int", "")
+
+
+def sqlite_tables(*names: str) -> list:
+    """The named tables, for ``create_all(tables=...)``.
+
+    A name that matches nothing is ignored, so callers may list tables
+    optimistically.
+    """
+    wanted = set(names)
+    return [t for name, t in Base.metadata.tables.items() if name in wanted]
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture
+async def sf():
+    """Session factory over an in-memory SQLite database with the program tables.
+
+    StaticPool keeps every session on the one connection that owns the
+    database; without it each session would see a fresh, empty schema.
+    """
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:", poolclass=StaticPool,
+    )
+    tables = sqlite_tables(
+        "program_schedules", "program_occurrences", "program_invitations",
+        "inbox_items", "events", "sessions", "orgs", "users",
+        "channel_identities",
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, tables=tables)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
 
 @pytest.fixture()
 def tenant_context(tmp_path: Path) -> TenantContext:

@@ -882,6 +882,164 @@ class AmbientScheduleRow(Base):
 
 
 # ---------------------------------------------------------------------------
+# Check-in Programs
+# ---------------------------------------------------------------------------
+
+
+class ProgramScheduleRow(Base):
+    """The ticker's claim/lock for one active Program.
+
+    Mirrors an ops ``programs`` row.  Deliberately separate from the
+    configuration: the runtime does not read ops tables, and this row holds
+    only what ticking needs.
+    """
+
+    __tablename__ = "program_schedules"
+    __table_args__ = (
+        UniqueConstraint("program_id", name="uq_program_schedule_program"),
+        Index(
+            "idx_program_schedules_due", "active", "next_run_at",
+            postgresql_where=text("active"),
+        ),
+    )
+
+    # Portable Postgres types, as AmbientScheduleRow uses: UUID/JSONB on
+    # Postgres (prod), String/JSON on SQLite so this table is unit-testable
+    # in isolation.  The Postgres DDL is unchanged.
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    program_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The projected ops configuration, refreshed by reconcile.  The roster
+    #: travels here too, so a tick never calls back into ops.
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False, default=dict,
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True,
+    )
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    locked_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+
+class ProgramOccurrenceRow(Base):
+    """One due time.  Carries what must not change once the check-in starts."""
+
+    __tablename__ = "program_occurrences"
+    __table_args__ = (
+        UniqueConstraint(
+            "program_id", "scheduled_for",
+            name="uq_program_occurrence_instant",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    program_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), nullable=False, index=True,
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    #: Which skill — not its content.  The skill is read live at reply time so
+    #: a doctor can correct a wrong question mid-check-in.
+    skill_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Pinned, unlike the skill: Meta approved this exact text.
+    template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    template_language: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="fired",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class ProgramInvitationRow(Base):
+    """One patient, one occurrence.
+
+    The pending record the reply path matches on, the run-history row, and the
+    deadline timer — one object, because they are one fact.
+
+    Delivery, response and escalation are three independent axes and must
+    never be collapsed: a send that failed is not a patient who stayed silent.
+    """
+
+    __tablename__ = "program_invitations"
+    __table_args__ = (
+        UniqueConstraint(
+            "occurrence_id", "user_id",
+            name="uq_program_invitation_patient",
+        ),
+        # The inbound lookup.  agent_id is part of the key because
+        # channel_identities is org-scoped and one person can be bound to
+        # several agents — without it, one agent's Program would swallow
+        # another agent's reply.
+        Index(
+            "idx_program_invitations_open",
+            "org_id", "agent_id", "platform", "platform_user_id",
+            "response_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), primary_key=True, default=uuid.uuid4,
+    )
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), nullable=False, index=True,
+    )
+    program_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+
+    delivery_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="queued",
+    )
+    provider_message_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    response_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="not_started",
+    )
+    escalation_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="none",
+    )
+    deadline_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        GUID(), nullable=True,
+    )
+    #: Which bundle version this turn ran against — recorded, not pinned.
+    skill_bundle_version: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+    )
+    #: Why this row is in the state it is, in operator words.
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Browser Profiles
 # ---------------------------------------------------------------------------
 
