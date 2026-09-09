@@ -38,6 +38,8 @@ def format_document_links(result, *, full=False):
         )
         if resolution == "matched" and len(link.get("documents", [])) == 1:
             doc = link["documents"][0]
+            if link.get("resolution_basis") == "human_review":
+                lines.append("  Confirmed in document review for these source and target versions.")
             lines.append(
                 f"  Read with kb_read_page: kb_id={doc['kb_id']}, path={doc['path']}"
             )
@@ -47,7 +49,9 @@ def format_document_links(result, *, full=False):
             )
         elif resolution == "needs_review":
             lines.append(
-                ("  The extracted edition matches a document identifier; verify how the source uses it. "
+                ("  A previous review no longer applies because a document or identity changed. "
+                 if link.get("review_status") == "stale" else
+                 "  The extracted edition matches a document identifier; verify how the source uses it. "
                  if link.get("resolution_basis") == "identifier_in_edition"
                  else "  Possible title matches to inspect. ")
                 + "No target or edition has been selected. "

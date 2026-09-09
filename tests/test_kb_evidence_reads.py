@@ -284,11 +284,15 @@ def link_response(raw, *, resolution="matched"):
     }]}
 
 
-async def test_source_reads_preview_links_and_full_read_preserves_condition(evidence_db, monkeypatch):
+@pytest.mark.parametrize("reviewed", [False, True])
+async def test_source_reads_preview_links_and_full_read_preserves_condition(evidence_db, monkeypatch, reviewed):
     raw = b"For indoor units only, this notice amends SPEC/71 revision B."
     path = await add_artifact(evidence_db, raw, file_id="source")
     monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
-    lookup = AsyncMock(return_value=link_response(raw))
+    response = link_response(raw)
+    if reviewed:
+        response["links"][0]["resolution_basis"] = "human_review"
+    lookup = AsyncMock(return_value=response)
     client = SimpleNamespace(get_agent_kb_document_links=lookup)
     preview = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "passage_id": "passage"},
         agent_id="agent", platform_client=client)
@@ -299,6 +303,8 @@ async def test_source_reads_preview_links_and_full_read_preserves_condition(evid
         agent_id="agent", platform_client=client)
     assert "Supporting quote (source text): " + raw.decode() in full
     assert "path=sources/spec.md" in full
+    if reviewed:
+        assert "Confirmed in document review" in full
 
 
 @pytest.mark.parametrize("status", ["not_found", "ambiguous", "conflict", "edition_unknown", "edition_mismatch", "self_reference"])
@@ -354,19 +360,23 @@ async def test_links_context_rejects_incompatible_read_arguments(argument):
     assert out.startswith("Error:") and "omit passage_id" in out
 
 
-@pytest.mark.parametrize("basis", [None, "identifier_in_edition"])
+@pytest.mark.parametrize("basis", [None, "identifier_in_edition", "stale_review"])
 async def test_candidates_are_readable_but_never_presented_as_verified_matches(evidence_db, monkeypatch, basis):
     raw = b"Use this supplement with the pump wiring instructions, edition B."
     path = await add_artifact(evidence_db, raw, file_id="source")
     monkeypatch.setattr(kb_tools, "fetch_wiki_object", AsyncMock(return_value=raw))
     response = link_response(raw, resolution="needs_review")
     response["links"][0]["resolution_basis"] = basis
+    if basis == "stale_review":
+        response["links"][0]["review_status"] = "stale"
     response["links"][0].update(documents=[{"kb_id": "kb", "path": "sources/pump.md", "filename": "pump.md", "identity_status": "conflict"}], truncated=True)
     out = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": path, "context": "links"}, agent_id="agent", platform_client=SimpleNamespace(get_agent_kb_document_links=AsyncMock(return_value=response)))
     assert "path=sources/pump.md" in out and "identity=conflict" in out
     assert "No target or edition has been selected" in out
     if basis == "identifier_in_edition":
         assert "extracted edition matches a document identifier" in out
+    if basis == "stale_review":
+        assert "previous review no longer applies" in out
     assert "Candidate list is incomplete" in out
     assert "Read with kb_read_page" not in out and "resolution=matched" not in out
     assert raw.decode() in out
