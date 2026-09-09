@@ -108,7 +108,8 @@ async def test_markdown_passage_uses_pinned_object_and_exact_offsets(
     out = await kb_tools._kb_read_page_handler(
         {"kb_id": "kb", "path": path, "passage_id": "passage"}, agent_id="agent"
     )
-    assert out.endswith("Exact clause")
+    assert out.split("\n\nStatement conflict")[0].endswith("Exact clause")
+    assert "Statement conflict checks are unavailable" in out
     assert "characters=6-18" in out and "sha256=" in out
     assert fetch.call_args.kwargs["path"] == "wiki/.versions/published/manual"
 
@@ -120,7 +121,7 @@ async def test_pdf_passage_and_page_range_are_readable(evidence_db, monkeypatch)
     out = await kb_tools._kb_read_page_handler(
         {"kb_id": "kb", "path": path, "passage_id": "passage"}, agent_id="agent"
     )
-    assert out.endswith("Exact clause") and "page=27" in out
+    assert out.split("\n\nStatement conflict")[0].endswith("Exact clause") and "page=27" in out
     out = await kb_tools._kb_read_page_handler(
         {"kb_id": "kb", "path": path, "pages": "27"}, agent_id="agent"
     )

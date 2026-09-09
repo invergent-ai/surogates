@@ -71,6 +71,7 @@ from surogates.db.ops_models import (
 )
 from surogates.runtime.platform_client import PlatformAuthError
 from surogates.tools.builtin.kb_document_links import format_document_links
+from surogates.tools.builtin.kb_statement_conflicts import format_statement_conflicts
 from surogates.storage.kb_hub import KBHubError, fetch_wiki_object
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.builtin.kb_evidence import (
@@ -482,8 +483,10 @@ async def _kb_read_page_handler(
 
     passage_id = (arguments.get("passage_id") or "").strip()
     context = arguments.get("context", "exact")
-    if context not in ("exact", "surrounding", "links"):
-        return "Error: `context` must be exact, surrounding or links."
+    if context not in ("exact", "surrounding", "links", "conflicts"):
+        return "Error: `context` must be exact, surrounding, links or conflicts."
+    if context == "conflicts" and any(arguments.get(key) is not None for key in ("passage_id", "pages", "offset", "limit")):
+        return "Error: context='conflicts' lists statement comparisons; omit passage_id, pages, offset and limit."
     if context == "links" and any(arguments.get(key) is not None for key in ("passage_id", "pages", "offset", "limit")):
         return "Error: context='links' lists document relationships; omit passage_id, pages, offset and limit."
     if context == "surrounding" and (
@@ -572,6 +575,7 @@ async def _kb_read_page_handler(
         return "Error: published artifact hash mismatch. Retry after the knowledge base is repaired."
 
     link_text = ""
+    conflict_text = ""
     platform_client = kwargs.get("platform_client")
     if platform_client and page.page_type == "source" and page.source_file_id and page.content_sha256:
         try:
@@ -582,15 +586,24 @@ async def _kb_read_page_handler(
             if result.get("status") in ("extracted", "partial") and result.get("artifact_sha256") != page.content_sha256:
                 result = {"status": "stale"}
             link_text = format_document_links(result, full=context == "links")
+            conflicts = result.get("statement_conflicts")
+            if conflicts and conflicts.get("artifact_sha256") != page.content_sha256:
+                conflicts = {"status": "stale"}
+            conflict_text = format_statement_conflicts(conflicts, full=context == "conflicts")
         except Exception:
             # Link navigation is optional; provider/API failures must not hide
             # verified source evidence or expose service credentials in errors.
             link_text = "Document links are temporarily unavailable." if context == "links" else ""
+            conflict_text = format_statement_conflicts(None)
     elif context == "links":
         link_text = "Document links require a verified original source and a configured platform connection."
+    if not conflict_text and (page.page_type == "source" or context == "conflicts"):
+        conflict_text = format_statement_conflicts(None)
+    if context == "conflicts":
+        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{conflict_text}"
     if context == "links":
-        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{link_text}"
-    link_suffix = "\n\n" + link_text if link_text else ""
+        return f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}_\n\n{link_text}\n\n{conflict_text}"
+    link_suffix = "".join("\n\n" + text for text in (link_text, conflict_text) if text)
 
     provenance = f"_Evidence: kb={kb_id}; path={path}; sha256={page.content_sha256 or 'legacy'}"
     if context == "surrounding":
@@ -925,7 +938,7 @@ _KB_READ_PAGE_PARAMS = {
         },
         "context": {
             "type": "string",
-            "enum": ["exact", "surrounding", "links"],
+            "enum": ["exact", "surrounding", "links", "conflicts"],
             "description": (
                 "With passage_id: exact (default) reads the passage alone. "
                 "surrounding expands the matched PDF page, then its immediate "
@@ -933,7 +946,8 @@ _KB_READ_PAGE_PARAMS = {
                 "Use it to read table headings and continued clauses. Cannot "
                 "combine surrounding with pages or offset. links lists this original "
                 "source's document relationships, quotations and exact target resolutions; "
-                "omit passage_id, pages, offset and limit for links."
+                "conflicts lists potential statement disagreements, both source quotations and current human decisions. "
+                "Omit passage_id, pages, offset and limit for links or conflicts."
             ),
         },
         "pages": {
@@ -1009,6 +1023,8 @@ def register(registry: ToolRegistry) -> None:
                 "content and published version. "
                 "Source reads also preview document links. Use context='links' "
                 "on the original source to inspect their quotations and target editions. "
+                "Statement disagreement notices accompany source reads; use context='conflicts' "
+                "for both source quotations, conditions and current reviewer decisions. "
                 "A page longer than the limit comes back in sections -- "
                 "the response reports the offset to pass for the next one."
             ),
