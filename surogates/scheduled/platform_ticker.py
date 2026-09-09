@@ -179,6 +179,26 @@ def _field(row: Any, name: str) -> Any:
     return getattr(row, name)
 
 
+def _program_now():
+    """Naive UTC, matching what the cadence module returns."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _next_occurrences_for(row):
+    """The next fire instant for a claimed schedule, from its own config."""
+    from surogates.programs.cadence import next_occurrences
+
+    config = getattr(row, "config", None) or {}
+    return next_occurrences(
+        _program_now(),
+        weekdays=config.get("weekdays") or [],
+        times_local=config.get("times_local") or [],
+        timezone=config.get("timezone") or "UTC",
+        count=1,
+    )
+
+
 async def main(
     *,
     settings: Any,
@@ -339,6 +359,66 @@ async def main(
             tick_interval_seconds=tick_interval, claim_limit=claim_limit,
         )
 
+    # Check-in Programs: a third ticker (its own leader lock) fires due
+    # Programs, expires unanswered check-ins, and hands queued openers to the
+    # outbox.
+    program_ticker = None
+    if not _run_one_injected:  # prod path only (session_store built above)
+        from surogates.programs.delivery import register_status_applier
+        from surogates.programs.materialize import (
+            identity_lookup_from,
+            materialize_occurrence,
+            send_queued_openers,
+        )
+        from surogates.programs.store import ProgramScheduleStore
+        from surogates.programs.ticker import ProgramTicker
+
+        program_store = ProgramScheduleStore(_session_factory())
+        _identity_lookup = identity_lookup_from(_session_factory())
+
+        # Lets the WhatsApp parser record delivery statuses. It is synchronous
+        # and holds no database handle, so this is how it gets one.
+        register_status_applier(_session_factory())
+
+        async def _program_run_one(row):  # pragma: no cover - prod path
+            fired_at = await materialize_occurrence(
+                row,
+                session_factory=_session_factory(),
+                identity_lookup=_identity_lookup,
+                now=_program_now(),
+            )
+            logger.debug("[programs] materialised occurrence %s", fired_at)
+            upcoming = _next_occurrences_for(row)
+            await program_store.mark_fired(
+                row, next_run_at=upcoming[0] if upcoming else None,
+            )
+
+        async def _program_send_openers():  # pragma: no cover - prod path
+            await send_queued_openers(
+                _session_factory(),
+                identity_lookup=_identity_lookup,
+                now=_program_now(),
+            )
+
+        program_lock = RedisLeaderLock(
+            redis, key="surogates:program_ticker:leader",
+            ttl_seconds=lock_ttl, holder_id=holder_id,
+        )
+        program_ticker = ProgramTicker(
+            program_store,
+            session_factory=_session_factory(),
+            materialize=_program_run_one,
+            send_openers=_program_send_openers,
+            # reconcile is left unwired: fetching ops' projection needs an ops
+            # base URL and a runtime-scoped key, neither of which this process
+            # configures yet. Until it is supplied, schedules are refreshed
+            # only by whatever calls reconcile_programs directly.
+            worker_id=worker_id,
+            leader_lock=program_lock,
+            tick_interval_seconds=tick_interval,
+            claim_limit=claim_limit,
+        )
+
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
 
@@ -346,6 +426,8 @@ async def main(
             ticker.request_stop()
             if ambient_ticker is not None:
                 ambient_ticker.request_stop()
+            if program_ticker is not None:
+                program_ticker.request_stop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
@@ -354,10 +436,12 @@ async def main(
                 pass
 
     try:
+        runners = [ticker.run()]
         if ambient_ticker is not None:
-            await asyncio.gather(ticker.run(), ambient_ticker.run())
-        else:
-            await ticker.run()
+            runners.append(ambient_ticker.run())
+        if program_ticker is not None:
+            runners.append(program_ticker.run())
+        await asyncio.gather(*runners)
     finally:
         close = getattr(redis, "aclose", None) or getattr(
             redis, "close", None,
