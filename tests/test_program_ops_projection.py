@@ -110,3 +110,21 @@ async def test_an_empty_projection_is_a_real_answer():
     assert await fetch_active_programs(
         client, base_url="http://ops:8888", runtime_key="rk",
     ) == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_json_200_returns_none():
+    # A proxy error page answers 200 with HTML. Raising out of the fetch is
+    # caught by the tick, but the None-not-[] contract belongs to this
+    # function, not to whoever happens to call it.
+    class _HtmlResp:
+        status_code = 200
+        is_success = True
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1")
+
+    client = _Client(_HtmlResp())
+    assert await fetch_active_programs(
+        client, base_url="http://ops:8888", runtime_key="rk",
+    ) is None

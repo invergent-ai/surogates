@@ -115,3 +115,62 @@ async def test_the_deadline_is_not_reached_yet(
     assert swept == 0
     row = await reload_invitation(awaiting_invitation.id)
     assert row.response_state == "awaiting_reply"
+
+
+@pytest.mark.asyncio
+async def test_the_send_pass_is_skipped_when_the_leader_lock_is_lost(sf):
+    # A backlog of openers is the one tick phase that can outlive the lease.
+    # A replica that is no longer leader must not run the same pass over the
+    # same still-queued rows — that is every patient messaged twice.
+    from surogates.programs.ticker import ProgramTicker
+
+    class _Store:
+        async def claim_due(self, **kw):
+            return []
+
+    class _LostLock:
+        async def heartbeat(self):
+            return False
+
+    sent = []
+
+    async def _send():
+        sent.append(1)
+
+    async def _materialize(row):  # pragma: no cover - no rows are claimed
+        raise AssertionError("nothing to materialise")
+
+    ticker = ProgramTicker(
+        _Store(), session_factory=sf, materialize=_materialize,
+        worker_id="w1", send_openers=_send, leader_lock=_LostLock(),
+    )
+    await ticker.tick_once()
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_send_pass_runs_while_the_leader_lock_holds(sf):
+    from surogates.programs.ticker import ProgramTicker
+
+    class _Store:
+        async def claim_due(self, **kw):
+            return []
+
+    class _HeldLock:
+        async def heartbeat(self):
+            return True
+
+    sent = []
+
+    async def _send():
+        sent.append(1)
+
+    async def _materialize(row):  # pragma: no cover
+        raise AssertionError("nothing to materialise")
+
+    ticker = ProgramTicker(
+        _Store(), session_factory=sf, materialize=_materialize,
+        worker_id="w1", send_openers=_send, leader_lock=_HeldLock(),
+    )
+    await ticker.tick_once()
+    assert sent == [1]

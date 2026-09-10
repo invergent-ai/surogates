@@ -153,8 +153,22 @@ class ProgramTicker:
                     )
 
         # Kept outside the claim so the lease covers database work rather than
-        # provider round trips.
+        # provider round trips. Confirm we still lead before starting them:
+        # a backlog of openers is the one phase that can outlive the leader
+        # lock, and a second replica running the same pass over the same
+        # still-queued rows would message every patient twice.
         if self._send_openers is not None:
+            if self._lock is not None and hasattr(self._lock, "heartbeat"):
+                try:
+                    if not await self._lock.heartbeat():
+                        logger.warning(
+                            "program ticker lost the leader lock before the "
+                            "send pass; leaving queued openers for the leader",
+                        )
+                        return
+                except Exception:
+                    logger.exception("program ticker heartbeat failed")
+                    return
             try:
                 await self._send_openers()
             except Exception:

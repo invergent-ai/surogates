@@ -55,7 +55,11 @@ async def fetch_active_programs(
         )
         return None
 
-    body = response.json()
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 — an HTML error page answering 200
+        logger.warning("[programs] ops answered the projection with a non-JSON body")
+        return None
     if not isinstance(body, list):
         # A proxy error page can answer 200 with an object; reading that as
         # "no Programs are active" would pause the whole fleet.

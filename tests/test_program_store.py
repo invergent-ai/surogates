@@ -128,3 +128,56 @@ async def test_deactivate_missing_stops_programs_that_left_the_projection(sf):
     assert [c.program_id for c in await store.claim_due(worker_id="w1", limit=10)] == [
         kept
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_reconcile_writes_nothing(sf):
+    # Reconcile runs every tick. Rewriting an identical config for every
+    # Program each time is a write per Program per tick for nothing.
+    from surogates.db.models import ProgramScheduleRow
+    import sqlalchemy as sa
+
+    store = ProgramScheduleStore(sf)
+    pid = uuid.uuid4()
+    cfg = {"weekdays": ["mon"], "times_local": ["09:00"], "timezone": "UTC"}
+    due = _utcnow() + timedelta(hours=1)
+    await store.ensure(program_id=pid, org_id=uuid.uuid4(), agent_id="a1", config=cfg, next_run_at=due)
+
+    # Plant a marker the no-op path must not disturb.
+    async with sf() as db:
+        await db.execute(
+            sa.update(ProgramScheduleRow)
+            .where(ProgramScheduleRow.program_id == pid)
+            .values(locked_by="marker")
+        )
+        await db.commit()
+
+    again = await store.ensure(
+        program_id=pid, org_id=(await store.get(pid)).org_id, agent_id="a1",
+        config=dict(cfg), next_run_at=_utcnow() + timedelta(days=3),
+    )
+    assert again.locked_by == "marker"
+    assert again.next_run_at == due
+
+
+@pytest.mark.asyncio
+async def test_a_reordered_weekday_list_does_not_move_the_clock(sf):
+    # Reconcile runs before claim_due. If an unstable ordering from ops were
+    # read as a cadence change, the tick in which `now` first crossed the due
+    # instant would move the clock past it before the claim ran — and the
+    # Program would never fire.
+    store = ProgramScheduleStore(sf)
+    pid = uuid.uuid4()
+    org = uuid.uuid4()
+    due = _utcnow() + timedelta(hours=1)
+    await store.ensure(
+        program_id=pid, org_id=org, agent_id="a1",
+        config={"weekdays": ["mon", "wed"], "times_local": ["09:00", "21:00"], "timezone": "UTC"},
+        next_run_at=due,
+    )
+    after = await store.ensure(
+        program_id=pid, org_id=org, agent_id="a1",
+        config={"weekdays": ["wed", "mon"], "times_local": ["21:00", "09:00"], "timezone": "UTC"},
+        next_run_at=_utcnow() + timedelta(days=3),
+    )
+    assert after.next_run_at == due

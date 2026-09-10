@@ -41,6 +41,20 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _cadence_value(value: Any) -> Any:
+    """Order-insensitive view of a cadence field.
+
+    Reconcile runs before claim_due in a tick. If ops ever projected
+    ``weekdays`` in an unstable order, a raw ``!=`` would recompute
+    ``next_run_at`` every tick — and the tick in which ``now`` first crossed
+    the due instant would move the clock past it before the claim ran, so the
+    Program would never fire.
+    """
+    if isinstance(value, list):
+        return sorted(str(v) for v in value)
+    return value
+
+
 class ProgramSchedule(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -103,9 +117,21 @@ class ProgramScheduleStore:
             else:
                 old = row.config or {}
                 cadence_changed = any(
-                    old.get(k) != config.get(k) for k in _CADENCE_KEYS
+                    _cadence_value(old.get(k)) != _cadence_value(config.get(k))
+                    for k in _CADENCE_KEYS
                 )
                 resuming = not row.active
+                unchanged = (
+                    row.active
+                    and row.org_id == org_id
+                    and row.agent_id == agent_id
+                    and old == config
+                )
+                if unchanged:
+                    # Reconcile runs every tick. Rewriting an identical JSONB
+                    # blob for every Program each time is a write per Program
+                    # per tick for nothing.
+                    return ProgramSchedule.model_validate(row)
                 row.org_id = org_id
                 row.agent_id = agent_id
                 row.config = config

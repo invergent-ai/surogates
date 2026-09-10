@@ -42,6 +42,15 @@ _OPEN_RESPONSE_STATES = ("awaiting_reply", "replied", "in_progress")
 _DEFAULT_DEADLINE_HOURS = 24
 
 
+def platform_of(identity: Any, schedule: Any) -> str:
+    """The channel this invitation is on — the identity's if it says, else the Program's."""
+    return (
+        getattr(identity, "platform", None)
+        or (schedule.config or {}).get("channel")
+        or "whatsapp"
+    )
+
+
 def _permission(identity: Any) -> str:
     meta = getattr(identity, "platform_meta", None) or {}
     return (meta.get("contact_permission") or {}).get("status") or "none"
@@ -70,7 +79,12 @@ async def _has_open_invitation(db, schedule, identity) -> bool:
         await db.execute(
             sa.select(sa.func.count())
             .select_from(ProgramInvitationRow)
+            # org_id leads the open-invitations index; without it this is a
+            # sequential scan of an append-only table, once per patient per
+            # occurrence, inside the claim lease.
+            .where(ProgramInvitationRow.org_id == schedule.org_id)
             .where(ProgramInvitationRow.agent_id == schedule.agent_id)
+            .where(ProgramInvitationRow.platform == platform_of(identity, schedule))
             .where(
                 ProgramInvitationRow.platform_user_id
                 == identity.platform_user_id
