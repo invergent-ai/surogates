@@ -151,7 +151,7 @@ async def test_a_still_permitted_opener_is_left_for_delivery(
     sf, queued_invitation, identity_lookup, reload_invitation,
 ):
     # The negative control for the test above: the cancel path must not be
-    # reachable for a patient who never withdrew.
+    # reachable for a user who never withdrew.
     from surogates.programs.materialize import send_queued_openers
 
     await send_queued_openers(sf, identity_lookup=identity_lookup, now=_utcnow())
@@ -164,7 +164,7 @@ async def test_a_delivery_status_callback_updates_the_invitation(
     sf, accepted_invitation, reload_invitation,
 ):
     # _log_statuses logs these and drops them, so an asynchronous rejection
-    # would leave the patient looking like a non-responder.
+    # would leave the user looking like a non-responder.
     from surogates.programs.delivery import apply_status_callback
 
     applied = await apply_status_callback(
@@ -180,7 +180,7 @@ async def test_a_delivery_status_callback_updates_the_invitation(
     # The response axis must not move: they were never reached.
     assert row.response_state == "awaiting_reply"
     # Provider wording has its own column, so a late status can never
-    # overwrite the agent's clinical note or a skip explanation in `reason`.
+    # overwrite the agent's operational note or a skip explanation in `reason`.
     assert "undeliverable" in (row.delivery_error or "").lower()
     assert row.reason is None
 
@@ -201,7 +201,7 @@ async def test_a_delivered_status_does_not_downgrade_a_reply(
     sf, make_invitation, reload_invitation,
 ):
     # Statuses arrive out of order. A late "delivered" must not walk back a
-    # patient who has already replied.
+    # user who has already replied.
     from surogates.programs.delivery import apply_status_callback
 
     inv = await make_invitation(
@@ -224,7 +224,7 @@ async def test_a_late_delivered_status_cannot_resurrect_a_failed_send(
     # Meta batches statuses and retries un-acknowledged webhooks, so a stale
     # "delivered" can land after "failed". Letting it win would put a send we
     # know was lost back into the reached set, and the sweep would then mark
-    # a patient we never reached as a non-responder.
+    # a user we never reached as a non-responder.
     from surogates.programs.delivery import apply_status_callback
 
     inv = await make_invitation(
@@ -276,7 +276,7 @@ async def test_a_dead_outbox_row_marks_the_invitation_failed(
     assert row.delivery_state == "failed"
     assert "132001" in row.delivery_error
     # Never asked, so nobody is awaited.  ``awaiting_reply`` is an open
-    # check-in, and an open check-in suppresses the patient's next occurrence:
+    # check-in, and an open check-in suppresses the user's next occurrence:
     # left there, one failed send would drop them from the Program for good.
     assert row.response_state == "not_started"
 
@@ -517,3 +517,24 @@ async def test_an_already_handed_over_opener_is_not_enqueued_twice(
         sf, identity_lookup=identity_lookup, now=_utcnow(), enqueue=_enqueue,
     )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_whatsapp_program_with_no_template_fails_its_users_not_forever(
+    queued_invitation,
+):
+    # Left queued, this row was retried every tick with a warning in the
+    # log and nothing on the delivery axis. Now it is undeliverable, and the
+    # send pass records that.
+    from surogates.programs.opener import OpenerUndeliverable, make_opener_enqueue
+
+    async def _config(program_id):
+        return {"channel": "whatsapp", "channel_identifier": "127"}  # no template
+
+    enqueue = make_opener_enqueue(
+        session_store=None, redis=None, session_factory=None,
+        delivery_service=None, config_for_program=_config,
+    )
+    with pytest.raises(OpenerUndeliverable) as exc:
+        await enqueue(queued_invitation)
+    assert "template" in exc.value.reason

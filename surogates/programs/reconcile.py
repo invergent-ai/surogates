@@ -1,7 +1,7 @@
 """Mirror ops' active Programs into the runtime's schedule table.
 
 Runs on a ``program_changed`` publish and, as a backstop, on a slow interval:
-a missed publish must not leave a paused Program messaging patients.
+a missed publish must not leave a paused Program messaging users.
 
 The whole projected row is stored as the schedule's ``config`` — roster
 included — so a tick never has to call back into ops to find out who to
@@ -41,7 +41,7 @@ async def reconcile_programs(store: Any, *, projected: list[dict]) -> None:
     tzdata lacks, ``"9"`` for a time, a non-UUID id — used to raise out of
     the loop.  That skipped every Program after the bad one **and** skipped
     ``deactivate_missing``, so one bad row meant a Program the operator had
-    paused kept messaging patients indefinitely, fleet-wide, every tick.
+    paused kept messaging users indefinitely, fleet-wide, every tick.
 
     A row that cannot be parsed is logged and left out of ``seen``, which
     deactivates its schedule.  A Program we cannot understand must not fire.

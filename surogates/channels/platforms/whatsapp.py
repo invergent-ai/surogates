@@ -240,7 +240,7 @@ def _log_statuses(value: dict, *, identifier: str) -> None:
                 state, identifier, status.get("id"),
             )
         # A check-in opener's fate lives on its invitation, not only in this
-        # log line: without recording it, a patient we never reached would be
+        # log line: without recording it, a user we never reached would be
         # marked a non-responder when the deadline sweep runs.  Fire-and-forget
         # because parsing is synchronous and a raise here would answer Meta
         # non-200 and start a retry loop.

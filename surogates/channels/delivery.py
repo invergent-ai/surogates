@@ -359,7 +359,7 @@ class DeliveryService:
             )
             await db.commit()
         logger.warning("Outbox %d dropped (no retry): %s", outbox_id, error)
-        # A check-in opener that died here was never seen by the patient. Say
+        # A check-in opener that died here was never seen by the user. Say
         # so on the invitation, or the deadline sweep later records them as a
         # non-responder for a question they were never asked.
         await self._report_to_invitation(

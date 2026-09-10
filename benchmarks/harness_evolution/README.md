@@ -1,23 +1,107 @@
-# Harness evolution
+# Harness evolution for model training
 
-A bounded harness optimizer for **Standard** and **Pro**, with offline planning
-and tests. It runs
-the Surogates harness through the ClawEval, Workspace-Bench,
-EnterpriseOps-Gym, DABstep, and GAIA clients. A frontier proposer edits an explicit set of product source files;
-fresh paired benchmark runs decide whether a candidate becomes the search
-frontier. Model weights stay fixed.
+**The higher purpose is to train our own Standard and Pro models for maximum
+accuracy on the Surogates harness.** Starting from capable existing models,
+we want to teach reliable use of our tools, prompts, context, and execution
+protocols while retaining their broader reasoning and agent capabilities.
+Pro should handle most tasks; Standard provides a more economical tier.
+Base models, checkpoint revisions, served model IDs, and deployment environments
+remain configurable.
 
-This implements a [StarHarness-style](https://arxiv.org/html/2608.24804v1)
-hill-climbing protocol, not the authors'
-unreleased package. It extends the patterns in `../gepa`: independent
+Accuracy means verified completion of representative enterprise tasks on
+unseen examples: correct actions, correct final state, and usable artifacts.
+The target is the performance of the complete model-and-harness system,
+subject to capability-retention, latency, and cost requirements. Measure
+progress on held-out task families that reflect intended customer workflows.
+
+This package currently provides the **harness optimization and evaluation
+foundation** for that training program. It runs the Surogates harness through
+ClawEval, Workspace-Bench, EnterpriseOps-Gym, DABstep, and GAIA. A frontier
+proposer edits an explicit set of product source files; fresh paired runs
+decide whether to accept each change. **Model weights stay fixed during this
+implemented phase.** Teacher-data generation, supervised fine-tuning (SFT),
+and reinforcement learning (RL) are subsequent stages to build.
+
+The harness optimizer implements a
+[StarHarness-style](https://arxiv.org/html/2608.24804v1) hill-climbing protocol.
+It is our implementation and extends the patterns in `../gepa`: independent
 benchmark clients, search/selection separation, regression checks, and
 invalidating unhealthy runs. It does not import or modify the GEPA package.
 
-**No experiment deploys or edits the working checkout.** Outputs are source
-snapshots, patches, and reports. The accepted frontier is a development
-candidate; inspect the patch and finish evaluation before shipping it.
+Experiments deploy isolated source snapshots and leave the working checkout
+untouched. Current outputs are patches, evaluation reports, and rollout
+traces. The intended training program will also produce versioned datasets
+and specialized model checkpoints, evaluated with a specific harness revision.
 
-## What is implemented
+## From benchmark tasks to specialized models
+
+The planned workflow connects harness improvement, training data, and model
+training under one evaluation protocol:
+
+1. **Define the task distribution and reserve evaluation data.** Use
+   EnterpriseOps, Claw, and Workspace for enterprise workflows, DABstep for
+   analytics, and GAIA for general-capability checks. Partition task families
+   and related variants before collecting training traces. Training,
+   selection, and final-test tasks must remain separate across teachers,
+   student models, harness revisions, and repeated attempts.
+2. **Establish and improve the harness baseline.** Measure both base models
+   and use the current controller to address tool, prompt, and execution
+   failures. Freeze the accepted harness revision for each model-training
+   experiment so weight changes can be compared on the same system.
+3. **Collect frontier-teacher demonstrations through our harness.** Run
+   training tasks with configurable teacher models using the same tool
+   interfaces and task environments the students will use. The harness
+   captures session traces, inspectable in Ops. Preserve the actual prompts,
+   tool definitions, visible assistant messages, ordered tool calls and
+   results, final outputs, and model/harness/dataset provenance. The harness
+   patch proposer and the demonstration teacher are separate roles; the
+   current proposer does not generate a training dataset.
+4. **Build a verified training dataset.** Join session traces to task outcomes
+   and artifact/state verification. Select correct demonstrations and useful
+   successful recoveries for SFT; retain failures separately for diagnosis
+   and possible preference or reward-based training. Export the real
+   conversation and tool protocol, with loss applied to intended assistant
+   targets. Keep hidden verifiers and answer-key files out of model inputs;
+   use them only for grading. Exclude credentials and selection/final-test
+   traces from training exports. Version the dataset
+   and its provenance; a saved trace alone is not a qualified training sample.
+5. **Adapt Standard and Pro.** Begin with SFT on the verified demonstrations.
+   Add RL once the training environments reset reliably and outcome rewards
+   are trustworthy, using student rollouts through the frozen harness.
+   Infrastructure and grader failures must not become learning signals.
+   Training methods, update sizes, and replay mixtures remain experiment
+   choices rather than capabilities implemented by this controller.
+6. **Promote model-and-harness pairs on held-out evidence.** Compare each
+   trained checkpoint against its base model on the same harness, and retain
+   the original model/harness baseline to measure total progress. Require
+   enterprise-task gains and capability-retention checks before promotion.
+   Record the model, harness revision, tool profiles, and training dataset
+   together so a result can be reproduced.
+
+Preserving existing capabilities is part of the objective. Include broad
+reasoning, coding, instruction-following, and tool-use checks beyond the
+training task families. General-capability replay and conservative weight
+updates are candidate mitigations for forgetting; neither guarantees its
+absence. Reject or roll back checkpoints that fail the agreed retention
+criteria. GAIA and the current task guards provide a starting point, not
+complete coverage of a model's capabilities.
+
+The final test for the finished model-and-harness pair must stay untouched
+throughout development. The current `final-test` command consumes the
+holdout in its harness-search manifest. If those results inform subsequent
+model training, that holdout is development evidence for the larger program;
+reserve a separate final test for the resulting trained models.
+
+## Implementation status
+
+| Stage | Status in this package |
+| --- | --- |
+| Benchmark execution, task partitions, paired comparisons, and harness search | Implemented; live environment and model bindings still required |
+| Teacher rollout collection and verified conversation-dataset export | Planned integration using harness session traces and benchmark outcomes |
+| SFT and RL training jobs, replay, and checkpoint management | Planned |
+| Trained-model promotion with broader capability-retention tests | Planned; current guards evaluate harness changes with fixed model weights |
+
+## Current harness optimizer
 
 - Two configurable model bindings, with model/checkpoint IDs and settings
   recorded in experiment inputs. Runtime model IDs are checked against
@@ -107,6 +191,10 @@ paths relative to that file. Configure:
 | `runtime.start`, `runtime.stop` | Operator-owned argv arrays; no shell interpolation |
 | `proposer` | Endpoint/key environment variable names and a proposer model ID |
 | `policy` | Proposal/repetition/time budgets and promotion thresholds |
+
+These are evaluation bindings for the current harness-search phase. They do
+not launch training jobs or configure demonstration teachers. Keep them fixed
+within a search; comparing a newly trained checkpoint requires a new experiment.
 
 The proposer endpoint uses the existing OpenAI-compatible Chat Completions
 interface. It returns a hypothesis, a failing search task, and complete file
@@ -209,7 +297,9 @@ Every accepted candidate gets a new snapshot; the original checkout stays
 untouched. Read `report.md`, `best.patch`, and private
 `attempts/<n>/comparison.json`. Runtime logs and per-task benchmark artifacts
 are under `evaluations/`. Search traces include failures as diagnostic
-evidence; they are not filtered into an SFT dataset during this phase.
+evidence. They can inform the planned dataset curation stage, but this command
+does not qualify or export them for SFT. Selection and holdout traces remain
+evaluation data.
 
 Run the holdout explicitly once after selecting the frontier:
 
@@ -235,9 +325,13 @@ execution, not container startup or rubric-judge cost.
 
 This version supports five benchmark adapters and a single hill-climbing
 frontier. It does not include tree search, automatic benchmark-family
-annotation, automatic production rollout, or weight training.
-Repeated selection gains are provisional, especially on
-small task sets; final results need their own uncertainty analysis.
+annotation, automatic production rollout, or the planned model-training
+pipeline. Its promotion checks measure harness changes with fixed weights;
+they do not establish that a fine-tuned model retains its base capabilities.
+Repeated selection gains are provisional, especially on small task sets;
+final results need their own uncertainty analysis. Cost ceilings and broader
+capability-retention gates are requirements of the training program still
+to implement.
 
 ## Enterprise suite
 

@@ -387,6 +387,39 @@ async def main(
             sched = await program_store.get(program_id)
             return sched.config if sched is not None else None
 
+        # Slack openers need the bot token in this process: the dispatcher
+        # holds credentials only for rows already in the outbox, and opening
+        # the direct message happens before there is a row.
+        _credentials_for = None
+        if getattr(settings, "encryption_key", ""):
+            from surogates.channels.credentials import resolve_channel_credentials
+            from surogates.tenant.credentials import CredentialVault
+
+            try:
+                _vault = CredentialVault(
+                    _session_factory(),
+                    encryption_key=settings.encryption_key.encode("utf-8"),
+                )
+            except Exception:
+                # A malformed key must cost Slack openers, not the whole
+                # ticker: scheduled runs and ambient ticks share this process.
+                logger.warning(
+                    "[programs] invalid encryption_key; Slack openers disabled",
+                )
+                _vault = None
+
+            if _vault is not None:
+                async def _credentials_for(kind, identifier, org_id):  # pragma: no cover - prod
+                    return await resolve_channel_credentials(
+                        vault=_vault, kind=kind, identifier=identifier,
+                        org_id=org_id, refs={"bot_token": "bot_token"},
+                    )
+        else:
+            logger.info(
+                "[programs] no encryption_key; Slack openers cannot be sent "
+                "from this process",
+            )
+
         _opener_enqueue = make_opener_enqueue(
             session_store=session_store,
             redis=redis,
@@ -397,6 +430,7 @@ async def main(
             storage=storage,
             settings=settings,
             config_for_program=_config_for_program,
+            credentials_for=_credentials_for,
         )
 
         async def _program_run_one(row):  # pragma: no cover - prod path
