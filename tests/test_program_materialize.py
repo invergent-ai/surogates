@@ -164,9 +164,88 @@ async def test_firing_the_same_instant_twice_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_a_retried_tick_on_a_claimed_schedule_does_not_double_message(
+    sf, identity_lookup,
+):
+    # The production contract, end to end: the instant stamped on the
+    # occurrence is the schedule's due time. The earlier idempotence test
+    # passes one literal twice, which any caller can satisfy by accident —
+    # this one goes through a real claimed row, the way the ticker does, and
+    # fails if a fresh wall clock is ever substituted.
+    import asyncio
+    from datetime import timedelta
+
+    from surogates.programs.store import ProgramScheduleStore
+
+    store = ProgramScheduleStore(sf)
+    pid = uuid.uuid4()
+    await store.ensure(
+        program_id=pid, org_id=uuid.uuid4(), agent_id="a1",
+        config={"channel": "whatsapp", "skill_ref": "s",
+                "patients": [str(uuid.uuid4())]},
+        next_run_at=_utcnow() - timedelta(minutes=1),
+    )
+    claimed = (await store.claim_due(worker_id="w1", limit=1))[0]
+
+    first = await materialize_occurrence(
+        claimed, session_factory=sf, identity_lookup=identity_lookup,
+        now=claimed.next_run_at,
+    )
+    await asyncio.sleep(0.01)  # a fresh wall clock would differ here
+    second = await materialize_occurrence(
+        claimed, session_factory=sf, identity_lookup=identity_lookup,
+        now=claimed.next_run_at,
+    )
+    assert first == second
+    assert len(await _invitations(sf, first)) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_patient_with_an_open_check_in_is_skipped(
     sf, schedule, identity_lookup, open_invitation,
 ):
+    occ_id = await materialize_occurrence(
+        schedule,
+        session_factory=sf,
+        identity_lookup=identity_lookup,
+        now=_utcnow(),
+    )
+    rows = await _invitations(sf, occ_id)
+    assert rows[0].delivery_state == "skipped"
+    assert "still open" in rows[0].reason.lower()
+
+
+@pytest_asyncio.fixture
+async def unanswered_invitation(sf, schedule, identity_lookup):
+    """An opener already sent, still inside its response deadline."""
+    user_id = uuid.UUID(schedule.config["patients"][0])
+    ident = await identity_lookup(schedule.org_id, "whatsapp", user_id)
+    async with sf() as db:
+        row = ProgramInvitationRow(
+            occurrence_id=uuid.uuid4(),
+            program_id=schedule.program_id,
+            org_id=schedule.org_id,
+            agent_id=schedule.agent_id,
+            user_id=user_id,
+            platform="whatsapp",
+            platform_user_id=ident.platform_user_id,
+            delivery_state="accepted",
+            response_state="awaiting_reply",
+            escalation_state="none",
+        )
+        db.add(row)
+        await db.commit()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_patient_with_an_unanswered_opener_is_skipped(
+    sf, schedule, identity_lookup, unanswered_invitation,
+):
+    # The canonical cadence is twice a day against a 24-hour deadline, so the
+    # next occurrence arrives while the first opener is still live. Sending a
+    # second one asks the same person two questions at once, and whichever
+    # they do not answer is later recorded as a non-response.
     occ_id = await materialize_occurrence(
         schedule,
         session_factory=sf,

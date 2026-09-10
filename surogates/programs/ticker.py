@@ -27,22 +27,40 @@ logger = logging.getLogger(__name__)
 #: skipped, cancelled or rejected by the provider is our failure, not theirs.
 _REACHED_STATES = ("accepted", "delivered")
 
+#: The patient answered but the agent never recorded an outcome. Terminal
+#: at the deadline, so the next occurrence can reach them again.
+_STARTED_STATES = ("replied", "in_progress")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) -> int:
-    """Close check-ins whose deadline has passed unanswered.
+    """Close every check-in whose deadline has passed without finishing.
 
-    The ``delivery_state`` filter is the point: without it a failed or skipped
-    send would be recorded as a patient who stayed silent, which blames the
-    patient for our failure to reach them and hides the delivery problem the
-    operator actually needs to fix.
+    Two transitions, because two different things go wrong and the operator
+    needs to tell them apart:
+
+    * asked and never answered → ``no_reply_by_deadline``.  The
+      ``delivery_state`` filter is the point here: without it a failed or
+      skipped send would be recorded as a patient who stayed silent, blaming
+      the patient for our failure to reach them and hiding the delivery
+      problem that actually needs fixing.
+    * answered but never closed → ``incomplete``.  Only ``checkin_outcome``
+      moves a row out of ``replied``, so a patient who trails off mid-answer,
+      a session that errors, or a model that simply never calls the tool would
+      leave the row open forever.  That matters beyond the history: an open
+      check-in suppresses the patient's next one, so without this they drop
+      out of the Program silently and permanently.
+
+    Both are terminal, which is what lets the next occurrence reach that
+    patient again.
     """
     now = now or _utcnow()
+    swept = 0
     async with session_factory() as db:
-        result = await db.execute(
+        unanswered = await db.execute(
             sa.update(ProgramInvitationRow)
             .where(ProgramInvitationRow.response_state == "awaiting_reply")
             .where(ProgramInvitationRow.delivery_state.in_(_REACHED_STATES))
@@ -50,8 +68,19 @@ async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) 
             .where(ProgramInvitationRow.deadline_at <= now)
             .values(response_state="no_reply_by_deadline")
         )
+        swept += int(unanswered.rowcount or 0)
+
+        unfinished = await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.response_state.in_(_STARTED_STATES))
+            .where(ProgramInvitationRow.deadline_at.isnot(None))
+            .where(ProgramInvitationRow.deadline_at <= now)
+            .values(response_state="incomplete")
+        )
+        swept += int(unfinished.rowcount or 0)
+
         await db.commit()
-        return int(result.rowcount or 0)
+        return swept
 
 
 class ProgramTicker:

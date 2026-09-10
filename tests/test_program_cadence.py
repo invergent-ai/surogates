@@ -46,6 +46,36 @@ def test_a_nonexistent_local_time_moves_to_the_first_valid_instant():
     assert got[0] is not None  # resolved, not skipped and not crashed
 
 
+def test_spring_forward_keeps_the_slots_in_order_and_fires_both():
+    # Sorting by local time-of-day is not monotone across the gap: 02:30 does
+    # not exist on this day, and resolving it with the pre-transition offset
+    # puts it AFTER 03:00 in real time. Sorting the resolved instants instead
+    # is what keeps the operator preview honest and stops a slot being lost.
+    got = next_occurrences(
+        datetime(2026, 3, 7, 23, 0),
+        weekdays=["sun"],
+        times_local=["02:30", "03:00"],
+        timezone="America/New_York",
+        count=2,
+    )
+    assert got == sorted(got)
+    # Both of Sunday's slots fire; neither is skipped to the following week.
+    assert all(d.date().isoformat() == "2026-03-08" for d in got), got
+
+
+def test_the_first_instant_after_a_spring_forward_is_the_earlier_slot():
+    got = next_occurrences(
+        datetime(2026, 3, 7, 23, 0),
+        weekdays=["sun"],
+        times_local=["02:30", "03:00"],
+        timezone="America/New_York",
+        count=1,
+    )
+    # 03:00 EST is 08:00 UTC; the nonexistent 02:30 resolves to 07:30 UTC.
+    # The earlier real instant must come first.
+    assert got[0].hour == 7
+
+
 def test_a_repeated_local_time_fires_once():
     # Autumn back: 03:00-04:00 happens twice on 2026-10-25 in Bucharest.
     got = next_occurrences(

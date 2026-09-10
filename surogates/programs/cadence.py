@@ -56,12 +56,23 @@ def next_occurrences(
     day = after.replace(tzinfo=_UTC).astimezone(tz).date()
     for _ in range(_MAX_DAYS_SCANNED):
         if day.weekday() in wanted:
-            for slot in parsed:
-                local = datetime.combine(day, slot, tzinfo=tz)
-                # A nonexistent local time (spring forward) resolves to a
-                # real instant rather than raising; a repeated one (autumn
-                # back) resolves to its first occurrence, so it fires once.
-                utc = local.astimezone(_UTC).replace(tzinfo=None)
+            # Resolve every slot to a real instant BEFORE ordering them.
+            # Local time-of-day is not monotone across a spring-forward gap:
+            # a nonexistent 02:30 resolves with the pre-transition offset and
+            # lands *after* a real 03:00, so ordering by the typed string
+            # returns them backwards and, at count=1, hands back the later
+            # instant while the earlier slot is never fired at all.
+            #
+            # A nonexistent local time still resolves rather than raising; a
+            # repeated one (autumn back) resolves to its first occurrence, so
+            # it fires once. `set` collapses two slots that a sub-hour shift
+            # maps onto the same instant.
+            for utc in sorted({
+                datetime.combine(day, slot, tzinfo=tz)
+                .astimezone(_UTC)
+                .replace(tzinfo=None)
+                for slot in parsed
+            }):
                 if utc > after and utc not in found:
                     found.append(utc)
                     if len(found) == count:

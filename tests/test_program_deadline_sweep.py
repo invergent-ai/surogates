@@ -42,15 +42,6 @@ async def skipped_invitation(make_invitation):
     )
 
 
-@pytest_asyncio.fixture
-async def replied_invitation(make_invitation):
-    return await make_invitation(
-        delivery_state="accepted",
-        response_state="replied",
-        deadline_at=_utcnow() + timedelta(hours=24),
-    )
-
-
 @pytest.mark.asyncio
 async def test_an_unanswered_invitation_expires(
     sf, awaiting_invitation, reload_invitation,
@@ -80,12 +71,37 @@ async def test_a_skipped_patient_is_not_a_non_responder(
     assert row.response_state != "no_reply_by_deadline"
 
 
+@pytest_asyncio.fixture
+async def replied_but_never_closed(make_invitation):
+    return await make_invitation(
+        delivery_state="accepted",
+        response_state="replied",
+        deadline_at=_utcnow() + timedelta(hours=24),
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_replied_invitation_is_left_alone(
-    sf, replied_invitation, reload_invitation,
+async def test_a_check_in_the_agent_never_closed_expires(
+    sf, replied_but_never_closed, reload_invitation,
 ):
+    # Only checkin_outcome moves an invitation out of "replied". If the
+    # patient trails off mid-answer, or the session errors, or the model
+    # simply never calls the tool, the row would stay open forever — and
+    # because an open check-in suppresses the next one, that patient would
+    # silently drop out of the Program for good.
     await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
-    row = await reload_invitation(replied_invitation.id)
+    row = await reload_invitation(replied_but_never_closed.id)
+    assert row.response_state == "incomplete"
+    # Distinct from silence: they did answer, the check-in just never closed.
+    assert row.response_state != "no_reply_by_deadline"
+
+
+@pytest.mark.asyncio
+async def test_a_replied_invitation_inside_its_deadline_is_left_alone(
+    sf, replied_but_never_closed, reload_invitation,
+):
+    await sweep_deadlines(sf, now=_utcnow())
+    row = await reload_invitation(replied_but_never_closed.id)
     assert row.response_state == "replied"
 
 

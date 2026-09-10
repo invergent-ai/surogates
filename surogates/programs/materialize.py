@@ -25,7 +25,15 @@ from surogates.db.models import (
 
 #: Response states meaning "this person is mid-check-in".  A patient in one of
 #: these must not be handed a second opener.
-_OPEN_RESPONSE_STATES = ("replied", "in_progress")
+#
+#: ``awaiting_reply`` belongs here.  The canonical cadence is twice a day and
+#: the default response deadline is a full day, so the next occurrence arrives
+#: while the first opener is still live: without it the patient is asked two
+#: questions at once and whichever they do not answer is later swept as a
+#: non-response.  The deadline sweep is what eventually clears these — it runs
+#: first in the tick precisely so an expired opener does not suppress the next
+#: check-in.
+_OPEN_RESPONSE_STATES = ("awaiting_reply", "replied", "in_progress")
 
 #: Used when a Program's projected config carries no deadline of its own.
 _DEFAULT_DEADLINE_HOURS = 24
@@ -50,10 +58,10 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
 async def _has_open_invitation(db, schedule, identity) -> bool:
     """Is this patient already mid-check-in with this agent?
 
-    Deliberately does not filter on ``awaiting_reply``: an unanswered opener is
-    closed by the deadline sweep before the next tick evaluates the roster, so
-    by the time this runs an ``awaiting_reply`` row is either expired or from
-    this same occurrence.
+    Counts an unanswered opener too.  The sweep runs first in the tick, so an
+    ``awaiting_reply`` row still here is one whose deadline has not passed —
+    a live question the patient has yet to answer, and not something to talk
+    over with a second one.
     """
     return (
         await db.execute(

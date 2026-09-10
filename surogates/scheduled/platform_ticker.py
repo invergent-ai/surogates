@@ -381,13 +381,23 @@ async def main(
         register_status_applier(_session_factory())
 
         async def _program_run_one(row):  # pragma: no cover - prod path
+            # Stamp the occurrence with the instant it was DUE, never the wall
+            # clock. The (program_id, scheduled_for) unique constraint is what
+            # makes a retried tick harmless — with a fresh clock per call it
+            # can never collide, and a pod rolled mid-tick double-messages the
+            # whole roster.
             fired_at = await materialize_occurrence(
                 row,
                 session_factory=_session_factory(),
                 identity_lookup=_identity_lookup,
-                now=_program_now(),
+                now=row.next_run_at or _program_now(),
             )
             logger.debug("[programs] materialised occurrence %s", fired_at)
+            # ponytail: the next run is computed from the wall clock, so slots
+            # missed during an outage are dropped rather than caught up. A
+            # burst of six openers after a three-day outage is worse than a
+            # gap; if catch-up is ever wanted, compute from row.next_run_at
+            # and cap the burst.
             upcoming = _next_occurrences_for(row)
             await program_store.mark_fired(
                 row, next_run_at=upcoming[0] if upcoming else None,
