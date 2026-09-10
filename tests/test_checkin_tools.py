@@ -21,7 +21,7 @@ ESCALATION_SA = uuid.uuid4()
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 async def _reload(sf, invitation_id):

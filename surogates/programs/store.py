@@ -6,7 +6,7 @@ uses.  Portable across SQLite (tests) and Postgres (prod): the claim is
 SQLAlchemy Core so it runs on both, and the SKIP LOCKED optimisation is applied
 opportunistically.
 
-Times here are **naive UTC**, matching what ``cadence.next_occurrences``
+Times here are **aware UTC**, matching what ``cadence.next_occurrences``
 returns.  Mixing naive and aware datetimes across this boundary is the kind of
 bug that only shows up an hour after a DST change.
 """
@@ -38,7 +38,7 @@ _CADENCE_KEYS = ("weekdays", "times_local", "timezone")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 class ProgramSchedule(BaseModel):

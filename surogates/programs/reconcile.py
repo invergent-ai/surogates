@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 async def reconcile_programs(store: Any, *, projected: list[dict]) -> None:

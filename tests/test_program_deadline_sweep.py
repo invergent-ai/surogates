@@ -11,7 +11,7 @@ from surogates.programs.ticker import sweep_deadlines
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 @pytest_asyncio.fixture

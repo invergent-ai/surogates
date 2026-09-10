@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -35,6 +35,8 @@ from sqlalchemy.orm import (
 )
 from sqlalchemy.types import TypeDecorator
 
+_UTC = timezone.utc
+
 
 class GUID(TypeDecorator):
     """Platform-independent UUID column.
@@ -61,6 +63,39 @@ class GUID(TypeDecorator):
         if value is None or isinstance(value, uuid.UUID):
             return value
         return uuid.UUID(str(value))
+
+
+class UTCDateTime(TypeDecorator):
+    """A ``timestamptz`` column that is always UTC-aware in Python.
+
+    Two things go wrong with a plain ``DateTime(timezone=True)`` and naive
+    values.  On write, asyncpg's timestamptz encoder interprets a naive
+    datetime as *system local* — so a pod with ``TZ=Europe/Bucharest`` in its
+    values file stores every check-in three hours off, and nothing in a
+    SQLite-backed test can see it.  On read, SQLite hands back naive values
+    while Postgres hands back aware ones, so the same comparison raises on one
+    backend and passes on the other.
+
+    This pins both ends: a naive value is bound as UTC (never local), and every
+    read comes back aware UTC on every backend.  Postgres DDL is unchanged.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_UTC)
+        return value.astimezone(_UTC)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        if value.tzinfo is None:
+            return value.replace(tzinfo=_UTC)
+        return value.astimezone(_UTC)
 
 
 class Base(DeclarativeBase):
@@ -921,14 +956,14 @@ class ProgramScheduleRow(Base):
         Boolean, nullable=False, default=True,
     )
     next_run_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        UTCDateTime(), nullable=True,
     )
     last_run_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        UTCDateTime(), nullable=True,
     )
     locked_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     locked_until: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        UTCDateTime(), nullable=True,
     )
 
 
@@ -952,7 +987,7 @@ class ProgramOccurrenceRow(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
+        UTCDateTime(), nullable=False,
     )
     #: Which skill — not its content.  The skill is read live at reply time so
     #: a doctor can correct a wrong question mid-check-in.
@@ -966,7 +1001,7 @@ class ProgramOccurrenceRow(Base):
         Text, nullable=False, server_default="fired",
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        UTCDateTime(), nullable=False, server_default=func.now(),
     )
 
 
@@ -1034,7 +1069,7 @@ class ProgramInvitationRow(Base):
         Text, nullable=False, server_default="none",
     )
     deadline_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True,
+        UTCDateTime(), nullable=True,
     )
     session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         GUID(), nullable=True,
@@ -1046,7 +1081,7 @@ class ProgramInvitationRow(Base):
     #: Why this row is in the state it is, in operator words.
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(),
+        UTCDateTime(), nullable=False, server_default=func.now(),
     )
 
 

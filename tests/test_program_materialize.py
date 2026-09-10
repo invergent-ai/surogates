@@ -15,7 +15,7 @@ from surogates.programs.materialize import materialize_occurrence
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 async def _invitations(sf, occurrence_id):

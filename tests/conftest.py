@@ -117,7 +117,7 @@ async def _make_program_invitation(
 
     from surogates.db.models import ProgramInvitationRow, ProgramOccurrenceRow
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     async with sf() as db:
         occ = ProgramOccurrenceRow(
             org_id=uuid4(),

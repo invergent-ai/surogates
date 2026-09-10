@@ -17,7 +17,7 @@ from surogates.programs.inbound import (
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 async def _seed(sf, *, agent_id="a1", response_state="awaiting_reply", org_id=None):

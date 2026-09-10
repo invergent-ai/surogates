@@ -35,12 +35,17 @@ def next_occurrences(
 ) -> list[datetime]:
     """The next *count* fire instants strictly after *after*.
 
-    *after* and the returned instants are naive UTC.  Returns fewer than
+    The returned instants are **aware UTC**.  *after* may be aware or naive;
+    a naive value is taken as UTC, never as local time.  Returns fewer than
     *count* — possibly none — when the cadence is empty or cannot be
     satisfied within the scan window.
     """
     if not weekdays or not times_local:
         return []
+    if after.tzinfo is None:
+        after = after.replace(tzinfo=_UTC)
+    else:
+        after = after.astimezone(_UTC)
 
     tz = ZoneInfo(timezone)
     wanted = {_WEEKDAYS[d] for d in weekdays if d in _WEEKDAYS}
@@ -53,7 +58,7 @@ def next_occurrences(
     )
 
     found: list[datetime] = []
-    day = after.replace(tzinfo=_UTC).astimezone(tz).date()
+    day = after.astimezone(tz).date()
     for _ in range(_MAX_DAYS_SCANNED):
         if day.weekday() in wanted:
             # Resolve every slot to a real instant BEFORE ordering them.
@@ -68,9 +73,7 @@ def next_occurrences(
             # it fires once. `set` collapses two slots that a sub-hour shift
             # maps onto the same instant.
             for utc in sorted({
-                datetime.combine(day, slot, tzinfo=tz)
-                .astimezone(_UTC)
-                .replace(tzinfo=None)
+                datetime.combine(day, slot, tzinfo=tz).astimezone(_UTC)
                 for slot in parsed
             }):
                 if utc > after and utc not in found:

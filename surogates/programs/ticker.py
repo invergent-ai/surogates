@@ -33,7 +33,7 @@ _STARTED_STATES = ("replied", "in_progress")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) -> int:

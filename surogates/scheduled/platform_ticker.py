@@ -180,9 +180,9 @@ def _field(row: Any, name: str) -> Any:
 
 
 def _program_now():
-    """Naive UTC, matching what the cadence module returns."""
+    """Aware UTC, matching what the cadence module returns."""
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 def _next_occurrences_for(row):
