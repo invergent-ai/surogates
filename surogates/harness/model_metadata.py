@@ -119,6 +119,19 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0012,
         supports_vision=True,
     ),
+    # --- Meta ---------------------------------------------------------------
+    # What ``pro_llm_model`` resolves the ``surogate-pro`` tier -- and the
+    # hidden advisor -- to.  Reasoning is MANDATORY on this model (OpenRouter
+    # reports no way to disable it) and its tokens are counted as completion,
+    # so the output rate is what a Pro turn actually pays.
+    "meta/muse-spark-1.3": ModelInfo(
+        id="meta/muse-spark-1.3",
+        context_window=1_048_576,
+        max_output_tokens=943_718,
+        input_cost_per_1k=0.00125,
+        output_cost_per_1k=0.00425,
+        supports_vision=True,
+    ),
     # --- Google ------------------------------------------------------------
     "google/gemini-3-flash-preview": ModelInfo(
         id="google/gemini-3-flash-preview",
@@ -331,6 +344,8 @@ _ALIASES: dict[str, str] = {
     "deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
     "deepseek/deepseek-v4-flash-20260423": "deepseek/deepseek-v4-flash-0731",
     "deepseek-ai/DeepSeek-V4-Flash": "deepseek/deepseek-v4-flash-0731",
+    "muse-spark-1.3": "meta/muse-spark-1.3",
+    "meta/muse-spark-1.3-20260902": "meta/muse-spark-1.3",
     "gemini-3-flash-preview": "google/gemini-3-flash-preview",
     "google/gemini-3-flash-preview-20251217": "google/gemini-3-flash-preview",
     "gemini-3.5-flash": "google/gemini-3.5-flash",

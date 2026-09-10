@@ -45,3 +45,11 @@ def test_sentinel_session_prices_against_the_served_model() -> None:
     )
     assert priced == "deepseek/deepseek-v4.1-flash"
     assert cost > 0
+
+
+def test_pro_sentinel_session_prices_against_the_served_model() -> None:
+    cost, priced = estimate_call_cost(
+        "surogate-pro", "meta/muse-spark-1.3", 1_000, 1_000,
+    )
+    assert priced == "meta/muse-spark-1.3"
+    assert cost > 0
