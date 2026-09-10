@@ -150,3 +150,43 @@ async def test_resuming_does_not_fire_the_slot_that_was_missed(sf):
     assert resumed.active is True
     assert resumed.next_run_at > _utcnow()
     assert await store.claim_due(worker_id="w1", limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_one_malformed_program_does_not_stop_the_fleet(sf):
+    # Nothing validates the projection before it arrives. A single bad row
+    # used to raise out of the loop, skipping every Program after it AND
+    # skipping deactivate_missing — so a Program the operator had paused kept
+    # messaging patients indefinitely, every tick, because of someone else's
+    # typo.
+    store = ProgramScheduleStore(sf)
+    good_before, good_after, paused = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await reconcile_programs(store, projected=[_projected(paused)])
+    assert (await store.get(paused)).active is True
+
+    await reconcile_programs(store, projected=[
+        _projected(good_before),
+        _projected(uuid.uuid4(), timezone="Mars/Olympus_Mons"),
+        _projected(uuid.uuid4(), times_local=["9"]),
+        {"id": "not-a-uuid", "org_id": str(uuid.uuid4()), "agent_id": "a1"},
+        _projected(good_after),
+    ])
+
+    assert (await store.get(good_before)).active is True
+    # The Program after the bad rows still got its schedule.
+    assert (await store.get(good_after)).active is True
+    # And the one that left the projection was deactivated despite the noise.
+    assert (await store.get(paused)).active is False
+
+
+@pytest.mark.asyncio
+async def test_a_program_that_cannot_be_parsed_does_not_fire(sf):
+    # A Program we cannot understand must not message anyone. Leaving it out
+    # of `seen` deactivates whatever schedule it had.
+    store = ProgramScheduleStore(sf)
+    pid = uuid.uuid4()
+    await reconcile_programs(store, projected=[_projected(pid)])
+    await reconcile_programs(
+        store, projected=[_projected(pid, timezone="Mars/Olympus_Mons")],
+    )
+    assert (await store.get(pid)).active is False

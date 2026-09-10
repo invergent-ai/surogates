@@ -364,21 +364,40 @@ async def main(
     # outbox.
     program_ticker = None
     if not _run_one_injected:  # prod path only (session_store built above)
-        from surogates.programs.delivery import register_status_applier
+        from surogates.channels.delivery import DeliveryService
         from surogates.programs.materialize import (
             identity_lookup_from,
             materialize_occurrence,
             send_queued_openers,
         )
+        from surogates.programs.opener import make_opener_enqueue
         from surogates.programs.store import ProgramScheduleStore
         from surogates.programs.ticker import ProgramTicker
 
         program_store = ProgramScheduleStore(_session_factory())
         _identity_lookup = identity_lookup_from(_session_factory())
 
-        # Lets the WhatsApp parser record delivery statuses. It is synchronous
-        # and holds no database handle, so this is how it gets one.
-        register_status_applier(_session_factory())
+        # The delivery-status applier is NOT registered here. Meta's status
+        # webhooks arrive in the channels process, and that is where the
+        # parser that reads them runs; registering it in this process would
+        # satisfy the check and silently discard every status. See
+        # channels/runner.py.
+
+        async def _config_for_program(program_id):  # pragma: no cover - prod
+            sched = await program_store.get(program_id)
+            return sched.config if sched is not None else None
+
+        _opener_enqueue = make_opener_enqueue(
+            session_store=session_store,
+            redis=redis,
+            session_factory=_session_factory(),
+            delivery_service=DeliveryService(
+                session_factory=_session_factory(), redis_client=redis,
+            ),
+            storage=storage,
+            settings=settings,
+            config_for_program=_config_for_program,
+        )
 
         async def _program_run_one(row):  # pragma: no cover - prod path
             # Stamp the occurrence with the instant it was DUE, never the wall
@@ -408,6 +427,7 @@ async def main(
                 _session_factory(),
                 identity_lookup=_identity_lookup,
                 now=_program_now(),
+                enqueue=_opener_enqueue,
             )
 
         # Mirror ops' active Programs. Unconfigured by default: with no

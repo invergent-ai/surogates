@@ -1013,9 +1013,20 @@ class ProgramInvitationRow(Base):
     delivery_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="queued",
     )
-    provider_message_id: Mapped[Optional[str]] = mapped_column(
-        Text, nullable=True,
+    #: The outbox row carrying this opener.  This is the join key the delivery
+    #: loop reports back through: the provider's message id does not exist
+    #: until the dispatcher has actually posted, minutes after enqueue.
+    outbox_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True, index=True,
     )
+    provider_message_id: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, index=True,
+    )
+    #: The provider's own wording for a failed send.  Kept apart from
+    #: ``reason`` so a late status webhook can never overwrite the agent's
+    #: clinical note or a skip explanation — the three axes stay separate on
+    #: disk too.
+    delivery_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     response_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default="not_started",
     )

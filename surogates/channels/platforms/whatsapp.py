@@ -578,6 +578,15 @@ class WhatsAppPlatform:
             # conversation.  Free-form text here comes back 131047, which is
             # permanent, so the opener would be dropped with nothing surfaced
             # to the operator.
+            if not isinstance(template, dict) or not template.get("name") or not template.get("language"):
+                # Nothing to retry: the payload can never become sendable.
+                # The wording is in the permanent-error list so the dispatcher
+                # drops it now instead of posting sixty times over half an
+                # hour and then reporting only "'language'".
+                return SendResult(
+                    success=False,
+                    error="template payload incomplete: name and language required",
+                )
             wamid, error = await send_message(
                 self._http,
                 token=token,

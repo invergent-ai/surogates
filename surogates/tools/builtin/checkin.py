@@ -13,6 +13,7 @@ import uuid
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 
 from surogates.db.models import (
     Event,
@@ -136,7 +137,11 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
         )
         row = await db.get(ProgramInvitationRow, inv.id)
 
-        if not target:
+        try:
+            target_id = uuid.UUID(str(target)) if target else None
+        except ValueError:
+            target_id = None
+        if target_id is None:
             # A visible failure, never a silent one: the agent saying it
             # escalated is not evidence that anyone was told.
             row.escalation_state = "failed"
@@ -162,7 +167,7 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
                 # The designated operator, never the acting principal: an item
                 # raised against the patient reaches nobody but the patient.
                 user_id=None,
-                service_account_id=uuid.UUID(str(target)),
+                service_account_id=target_id,
                 session_id=inv.session_id,
                 source_event_id=event.id,
                 # An existing InboxKind. A new value would never pass the ops
@@ -180,7 +185,28 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
         # Escalation is its own axis: raising a hand does not mean the patient
         # has finished answering, so response_state is deliberately untouched.
         row.escalation_state = "raised"
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # The configured target is not a service account this database
+            # knows — a human's id pasted where a principal belongs, say. The
+            # insert rolled back, taking the event and the "raised" mark with
+            # it. Record the failure in its own transaction so the raised
+            # hand is not simply lost.
+            await db.rollback()
+            logger.warning(
+                "[programs] escalation target %s for program %s is not a "
+                "service account", target_id, inv.program_id,
+            )
+            async with sf() as db2:
+                row2 = await db2.get(ProgramInvitationRow, inv.id)
+                row2.escalation_state = "failed"
+                row2.reason = "Escalation target is not a valid service account"
+                await db2.commit()
+            return (
+                "Could not escalate: this Program's responsible operator is "
+                "not configured correctly."
+            )
 
     return "Escalated to the responsible operator."
 

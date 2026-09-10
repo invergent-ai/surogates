@@ -9,6 +9,7 @@ the record instead of being the thing the operator needs to see.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -22,6 +23,8 @@ from surogates.db.models import (
     ProgramOccurrenceRow,
     ProgramScheduleRow,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Response states meaning "this person is mid-check-in".  A patient in one of
 #: these must not be handed a second opener.
@@ -163,10 +166,16 @@ async def send_queued_openers(
     calls into the runtime to cancel anything — and it closes the race where
     permission is withdrawn between materialising the occurrence and sending.
 
-    *enqueue* is ``async (invitation) -> str | None`` returning the provider
-    message id.  It is optional so the cancellation pass can be exercised on
-    its own; when it is absent, survivors stay queued for the next tick rather
-    than being silently marked sent.
+    *enqueue* is ``async (invitation) -> int | None`` returning the **outbox
+    row id** — never a provider message id, which does not exist until the
+    dispatcher has posted.  The invitation is keyed on that row and the
+    dispatcher reports the provider id back through it.  It is optional so
+    the cancellation pass can be exercised alone; production always passes
+    it, and the ticker refuses to start without one.
+
+    Every row is committed on its own.  A single commit at the end meant a
+    failure on the k-th enqueue rolled back the first k-1, whose openers
+    were already in the outbox — and the next tick sent them all again.
 
     Returns the number of invitations cancelled.
     """
@@ -176,43 +185,53 @@ async def send_queued_openers(
             await db.execute(
                 sa.select(ProgramInvitationRow)
                 .where(ProgramInvitationRow.delivery_state == "queued")
+                .where(ProgramInvitationRow.outbox_id.is_(None))
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).scalars().all()
+        deadlines = await _deadline_hours_by_program(
+            db, {row.program_id for row in rows},
+        )
 
-        survivors = []
-        for row in rows:
-            identity = await identity_lookup(
-                row.org_id, row.platform, row.user_id,
-            )
+    for pending in rows:
+        async with session_factory() as db:
+            row = await db.get(ProgramInvitationRow, pending.id)
+            if row is None or row.delivery_state != "queued" or row.outbox_id is not None:
+                continue  # another worker got here first
+
+            try:
+                identity = await identity_lookup(
+                    row.org_id, row.platform, row.user_id,
+                )
+            except Exception:  # noqa: BLE001 — one patient, not the fleet
+                logger.exception(
+                    "[programs] identity lookup failed for invitation %s; "
+                    "leaving it queued", row.id,
+                )
+                continue
+
             if identity is None or _permission(identity) != "granted":
                 row.delivery_state = "canceled"
                 row.reason = "Permission withdrawn before the opener was sent"
                 cancelled += 1
+                await db.commit()
                 continue
-            survivors.append(row)
-        await db.commit()
 
-        if enqueue is None:
-            return cancelled
-
-        deadlines = await _deadline_hours_by_program(
-            db, {row.program_id for row in survivors},
-        )
-        for row in survivors:
-            provider_message_id = await enqueue(row)
-            if provider_message_id is None:
-                # The opener was not accepted; leave it queued so the next
-                # tick retries rather than starting a deadline nobody was
-                # asked to meet.
+            if enqueue is None:
                 continue
-            row.provider_message_id = provider_message_id
-            row.delivery_state = "accepted"
+
+            outbox_id = await enqueue(row)
+            if outbox_id is None:
+                # Nothing was handed over; leave it queued so the next tick
+                # retries rather than starting a deadline nobody was asked
+                # to meet.
+                continue
+            row.outbox_id = int(outbox_id)
             row.response_state = "awaiting_reply"
             row.deadline_at = now + timedelta(
                 hours=deadlines.get(row.program_id, _DEFAULT_DEADLINE_HOURS),
             )
-        await db.commit()
+            await db.commit()
 
     return cancelled
 
@@ -241,13 +260,19 @@ def identity_lookup_from(session_factory: Any):
 
     async def _lookup(org_id, platform, user_id):
         async with session_factory() as db:
+            # Newest first, and never scalar_one: nothing unique guards
+            # (org, platform, user), so a patient whose new number was linked
+            # without removing the old one has two rows, and raising here
+            # would stop every opener in the fleet on this patient's account.
             return (
                 await db.execute(
                     sa.select(ChannelIdentity)
                     .where(ChannelIdentity.org_id == org_id)
                     .where(ChannelIdentity.platform == platform)
                     .where(ChannelIdentity.user_id == user_id)
+                    .order_by(ChannelIdentity.id.desc())
+                    .limit(1)
                 )
-            ).scalar_one_or_none()
+            ).scalars().first()
 
     return _lookup
