@@ -39,7 +39,11 @@ class _SlackClient:
 
 
 class _Store:
-    async def emit_synthetic_user_message(self, *a, **kw):
+    def __init__(self):
+        self.emitted = []
+
+    async def emit_synthetic_user_message(self, session_id, **kw):
+        self.emitted.append((session_id, kw))
         return 42
 
 
@@ -75,11 +79,13 @@ def _slack_enqueue(monkeypatch, *, client, creds=None, config=None):
         return creds if creds is not None else {"bot_token": "xoxb-1"}
 
     delivery = _Delivery()
+    store = _Store()
     enqueue = make_opener_enqueue(
-        session_store=_Store(), redis=None, session_factory=None,
+        session_store=store, redis=None, session_factory=None,
         delivery_service=delivery, config_for_program=_config,
         credentials_for=_creds, slack_client_factory=lambda token: client,
     )
+    captured["store"] = store
     return enqueue, delivery, captured, session_id
 
 
@@ -94,9 +100,22 @@ async def test_the_slack_opener_lands_in_the_direct_message_session(
     client = _SlackClient(dm="D777")
     enqueue, delivery, captured, _sid = _slack_enqueue(monkeypatch, client=client)
     assert await enqueue(inv) == 99
-    # Inbound keys a Slack DM session on the D-channel id, so the opener must too.
+    # Inbound keys a Slack DM session on the D-channel id, so the opener must
+    # too: the same key the reply pipeline computes for a top-level DM.
+    from surogates.channels.source import SessionSource, build_session_key
+
     assert client.opened == ["U1"]
-    assert captured["key"] == "agent:slack:dm:D777"
+    assert captured["key"] == build_session_key(SessionSource(
+        platform="slack", chat_id="D777", chat_type="dm", user_id="U1",
+        user_name="", thread_id=None, chat_name="D777",
+    ))
+    # The transcript event is user-role; the opener is marked as the agent's
+    # own message, not something the person said.
+    ((event_sid, event), ) = captured["store"].emitted
+    assert event_sid == _sid
+    assert event["content"] == "[Check-in opener sent: Time for your check-in. Reply to begin.]"
+    assert event["synthetic"] == "checkin_opener"
+    assert event["metadata"]["program_id"] == str(inv.program_id)
     assert captured["config"]["slack_channel_id"] == "D777"
     assert captured["config"]["channel_identifier"] == "A0123"
     ((_, event_id, channel, destination, payload),) = delivery.calls

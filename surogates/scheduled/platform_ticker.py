@@ -395,16 +395,25 @@ async def main(
             from surogates.channels.credentials import resolve_channel_credentials
             from surogates.tenant.credentials import CredentialVault
 
-            _vault = CredentialVault(
-                _session_factory(),
-                encryption_key=settings.encryption_key.encode("utf-8"),
-            )
-
-            async def _credentials_for(kind, identifier, org_id):  # pragma: no cover - prod
-                return await resolve_channel_credentials(
-                    vault=_vault, kind=kind, identifier=identifier, org_id=org_id,
-                    refs={"bot_token": "bot_token"},
+            try:
+                _vault = CredentialVault(
+                    _session_factory(),
+                    encryption_key=settings.encryption_key.encode("utf-8"),
                 )
+            except Exception:
+                # A malformed key must cost Slack openers, not the whole
+                # ticker: scheduled runs and ambient ticks share this process.
+                logger.warning(
+                    "[programs] invalid encryption_key; Slack openers disabled",
+                )
+                _vault = None
+
+            if _vault is not None:
+                async def _credentials_for(kind, identifier, org_id):  # pragma: no cover - prod
+                    return await resolve_channel_credentials(
+                        vault=_vault, kind=kind, identifier=identifier,
+                        org_id=org_id, refs={"bot_token": "bot_token"},
+                    )
         else:
             logger.info(
                 "[programs] no encryption_key; Slack openers cannot be sent "

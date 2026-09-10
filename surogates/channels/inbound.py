@@ -750,7 +750,7 @@ class ChannelInboundPipeline:
         # replied and injecting the instruction — wait until the message has
         # cleared every gate that can still drop it, because a check-in
         # recorded as answered for a reply that was then dropped is a false
-        # record on an orgal timeline.
+        # record on an operational timeline.
         # ------------------------------------------------------------------
         _checkin_invitation = None
         try:

@@ -45,8 +45,6 @@ class OpenerUndeliverable(Exception):
 
 
 def _opener_text(config: dict) -> str:
-    if config.get("channel") == "slack":
-        return str(config.get("opener_text") or "")
     name = config.get("template_name") or "check-in"
     return f"[Check-in opener sent: template '{name}']"
 
@@ -141,8 +139,11 @@ def make_opener_enqueue(
         session_id = await _session(
             invitation, "slack", session_key, channel_id=dm_id, sender=sender,
         )
+        # The transcript event is a user-role message; the marker keeps the
+        # model from reading its own invitation as something the person said.
         event_id = await session_store.emit_synthetic_user_message(
-            session_id, content=text, synthetic="checkin_opener",
+            session_id, content=f"[Check-in opener sent: {text}]",
+            synthetic="checkin_opener",
             metadata=_metadata(invitation, template_name=None),
         )
         return await delivery_service.enqueue(
