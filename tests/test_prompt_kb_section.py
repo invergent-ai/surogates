@@ -66,7 +66,8 @@ def test_reference_kb_gets_soft_header_and_tree(tmp_path: Path):
     )
     section = builder._kb_section()
     assert "when relevant" in section.lower()
-    assert "authoritative" not in section.lower()
+    assert "## Authoritative (consult first)" not in section
+    assert "These knowledge bases are your authoritative source" not in section
     assert "Extra Notes" in section
     assert "notes.md" in section
 
