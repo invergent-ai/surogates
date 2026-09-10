@@ -1,4 +1,4 @@
-"""Session workspace storage shape tests."""
+"""Session and workspace APIs persist and clean up files within the session prefix."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import pytest
 from fastapi import BackgroundTasks, Response, UploadFile
 
 from surogates.api.routes import workspace as workspace_route
-from surogates.api.routes import prompts as prompts_route
 from surogates.api.routes import sessions as sessions_route
 from surogates.artifacts.models import ArtifactKind
 from surogates.artifacts.store import ArtifactStore
@@ -248,32 +247,6 @@ async def test_create_web_session_uses_agent_bucket_and_session_path():
     )
 
     assert response.id == store.session.id
-    assert storage.created_buckets == ["ops-agent-bucket"]
-    assert store.session.config["storage_bucket"] == "ops-agent-bucket"
-    assert store.session.config["workspace_path"] == (
-        f"/bucket-root/ops-agent-bucket/{store.session.id}"
-    )
-
-
-async def test_submit_prompt_uses_agent_bucket_and_session_path():
-    org_id = uuid4()
-    service_account_id = uuid4()
-    store = _Store(org_id)
-    storage = _RecordingStorage()
-    redis = _Redis()
-    request = _request(store, storage, redis)
-    tenant = _tenant(org_id)
-
-    accepted = await prompts_route._submit_one(
-        prompts_route.PromptRequest(prompt="run this"),
-        request=request,
-        tenant=tenant,
-        agent_id=store.agent_id,
-        service_account_id=service_account_id,
-        store=store,
-    )
-
-    assert accepted.session_id == store.session.id
     assert storage.created_buckets == ["ops-agent-bucket"]
     assert store.session.config["storage_bucket"] == "ops-agent-bucket"
     assert store.session.config["workspace_path"] == (

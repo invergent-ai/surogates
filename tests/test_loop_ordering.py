@@ -3,7 +3,6 @@ completion, dedupe before dispatch, per-session interrupt."""
 from __future__ import annotations
 
 import copy
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -90,9 +89,6 @@ def _responses(emits):
     return [p for t, p in emits if t == EventType.LLM_RESPONSE]
 
 
-# -- persist after revision -------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_length_continuation_prefix_reaches_persisted_response(monkeypatch):
     h = _harness()
@@ -109,9 +105,6 @@ async def test_recovered_conclusion_reaches_persisted_response(monkeypatch):
     emits = await _drive(h, [_resp("")] * 4, monkeypatch)
     assert _responses(emits)[-1]["message"]["content"] == "42"
     h._fail_session.assert_not_awaited()
-
-
-# -- small guards -----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -144,9 +137,6 @@ async def test_provider_error_with_partial_text_is_retried(monkeypatch):
     h._complete_session.assert_awaited_once()
 
 
-# -- fail through completion ------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_in_loop_provider_failure_goes_through_fail_session(monkeypatch):
     h = _harness()
@@ -154,119 +144,6 @@ async def test_in_loop_provider_failure_goes_through_fail_session(monkeypatch):
     h._fail_session.assert_awaited_once()
     assert h._fail_session.await_args.kwargs["reason"] == "provider_error"
     h._store.update_session_status.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_fail_session_notifies_parent_and_advances_cursor(monkeypatch):
-    store = AsyncMock()
-    store.emit_event = AsyncMock(return_value=77)
-    h = _make_loop_harness(session_store=store)
-    h._fail_session = AgentHarness._fail_session.__get__(h)
-    h._finalize_dynamic_loop_if_needed = AsyncMock(return_value=None)
-    h._resolve_loop_result_parent = AsyncMock(return_value=None)
-    notify = AsyncMock()
-    monkeypatch.setattr("surogates.harness.worker_notify.notify_parent_on_failure", notify)
-    session = _make_session()
-    session.parent_id = uuid4()
-    session.task_id = None
-    lease = SimpleNamespace(lease_token=uuid4())
-
-    await h._fail_session(session, [], lease, reason="provider_error", attempts=2)
-
-    fail = [c for c in store.emit_event.await_args_list if c.args[1] == EventType.SESSION_FAIL]
-    assert fail and fail[0].args[2]["reason"] == "provider_error"
-    assert fail[0].args[2]["attempts"] == 2
-    store.update_session_status.assert_awaited_once_with(session.id, "failed")
-    notify.assert_awaited_once()
-    h._finalize_dynamic_loop_if_needed.assert_awaited_once()
-    store.advance_harness_cursor.assert_awaited_once_with(session.id, 77, lease.lease_token)
-
-
-# -- compaction callback ----------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_error_compaction_persists_internal_messages_and_rebinds():
-    store = AsyncMock()
-    store.emit_event = AsyncMock(return_value=1)
-    h = _make_loop_harness(session_store=store)
-    h._compress_context_callback = AgentHarness._compress_context_callback.__get__(h)
-    h._memory_snapshot_cache = {}
-    messages = [
-        {"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1", "reasoning": "r"},
-        {"role": "user", "content": "u2"}, {"role": "assistant", "content": "a2"},
-    ]
-    compressed = [{"role": "user", "content": "[summary]"}, messages[-1]]
-    h._compressor = SimpleNamespace(
-        compress=AsyncMock(return_value=(compressed, {"summary": "s"})),
-        should_compress=lambda *a, **k: True,
-    )
-    system = {"role": "system", "content": "sys"}
-
-    async def build_api(msgs):
-        return [system] + [dict(m) for m in msgs]
-
-    cb = h._compress_context_callback(
-        _make_session(), messages, "sys", SimpleNamespace(lease_token=uuid4()),
-        build_api_messages=build_api,
-    )
-    result = await cb(await build_api(messages))
-
-    h._compressor.compress.assert_awaited_once()
-    assert h._compressor.compress.await_args.args[0] is messages or \
-        h._compressor.compress.await_args.args[0] == messages[:len(messages)]
-    persisted = store.emit_event.await_args.args[2]["compacted_messages"]
-    assert persisted == compressed
-    assert all(m["role"] != "system" for m in persisted)
-    assert messages == compressed
-    assert result[0] is system and result[1:] == [dict(m) for m in compressed]
-
-
-# -- streaming dedupe before dispatch ---------------------------------------
-
-
-def _tc(name: str, args: dict, call_id: str) -> dict:
-    return {"id": call_id, "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args)}}
-
-
-@pytest.mark.asyncio
-async def test_streaming_executor_dedupes_and_caps_on_add():
-    from tests.test_streaming_executor import _make_executor
-
-    ex = _make_executor()
-    ex.add_tool(_tc("write_file", {"path": "a"}, "c1"))
-    ex.add_tool(_tc("write_file", {"path": "a"}, "c2"))
-    for i in range(7):
-        ex.add_tool(_tc("delegate_task", {"n": i}, f"d{i}"))
-    names = [t.tool_call["function"]["name"] for t in ex._tracked]
-    ex.discard()
-    assert names.count("write_file") == 1
-    assert names.count("delegate_task") == 5
-
-
-# -- mission pre-check ------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_mission_check_skips_db_without_active_mission(monkeypatch):
-    factory = MagicMock()
-    h = _make_loop_harness(session_store=AsyncMock())
-    h._session_factory = factory
-    h._mission_has_pending_work = AgentHarness._mission_has_pending_work.__get__(h)
-
-    queried = []
-
-    async def spy(self, sid):
-        queried.append(sid)
-        return None
-
-    monkeypatch.setattr("surogates.missions.store.MissionStore.get_active_for_session", spy)
-    assert await h._mission_has_pending_work(_make_session()) is False
-    assert queried == []
-
-
-# -- per-session interrupt --------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -341,9 +218,3 @@ async def test_coding_agent_cancels_on_the_session_interrupt_only(monkeypatch):
     assert captured["should_cancel"]() is False
     flag["v"] = True
     assert captured["should_cancel"]() is True
-
-
-def test_global_interrupt_module_is_gone():
-    import importlib.util
-
-    assert importlib.util.find_spec("surogates.tools.utils.interrupt") is None

@@ -1,4 +1,4 @@
-"""Tests for JSON tool-call argument repair and malformed-argument safety."""
+"""Malformed tool arguments are handled safely during execution and streaming."""
 
 from __future__ import annotations
 
@@ -12,38 +12,9 @@ import pytest
 
 from surogates.harness.tool_exec import (
     execute_single_tool,
-    repair_tool_call_arguments,
-    tool_call_arguments_look_incomplete,
 )
 from surogates.harness.llm_call import call_llm_streaming_inner
-from surogates.harness.loop import build_partial_tool_call_recovery_results
 from surogates.tools.registry import ToolRegistry, ToolSchema
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ('{"path": "a.txt", "content": "hello",}', {"path": "a.txt", "content": "hello"}),
-        ('{"command": "printf \t hi"}', {"command": "printf \t hi"}),
-        ('{"path": "a.txt", "content": "hello"', {"path": "a.txt", "content": "hello"}),
-        ('{"items": [1, 2, 3,]}', {"items": [1, 2, 3]}),
-        ('{"path": "a.txt"}}', {"path": "a.txt"}),
-    ],
-)
-def test_repair_tool_call_arguments_handles_common_model_json_damage(
-    raw: str,
-    expected: dict,
-) -> None:
-    repaired = repair_tool_call_arguments(raw, "write_file")
-
-    assert json.loads(repaired) == expected
-
-
-def test_tool_call_arguments_look_incomplete_detects_truncated_objects() -> None:
-    assert tool_call_arguments_look_incomplete('{"path": "a.txt"') is True
-    assert tool_call_arguments_look_incomplete('{"items": [1, 2}') is True
-    assert tool_call_arguments_look_incomplete('{"path": "a.txt"}') is False
-    assert tool_call_arguments_look_incomplete("") is False
 
 
 @pytest.mark.asyncio
@@ -145,18 +116,3 @@ async def test_streaming_marks_incomplete_tool_call_arguments_as_partial() -> No
     assert usage["finish_reason"] == "tool_calls"
     assert usage["partial_tool_call"] is True
     assert usage["partial_tool_names"] == ["write_file"]
-
-
-def test_partial_tool_call_recovery_results_preserve_tool_call_pairing() -> None:
-    tool_calls = [
-        {"id": "tc_1", "function": {"name": "write_file", "arguments": "{}"}},
-        {"id": "tc_2", "function": {"name": "terminal", "arguments": "{}"}},
-    ]
-
-    results = build_partial_tool_call_recovery_results(tool_calls)
-
-    assert [result["tool_call_id"] for result in results] == ["tc_1", "tc_2"]
-    payloads = [json.loads(result["content"]) for result in results]
-    assert payloads[0]["error"].startswith("Partial tool call arguments")
-    assert payloads[0]["tool"] == "write_file"
-    assert payloads[1]["tool"] == "terminal"

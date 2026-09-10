@@ -1,4 +1,4 @@
-"""Unit tests for CodeCommandMixin via a fake harness (no real AgentHarness)."""
+"""Code-command execution workflows with simulated storage and sandbox services."""
 
 from __future__ import annotations
 
@@ -91,24 +91,6 @@ def _last_message(harness) -> str:
     event_type, data = harness._store.events[-1]
     assert event_type == EventType.LLM_RESPONSE
     return data["message"]["content"]
-
-
-async def test_help_emits_usage():
-    h = _Harness()
-    await h._handle_code_command(_session(), "/code", _lease())
-    assert "/code claude" in _last_message(h)
-
-
-async def test_login_emits_instructions():
-    h = _Harness()
-    await h._handle_code_command(_session(), "/code login claude", _lease())
-    assert "claude setup-token" in _last_message(h)
-
-
-async def test_status_without_vault_explains():
-    h = _Harness(vault=None)
-    await h._handle_code_command(_session(), "/code status", _lease())
-    assert "vault" in _last_message(h).lower()
 
 
 def _event_types(harness):

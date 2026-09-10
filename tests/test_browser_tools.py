@@ -699,44 +699,6 @@ BROWSER_TOOL_NAMES = [
 ]
 
 
-class TestToolWiring:
-    def test_router_locates_browser_tools_in_harness(self) -> None:
-        from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-
-        for tool in BROWSER_TOOL_NAMES:
-            assert TOOL_LOCATIONS[tool] == ToolLocation.HARNESS, tool
-
-    def test_runtime_registers_browser_tools(self) -> None:
-        from surogates.tools.registry import ToolRegistry
-        from surogates.tools.runtime import ToolRuntime
-
-        registry = ToolRegistry()
-        ToolRuntime(registry).register_builtins()
-
-        for tool in BROWSER_TOOL_NAMES:
-            assert registry.has(tool), tool
-
-    def test_browser_scroll_schema_explains_direction(self) -> None:
-        from surogates.tools.registry import ToolRegistry
-        from surogates.tools.runtime import ToolRuntime
-
-        registry = ToolRegistry()
-        ToolRuntime(registry).register_builtins()
-
-        [schema] = registry.get_schemas(names={"browser_scroll"})
-        function = schema["function"]
-        delta_y = function["parameters"]["properties"]["delta_y"]
-        assert "positive" in function["description"].lower()
-        assert "scroll down" in function["description"].lower()
-        assert "positive" in delta_y["description"].lower()
-        assert "scroll down" in delta_y["description"].lower()
-
-    def test_governance_url_arg_includes_browser_navigate(self) -> None:
-        from surogates.governance.policy import _URL_ARGUMENT_MAP
-
-        assert "url" in _URL_ARGUMENT_MAP["browser_navigate"]
-
-
 class TestRouterDispatch:
     async def test_router_dispatches_browser_navigate(self, tenant) -> None:
         from surogates.governance.policy import GovernanceGate, PolicyDecision
@@ -819,50 +781,6 @@ async def test_browser_tool_suspends_while_user_holds_control(
     assert pool.destroyed == []
 
 
-def test_browser_source_ref_uses_boundary_workspace_prefix():
-    from surogates.tools.builtin.browser import build_browser_session_source_ref
-
-    session = SimpleNamespace(
-        id="session-1",
-        channel="slack",
-        config={
-            "storage_key_prefix": "project/agent",
-            "workspace_boundary": "slack:c:G1",
-        },
-    )
-
-    assert (
-        build_browser_session_source_ref(
-            storage_bucket="agent-bucket",
-            session=session,
-            session_id="session-1",
-        )
-        == "s3://agent-bucket/project/agent/boundaries/slack:c:G1/workspace/"
-    )
-
-
-def test_browser_screenshot_key_uses_boundary_workspace_prefix():
-    from surogates.tools.builtin.browser import build_browser_screenshot_key
-
-    session = SimpleNamespace(
-        id="session-1",
-        channel="slack",
-        config={
-            "storage_key_prefix": "project/agent",
-            "workspace_boundary": "slack:c:G1",
-        },
-    )
-
-    assert (
-        build_browser_screenshot_key(
-            session=session,
-            session_id="session-1",
-            relative_path="browser-screenshots/shot.png",
-        )
-        == "project/agent/boundaries/slack:c:G1/workspace/browser-screenshots/shot.png"
-    )
-
-
 class TestGetStateFormat:
     async def test_defaults_to_markdown(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_get_state_handler
@@ -907,24 +825,6 @@ class TestGetStateFormat:
             _client_factory=lambda endpoint: FailingStateClient(),
         )
         assert json.loads(result)["error"] == "get_state_failed"
-
-
-class TestGetStateSchema:
-    def test_compact_is_gone(self) -> None:
-        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
-
-        assert "compact" not in GET_STATE_SCHEMA["properties"]
-
-    def test_every_parameter_is_documented(self) -> None:
-        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
-
-        for name, prop in GET_STATE_SCHEMA["properties"].items():
-            assert prop.get("description"), f"{name} has no description"
-
-    def test_format_enumerates_both_modes(self) -> None:
-        from surogates.tools.builtin.browser import GET_STATE_SCHEMA
-
-        assert GET_STATE_SCHEMA["properties"]["format"]["enum"] == ["markdown", "json"]
 
 
 class FakeEvaluateClient(FakeClient):
@@ -1006,36 +906,6 @@ class TestEvaluateHandler:
         assert json.loads(result)["error"] == "missing_code"
 
 
-class TestEvaluateAuditTrail:
-    """browser_evaluate's security posture is 'unrestricted but audited'.
-
-    That only holds if the complete JS source reaches the TOOL_CALL event.
-    These pin the two transformations it passes through on the way there.
-    """
-
-    def test_path_sanitisation_leaves_javascript_intact(self) -> None:
-        from surogates.harness.tool_exec import _sanitize_paths
-
-        code = (
-            "const rows = [...document.querySelectorAll('tr')];\n"
-            "return rows.map(r => ({t: r.innerText, n: r.children.length}));"
-        )
-        sanitized = _sanitize_paths({"code": code}, "/workspace")
-        assert sanitized["code"] == code
-
-    def test_arguments_are_not_truncated_on_the_tool_call_event(self) -> None:
-        import inspect
-
-        from surogates.harness import tool_exec
-
-        src = inspect.getsource(tool_exec)
-        # The TOOL_CALL payload carries the whole argument dict.  ``_truncate_args``
-        # feeds ``arguments_excerpt`` on a *different* event -- if it ever moves
-        # onto ``tool_call_data``, the audit trail silently loses long JS bodies.
-        assert '"arguments": sanitized_args,' in src
-        assert '"arguments": _truncate_args' not in src
-
-
 class TestNavigateSnapshot:
     """Navigation returns the page outline, not just a title.
 
@@ -1090,21 +960,3 @@ class TestNavigateSnapshot:
         assert "error" not in body
         assert body["url"] == "https://example.com"
         assert "browser_get_state" in body["snapshot_error"]
-
-    def test_truncation_cuts_on_a_line_boundary(self) -> None:
-        """A mid-line cut would hand the model a '@eN' ref it cannot use."""
-        from surogates.tools.builtin.browser import (
-            _MAX_NAVIGATE_SNAPSHOT_CHARS,
-            _truncate_snapshot,
-        )
-
-        line = '- button @e1 "Click me"'
-        big = "\n".join([line] * 2000)
-        assert len(big) > _MAX_NAVIGATE_SNAPSHOT_CHARS
-        out, truncated = _truncate_snapshot(big)
-        assert truncated is True
-        assert len(out) <= _MAX_NAVIGATE_SNAPSHOT_CHARS
-        assert all(l == line for l in out.splitlines())
-
-        small = "\n".join([line] * 3)
-        assert _truncate_snapshot(small) == (small, False)

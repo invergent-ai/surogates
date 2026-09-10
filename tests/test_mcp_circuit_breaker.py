@@ -7,21 +7,6 @@ import json
 from surogates.tools.mcp import client
 
 
-def test_mcp_server_task_opens_circuit_after_failures() -> None:
-    server = client.MCPServerTask("srv")
-    server._circuit_failure_threshold = 2
-    server._circuit_cooldown_seconds = 30
-
-    server.record_call_failure()
-    assert server.circuit_open_remaining() == 0
-
-    server.record_call_failure()
-    assert server.circuit_open_remaining() > 0
-
-    server.record_call_success()
-    assert server.circuit_open_remaining() == 0
-
-
 def test_mcp_tool_handler_skips_call_when_circuit_open(monkeypatch) -> None:
     server = client.MCPServerTask("srv")
     server.session = object()

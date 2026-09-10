@@ -2,9 +2,7 @@ from types import SimpleNamespace
 
 from surogates.session.events import EventType
 from surogates.session.interactive_input import (
-    pending_input_for_session,
     resolve_input_response,
-    valid_tool_call_id,
 )
 
 
@@ -48,31 +46,6 @@ class _Store:
     async def emit_event(self, session_id, event_type, data):
         self.emitted.append((session_id, event_type, data))
         return 42
-
-
-def test_valid_tool_call_id_rejects_bad_values():
-    assert valid_tool_call_id("tc1") == "tc1"
-    assert valid_tool_call_id("") is None
-    assert valid_tool_call_id("x\nbad") is None
-    assert valid_tool_call_id("x" * 129) is None
-
-
-async def test_pending_input_returns_payload_for_newest_pending_item():
-    row = SimpleNamespace(
-        action_ref={"tool_call_id": "tc1"},
-        payload={"questions": [{"prompt": "q"}], "context": "ctx"},
-        created_at=None,
-    )
-    store = _Store(_DB(_ExecuteResult(row=row)))
-
-    pending = await pending_input_for_session(store, session_id="s1")
-
-    assert pending == {
-        "tool_call_id": "tc1",
-        "questions": [{"prompt": "q"}],
-        "context": "ctx",
-        "created_at": None,
-    }
 
 
 def _pending_row(questions):

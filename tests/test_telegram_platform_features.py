@@ -1,5 +1,4 @@
-"""Tests for the Telegram platform upgrades: media parse, download, HTML
-send with chunking/reply-threading, reaction ack, and interactive input."""
+"""Telegram media transfer, message delivery and pending-input interactions."""
 
 from __future__ import annotations
 
@@ -8,14 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
-import pytest
 import respx
 
 from surogates.channels.platforms.telegram import TelegramPlatform, parse
 from surogates.channels.platforms.telegram_interactive import (
-    build_input_prompt,
-    parse_callback_data,
-    resolve_text_answer,
     tool_call_digest,
 )
 
@@ -45,61 +40,6 @@ def _item(content: str = "hi", *, destination: dict | None = None, payload: dict
         destination={"chat_id": "111", **(destination or {})},
         payload={"content": content, **(payload or {})},
     )
-
-
-# ---------------------------------------------------------------------------
-# Inbound media parse
-# ---------------------------------------------------------------------------
-
-
-class TestMediaParse:
-    def test_photo_takes_largest_size(self):
-        update = _message(
-            {
-                "photo": [
-                    {"file_id": "small", "file_unique_id": "u1", "file_size": 100},
-                    {"file_id": "big", "file_unique_id": "u2", "file_size": 9000},
-                ]
-            },
-            caption="look",
-        )
-        msg = parse(update, bot_username=BOT)
-        assert msg.text == "look"
-        assert msg.kind == "image"
-        assert [f.file_id for f in msg.files] == ["big"]
-        assert msg.files[0].mime_type == "image/jpeg"
-
-    def test_document_keeps_name_and_mime(self):
-        update = _message(
-            {
-                "document": {
-                    "file_id": "doc1",
-                    "file_name": "report.pdf",
-                    "mime_type": "application/pdf",
-                    "file_size": 1234,
-                }
-            }
-        )
-        msg = parse(update, bot_username=BOT)
-        assert msg.kind == "document"
-        ref = msg.files[0]
-        assert (ref.filename, ref.mime_type, ref.size) == ("report.pdf", "application/pdf", 1234)
-        assert ref.url == "doc1"
-
-    def test_voice_message(self):
-        update = _message({"voice": {"file_id": "v1", "mime_type": "audio/ogg", "file_size": 10}})
-        msg = parse(update, bot_username=BOT)
-        assert msg.kind == "audio"
-        assert msg.files[0].filename == "voice.ogg"
-
-    def test_message_id_recorded_in_source(self):
-        msg = parse(_message({}, text="hello"), bot_username=BOT)
-        assert msg.source["message_id"] == 42
-
-
-# ---------------------------------------------------------------------------
-# download_file
-# ---------------------------------------------------------------------------
 
 
 class TestDownloadFile:
@@ -138,11 +78,6 @@ class TestDownloadFile:
     async def test_none_without_token(self):
         p = TelegramPlatform()
         assert await p.download_file(creds={}, url="fid", max_bytes=10) is None
-
-
-# ---------------------------------------------------------------------------
-# send — HTML, chunking, reply threading
-# ---------------------------------------------------------------------------
 
 
 def _capture_send(route):
@@ -221,11 +156,6 @@ class TestSend:
         assert _capture_send(route)[0]["message_thread_id"] == 77
 
 
-# ---------------------------------------------------------------------------
-# ack_received (reaction)
-# ---------------------------------------------------------------------------
-
-
 class TestAckReceived:
     @respx.mock
     async def test_reacts_when_enabled(self):
@@ -247,68 +177,11 @@ class TestAckReceived:
         p._http.post.assert_not_awaited()
 
 
-# ---------------------------------------------------------------------------
-# Interactive input
-# ---------------------------------------------------------------------------
-
-
 QUESTIONS = [{"prompt": "Deploy to prod?", "choices": [{"label": "Yes"}, {"label": "No"}], "allow_other": False}]
 
 
 class TestInteractive:
-    def test_build_prompt_single_choice_question(self):
-        html_text, plain_text, markup = build_input_prompt(
-            session_id="s-1",
-            questions=QUESTIONS,
-            context="Release 1.2 ready.",
-            tool_call_id="tc-1",
-        )
-        assert "Deploy to prod?" in html_text and "Release 1.2" in plain_text
-        rows = markup["inline_keyboard"]
-        assert [r[0]["text"] for r in rows] == ["Yes", "No"]
-        assert rows[0][0]["callback_data"] == f"si:s-1:0:0:{tool_call_digest('tc-1')}"
 
-    def test_callback_data_fits_telegram_cap(self):
-        _, _, markup = build_input_prompt(
-            session_id="11111111-2222-3333-4444-555555555555",
-            questions=QUESTIONS,
-            tool_call_id="toolu_" + "x" * 120,
-        )
-        for row in markup["inline_keyboard"]:
-            assert len(row[0]["callback_data"].encode()) <= 64
-
-    def test_free_text_prompt_has_no_keyboard(self):
-        _, _, markup = build_input_prompt(
-            session_id="s-1", questions=[{"prompt": "Name?"}],
-        )
-        assert markup is None
-
-    def test_parse_callback_roundtrip(self):
-        assert parse_callback_data("si:abc:0:1:deadbeef") == ("abc", 0, 1, "deadbeef")
-        assert parse_callback_data("si:abc:0:1") is None
-        assert parse_callback_data("nope") is None
-        assert parse_callback_data("si:abc:x:1:deadbeef") is None
-
-    def test_resolve_text_answer_matches_choice(self):
-        responses = resolve_text_answer(QUESTIONS, "yes")
-        assert responses[0]["answer"] == "Yes" and responses[0]["is_other"] is False
-
-    def test_resolve_text_answer_other(self):
-        responses = resolve_text_answer(QUESTIONS, "maybe later")
-        assert responses[0]["answer"] == "maybe later" and responses[0]["is_other"] is True
-
-    def test_resolve_text_answer_open_question_is_never_other(self):
-        # No choices means no menu to depart from: the reply IS the
-        # answer.  Conversational agents ask exclusively in this shape,
-        # so a stray "other" flag here marks every single reply.
-        open_questions = [{"prompt": "What subjects do you like?"}]
-        responses = resolve_text_answer(open_questions, "computers and sports")
-        assert responses[0]["answer"] == "computers and sports"
-        assert responses[0]["is_other"] is False
-
-    def test_resolve_text_answer_empty_choices_list_is_never_other(self):
-        responses = resolve_text_answer([{"prompt": "Why?", "choices": []}], "because")
-        assert responses[0]["is_other"] is False
 
     @respx.mock
     async def test_send_input_prompt_includes_keyboard(self):

@@ -666,7 +666,7 @@ async def test_stream_terminal_close_emits_session_done(
 
 
 async def test_stream_race_recovery_streams_resumed_events(
-    app, client: AsyncClient, session_factory,
+    app, client: AsyncClient, session_factory, monkeypatch,
 ):
     """Race guard delivers events that land during the grace window.
 
@@ -679,6 +679,13 @@ async def test_stream_race_recovery_streams_resumed_events(
     Uses ``app.state.session_store`` (redis-aware) so ``emit_event``
     actually publishes on ``surogates:session:{id}``.
     """
+    from surogates.api.routes import website as website_module
+
+    # ASGITransport buffers the response until the application closes it.
+    # Let the recovered stream expire after delivering the resumed events;
+    # an active session would otherwise hold this request open for five minutes.
+    monkeypatch.setattr(website_module, "_MAX_STREAM_DURATION", 2)
+
     csrf, sid, origin = await _bootstrap(app, client, session_factory)
     redis_store: SessionStore = app.state.session_store
     await redis_store.update_session_status(sid, "completed")

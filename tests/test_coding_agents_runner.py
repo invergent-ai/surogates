@@ -1,4 +1,4 @@
-"""Unit tests for the worker-side /code run orchestration (fake sandbox)."""
+"""Coding-agent execution workflows through a simulated sandbox."""
 
 from __future__ import annotations
 

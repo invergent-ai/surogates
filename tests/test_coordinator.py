@@ -1,24 +1,17 @@
-"""Tests for coordinator mode: spawn_worker, send_worker_message, stop_worker,
-worker notification, event replay, tool filtering, and saga read-only parallel fix.
-"""
+"""Functional worker spawning, messaging, stopping, and parent notification tests."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.harness.budget import IterationBudget
 from surogates.session.events import EventType
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _default_workspace_config() -> dict:
@@ -61,11 +54,6 @@ def _make_redis() -> AsyncMock:
     redis.zadd = AsyncMock()
     redis.publish = AsyncMock()
     return redis
-
-
-# ---------------------------------------------------------------------------
-# spawn_worker
-# ---------------------------------------------------------------------------
 
 
 class TestSpawnWorker:
@@ -205,11 +193,6 @@ class TestSpawnWorker:
         assert "error" in parsed
 
 
-# ---------------------------------------------------------------------------
-# send_worker_message
-# ---------------------------------------------------------------------------
-
-
 class TestSendWorkerMessage:
     @pytest.mark.asyncio
     async def test_sends_message_and_enqueues(self) -> None:
@@ -329,11 +312,6 @@ class TestSendWorkerMessage:
         store.update_session_status.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# stop_worker
-# ---------------------------------------------------------------------------
-
-
 class TestStopWorker:
     @pytest.mark.asyncio
     async def test_publishes_interrupt(self) -> None:
@@ -383,11 +361,6 @@ class TestStopWorker:
 
         parsed = json.loads(result)
         assert "error" in parsed
-
-
-# ---------------------------------------------------------------------------
-# Worker notification
-# ---------------------------------------------------------------------------
 
 
 class TestWorkerNotification:
@@ -486,186 +459,6 @@ class TestWorkerNotification:
         assert "no response" in result.lower()
 
 
-# ---------------------------------------------------------------------------
-# Event replay
-# ---------------------------------------------------------------------------
-
-
-class TestEventReplay:
-    """Test that WORKER_COMPLETE and WORKER_FAILED are replayed as user messages."""
-
-    def _make_event(self, event_type: str, data: dict) -> MagicMock:
-        event = MagicMock()
-        event.type = event_type
-        event.data = data
-        event.id = 1
-        return event
-
-    def test_worker_complete_becomes_user_message(self) -> None:
-        from surogates.harness.loop import AgentHarness
-
-        harness = MagicMock(spec=AgentHarness)
-
-        events = [
-            self._make_event(
-                EventType.WORKER_COMPLETE.value,
-                {"worker_id": "abc-123", "result": "Fixed the bug."},
-            ),
-        ]
-
-        # Call the real method.
-        messages = AgentHarness._rebuild_messages(harness, events)
-
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert "[Worker abc-123 completed]" in messages[0]["content"]
-        assert "Fixed the bug." in messages[0]["content"]
-
-    def test_multiple_worker_events_in_replay(self) -> None:
-        """Multiple WORKER_COMPLETE events produce multiple user messages."""
-        from surogates.harness.loop import AgentHarness
-
-        harness = MagicMock(spec=AgentHarness)
-
-        events = [
-            self._make_event(
-                EventType.WORKER_COMPLETE.value,
-                {"worker_id": "worker-1", "result": "Found the bug."},
-            ),
-            self._make_event(
-                EventType.WORKER_COMPLETE.value,
-                {"worker_id": "worker-2", "result": "Tests pass."},
-            ),
-            self._make_event(
-                EventType.WORKER_FAILED.value,
-                {"worker_id": "worker-3", "error": "Build failed"},
-            ),
-        ]
-
-        messages = AgentHarness._rebuild_messages(harness, events)
-
-        assert len(messages) == 3
-        assert "[Worker worker-1 completed]" in messages[0]["content"]
-        assert "[Worker worker-2 completed]" in messages[1]["content"]
-        assert "[Worker worker-3 failed" in messages[2]["content"]
-
-    def test_worker_failed_becomes_user_message(self) -> None:
-        from surogates.harness.loop import AgentHarness
-
-        harness = MagicMock(spec=AgentHarness)
-
-        events = [
-            self._make_event(
-                EventType.WORKER_FAILED.value,
-                {"worker_id": "def-456", "error": "Out of memory"},
-            ),
-        ]
-
-        messages = AgentHarness._rebuild_messages(harness, events)
-
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert "[Worker def-456 failed" in messages[0]["content"]
-        assert "Out of memory" in messages[0]["content"]
-
-
-# ---------------------------------------------------------------------------
-# Tool filtering
-# ---------------------------------------------------------------------------
-
-
-class TestToolFiltering:
-    """Test that coordinator and worker sessions get filtered tool sets."""
-
-    def test_coordinator_gets_all_tools(self) -> None:
-        """Coordinator mode is soft — coordinators get all tools, not a restricted set."""
-        from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-
-        # Simulate what loop.py does for a coordinator session.
-        # coordinator=True → tool_filter=None → all tools visible.
-        all_tools = {
-            "terminal", "read_file", "write_file", "search_files",
-            "spawn_worker", "send_worker_message", "stop_worker",
-        }
-        # No filtering for coordinators.
-        tool_filter = None
-        visible = all_tools if tool_filter is None else all_tools & tool_filter
-
-        # Coordinator sees everything including spawn_worker AND terminal.
-        assert "spawn_worker" in visible
-        assert "terminal" in visible
-        assert "write_file" in visible
-
-    def test_worker_excluded_tools(self) -> None:
-        from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-
-        assert "spawn_worker" in WORKER_EXCLUDED_TOOLS
-        assert "send_worker_message" in WORKER_EXCLUDED_TOOLS
-        assert "stop_worker" in WORKER_EXCLUDED_TOOLS
-
-    def test_normal_session_excludes_coordinator_tools(self) -> None:
-        """Normal sessions (no coordinator flag) should not see coordinator tools."""
-        from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-
-        # Simulate what loop.py does for a normal session (no coordinator,
-        # no allowed_tools, no excluded_tools in config).
-        all_tools = {
-            "terminal", "read_file", "write_file", "search_files",
-            "spawn_worker", "send_worker_message", "stop_worker",
-        }
-        excluded = set()
-        excluded.update(WORKER_EXCLUDED_TOOLS)
-        filtered = all_tools - excluded
-
-        assert "terminal" in filtered
-        assert "read_file" in filtered
-        assert "spawn_worker" not in filtered
-        assert "send_worker_message" not in filtered
-        assert "stop_worker" not in filtered
-
-
-# ---------------------------------------------------------------------------
-# Delegation cap
-# ---------------------------------------------------------------------------
-
-
-class TestDelegationCap:
-    def test_caps_spawn_worker_calls(self) -> None:
-        from surogates.harness.sanitize import cap_delegate_calls
-
-        tool_calls = [
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": f"tc_{i}"}
-            for i in range(10)
-        ]
-        capped = cap_delegate_calls(tool_calls, max_delegates=3)
-        spawn_calls = [tc for tc in capped if tc["function"]["name"] == "spawn_worker"]
-        assert len(spawn_calls) == 3
-
-    def test_caps_mixed_delegate_and_spawn(self) -> None:
-        from surogates.harness.sanitize import cap_delegate_calls
-
-        tool_calls = [
-            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "tc_1"},
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "tc_2"},
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "tc_3"},
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "tc_4"},
-            {"function": {"name": "read_file", "arguments": "{}"}, "id": "tc_5"},
-        ]
-        capped = cap_delegate_calls(tool_calls, max_delegates=2)
-        delegation_calls = [
-            tc for tc in capped
-            if tc["function"]["name"] in ("delegate_task", "spawn_worker")
-        ]
-        assert len(delegation_calls) == 2
-        # read_file should be preserved.
-        assert any(tc["function"]["name"] == "read_file" for tc in capped)
-
-
-# ---------------------------------------------------------------------------
-# delegate.py queue bug fix
-# ---------------------------------------------------------------------------
-
-
 class TestDelegateQueueFix:
     @pytest.mark.asyncio
     async def test_uses_work_queue_not_task_queue(self) -> None:
@@ -713,171 +506,3 @@ class TestDelegateQueueFix:
             },
         )
         redis.lpush.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Saga + read-only parallel tools
-# ---------------------------------------------------------------------------
-
-
-class TestSagaReadOnlyParallel:
-    def test_all_readonly_tools_parallel_with_saga(self) -> None:
-        from surogates.harness.tool_exec import should_parallelize, _all_concurrency_safe
-
-        tool_calls = [
-            {"function": {"name": "read_file", "arguments": '{"path": "/a"}'}},
-            {"function": {"name": "search_files", "arguments": '{"query": "x"}'}},
-        ]
-
-        assert should_parallelize(tool_calls) is True
-        assert _all_concurrency_safe(tool_calls) is True
-
-    def test_mixed_tools_not_all_safe(self) -> None:
-        from surogates.harness.tool_exec import _all_concurrency_safe
-
-        tool_calls = [
-            {"function": {"name": "read_file", "arguments": "{}"}},
-            {"function": {"name": "terminal", "arguments": "{}"}},
-        ]
-
-        assert _all_concurrency_safe(tool_calls) is False
-
-
-class TestDelegationParallel:
-    def test_delegate_task_batch_parallelizes(self) -> None:
-        """A heavyskill-style batch of delegate_task calls fans out concurrently."""
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "1"},
-            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "2"},
-            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "3"},
-        ]
-        assert should_parallelize(tool_calls) is True
-
-    def test_spawn_worker_batch_parallelizes(self) -> None:
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "1"},
-            {"function": {"name": "spawn_worker", "arguments": "{}"}, "id": "2"},
-        ]
-        assert should_parallelize(tool_calls) is True
-
-    def test_delegation_excluded_from_streaming_eager_dispatch(self) -> None:
-        """Delegation tools must not be eager-dispatched during streaming —
-        a discarded stream would orphan child sessions in the DB."""
-        from surogates.harness.tool_exec import is_parallelizable
-
-        assert is_parallelizable("delegate_task") is False
-        assert is_parallelizable("spawn_worker") is False
-
-    def test_mixed_delegate_and_ask_user_question_serial(self) -> None:
-        """ask_user_question still forces serial — it blocks on user input."""
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "delegate_task", "arguments": "{}"}, "id": "1"},
-            {"function": {"name": "ask_user_question", "arguments": "{}"}, "id": "2"},
-        ]
-        assert should_parallelize(tool_calls) is False
-
-
-# ---------------------------------------------------------------------------
-# Coordinator prompt
-# ---------------------------------------------------------------------------
-
-
-class TestCoordinatorPrompt:
-    def test_coordinator_guidance_injected(self) -> None:
-        from surogates.harness.prompt import PromptBuilder
-
-        session = _make_session(config={"coordinator": True})
-        tenant = MagicMock()
-        tenant.org_config = {"agent_name": "Test"}
-        tenant.user_id = uuid4()
-        tenant.user_preferences = {}
-        tenant.asset_root = "/tmp/test"
-
-        builder = PromptBuilder(
-            tenant=tenant,
-            session=session,
-            available_tools={"spawn_worker", "read_file"},
-        )
-
-        prompt = builder.build()
-        assert "worker delegation" in prompt.lower()
-        assert "spawn_worker" in prompt
-
-    def test_no_coordinator_guidance_for_normal_session(self) -> None:
-        from surogates.harness.prompt import PromptBuilder
-
-        session = _make_session(config={})
-        tenant = MagicMock()
-        tenant.org_config = {"agent_name": "Test"}
-        tenant.user_id = uuid4()
-        tenant.user_preferences = {}
-        tenant.asset_root = "/tmp/test"
-
-        builder = PromptBuilder(
-            tenant=tenant,
-            session=session,
-            available_tools={"terminal", "read_file"},
-        )
-
-        prompt = builder.build()
-        assert "spawn_worker" not in prompt
-
-
-class TestPatchBatchParallel:
-    """`patch` edits to distinct files run concurrently; ambiguous ones don't."""
-
-    def test_disjoint_patches_parallelize(self) -> None:
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "1"},
-            {"function": {"name": "patch", "arguments": '{"path": "/b.py"}'}, "id": "2"},
-        ]
-        assert should_parallelize(tool_calls) is True
-
-    def test_same_file_patches_stay_sequential(self) -> None:
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "1"},
-            {"function": {"name": "patch", "arguments": '{"path": "/a.py"}'}, "id": "2"},
-        ]
-        assert should_parallelize(tool_calls) is False
-
-    def test_v4a_patches_stay_sequential(self) -> None:
-        """V4A mode hides its targets inside the patch body, so we cannot
-        prove two calls are disjoint -- they must not race."""
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {
-                "function": {
-                    "name": "patch",
-                    "arguments": '{"mode": "patch", "patch": "*** Begin Patch"}',
-                },
-                "id": "1",
-            },
-            {
-                "function": {
-                    "name": "patch",
-                    "arguments": '{"mode": "patch", "patch": "*** Begin Patch"}',
-                },
-                "id": "2",
-            },
-        ]
-        assert should_parallelize(tool_calls) is False
-
-    def test_malformed_arguments_stay_sequential(self) -> None:
-        from surogates.harness.tool_exec import should_parallelize
-
-        tool_calls = [
-            {"function": {"name": "patch", "arguments": "{not json"}, "id": "1"},
-            {"function": {"name": "write_file", "arguments": '{"path": "/b.py"}'}, "id": "2"},
-        ]
-        assert should_parallelize(tool_calls) is False

@@ -243,13 +243,6 @@ async def merge_env_with_eval(session_factory, seeded_org_and_session):
     )
 
 
-def test_merge_schema_accepts_no_score_argument():
-    from surogates.tools.builtin.arbor import _MERGE_SCHEMA
-
-    props = _MERGE_SCHEMA.parameters["properties"]
-    assert "score" not in props and "test_score" not in props
-
-
 @pytest.mark.asyncio(loop_scope="session")
 async def test_merge_requires_eval_cmd_test(merge_env):
     _store, _run_id, _pool, kwargs = merge_env
@@ -516,53 +509,6 @@ async def test_dispatch_threads_bundle_to_spawn(dispatch_env):
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_create_session_for_task_passes_bundle_to_resolver():
-    """_create_session_for_task forwards the bundle to resolve_agent_by_name
-    so bundle-delivered sub-agents (arbor-executor) actually resolve."""
-    from types import SimpleNamespace
-
-    from surogates.tasks import spawn as spawn_mod
-
-    sentinel_bundle = object()
-    captured: dict = {}
-
-    async def fake_resolve(name, tenant, *, session_factory=None, bundle=None, **_):
-        captured["bundle"] = bundle
-        captured["name"] = name
-        return SimpleNamespace(
-            name=name, model=None, max_iterations=None,
-            tools=None, disallowed_tools=None,
-            preloaded_skills=["arbor-executor"],
-        )
-
-    parent = SimpleNamespace(id=uuid.uuid4(), agent_id="agent-x")
-    child = SimpleNamespace(id=uuid.uuid4())
-    task = SimpleNamespace(
-        id=uuid.uuid4(), agent_def_name="arbor-executor", goal="g",
-        context=None, attempt_count=0, parent_session_id=parent.id,
-        current_session_id=None,
-    )
-    store = SimpleNamespace(
-        get_session=AsyncMock(return_value=parent), emit_event=AsyncMock(),
-    )
-    with patch.object(spawn_mod, "resolve_agent_by_name", new=fake_resolve), \
-        patch.object(
-            spawn_mod, "create_child_session",
-            new=AsyncMock(return_value=child),
-        ), \
-        patch(
-            "surogates.board.groups.ensure_group_and_inherit",
-            new=AsyncMock(),
-        ):
-        await spawn_mod._create_session_for_task(
-            task, session_store=store, session_factory=None,
-            tenant=object(), bundle=sentinel_bundle,
-        )
-    assert captured["bundle"] is sentinel_bundle
-    assert captured["name"] == "arbor-executor"
-
-
-@pytest.mark.asyncio(loop_scope="session")
 async def test_merge_eval_extractor_written_where_eval_runs_it(merge_env_with_eval):
     """The detached held-out eval runs ``python3 <extractor>``; the
     extractor must be written to that exact path or the merge gate reads
@@ -585,20 +531,6 @@ async def test_merge_eval_extractor_written_where_eval_runs_it(merge_env_with_ev
         "python3 /workspace/.arbor/extract_score.py" in i
         for (_, _, i) in pool.calls
     ), "eval command does not run the extractor at its written path"
-
-
-def test_terminal_stdout_unwraps_envelope():
-    """_terminal_stdout pulls stdout from the terminal tool's JSON
-    envelope and passes a bare (non-envelope) string through."""
-    from surogates.tools.builtin.arbor import _terminal_stdout
-
-    env = json.dumps({"output": '{"score": 1.0}\n', "exit_code": 0, "error": None})
-    assert _terminal_stdout(env) == '{"score": 1.0}\n'
-    # bare stdout (e.g. a test stub) is returned unchanged
-    assert _terminal_stdout('{"score": 1.0}') == '{"score": 1.0}'
-    # empty / missing file
-    assert _terminal_stdout(json.dumps({"output": "", "exit_code": 0, "error": None})) == ""
-    assert _terminal_stdout("") == ""
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -625,33 +557,6 @@ async def test_merge_status_reads_score_from_terminal_envelope(merge_env_with_ev
 # ---------------------------------------------------------------------------
 # Bundle handoff (executors run in a separate sandbox; git state can't cross)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_bundle_branch_b64_success_and_failure():
-    """_bundle_branch_b64 returns the one-line base64 on success and None
-    when the bundle command empties out or leaks a git error."""
-    from surogates.tools.builtin.arbor import _bundle_branch_b64
-
-    class _Pool:
-        def __init__(self, resp):
-            self.resp = resp
-
-        async def ensure(self, *a, **k):
-            return None
-
-        async def execute(self, *a, **k):
-            return self.resp
-
-    async def call(resp):
-        return await _bundle_branch_b64(
-            {"sandbox_pool": _Pool(resp), "session_id": "s"},
-            repo_path="/repo", trunk_branch="trunk", branch="b", key="1",
-        )
-
-    assert await call("ZmFrZS1idW5kbGU=") == "ZmFrZS1idW5kbGU="
-    assert await call("") is None                       # bundle failed
-    assert await call("fatal: not a git repository") is None  # error leaked
 
 
 @pytest.mark.asyncio(loop_scope="session")

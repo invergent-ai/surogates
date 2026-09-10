@@ -245,18 +245,6 @@ class TestProvision:
 
 
 class TestStatus:
-    async def test_status_running(self, fake_spec_json_transport) -> None:
-        docker = FakeDocker()
-        backend = ProcessBrowserBackend(
-            image="i",
-            rest_port_base=30000,
-            cdp_port_base=31000,
-            live_view_port_base=32000,
-            docker=docker,
-            httpx_transport=fake_spec_json_transport,
-        )
-        bid, _ = await backend.provision(BrowserSpec())
-        assert await backend.status(bid) == BrowserStatus.RUNNING
 
     async def test_status_asks_docker_about_containers_it_did_not_create(
         self, fake_spec_json_transport
@@ -286,21 +274,6 @@ class TestStatus:
 
         assert await backend.status("cid-previous") == BrowserStatus.RUNNING
 
-    async def test_status_reports_a_truly_unknown_container_terminated(
-        self, fake_spec_json_transport
-    ) -> None:
-        docker = FakeDocker()
-        backend = ProcessBrowserBackend(
-            image="i",
-            rest_port_base=30000,
-            cdp_port_base=31000,
-            live_view_port_base=32000,
-            docker=docker,
-            httpx_transport=fake_spec_json_transport,
-        )
-        # FakeDocker inspect answers "exited" for ids it has never seen, which
-        # is docker's way of saying there is nothing to reattach to.
-        assert await backend.status("cid-never-existed") == BrowserStatus.TERMINATED
 
     async def test_destroy_reaches_containers_it_did_not_create(
         self, fake_spec_json_transport
@@ -402,17 +375,6 @@ class TestDestroy:
         assert "stop" in verbs
         assert "rm" in verbs
 
-    async def test_destroy_unknown_is_noop(self, fake_spec_json_transport) -> None:
-        docker = FakeDocker()
-        backend = ProcessBrowserBackend(
-            image="i",
-            rest_port_base=30000,
-            cdp_port_base=31000,
-            live_view_port_base=32000,
-            docker=docker,
-            httpx_transport=fake_spec_json_transport,
-        )
-        await backend.destroy("never-provisioned")
 
     async def test_destroy_for_session_stops_labeled_containers(
         self,

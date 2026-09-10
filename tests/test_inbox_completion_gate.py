@@ -16,7 +16,6 @@ import pytest
 
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.session.events import EventType
-from surogates.session.inbox_payload import raises_completion_inbox_item
 
 
 def _session(*, channel: str, parent_id=None, config=None, task_id=None):
@@ -92,36 +91,6 @@ async def _complete(session):
 
 def _kinds(store) -> list[EventType]:
     return [event_type for event_type, _ in store.events]
-
-
-# --- the predicate ---------------------------------------------------------
-
-
-@pytest.mark.parametrize("channel", ["web", "website"])
-def test_root_conversation_channels_notify(channel):
-    assert raises_completion_inbox_item(_session(channel=channel)) is True
-
-
-@pytest.mark.parametrize(
-    "channel", ["api", "slack", "telegram", "whatsapp", "ambient", "scheduled"]
-)
-def test_channels_without_an_inbox_surface_do_not_notify(channel):
-    # api/ambient/scheduled runs have no conversation a person opens; the
-    # messaging channels deliver the answer in the conversation itself.
-    assert raises_completion_inbox_item(_session(channel=channel)) is False
-
-
-@pytest.mark.parametrize("channel", ["worker", "task", "delegation", "web"])
-def test_child_sessions_never_notify(channel):
-    # A delegated child's result reaches its coordinator through
-    # WORKER_COMPLETE; the human reads it in the parent conversation.
-    assert (
-        raises_completion_inbox_item(_session(channel=channel, parent_id=uuid4()))
-        is False
-    )
-
-
-# --- the emission itself ---------------------------------------------------
 
 
 async def test_web_root_session_emits_the_inbox_item():

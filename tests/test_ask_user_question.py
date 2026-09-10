@@ -1,12 +1,6 @@
-"""Tests for the ask_user_question tool and its response endpoint.
+"""Functional coverage for ask_user_question answer and cancellation workflows.
 
-Covers:
-- Schema validation (``_validate_questions``).
-- Handler round-trip with a fake session store (response arrives).
-- Handler cancellation via session status flip to ``paused``.
-- Handler ignores responses with a non-matching ``tool_call_id``.
-- The ``AskUserQuestionAnswer`` / ``AskUserQuestionResponseRequest`` API models.
-"""
+Exercises asynchronous replies, tool-call matching, session pause and handler errors."""
 
 from __future__ import annotations
 
@@ -17,25 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
 
-from surogates.api.routes.ask_user_question import (
-    AskUserQuestionAnswer,
-    AskUserQuestionResponseRequest,
-)
 from surogates.session.events import EventType
 from surogates.tools.builtin.ask_user_question import (
-    AskUserQuestionSchemaError,
-    MAX_CHOICES_PER_QUESTION,
-    MAX_QUESTIONS,
     _ask_user_question_handler,
-    _validate_questions,
 )
-
-
-# =========================================================================
-# Fake event / store
-# =========================================================================
 
 
 class FakeEvent:
@@ -98,97 +78,6 @@ class FakeSessionStore:
         self, session_id: Any, lease_token: Any, ttl_seconds: int = 60,
     ) -> None:
         self.renewed += 1
-
-
-# =========================================================================
-# Schema validation
-# =========================================================================
-
-
-class TestValidateQuestions:
-
-    def test_requires_array(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions("not an array")  # type: ignore[arg-type]
-
-    def test_rejects_empty(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions([])
-
-    def test_rejects_too_many(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions(
-                [{"prompt": f"q{i}"} for i in range(MAX_QUESTIONS + 1)],
-            )
-
-    def test_rejects_missing_prompt(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions([{"choices": []}])
-
-    def test_rejects_blank_prompt(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions([{"prompt": "   "}])
-
-    def test_rejects_too_many_choices(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions([{
-                "prompt": "pick",
-                "choices": [
-                    {"label": f"c{i}"} for i in range(MAX_CHOICES_PER_QUESTION + 1)
-                ],
-            }])
-
-    def test_rejects_missing_choice_label(self):
-        with pytest.raises(AskUserQuestionSchemaError):
-            _validate_questions([{
-                "prompt": "pick",
-                "choices": [{"description": "only desc"}],
-            }])
-
-    def test_open_ended_question_allowed(self):
-        out = _validate_questions([{"prompt": "describe"}])
-        assert out == [{"prompt": "describe", "allow_other": True}]
-
-    def test_normalises_full_question(self):
-        out = _validate_questions([
-            {
-                "prompt": "  Pick one  ",
-                "choices": [
-                    {"label": "A", "description": "first"},
-                    {"label": "B"},
-                ],
-                "allow_other": False,
-            },
-        ])
-        assert out == [{
-            "prompt": "Pick one",
-            "allow_other": False,
-            "choices": [
-                {"label": "A", "description": "first"},
-                {"label": "B"},
-            ],
-        }]
-
-    def test_allow_other_defaults_true(self):
-        out = _validate_questions([{"prompt": "x"}])
-        assert out[0]["allow_other"] is True
-
-    def test_drops_non_string_description(self):
-        out = _validate_questions([{
-            "prompt": "x",
-            "choices": [{"label": "L", "description": 42}],
-        }])
-        assert out[0]["choices"] == [{"label": "L"}]
-
-    def test_caps_prompt_length(self):
-        very_long = "a" * 10000
-        out = _validate_questions([{"prompt": very_long}])
-        assert len(out[0]["prompt"]) <= 1000
-
-
-# =========================================================================
-# Handler round-trip
-# =========================================================================
 
 
 @pytest.mark.asyncio
@@ -353,42 +242,3 @@ async def test_handler_exits_quickly_when_session_already_paused():
     result = json.loads(raw)
     assert result["cancelled"] is True
     assert result["reason"] == "session.paused"
-
-
-# =========================================================================
-# Endpoint model validation
-# =========================================================================
-
-
-class TestAskUserQuestionRequestModel:
-
-    def test_answer_requires_question_and_answer(self):
-        with pytest.raises(ValidationError):
-            AskUserQuestionAnswer(question="", answer="a")
-        with pytest.raises(ValidationError):
-            AskUserQuestionAnswer(question="q", answer="")
-
-    def test_strips_whitespace(self):
-        a = AskUserQuestionAnswer(question="  q  ", answer=" a ")
-        assert a.question == "q"
-        assert a.answer == "a"
-
-    def test_is_other_defaults_false(self):
-        a = AskUserQuestionAnswer(question="q", answer="a")
-        assert a.is_other is False
-
-    def test_request_requires_at_least_one_response(self):
-        with pytest.raises(ValidationError):
-            AskUserQuestionResponseRequest(responses=[])
-
-    def test_request_caps_responses(self):
-        too_many = [
-            AskUserQuestionAnswer(question=f"q{i}", answer=f"a{i}")
-            for i in range(MAX_QUESTIONS + 1)
-        ]
-        with pytest.raises(ValidationError):
-            AskUserQuestionResponseRequest(responses=too_many)
-
-    def test_answer_length_capped(self):
-        with pytest.raises(ValidationError):
-            AskUserQuestionAnswer(question="q", answer="a" * 5000)

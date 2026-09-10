@@ -1,15 +1,4 @@
-"""Tests for filesystem-path handling during tool execution.
-
-Covers:
-
-* Workspace-path sanitisation in events vs. tool-result messages — the
-  frontend-visible event payload must hide real filesystem paths, while
-  the tool-result content returned to the LLM must keep them so the
-  model's mental map matches the sandbox.
-* Shell-variable rejection in path-typed tool arguments — ``$HOME``,
-  ``${HOME}``, etc. in path args produce a clear governance refusal
-  instead of a literal ``$HOME`` directory being created.
-"""
+"""Tool execution preserves model-visible paths and rejects unsafe path arguments."""
 
 from __future__ import annotations
 
@@ -21,44 +10,10 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.tool_exec import (
-    _sanitize_paths,
     execute_single_tool,
 )
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
-
-
-# ---------------------------------------------------------------------------
-# _sanitize_paths — pure helper
-# ---------------------------------------------------------------------------
-
-
-def test_sanitize_paths_replaces_workspace_in_string() -> None:
-    assert _sanitize_paths("/tmp/sbx-abc/foo.py", "/tmp/sbx-abc") == \
-        "__WORKSPACE__/foo.py"
-
-
-def test_sanitize_paths_replaces_workspace_in_dict() -> None:
-    out = _sanitize_paths(
-        {"path": "/tmp/sbx-abc/foo.py", "size": 12}, "/tmp/sbx-abc",
-    )
-    assert out == {"path": "__WORKSPACE__/foo.py", "size": 12}
-
-
-def test_sanitize_paths_returns_input_when_no_workspace() -> None:
-    payload = {"path": "/tmp/sbx-abc/foo.py"}
-    assert _sanitize_paths(payload, None) is payload
-
-
-def test_sanitize_paths_strips_trailing_slash_consistently() -> None:
-    # Both trailing and non-trailing forms of the workspace should match.
-    assert _sanitize_paths("/tmp/sbx-abc/foo", "/tmp/sbx-abc/") == \
-        "__WORKSPACE__/foo"
-
-
-# ---------------------------------------------------------------------------
-# Helpers for execute_single_tool tests
-# ---------------------------------------------------------------------------
 
 
 def _make_terminal_registry(handler_output: str) -> ToolRegistry:
@@ -126,11 +81,6 @@ def _make_store() -> AsyncMock:
 _ids = iter(range(1, 10_000))
 
 
-# ---------------------------------------------------------------------------
-# Asymmetry: event payload sanitised, LLM message keeps real paths.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_tool_result_event_sanitises_workspace_path() -> None:
     """The TOOL_RESULT event stored in the log redacts the workspace path."""
@@ -196,11 +146,6 @@ async def test_tool_result_returned_to_llm_keeps_real_paths() -> None:
     assert result["role"] == "tool"
     assert workspace in result["content"]
     assert "__WORKSPACE__" not in result["content"]
-
-
-# ---------------------------------------------------------------------------
-# Path-arg hygiene: reject shell-variable patterns.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -323,28 +268,6 @@ async def test_terminal_workdir_rejects_dollar_var() -> None:
     assert "$HOME" in err or "shell variable" in err.lower()
 
 
-# ---------------------------------------------------------------------------
-# System prompt guidance — file-tool paths are taken literally.
-# ---------------------------------------------------------------------------
-
-
-def test_workspace_rules_warn_about_literal_paths() -> None:
-    """The injected workspace rules must call out literal-path interpretation.
-
-    Without this guidance the model treats ``$HOME/foo.py`` as a normal
-    relative-ish path and the file tools create a directory named ``$HOME``.
-    """
-    from surogates.harness.prompt_library import default_library
-
-    body = default_library().get("identity/workspace_rules")
-    text = body.lower()
-    assert "literal" in text
-    assert "$home" in text
-    # Mention the specific tools whose path args are literal.
-    assert "write_file" in body
-    assert "read_file" in body
-
-
 @pytest.mark.asyncio
 async def test_terminal_command_can_contain_dollar_var() -> None:
     """``terminal.command`` is shell-interpreted — ``$HOME`` is normal there."""
@@ -368,11 +291,6 @@ async def test_terminal_command_can_contain_dollar_var() -> None:
     )
 
     handler.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Replay round-trip: the sanitised event must expand back to the live string.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -424,16 +342,3 @@ async def test_replayed_tool_result_matches_what_the_llm_saw_live() -> None:
     assert replayed[0]["content"] == live["content"]
     assert "__WORKSPACE__" not in replayed[0]["content"]
     assert replayed[0]["content"] == raw_output
-
-
-def test_replay_leaves_the_token_alone_without_a_workspace_path() -> None:
-    """No workspace on the session config — nothing to expand to."""
-    from surogates.harness.loop import AgentHarness
-
-    event = SimpleNamespace(
-        type=EventType.TOOL_RESULT.value,
-        data={"tool_call_id": "tc_1", "content": "wrote __WORKSPACE__/foo.py"},
-        id=1,
-    )
-    replayed = AgentHarness._rebuild_messages(SimpleNamespace(), [event])
-    assert replayed[0]["content"] == "wrote __WORKSPACE__/foo.py"

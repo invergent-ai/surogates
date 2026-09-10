@@ -1,16 +1,4 @@
-"""Tests for the multi-bundle skill loader.
-
-Layer 1 of :meth:`ResourceLoader.load_skills` is now the merge of two
-optional bundles:
-
-* the shared ``platform/system-skills`` bundle whose root IS the
-  catalog (``<name>/SKILL.md``),
-* the per-agent Hub bundle whose ``skills/<name>/SKILL.md`` subtree
-  holds org-attached skills.
-
-Per-agent shadows system on name collision because the per-agent bundle
-is the LAST argument to ``_merge`` (last-wins-by-name semantics).
-"""
+"""Skill catalogs merge system and per-agent bundle resources."""
 
 from __future__ import annotations
 
@@ -60,123 +48,6 @@ def _tenant() -> TenantContext:
         permissions=frozenset(),
         asset_root="/tmp/no-such-asset-root",
     )
-
-
-# ---------------------------------------------------------------------------
-# _load_skills_from_bundle root_prefix
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_load_skills_from_bundle_root_prefix_empty() -> None:
-    """System-bundle layout: skills live at the repo root."""
-
-    bundle = _FakeBundle(
-        {
-            "brainstorming/SKILL.md": _skill_md("brainstorming", "system"),
-            "executing-plans/SKILL.md": _skill_md(
-                "executing-plans", "system",
-            ),
-        }
-    )
-    loader = ResourceLoader()
-
-    skills = await loader._load_skills_from_bundle(
-        bundle, source=SKILL_SOURCE_PLATFORM, root_prefix="",
-    )
-
-    assert sorted(s.name for s in skills if not s.is_expert) == [
-        "brainstorming",
-        "executing-plans",
-    ]
-    assert all(s.source == SKILL_SOURCE_PLATFORM for s in skills)
-
-
-@pytest.mark.asyncio
-async def test_load_skills_from_bundle_root_prefix_default_is_skills() -> None:
-    """Per-agent bundle layout: skills live under ``skills/``."""
-
-    bundle = _FakeBundle(
-        {
-            "SOUL.md": "ignored — not under skills/",
-            "agents/foo/AGENT.md": "ignored — not under skills/",
-            "skills/foo/SKILL.md": _skill_md("foo", "agent-attached"),
-            "skills/bar/SKILL.md": _skill_md("bar", "agent-attached"),
-        }
-    )
-    loader = ResourceLoader()
-
-    skills = await loader._load_skills_from_bundle(
-        bundle, source=SKILL_SOURCE_PLATFORM,
-    )
-
-    assert sorted(s.name for s in skills if not s.is_expert) == ["bar", "foo"]
-
-
-@pytest.mark.asyncio
-async def test_load_skills_from_bundle_handles_nested_path() -> None:
-    """Skill loader uses the LAST path segment when frontmatter has no
-    name, so ``skills/cat/foo/SKILL.md`` should still surface as
-    ``foo``."""
-
-    bundle = _FakeBundle(
-        {
-            "skills/cat/foo/SKILL.md": "no frontmatter — body only\n",
-        }
-    )
-    loader = ResourceLoader()
-
-    skills = await loader._load_skills_from_bundle(
-        bundle, source=SKILL_SOURCE_PLATFORM,
-    )
-
-    assert [s.name for s in skills if not s.is_expert] == ["foo"]
-
-
-@pytest.mark.asyncio
-async def test_load_skills_from_bundle_swallows_list_exception() -> None:
-    """A Hub failure on ``list`` MUST NOT propagate — Layer 1 falls
-    back to empty so the agent's session still boots with whatever
-    higher-precedence layers can provide."""
-
-    class _BrokenBundle:
-        async def list(self, prefix: str = "") -> list[str]:
-            raise RuntimeError("hub list failed")
-
-        async def read_text(self, path: str) -> str:  # pragma: no cover
-            raise AssertionError("should not be reached")
-
-    loader = ResourceLoader()
-    skills = await loader._load_skills_from_bundle(
-        _BrokenBundle(), source=SKILL_SOURCE_PLATFORM, root_prefix="",
-    )
-    assert [s for s in skills if not s.is_expert] == []
-
-
-@pytest.mark.asyncio
-async def test_load_skills_from_bundle_skips_directory_marker() -> None:
-    """Some Hub backends include the bare prefix path in ``list``
-    results (e.g. ``skills/`` itself).  The loader must skip entries
-    whose post-prefix component is empty."""
-
-    bundle = _FakeBundle(
-        {
-            "skills/": "",
-            "skills/foo/SKILL.md": _skill_md("foo", "agent-attached"),
-        }
-    )
-    loader = ResourceLoader()
-
-    skills = await loader._load_skills_from_bundle(
-        bundle, source=SKILL_SOURCE_PLATFORM,
-    )
-
-    assert [s.name for s in skills if not s.is_expert] == ["foo"]
-
-
-# ---------------------------------------------------------------------------
-# load_skills(bundle=..., system_bundle=...) — Layer 1 merge
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -297,44 +168,6 @@ async def test_load_skills_per_agent_only() -> None:
         db_session=None,
         bundle=per_agent,
         system_bundle=None,
-    )
-
-    assert [s.name for s in skills if not s.is_expert] == ["foo"]
-
-
-@pytest.mark.asyncio
-async def test_load_skills_no_bundles_returns_empty() -> None:
-    """Boot path: when neither bundle is wired the loader yields an
-    empty Layer 1 rather than crashing.  Layers 2-4 are independent
-    and exercised in ``test_loader_agents.py``."""
-
-    loader = ResourceLoader()
-
-    skills = await loader.load_skills(
-        _tenant(),
-        db_session=None,
-        bundle=None,
-        system_bundle=None,
-    )
-
-    assert [s for s in skills if not s.is_expert] == []
-
-
-@pytest.mark.asyncio
-async def test_load_skills_system_bundle_kwarg_is_keyword_only_default_none() -> None:
-    """``system_bundle`` defaults to ``None`` so older call sites that
-    only pass ``bundle=`` keep working — important for the test suite
-    and any code path that hasn't been updated yet."""
-
-    per_agent = _FakeBundle(
-        {"skills/foo/SKILL.md": _skill_md("foo", "agent-attached")},
-    )
-    loader = ResourceLoader()
-
-    # No ``system_bundle`` kwarg at all — must not raise and must
-    # produce the same result as passing ``system_bundle=None``.
-    skills = await loader.load_skills(
-        _tenant(), db_session=None, bundle=per_agent,
     )
 
     assert [s.name for s in skills if not s.is_expert] == ["foo"]

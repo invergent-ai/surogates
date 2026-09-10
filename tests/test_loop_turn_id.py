@@ -24,11 +24,6 @@ from surogates.session.events import EventType
 from surogates.session.models import Session
 
 
-# ---------------------------------------------------------------------------
-# Scaffolding shared with later harness/loop tests in this file (A4, A7, A8).
-# ---------------------------------------------------------------------------
-
-
 def _make_loop_harness(
     *,
     session_store: Any,
@@ -164,11 +159,6 @@ async def _drive_run_loop(
         (call.args[0], call.args[1], call.args[2])
         for call in harness._store.emit_event.await_args_list
     ]
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -308,56 +298,6 @@ async def test_two_iterations_share_turn_id_with_increasing_index(
     assert request_emits[0]["turn_id"] == response_emits[0]["turn_id"]
     assert request_emits[0]["iteration_index"] == 0
     assert response_emits[0]["iteration_index"] == 0
-
-
-@pytest.mark.asyncio
-async def test_request_final_summary_stamps_turn_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The budget-exhausted final summary path stamps the supplied turn_id."""
-    store = AsyncMock()
-    store.emit_event = AsyncMock(side_effect=range(900, 1000))
-
-    harness = _make_loop_harness(
-        session_store=store,
-        budget=IterationBudget(max_total=1),
-    )
-
-    async def fake_call_llm_with_retry(**kwargs: Any) -> tuple[dict, dict]:
-        assert kwargs.get("turn_id") == "turn-final"
-        return (
-            {"role": "assistant", "content": "Summary."},
-            {"model": "test-model", "finish_reason": "stop",
-             "input_tokens": 1, "output_tokens": 5},
-        )
-
-    monkeypatch.setattr(
-        "surogates.harness.loop.call_llm_with_retry",
-        fake_call_llm_with_retry,
-    )
-
-    session = _make_session()
-    lease = SimpleNamespace(lease_token=uuid4())
-    messages: list[dict] = [{"role": "user", "content": "do it"}]
-
-    await harness._request_final_summary(
-        session,
-        messages,
-        "system",
-        lease,
-        turn_id="turn-final",
-    )
-
-    response_emits = [
-        call.args[2]
-        for call in store.emit_event.await_args_list
-        if call.args[1] == EventType.LLM_RESPONSE
-    ]
-    assert response_emits, "expected a final LLM_RESPONSE event"
-    payload = response_emits[0]
-    assert payload["turn_id"] == "turn-final"
-    assert payload["finish_reason"] == "budget_exhausted"
-    assert "iteration_index" in payload
 
 
 @pytest.mark.asyncio

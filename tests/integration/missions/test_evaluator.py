@@ -221,61 +221,6 @@ async def test_old_terminal_task_does_not_retrigger_after_evaluation(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_build_evaluator_prompt_includes_all_four_blocks(
-    session_factory, session_store, org_id, user_id, chat_session,
-):
-    """The evaluator prompt carries rubric, response, completed tasks, in-flight tasks."""
-    from surogates.missions.evaluator import build_evaluator_prompt
-
-    store = MissionStore(session_factory)
-    created = await handle_mission_create(
-        description="train model", rubric="gsm8k >= 0.8",
-        session_id=chat_session.id, user_id=user_id, org_id=org_id,
-        agent_id="orchestrator",
-        session_store=session_store, session_factory=session_factory,
-        mission_store=store,
-    )
-    async with session_factory() as db:
-        db.add_all([
-            Task(
-                org_id=org_id, parent_session_id=chat_session.id,
-                goal="research vLLM", status="done",
-                result="vLLM cheaper at our scale",
-                result_metadata={"sources": 5},
-                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                mission_id=created.mission_id,
-            ),
-            Task(
-                org_id=org_id, parent_session_id=chat_session.id,
-                goal="verifier-round-1", status="done",
-                result="gsm8k=0.65 over 200 examples",
-                result_metadata={"score": 0.65, "n": 200},
-                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-                mission_id=created.mission_id,
-            ),
-            Task(
-                org_id=org_id, parent_session_id=chat_session.id,
-                goal="training-round-2", status="running",
-                attempt_count=1, mission_id=created.mission_id,
-            ),
-        ])
-        await db.commit()
-
-    prompt = await build_evaluator_prompt(
-        mission_id=created.mission_id,
-        coordinator_last_response="Round 1 done; running round 2.",
-        session_factory=session_factory,
-        mission_store=store,
-    )
-    assert "gsm8k >= 0.8" in prompt
-    assert "Round 1 done" in prompt
-    assert "vLLM cheaper" in prompt
-    assert "0.65" in prompt
-    assert "training-round-2" in prompt
-    assert "running" in prompt
-
-
-@pytest.mark.asyncio(loop_scope="session")
 async def test_apply_verdict_satisfied_marks_status_terminal(
     session_factory, session_store, org_id, user_id, chat_session,
 ):

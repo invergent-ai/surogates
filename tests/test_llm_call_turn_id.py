@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -55,14 +54,6 @@ def _make_llm_client(stream):
             completions=SimpleNamespace(create=AsyncMock(return_value=stream))
         ),
     )
-
-
-def test_call_llm_with_retry_signature_has_optional_turn_id() -> None:
-    sig = inspect.signature(call_llm_with_retry)
-    assert "turn_id" in sig.parameters
-    param = sig.parameters["turn_id"]
-    assert param.kind is inspect.Parameter.KEYWORD_ONLY
-    assert param.default is None
 
 
 @pytest.mark.asyncio

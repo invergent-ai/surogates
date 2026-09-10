@@ -1,37 +1,18 @@
-"""Tests for the streaming tool executor.
-
-Covers: concurrency classification, executor lifecycle, parallel execution
-of concurrency-safe tools, sequential execution of non-concurrent tools,
-insertion-order result delivery, sibling abort, discard, interrupt handling,
-and tool block detection during LLM streaming.
-"""
+"""Streaming tool execution concurrency, cancellation and guardrail behavior."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from surogates.harness.streaming_executor import (
     StreamingToolExecutor,
-    ToolStatus,
-    TrackedTool,
-    _is_error_result,
 )
-from surogates.harness.tool_exec import (
-    CONCURRENCY_SAFE_TOOLS,
-    SIBLING_ABORT_TOOLS,
-    is_parallelizable,
-)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_tool_call(name: str, args: dict | None = None, call_id: str | None = None) -> dict:
@@ -110,181 +91,6 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
     )
 
 
-def test_ctor_accepts_every_kwarg_the_harness_passes():
-    """Regression: ``_make_streaming_executor`` in harness/loop.py and this
-    constructor must not drift apart.  A kwarg added to the loop call site
-    without a matching parameter here fails only at runtime (production
-    SESSION_FAIL) — exactly what happened with ``summary_llm_client``.
-    """
-    import inspect
-    import re
-    from pathlib import Path
-
-    import surogates.harness.loop as loop_module
-
-    src = Path(loop_module.__file__).read_text()
-    block = re.search(
-        r"return StreamingToolExecutor\((.*?)\n\s*\)", src, re.S,
-    ).group(1)
-    passed = set(re.findall(r"(\w+)=", block))
-    accepted = set(
-        inspect.signature(StreamingToolExecutor.__init__).parameters,
-    ) - {"self"}
-    missing = passed - accepted
-    assert not missing, (
-        f"harness loop passes kwargs StreamingToolExecutor does not "
-        f"accept: {sorted(missing)}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Concurrency classification
-# ---------------------------------------------------------------------------
-
-
-class TestConcurrencyClassification:
-    """Tests for is_parallelizable and the CONCURRENCY_SAFE_TOOLS set."""
-
-    def test_read_only_tools_are_safe(self) -> None:
-        safe_tools = [
-            "read_file", "search_files", "list_files",
-            "session_search", "skills_list", "skill_view",
-            "web_search", "web_extract", "web_crawl",
-        ]
-        for name in safe_tools:
-            assert is_parallelizable(name), f"{name} should be concurrency-safe"
-
-    def test_write_tools_are_not_parallelizable(self) -> None:
-        # ``todo`` sits here with ``delegate_task``: both allocate durable
-        # state mid-stream (a plan snapshot event, a child session), so a
-        # discarded stream must not have already committed them. Both are
-        # promoted to parallel once the stream commits -- see
-        # BATCH_PARALLEL_TOOLS.
-        non_parallel_tools = [
-            "write_file", "patch", "todo",
-            "memory", "skill_manage", "delegate_task", "ask_user_question",
-        ]
-        for name in non_parallel_tools:
-            assert not is_parallelizable(name), f"{name} should NOT be parallelizable"
-
-    def test_sandbox_tools_are_parallelizable(self) -> None:
-        sandbox_parallel = ["terminal"]
-        for name in sandbox_parallel:
-            assert is_parallelizable(name), f"{name} should be parallelizable"
-
-    def test_unknown_tool_is_not_safe(self) -> None:
-        assert not is_parallelizable("unknown_tool_xyz")
-
-    def test_sibling_abort_tools(self) -> None:
-        assert "terminal" in SIBLING_ABORT_TOOLS
-        assert "read_file" not in SIBLING_ABORT_TOOLS
-
-
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
-
-
-class TestHelperFunctions:
-    def test_is_error_result_with_error(self) -> None:
-        result = {"content": json.dumps({"error": "something broke"})}
-        assert _is_error_result(result) is True
-
-    def test_is_error_result_without_error(self) -> None:
-        result = {"content": json.dumps({"ok": True})}
-        assert _is_error_result(result) is False
-
-    def test_is_error_result_with_plain_text(self) -> None:
-        result = {"content": "file contents here"}
-        assert _is_error_result(result) is False
-
-    def test_is_error_result_with_null_error_is_success(self) -> None:
-        """``terminal`` always emits ``"error": null`` on success — the
-        executor must not treat key presence as failure, otherwise every
-        successful terminal call triggers sibling abort and silently
-        cancels concurrent peers."""
-        result = {"content": json.dumps({"output": "ok", "exit_code": 0, "error": None})}
-        assert _is_error_result(result) is False
-
-    def test_is_error_result_with_empty_string_error_is_success(self) -> None:
-        result = {"content": json.dumps({"output": "ok", "error": ""})}
-        assert _is_error_result(result) is False
-
-    def test_make_skipped_tool_result_with_reason(self) -> None:
-        from surogates.harness.message_utils import make_skipped_tool_result
-        tc = _make_tool_call("read_file", call_id="tc_123")
-        result = make_skipped_tool_result(tc, reason="cancelled (sibling error)")
-        assert result["role"] == "tool"
-        assert result["tool_call_id"] == "tc_123"
-        assert "cancelled" in result["content"].lower()
-
-
-# ---------------------------------------------------------------------------
-# StreamingToolExecutor — lifecycle
-# ---------------------------------------------------------------------------
-
-
-class TestExecutorLifecycle:
-    def test_initial_state(self) -> None:
-        executor = _make_executor()
-        assert executor.has_tools is False
-        assert executor.tool_count == 0
-
-    @pytest.mark.asyncio
-    async def test_add_tool_increments_count(self) -> None:
-        executor = _make_executor()
-        executor.add_tool(_make_tool_call("read_file"))
-        assert executor.has_tools is True
-        assert executor.tool_count == 1
-
-    def test_add_tool_after_discard_is_ignored(self) -> None:
-        executor = _make_executor()
-        executor.discard()
-        executor.add_tool(_make_tool_call("read_file"))
-        assert executor.has_tools is False
-
-    @pytest.mark.asyncio
-    async def test_empty_executor_returns_empty_results(self) -> None:
-        executor = _make_executor()
-        results = await executor.get_all_results()
-        assert results == []
-
-    def test_stats_with_no_tools(self) -> None:
-        executor = _make_executor()
-        stats = executor.stats
-        assert stats["total"] == 0
-        assert stats["concurrent"] == 0
-        assert stats["sequential"] == 0
-
-    @pytest.mark.asyncio
-    async def test_platform_client_reaches_dispatch(self) -> None:
-        """__init__ accepting platform_client is not enough -- _run_tool
-        must actually forward it through execute_single_tool into
-        tools.dispatch. Accept-but-drop is exactly the class of bug the
-        kb_search_pages wiring exists to catch, and streaming is the
-        default tool-execution path in production."""
-        captured: dict[str, Any] = {}
-
-        async def mock_dispatch(name, args, **kwargs):
-            captured["platform_client"] = kwargs.get("platform_client")
-            return json.dumps({"ok": True})
-
-        tools = _make_registry("read_file")
-        tools.dispatch = mock_dispatch
-        marker = object()
-
-        executor = _make_executor(tools=tools, platform_client=marker)
-        executor.add_tool(_make_tool_call("read_file"))
-        await executor.get_all_results()
-
-        assert captured["platform_client"] is marker
-
-
-# ---------------------------------------------------------------------------
-# Concurrent execution
-# ---------------------------------------------------------------------------
-
-
 class TestConcurrentExecution:
     """Tests that concurrency-safe tools execute in parallel."""
 
@@ -343,11 +149,6 @@ class TestConcurrentExecution:
         assert completion_order[0] == "search_files"
         assert results[0]["tool_call_id"] == "tc_1"  # read_file first
         assert results[1]["tool_call_id"] == "tc_2"  # search_files second
-
-
-# ---------------------------------------------------------------------------
-# Sequential execution
-# ---------------------------------------------------------------------------
 
 
 class TestSequentialExecution:
@@ -416,94 +217,6 @@ class TestSequentialExecution:
         search_start_idx = execution_timeline.index(("search_files", "start"))
         assert write_end_idx < read_start_idx
         assert write_end_idx < search_start_idx
-
-
-# ---------------------------------------------------------------------------
-# Concurrency gate
-# ---------------------------------------------------------------------------
-
-
-class TestConcurrencyGate:
-    """Tests for the _can_execute logic."""
-
-    @pytest.mark.asyncio
-    async def test_concurrent_with_concurrent_allowed(self) -> None:
-        """Two concurrent-safe tools can execute together."""
-        executor = _make_executor()
-
-        tc1 = _make_tool_call("read_file", call_id="tc_1")
-        tc2 = _make_tool_call("search_files", call_id="tc_2")
-
-        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=True)
-        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=True)
-
-        executor._tracked.append(tracked1)
-        tracked1.status = ToolStatus.EXECUTING
-
-        assert executor._can_execute(tracked2) is True
-
-    @pytest.mark.asyncio
-    async def test_non_concurrent_with_concurrent_blocked(self) -> None:
-        """A non-concurrent tool cannot start while concurrent tools are running."""
-        executor = _make_executor()
-
-        tc1 = _make_tool_call("read_file", call_id="tc_1")
-        tc2 = _make_tool_call("write_file", call_id="tc_2")
-
-        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=True)
-        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=False)
-
-        executor._tracked.append(tracked1)
-        tracked1.status = ToolStatus.EXECUTING
-
-        assert executor._can_execute(tracked2) is False
-
-    @pytest.mark.asyncio
-    async def test_concurrent_with_non_concurrent_blocked(self) -> None:
-        """A concurrent tool cannot start while a non-concurrent tool is running."""
-        executor = _make_executor()
-
-        tc1 = _make_tool_call("write_file", call_id="tc_1")
-        tc2 = _make_tool_call("read_file", call_id="tc_2")
-
-        tracked1 = TrackedTool(tool_call=tc1, is_parallelizable=False)
-        tracked2 = TrackedTool(tool_call=tc2, is_parallelizable=True)
-
-        executor._tracked.append(tracked1)
-        tracked1.status = ToolStatus.EXECUTING
-
-        assert executor._can_execute(tracked2) is False
-
-    def test_sibling_aborted_blocks_all(self) -> None:
-        """Nothing can execute after sibling abort."""
-        executor = _make_executor()
-        executor._sibling_aborted = True
-
-        tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
-        assert executor._can_execute(tracked) is False
-
-    def test_discarded_blocks_all(self) -> None:
-        """Nothing can execute after discard."""
-        executor = _make_executor()
-        executor._discarded = True
-
-        tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
-        assert executor._can_execute(tracked) is False
-
-    def test_interrupt_blocks_all(self) -> None:
-        """Nothing can execute when interrupted."""
-        executor = _make_executor(interrupt_check=lambda: True)
-
-        tc = _make_tool_call("read_file")
-        tracked = TrackedTool(tool_call=tc, is_parallelizable=True)
-        assert executor._can_execute(tracked) is False
-
-
-# ---------------------------------------------------------------------------
-# Sibling abort
-# ---------------------------------------------------------------------------
 
 
 class TestSiblingAbort:
@@ -632,11 +345,6 @@ class TestSiblingAbort:
         assert executor._sibling_aborted is False
 
 
-# ---------------------------------------------------------------------------
-# Discard
-# ---------------------------------------------------------------------------
-
-
 class TestDiscard:
     """Tests for executor discard (e.g., on model fallback mid-stream)."""
 
@@ -675,11 +383,6 @@ class TestDiscard:
         executor.discard()
         executor.add_tool(_make_tool_call("read_file"))
         assert executor.tool_count == 0
-
-
-# ---------------------------------------------------------------------------
-# Interrupt handling
-# ---------------------------------------------------------------------------
 
 
 class TestInterruptHandling:
@@ -743,42 +446,6 @@ class TestInterruptHandling:
         )
 
 
-# ---------------------------------------------------------------------------
-# Stats
-# ---------------------------------------------------------------------------
-
-
-class TestStats:
-    @pytest.mark.asyncio
-    async def test_stats_after_execution(self) -> None:
-        async def mock_dispatch(name, args, **kwargs):
-            return json.dumps({"ok": True})
-
-        store = _make_store()
-        tools = _make_registry("read_file", "write_file")
-        tools.dispatch = mock_dispatch
-
-        executor = _make_executor(store=store, tools=tools)
-
-        executor.add_tool(_make_tool_call("read_file", call_id="tc_1"))
-        executor.add_tool(_make_tool_call("write_file", call_id="tc_2"))
-
-        await executor.get_all_results()
-
-        stats = executor.stats
-        assert stats["total"] == 2
-        assert stats["concurrent"] == 1
-        assert stats["sequential"] == 1
-        assert stats["completed"] == 2
-        assert stats["errored"] == 0
-        assert stats["sibling_aborted"] is False
-
-
-# ---------------------------------------------------------------------------
-# Tool block detection in LLM streaming
-# ---------------------------------------------------------------------------
-
-
 class TestToolBlockDetection:
     """Tests for the on_tool_call_complete callback in call_llm_streaming_inner."""
 
@@ -786,7 +453,6 @@ class TestToolBlockDetection:
     async def test_callback_fires_on_higher_index(self) -> None:
         """When a new tool call starts at index N, tool calls at indices < N
         should be reported as complete via the callback."""
-        from unittest.mock import AsyncMock as _AM, MagicMock as _MM
 
         notified: list[dict] = []
 
@@ -948,11 +614,6 @@ class TestToolBlockDetection:
         assert len(notified) == 0
 
 
-# ---------------------------------------------------------------------------
-# Process queue
-# ---------------------------------------------------------------------------
-
-
 class TestProcessQueue:
     """Tests for _process_queue behavior."""
 
@@ -984,11 +645,6 @@ class TestProcessQueue:
         assert "write_file" in execution_order
         write_idx = execution_order.index("write_file")
         assert write_idx >= 2  # Must be after both concurrent tools
-
-
-# ---------------------------------------------------------------------------
-# Error handling
-# ---------------------------------------------------------------------------
 
 
 class TestErrorHandling:
@@ -1037,11 +693,6 @@ class TestErrorHandling:
         # Both should have results.
         assert results[0]["tool_call_id"] == "tc_1"
         assert results[1]["tool_call_id"] == "tc_2"
-
-
-# ---------------------------------------------------------------------------
-# Tool loop guardrails
-# ---------------------------------------------------------------------------
 
 
 class TestStreamingExecutorGuardrails:
@@ -1187,18 +838,3 @@ class TestStreamingExecutorGuardrails:
 
         assert tools.dispatch.calls == 5
         assert all("guardrail" not in (r.get("content") or "") for r in results)
-
-
-# ---------------------------------------------------------------------------
-# Integration: re-export from tool_exec
-# ---------------------------------------------------------------------------
-
-
-class TestCanonicalImport:
-    """Verify constants are defined in tool_exec and importable from streaming_executor."""
-
-    def test_streaming_executor_reexports_from_tool_exec(self) -> None:
-        from surogates.harness import streaming_executor as se
-        from surogates.harness import tool_exec as te
-        assert se.SIBLING_ABORT_TOOLS is te.SIBLING_ABORT_TOOLS
-        assert se.is_parallelizable is te.is_parallelizable

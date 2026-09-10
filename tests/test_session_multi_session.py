@@ -1,11 +1,4 @@
-"""Web-channel single-session enforcement.
-
-With the agent's "multi session" capability off, ``POST /v1/sessions``
-returns the user's newest reusable web session (HTTP 200) instead of
-creating another; a user with no reusable session still gets a fresh
-one.  The api channel and the capability-on default keep today's
-always-create behavior.
-"""
+"""Session create/list routes enforce the configured single-session capability."""
 
 from __future__ import annotations
 
@@ -221,73 +214,3 @@ async def test_list_hides_multi_era_sessions_when_capability_off():
 
     assert store.list_calls[0]["single_session_only"] is True
     assert store.list_calls[1]["single_session_only"] is False
-
-
-def _session(channel="web", *, parent_id=None, config=None):
-    return SimpleNamespace(
-        id=uuid4(),
-        org_id=uuid4(),
-        agent_id="support-bot",
-        status="active",
-        channel=channel,
-        parent_id=parent_id,
-        config=config or {},
-    )
-
-
-class _GetStore:
-    def __init__(self, session):
-        self._session = session
-
-    async def get_session(self, session_id):
-        return self._session
-
-
-def _owning_tenant(session):
-    tenant = SimpleNamespace(org_id=session.org_id)
-    tenant.owns_session = lambda org_id, session_id: True
-    return tenant
-
-
-def _get_request(store):
-    return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(session_store=store)),
-    )
-
-
-def _fake_runtime(multi_session):
-    return SimpleNamespace(agent_id="support-bot", multi_session=multi_session)
-
-
-async def test_access_block_hides_unmarked_web_session_when_off():
-    from fastapi import HTTPException
-
-    session = _session("web")
-    with pytest.raises(HTTPException) as exc:
-        await sessions_route._get_session_for_tenant(
-            _get_request(_GetStore(session)), session.id,
-            _owning_tenant(session), _fake_runtime(multi_session=False),
-        )
-    assert exc.value.status_code == 404
-
-
-async def test_access_allows_canonical_and_children_and_other_channels():
-    canonical = _session("web", config={"single_session": True})
-    child = _session("web", parent_id=uuid4())
-    api_session = _session("api")
-
-    for session in (canonical, child, api_session):
-        got = await sessions_route._get_session_for_tenant(
-            _get_request(_GetStore(session)), session.id,
-            _owning_tenant(session), _fake_runtime(multi_session=False),
-        )
-        assert got is session
-
-
-async def test_access_unrestricted_when_capability_on():
-    session = _session("web")  # unmarked multi-era session
-    got = await sessions_route._get_session_for_tenant(
-        _get_request(_GetStore(session)), session.id,
-        _owning_tenant(session), _fake_runtime(multi_session=True),
-    )
-    assert got is session

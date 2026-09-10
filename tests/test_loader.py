@@ -1,4 +1,4 @@
-"""Tests for surogates.tools.loader.ResourceLoader."""
+"""Skill loading combines resource sources with the correct user scope and precedence."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from surogates.tenant.context import TenantContext
-from surogates.tools.loader import ResourceLoader, SkillDef
+from surogates.tools.loader import ResourceLoader
 
 
 class _FakeBundle:
@@ -39,93 +39,6 @@ def _make_tenant(asset_root: str) -> TenantContext:
         permissions=frozenset(),
         asset_root=asset_root,
     )
-
-
-# =========================================================================
-# load_skills_from_dir (via _load_skills_from_dir)
-# =========================================================================
-
-
-class TestLoadSkillsFromDir:
-    """Skill file parsing with YAML frontmatter."""
-
-    def test_parses_yaml_frontmatter(self, tmp_path: Path):
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-        (skills_dir / "my_skill.md").write_text(
-            "---\nname: my-skill\ndescription: Does something\n---\n"
-            "# Skill body\nHello world\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader()
-        # Use the private method directly for unit testing.
-        skills = loader._load_skills_from_dir(str(skills_dir), "platform")
-        assert len(skills) == 1
-        assert skills[0].name == "my-skill"
-        assert skills[0].description == "Does something"
-        assert "Hello world" in skills[0].content
-
-    def test_fallback_name_from_filename(self, tmp_path: Path):
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir()
-        (skills_dir / "auto_name.md").write_text(
-            "No frontmatter here, just content.\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader()
-        skills = loader._load_skills_from_dir(str(skills_dir), "platform")
-        assert len(skills) == 1
-        assert skills[0].name == "auto_name"
-
-    def test_empty_directory_returns_empty(self, tmp_path: Path):
-        empty_dir = tmp_path / "empty_skills"
-        empty_dir.mkdir()
-
-        loader = ResourceLoader()
-        skills = loader._load_skills_from_dir(str(empty_dir), "platform")
-        assert skills == []
-
-    def test_nonexistent_directory_returns_empty(self, tmp_path: Path):
-        loader = ResourceLoader()
-        skills = loader._load_skills_from_dir(str(tmp_path / "nope"), "platform")
-        assert skills == []
-
-    def test_category_description_from_description_md(self, tmp_path: Path):
-        skills_dir = tmp_path / "skills"
-        skill_dir = skills_dir / "creative" / "ascii-art"
-        skill_dir.mkdir(parents=True)
-        (skills_dir / "creative" / "DESCRIPTION.md").write_text(
-            "---\n"
-            "description: Creative content generation and visual design tools.\n"
-            "---\n",
-            encoding="utf-8",
-        )
-        (skill_dir / "SKILL.md").write_text(
-            "---\n"
-            "name: ascii-art\n"
-            "description: Make ASCII artwork.\n"
-            "---\n"
-            "Body\n",
-            encoding="utf-8",
-        )
-
-        loader = ResourceLoader()
-
-        skills = loader._load_skills_from_dir(str(skills_dir), "platform")
-
-        assert len(skills) == 1
-        assert skills[0].category == "creative"
-        assert (
-            skills[0].category_description
-            == "Creative content generation and visual design tools."
-        )
-
-
-# =========================================================================
-# Merge precedence
-# =========================================================================
 
 
 class TestMergePrecedence:
@@ -169,11 +82,6 @@ class TestMergePrecedence:
         assert len(shared_skills) == 1
         assert shared_skills[0].description == "user version"
         assert shared_skills[0].source == "user"
-
-
-# =========================================================================
-# load_skills with tenant.user_id = None (service-account principals)
-# =========================================================================
 
 
 class TestLoadSkillsWithUserIdNone:

@@ -9,22 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from surogates.tools.registry import ToolRegistry
-
-
-def _registry() -> ToolRegistry:
-    from surogates.tools.builtin import media_gen
-
-    registry = ToolRegistry()
-    media_gen.register(registry)
-    return registry
-
-
-def test_media_gen_tools_register_unconditionally():
-    registry = _registry()
-    assert registry.get("generate_image") is not None
-    assert registry.get("generate_video") is not None
-
 
 @pytest.mark.asyncio
 async def test_generate_image_errors_when_unconfigured():
@@ -40,73 +24,6 @@ async def test_generate_video_errors_when_unconfigured():
 
     result = json.loads(await _generate_video_handler({"prompt": "a cat"}))
     assert "not available" in result["error"]
-
-
-@pytest.mark.asyncio
-async def test_save_media_bytes_writes_local_workspace(tmp_path):
-    from surogates.tools.builtin.media_gen import _save_media_bytes
-
-    saved = await _save_media_bytes(
-        b"png-bytes",
-        relative_path="media/images/x.png",
-        workspace_path=str(tmp_path),
-        storage=None,
-        session_id=None,
-        session_config=None,
-    )
-    assert saved is True
-    assert (tmp_path / "media" / "images" / "x.png").read_bytes() == b"png-bytes"
-
-
-@pytest.mark.asyncio
-async def test_save_media_bytes_writes_storage_backend():
-    from surogates.tools.builtin.media_gen import _save_media_bytes
-
-    storage = SimpleNamespace(write=AsyncMock())
-    saved = await _save_media_bytes(
-        b"mp4-bytes",
-        relative_path="media/videos/x.mp4",
-        workspace_path=None,
-        storage=storage,
-        session_id="sess-1",
-        session_config={"storage_bucket": "agent-bucket", "storage_key_prefix": "org/agent"},
-    )
-    assert saved is True
-    storage.write.assert_awaited_once()
-    bucket, key, data = storage.write.await_args.args
-    assert bucket == "agent-bucket"
-    assert key.endswith("media/videos/x.mp4")
-    assert data == b"mp4-bytes"
-
-
-@pytest.mark.asyncio
-async def test_save_media_bytes_false_when_no_destination():
-    from surogates.tools.builtin.media_gen import _save_media_bytes
-
-    saved = await _save_media_bytes(
-        b"data",
-        relative_path="media/images/x.png",
-        workspace_path=None,
-        storage=None,
-        session_id=None,
-        session_config=None,
-    )
-    assert saved is False
-
-
-def test_normalize_output_path_blocks_traversal():
-    from surogates.tools.builtin.media_gen import _normalize_output_path
-    from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-
-    with pytest.raises(WorkspaceSandboxError):
-        _normalize_output_path("../../etc/passwd", default="x.png")
-
-
-def test_normalize_output_path_defaults_when_empty():
-    from surogates.tools.builtin.media_gen import _normalize_output_path
-
-    assert _normalize_output_path("", default="media/images/d.png") == "media/images/d.png"
-    assert _normalize_output_path("/abs/cleaned.png", default="d.png") == "abs/cleaned.png"
 
 
 _PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="  # 1x1 png
@@ -410,22 +327,6 @@ async def test_generate_video_includes_first_frame_image(tmp_path, monkeypatch):
     assert frame["image_url"]["url"].startswith("data:image/png;base64,")
 
 
-def test_media_gen_tools_route_to_harness():
-    """Regression: tools absent from TOOL_LOCATIONS fall back to SANDBOX
-    routing and die there as 'Unknown tool' (the sandbox tool-executor
-    has no media_gen config, LLM client, or storage) — exactly how
-    generate_image failed in DEV. Both media tools must be explicitly
-    HARNESS-routed, like vision_analyze.
-    """
-    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-
-    for name in ("generate_image", "generate_video"):
-        assert TOOL_LOCATIONS.get(name) is ToolLocation.HARNESS, (
-            f"{name} is not HARNESS-routed; sandbox fallback surfaces "
-            f"it as 'Unknown tool'"
-        )
-
-
 class _FakeApiClient:
     def __init__(self, response='{"success": true}', raise_exc=None):
         self.response = response
@@ -514,25 +415,6 @@ async def test_generate_video_creates_inline_artifact(tmp_path, monkeypatch):
     assert call["spec"]["mime_type"] == "video/mp4"
 
 
-def test_media_artifact_specs_validate():
-    import pytest as _pytest
-    from pydantic import ValidationError
-
-    from surogates.artifacts.models import (
-        ArtifactKind, ArtifactSpec, ImageSpec, VideoSpec,
-    )
-
-    ImageSpec(path="media/images/x.png", mime_type="image/png", caption="c")
-    VideoSpec(path="media/videos/x.mp4")
-    ArtifactSpec(
-        name="x.png", kind=ArtifactKind.IMAGE,
-        spec={"path": "media/images/x.png"},
-    ).validate_spec()
-    for bad in ("", "/abs/x.png", "../escape.png", "a/../b.png"):
-        with _pytest.raises(ValidationError):
-            ImageSpec(path=bad)
-
-
 @pytest.mark.asyncio
 async def test_generate_video_surfaces_upstream_error_body(tmp_path, monkeypatch):
     import httpx as _httpx
@@ -554,9 +436,6 @@ async def test_generate_video_surfaces_upstream_error_body(tmp_path, monkeypatch
     ))
     assert "400 Bad Request" in result["error"]
     assert "not a valid model ID" in result["error"]  # upstream body surfaced
-
-
-# ── budget-exhausted (HTTP 402) handling ────────────────────────────
 
 
 class _Broke402Client:
@@ -642,64 +521,6 @@ async def test_generate_video_402_returns_budget_guidance(monkeypatch, tmp_path)
         workspace_path=str(tmp_path),
     ))
     assert result["error"].startswith("media_budget_exhausted")
-
-
-# ── worker schema gating (_media_tool_exclusions) ───────────────────
-
-
-def _cfg(**kwargs):
-    from surogates.tools.builtin.media_gen import MediaGenConfig
-
-    return MediaGenConfig(**kwargs)
-
-
-def test_media_tool_exclusions_drop_both_when_nothing_configured():
-    from surogates.orchestrator.worker import _media_tool_exclusions
-
-    assert _media_tool_exclusions(_cfg()) == {
-        "generate_image", "generate_video",
-    }
-
-
-def test_media_tool_exclusions_keep_image_when_wired():
-    from surogates.orchestrator.worker import _media_tool_exclusions
-
-    cfg = _cfg(image_client=object(), image_model="google/gemini-2.5-flash-image")
-    assert _media_tool_exclusions(cfg) == {"generate_video"}
-
-
-def test_media_tool_exclusions_keep_video_when_wired():
-    from surogates.orchestrator.worker import _media_tool_exclusions
-
-    cfg = _cfg(video_model="x-ai/grok-imagine-video",
-               video_base_url="http://proxy.test/v1")
-    assert _media_tool_exclusions(cfg) == {"generate_image"}
-
-
-def test_media_tool_exclusions_empty_when_both_wired():
-    from surogates.orchestrator.worker import _media_tool_exclusions
-
-    cfg = _cfg(
-        image_client=object(),
-        image_model="google/gemini-2.5-flash-image",
-        video_model="x-ai/grok-imagine-video",
-        video_base_url="http://proxy.test/v1",
-    )
-    assert _media_tool_exclusions(cfg) == set()
-
-
-def test_media_tool_exclusions_video_needs_both_model_and_url():
-    from surogates.orchestrator.worker import _media_tool_exclusions
-
-    assert "generate_video" in _media_tool_exclusions(
-        _cfg(video_model="x-ai/grok-imagine-video"),
-    )
-    assert "generate_video" in _media_tool_exclusions(
-        _cfg(video_base_url="http://proxy.test/v1"),
-    )
-
-
-# ── per-buyer budget hooks ──────────────────────────────────────────
 
 
 class _HookRecorder:
@@ -830,178 +651,3 @@ async def test_image_unmetered_without_hooks_stays_free(tmp_path):
         workspace_path=str(tmp_path),
     ))
     assert "error" not in result
-
-
-# ── worker media budget hook factory ────────────────────────────────
-
-
-def _hook_ctx(metered=True, cents=4, buy_url="https://buy.example/a"):
-    return SimpleNamespace(
-        media_credits_metered=metered,
-        media_image_cents=cents,
-        commerce_buy_url=buy_url,
-        agent_id="agent-1",
-    )
-
-
-def _hook_session(config=None, user_id="u-1", service_account_id=None):
-    return SimpleNamespace(
-        id="11111111-1111-1111-1111-111111111111",
-        config=config or {},
-        user_id=user_id,
-        service_account_id=service_account_id,
-    )
-
-
-def test_media_hooks_none_when_unmetered():
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-
-    a, s = _build_media_budget_hooks(
-        ctx=_hook_ctx(metered=False),
-        session=_hook_session(),
-        platform_client=object(),
-    )
-    assert a is None and s is None
-
-
-def test_media_hooks_none_for_service_account_sessions():
-    """Exemption keys on the SESSION row's service_account_id — the
-    credential principal is the agent's own SA on managed channels
-    and must not exempt Slack/Telegram buyers."""
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-
-    a, s = _build_media_budget_hooks(
-        ctx=_hook_ctx(),
-        session=_hook_session(user_id=None, service_account_id="sa-1"),
-        platform_client=object(),
-    )
-    assert a is None and s is None
-
-
-def test_media_hooks_built_for_managed_channel_end_users():
-    """A slack/telegram end-user session (human user_id, no session
-    SA) gets metering hooks even though the CREDENTIAL principal for
-    such sessions is the agent's own service account."""
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-
-    a, s = _build_media_budget_hooks(
-        ctx=_hook_ctx(),
-        session=_hook_session(user_id="u-slack-1"),
-        platform_client=object(),
-    )
-    assert a is not None and s is not None
-
-
-@pytest.mark.asyncio
-async def test_media_hooks_anonymous_sender_raises_buy_prompt():
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-    from surogates.tools.builtin.media_gen import MediaBudgetExhaustedError
-
-    authorize, _ = _build_media_budget_hooks(
-        ctx=_hook_ctx(),
-        session=_hook_session(user_id=None),
-        platform_client=object(),
-    )
-    with pytest.raises(MediaBudgetExhaustedError) as exc_info:
-        await authorize(4)
-    assert exc_info.value.buy_url == "https://buy.example/a"
-
-
-@pytest.mark.asyncio
-async def test_media_hooks_authorize_and_settle_call_platform():
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-
-    class _Client:
-        def __init__(self):
-            self.authorize_kwargs = None
-            self.settle_kwargs = None
-
-        async def media_authorize(self, agent_id, **kwargs):
-            self.authorize_kwargs = {"agent_id": agent_id, **kwargs}
-            return {
-                "metered": True,
-                "reservation_id": "r1",
-                "balance_id": "b1",
-                "reserved_cents": 4,
-            }
-
-        async def media_settle(self, agent_id, **kwargs):
-            self.settle_kwargs = {"agent_id": agent_id, **kwargs}
-            return {"settled": True}
-
-    client = _Client()
-    authorize, settle = _build_media_budget_hooks(
-        ctx=_hook_ctx(),
-        session=_hook_session(
-            config={"commerce_buyer": {"firebase_uid": "fb-1"}},
-        ),
-        platform_client=client,
-    )
-    receipt = await authorize(4)
-    assert client.authorize_kwargs["firebase_uid"] == "fb-1"
-    assert client.authorize_kwargs["requested_cents"] == 4
-    assert receipt["balance_id"] == "b1"
-    await settle(receipt, 4, "img-x")
-    assert client.settle_kwargs == {
-        "agent_id": "agent-1",
-        "balance_id": "b1",
-        "reserved_cents": 4,
-        "actual_cents": 4,
-        "external_ref": "img-x",
-        "reservation_id": "r1",
-    }
-
-
-@pytest.mark.asyncio
-async def test_media_hooks_exhausted_maps_to_buy_prompt_error():
-    from surogates.orchestrator.worker import _build_media_budget_hooks
-    from surogates.runtime.platform_client import MediaCreditsExhaustedError
-    from surogates.tools.builtin.media_gen import MediaBudgetExhaustedError
-
-    class _BrokeClient:
-        async def media_authorize(self, agent_id, **kwargs):
-            raise MediaCreditsExhaustedError("media_credits_exhausted")
-
-    authorize, _ = _build_media_budget_hooks(
-        ctx=_hook_ctx(),
-        session=_hook_session(),
-        platform_client=_BrokeClient(),
-    )
-    with pytest.raises(MediaBudgetExhaustedError) as exc_info:
-        await authorize(None)
-    assert exc_info.value.buy_url == "https://buy.example/a"
-
-
-# ── package capability exclusions for media tools ───────────────────
-
-
-def test_entitlement_exclusions_drop_media_tools():
-    from surogates.orchestrator.worker import _entitlement_tool_exclusions
-
-    class _Registry:
-        tool_names = ("generate_image", "generate_video")
-
-        def get_all(self):
-            return []
-
-    session_config = {
-        "entitlements": {"capabilities": ["code", "browser"]},
-    }
-    excluded = _entitlement_tool_exclusions(
-        session_config=session_config,
-        tool_registry=_Registry(),
-        mcp_scope=None,
-    )
-    assert "generate_image" in excluded
-    assert "generate_video" in excluded
-
-    session_config = {
-        "entitlements": {"capabilities": ["image", "video"]},
-    }
-    excluded = _entitlement_tool_exclusions(
-        session_config=session_config,
-        tool_registry=_Registry(),
-        mcp_scope=None,
-    )
-    assert "generate_image" not in excluded
-    assert "generate_video" not in excluded

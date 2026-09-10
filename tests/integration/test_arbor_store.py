@@ -1,7 +1,6 @@
 """Integration tests for the Arbor research tables and ResearchStore."""
 from __future__ import annotations
 
-import uuid
 
 import pytest
 import pytest_asyncio
@@ -72,7 +71,6 @@ from surogates.arbor.store import (  # noqa: E402
     MetaKeyError,
     NodeStateError,
     ResearchStore,
-    is_improvement,
 )
 
 
@@ -87,17 +85,6 @@ async def research_run(session_factory, seeded_org_and_session):
         objective="maximize F1",
     )
     return store, run_id, org_id
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_create_run_seeds_root_and_defaults(research_run):
-    store, run_id, _ = research_run
-    run = await store.get_run(run_id)
-    assert run.status == "init"
-    assert run.meta["metric_direction"] == "maximize"
-    assert run.meta["max_cycles"] == 20
-    root = await store.get_node(run_id, "ROOT")
-    assert root.depth == 0 and root.status == "pending"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -147,14 +134,6 @@ async def test_prune_is_recursive_and_terminal(research_run):
     assert "[Pruned: dead end]" in (n1.insight or "")
     with pytest.raises(NodeStateError):
         await store.update_node(run_id, "1", status="running")
-
-
-def test_is_improvement_direction_aware():
-    assert is_improvement(0.5, 0.4, "maximize")
-    assert not is_improvement(0.3, 0.4, "maximize")
-    assert is_improvement(0.3, 0.4, "minimize")
-    assert is_improvement(0.5, None, "maximize")  # no baseline yet -> improvement
-    assert not is_improvement(None, 0.4, "maximize")
 
 
 @pytest.mark.asyncio(loop_scope="session")

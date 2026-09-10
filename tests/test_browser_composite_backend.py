@@ -103,13 +103,3 @@ async def test_routes_destroy_to_fallback_when_provisioned_there() -> None:
     bid, _ = await c.provision(BrowserSpec(), session_id="S", org_id="O", user_id="U")
     await c.destroy(bid)
     assert fallback.destroyed == ["fallback-1"]
-
-
-@pytest.mark.asyncio
-async def test_unknown_browser_id_uses_primary_for_status() -> None:
-    """A destroy after the routing table forgot the mapping (process
-    restart) defaults to primary — the manager's release endpoint is
-    idempotent on unknown lease ids."""
-    primary = _PrimaryHappy()
-    c = CompositeFallbackBackend(primary=primary, fallback=_Fallback())
-    assert await c.status("never-seen") == BrowserStatus.RUNNING

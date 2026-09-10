@@ -9,8 +9,6 @@ from pydantic import BaseModel
 
 from surogates.harness.structured_output import (
     generate_structured,
-    iter_json_objects,
-    parse_json_object,
 )
 
 
@@ -136,11 +134,6 @@ async def test_generate_structured_returns_none_when_outlines_fails() -> None:
     )
 
     assert decision is None
-
-
-# ---------------------------------------------------------------------------
-# JSON-mode fallback (when Outlines returns None)
-# ---------------------------------------------------------------------------
 
 
 async def test_falls_back_to_json_mode_when_outlines_returns_none() -> None:
@@ -337,55 +330,6 @@ async def test_fallback_skipped_for_empty_messages() -> None:
     create_mock.assert_not_awaited()
 
 
-# ---------------------------------------------------------------------------
-# parse_json_object
-# ---------------------------------------------------------------------------
-
-
-def test_parse_json_object_accepts_raw_object() -> None:
-    assert parse_json_object('{"a": 1}') == {"a": 1}
-
-
-def test_parse_json_object_accepts_fenced_object() -> None:
-    fenced = '```json\n{"recap": "done", "artifacts": []}\n```'
-    assert parse_json_object(fenced) == {"recap": "done", "artifacts": []}
-
-
-def test_parse_json_object_accepts_bare_fence_without_language_tag() -> None:
-    assert parse_json_object('```\n{"a": true}\n```') == {"a": True}
-
-
-def test_parse_json_object_accepts_prose_around_fence() -> None:
-    text = (
-        "Sure! Here is the JSON:\n```json\n"
-        '{"a": {"nested": "with a } brace in a string"}}\n'
-        "```\nHope this helps."
-    )
-    assert parse_json_object(text) == {
-        "a": {"nested": "with a } brace in a string"},
-    }
-
-
-def test_parse_json_object_skips_false_brace_starts() -> None:
-    assert parse_json_object('{oops — real one: {"a": 1}') == {"a": 1}
-
-
-def test_parse_json_object_rejects_non_object_json() -> None:
-    assert parse_json_object("[1, 2, 3]") is None
-    assert parse_json_object('"just a string"') is None
-
-
-def test_parse_json_object_rejects_truncated_object() -> None:
-    assert parse_json_object('```json\n{"recap": "cut off mid') is None
-
-
-def test_parse_json_object_rejects_empty_and_non_string() -> None:
-    assert parse_json_object("") is None
-    assert parse_json_object("   ") is None
-    assert parse_json_object(None) is None
-    assert parse_json_object(42) is None
-
-
 async def test_fallback_reads_json_from_reasoning_content() -> None:
     """Prose in ``content`` must not mask the object a reasoning-mode
     model parked in ``reasoning_content``."""
@@ -418,18 +362,6 @@ async def test_fallback_reads_json_from_reasoning_content() -> None:
         )
 
     assert decision == RoutingDecision(route="final", confidence=0.9)
-
-
-def test_iter_json_objects_yields_every_embedded_object() -> None:
-    text = 'draft {"a": 1} then final ```json\n{"a": 2}\n```'
-    assert list(iter_json_objects(text)) == [{"a": 1}, {"a": 2}]
-
-
-def test_iter_json_objects_does_not_rescan_nested_objects() -> None:
-    # The outer object is complete, so its members must not be yielded
-    # again as separate candidates.
-    text = 'noise {"outer": {"inner": 1}} tail'
-    assert list(iter_json_objects(text)) == [{"outer": {"inner": 1}}]
 
 
 async def test_fallback_skips_draft_objects_that_fail_the_schema() -> None:

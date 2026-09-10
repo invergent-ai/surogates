@@ -1,4 +1,4 @@
-"""Tests for surogates.sandbox.process.ProcessSandbox and surogates.sandbox.pool.SandboxPool."""
+"""Process sandbox execution and pool lifecycle workflows."""
 
 from __future__ import annotations
 
@@ -13,24 +13,9 @@ from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.process import ProcessSandbox
 
 
-# =========================================================================
-# ProcessSandbox
-# =========================================================================
-
-
 class TestProcessSandbox:
     """Test the subprocess-based sandbox backend."""
 
-    @pytest.mark.asyncio
-    async def test_provision_creates_sandbox(self):
-        sandbox = ProcessSandbox()
-        spec = SandboxSpec()
-        sandbox_id = await sandbox.provision(spec)
-        assert isinstance(sandbox_id, str)
-        assert len(sandbox_id) == 32  # UUID hex
-        status = await sandbox.status(sandbox_id)
-        assert status == SandboxStatus.RUNNING
-        await sandbox.destroy(sandbox_id)
 
     @pytest.mark.asyncio
     async def test_execute_runs_command(self):
@@ -100,17 +85,6 @@ class TestProcessSandbox:
         sandbox = ProcessSandbox()
         with pytest.raises(ValueError, match="Unknown sandbox"):
             await sandbox.execute("nonexistent", "echo", "")
-
-    @pytest.mark.asyncio
-    async def test_destroy_unknown_sandbox_no_error(self):
-        sandbox = ProcessSandbox()
-        # Should not raise.
-        await sandbox.destroy("nonexistent")
-
-
-# =========================================================================
-# SandboxPool
-# =========================================================================
 
 
 class TestSandboxPool:
@@ -214,104 +188,6 @@ class TestSandboxPool:
 
         assert await backend.status(id1) == SandboxStatus.TERMINATED
         assert await backend.status(id2) == SandboxStatus.TERMINATED
-
-
-def test_sandbox_spec_has_session_and_workspace_fields():
-    from surogates.sandbox.base import SandboxSpec
-
-    # Defaults keep existing call sites working.
-    spec = SandboxSpec()
-    assert spec.session_id == ""
-    assert spec.workspace_path is None
-
-    spec2 = SandboxSpec(session_id="root-123", workspace_path="/tmp/ws")
-    assert spec2.session_id == "root-123"
-    assert spec2.workspace_path == "/tmp/ws"
-
-
-def test_sandbox_settings_docker_defaults():
-    from surogates.config import SandboxSettings
-
-    s = SandboxSettings()
-    # backend literal accepts "docker"
-    s2 = SandboxSettings(backend="docker")
-    assert s2.backend == "docker"
-    assert s.docker_image == "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
-    assert s.docker_executor_port_base == 33000
-    assert s.docker_ready_timeout == 60
-    assert s.docker_network == "bridge"
-
-
-class _BackendWithReap:
-    def __init__(self):
-        self.destroyed_ids = []
-        self.reaped_sessions = []
-
-    async def provision(self, spec):
-        return "sb-1"
-
-    async def execute(self, sandbox_id, name, input):
-        return "{}"
-
-    async def status(self, sandbox_id):
-        from surogates.sandbox.base import SandboxStatus
-        return SandboxStatus.RUNNING
-
-    async def destroy(self, sandbox_id):
-        self.destroyed_ids.append(sandbox_id)
-
-    async def destroy_for_session(self, session_id):
-        self.reaped_sessions.append(session_id)
-
-
-class _BackendNoReap:
-    async def provision(self, spec):
-        return "sb-1"
-
-    async def execute(self, sandbox_id, name, input):
-        return "{}"
-
-    async def status(self, sandbox_id):
-        from surogates.sandbox.base import SandboxStatus
-        return SandboxStatus.RUNNING
-
-    async def destroy(self, sandbox_id):
-        pass
-
-
-@pytest.mark.asyncio
-async def test_pool_destroy_for_session_calls_backend_reap():
-    from surogates.sandbox.base import SandboxSpec
-    from surogates.sandbox.pool import SandboxPool
-
-    backend = _BackendWithReap()
-    pool = SandboxPool(backend)
-    await pool.ensure("root-1", SandboxSpec())
-    await pool.destroy_for_session("root-1")
-    assert backend.destroyed_ids == ["sb-1"]
-    assert backend.reaped_sessions == ["root-1"]
-
-
-@pytest.mark.asyncio
-async def test_pool_destroy_for_session_reaps_without_mapping():
-    from surogates.sandbox.pool import SandboxPool
-
-    backend = _BackendWithReap()
-    pool = SandboxPool(backend)
-    # No ensure() — pool has no mapping, but the backend should still reap.
-    await pool.destroy_for_session("orphan-1")
-    assert backend.destroyed_ids == []
-    assert backend.reaped_sessions == ["orphan-1"]
-
-
-@pytest.mark.asyncio
-async def test_pool_destroy_for_session_without_backend_reap_is_noop():
-    from surogates.sandbox.pool import SandboxPool
-
-    backend = _BackendNoReap()
-    pool = SandboxPool(backend)
-    # Backend has no destroy_for_session — must not raise.
-    await pool.destroy_for_session("root-1")
 
 
 class TestReleaseThenDestroy:

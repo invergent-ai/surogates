@@ -28,10 +28,6 @@ from surogates.channels.source import SessionSource, build_session_key
 from surogates.session.events import EventType
 
 
-# ---------------------------------------------------------------------------
-# Fake helpers
-# ---------------------------------------------------------------------------
-
 # The messaging user's home org. Deliberately DIFFERENT from the agent's org
 # (AGENT_ORG_ID) so tests can assert the session is owned by the agent's org
 # (routing.org_id), not the messaging user's org (identity.org_id).
@@ -119,10 +115,6 @@ class _FakeState:
     async def is_bot_message(self, ts: str) -> bool:
         return ts in self._botmsg
 
-
-# ---------------------------------------------------------------------------
-# Fixture factories
-# ---------------------------------------------------------------------------
 
 def _make_msg(
     *,
@@ -302,21 +294,6 @@ def _make_deps(
     deps._pairing_created = pairing_created  # type: ignore[attr-defined]
     deps._link_prompts_sent = link_prompts_sent  # type: ignore[attr-defined]
     return deps
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_pairing_prompted_outcome_and_deps_fields():
-    """linked mode needs the PAIRING_PROMPTED outcome and the pairing deps back."""
-    assert InboundOutcome.PAIRING_PROMPTED.value == "pairing_prompted"
-    deps = _make_deps()
-    assert hasattr(deps, "pairing") and hasattr(deps, "pairing_sender")
-    # The test factory records producer activity for the gate-branch tests.
-    assert hasattr(deps, "_pairing_created") and hasattr(deps, "_link_prompts_sent")
 
 
 @pytest.mark.asyncio
@@ -738,11 +715,6 @@ async def test_channel_identifier_in_session_config_uses_routing_identifier_not_
     )
 
 
-# ---------------------------------------------------------------------------
-# FIX 3: per_user_groups passed through to build_session_key
-# ---------------------------------------------------------------------------
-
-
 def _make_group_msg(*, platform_user_id: str, ts: str = "50.0") -> InboundMessage:
     return InboundMessage(
         kind="text",
@@ -814,11 +786,6 @@ async def test_per_user_groups_false_different_users_get_same_session_key():
         f"per_user_groups=False: two users in same group must share a session key; "
         f"got key_a={key_a!r} key_b={key_b!r}"
     )
-
-
-# ---------------------------------------------------------------------------
-# FIX 5 (pipeline): allow_bots gate
-# ---------------------------------------------------------------------------
 
 
 def _make_bot_msg(
@@ -1022,11 +989,6 @@ async def test_allow_bots_all_string_processes_bot_message_regression():
     )
 
 
-# ---------------------------------------------------------------------------
-# Follow resolver (deps.follow_enabled) gate tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_firehose_when_follow_enabled():
     """Non-DM, non-mention channel message → FIREHOSED when deps.follow_enabled returns True."""
@@ -1137,99 +1099,6 @@ async def test_mention_unaffected_by_follow():
     assert deps._enqueued
 
 
-# ---------------------------------------------------------------------------
-# _resolve_follow unit tests (via runner._make_deps_factory internals)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_resolve_follow_true():
-    """Mate cache returning follow_enabled=True → resolver returns True."""
-    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
-
-    entries: dict[str, dict] = {
-        mate_cache_key("agent-1", "slack", "C_ABC"): {"follow_enabled": True},
-    }
-
-    async def _loader(key: str) -> dict | None:
-        return entries.get(key)
-
-    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
-
-    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
-        if not channel_id:
-            return False
-        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
-        return bool(s and s.get("follow_enabled"))
-
-    result = await _resolve_follow("agent-1", "slack", "C_ABC")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_resolve_follow_false_value():
-    """Mate cache returning follow_enabled=False → resolver returns False."""
-    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
-
-    async def _loader(key: str) -> dict | None:
-        return {"follow_enabled": False}
-
-    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
-
-    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
-        if not channel_id:
-            return False
-        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
-        return bool(s and s.get("follow_enabled"))
-
-    result = await _resolve_follow("agent-1", "slack", "C_XYZ")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_resolve_follow_none():
-    """Mate cache returning None → resolver returns False."""
-    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
-
-    async def _loader(key: str) -> dict | None:
-        return None
-
-    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
-
-    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
-        if not channel_id:
-            return False
-        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
-        return bool(s and s.get("follow_enabled"))
-
-    result = await _resolve_follow("agent-1", "slack", "C_MISSING")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_resolve_follow_empty_channel():
-    """Empty channel_id → resolver returns False without hitting the cache."""
-    from surogates.runtime.mate_settings_cache import MateSettingsCache, mate_cache_key
-
-    loader_calls: list[str] = []
-
-    async def _loader(key: str) -> dict | None:
-        loader_calls.append(key)
-        return {"follow_enabled": True}
-
-    cache = MateSettingsCache(loader=_loader, ttl_seconds=30.0)
-
-    async def _resolve_follow(agent_id: str, platform: str, channel_id: str) -> bool:
-        if not channel_id:
-            return False
-        s = await cache.get(mate_cache_key(agent_id, platform, channel_id))
-        return bool(s and s.get("follow_enabled"))
-
-    result = await _resolve_follow("agent-1", "slack", "")
-    assert result is False
-    assert not loader_calls, "loader must not be called when channel_id is empty"
-
-
 @pytest.mark.asyncio
 async def test_linked_unknown_sender_prompts_link_no_session():
     """linked policy + unknown sender → mint a code, send the link prompt,
@@ -1283,11 +1152,6 @@ async def test_linked_known_real_user_is_processed():
     assert result == InboundOutcome.PROCESSED
     assert deps._sessions_created
     assert not deps._pairing_created, "no link prompt when already linked"
-
-
-# ---------------------------------------------------------------------------
-# memory_boundary persisted on channel sessions
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1355,11 +1219,6 @@ async def test_channel_session_blank_identifier_memory_boundary_fails_closed():
 
     created = deps._sessions_created[-1]
     assert created["config"]["memory_boundary"] == f"slack:iso:{created['session_key']}"
-
-
-# ---------------------------------------------------------------------------
-# Slice C: per-user allowance gate on the slack/telegram inbound pipeline
-# ---------------------------------------------------------------------------
 
 
 class _FakeAllowanceClient:

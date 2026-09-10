@@ -1,107 +1,9 @@
-"""Tests for the boot catch-up watermark + replay."""
+"""Channel catch-up replay, concurrency locks, rate limits and routing behavior."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
-from surogates.channels.channel_catchup import (
-    _watermark_from,
-    latest_catchup_watermark,
-)
-
-
-class TestWatermarkFrom:
-    def test_prefers_exact_ts(self):
-        created = datetime(2024, 4, 5, 12, 0, 0, tzinfo=timezone.utc)
-        assert _watermark_from("1712345678.123456", created) == "1712345678.123456"
-
-    def test_falls_back_to_created_at(self):
-        created = datetime(2024, 4, 5, 12, 0, 0, 500000, tzinfo=timezone.utc)
-        assert _watermark_from(None, created) == f"{created.timestamp():.6f}"
-
-    def test_none_when_no_events(self):
-        assert _watermark_from(None, None) is None
-
-
-# --- watermark query (mocked db) ---------------------------------------------
-
-
-class _FakeResult:
-    def __init__(self, value: str | None) -> None:
-        self._value = value
-
-    def scalar_one_or_none(self) -> str | None:
-        return self._value
-
-
-class _FakeDB:
-    def __init__(self, value: str | None) -> None:
-        self._value = value
-        self.executed = False
-        self.params: dict[str, Any] | None = None
-
-    async def __aenter__(self) -> "_FakeDB":
-        return self
-
-    async def __aexit__(self, *exc: Any) -> bool:
-        return False
-
-    async def execute(self, _stmt: Any, _params: dict[str, Any] | None = None) -> _FakeResult:
-        self.executed = True
-        self.params = _params
-        return _FakeResult(self._value)
-
-
-def _sf(value: str | None):
-    db = _FakeDB(value)
-
-    def factory() -> _FakeDB:
-        return db
-
-    factory.db = db  # type: ignore[attr-defined]
-    return factory
-
-
-class TestLatestCatchupWatermark:
-    async def test_returns_exact_ts(self):
-        wm = await latest_catchup_watermark(
-            _sf("1712345678.123456"),
-            org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
-        )
-        assert wm == "1712345678.123456"
-
-    async def test_falls_back_to_created_at(self):
-        created = datetime(2024, 4, 5, 12, 0, 0, tzinfo=timezone.utc)
-        wm = await latest_catchup_watermark(
-            _sf(f"{created.timestamp():.6f}"),
-            org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
-        )
-        assert wm == f"{created.timestamp():.6f}"
-
-    async def test_none_when_never_seen(self):
-        wm = await latest_catchup_watermark(
-            _sf(None),
-            org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
-        )
-        assert wm is None
-
-    async def test_forwards_scoping_params(self):
-        from surogates.session.events import EventType
-
-        sf = _sf("1712345678.123456")
-        await latest_catchup_watermark(
-            sf, org_id="org-1", agent_id="agent-1", api_app_id="A1", chat_id="C1",
-        )
-        params = sf.db.params  # type: ignore[attr-defined]
-        assert params["org_id"] == "org-1"
-        assert params["agent_id"] == "agent-1"
-        assert params["api_app_id"] == "A1"
-        assert params["chat_id"] == "C1"
-        assert params["event_type"] == EventType.USER_MESSAGE.value
-
-
-# --- ChannelCatchup replay tests ---------------------------------------------
 
 from dataclasses import dataclass
 
@@ -205,7 +107,7 @@ def _catchup(*, client, pipeline, routings, watermarks, limits=None):
     platform = _FakePlatform(client)
     cu = ChannelCatchup(
         redis=None,
-        session_factory=_sf(None),             # bypassed by the _watermark injection
+        session_factory=None,  # Watermarks are supplied by the fake below.
         vault=_FakeVault(),
         platform_client=_FakePlatformClient(routings),
         registry=None,

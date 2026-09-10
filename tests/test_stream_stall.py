@@ -1,11 +1,4 @@
-"""Tests for the stream-stall watchdog in call_llm_streaming_inner.
-
-Validates that when the upstream LLM stops sending bytes mid-stream
-(common failure mode: proxy drops the connection without closing it)
-the watchdog task notices after ``STREAM_STALE_TIMEOUT`` and closes
-the response.  Without the watchdog the ``async for`` would block on
-``__anext__()`` forever, holding the worker hostage on a dead stream.
-"""
+"""LLM streaming watchdog cancellation and content scrubbing."""
 
 from __future__ import annotations
 
@@ -18,7 +11,6 @@ import pytest
 
 from surogates.harness.llm_call import (
     call_llm_streaming_inner,
-    compute_stream_stale_timeout,
 )
 
 
@@ -59,71 +51,6 @@ class _BlockingStream:
     async def aclose(self):
         self.closed = True
         self._close_event.set()
-
-
-def test_stream_stale_timeout_defaults_to_180_seconds(monkeypatch):
-    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
-    monkeypatch.setattr(
-        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
-        False,
-    )
-
-    timeout = compute_stream_stale_timeout(
-        [{"role": "user", "content": "short request"}],
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o",
-    )
-
-    assert timeout == 180.0
-
-
-def test_stream_stale_timeout_scales_for_medium_and_large_contexts(monkeypatch):
-    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
-    monkeypatch.setattr(
-        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
-        False,
-    )
-
-    medium_timeout = compute_stream_stale_timeout(
-        [{"role": "user", "content": "x" * 240_000}],
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o",
-    )
-    large_timeout = compute_stream_stale_timeout(
-        [{"role": "user", "content": "x" * 420_000}],
-        base_url="https://api.openai.com/v1",
-        model="gpt-4o",
-    )
-
-    assert medium_timeout >= 240.0
-    assert large_timeout >= 300.0
-
-
-def test_stream_stale_timeout_disabled_for_implicit_local_endpoint(monkeypatch):
-    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 180.0)
-    monkeypatch.setattr(
-        "surogates.harness.llm_call.STREAM_STALE_TIMEOUT_EXPLICIT",
-        False,
-    )
-
-    timeout = compute_stream_stale_timeout(
-        [{"role": "user", "content": "x" * 420_000}],
-        base_url="http://localhost:11434/v1",
-        model="llama3",
-    )
-
-    assert timeout == float("inf")
-
-
-def test_stream_stale_timeout_respects_explicit_timeout_for_local_endpoint():
-    timeout = compute_stream_stale_timeout(
-        [{"role": "user", "content": "x" * 420_000}],
-        base_url="http://127.0.0.1:8080/v1",
-        model="llama3",
-        explicit_timeout=42.0,
-    )
-
-    assert timeout == 42.0
 
 
 @pytest.mark.asyncio

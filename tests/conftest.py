@@ -178,7 +178,7 @@ def reload_invitation(sf):
 
 @pytest.fixture()
 def tenant_context(tmp_path: Path) -> TenantContext:
-    """A default TenantContext suitable for most unit tests."""
+    """A default TenantContext for functional tests."""
     return TenantContext(
         org_id=UUID("00000000-0000-0000-0000-000000000001"),
         user_id=UUID("00000000-0000-0000-0000-000000000002"),

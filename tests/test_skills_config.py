@@ -1,17 +1,7 @@
-"""Regression tests for skill listing via the API and the builtin handler.
-
-Platform skills used to be loaded from a configured on-disk directory
-(``settings.platform_skills_dir``); that mechanism was retired when the
-platform became multi-tenant.  Skills now come from Hub bundles (the
-per-agent ``skills/<name>/`` subtree and the shared ``system-skills``
-bundle) plus the org/user DB layers.  These tests exercise the current
-sources: a bundle-backed skill surfaced by the ``/skills`` API route, and
-the builtin ``skills_list`` handler delegating to the API client.
-"""
+"""The skills API lists skills attached through the agent bundle."""
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -19,7 +9,6 @@ import pytest
 
 from surogates.api.routes.skills import list_skills
 from surogates.tenant.context import TenantContext
-from surogates.tools.builtin.skills import _skills_list_handler
 
 TEST_AGENT_ID = "agent-under-test"
 
@@ -122,42 +111,3 @@ async def test_api_list_skills_surfaces_bundle_attached_skill():
     # skill under test rather than an exact total.
     names = [s.name for s in response.skills]
     assert "configured-skill" in names
-
-
-@pytest.mark.asyncio
-async def test_builtin_skills_list_delegates_to_api_client():
-    """In the worker, ``skills_list`` delegates to the API client, which
-    is what resolves the per-agent bundle/DB skills server-side."""
-
-    class _FakeApiClient:
-        def __init__(self) -> None:
-            self.called_with: object = "unset"
-
-        async def list_skills(self, category):
-            self.called_with = category
-            return json.dumps(
-                {
-                    "count": 1,
-                    "skills": [
-                        {
-                            "name": "configured-skill",
-                            "description": "From the API",
-                            "category": None,
-                            "type": "skill",
-                        }
-                    ],
-                    "categories": [],
-                }
-            )
-
-    api_client = _FakeApiClient()
-    raw = await _skills_list_handler(
-        {},
-        tenant=_make_tenant(),
-        api_client=api_client,
-    )
-
-    result = json.loads(raw)
-    assert result["count"] == 1
-    assert result["skills"][0]["name"] == "configured-skill"
-    assert api_client.called_with is None

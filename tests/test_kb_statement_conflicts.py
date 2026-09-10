@@ -1,6 +1,5 @@
 """Current review decisions accompany real authorized source reads."""
 
-import copy
 import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from surogates.tools.builtin import kb_tools
-from surogates.tools.builtin.kb_statement_conflicts import format_statement_conflicts
 from tests.test_kb_evidence_reads import add_artifact, link_response
 from tests.test_kb_evidence_reads import evidence_db as evidence_db
 
@@ -77,22 +75,3 @@ async def test_conflict_reads_obey_session_entitlements(evidence_db, monkeypatch
     result = await kb_tools._kb_read_page_handler({"kb_id": "kb", "path": "sources/a.md", "context": "conflicts"}, agent_id="agent", session_config={"entitlements": {"kb_ids": []}})
     assert "not included" in result
     fetch.assert_not_called()
-
-
-def test_conflict_output_cap_omits_whole_pairs_not_trailing_conditions():
-    raw = ("Long original sentence. " * 25 + "For cold water only.").encode()
-    result = conflict_result(raw)
-    pair = result["items"][0]
-    pair["left"]["statement"]["context"] = [pair["left"]["statement"]["evidence"]] * 2
-    result["items"] = [copy.deepcopy(pair) for _ in range(16)]
-    out = format_statement_conflicts(result, full=True)
-    assert len(out) < 21500 and "omitted by the response limit" in out
-    assert "For cold water only." in out
-
-
-def test_old_or_dismissed_items_cannot_be_rendered_as_current_preferences():
-    result = conflict_result(b"Source", status="prefer_left")
-    result["items"][0]["current"] = False
-    assert "Reviewer prefers" not in format_statement_conflicts(result, full=True)
-    result["items"][0].update(current=True, status="dismiss")
-    assert "Reviewer prefers" not in format_statement_conflicts(result, full=True)

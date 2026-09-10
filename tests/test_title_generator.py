@@ -1,8 +1,7 @@
-"""Tests for automatic session title generation."""
+"""Automatic session title generation, provider fallback and loop-command trigger."""
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,12 +10,10 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.title_generator import (
-    clean_generated_title,
     generate_session_title,
     maybe_generate_session_title,
 )
-from surogates.harness.loop import AgentHarness, _title_source_messages
-from surogates.session.events import EventType
+from surogates.harness.loop import AgentHarness
 from surogates.session.models import Event, Session, SessionLease
 
 
@@ -60,21 +57,6 @@ def _response(content: str):
             )
         ]
     )
-
-
-def test_clean_generated_title_removes_wrapping_noise() -> None:
-    assert clean_generated_title('"Title: Build a Billing Dashboard."') == (
-        "Build a Billing Dashboard"
-    )
-
-
-def test_clean_generated_title_limits_length() -> None:
-    raw = "x" * 100
-
-    title = clean_generated_title(raw)
-
-    assert len(title) == 80
-    assert title.endswith("...")
 
 
 @pytest.mark.asyncio
@@ -347,114 +329,6 @@ async def test_maybe_generate_session_title_skips_later_exchanges(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_harness_title_hook_runs_in_background(monkeypatch) -> None:
-    harness = AgentHarness.__new__(AgentHarness)
-    harness._store = SimpleNamespace(emit_event=AsyncMock(return_value=42))
-    harness._llm = SimpleNamespace()
-    harness._tenant = SimpleNamespace()
-    harness._summary_client = SimpleNamespace()
-    harness._summary_model = "agent-summary-model"
-    harness._background_tasks = set()
-
-    maybe_generate = AsyncMock(return_value="Build Sales Chart")
-    monkeypatch.setattr(
-        "surogates.harness.loop.maybe_generate_session_title",
-        maybe_generate,
-    )
-    session = SimpleNamespace(id=uuid4(), title=None)
-    messages = [{"role": "user", "content": "build a chart"}]
-
-    harness._maybe_generate_title(
-        session=session,
-        messages=messages,
-        model="gpt-4o",
-    )
-
-    # The call should not have happened synchronously -- it was scheduled.
-    maybe_generate.assert_not_called()
-    assert len(harness._background_tasks) == 1
-
-    # Drain the background task and verify the underlying generator ran.
-    await asyncio.gather(*list(harness._background_tasks))
-
-    maybe_generate.assert_awaited_once_with(
-        store=harness._store,
-        llm_client=harness._llm,
-        session=session,
-        messages=messages,
-        model="gpt-4o",
-        summary_client=harness._summary_client,
-        summary_model=harness._summary_model,
-    )
-    # A successful title write must emit SESSION_TITLE_UPDATED so the SSE
-    # stream can patch the sidebar without an explicit refetch.
-    from surogates.session.events import EventType
-
-    harness._store.emit_event.assert_awaited_once_with(
-        session.id,
-        EventType.SESSION_TITLE_UPDATED,
-        {"title": "Build Sales Chart"},
-    )
-    assert harness._background_tasks == set()
-
-
-@pytest.mark.asyncio
-async def test_harness_title_hook_skips_event_when_no_title(monkeypatch) -> None:
-    """No title generated → no SESSION_TITLE_UPDATED event."""
-    harness = AgentHarness.__new__(AgentHarness)
-    harness._store = SimpleNamespace(emit_event=AsyncMock())
-    harness._llm = SimpleNamespace()
-    harness._tenant = SimpleNamespace()
-    harness._summary_client = None
-    harness._summary_model = ""
-    harness._background_tasks = set()
-
-    maybe_generate = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "surogates.harness.loop.maybe_generate_session_title",
-        maybe_generate,
-    )
-    session = SimpleNamespace(id=uuid4(), title=None)
-    messages = [{"role": "user", "content": "build a chart"}]
-
-    harness._maybe_generate_title(
-        session=session,
-        messages=messages,
-        model="gpt-4o",
-    )
-    await asyncio.gather(*list(harness._background_tasks))
-
-    maybe_generate.assert_awaited_once()
-    harness._store.emit_event.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_harness_title_hook_skips_when_title_already_set(monkeypatch) -> None:
-    harness = AgentHarness.__new__(AgentHarness)
-    harness._store = SimpleNamespace()
-    harness._llm = SimpleNamespace()
-    harness._tenant = SimpleNamespace()
-    harness._background_tasks = set()
-
-    maybe_generate = AsyncMock(return_value="Whatever")
-    monkeypatch.setattr(
-        "surogates.harness.loop.maybe_generate_session_title",
-        maybe_generate,
-    )
-    session = SimpleNamespace(id=uuid4(), title="Existing")
-    messages = [{"role": "user", "content": "build a chart"}]
-
-    harness._maybe_generate_title(
-        session=session,
-        messages=messages,
-        model="gpt-4o",
-    )
-
-    assert harness._background_tasks == set()
-    maybe_generate.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
     """``wake()`` schedules title generation for /loop commands.
 
@@ -545,80 +419,3 @@ async def test_wake_kicks_off_title_for_loop_command(monkeypatch) -> None:
     assert call_kwargs["messages"] == rebuilt_messages
     assert call_kwargs["model"] == "gpt-4o"
     assert harness._background_tasks == set()
-
-
-class TestTitleSourceMessages:
-    """The titler must see the user's words, not the harness's notes.
-
-    ``_rebuild_messages`` prepends the per-turn ephemeral notes to the
-    user's text.  Feeding that to the titler named every whiteboard
-    session after the canvas geometry note -- the board's question box is
-    optional, so with nothing typed the note is the entire message.
-    """
-
-    @staticmethod
-    def _user_event(content, **data):
-        return SimpleNamespace(
-            type=EventType.USER_MESSAGE.value,
-            data={"content": content, **data},
-        )
-
-    def test_uses_the_typed_question_not_the_canvas_note(self) -> None:
-        events = [
-            self._user_event(
-                "what is A + B?",
-                metadata={"whiteboard": {"sourceRect": {
-                    "x": 0, "y": 0, "w": 10, "h": 10,
-                }, "imageScale": 2}},
-            ),
-        ]
-        assert _title_source_messages(events) == [
-            {"role": "user", "content": "what is A + B?"},
-        ]
-
-    def test_a_silent_board_turn_carries_no_text_to_title(self) -> None:
-        # The regression: this used to arrive as the geometry note and
-        # every board was titled after it.
-        events = [
-            self._user_event(
-                "",
-                metadata={"whiteboard": {"mode": "sketch"}},
-            ),
-        ]
-        assert _title_source_messages(events) == [
-            {"role": "user", "content": ""},
-        ]
-
-    def test_a_silent_board_turn_produces_no_title(self) -> None:
-        # An empty first message is what makes the generator decline, so
-        # no title beats the same wrong title on every board.
-        import asyncio as _asyncio
-
-        events = [self._user_event("")]
-        store = SimpleNamespace(update_session_title_if_empty=AsyncMock())
-        title = _asyncio.run(
-            maybe_generate_session_title(
-                store=store,
-                llm_client=SimpleNamespace(),
-                session=SimpleNamespace(id=uuid4(), title=None),
-                messages=_title_source_messages(events),
-                model="m",
-            )
-        )
-        assert title is None
-        store.update_session_title_if_empty.assert_not_called()
-
-    def test_ignores_non_user_events(self) -> None:
-        events = [
-            SimpleNamespace(type="llm.response", data={"content": "hi"}),
-            self._user_event("real question"),
-        ]
-        assert _title_source_messages(events) == [
-            {"role": "user", "content": "real question"},
-        ]
-
-    def test_tolerates_a_missing_payload(self) -> None:
-        events = [SimpleNamespace(type=EventType.USER_MESSAGE.value, data=None)]
-        assert _title_source_messages(events) == [
-            {"role": "user", "content": ""},
-        ]

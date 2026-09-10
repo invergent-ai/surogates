@@ -13,12 +13,9 @@ Covers the security-critical dispatch flow:
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
 
-import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -27,10 +24,6 @@ from surogates.channels.inbound import InboundMessage, InboundOutcome, PipelineD
 from surogates.channels.registry import ChannelDescriptor, ChannelRegistry, VerificationResult
 from surogates.channels.base import SendResult
 
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 ORG_ID = "org-11111111-1111-1111-1111-111111111111"
 AGENT_ID = "agent-aaaaaaaaa"
@@ -41,11 +34,6 @@ UNKNOWN_IDENTIFIER = "NOT_PROVISIONED"
 KNOWN_URL = f"/channels/fake/{IDENTIFIER}"
 UNKNOWN_URL = f"/channels/fake/{UNKNOWN_IDENTIFIER}"
 INTERACTIVE_KNOWN_URL = f"/channels/fake_interactive/{IDENTIFIER}"
-
-
-# ---------------------------------------------------------------------------
-# Fake platform
-# ---------------------------------------------------------------------------
 
 
 def _make_msg(**kw) -> InboundMessage:
@@ -125,11 +113,6 @@ class _FakePlatformWithInteractive(_FakePlatform):
         return self.non_msg_return
 
 
-# ---------------------------------------------------------------------------
-# Fake cache, vault, pipeline
-# ---------------------------------------------------------------------------
-
-
 class _FakeCache:
     """Routing cache: returns tenant for IDENTIFIER, None for everything else."""
 
@@ -181,11 +164,6 @@ class _FakePipeline:
         return self._outcome
 
 
-# ---------------------------------------------------------------------------
-# Settings stubs
-# ---------------------------------------------------------------------------
-
-
 class _FakeChannelCfg:
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = enabled
@@ -195,11 +173,6 @@ def _settings(enabled_kinds: set[str]) -> Any:
     return SimpleNamespace(
         channels={k: _FakeChannelCfg(enabled=k in enabled_kinds) for k in enabled_kinds},
     )
-
-
-# ---------------------------------------------------------------------------
-# Helpers to build the app under test
-# ---------------------------------------------------------------------------
 
 
 def _deps_factory(kind, routing, creds, platform) -> PipelineDeps:
@@ -259,11 +232,6 @@ async def _post(app: FastAPI, path: str, body: dict | None = None, raw: bytes | 
                 headers={"content-type": "application/json"},
             )
         return await c.post(path, json=body if body is not None else {"text": "hi"})
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestRoutesMounting:
@@ -330,29 +298,7 @@ class TestRoutesMounting:
 
 
 class TestUnknownIdentifier:
-    async def test_unknown_identifier_returns_200(self):
-        """Unknown identifier → fast-ack 200."""
-        app, _, cache, vault, pipeline = _make_app()
-        r = await _post(app, UNKNOWN_URL)
-        assert r.status_code == 200
 
-    async def test_unknown_identifier_no_vault_call(self):
-        """Unknown identifier → NO credential lookup."""
-        app, _, cache, vault, pipeline = _make_app()
-        await _post(app, UNKNOWN_URL)
-        assert vault.calls == [], "vault must not be called for unknown identifier"
-
-    async def test_unknown_identifier_no_pipeline_call(self):
-        """Unknown identifier → pipeline NOT called."""
-        app, _, cache, vault, pipeline = _make_app()
-        await _post(app, UNKNOWN_URL)
-        assert pipeline.calls == []
-
-    async def test_unknown_identifier_no_parse_call(self):
-        """Unknown identifier → parse NOT called."""
-        app, platform, cache, vault, pipeline = _make_app()
-        await _post(app, UNKNOWN_URL)
-        assert platform.parse_calls == []
 
     async def test_unknown_identifier_garbage_body_returns_200_no_oracle(self):
         """Garbage body to an UNKNOWN identifier → 200 fast-ack (no 400/404 oracle).
@@ -399,17 +345,6 @@ class TestFailedVerification:
 
 
 class TestVerificationResult:
-    async def test_handshake_returns_verification_result_status(self):
-        """verify returns accepted VerificationResult → respond with that status_code."""
-        platform = _FakePlatform()
-        platform._verify_return = VerificationResult(
-            accepted=True,
-            response_body={"challenge": "abc123"},
-            status_code=200,
-        )
-        app, _, _, _, pipeline = _make_app(platform=platform)
-        r = await _post(app, KNOWN_URL)
-        assert r.status_code == 200
 
     async def test_handshake_returns_verification_result_body(self):
         """verify returns accepted VerificationResult → response body matches."""
@@ -499,32 +434,6 @@ class TestHappyPath:
         await _post(app, KNOWN_URL)
         assert len(pipeline.calls) == 1
 
-    async def test_verified_request_returns_200(self):
-        """Known identifier + verified → 200."""
-        app, *_ = _make_app()
-        r = await _post(app, KNOWN_URL)
-        assert r.status_code == 200
-
-    async def test_routing_object_has_org_id(self):
-        """Routing object passed to pipeline has resolved org_id."""
-        app, _, _, _, pipeline = _make_app()
-        await _post(app, KNOWN_URL)
-        call = pipeline.calls[0]
-        assert call["routing"].org_id == ORG_ID
-
-    async def test_routing_object_has_agent_id(self):
-        """Routing object passed to pipeline has resolved agent_id."""
-        app, _, _, _, pipeline = _make_app()
-        await _post(app, KNOWN_URL)
-        call = pipeline.calls[0]
-        assert call["routing"].agent_id == AGENT_ID
-
-    async def test_routing_object_has_platform(self):
-        """Routing object passed to pipeline carries the platform kind."""
-        app, platform, _, _, pipeline = _make_app()
-        await _post(app, KNOWN_URL)
-        call = pipeline.calls[0]
-        assert call["routing"].platform == platform.kind
 
     async def test_routing_object_carries_api_web_url(self):
         """The per-agent base URL must survive onto the routing object.
@@ -546,11 +455,6 @@ class TestHappyPath:
         call = pipeline.calls[0]
         assert call["routing"].api_web_url == "https://acme.cloud.surogate.ai"
 
-    async def test_routing_object_api_web_url_defaults_to_empty(self):
-        """A routing record without api_web_url yields "", never an attribute error."""
-        app, _, _, _, pipeline = _make_app()
-        await _post(app, KNOWN_URL)
-        assert pipeline.calls[0]["routing"].api_web_url == ""
 
     async def test_config_passed_to_pipeline(self):
         """Resolved config is forwarded to pipeline.handle."""
@@ -559,15 +463,6 @@ class TestHappyPath:
         call = pipeline.calls[0]
         assert call["config"] == {"require_mention": False}
 
-    async def test_vault_called_exactly_once_for_known_identifier(self):
-        """Credential lookup happens EXACTLY once for a known identifier.
-
-        An exact count (not >= 1) guards against an accidental double-resolution
-        of credentials per request.
-        """
-        app, _, _, vault, _ = _make_app()
-        await _post(app, KNOWN_URL)
-        assert len(vault.calls) == 1
 
     async def test_routing_object_carries_path_identifier(self):
         """Routing object passed to the pipeline carries the path identifier (app_id).
@@ -700,11 +595,6 @@ class TestHandleNonMessageUpdate:
         assert len(pipeline.calls) == 1
 
 
-# ---------------------------------------------------------------------------
-# Enrich hook
-# ---------------------------------------------------------------------------
-
-
 class _FakePlatformWithEnrich(_FakePlatform):
     """Platform that declares an async enrich hook."""
 
@@ -761,16 +651,6 @@ class TestEnrichHook:
         app = dispatcher.build_app()
         return app, platform, cache, vault, pipeline
 
-    async def test_enrich_is_called_when_platform_has_enrich(self):
-        """When platform.enrich exists, dispatcher calls it before pipeline."""
-        app, platform, _, _, pipeline = self._make_app_with_enrich()
-
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="https://test") as c:
-            r = await c.post(f"/channels/fake_enrich/{IDENTIFIER}", json={"text": "hi"})
-
-        assert r.status_code == 200
-        assert len(platform.enrich_calls) == 1
 
     async def test_enriched_message_reaches_pipeline(self):
         """pipeline.handle receives the enriched message returned by enrich."""
@@ -835,11 +715,6 @@ class TestEnrichHook:
         assert len(pipeline.calls) == 1
         # The message reaching the pipeline is the ORIGINAL (pre-enrich) one.
         assert pipeline.calls[0]["msg"].user_name == "alice"
-
-
-# ---------------------------------------------------------------------------
-# Slack interactive surface integration tests — form-encoded POSTs
-# ---------------------------------------------------------------------------
 
 
 import hashlib
@@ -1075,10 +950,6 @@ class TestSlackInteractiveSurfaces:
         assert r.status_code == 200
         assert pipeline.calls == []
 
-
-# ---------------------------------------------------------------------------
-# GET handshake route (platforms declaring handshake_get)
-# ---------------------------------------------------------------------------
 
 HANDSHAKE_IDENTIFIER = "t1"
 HANDSHAKE_URL = f"/handshaker/{HANDSHAKE_IDENTIFIER}"

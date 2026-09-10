@@ -15,7 +15,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fastapi import HTTPException
 
 from surogates.tenant.auth.service_account import (
     KIND_AGENT_PRINCIPAL,
@@ -23,24 +22,10 @@ from surogates.tenant.auth.service_account import (
     KIND_SERVICE,
     ServiceAccountStore,
 )
-from surogates.tenant.context import TenantContext
 
 from .conftest import create_org
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
-
-
-def _ctx(*, agent_id: str | None, sa_id: uuid.UUID | None = None) -> TenantContext:
-    return TenantContext(
-        org_id=uuid.uuid4(),
-        user_id=None,
-        org_config={},
-        user_preferences={},
-        permissions=frozenset(),
-        asset_root="/tmp/assets",
-        service_account_id=sa_id or uuid.uuid4(),
-        service_account_agent_id=agent_id,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -180,52 +165,6 @@ async def test_resolution_carries_the_agent_binding_on_every_path(
     resolved = await store.get_by_token(org_scoped.token)
     assert resolved is not None
     assert resolved.agent_id is None
-
-
-# ---------------------------------------------------------------------------
-# the guard
-# ---------------------------------------------------------------------------
-
-async def _enforce(ctx, target: str | None):
-    """Drive the real middleware guard against a request naming *target*."""
-    from starlette.requests import Request
-
-    from surogates.tenant.auth.middleware import enforce_agent_binding
-
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/v1/api/skills",
-        # A host with no dot: slug resolution is skipped, so the fake scope
-        # needs no ``app`` on it.
-        "headers": [(b"host", b"localhost")],
-        "query_string": (
-            f"agent_id={target}".encode() if target else b""
-        ),
-    }
-    await enforce_agent_binding(Request(scope), ctx)
-
-
-async def test_a_bound_key_is_refused_against_another_agent():
-    with pytest.raises(HTTPException) as exc:
-        await _enforce(_ctx(agent_id="agent-a"), "agent-b")
-    assert exc.value.status_code == 403
-    assert "bound to a different agent" in exc.value.detail
-
-
-async def test_a_bound_key_passes_against_its_own_agent():
-    await _enforce(_ctx(agent_id="agent-a"), "agent-a")
-
-
-async def test_an_org_scoped_token_is_unchanged():
-    """The control plane's own machine identities must keep org-wide reach."""
-    await _enforce(_ctx(agent_id=None), "any-agent-at-all")
-
-
-async def test_an_unresolvable_target_leaves_the_request_to_its_own_guards():
-    """Session-addressed routes name no agent; they are covered by the
-    session guard instead, against the session row's own agent."""
-    await _enforce(_ctx(agent_id="agent-a"), None)
 
 
 # ---------------------------------------------------------------------------

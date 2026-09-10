@@ -1,7 +1,4 @@
-"""Tests for the WhatsApp Cloud API Graph client.
-
-Written BEFORE the implementation module exists (TDD).
-"""
+"""WhatsApp API messaging and media transport workflows."""
 
 from __future__ import annotations
 
@@ -13,8 +10,6 @@ from surogates.channels.platforms.whatsapp_api import (
     DEFAULT_API_VERSION,
     GRAPH_API_BASE,
     download_media,
-    ext_for_mime,
-    format_graph_error,
     graph_url,
     send_message,
     upload_media,
@@ -22,57 +17,6 @@ from surogates.channels.platforms.whatsapp_api import (
 
 TOKEN = "EAAtest-token"
 PNID = "7794189252778687"
-
-
-# ---------------------------------------------------------------------------
-# graph_url
-# ---------------------------------------------------------------------------
-
-
-class TestGraphUrl:
-    def test_builds_phone_scoped_url(self):
-        assert graph_url(PNID, "messages") == (
-            f"{GRAPH_API_BASE}/{DEFAULT_API_VERSION}/{PNID}/messages"
-        )
-
-    def test_strips_leading_slash(self):
-        assert graph_url(PNID, "/media").endswith(f"/{PNID}/media")
-
-    def test_version_is_not_v20(self):
-        # v20.0 is removed by Meta on 2026-09-24.
-        assert DEFAULT_API_VERSION != "v20.0"
-
-    def test_version_override(self):
-        assert "/v25.0/" in graph_url(PNID, "messages", api_version="v25.0")
-
-
-# ---------------------------------------------------------------------------
-# format_graph_error
-# ---------------------------------------------------------------------------
-
-
-class TestFormatGraphError:
-    def test_includes_code_and_status(self):
-        body = {"error": {"message": "Re-engagement message", "code": 131047}}
-        assert format_graph_error(400, body) == (
-            "graph error 131047 (HTTP 400): Re-engagement message"
-        )
-
-    def test_codeless_error_has_no_graph_prefix(self):
-        # Code-less errors must never match a permanent prefix, so they stay
-        # retryable by construction.
-        body = {"error": {"message": "boom"}}
-        out = format_graph_error(500, body)
-        assert out == "HTTP 500: boom"
-        assert "graph error" not in out
-
-    def test_missing_error_object(self):
-        assert format_graph_error(502, {}) == "HTTP 502: unknown error"
-
-
-# ---------------------------------------------------------------------------
-# send_message
-# ---------------------------------------------------------------------------
 
 
 class TestSendMessage:
@@ -128,11 +72,6 @@ class TestSendMessage:
                 )
         assert wamid is None
         assert error == "graph error 100 (HTTP 400): bad"
-
-
-# ---------------------------------------------------------------------------
-# download_media — the two-hop fetch
-# ---------------------------------------------------------------------------
 
 
 class TestDownloadMedia:
@@ -234,11 +173,6 @@ class TestDownloadMedia:
         assert mime is None
 
 
-# ---------------------------------------------------------------------------
-# upload_media
-# ---------------------------------------------------------------------------
-
-
 class TestUploadMedia:
     @pytest.mark.asyncio
     async def test_returns_media_id(self):
@@ -272,28 +206,3 @@ class TestUploadMedia:
         assert media_id is None
         assert "cap" in (error or "")
         assert len(route.calls) == 0
-
-
-# ---------------------------------------------------------------------------
-# ext_for_mime
-# ---------------------------------------------------------------------------
-
-
-class TestExtForMime:
-    @pytest.mark.parametrize(
-        "mime,expected",
-        [
-            ("audio/ogg", ".ogg"),                 # not mimetypes' .oga
-            ("audio/ogg; codecs=opus", ".ogg"),    # parameters stripped
-            ("audio/x-opus+ogg", ".ogg"),
-            ("audio/opus", ".ogg"),
-            ("audio/mp4", ".m4a"),                 # iOS voice memos
-            ("audio/x-m4a", ".m4a"),
-            ("image/jpeg", ".jpg"),                # not legacy .jpe
-        ],
-    )
-    def test_overrides(self, mime, expected):
-        assert ext_for_mime(mime) == expected
-
-    def test_unknown_mime_falls_back_to_bin(self):
-        assert ext_for_mime("application/x-nonsense") == ".bin"

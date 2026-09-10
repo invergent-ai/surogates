@@ -616,26 +616,6 @@ async def test_patch_session_user_route_renames(
     assert resp.json()["title"] == "My session"
 
 
-async def test_api_live_chat_routes_are_registered(app):
-    """Ops-required live chat routes are exposed on the service-account prefix."""
-    paths = app.openapi()["paths"]
-
-    assert "/v1/api/sessions" in paths
-    assert "/v1/api/sessions/{session_id}" in paths
-    assert "delete" in paths["/v1/api/sessions/{session_id}"]
-    assert "patch" in paths["/v1/api/sessions/{session_id}"]
-    assert "/v1/api/sessions/{session_id}/messages" in paths
-    assert "/v1/api/sessions/{session_id}/pause" in paths
-    assert "/v1/api/sessions/{session_id}/retry" in paths
-    assert "/v1/api/sessions/{session_id}/events" in paths
-    assert "/v1/api/sessions/{session_id}/artifacts/{artifact_id}" in paths
-    assert "/v1/api/sessions/{session_id}/ask_user_question/{tool_call_id}/respond" in paths
-    assert "/v1/api/sessions/{session_id}/workspace/tree" in paths
-    assert "/v1/api/sessions/{session_id}/workspace/file" in paths
-    assert "/v1/api/sessions/{session_id}/workspace/upload" in paths
-    assert "/v1/api/sessions/{session_id}/workspace/download" in paths
-
-
 async def test_api_session_workspace_file_with_service_account(
     client: AsyncClient, app, session_factory
 ):

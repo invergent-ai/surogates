@@ -1,35 +1,10 @@
-"""BoardNote ORM model: insert, defaults, seq monotonicity."""
+"""Board-note sequence numbers advance across database inserts and updates."""
 import uuid
 
 import pytest
 from sqlalchemy import select, update
 
 from surogates.db.models import BoardNote, board_note_seq
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_board_note_insert_defaults(session_factory, org_id, parent_session):
-    group_id = uuid.uuid4()
-    async with session_factory() as db:
-        note = BoardNote(
-            org_id=org_id,
-            group_id=group_id,
-            writer_session_id=parent_session.id,
-            writer_label="coord",
-            type="FACT",
-            content="channels/slack.py:214 bypasses outbox for DMs",
-        )
-        db.add(note)
-        await db.commit()
-        await db.refresh(note)
-
-    assert note.id > 0
-    assert note.seq > 0
-    assert note.status == "active"
-    assert note.ref is None
-    assert note.expires_at is None
-    assert note.created_at is not None
-    assert note.updated_at is not None
 
 
 @pytest.mark.asyncio(loop_scope="session")

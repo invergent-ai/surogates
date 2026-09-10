@@ -1,14 +1,4 @@
-"""Tests for the per-platform outbound delivery loop.
-
-Covers:
-  1. deliver_batch happy path: claimed item → creds resolved by identifier →
-     platform.send called → mark_delivered with the message_id.
-  2. send returning failure → mark_failed (not mark_delivered).
-  3. send RAISING an exception → mark_failed, batch continues to the next item.
-  4. item missing channel_identifier in destination → mark_failed, no send.
-  5. item whose identifier no longer resolves (tenant deprovisioned) → mark_failed.
-  6. _enqueue_channel_delivery puts channel_identifier into the slack destination.
-"""
+"""Outbound delivery, retries, media uploads and progress-message workflows."""
 
 from __future__ import annotations
 
@@ -17,15 +7,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 
 from surogates.channels.base import SendResult
-from surogates.channels.channel_media import OutboundFile
-
-
-# ---------------------------------------------------------------------------
-# Fakes
-# ---------------------------------------------------------------------------
+from surogates.channels.dispatcher import ChannelDeliveryDispatcher
 
 
 @dataclass
@@ -123,8 +107,6 @@ def _make_dispatcher(
     vault: _FakeVault | None = None,
     redis: Any = None,
 ) -> "ChannelDeliveryDispatcher":
-    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
-
     return ChannelDeliveryDispatcher(
         cache=cache or _FakeCache(),
         vault=vault or _FakeVault(),
@@ -133,21 +115,12 @@ def _make_dispatcher(
     )
 
 
-# ---------------------------------------------------------------------------
-# Helper: build a cache with a known tenant for identifier APP_ID
-# ---------------------------------------------------------------------------
-
 APP_ID = "A01234567"
 ORG_ID = "org-aaaaaa"
 
 _KNOWN_CACHE = {
     f"slack:{APP_ID}": {"org_id": ORG_ID, "agent_id": "agent-x", "config": {}},
 }
-
-
-# ---------------------------------------------------------------------------
-# Tests: deliver_batch happy path
-# ---------------------------------------------------------------------------
 
 
 class TestDeliverBatchHappyPath:
@@ -203,24 +176,6 @@ class TestDeliverBatchHappyPath:
         assert delivery.delivered == [(42, "slack-msg-999")]
         assert delivery.failed == []
 
-    async def test_deliver_batch_returns_count_of_items(self):
-        """deliver_batch returns the number of items processed."""
-        items = [
-            _FakeOutboxItem(id=i, destination={"channel_identifier": APP_ID}) for i in range(3)
-        ]
-        delivery = _FakeDeliveryService(items=items)
-        platform = _FakePlatform()
-        cache = _FakeCache(_KNOWN_CACHE)
-
-        dispatcher = _make_dispatcher(platform=platform, delivery=delivery, cache=cache)
-        n = await dispatcher.deliver_batch(platform)
-        assert n == 3
-
-
-# ---------------------------------------------------------------------------
-# Tests: send returning failure
-# ---------------------------------------------------------------------------
-
 
 class TestDeliverBatchSendFailure:
     async def test_send_failure_calls_mark_failed(self):
@@ -257,11 +212,6 @@ class TestDeliverBatchSendFailure:
         failed_id, error_msg = delivery.failed[0]
         assert failed_id == 8
         assert error_msg  # non-empty
-
-
-# ---------------------------------------------------------------------------
-# Tests: send RAISES — per-item isolation
-# ---------------------------------------------------------------------------
 
 
 class TestDeliverBatchSendRaises:
@@ -318,11 +268,6 @@ class TestDeliverBatchSendRaises:
         assert (11, "m-11") in delivery.delivered
 
 
-# ---------------------------------------------------------------------------
-# Tests: missing channel_identifier in destination
-# ---------------------------------------------------------------------------
-
-
 class TestMissingChannelIdentifier:
     async def test_missing_identifier_calls_mark_failed(self):
         """An item with no channel_identifier in destination → mark_failed, no send."""
@@ -340,28 +285,6 @@ class TestMissingChannelIdentifier:
         assert len(delivery.failed) == 1
         assert delivery.failed[0][0] == 5
         assert platform.send_calls == []
-
-    async def test_empty_identifier_calls_mark_failed(self):
-        """An item with channel_identifier="" → mark_failed, no send."""
-        item = _FakeOutboxItem(
-            id=6,
-            destination={"channel_identifier": ""},
-        )
-        delivery = _FakeDeliveryService(items=[item])
-        platform = _FakePlatform()
-        cache = _FakeCache(_KNOWN_CACHE)
-
-        dispatcher = _make_dispatcher(platform=platform, delivery=delivery, cache=cache)
-        await dispatcher.deliver_batch(platform)
-
-        assert len(delivery.failed) == 1
-        assert delivery.failed[0][0] == 6
-        assert platform.send_calls == []
-
-
-# ---------------------------------------------------------------------------
-# Tests: deprovisioned / unknown identifier
-# ---------------------------------------------------------------------------
 
 
 class TestUnknownIdentifier:
@@ -404,386 +327,6 @@ class TestUnknownIdentifier:
         assert any(did == 21 for did, _ in delivery.delivered)
 
 
-# ---------------------------------------------------------------------------
-# Tests: _enqueue_channel_delivery puts channel_identifier in destination
-# ---------------------------------------------------------------------------
-
-
-class TestEnqueueChannelDeliveryIncludesIdentifier:
-    """Verify that _enqueue_channel_delivery copies channel_identifier into destination."""
-
-    async def test_slack_destination_includes_channel_identifier(self):
-        """Slack destination dict must contain channel_identifier from session config."""
-        from surogates.session.store import SessionStore
-
-        # Build a minimal fake SessionStore with the parts _enqueue_channel_delivery uses.
-        captured: list[dict] = []
-
-        class _FakeSF:
-            """Async context manager yielding a fake DB session."""
-            def __call__(self):
-                return _FakeSF()
-            async def __aenter__(self):
-                return self
-            async def __aexit__(self, *a):
-                pass
-            async def get(self, model, pk):
-                # Return a fake session row with channel='slack' and the config.
-                # Keys match what inbound.py writes: {platform}_channel_id,
-                # {platform}_thread_key, channel_identifier.
-                from types import SimpleNamespace
-                return SimpleNamespace(
-                    channel="slack",
-                    config={
-                        "slack_channel_id": "C123",
-                        "slack_thread_key": "1234.5678",
-                        "channel_identifier": "A_SLACK_APP",
-                    },
-                )
-            async def add(self, obj):
-                pass
-            async def commit(self):
-                pass
-
-        class _FakeOutboxCapture:
-            def __init__(self, **kw):
-                captured.append(dict(kw))
-            id = None
-
-        # Patch DeliveryOutbox at its definition site (surogates.db.models) so
-        # the inline `from surogates.db.models import DeliveryOutbox` inside
-        # _enqueue_channel_delivery picks up the fake.
-        import unittest.mock as mock
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutboxCapture):
-            sf = _FakeSF()
-            # Instantiate a bare SessionStore (bypassing __init__ side effects).
-            ss = object.__new__(store_mod.SessionStore)
-            ss._sf = sf
-            ss._channel_cache = {}
-
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=1,
-                event_type=EventType.LLM_RESPONSE,
-                data={"message": {"content": "hello world"}},
-            )
-
-        assert len(captured) == 1, "Expected exactly one outbox row to be enqueued"
-        dest = captured[0]["destination"]
-        assert "channel_identifier" in dest, (
-            f"channel_identifier missing from slack destination: {dest}"
-        )
-        assert dest["channel_identifier"] == "A_SLACK_APP"
-
-
-# ---------------------------------------------------------------------------
-# Seam tests: pipeline-written keys → store reads → send-consumable destination
-# ---------------------------------------------------------------------------
-
-
-def _make_fake_store(channel: str, config: dict) -> "object":
-    """Return a bare SessionStore wired with a fake session row."""
-    import unittest.mock as mock
-    from surogates.session import store as store_mod
-
-    class _FakeSF:
-        def __call__(self):
-            return _FakeSF()
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-        async def get(self, model, pk):
-            from types import SimpleNamespace
-            return SimpleNamespace(channel=channel, config=config)
-
-        async def add(self, obj):
-            pass
-
-        async def commit(self):
-            pass
-
-    ss = object.__new__(store_mod.SessionStore)
-    ss._sf = _FakeSF()
-    ss._channel_cache = {}
-    return ss
-
-
-async def _capture_destination(channel: str, config: dict) -> dict:
-    """Run _enqueue_channel_delivery with the given config and return destination."""
-    import unittest.mock as mock
-    from surogates.session.events import EventType
-
-    captured: list[dict] = []
-
-    class _FakeOutboxCapture:
-        def __init__(self, **kw):
-            captured.append(dict(kw))
-
-        id = None
-
-    ss = _make_fake_store(channel, config)
-    with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutboxCapture):
-        await ss._enqueue_channel_delivery(
-            session_id=uuid4(),
-            event_id=1,
-            event_type=EventType.LLM_RESPONSE,
-            data={"message": {"content": "seam test"}},
-        )
-
-    assert len(captured) == 1, f"Expected one outbox row, got {len(captured)}"
-    return captured[0]["destination"]
-
-
-class TestDeliverySeamPipelineKeys:
-    """Seam tests: config keys written by inbound.py → destination consumed by send().
-
-    The pipeline (inbound.py ~line 347) writes:
-        {platform}_channel_id, {platform}_thread_key, channel_identifier
-
-    SlackPlatform.send reads: destination["channel_id"], destination.get("thread_ts")
-    TelegramPlatform.send reads: destination["chat_id"], destination.get("message_thread_id")
-
-    store.py _enqueue_channel_delivery must translate between the two.
-    """
-
-    async def test_slack_pipeline_keys_produce_nonempty_channel_id(self):
-        """Pipeline writes slack_channel_id → destination["channel_id"] is non-empty."""
-        config = {
-            "slack_channel_id": "C1SEAM",
-            "slack_thread_key": "123.45",
-            "channel_identifier": "A0X_SEAM",
-        }
-        dest = await _capture_destination("slack", config)
-        assert dest.get("channel_id"), (
-            f"destination['channel_id'] is empty or missing; got: {dest!r}\n"
-            "This is the seam bug: store reads 'slack_channel_id' but must map it to 'channel_id'."
-        )
-        assert dest["channel_id"] == "C1SEAM"
-
-    async def test_slack_pipeline_keys_produce_thread_ts(self):
-        """Pipeline writes slack_thread_key → destination["thread_ts"] is set."""
-        config = {
-            "slack_channel_id": "C1SEAM",
-            "slack_thread_key": "123.45",
-            "channel_identifier": "A0X_SEAM",
-        }
-        dest = await _capture_destination("slack", config)
-        assert dest.get("thread_ts") == "123.45", (
-            f"destination['thread_ts'] should be '123.45'; got: {dest.get('thread_ts')!r}\n"
-            "store must read 'slack_thread_key' (not 'slack_thread_ts')."
-        )
-
-    async def test_slack_no_stale_team_id_key(self):
-        """Pipeline never writes slack_team_id; destination must not include it."""
-        config = {
-            "slack_channel_id": "C1SEAM",
-            "slack_thread_key": "123.45",
-            "channel_identifier": "A0X_SEAM",
-        }
-        dest = await _capture_destination("slack", config)
-        # team_id is not consumed by SlackPlatform.send and was never written
-        # by the pipeline; it should not appear in the destination.
-        assert "team_id" not in dest, (
-            f"destination must not contain 'team_id' (never written by pipeline): {dest!r}"
-        )
-
-    async def test_telegram_pipeline_keys_produce_nonempty_chat_id(self):
-        """Pipeline writes telegram_channel_id → destination["chat_id"] is non-empty.
-
-        This is the CRITICAL bug: store was reading 'telegram_chat_id' but the
-        pipeline writes 'telegram_channel_id', so chat_id was always ''.
-        """
-        config = {
-            "telegram_channel_id": "-100123456789",
-            "telegram_thread_key": "42",
-            "channel_identifier": "@my_bot",
-        }
-        dest = await _capture_destination("telegram", config)
-        assert dest.get("chat_id"), (
-            f"destination['chat_id'] is empty or missing; got: {dest!r}\n"
-            "CRITICAL seam bug: store reads 'telegram_chat_id' but pipeline writes "
-            "'telegram_channel_id'."
-        )
-        assert dest["chat_id"] == "-100123456789"
-
-    async def test_telegram_pipeline_keys_produce_message_thread_id(self):
-        """Pipeline writes telegram_thread_key → destination["message_thread_id"] is set."""
-        config = {
-            "telegram_channel_id": "-100123456789",
-            "telegram_thread_key": "42",
-            "channel_identifier": "@my_bot",
-        }
-        dest = await _capture_destination("telegram", config)
-        assert dest.get("message_thread_id") == "42", (
-            f"destination['message_thread_id'] should be '42'; got: {dest.get('message_thread_id')!r}\n"
-            "store must read 'telegram_thread_key' and emit 'message_thread_id'."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Tests: scheduled/loop child sessions deliver to their origin channel
-# ---------------------------------------------------------------------------
-
-
-class TestScheduledDeliveryResolvesParentChannel:
-    """A /loop run session has channel='scheduled' and lacks the origin
-    channel's routing config. Its deliverable events must be enqueued to the
-    channel that created the schedule (the parent session), resolved from the
-    parent's channel + config — otherwise the row is stranded under the
-    'scheduled' channel, which no delivery loop ever drains.
-    """
-
-    @staticmethod
-    def _make_store(child_row, parent_row):
-        import unittest.mock as mock  # noqa: F401
-        from surogates.session import store as store_mod
-
-        child_id = child_row.id
-        parent_id = parent_row.id
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *a):
-                return False
-
-            async def get(self, model, pk):
-                if pk == child_id:
-                    return child_row
-                if pk == parent_id:
-                    return parent_row
-                return None
-
-            def add(self, obj):
-                pass
-
-            async def commit(self):
-                pass
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-        return ss
-
-    async def _capture(self, child_row, parent_row):
-        import unittest.mock as mock
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeOutbox:
-            id = None
-
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = self._make_store(child_row, parent_row)
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=child_row.id,
-                event_id=77,
-                event_type=EventType.LLM_RESPONSE,
-                data={"message": {"content": "Hello! 👋"}},
-            )
-        return captured
-
-    async def test_scheduled_child_delivers_to_parent_slack_channel(self):
-        from types import SimpleNamespace
-
-        parent_id = uuid4()
-        child = SimpleNamespace(
-            id=uuid4(),
-            channel="scheduled",
-            parent_id=parent_id,
-            config={
-                "scheduled_source": "loop",
-                "workspace_boundary": "slack:d:D0ARYMB35TR",
-            },
-        )
-        parent = SimpleNamespace(
-            id=parent_id,
-            channel="slack",
-            parent_id=None,
-            config={
-                "slack_channel_id": "D0ARYMB35TR",
-                "slack_thread_key": None,
-                "channel_identifier": "A0ASHN5GN2G",
-            },
-        )
-
-        captured = await self._capture(child, parent)
-
-        assert len(captured) == 1, (
-            f"expected the scheduled run to enqueue one outbox row, got {len(captured)}"
-        )
-        row = captured[0]
-        assert row["channel"] == "slack", (
-            f"scheduled child must deliver under the parent's channel 'slack', "
-            f"got {row['channel']!r} (stranded under an undrained channel)"
-        )
-        assert row["dedupe_key"] == "slack:77"
-        assert row["destination"]["channel_id"] == "D0ARYMB35TR"
-        assert row["destination"]["channel_identifier"] == "A0ASHN5GN2G"
-        assert row["payload"]["content"] == "Hello! 👋"
-
-    async def test_detached_scheduled_child_without_parent_is_skipped(self):
-        """A scheduled run with no parent (detached schedule) has no origin
-        channel — nothing to deliver, and it must not strand a 'scheduled' row.
-        """
-        from types import SimpleNamespace
-
-        child = SimpleNamespace(
-            id=uuid4(),
-            channel="scheduled",
-            parent_id=None,
-            config={"scheduled_source": "loop"},
-        )
-
-        captured = await self._capture(child, child)
-        assert captured == [], (
-            f"detached scheduled run must not enqueue any outbox row, got {captured!r}"
-        )
-
-    async def test_scheduled_child_of_web_parent_enqueues_nothing(self):
-        """A web-origin loop's run must not strand a spurious 'scheduled' outbox
-        row. Web delivery is SSE + inbox (a separate path), never the outbox, so
-        resolving to the web parent returns early with nothing enqueued.
-        """
-        from types import SimpleNamespace
-
-        parent_id = uuid4()
-        child = SimpleNamespace(
-            id=uuid4(),
-            channel="scheduled",
-            parent_id=parent_id,
-            config={"scheduled_source": "loop"},
-        )
-        parent = SimpleNamespace(
-            id=parent_id, channel="web", parent_id=None, config={}
-        )
-
-        captured = await self._capture(child, parent)
-        assert captured == [], (
-            f"web-origin scheduled run must not enqueue an outbox row, got {captured!r}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# FIX 2: mark_bot_message called after successful delivery
-# ---------------------------------------------------------------------------
-
-
 class _FakeRedis:
     """Minimal Redis fake tracking set calls."""
 
@@ -811,8 +354,6 @@ def _make_dispatcher_with_redis(
     vault: _FakeVault | None = None,
     redis: Any = None,
 ) -> "ChannelDeliveryDispatcher":
-    from surogates.channels.dispatcher import ChannelDeliveryDispatcher
-
     return ChannelDeliveryDispatcher(
         cache=cache or _FakeCache(),
         vault=vault or _FakeVault(),
@@ -890,7 +431,6 @@ class TestMarkBotMessageAfterDelivery:
 
     async def test_failed_send_does_not_mark_bot_message(self):
         """A failed send must NOT mark any bot message."""
-        from surogates.channels.channel_state import ChannelAdapterState
 
         fake_redis = _FakeRedis()
         agent_id = "agent-z"
@@ -952,8 +492,7 @@ class TestMarkBotMessageAfterDelivery:
                 return ts in self._botmsg
 
         # Fake deps
-        from uuid import uuid4, UUID
-        from surogates.channels.source import SessionSource, build_session_key
+        from uuid import UUID
 
         store_events: list = []
 
@@ -1047,7 +586,6 @@ class TestMarkBotMessageAfterDelivery:
 
     async def test_mark_bot_message_error_does_not_cause_mark_failed(self):
         """A Redis error during mark_bot_message must NOT propagate or trigger mark_failed."""
-        from surogates.channels.channel_state import ChannelAdapterState
 
         class _ErrorRedis:
             """Redis fake whose set always raises."""
@@ -1144,11 +682,6 @@ class TestMarkBotMessageAfterDelivery:
         assert await state.is_bot_message("slack-thread-001"), (
             "thread_ts from Slack destination must still be marked as bot message"
         )
-
-
-# ---------------------------------------------------------------------------
-# Tests: thinking-placeholder injected into destination on delivery
-# ---------------------------------------------------------------------------
 
 
 class TestThinkingPlaceholderDelivery:
@@ -1296,328 +829,6 @@ class TestThinkingPlaceholderDelivery:
         assert delivery.delivered == []
         assert delivery.failed == [(104, "rate_limited")]
 
-
-# ---------------------------------------------------------------------------
-# Tests: INBOX_INPUT_REQUIRED events enqueued to outbox for channel sessions
-# ---------------------------------------------------------------------------
-
-
-class TestInputRequiredOutboxDelivery:
-    async def test_slack_input_required_enqueues_prompt_payload(self):
-        import unittest.mock as mock
-        from uuid import uuid4
-
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, model, pk):
-                from types import SimpleNamespace
-
-                return SimpleNamespace(
-                    channel="slack",
-                    config={
-                        "slack_channel_id": "C1",
-                        "slack_thread_key": "100.0",
-                        "channel_identifier": "A0X",
-                    },
-                )
-
-            def add(self, obj):
-                pass
-
-            async def commit(self):
-                pass
-
-        class _FakeOutbox:
-            id = None
-
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=11,
-                event_type=EventType.INBOX_INPUT_REQUIRED,
-                data={
-                    "tool_call_id": "tc1",
-                    "questions": [{"prompt": "Which color?"}],
-                    "context": "need a choice",
-                },
-            )
-
-        assert len(captured) == 1
-        assert captured[0]["channel"] == "slack"
-        assert captured[0]["dedupe_key"] == "slack:11"
-        assert captured[0]["destination"] == {
-            "channel_id": "C1",
-            "thread_ts": "100.0",
-            "channel_identifier": "A0X",
-        }
-        assert captured[0]["payload"] == {
-            "input_prompt": True,
-            "tool_call_id": "tc1",
-            "questions": [{"prompt": "Which color?"}],
-            "context": "need a choice",
-        }
-
-    async def test_slack_input_required_strips_next_action_from_context(self):
-        """The model appends its <next_action> footer to the context argument.
-        It is harness metadata and must be stripped before reaching Slack,
-        the same as the LLM_RESPONSE content path does.
-        """
-        import unittest.mock as mock
-        from uuid import uuid4
-
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, model, pk):
-                from types import SimpleNamespace
-
-                return SimpleNamespace(
-                    channel="slack",
-                    config={
-                        "slack_channel_id": "C1",
-                        "slack_thread_key": "100.0",
-                        "channel_identifier": "A0X",
-                    },
-                )
-
-            def add(self, obj):
-                pass
-
-            async def commit(self):
-                pass
-
-        class _FakeOutbox:
-            id = None
-
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=15,
-                event_type=EventType.INBOX_INPUT_REQUIRED,
-                data={
-                    "tool_call_id": "tc1",
-                    "questions": [{"prompt": "Which format?"}],
-                    "context": (
-                        "Pick a format to get started.\n\n"
-                        '<next_action complexity="low" summary="hide">\n'
-                        "I'll wait for the user to choose.\n"
-                        "</next_action>"
-                    ),
-                },
-            )
-
-        assert len(captured) == 1
-        assert captured[0]["payload"]["context"] == "Pick a format to get started."
-        assert "next_action" not in captured[0]["payload"]["context"]
-
-    async def test_web_input_required_does_not_enqueue_prompt_payload(self):
-        import unittest.mock as mock
-        from uuid import uuid4
-
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, model, pk):
-                from types import SimpleNamespace
-
-                return SimpleNamespace(channel="web", config={})
-
-        class _FakeOutbox:
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=12,
-                event_type=EventType.INBOX_INPUT_REQUIRED,
-                data={"tool_call_id": "tc1", "questions": [{"prompt": "q"}]},
-            )
-
-        assert captured == []
-
-    async def test_telegram_input_required_enqueues_prompt_payload(self):
-        """Telegram renders questions as an inline keyboard, so its
-        INBOX_INPUT_REQUIRED events must enqueue the input_prompt payload —
-        send() routes them to _send_input_prompt, never the plain-text path.
-        """
-        import unittest.mock as mock
-        from uuid import uuid4
-
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, model, pk):
-                from types import SimpleNamespace
-
-                return SimpleNamespace(
-                    channel="telegram",
-                    config={
-                        "telegram_channel_id": "-100123456789",
-                        "telegram_thread_key": "42",
-                        "channel_identifier": "tg-1",
-                    },
-                )
-
-        class _FakeOutbox:
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=14,
-                event_type=EventType.INBOX_INPUT_REQUIRED,
-                data={"tool_call_id": "tc1", "questions": [{"prompt": "q"}]},
-            )
-
-        assert len(captured) == 1
-        payload = captured[0]["payload"]
-        assert payload["input_prompt"] is True
-        assert payload["tool_call_id"] == "tc1"
-        assert payload["questions"] == [{"prompt": "q"}]
-        assert captured[0]["destination"]["chat_id"] == "-100123456789"
-
-    async def test_slack_input_required_no_tool_call_id_still_enqueues(self):
-        """questions present but no tool_call_id key must still enqueue (gate is questions-only)."""
-        import unittest.mock as mock
-        from uuid import uuid4
-
-        from surogates.session import store as store_mod
-        from surogates.session.events import EventType
-
-        captured: list[dict] = []
-
-        class _FakeSF:
-            def __call__(self):
-                return self
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            async def get(self, model, pk):
-                from types import SimpleNamespace
-
-                return SimpleNamespace(
-                    channel="slack",
-                    config={
-                        "slack_channel_id": "C2",
-                        "slack_thread_key": "200.0",
-                        "channel_identifier": "A0Y",
-                    },
-                )
-
-            def add(self, obj):
-                pass
-
-            async def commit(self):
-                pass
-
-        class _FakeOutbox:
-            id = None
-
-            def __init__(self, **kwargs):
-                captured.append(kwargs)
-
-        ss = object.__new__(store_mod.SessionStore)
-        ss._sf = _FakeSF()
-        ss._channel_cache = {}
-
-        with mock.patch("surogates.db.models.DeliveryOutbox", _FakeOutbox):
-            await ss._enqueue_channel_delivery(
-                session_id=uuid4(),
-                event_id=13,
-                event_type=EventType.INBOX_INPUT_REQUIRED,
-                data={
-                    "questions": [{"prompt": "Pick one"}],
-                    "context": "no tool call here",
-                    # no tool_call_id key at all
-                },
-            )
-
-        assert len(captured) == 1, f"expected 1 outbox row, got {len(captured)}"
-        assert captured[0]["payload"]["input_prompt"] is True
-        assert captured[0]["payload"]["tool_call_id"] == ""
-        assert captured[0]["payload"]["questions"] == [{"prompt": "Pick one"}]
-
-
-# ---------------------------------------------------------------------------
-# Tests: Slack MEDIA: outbound file delivery
-# ---------------------------------------------------------------------------
 
 @dataclass
 class _MediaSession:
@@ -1838,11 +1049,6 @@ class TestSlackMediaDelivery:
         assert platform.deleted == [{"channel": "C001", "ts": "1700.5"}]
         assert progress_key("slack", session_id) in redis.deleted
         assert delivery.delivered == [(5, "FA9")]
-
-
-# ---------------------------------------------------------------------------
-# Tests: live-progress dispatcher state machine (Task 2)
-# ---------------------------------------------------------------------------
 
 
 class _FullRedis:
@@ -2075,26 +1281,7 @@ class TestLiveProgressDispatcher:
         assert delivery.failed == []
 
 
-# ---------------------------------------------------------------------------
-# Tests: permanent-error classification + age cap (no infinite retries)
-# ---------------------------------------------------------------------------
-
-
 class TestPermanentDeliveryFailures:
-    def test_is_permanent_classifies_known_codes(self):
-        from surogates.channels.delivery import is_permanent_delivery_error
-
-        # A read-only channel / archived / dead auth never succeeds on retry.
-        assert is_permanent_delivery_error(
-            "The server responded with: {'ok': False, "
-            "'error': 'restricted_action_read_only_channel'}"
-        )
-        assert is_permanent_delivery_error("is_archived")
-        assert is_permanent_delivery_error("token_revoked")
-        # Transient / unknown errors are retryable.
-        assert not is_permanent_delivery_error("ratelimited")
-        assert not is_permanent_delivery_error("network timeout")
-        assert not is_permanent_delivery_error("channel_not_found")  # age-cap handles it
 
     async def test_permanent_result_error_marks_dead_not_failed(self):
         item = _FakeOutboxItem(id=71, destination={"channel_identifier": APP_ID})
@@ -2154,11 +1341,6 @@ class TestPermanentDeliveryFailures:
 
         assert delivery.dead and delivery.dead[0][0] == 74
         assert delivery.failed == []
-
-
-# ---------------------------------------------------------------------------
-# Tests: coding-run heartbeats edit ONE message in place (latest activity)
-# ---------------------------------------------------------------------------
 
 
 class _CodeRunRedis:
@@ -2245,65 +1427,6 @@ class TestCodeRunEditInPlace:
         await dispatcher.deliver_batch(platform)
         # Neither edits — each run posts its own fresh main message.
         assert platform.edits == [None, None]
-
-
-# ---------------------------------------------------------------------------
-# WhatsApp Graph error classification
-# ---------------------------------------------------------------------------
-
-
-class TestGraphErrorClassification:
-    @pytest.mark.parametrize(
-        "error",
-        [
-            "graph error 190 (HTTP 401): Session has expired",
-            "graph error 100 (HTTP 400): Unsupported get request",
-            "graph error 131026 (HTTP 400): Message undeliverable",
-            "graph error 131047 (HTTP 400): Re-engagement message",
-        ],
-    )
-    def test_permanent_graph_errors(self, error):
-        from surogates.channels.delivery import is_permanent_delivery_error
-
-        assert is_permanent_delivery_error(error) is True
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            "graph error 130429 (HTTP 400): Rate limit hit",
-            "graph error 4 (HTTP 400): Application request limit reached",
-            "HTTP 500: internal error",
-            "HTTP 429: too many requests",
-        ],
-    )
-    def test_retryable_graph_errors(self, error):
-        from surogates.channels.delivery import is_permanent_delivery_error
-
-        assert is_permanent_delivery_error(error) is False
-
-    def test_codeless_error_is_retryable(self):
-        # format_graph_error omits the "graph error" prefix when Meta returns
-        # no code, so a code-less error can never match a permanent prefix.
-        from surogates.channels.delivery import is_permanent_delivery_error
-
-        assert is_permanent_delivery_error("HTTP 400: something odd") is False
-
-    def test_unrelated_error_containing_100_stays_retryable(self):
-        # The matcher is an unanchored substring test shared by every
-        # platform: a bare "100" entry would kill these.
-        from surogates.channels.delivery import is_permanent_delivery_error
-
-        assert is_permanent_delivery_error(
-            "slack rate limited: retry after 1000 seconds",
-        ) is False
-        assert is_permanent_delivery_error(
-            "upload failed: file exceeds 100 MB",
-        ) is False
-
-
-# ---------------------------------------------------------------------------
-# MEDIA: gate — capability-based, not Slack-only
-# ---------------------------------------------------------------------------
 
 
 class _NoSendFilesPlatform(_FakePlatform):

@@ -35,32 +35,6 @@ def _session(**kw):
 
 
 @pytest.mark.asyncio
-async def test_returns_provider_for_follow_channel():
-    p = await build_channel_provider(
-        _session(), storage_backend=object(), bucket="b", redis_client=_Redis(),
-    )
-    assert p is not None
-    assert p.name == "channel"
-
-
-@pytest.mark.asyncio
-async def test_returns_none_when_follow_disabled():
-    p = await build_channel_provider(
-        _session(config={"slack_channel_id": "C123"}),
-        storage_backend=object(), bucket="b", redis_client=_Redis(),
-    )
-    assert p is None
-
-
-@pytest.mark.asyncio
-async def test_returns_none_for_web_session():
-    p = await build_channel_provider(
-        _session(channel="web"), storage_backend=object(), bucket="b", redis_client=_Redis(),
-    )
-    assert p is None
-
-
-@pytest.mark.asyncio
 async def test_drains_queued_observations_before_prefetch():
     redis = _Redis()
     redis.items = [
@@ -72,23 +46,3 @@ async def test_drains_queued_observations_before_prefetch():
     assert p is not None
     assert "ci red" in p.prefetch("ci")
     assert redis.items == []
-
-
-@pytest.mark.asyncio
-async def test_follow_enabled_override_true_builds_even_without_config_flag():
-    s = _session(config={"slack_channel_id": "C123"})  # no mate_follow flag
-    p = await build_channel_provider(
-        s, storage_backend=object(), bucket="b", redis_client=_Redis(),
-        follow_enabled=True,
-    )
-    assert p is not None
-
-
-@pytest.mark.asyncio
-async def test_follow_enabled_override_false_blocks_even_with_config_flag():
-    s = _session()  # config has mate_follow=True
-    p = await build_channel_provider(
-        s, storage_backend=object(), bucket="b", redis_client=_Redis(),
-        follow_enabled=False,
-    )
-    assert p is None

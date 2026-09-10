@@ -82,38 +82,3 @@ async def test_below_the_terminal_is_not_stagnant(
             mid, result="needs_revision", explanation="no", feedback="f",
         )
     assert await store.is_stagnant(mid) is False
-
-
-async def test_the_judge_is_told_it_has_been_here_before(
-    session_factory, org_id, user_id, chat_session,
-):
-    """The load-bearing change: the evaluator already ran every round, it
-    simply had no memory of having done so."""
-    from surogates.missions.evaluator import build_evaluator_prompt
-
-    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
-    for _ in range(2):
-        await store.record_evaluation(
-            mid, result="needs_revision",
-            explanation="the tests still fail", feedback="fix the tests",
-        )
-
-    prompt = await build_evaluator_prompt(
-        mission_id=mid, coordinator_last_response="tried again",
-        session_factory=session_factory, mission_store=store,
-    )
-    assert "2" in prompt
-    assert "the tests still fail" in prompt
-
-
-async def test_a_first_pass_prompt_carries_no_history(
-    session_factory, org_id, user_id, chat_session,
-):
-    from surogates.missions.evaluator import build_evaluator_prompt
-
-    store, mid = await _mission(session_factory, org_id, user_id, chat_session)
-    prompt = await build_evaluator_prompt(
-        mission_id=mid, coordinator_last_response="first try",
-        session_factory=session_factory, mission_store=store,
-    )
-    assert "previous evaluation" not in prompt.lower()

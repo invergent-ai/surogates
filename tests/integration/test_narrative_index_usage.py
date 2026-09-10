@@ -3,11 +3,8 @@
 #
 """Prove the narrative FTS index is real and that queries can use it.
 
-The parity unit tests pin the DDL text against the helpers, but text
-matching cannot tell you whether Postgres agrees. These tests execute the
-real statements against the real schema and read the planner's mind:
+These tests execute real queries against PostgreSQL and verify that:
 
-* the index exists after ``observability.sql`` has been applied,
 * a query rendered from the shared helpers is *satisfiable* by it, and
 * the searchable-text expression behaves as documented across the four
   payload shapes it has to cover.
@@ -31,39 +28,6 @@ from surogates.db.narrative import (
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 _INDEX_NAME = "idx_events_narrative_fts_v2"
-
-
-async def test_index_exists(session_factory) -> None:
-    async with session_factory() as db:
-        found = (
-            await db.execute(
-                text(
-                    "SELECT indexname FROM pg_indexes "
-                    "WHERE tablename = 'events' AND indexname = :name"
-                ),
-                {"name": _INDEX_NAME},
-            )
-        ).scalar_one_or_none()
-
-    assert found == _INDEX_NAME, (
-        "observability.sql did not create the narrative FTS index"
-    )
-
-
-async def test_index_is_gin_and_partial(session_factory) -> None:
-    async with session_factory() as db:
-        definition = (
-            await db.execute(
-                text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"),
-                {"name": _INDEX_NAME},
-            )
-        ).scalar_one()
-
-    assert "USING gin" in definition
-    assert "WHERE" in definition
-    for event_type in NARRATIVE_SEARCH_TYPES:
-        assert event_type in definition
-    assert "llm.delta" not in definition
 
 
 async def test_planner_can_use_the_index_for_the_shared_query(

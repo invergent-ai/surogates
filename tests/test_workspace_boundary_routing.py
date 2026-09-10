@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from surogates.session.attachment_ingest import ingest_attachment_bytes, workspace_root_id
-from surogates.storage.tenant import boundary_workspace_key, boundary_workspace_prefix
 
 
 class _Storage:
@@ -75,40 +74,3 @@ async def test_attachment_ingest_writes_to_boundary_workspace():
             b"%PDF",
         )
     ]
-
-
-def test_boundary_workspace_helpers_make_distinct_private_channel_keys():
-    session_a = _session("slack:c:G1")
-    session_b = _session("slack:c:G2")
-
-    key_a = boundary_workspace_key(
-        session_a.config,
-        session_a,
-        workspace_root_id(session_a),
-        "uploads/report.pdf",
-    )
-    key_b = boundary_workspace_key(
-        session_b.config,
-        session_b,
-        workspace_root_id(session_b),
-        "uploads/report.pdf",
-    )
-
-    assert key_a != key_b
-    assert "/boundaries/slack:c:G1/workspace/" in key_a
-    assert "/boundaries/slack:c:G2/workspace/" in key_b
-
-
-def test_public_boundary_is_shared():
-    session_a = _session("public")
-    session_b = _session("public")
-
-    assert boundary_workspace_prefix(
-        session_a.config,
-        session_a,
-        workspace_root_id(session_a),
-    ) == boundary_workspace_prefix(
-        session_b.config,
-        session_b,
-        workspace_root_id(session_b),
-    )

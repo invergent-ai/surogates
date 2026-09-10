@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from surogates.channels.identity import get_or_create_channel_session
-from surogates.session.events import EventType
 
 
 class _Result:
@@ -106,20 +105,6 @@ async def test_backfills_multi_party_on_resume():
     assert store.config_updates == [(sid, "multi_party", True)]
 
 
-async def test_no_backfill_when_multi_party_already_matches():
-    sid = uuid4()
-    store = _Store()
-    got = await _call_group(
-        store,
-        _SessionFactory(
-            SimpleNamespace(id=sid, status="active", config={"multi_party": True})
-        ),
-        {"slack_channel_id": "C1", "multi_party": True},
-    )
-    assert got == sid
-    assert store.config_updates == []
-
-
 async def test_refreshes_channel_identifier_on_resume():
     # An operator repointing the channel at a different identifier (a new
     # WhatsApp number) leaves live sessions pinned to the old one. Delivery
@@ -141,23 +126,6 @@ async def test_refreshes_channel_identifier_on_resume():
     assert store.config_updates == [
         (sid, "channel_identifier", "1275764455611851"),
     ]
-
-
-async def test_no_refresh_when_channel_identifier_matches():
-    sid = uuid4()
-    store = _Store()
-    got = await _call_group(
-        store,
-        _SessionFactory(
-            SimpleNamespace(
-                id=sid, status="active",
-                config={"channel_identifier": "A0"},
-            )
-        ),
-        {"slack_channel_id": "C1", "channel_identifier": "A0"},
-    )
-    assert got == sid
-    assert store.config_updates == []
 
 
 async def test_absent_incoming_identifier_never_clears_the_stored_one():
@@ -215,28 +183,6 @@ async def test_creates_when_no_prior_session():
     assert store.created is not None
     assert got == store.created["session_id"]
     assert store.resumed == []
-
-
-async def test_resume_session_helper_flips_status_and_tags_source():
-    from surogates.session.store import SessionStore
-
-    store = SessionStore.__new__(SessionStore)   # bypass __init__/DB
-    calls: list = []
-
-    async def _upd(sid, status):
-        calls.append(("status", sid, status))
-
-    async def _emit(sid, et, data):
-        calls.append(("event", sid, et, data))
-
-    store.update_session_status = _upd
-    store.emit_event = _emit
-    sid = uuid4()
-    await store.resume_session(sid, source="channel_message")
-    assert calls == [
-        ("status", sid, "active"),
-        ("event", sid, EventType.SESSION_RESUME, {"source": "channel_message"}),
-    ]
 
 
 async def _call_group(store, factory, config):

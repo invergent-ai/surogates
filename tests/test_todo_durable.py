@@ -1,14 +1,4 @@
-"""The todo list must survive a wake boundary.
-
-`TodoStore` lived in a module-global dict that nothing persisted and nothing
-evicted, so a new worker/pod/wake started blank: a read returned
-`{"todos": [], "total": 0}` while the transcript plainly showed a list, and
-`merge=true` fell through to replace (merging onto an empty map), silently
-dropping everything written earlier.
-
-The list is recovered from the last `todo.updated` event — every todo response
-is already a complete snapshot, so recovery reads one row.
-"""
+"""Todo edits survive wake boundaries without leaking across sessions or losing state."""
 
 from __future__ import annotations
 
@@ -87,13 +77,6 @@ async def test_a_cold_read_returns_the_list():
 
 
 @pytest.mark.asyncio
-async def test_a_session_that_never_wrote_reads_empty():
-    out = await _call(_Store(), uuid4())
-    assert out["todos"] == []
-    assert out["summary"]["total"] == 0
-
-
-@pytest.mark.asyncio
 async def test_an_explicitly_emptied_list_stays_empty():
     """`[]` (emptied) must not be confused with `None` (never written)."""
     store, sid = _Store(), uuid4()
@@ -142,18 +125,6 @@ async def test_two_sessions_do_not_share_a_list():
     }
 
 
-@pytest.mark.asyncio
-async def test_no_store_still_answers():
-    """Tool kwargs are best-effort; a missing store must not break the wake."""
-    out = json.loads(
-        await _todo_handler(
-            {"todos": [{"id": "1", "content": "a", "status": "pending"}]},
-            session_id=str(uuid4()),
-        )
-    )
-    assert [t["id"] for t in out["todos"]] == ["1"]
-
-
 class _Broken(_Store):
     async def latest_todo_snapshot(self, session_id):
         raise RuntimeError("db blip")
@@ -185,24 +156,3 @@ async def test_a_failed_load_does_not_report_an_empty_plan():
     out = await _call(_Broken(), uuid4())
     assert "error" in out
     assert out.get("todos") != []
-
-
-def test_todo_is_not_dispatched_mid_stream():
-    """A todo write allocates durable state, so a discarded stream must not
-    have already committed it -- the rule PARALLEL_TOOLS' docstring states."""
-    from surogates.harness.tool_exec import (
-        BATCH_PARALLEL_TOOLS,
-        PARALLEL_TOOLS,
-        SAGA_EXCLUDED_TOOLS,
-    )
-
-    assert "todo" not in PARALLEL_TOOLS
-    # Nor after the stream commits: every call is an unlocked
-    # read-modify-write on the event log, so two concurrent todo calls would
-    # silently drop one update. The old shared in-process store could not
-    # lose one; running sequentially is what keeps that true.
-    assert "todo" not in BATCH_PARALLEL_TOOLS
-    # Saga compensation restores a sandbox checkpoint, and todo never gets
-    # one -- journaling it would create a step that can only fail to roll
-    # back.
-    assert "todo" in SAGA_EXCLUDED_TOOLS

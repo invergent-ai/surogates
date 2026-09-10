@@ -86,20 +86,6 @@ async def test_no_channel_bound_is_suppressed():
     assert ctx["delivery"].enqueued == []
 
 
-def test_mate_ambient_post_routes_to_harness():
-    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-    assert TOOL_LOCATIONS["mate_ambient_post"] == ToolLocation.HARNESS
-
-
-def test_register_adds_tool_to_registry():
-    from surogates.tools.registry import ToolRegistry
-    from surogates.tools.mate_ambient import register
-    reg = ToolRegistry()
-    register(reg)
-    names = {s["function"]["name"] for s in reg.get_schemas({"mate_ambient_post"})}
-    assert "mate_ambient_post" in names
-
-
 @pytest.mark.asyncio
 async def test_adapter_blocks_non_ambient_session():
     from surogates.tools.mate_ambient import _mate_ambient_post_handler

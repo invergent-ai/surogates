@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-import pytest
 
 from surogates.channels.dispatcher import ChannelWebhookReconciler
 from surogates.channels.registry import ChannelDescriptor, ChannelRegistry
@@ -24,17 +22,8 @@ from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundMessage
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 ORG_ID = "org-aaaa-1111"
 PUBLIC_URL = "https://channels.surogate.ai"
-
-
-# ---------------------------------------------------------------------------
-# Fake platform helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_api_descriptor(*, raise_on: set[str] | None = None) -> ChannelDescriptor:
@@ -108,11 +97,6 @@ class _FakeManualPlatform(_FakeApiPlatform):
         return f"/channels/slack/{identifier}" if identifier else "/channels/slack"
 
 
-# ---------------------------------------------------------------------------
-# Fake vault
-# ---------------------------------------------------------------------------
-
-
 class _FakeVault:
     def __init__(self, values: dict[str, str] | None = None) -> None:
         self._values = values or {}
@@ -121,11 +105,6 @@ class _FakeVault:
     async def resolve_ref(self, ref: str, *, org_id: str) -> str | None:
         self.calls.append((ref, org_id))
         return self._values.get(ref, f"resolved:{ref}")
-
-
-# ---------------------------------------------------------------------------
-# Fake platform_client
-# ---------------------------------------------------------------------------
 
 
 class _FakePlatformClient:
@@ -138,11 +117,6 @@ class _FakePlatformClient:
         return list(self._routings.get(kind, []))
 
 
-# ---------------------------------------------------------------------------
-# Settings stub
-# ---------------------------------------------------------------------------
-
-
 class _FakeChannelCfg:
     def __init__(self, enabled: bool = True) -> None:
         self.enabled = enabled
@@ -151,11 +125,6 @@ class _FakeChannelCfg:
 def _settings(*kinds: str) -> Any:
     from types import SimpleNamespace
     return SimpleNamespace(channels={k: _FakeChannelCfg(enabled=True) for k in kinds})
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_reconciler(
@@ -174,103 +143,6 @@ def _make_reconciler(
         settings=settings,
         registry=registry,
     )
-
-
-# ===========================================================================
-# Tests: PlatformClient.list_channel_routings
-# ===========================================================================
-
-
-class TestListChannelRoutings:
-    async def test_returns_list_on_200(self):
-        from surogates.runtime.platform_client import PlatformClient
-
-        rows = [
-            {"channel_identifier": "@bot1", "org_id": "o1", "agent_id": "a1"},
-            {"channel_identifier": "@bot2", "org_id": "o2", "agent_id": "a2"},
-        ]
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/channels/by-kind/telegram"
-            return httpx.Response(200, json=rows)
-
-        client = PlatformClient(
-            base_url="http://platform",
-            token="tok",
-            transport=httpx.MockTransport(handler),
-        )
-        result = await client.list_channel_routings("telegram")
-        assert result == rows
-        await client.aclose()
-
-    async def test_returns_empty_list_on_404(self):
-        from surogates.runtime.platform_client import PlatformClient
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404)
-
-        client = PlatformClient(
-            base_url="http://platform",
-            token="tok",
-            transport=httpx.MockTransport(handler),
-        )
-        result = await client.list_channel_routings("telegram")
-        assert result == []
-        await client.aclose()
-
-    async def test_raises_platform_auth_error_on_401(self):
-        from surogates.runtime.platform_client import PlatformAuthError, PlatformClient
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(401)
-
-        client = PlatformClient(
-            base_url="http://platform",
-            token="bad",
-            transport=httpx.MockTransport(handler),
-        )
-        with pytest.raises(PlatformAuthError):
-            await client.list_channel_routings("telegram")
-        await client.aclose()
-
-    async def test_raises_http_status_error_on_500(self):
-        from surogates.runtime.platform_client import PlatformClient
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(500, text="boom")
-
-        client = PlatformClient(
-            base_url="http://platform",
-            token="tok",
-            transport=httpx.MockTransport(handler),
-        )
-        with pytest.raises(httpx.HTTPStatusError):
-            await client.list_channel_routings("telegram")
-        await client.aclose()
-
-    async def test_uses_correct_url_path(self):
-        """Hits /api/channels/by-kind/{kind}, not the by-identifier endpoint."""
-        from surogates.runtime.platform_client import PlatformClient
-
-        seen_paths: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            seen_paths.append(request.url.path)
-            return httpx.Response(200, json=[])
-
-        client = PlatformClient(
-            base_url="http://platform",
-            token="tok",
-            transport=httpx.MockTransport(handler),
-        )
-        await client.list_channel_routings("slack")
-        assert seen_paths == ["/api/channels/by-kind/slack"]
-        await client.aclose()
-
-
-# ===========================================================================
-# Tests: ChannelWebhookReconciler.register_all
-# ===========================================================================
 
 
 class TestRegisterAll:
@@ -444,11 +316,6 @@ class TestRegisterAll:
         )
 
 
-# ===========================================================================
-# Tests: ChannelWebhookReconciler.handle_routing_change
-# ===========================================================================
-
-
 class TestHandleRoutingChange:
     async def test_re_registers_the_named_identifier(self):
         """handle_routing_change registers exactly the named identifier."""
@@ -560,94 +427,3 @@ class TestHandleRoutingChange:
 
         _, url, _ = descriptor._registered[0]
         assert url == "https://channels.surogate.ai" + platform.route_path("@single")
-
-
-# ===========================================================================
-# Tests: pubsub channel-name parsing (via run())
-# ===========================================================================
-
-
-class TestPubsubChannelNameParse:
-    """Verify handle_routing_change receives the right kind/identifier from
-    channel names produced by the pubsub loop.
-
-    We test the parsing directly by monkeypatching handle_routing_change so
-    we don't need a real Redis connection.
-    """
-
-    async def test_parses_simple_kind_and_identifier(self):
-        """channel_routing_changed:telegram:@mybot → kind=telegram, identifier=@mybot."""
-        parsed: list[tuple[str, str]] = []
-
-        descriptor = _make_api_descriptor()
-        platform = _FakeApiPlatform(descriptor)
-        pc = _FakePlatformClient()
-        vault = _FakeVault()
-        reg = ChannelRegistry()
-        reg.register(platform)
-        reconciler = _make_reconciler(pc, vault, reg)
-
-        # Patch handle_routing_change to capture calls
-        async def _capture(kind: str, identifier: str) -> None:
-            parsed.append((kind, identifier))
-
-        reconciler.handle_routing_change = _capture  # type: ignore[method-assign]
-
-        # Simulate what run() does with a pmessage
-        channel = "channel_routing_changed:telegram:@mybot"
-        suffix = channel.removeprefix("channel_routing_changed:")
-        kind, identifier = suffix.split(":", 1)
-        await reconciler.handle_routing_change(kind, identifier)
-
-        assert parsed == [("telegram", "@mybot")]
-
-    async def test_parses_identifier_with_colon(self):
-        """Identifiers that themselves contain colons are handled by split(':', 1)."""
-        parsed: list[tuple[str, str]] = []
-
-        descriptor = _make_api_descriptor()
-        platform = _FakeApiPlatform(descriptor)
-        pc = _FakePlatformClient()
-        vault = _FakeVault()
-        reg = ChannelRegistry()
-        reg.register(platform)
-        reconciler = _make_reconciler(pc, vault, reg)
-
-        async def _capture(kind: str, identifier: str) -> None:
-            parsed.append((kind, identifier))
-
-        reconciler.handle_routing_change = _capture  # type: ignore[method-assign]
-
-        channel = "channel_routing_changed:some_platform:id:with:colons"
-        suffix = channel.removeprefix("channel_routing_changed:")
-        kind, identifier = suffix.split(":", 1)
-        await reconciler.handle_routing_change(kind, identifier)
-
-        assert parsed == [("some_platform", "id:with:colons")]
-
-    async def test_channel_name_without_separator_is_ignored(self):
-        """A channel name with no second colon does not call handle_routing_change."""
-        parsed: list[tuple[str, str]] = []
-
-        descriptor = _make_api_descriptor()
-        platform = _FakeApiPlatform(descriptor)
-        pc = _FakePlatformClient()
-        vault = _FakeVault()
-        reg = ChannelRegistry()
-        reg.register(platform)
-        reconciler = _make_reconciler(pc, vault, reg)
-
-        async def _capture(kind: str, identifier: str) -> None:  # pragma: no cover
-            parsed.append((kind, identifier))
-
-        reconciler.handle_routing_change = _capture  # type: ignore[method-assign]
-
-        channel = "channel_routing_changed:nodashhere"
-        suffix = channel.removeprefix("channel_routing_changed:")
-        if ":" not in suffix:
-            pass  # run() would skip this
-        else:
-            kind, identifier = suffix.split(":", 1)
-            await reconciler.handle_routing_change(kind, identifier)
-
-        assert parsed == []

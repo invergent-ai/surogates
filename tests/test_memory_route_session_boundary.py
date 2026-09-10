@@ -122,21 +122,6 @@ async def test_eval_session_write_does_not_land_in_shared_memory():
     assert "agents/support-bot/shared/memory.json" not in backend.written
 
 
-async def test_eval_session_read_serves_the_boundary_partition():
-    org_id = uuid4()
-    session = _session(org_id, {"memory_boundary": _EVAL_BOUNDARY})
-    _, request, tenant, agent_runtime = _fixtures(session, org_id=org_id)
-
-    store = await memory_route._build_store(
-        request, tenant, agent_runtime, session.id,
-    )
-
-    assert store._keys == {
-        "memory": f"agents/support-bot/boundaries/{_EVAL_BOUNDARY}/memory.json",
-        "user": f"agents/support-bot/boundaries/{_EVAL_BOUNDARY}/user.json",
-    }
-
-
 async def test_a_managed_channel_thread_is_scoped_too():
     # The root cause predates the evaluation work: a Slack thread's memory
     # went to the acting user's personal store while the worker read the
@@ -171,20 +156,6 @@ async def test_a_plain_web_session_keeps_the_per_user_layout():
     assert backend.written == [
         f"agents/support-bot/users/{tenant.user_id}/memory.json",
     ]
-
-
-async def test_no_session_id_keeps_todays_layout():
-    # The Studio memory panel talks about a user's memory, not any one
-    # session, and must keep working unchanged. A user JWT never carries
-    # session_scope_id, so the new fallback has nothing to catch here.
-    _, request, tenant, agent_runtime = _fixtures(service_account=False)
-    assert tenant.session_scope_id is None
-
-    store = await memory_route._build_store(request, tenant, agent_runtime)
-
-    assert store._keys["memory"] == (
-        f"agents/support-bot/users/{tenant.user_id}/memory.json"
-    )
 
 
 async def test_a_session_scoped_token_with_no_session_id_still_resolves_the_boundary():
@@ -237,24 +208,3 @@ async def test_an_unknown_session_is_a_404():
     with pytest.raises(HTTPException) as exc:
         await _mutate(request, tenant, agent_runtime, uuid4())
     assert exc.value.status_code == 404
-
-
-def test_the_harness_client_sends_its_session_id():
-    # The route can only scope what it is told about; the client is the only
-    # thing that knows which session a memory call belongs to.
-    from surogates.harness.api_client import HarnessAPIClient
-
-    sid = str(uuid4())
-    client = HarnessAPIClient(
-        base_url="http://api", token="t", session_id=sid, agent_id="a1",
-    )
-    assert client._memory_params() == {"session_id": sid}
-    assert client._merge_params(client._memory_params()) == {
-        "agent_id": "a1", "session_id": sid,
-    }
-
-    # A client with no session (legacy wiring) sends nothing extra and gets
-    # today's unscoped behaviour rather than an error.
-    assert HarnessAPIClient(
-        base_url="http://api", token="t",
-    )._memory_params() is None

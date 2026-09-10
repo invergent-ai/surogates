@@ -1,68 +1,23 @@
-"""Tests for cross-session provider rate-limit guard."""
+"""LLM requests reject provider cooldowns beyond the allowed wait."""
 
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from surogates.harness.llm_call import call_llm_with_retry
-from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
-
-
-class FakeRedis:
-    def __init__(self) -> None:
-        self.values: dict[str, bytes] = {}
-
-    async def get(self, key: str):
-        return self.values.get(key)
-
-    async def setex(self, key: str, ttl: int, value: str) -> None:
-        self.values[key] = value.encode("utf-8")
-
-    async def delete(self, key: str) -> None:
-        self.values.pop(key, None)
+from surogates.harness.llm_call import (
+    MAX_RATE_LIMIT_WAIT_SECONDS,
+    call_llm_with_retry,
+)
 
 
 @pytest.mark.asyncio
-async def test_records_and_reads_remaining_rate_limit() -> None:
-    redis = FakeRedis()
-    guard = ProviderRateLimitGuard(redis, "https://api.provider.test/v1")
-
-    await guard.record_until(time.time() + 120)
-
-    remaining = await guard.remaining_seconds()
-    assert remaining is not None
-    assert 0 < remaining <= 120
-
-
-@pytest.mark.asyncio
-async def test_expired_rate_limit_is_cleared() -> None:
-    redis = FakeRedis()
-    guard = ProviderRateLimitGuard(redis, "openrouter")
-
-    await guard.record_until(time.time() - 1)
-
-    assert await guard.remaining_seconds() is None
-    assert redis.values == {}
-
-
-@pytest.mark.asyncio
-async def test_missing_redis_is_noop() -> None:
-    guard = ProviderRateLimitGuard(None, "openrouter")
-
-    await guard.record_until(time.time() + 120)
-
-    assert await guard.remaining_seconds() is None
-
-
-@pytest.mark.asyncio
-async def test_active_guard_skips_provider_call() -> None:
+async def test_excessive_provider_cooldown_skips_provider_call() -> None:
     class ActiveGuard:
         async def remaining_seconds(self) -> float:
-            return 60.0
+            return MAX_RATE_LIMIT_WAIT_SECONDS + 1
 
     create = AsyncMock()
     llm_client = SimpleNamespace(

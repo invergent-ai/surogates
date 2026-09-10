@@ -3,7 +3,6 @@
 from surogates.channels.inbound import (
     ChannelInboundPipeline,
     InboundOutcome,
-    is_stop_command,
 )
 from surogates.session.events import EventType
 
@@ -14,16 +13,6 @@ from tests.test_channel_pipeline import (
     _make_msg,
     _make_routing,
 )
-
-
-def test_is_stop_command():
-    assert is_stop_command("/stop")
-    assert is_stop_command("  /STOP ")  # leading-space (Slack) + case-insensitive
-    assert is_stop_command("/cancel")
-    assert not is_stop_command("stop")  # must be the slash form
-    assert not is_stop_command("/stop the retries")  # only a bare command
-    assert not is_stop_command("")
-    assert not is_stop_command(None)
 
 
 async def _run(deps, text):

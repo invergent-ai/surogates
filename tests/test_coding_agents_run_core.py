@@ -1,4 +1,4 @@
-"""Unit tests for the shared coding-run core (fakes for store/sandbox)."""
+"""Coding-run orchestration, credentials and events with simulated external services."""
 
 from __future__ import annotations
 

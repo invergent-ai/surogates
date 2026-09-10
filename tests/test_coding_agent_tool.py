@@ -1,9 +1,4 @@
-"""Unit tests for the run_coding_agent tool handler (fake kwargs).
-
-The tool runs a coding agent on a *configured repo* and opens a PR: it requires
-a repo in ``session.config['repos']`` and a git PAT, and returns the PR URL when
-the coding CLI opens one.
-"""
+"""Coding-agent tool workflows with simulated credentials and sandbox execution."""
 
 from __future__ import annotations
 

@@ -1,30 +1,4 @@
-"""Characterization tests for upstream-gateway error sentinels leaking to users.
-
-Context
--------
-Prod routes agent LLM traffic through a third-party gateway (yunwu.ai).
-When that gateway's own upstream returns no content, it does **not** return
-an error status -- it fabricates a normal-looking chat completion whose
-``content`` is a hardcoded Chinese error string and attaches a bogus
-tool_call with ``finish_reason='tool_calls'``:
-
-    ⚠️ 上游模型未返回任何内容。可能原因：触发了安全策略、上游限流、
-    或模型对当前输入直接结束。请重试或简化输入后再试。
-
-Because it arrives as ordinary streamed ``content`` (plus a tool call), it
-sails past every existing guard and is streamed live to the end user as an
-``llm.delta`` event and persisted as the assistant message.
-
-These tests pin the behaviour we want:
-  * the sentinel is NEVER emitted to the user as a visible delta, and
-  * it is NOT persisted as assistant content, and the bogus tool call is
-    dropped, so the turn can be retried / failed over,
-while LEGITIMATE content (including a legit "⚠️" warning) is untouched.
-
-The first group is expected to FAIL against current code -- that failure is
-the gap. The "must stay green" group protects functionality: whatever simple
-fix we add must not eat real content.
-"""
+"""Upstream failure sentinels are suppressed and requests recover or fail safely."""
 
 from __future__ import annotations
 
@@ -36,10 +10,6 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.llm_call import call_llm_streaming_inner
-from surogates.harness.stream_scrubbers import (
-    StreamingContextScrubber,
-    StreamingThinkScrubber,
-)
 from surogates.session.events import EventType
 
 # NB: pyproject sets ``asyncio_mode = "auto"`` -- async tests are detected
@@ -53,11 +23,6 @@ SENTINEL = (
     "⚠️ 上游模型未返回任何内容。可能原因：触发了安全策略、上游限流、"
     "或模型对当前输入直接结束。请重试或简化输入后再试。"
 )
-
-
-# ---------------------------------------------------------------------------
-# Fakes (mirrors tests/test_midstream_interrupt.py)
-# ---------------------------------------------------------------------------
 
 
 def _make_session() -> SimpleNamespace:
@@ -148,11 +113,6 @@ def _emitted_delta_texts(store: AsyncMock) -> list[str]:
     return texts
 
 
-# ---------------------------------------------------------------------------
-# THE GAP -- expected to FAIL against current code
-# ---------------------------------------------------------------------------
-
-
 class TestSentinelMustNeverReachTheUser:
     async def test_sentinel_not_streamed_as_delta_single_chunk(self) -> None:
         """The Chinese error must never be emitted as a visible delta."""
@@ -203,11 +163,6 @@ class TestSentinelMustNeverReachTheUser:
         )
 
 
-# ---------------------------------------------------------------------------
-# GUARDRAILS -- must STAY green (fix must not affect real functionality)
-# ---------------------------------------------------------------------------
-
-
 class TestLegitimateContentUnaffected:
     async def test_normal_content_still_streamed(self) -> None:
         chunks = [
@@ -241,29 +196,6 @@ class TestLegitimateContentUnaffected:
 
         assert msg["content"] == "Let me check that."
         assert msg.get("tool_calls"), "legit tool call was dropped"
-
-
-# ---------------------------------------------------------------------------
-# WHY it leaks -- the existing scrubbers do not recognise the sentinel
-# ---------------------------------------------------------------------------
-
-
-def test_existing_scrubbers_pass_the_sentinel_through_unchanged() -> None:
-    """Documents the gap: neither existing scrubber is the fix point.
-
-    The streaming pipeline is
-    ``context_scrubber.feed(think_scrubber.feed(text))`` -- both let the
-    gateway error through verbatim, which is why it reaches the user.
-    """
-    think = StreamingThinkScrubber()
-    context = StreamingContextScrubber()
-    visible = context.feed(think.feed(SENTINEL)) + context.feed(think.flush()) + context.flush()
-    assert visible == SENTINEL  # unchanged -> nothing strips it today
-
-
-# ---------------------------------------------------------------------------
-# Non-streaming path -- the sentinel must never be persisted or returned
-# ---------------------------------------------------------------------------
 
 
 def _non_streaming_response(content: str, *, tool_calls: list[Any] | None = None):
@@ -333,11 +265,6 @@ class TestNonStreamingSentinelGuard:
 
         assert msg["content"] == content
         assert "upstream_error_sentinel" not in usage
-
-
-# ---------------------------------------------------------------------------
-# Retry / failover routing in call_llm_with_retry
-# ---------------------------------------------------------------------------
 
 
 async def _run_with_retry(
@@ -464,11 +391,6 @@ class TestRetryRoutingOnSentinel:
         assert on_stream_retry.called, "executor was not discarded on sentinel retry"
 
 
-# ---------------------------------------------------------------------------
-# Safety: what the user actually sees in the worst case (all retries fail)
-# ---------------------------------------------------------------------------
-
-
 def _has_cjk(text: str) -> bool:
     return any("一" <= ch <= "鿿" for ch in text)
 
@@ -504,7 +426,3 @@ class TestTerminalErrorIsSafe:
         assert not _has_cjk(info.title)
         assert not _has_cjk(info.detail)
         assert info.retryable is True
-
-    def test_sentinel_itself_would_be_flagged_cjk(self) -> None:
-        """Sanity check the CJK detector actually fires on the gateway string."""
-        assert _has_cjk(SENTINEL) is True

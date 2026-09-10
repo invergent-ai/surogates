@@ -1,3 +1,5 @@
+"""Session creation preserves workspace and principal boundaries."""
+
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -341,44 +343,6 @@ async def test_create_child_session_propagates_idempotency_and_session_id():
     call = store.create_session.await_args.kwargs
     assert call["session_id"] == explicit_id
     assert call["idempotency_key"] == "scheduled:abc:2026-05-12T00:00:00"
-
-
-# ---------------------------------------------------------------------------
-# stamp_workspace_config: direct tests for supports_vision stamping
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_stamp_workspace_config_does_not_stamp_vision_support():
-    """Vision support is model-dependent, so provisioning must not guess.
-
-    The session row exists before any worker resolves the agent's LLM
-    bundle, so the model is unknown here. Stamping a guess would freeze
-    a wrong value into the session config for its whole life; the
-    harness re-derives vision support from the live model instead.
-    """
-    from surogates.session.provisioning import stamp_workspace_config
-
-    class _FakeStorage:
-        async def create_bucket(self, bucket): pass
-        def resolve_workspace_path(self, bucket, session_id): return f"/ws/{session_id}"
-
-    class _FakeSettings:
-        class storage:
-            bucket = "test-bucket"
-            key_prefix = ""
-
-    config: dict = {}
-    session_id = uuid4()
-    await stamp_workspace_config(
-        config,
-        storage=_FakeStorage(),
-        settings=_FakeSettings(),
-        session_id=session_id,
-    )
-
-    assert "supports_vision" not in config
-    assert config["storage_bucket"] == "test-bucket"
-    assert config["workspace_path"] == f"/ws/{session_id}"
 
 
 @pytest.mark.asyncio

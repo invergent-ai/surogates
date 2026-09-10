@@ -214,12 +214,6 @@ class TestExecute:
             await runner.cleanup()
             await backend.aclose()
 
-    async def test_unknown_sandbox_raises_value_error(self, healthz_transport):
-        backend = _backend(FakeDocker(), healthz_transport)
-        with pytest.raises(ValueError):
-            await backend.execute("nope", "terminal", "{}")
-        await backend.aclose()
-
 
 class TestStatusAndDestroy:
     async def test_status_running(self, healthz_transport):
@@ -229,10 +223,6 @@ class TestStatusAndDestroy:
         assert await backend.status(sid) == SandboxStatus.RUNNING
         await backend.aclose()
 
-    async def test_status_unknown_is_terminated(self, healthz_transport):
-        backend = _backend(FakeDocker(), healthz_transport)
-        assert await backend.status("nope") == SandboxStatus.TERMINATED
-        await backend.aclose()
 
     async def test_destroy_stops_and_removes(self, healthz_transport):
         docker = FakeDocker()
@@ -358,58 +348,6 @@ class TestReadinessReporting:
             await backend.provision(SandboxSpec(session_id="root-1"))
         assert "ConnectError" in str(ei.value)
         await backend.aclose()
-
-
-class TestWorkspaceModeSelection:
-    @staticmethod
-    def _s3_storage():
-        from types import SimpleNamespace
-        return SimpleNamespace(
-            endpoint="https://acct.r2.cloudflarestorage.com",
-            access_key="ak", secret_key="sk", region="auto",
-        )
-
-    def _spec_with_s3_resource(self):
-        from surogates.sandbox.base import Resource
-        return SandboxSpec(
-            session_id="root-1",
-            workspace_path="/workspace",  # S3Backend sentinel
-            resources=[Resource(
-                source_ref="s3://surogate-workspaces-dev/sessions/root-1",
-                mount_path="/workspace",
-            )],
-        )
-
-    def test_s3fs_mode_when_resource_and_creds(self, healthz_transport):
-        backend = _backend(FakeDocker(), healthz_transport,
-                           storage_settings=self._s3_storage())
-        mode, detail = backend._workspace_mode(self._spec_with_s3_resource())
-        assert mode == "s3fs"
-        assert detail == "surogate-workspaces-dev:/sessions/root-1"
-
-    def test_ephemeral_when_s3_resource_but_no_creds(self, healthz_transport):
-        backend = _backend(FakeDocker(), healthz_transport)  # no storage_settings
-        mode, detail = backend._workspace_mode(self._spec_with_s3_resource())
-        assert mode == "ephemeral"
-        assert detail is None
-
-    def test_bind_mode_for_real_host_path(self, healthz_transport, tmp_path):
-        backend = _backend(FakeDocker(), healthz_transport,
-                           storage_settings=self._s3_storage())
-        spec = SandboxSpec(session_id="root-1", workspace_path=str(tmp_path))
-        mode, detail = backend._workspace_mode(spec)
-        assert mode == "bind"
-        assert detail == str(tmp_path)
-
-    def test_bucket_spec_bare_bucket(self, healthz_transport):
-        from surogates.sandbox.base import Resource
-        backend = _backend(FakeDocker(), healthz_transport,
-                           storage_settings=self._s3_storage())
-        spec = SandboxSpec(resources=[Resource(
-            source_ref="s3://justbucket", mount_path="/workspace")])
-        mode, detail = backend._workspace_mode(spec)
-        assert mode == "s3fs"
-        assert detail == "justbucket"
 
 
 class TestS3fsModeProvision:

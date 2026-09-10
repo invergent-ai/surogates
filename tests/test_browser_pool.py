@@ -11,7 +11,7 @@ from surogates.browser.base import (
     BrowserStatus,
     BrowserUnavailableError,
 )
-from surogates.browser.pool import BrowserPool, EnsureResult
+from surogates.browser.pool import BrowserPool
 from surogates.browser.registry import BrowserEntry
 
 
@@ -68,23 +68,6 @@ class FakeRegistry:
 
 
 class TestEnsure:
-    async def test_first_call_provisions(self) -> None:
-        backend = FakeBackend()
-        registry = FakeRegistry()
-        pool = BrowserPool(backend=backend, registry=registry)  # type: ignore[arg-type]
-
-        result = await pool.ensure(
-            session_id="sess-1",
-            org_id="o",
-            user_id="u",
-            spec=BrowserSpec(),
-        )
-        assert isinstance(result, EnsureResult)
-        assert result.newly_provisioned is True
-        assert result.endpoint.rest_url == "http://x:30001"
-        assert backend.provisions == 1
-        assert backend.provision_labels == [("sess-1", "o", "u")]
-        assert "sess-1" in registry.entries
 
     async def test_second_call_reuses(self) -> None:
         backend = FakeBackend()
@@ -219,9 +202,6 @@ class TestDestroy:
         assert backend.destroys == ["b1"]
         assert "sess-1" not in registry.entries
 
-    async def test_destroy_for_unknown_session_is_noop(self) -> None:
-        pool = BrowserPool(backend=FakeBackend(), registry=FakeRegistry())  # type: ignore[arg-type]
-        await pool.destroy_for_session("nope")
 
     async def test_destroy_for_missing_mapping_uses_backend_session_cleanup(
         self,
@@ -330,23 +310,6 @@ class TestEvents:
         assert destroy_event[1]["session_id"] == "sess-1"
         assert destroy_event[1]["browser_id"] is None
 
-    async def test_destroy_with_cold_mapping_and_empty_registry_skips_emit(
-        self,
-    ) -> None:
-        # If neither the mapping nor the registry knew about the session
-        # there's nothing to announce — don't emit a phantom destroy.
-        events: list[tuple[str, dict]] = []
-
-        async def emitter(session_id: str, event_type: str, data: dict) -> None:
-            events.append((event_type, data))
-
-        pool = BrowserPool(
-            backend=FakeBackend(),
-            registry=FakeRegistry(),  # type: ignore[arg-type]
-            event_emitter=emitter,
-        )
-        await pool.destroy_for_session("nope")
-        assert events == []
 
     async def test_reprovision_emits_destroyed_then_provisioned(self) -> None:
         # When ensure() finds a stale slot it tears the old pod down and

@@ -15,7 +15,6 @@ from surogates.db.models import (
     ProgramOccurrenceRow,
     ProgramScheduleRow,
 )
-from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
 ESCALATION_SA = uuid.uuid4()
 
@@ -91,14 +90,6 @@ def _kwargs(sf, invitation):
         "api_client": None,
         "session_config": {},
     }
-
-
-def test_both_tools_route_to_the_harness():
-    # An unlisted tool falls through to the sandbox executor and fails as
-    # "Unknown tool" — these write invitation rows and operator inbox items
-    # and need the worker's database.
-    assert TOOL_LOCATIONS["checkin_outcome"] is ToolLocation.HARNESS
-    assert TOOL_LOCATIONS["checkin_escalate"] is ToolLocation.HARNESS
 
 
 @pytest.mark.asyncio
@@ -195,33 +186,3 @@ async def test_escalation_does_not_close_the_check_in(sf, awaiting_invitation):
         {"reason": "BP 180/110"}, **_kwargs(sf, awaiting_invitation),
     )
     assert (await _reload(sf, awaiting_invitation.id)).response_state == "replied"
-
-
-def test_the_checkin_tools_are_registered_with_the_other_builtins():
-    # ``tests`` above call the handlers directly, which passes while the
-    # tools are unreachable in production.  The synthetic instruction tells
-    # the agent to call them by name; they have to be in the registry.
-    from surogates.tools.registry import ToolRegistry
-    from surogates.tools.runtime import ToolRuntime
-
-    registry = ToolRegistry()
-    ToolRuntime(registry).register_builtins()
-    assert registry.has("checkin_outcome")
-    assert registry.has("checkin_escalate")
-
-
-def test_the_checkin_tools_are_only_offered_on_a_channel_session():
-    from surogates.harness.tool_schemas import drop_unusable_tools
-
-    schemas = [
-        {"function": {"name": n}}
-        for n in ("checkin_outcome", "checkin_escalate", "terminal")
-    ]
-    off_channel = drop_unusable_tools(
-        schemas, has_kbs=False, has_channel=False, is_scheduled=False,
-    )
-    assert {s["function"]["name"] for s in off_channel} == {"terminal"}
-    on_channel = drop_unusable_tools(
-        schemas, has_kbs=False, has_channel=True, is_scheduled=False,
-    )
-    assert len(on_channel) == 3

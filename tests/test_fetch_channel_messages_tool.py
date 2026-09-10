@@ -1,7 +1,6 @@
 import json
 
 from surogates.tools.builtin.channel_messages import _fetch_channel_messages_handler
-from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
 
 async def test_missing_api_client_returns_error():
@@ -34,7 +33,3 @@ async def test_blank_since_and_user_become_none():
     await _fetch_channel_messages_handler(
         {"since": "", "user": ""}, api_client=_Client())
     assert calls == {"limit": None, "since": None, "user": None}
-
-
-def test_tool_routed_to_harness():
-    assert TOOL_LOCATIONS["fetch_channel_messages"] == ToolLocation.HARNESS

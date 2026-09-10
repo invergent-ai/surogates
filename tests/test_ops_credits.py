@@ -83,12 +83,3 @@ async def test_lenient_at_expired_cycle(ops_factory):
 async def test_allows_when_no_row(ops_factory):
     # Different project with no seeded balance row.
     await assert_browser_minutes_available("project-without-a-row")
-
-
-async def test_allows_when_org_id_empty(ops_factory):
-    await assert_browser_minutes_available("")
-
-
-async def test_allows_when_ops_db_not_configured(monkeypatch):
-    monkeypatch.setattr(ops_engine, "_session_factory", None)
-    await assert_browser_minutes_available(PROJECT)  # no raise

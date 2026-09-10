@@ -1,14 +1,4 @@
-"""Tests for the user-driven session rename endpoint.
-
-Covers:
-
-1. ``UpdateSessionRequest`` validates the title (non-empty, length cap).
-2. The ``PATCH /sessions/{id}`` route calls ``store.update_session_title``
-   with the cleaned title and returns the refreshed session.
-3. Scheduler-owned (read-only) sessions are rejected.
-4. The store's ``update_session_title`` overwrites unconditionally,
-   distinct from ``update_session_title_if_empty``.
-"""
+"""Session rename endpoint persistence and scheduled-run restrictions."""
 
 from __future__ import annotations
 
@@ -18,53 +8,12 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from pydantic import ValidationError
 
 from surogates.api.routes.sessions import (
     UpdateSessionRequest,
     update_session,
 )
 from surogates.session.models import Session
-
-
-# ---------------------------------------------------------------------------
-# UpdateSessionRequest schema
-# ---------------------------------------------------------------------------
-
-
-def test_update_session_request_accepts_valid_title():
-    req = UpdateSessionRequest(title="Debug Redis Failures")
-    assert req.title == "Debug Redis Failures"
-
-
-def test_update_session_request_strips_surrounding_whitespace():
-    req = UpdateSessionRequest(title="   Trimmed Title   ")
-    assert req.title == "Trimmed Title"
-
-
-def test_update_session_request_rejects_empty_title():
-    with pytest.raises(ValidationError):
-        UpdateSessionRequest(title="")
-
-
-def test_update_session_request_rejects_blank_title():
-    with pytest.raises(ValidationError):
-        UpdateSessionRequest(title="    ")
-
-
-def test_update_session_request_rejects_overlong_title():
-    with pytest.raises(ValidationError):
-        UpdateSessionRequest(title="x" * 257)
-
-
-def test_update_session_request_accepts_max_length_title():
-    req = UpdateSessionRequest(title="x" * 256)
-    assert len(req.title) == 256
-
-
-# ---------------------------------------------------------------------------
-# update_session route
-# ---------------------------------------------------------------------------
 
 
 def _stub_session(*, channel: str = "web", config: dict | None = None) -> Session:

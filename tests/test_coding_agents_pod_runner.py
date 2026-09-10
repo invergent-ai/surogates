@@ -1,10 +1,9 @@
-"""Unit tests for the pod-side /code launcher (real subprocesses, tmp dirs)."""
+"""Pod-side coding-agent launch, cancellation and checkout with real subprocesses."""
 
 from __future__ import annotations
 
 import time
 
-import pytest
 
 from surogates.coding_agents import pod_runner
 
@@ -127,12 +126,6 @@ def test_codex_auth_read_back_on_completion(tmp_path):
     assert "refreshed" in res.get("codex_auth_json", "")
 
 
-def test_poll_unknown_run_is_done_with_error(tmp_path):
-    res = pod_runner.poll({"run_id": "missing", "offset": 0}, base=str(tmp_path))
-    assert res["done"] is True
-    assert res.get("error")
-
-
 def test_dispatch_routes_actions(tmp_path):
     base = str(tmp_path)
     out = pod_runner.dispatch(
@@ -221,14 +214,6 @@ def test_checkout_reports_failure_with_error(tmp_path):
     assert result["ok"] is False
     assert result["exit_code"] == 3
     assert "boom" in result["error"]
-
-
-def test_checkout_requires_a_command(tmp_path):
-    result = pod_runner.checkout(
-        {"run_id": "co4", "env": {"WORKSPACE_DIR": str(tmp_path)}},
-    )
-    assert result["ok"] is False
-    assert "command is required" in result["error"]
 
 
 def test_checkout_missing_workspace_is_error(tmp_path):

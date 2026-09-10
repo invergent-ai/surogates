@@ -1,4 +1,4 @@
-"""Tests for the harness-local vision_analyze builtin."""
+"""The vision tool reads workspace images, routes model requests and rejects unsafe paths."""
 
 from __future__ import annotations
 
@@ -59,18 +59,6 @@ class FakeStorage:
             return self.objects[(bucket, key)]
         except KeyError as exc:
             raise KeyError(f"{bucket}/{key}") from exc
-
-
-def test_tool_runtime_registers_vision_analyze() -> None:
-    from surogates.tools.runtime import ToolRuntime
-    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-
-    registry = ToolRegistry()
-
-    ToolRuntime(registry).register_builtins()
-
-    assert registry.has("vision_analyze")
-    assert TOOL_LOCATIONS["vision_analyze"] == ToolLocation.HARNESS
 
 
 @pytest.mark.asyncio

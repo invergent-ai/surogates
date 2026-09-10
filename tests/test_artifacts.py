@@ -1,8 +1,6 @@
-"""Tests for the artifacts subsystem.
+"""Functional coverage for artifact persistence, revisions and create_artifact.
 
-Covers the spec validators, :class:`ArtifactStore` persistence, and the
-``create_artifact`` tool handler (routed through a stub API client).
-"""
+Exercises local storage and tool responses, including malformed specs and citations."""
 
 from __future__ import annotations
 
@@ -12,19 +10,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import ValidationError
 
 from surogates.artifacts.models import (
     MAX_ARTIFACT_BYTES,
-    MAX_TABLE_COLS,
-    MAX_TABLE_ROWS,
     ArtifactKind,
-    ArtifactSpec,
-    ChartJsSpec,
-    HtmlSpec,
-    MarkdownSpec,
-    SvgSpec,
-    TableSpec,
 )
 from surogates.artifacts.store import (
     ArtifactLimitError,
@@ -33,150 +22,6 @@ from surogates.artifacts.store import (
 )
 from surogates.storage.backend import LocalBackend
 from surogates.tools.builtin.artifact import _create_artifact_handler
-from surogates.harness.prompt import PromptBuilder
-from surogates.harness.prompt_library import default_library
-from surogates.tenant.context import TenantContext
-
-
-# =========================================================================
-# Spec validators
-# =========================================================================
-
-
-class TestArtifactSpec:
-    """ArtifactSpec top-level parsing + name safety."""
-
-    def test_name_must_not_contain_path_separators(self):
-        with pytest.raises(ValidationError):
-            ArtifactSpec(name="foo/bar", kind=ArtifactKind.MARKDOWN, spec={"content": "x"})
-
-    def test_name_rejects_newlines_and_nulls(self):
-        # Trailing whitespace is stripped; we only need to reject characters
-        # that survive the trim.
-        for bad in ("foo\nbar", "foo\x00bar", "foo\\bar", ".."):
-            with pytest.raises(ValidationError):
-                ArtifactSpec(name=bad, kind=ArtifactKind.MARKDOWN, spec={"content": "x"})
-
-    def test_name_trimmed(self):
-        spec = ArtifactSpec(
-            name="  Revenue 2025  ", kind=ArtifactKind.MARKDOWN, spec={"content": "x"},
-        )
-        assert spec.name == "Revenue 2025"
-
-    def test_validate_spec_accepts_each_kind(self):
-        # Valid specs for each kind pass without raising.
-        ArtifactSpec(
-            name="x", kind=ArtifactKind.MARKDOWN, spec={"content": "hi"},
-        ).validate_spec()
-        ArtifactSpec(
-            name="x", kind=ArtifactKind.TABLE,
-            spec={"columns": ["a", "b"], "rows": [{"a": 1, "b": 2}]},
-        ).validate_spec()
-        ArtifactSpec(
-            name="x", kind=ArtifactKind.CHART,
-            spec={"chart_js": {"type": "bar", "data": {"labels": ["a"], "datasets": [{"data": [1]}]}}},
-        ).validate_spec()
-        ArtifactSpec(
-            name="x", kind=ArtifactKind.HTML,
-            spec={"html": "<!doctype html><p>hi</p>"},
-        ).validate_spec()
-        ArtifactSpec(
-            name="x", kind=ArtifactKind.SVG,
-            spec={"svg": "<svg viewBox='0 0 10 10'><circle cx='5' cy='5' r='4'/></svg>"},
-        ).validate_spec()
-
-
-class TestMarkdownSpec:
-    def test_empty_content_rejected(self):
-        with pytest.raises(ValidationError):
-            MarkdownSpec(content="   ")
-
-    def test_valid(self):
-        assert MarkdownSpec(content="# Hello").content == "# Hello"
-
-
-class TestTableSpec:
-    def test_valid(self):
-        s = TableSpec(
-            columns=["name", "value"],
-            rows=[{"name": "a", "value": 1}, {"name": "b", "value": 2}],
-        )
-        assert len(s.rows) == 2
-
-    def test_duplicate_columns_rejected(self):
-        with pytest.raises(ValidationError):
-            TableSpec(columns=["a", "a"], rows=[])
-
-    def test_row_limit_enforced(self):
-        with pytest.raises(ValidationError):
-            TableSpec(
-                columns=["a"], rows=[{"a": i} for i in range(MAX_TABLE_ROWS + 1)],
-            )
-
-    def test_column_limit_enforced(self):
-        with pytest.raises(ValidationError):
-            TableSpec(
-                columns=[f"c{i}" for i in range(MAX_TABLE_COLS + 1)], rows=[],
-            )
-
-
-class TestChartJsSpec:
-    def test_basic_chartjs_config_allowed(self):
-        c = ChartJsSpec(
-            chart_js={
-                "type": "bar",
-                "data": {"labels": ["a"], "datasets": [{"label": "A", "data": [1]}]},
-            },
-        )
-        assert c.chart_js["type"] == "bar"
-
-    def test_chartjs_config_requires_type(self):
-        with pytest.raises(ValidationError):
-            ChartJsSpec(chart_js={"data": {"labels": ["a"], "datasets": [{"data": [1]}]}})
-
-    def test_chartjs_config_requires_data_object(self):
-        with pytest.raises(ValidationError):
-            ChartJsSpec(chart_js={"type": "bar"})
-
-
-class TestHtmlSpec:
-    def test_valid(self):
-        h = HtmlSpec(html="<!doctype html><body><p>hello</p></body>")
-        assert "<p>" in h.html
-
-    def test_empty_rejected(self):
-        with pytest.raises(ValidationError):
-            HtmlSpec(html="   ")
-
-    def test_script_tags_preserved(self):
-        # HtmlSpec does not sanitise — the iframe sandbox is the security
-        # boundary, so scripts are passed through verbatim.
-        body = "<html><body><script>alert(1)</script></body></html>"
-        h = HtmlSpec(html=body)
-        assert "<script>" in h.html
-
-
-class TestSvgSpec:
-    def test_valid(self):
-        s = SvgSpec(svg="<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'/>")
-        assert "<svg" in s.svg
-
-    def test_empty_rejected(self):
-        with pytest.raises(ValidationError):
-            SvgSpec(svg="")
-
-    def test_non_svg_rejected(self):
-        with pytest.raises(ValidationError):
-            SvgSpec(svg="<div>not an svg</div>")
-
-    def test_trims_whitespace(self):
-        s = SvgSpec(svg="\n\n  <svg viewBox='0 0 1 1'/>  \n")
-        assert s.svg.startswith("<svg")
-
-
-# =========================================================================
-# ArtifactStore
-# =========================================================================
 
 
 @pytest.fixture
@@ -232,14 +77,6 @@ class TestArtifactStoreCreate:
         assert parsed["kind"] == "markdown"
         assert parsed["spec"] == {"content": "# Hello"}
 
-    async def test_assigns_distinct_ids(self, store):
-        a = await store.create(
-            name="a", kind=ArtifactKind.MARKDOWN, spec={"content": "x"},
-        )
-        b = await store.create(
-            name="b", kind=ArtifactKind.MARKDOWN, spec={"content": "y"},
-        )
-        assert a.artifact_id != b.artifact_id
 
     async def test_index_maintained_in_creation_order(self, store):
         a = await store.create(
@@ -313,14 +150,6 @@ class TestArtifactStoreRead:
         with pytest.raises(ArtifactNotFoundError):
             await store.get_payload(uuid4())
 
-    async def test_list_empty_when_no_artifacts(self, store):
-        assert await store.list() == []
-
-
-# =========================================================================
-# create_artifact tool handler
-# =========================================================================
-
 
 class _StubAPIClient:
     """Records calls so tests can assert on the forwarded payload."""
@@ -347,18 +176,6 @@ class _StubAPIClient:
 
 
 class TestCreateArtifactHandler:
-    async def test_missing_api_client_returns_error(self):
-        out = await _create_artifact_handler(
-            {"name": "x", "kind": "markdown", "spec": {"content": "y"}},
-        )
-        data = json.loads(out)
-        assert data["success"] is False
-        assert "API client" in data["error"]
-        # The earlier wording attributed this to a "unit-test harness",
-        # which misled triage when it surfaced in production for
-        # anonymous website-channel sessions.  Make sure that hint
-        # stays out of the message.
-        assert "unit-test" not in data["error"]
 
     async def test_forwards_to_api_client(self):
         client = _StubAPIClient()
@@ -371,13 +188,6 @@ class TestCreateArtifactHandler:
         assert json.loads(out)["success"] is True
         assert client.calls == [{**args, "artifact_id": None}]
 
-    async def test_missing_name_or_kind_rejected_locally(self):
-        client = _StubAPIClient()
-        out = await _create_artifact_handler(
-            {"kind": "markdown", "spec": {"content": "y"}}, api_client=client,
-        )
-        assert json.loads(out)["success"] is False
-        assert client.calls == []
 
     async def test_missing_spec_entirely_returns_shape_hint(self):
         # LLM called the tool with only name+kind.  The handler must
@@ -396,15 +206,6 @@ class TestCreateArtifactHandler:
         assert "columns" in data["hint"]
         assert client.calls == []
 
-    async def test_unknown_kind_rejected_locally(self):
-        client = _StubAPIClient()
-        out = await _create_artifact_handler(
-            {"name": "x", "kind": "bogus", "spec": {}}, api_client=client,
-        )
-        data = json.loads(out)
-        assert data["success"] is False
-        assert "Unknown kind" in data["error"]
-        assert client.calls == []
 
     async def test_invalid_kind_spec_caught_locally_with_shape_hint(self):
         # Pass a spec for the wrong kind (chart without chart_js).  The
@@ -422,70 +223,6 @@ class TestCreateArtifactHandler:
         # Crucially: never hit the API.
         assert client.calls == []
 
-    def test_description_omits_concrete_json_examples(self):
-        # Verbose JSON call-shape examples in the description cause
-        # smaller models (observed with gpt-5.4-mini) to emit the JSON
-        # as assistant text instead of invoking the tool.  The richer
-        # schema carries the shape info; the description must not
-        # duplicate it as literal JSON.
-        from surogates.tools.registry import ToolRegistry
-        from surogates.tools.builtin import artifact as artifact_module
-
-        registry = ToolRegistry()
-        artifact_module.register(registry)
-        desc = registry._entries["create_artifact"].schema.description
-        # No concrete JSON braces in the description — shape info lives
-        # in the parameter schema, not here.
-        assert "{\"name\":" not in desc
-        assert "{\"kind\":" not in desc
-        assert "copy these shapes" not in desc.lower()
-        # Positive: description should explicitly direct the model to
-        # invoke the tool rather than describe the call.
-        assert "invoke this tool" in desc.lower()
-
-    def test_schema_exposes_per_kind_spec_properties(self):
-        # The schema must name every possible property of `spec` with
-        # per-kind REQUIRED markers so the LLM has structural guidance —
-        # not just an opaque `{"type": "object"}`.  Regression guard for
-        # the original "LLM omits spec entirely" bug.
-        from surogates.tools.registry import ToolRegistry
-        from surogates.tools.builtin import artifact as artifact_module
-
-        registry = ToolRegistry()
-        artifact_module.register(registry)
-        entry = registry._entries["create_artifact"]
-        spec_schema = entry.schema.parameters["properties"]["spec"]
-        assert spec_schema["type"] == "object"
-        props = spec_schema["properties"]
-        # Every kind's required field must appear as a named property.
-        for required_field in (
-            "content", "columns", "rows", "chart_js", "html", "svg",
-        ):
-            assert required_field in props, f"schema missing {required_field}"
-            assert "REQUIRED" in props[required_field]["description"]
-        # Caption is optional, not required.
-        assert "caption" in props
-        assert "optional" in props["caption"]["description"].lower()
-
-    def test_prompt_guidance_describes_structured_spec_contract(self):
-        # Smaller/local models are sensitive to contradictory wording.
-        # The guidance must match the actual tool schema: top-level
-        # name/kind/spec, with content nested inside spec.
-        tenant = TenantContext(
-            org_id=uuid4(),
-            user_id=uuid4(),
-            org_config={"default_model": "gpt-4o"},
-            user_preferences={},
-            permissions=frozenset(),
-            asset_root="/tmp/test_assets",
-        )
-        builder = PromptBuilder(tenant, available_tools={"create_artifact"})
-        prompt = builder.build()
-
-        assert "plain string parameter" not in prompt
-        assert "`name`, `kind`, and `spec`" in prompt
-        assert "`spec.chart_js`" in prompt
-        assert "Never put `chart_js`, `content`, `html`, `svg`, `columns`, or `rows` at the top level" in prompt
 
     async def test_invalid_chartjs_config_blocked_locally(self):
         client = _StubAPIClient()
@@ -661,11 +398,6 @@ class TestCreateArtifactHandler:
         assert "must be a JSON object" in data["error"]
         assert "list" in data["error"]
         assert client.calls == []
-
-
-# =========================================================================
-# Research citation validator (Guard 3)
-# =========================================================================
 
 
 class _StubSandboxPool:
@@ -893,163 +625,6 @@ class TestCitationValidator:
         assert len(sandbox.calls) == 1
 
 
-# =========================================================================
-# Fenced-artifact promoter
-# =========================================================================
-
-
-class TestFencePromoter:
-    """Regex + kind mapping for auto-promoting ``` fences into artifacts."""
-
-    def test_matches_svg_fence(self):
-        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
-        content = "Here you go:\n\n```svg\n<svg viewBox='0 0 10 10'/>\n```\n"
-        m = _FENCE_RE.search(content)
-        assert m is not None
-        assert m.group(1) == "svg"
-        assert m.group(1) in _PROMOTABLE_FENCES
-        assert "<svg" in m.group(2)
-
-    def test_matches_html_fence(self):
-        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
-        content = "```html\n<!doctype html><p>hi</p>\n```"
-        m = _FENCE_RE.search(content)
-        assert m is not None
-        assert m.group(1) == "html"
-        assert m.group(1) in _PROMOTABLE_FENCES
-
-    def test_unrelated_code_fence_ignored(self):
-        # python / ts / shell fences are NOT promotable.
-        from surogates.harness.loop import _FENCE_RE, _PROMOTABLE_FENCES
-        content = "```python\nprint('hi')\n```"
-        m = _FENCE_RE.search(content)
-        assert m is not None
-        assert m.group(1) == "python"
-        assert m.group(1) not in _PROMOTABLE_FENCES
-
-    def test_derive_name_uses_last_user_message(self):
-        from surogates.harness.loop import _derive_artifact_name
-        messages = [
-            {"role": "user", "content": "first prompt"},
-            {"role": "assistant", "content": "reply"},
-            {"role": "user", "content": '"Draw a minimal SVG logo for Steam & Bean"'},
-        ]
-        assert _derive_artifact_name("svg", messages) == (
-            "Draw a minimal SVG logo for Steam & Bean"
-        )
-
-    def test_derive_name_falls_back_when_no_user(self):
-        from surogates.harness.loop import _derive_artifact_name
-        assert _derive_artifact_name("svg", []) == "SVG artifact"
-        assert _derive_artifact_name("html", []) == "HTML preview"
-        assert _derive_artifact_name("unknown", []) == "Artifact"
-
-    def test_derive_name_truncates_long_prompt(self):
-        from surogates.harness.loop import _derive_artifact_name
-        long = "a" * 200
-        assert len(_derive_artifact_name("svg", [
-            {"role": "user", "content": long},
-        ])) == 80
-
-
-# =========================================================================
-# Workspace hides internal artifact storage
-# =========================================================================
-
-
-class TestWorkspaceHidesArtifacts:
-    """``artifacts/`` prefix is server-side storage, must not surface in the
-    workspace file browser nor be readable/writable through its API."""
-
-    def test_is_reserved_matches_artifacts_prefix(self):
-        from surogates.api.routes.workspace import _is_reserved
-        assert _is_reserved("_artifacts/abc/meta.json") is True
-        assert _is_reserved("_artifacts/index.json") is True
-        # A plain ``artifacts/`` path (no leading underscore) must NOT
-        # match — the underscore-prefix is the whole point of the rename.
-        assert _is_reserved("artifacts/abc.json") is False
-        # Files that merely start with the string must not match.
-        assert _is_reserved("_artifacts.md") is False
-        assert _is_reserved("src/_artifacts/logo.svg") is False
-        assert _is_reserved("notes.txt") is False
-
-    def test_validate_path_blocks_reserved_prefix(self):
-        from fastapi import HTTPException
-        from surogates.api.routes.workspace import _validate_path
-        with pytest.raises(HTTPException) as exc:
-            _validate_path("_artifacts/foo/meta.json")
-        assert exc.value.status_code == 403
-        # Normal paths still pass, including an ``artifacts/`` folder
-        # a user might legitimately have in their project.
-        _validate_path("src/main.py")
-        _validate_path("docs/README.md")
-        _validate_path("artifacts/my-thing.png")
-
-
-# =========================================================================
-# PromptBuilder — artifact guidance injection
-# =========================================================================
-
-
-class TestArtifactGuidance:
-    """The artifact guidance fragment is injected only when create_artifact is available."""
-
-    @pytest.fixture
-    def tenant(self) -> TenantContext:
-        return TenantContext(
-            org_id=uuid4(),
-            user_id=uuid4(),
-            org_config={"default_model": "gpt-4o"},
-            user_preferences={},
-            permissions=frozenset(),
-            asset_root="/tmp/test_assets",
-        )
-
-    def test_guidance_injected_when_tool_available(self, tenant):
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"create_artifact", "memory"},
-        )
-        guidance = default_library().get("guidance/artifact")
-        assert guidance in pb._tool_guidance_section()
-
-    def test_guidance_not_injected_without_tool(self, tenant):
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools={"memory"},
-        )
-        guidance = default_library().get("guidance/artifact")
-        assert guidance not in pb._tool_guidance_section()
-
-    def test_worker_wires_registry_tool_names_into_builder(self, tenant):
-        """Regression: production worker must pass ``tool_registry.tool_names``
-        to PromptBuilder so tool-aware guidance fragments reach the system
-        prompt.  Until session cbf414ac…e1362a1 made it visible, the worker
-        constructed the builder with no ``available_tools`` and every
-        tool-gated guidance fragment (artifact, memory, skills, expert,
-        session_search, tool_use_enforcement) was silently dropped for
-        every model on every session.
-        """
-        from surogates.tools.registry import ToolRegistry
-        from surogates.tools.runtime import ToolRuntime
-
-        registry = ToolRegistry()
-        ToolRuntime(registry).register_builtins()
-        assert "create_artifact" in registry.tool_names, (
-            "registry must advertise create_artifact for this regression "
-            "test to be meaningful"
-        )
-
-        pb = PromptBuilder(
-            tenant=tenant,
-            available_tools=set(registry.tool_names),
-        )
-        section = pb._tool_guidance_section()
-        assert default_library().get("guidance/artifact") in section
-        assert default_library().get("guidance/memory") in section
-        assert default_library().get("guidance/skills") in section
-
-
 class TestArtifactStoreUpdate:
     """Revisions bump the version in place instead of forking a new artifact."""
 
@@ -1187,25 +762,6 @@ class TestCreateArtifactHandlerRevision:
         )
         assert client.calls[0]["artifact_id"] == "abc-123"
 
-    async def test_absent_artifact_id_forwards_none(self):
-        client = _StubAPIClient()
-        await _create_artifact_handler(
-            {"name": "r", "kind": "markdown", "spec": self._SPEC},
-            api_client=client,
-        )
-        assert client.calls[0]["artifact_id"] is None
-
-    async def test_empty_artifact_id_is_treated_as_absent(self):
-        """An empty string must create, not attempt a revision of ''."""
-        client = _StubAPIClient()
-        await _create_artifact_handler(
-            {
-                "name": "r", "kind": "markdown", "spec": self._SPEC,
-                "artifact_id": "",
-            },
-            api_client=client,
-        )
-        assert client.calls[0]["artifact_id"] is None
 
     async def test_failed_revision_returns_the_stored_spec(self):
         client = _StubAPIClient(

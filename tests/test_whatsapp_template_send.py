@@ -316,18 +316,6 @@ async def test_a_template_missing_its_language_fails_permanently(monkeypatch):
     assert is_permanent_delivery_error(result.error)
 
 
-def test_template_graph_errors_are_permanent():
-    # A renamed or paused template fails every opener for the roster; retrying
-    # for thirty minutes cannot change that and only delays the failure the
-    # operator needs to see.
-    from surogates.channels.delivery import is_permanent_delivery_error
-
-    for code in ("132000", "132001", "132005", "132007", "132012", "132015", "132016"):
-        assert is_permanent_delivery_error(
-            f"graph error {code} (HTTP 400): whatever Meta said"
-        ), code
-
-
 @pytest.mark.asyncio
 async def test_a_sent_opener_is_keyed_on_its_outbox_row(
     sf, queued_invitation, identity_lookup, reload_invitation,

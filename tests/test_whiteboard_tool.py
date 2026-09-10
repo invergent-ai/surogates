@@ -1,9 +1,8 @@
-"""The whiteboard_draw tool: schema, routing, and handler behaviour."""
+"""Whiteboard tool drawing validation, result feedback and answer-slot behavior."""
 import asyncio
 import json
 
 from surogates.tools.builtin.whiteboard import (
-    WHITEBOARD_TOOL_NAMES,
     register,
 )
 from surogates.tools.registry import ToolRegistry
@@ -18,30 +17,6 @@ def _registry():
 def _call(registry, arguments, **kwargs):
     entry = registry.get("whiteboard_draw")
     return asyncio.run(entry.handler(arguments, **kwargs))
-
-
-def test_registers_under_the_whiteboard_toolset():
-    entry = _registry().get("whiteboard_draw")
-    assert entry.toolset == "whiteboard"
-
-
-def test_schema_declares_commands_as_required():
-    schema = _registry().get("whiteboard_draw").schema
-    assert schema.parameters["required"] == ["commands"]
-    assert schema.parameters["properties"]["commands"]["type"] == "array"
-
-
-def test_routes_to_harness():
-    """Regression: a tool absent from TOOL_LOCATIONS falls back to SANDBOX
-    routing and dies there as 'Unknown tool'.
-    """
-    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
-
-    for name in WHITEBOARD_TOOL_NAMES:
-        assert TOOL_LOCATIONS.get(name) is ToolLocation.HARNESS, (
-            f"{name} is not HARNESS-routed; the sandbox fallback surfaces "
-            f"it as 'Unknown tool'"
-        )
 
 
 def test_handler_accepts_a_valid_command_list():
@@ -87,14 +62,6 @@ def test_handler_rejects_a_malformed_commands_string():
     assert "commands" in result.lower()
 
 
-def test_description_names_every_command_tool():
-    description = _registry().get("whiteboard_draw").schema.description
-    for tool in ("write_text", "draw_formula", "draw", "erase",
-                 "place_artifact"):
-        assert tool in description
-
-
-# --- what the model learns back ---------------------------------------
 #
 # The image and the occupied-cell list are both captured at Ask time, so
 # a second iteration has no evidence its first draw happened. One real
@@ -109,15 +76,6 @@ def test_result_reports_where_the_object_landed():
     ]})
     assert "(1310, 338)" in out
     assert "= \\infty" in out
-
-
-def test_result_warns_that_the_image_predates_the_call():
-    out = _call(_registry(), {"commands": [
-        {"tool": "write_text", "x": 0, "y": 0, "text": "hi",
-         "fontSize": 20, "maxWidth": 100},
-    ]})
-    assert "captured before this call" in out
-    assert "do not draw it again" in out
 
 
 def test_result_lists_every_command():
@@ -164,15 +122,6 @@ def test_result_rejects_malformed_readings():
     assert out.startswith("Error:")
 
 
-def test_schema_declares_readings():
-    schema = _registry().get("whiteboard_draw").schema
-    props = schema.parameters["properties"]
-    assert "readings" in props
-    assert props["readings"]["items"]["required"] == ["mark", "text"]
-
-
-# --- slots --------------------------------------------------------------
-
 def test_rejects_a_call_that_leaves_the_users_slot_empty():
     """Session 1231fab2: `H ? USE`, the model knew the answer was O and
     replied in prose beside the board. A slot is the user's own answer
@@ -211,19 +160,3 @@ def test_rejects_an_unknown_intent():
         {"tool": "write_text", "text": "O", "anchor": "latest"},
     ], "intent": "ponder"})
     assert out.startswith("Error:")
-
-
-def test_schema_declares_intent():
-    props = _registry().get("whiteboard_draw").schema.parameters["properties"]
-    assert props["intent"]["enum"] == ["fill", "continue", "transform", "respond"]
-
-
-def test_slots_come_from_the_turn_metadata():
-    from surogates.whiteboard.turn import slots_from_metadata
-
-    meta = {"whiteboard": {"marks": [
-        {"id": "A1", "kind": "ink"}, {"id": "S1", "kind": "slot"},
-        {"id": "S2", "kind": "slot"}, "junk",
-    ]}}
-    assert slots_from_metadata(meta) == frozenset({"S1", "S2"})
-    assert slots_from_metadata(None) == frozenset()

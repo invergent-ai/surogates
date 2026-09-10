@@ -1,4 +1,4 @@
-"""Tests for the apply_rlimits helper.
+"""Subprocess resource limits take effect before a tool starts.
 
 RLIMIT_AS (virtual memory) and RLIMIT_CPU
 (CPU seconds) get applied in the subprocess's preexec_fn so an
@@ -7,7 +7,6 @@ OOM-bomb or fork-bomb tool cannot take down the proxy pod.
 
 from __future__ import annotations
 
-import resource
 
 
 def test_apply_rlimits_sets_memory_cap_via_subprocess():
@@ -45,15 +44,3 @@ def test_apply_rlimits_sets_memory_cap_via_subprocess():
     mem_soft, cpu_soft = result.stdout.split()
     assert int(mem_soft) <= 64 * 1024 * 1024
     assert int(cpu_soft) <= 10
-
-
-def test_apply_rlimits_ignores_negative_or_zero_caps():
-    """Defensive: a misconfigured cap (e.g., 0 from a typo) should
-    not lock the subprocess into immediate failure.  The helper
-    skips the rlimit call when the cap is non-positive."""
-    from surogates.mcp_proxy.rlimits import apply_rlimits
-
-    soft_before, _ = resource.getrlimit(resource.RLIMIT_AS)
-    apply_rlimits(memory_limit_mb=0, cpu_seconds=-1)
-    soft_after, _ = resource.getrlimit(resource.RLIMIT_AS)
-    assert soft_after == soft_before

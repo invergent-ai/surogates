@@ -657,11 +657,14 @@ async def test_a_bound_key_still_reaches_its_own_agents_session(
         agent_id=AGENT, channel=API_CHANNEL, model=None, config={},
         service_account_id=api_key.id,
     )
+    # A completed session lets the event stream close after replay.
+    await store.update_session_status(mine.id, "completed")
     r = await client.get(
         f"/v1/api/sessions/{mine.id}/events?after=0",
         headers=auth(api_key.token),
     )
-    assert r.status_code != 404, r.text
+    assert r.status_code == 200, r.text
+    assert "event: session.done" in r.text
 
 
 async def test_two_unrelated_first_turns_never_share_a_session(

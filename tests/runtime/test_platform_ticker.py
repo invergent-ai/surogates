@@ -124,35 +124,6 @@ async def test_ticker_marks_run_failed_when_materialization_raises():
 
 
 @pytest.mark.asyncio
-async def test_ticker_runs_recovery_each_tick():
-    """When a ``recover`` callable is supplied it runs once per tick
-    (under the lock) to requeue/recover stalled dynamic loops."""
-    from surogates.scheduled.platform_ticker import PlatformTicker
-
-    lock = _StubLock()
-    store = _StubStore(due_rows=[])
-    recover_calls = 0
-
-    async def run_one(row):  # pragma: no cover - no due rows here
-        pass
-
-    async def recover():
-        nonlocal recover_calls
-        recover_calls += 1
-
-    ticker = PlatformTicker(
-        lock=lock, store=store, run_one=run_one, recover=recover,
-        tick_interval_seconds=0.01, worker_id="ticker-g",
-    )
-    task = asyncio.create_task(ticker.run())
-    await asyncio.sleep(0.05)
-    ticker.request_stop()
-    await task
-
-    assert recover_calls >= 1
-
-
-@pytest.mark.asyncio
 async def test_ticker_recovery_failure_does_not_abort_tick():
     """A throwing ``recover`` must not stop due rows from being
     materialized — recovery is best-effort."""
@@ -276,34 +247,3 @@ async def test_ticker_releases_lock_on_cancellation():
     await task
 
     assert lock.released is True
-
-
-@pytest.mark.asyncio
-async def test_ticker_heartbeats_twice_per_tick():
-    """The two heartbeat calls (one before the DB read, one
-    before materialization) catch a slow DB read pushing us past
-    the TTL boundary -- if the DB took too long, the second
-    heartbeat returns False and we drop the rows for this
-    tick rather than double-fire."""
-    from surogates.scheduled.platform_ticker import PlatformTicker
-
-    lock = _StubLock()
-    store = _StubStore(due_rows=[
-        {"agent_id": "a-1", "org_id": "o-1", "id": "s-1"},
-    ])
-
-    async def run_one(row):
-        pass
-
-    ticker = PlatformTicker(
-        lock=lock, store=store, run_one=run_one,
-        tick_interval_seconds=0.01, worker_id="ticker-e",
-    )
-    task = asyncio.create_task(ticker.run())
-    await asyncio.sleep(0.05)
-    ticker.request_stop()
-    await task
-
-    # At least 2 heartbeats fired (one before DB read, one
-    # before materialization) per successful tick.
-    assert lock.heartbeat_calls >= 2

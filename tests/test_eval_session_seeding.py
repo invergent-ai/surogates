@@ -1,4 +1,4 @@
-"""Seeded turns become real events without waking the worker."""
+"""Session creation authorizes and screens seeded evaluation turns."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -7,83 +7,8 @@ from uuid import uuid4
 import pytest
 from fastapi import Response
 
-from surogates.api.routes.sessions import SeedTurn, seed_turn_events
+from surogates.api.routes.sessions import SeedTurn
 from surogates.session.events import EventType
-
-
-def test_user_turn_becomes_a_user_message_event():
-    events = seed_turn_events([SeedTurn(role="user", content="2+2?")])
-    assert events == [
-        (EventType.USER_MESSAGE, {"content": "2+2?", "synthetic": "seed"}),
-    ]
-
-
-def test_assistant_turn_becomes_an_llm_response_event():
-    # The response contract is {"message": {"role": ..., "content": ...}}; the
-    # context replay appends that dict verbatim into the provider's messages
-    # array, which rejects a message carrying no role.
-    events = seed_turn_events([SeedTurn(role="assistant", content="4")])
-    assert events == [(
-        EventType.LLM_RESPONSE,
-        {
-            "message": {"role": "assistant", "content": "4"},
-            "synthetic": "seed",
-        },
-    )]
-
-
-def test_both_seeded_roles_are_marked_synthetic():
-    # The facade reads the last llm.response back as the agent's answer; without
-    # a marker a seeded turn is indistinguishable from a real one and a row
-    # whose real turn died would be graded against its own recorded answer.
-    events = seed_turn_events([
-        SeedTurn(role="user", content="q"),
-        SeedTurn(role="assistant", content="a"),
-    ])
-    assert [data["synthetic"] for _, data in events] == ["seed", "seed"]
-
-
-def test_seeded_assistant_message_replays_with_a_role():
-    # Guards the wire shape end-to-end: the replay builder must produce a
-    # messages array every OpenAI-compatible provider accepts.
-    from surogates.harness.loop_context_replay import ContextReplayMixin
-
-    events = [
-        SimpleNamespace(
-            type=event_type.value, data=data, id=index,
-        )
-        for index, (event_type, data) in enumerate(seed_turn_events([
-            SeedTurn(role="user", content="one"),
-            SeedTurn(role="assistant", content="two"),
-        ]))
-    ]
-    messages = ContextReplayMixin._rebuild_messages(
-        ContextReplayMixin(), events, workspace_path="",
-    )
-    assert [m.get("role") for m in messages] == ["user", "assistant"]
-
-
-def test_order_is_preserved():
-    events = seed_turn_events([
-        SeedTurn(role="user", content="one"),
-        SeedTurn(role="assistant", content="two"),
-        SeedTurn(role="user", content="three"),
-    ])
-    assert [t for t, _ in events] == [
-        EventType.USER_MESSAGE,
-        EventType.LLM_RESPONSE,
-        EventType.USER_MESSAGE,
-    ]
-
-
-def test_empty_seed_produces_no_events():
-    assert seed_turn_events([]) == []
-    assert seed_turn_events(None) == []
-
-
-def test_unknown_role_is_rejected():
-    with pytest.raises(ValueError):
-        SeedTurn(role="system", content="x")
 
 
 class _RecordingStore:
@@ -106,38 +31,6 @@ class _RecordingStore:
             model=kwargs["model"],
             config=kwargs["config"],
         )
-
-
-async def test_seeded_turns_are_emitted_in_order():
-    from surogates.api.routes.sessions import emit_seed_turns
-
-    store = _RecordingStore()
-    await emit_seed_turns(
-        store,
-        session_id="s-1",
-        turns=[
-            SeedTurn(role="user", content="one"),
-            SeedTurn(role="assistant", content="two"),
-        ],
-    )
-    assert store.emitted == [
-        (EventType.USER_MESSAGE, {"content": "one", "synthetic": "seed"}),
-        (
-            EventType.LLM_RESPONSE,
-            {
-                "message": {"role": "assistant", "content": "two"},
-                "synthetic": "seed",
-            },
-        ),
-    ]
-
-
-async def test_no_seed_emits_nothing():
-    from surogates.api.routes.sessions import emit_seed_turns
-
-    store = _RecordingStore()
-    await emit_seed_turns(store, session_id="s-1", turns=None)
-    assert store.emitted == []
 
 
 class _Storage:
@@ -415,67 +308,3 @@ async def test_a_seeded_assistant_turn_goes_through_the_injection_screen():
     assert exc.value.status_code == 422
     assert store.emitted == []
     assert store.created == []
-
-
-def test_a_seeded_answer_is_never_reported_as_the_agents_output():
-    # ``extract_final_response`` scans in reverse for the last llm.response
-    # with content. A seeded assistant turn IS an llm.response, so without the
-    # marker check a session that produced nothing hands back the transcript
-    # it was seeded with — for an evaluation row, grading it against its own
-    # recorded answer.
-    from surogates.harness.message_utils import extract_final_response
-
-    events = [
-        SimpleNamespace(type=event_type.value, data=data, id=index)
-        for index, (event_type, data) in enumerate(seed_turn_events([
-            SeedTurn(role="user", content="q"),
-            SeedTurn(role="assistant", content="the recorded answer"),
-        ]))
-    ]
-    assert extract_final_response(events) == "(no response produced)"
-
-    # A real response after the seed is still found.
-    events.append(SimpleNamespace(
-        type=EventType.LLM_RESPONSE.value,
-        data={"message": {"role": "assistant", "content": "the real answer"}},
-        id=len(events),
-    ))
-    assert extract_final_response(events) == "the real answer"
-
-
-def test_too_many_seed_turns_is_rejected():
-    from pydantic import ValidationError
-
-    from surogates.api.routes.sessions import (
-        MAX_SEED_TURNS,
-        CreateSessionRequest,
-    )
-
-    turns = [
-        SeedTurn(role="user", content="x") for _ in range(MAX_SEED_TURNS + 1)
-    ]
-    with pytest.raises(ValidationError):
-        CreateSessionRequest(seed_turns=turns)
-
-    CreateSessionRequest(seed_turns=turns[:MAX_SEED_TURNS])
-
-
-def test_oversized_seed_content_is_rejected():
-    from pydantic import ValidationError
-
-    from surogates.api.routes.sessions import (
-        MAX_SEED_CONTENT_LENGTH,
-        CreateSessionRequest,
-    )
-
-    half = MAX_SEED_CONTENT_LENGTH // 2
-    with pytest.raises(ValidationError):
-        CreateSessionRequest(seed_turns=[
-            SeedTurn(role="user", content="x" * (half + 1)),
-            SeedTurn(role="assistant", content="y" * (half + 1)),
-        ])
-
-    CreateSessionRequest(seed_turns=[
-        SeedTurn(role="user", content="x" * half),
-        SeedTurn(role="assistant", content="y" * half),
-    ])

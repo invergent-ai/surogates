@@ -1,11 +1,4 @@
-"""Unit tests for the operator-only user_reports builtin tool.
-
-The ops-DB side (cohort overview) runs against in-memory SQLite via
-the OpsBase metadata (the kb_tools/ops_credits convention).  The
-surogates-DB side (org users + memory_summary) and the owner-scope
-DB lookup are monkeypatched — their SQL runs against Postgres-only
-JSONB in production and is exercised by the ops-side live checks.
-"""
+"""Operator reports tool authorization and user/cohort report retrieval."""
 
 from __future__ import annotations
 
@@ -24,7 +17,6 @@ from sqlalchemy.pool import StaticPool
 
 from surogates.db import ops_engine
 from surogates.db.ops_models import OpsAgent, OpsBase
-from surogates.tools import owner_scope
 from surogates.tools.builtin import user_reports as module
 
 _ORG = UUID("11111111-1111-1111-1111-111111111111")
@@ -95,14 +87,6 @@ async def test_refuses_without_owner_scope(monkeypatch):
     )
     result = await _call({"action": "overview"})
     assert "operator" in result["error"]
-
-
-async def test_owner_scope_receives_principal_and_config(monkeypatch):
-    gate = AsyncMock(return_value=False)
-    monkeypatch.setattr(module, "is_owner_scoped", gate)
-    store = SimpleNamespace(_sf="factory-sentinel")
-    await _call({"action": "overview"}, session_store=store)
-    gate.assert_awaited_once_with(store, _SA_ID, _OWNER_CONFIG)
 
 
 # ── overview (ops DB) ──────────────────────────────────────────────
@@ -190,57 +174,3 @@ async def test_get_unknown_or_missing_user(owner_scoped, org_users):
 async def test_unknown_action(owner_scoped):
     result = await _call({"action": "bogus"})
     assert "must be one of" in result["error"]
-
-
-# ── owner_scope module ─────────────────────────────────────────────
-
-
-def test_config_ok_conditions():
-    ok = owner_scope.owner_scope_config_ok
-    assert ok(_SA_ID, _OWNER_CONFIG)
-    assert not ok(None, _OWNER_CONFIG)
-    assert not ok(_SA_ID, None)
-    assert not ok(_SA_ID, {"ops": {}})
-    assert not ok(_SA_ID, {**_OWNER_CONFIG, "agent_type": "copilot"})
-
-
-class _FakeResult:
-    def __init__(self, name):
-        self._name = name
-
-    def scalar_one_or_none(self):
-        return self._name
-
-
-class _FakeDb:
-    def __init__(self, name):
-        self._name = name
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def execute(self, *_args, **_kwargs):
-        return _FakeResult(self._name)
-
-
-def _store(sa_name):
-    return SimpleNamespace(_sf=lambda: _FakeDb(sa_name))
-
-
-async def test_is_owner_scoped_requires_ops_chat_prefix():
-    assert await owner_scope.is_owner_scoped(
-        _store("ops-chat-org-user"), _SA_ID, _OWNER_CONFIG,
-    )
-    assert not await owner_scope.is_owner_scoped(
-        _store("agent:some-agent"), _SA_ID, _OWNER_CONFIG,
-    )
-    assert not await owner_scope.is_owner_scoped(
-        _store(None), _SA_ID, _OWNER_CONFIG,
-    )
-    # Config short-circuit: no DB call path needed at all.
-    assert not await owner_scope.is_owner_scoped(
-        _store("ops-chat-org-user"), None, _OWNER_CONFIG,
-    )

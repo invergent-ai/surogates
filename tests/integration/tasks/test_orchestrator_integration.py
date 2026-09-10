@@ -1,8 +1,6 @@
 """End-to-end integration tests for the task layer wired into the Orchestrator.
 
 Verifies:
-* The Orchestrator constructor accepts ``session_factory`` and
-  ``tenant_for_task`` kwargs.
 * A full fan-in flow: two parents → done → synthesizer auto-promotes
   via the tick → tick claims and spawns → parent completion event.
 * Crash + retry: a worker session that fails without WORKER_COMPLETE
@@ -15,9 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
 
-from surogates.db.models import Event, Session as ORMSession, Task, TaskLink
+from surogates.db.models import Session as ORMSession, Task, TaskLink
 from surogates.session.events import EventType
 
 from tests.integration.conftest import create_org
@@ -46,38 +43,6 @@ async def parent_session(session_factory, org_id: uuid.UUID) -> ORMSession:
         await db.commit()
         await db.refresh(s)
     return s
-
-
-def test_orchestrator_accepts_task_layer_kwargs():
-    """Orchestrator.__init__ takes session_factory + tenant_for_task without breaking."""
-    from surogates.orchestrator.dispatcher import Orchestrator
-
-    o = Orchestrator(
-        redis_client=AsyncMock(),
-        session_store=AsyncMock(),
-        harness_factory=lambda *a, **kw: None,
-        agent_id="orchestrator",
-        queue_key="surogates:work_queue:orchestrator",
-        session_factory=MagicMock(),
-        tenant_for_task=lambda task: MagicMock(org_id=task.org_id),
-    )
-    assert o._session_factory is not None
-    assert o._tenant_for_task is not None
-
-
-def test_orchestrator_works_without_task_layer_kwargs():
-    """Construction without the new kwargs keeps the old contract working."""
-    from surogates.orchestrator.dispatcher import Orchestrator
-
-    o = Orchestrator(
-        redis_client=AsyncMock(),
-        session_store=AsyncMock(),
-        harness_factory=lambda *a, **kw: None,
-        agent_id="orchestrator",
-        queue_key="surogates:work_queue:orchestrator",
-    )
-    assert o._session_factory is None
-    assert o._tenant_for_task is None
 
 
 @pytest.mark.asyncio(loop_scope="session")

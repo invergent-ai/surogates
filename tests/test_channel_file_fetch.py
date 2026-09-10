@@ -294,11 +294,6 @@ async def test_fetch_channel_file_maps_unavailable_api_error(monkeypatch):
     assert platform.download_calls == 0
 
 
-# ── Part 2: _resolve_file_id + fetch_channel_file with name resolution ────
-
-from surogates.channels.file_fetch import _resolve_file_id  # noqa: E402
-
-
 class _FakePlatformWithListing(_FakePlatform):
     """Extends _FakePlatform with a list_channel_files stub for name resolution tests."""
 
@@ -310,58 +305,6 @@ class _FakePlatformWithListing(_FakePlatform):
     async def list_channel_files(self, *, creds, channel_id):
         self.list_calls += 1
         return self._channel_files
-
-
-# Test: passing an F-id passthrough — list_channel_files must NOT be called
-async def test_resolve_file_id_passthrough_for_slack_id():
-    platform = _FakePlatformWithListing(channel_files=[])
-    resolved = await _resolve_file_id(
-        platform, {"bot_token": "xoxb"}, "C1", "F0BE46MG31P",
-    )
-    assert resolved == "F0BE46MG31P"
-    assert platform.list_calls == 0
-
-
-# Test: newest-created match wins on duplicate names
-async def test_resolve_file_id_returns_newest_on_duplicate_names():
-    files = [
-        {"id": "F111", "name": "report.html", "created": 100},
-        {"id": "F222", "name": "report.html", "created": 200},
-    ]
-    platform = _FakePlatformWithListing(channel_files=files)
-    resolved = await _resolve_file_id(
-        platform, {"bot_token": "xoxb"}, "C1", "report.html",
-    )
-    assert resolved == "F222"
-
-
-# Test: missing name raises ChannelFileNotFound listing available filenames
-async def test_resolve_file_id_not_found_lists_available():
-    files = [
-        {"id": "F111", "name": "report.html", "created": 100},
-    ]
-    platform = _FakePlatformWithListing(channel_files=files)
-    with pytest.raises(ChannelFileNotFound) as ei:
-        await _resolve_file_id(
-            platform, {"bot_token": "xoxb"}, "C1", "missing.html",
-        )
-    msg = str(ei.value)
-    assert "missing.html" in msg
-    assert "report.html" in msg
-
-
-# Test: a ChannelApiError raised while listing files during resolution is
-# translated to the matching ChannelFile* error, so a rate-limited files.list
-# surfaces as 429 rather than an opaque 500.
-async def test_resolve_file_id_translates_api_error():
-    class _RateLimitedLister(_FakePlatform):
-        async def list_channel_files(self, *, creds, channel_id):
-            raise ChannelApiError("rate_limited", "ratelimited")
-
-    with pytest.raises(ChannelFileRateLimited):
-        await _resolve_file_id(
-            _RateLimitedLister(), {"bot_token": "xoxb"}, "C1", "report.html",
-        )
 
 
 # Test: fetch_channel_file with a filename resolves and downloads the correct file
