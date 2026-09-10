@@ -15,6 +15,7 @@ from surogates.harness.loop_artifacts import (
     _coerce_modified_to_datetime,
     _coerce_tool_args,
     _derive_artifact_name,
+    _terminal_executes_file,
 )
 from surogates.harness.delivery_manifest import (
     check_terminal_claim,
@@ -539,19 +540,18 @@ class ArtifactCompletionMixin:
             workspace_candidates, entries_by_path = [], {}
         out.extend(workspace_candidates)
 
-        # Flag intermediate scripts: a file the agent wrote and then
-        # ran via terminal is almost always scaffolding (e.g. a python
-        # script used to generate the real deliverable), not a final
-        # artifact the user wanted. Annotate so the summarizer LLM can
-        # filter them out — we don't drop here because the user
-        # occasionally does ask for code, and the LLM gets to make
-        # that call against the user message.
+        # Reconciliation rejects executed helper scripts as scaffolding.
+        # Only execution counts: inspecting a PDF with pdfinfo or passing
+        # an output path to a generator must not discard the deliverable.
         annotated: list[TurnArtifact] = []
         for art in out:
             if art.kind != "file":
                 annotated.append(art)
                 continue
-            executed = any(art.ref in cmd for cmd in terminal_commands)
+            executed = any(
+                _terminal_executes_file(cmd, art.ref)
+                for cmd in terminal_commands
+            )
             if executed:
                 meta = dict(art.meta or {})
                 meta["executed_by_terminal"] = True

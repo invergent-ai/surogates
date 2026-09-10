@@ -382,7 +382,9 @@ def _is_internal_workspace_path(path: str) -> bool:
     """True for workspace paths that are never user deliverables.
 
     Any hidden path segment marks agent-internal state (``.agents/``
-    skill context files, ``.claude/`` config, ``.cache/`` …),
+    skill context files, ``.claude/`` config, ``.cache/`` …). Python's
+    ``__pycache__/`` directories and bytecode files are generated runtime
+    state, including when they live below a user output directory.
     ``uploads/`` holds user-provided attachments — inputs, not
     outputs — and the underscore directories above are storage for a
     surface the chat already renders. Filtered deterministically so they
@@ -390,10 +392,12 @@ def _is_internal_workspace_path(path: str) -> bool:
     download card.
     """
     segments = [s for s in path.split("/") if s]
-    if any(s.startswith(".") for s in segments):
+    if any(s.startswith(".") or s == "__pycache__" for s in segments):
         return True
     if not segments:
         return False
+    if segments[-1].lower().endswith((".pyc", ".pyo")):
+        return True
     return (
         segments[0] == "uploads"
         or segments[0] in _INTERNAL_WORKSPACE_PREFIXES
