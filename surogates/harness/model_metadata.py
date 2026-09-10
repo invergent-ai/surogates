@@ -105,6 +105,20 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         input_cost_per_1k=8e-05,
         output_cost_per_1k=0.00018,
     ),
+    # The V4.1 Flash release, and what ``base_llm_model`` resolves the
+    # ``surogate`` tier to.  Rates are the WEEKDAY PEAK ones: DeepSeek
+    # halves them off-peak (weekends, and 00:00-01:00 / 04:00-06:00 /
+    # 10:00-24:00 UTC on weekdays), so a session priced here reads at or
+    # above what it actually cost.  Reasoning is on by default upstream
+    # and its tokens land in the completion count, priced as output.
+    "deepseek/deepseek-v4.1-flash": ModelInfo(
+        id="deepseek/deepseek-v4.1-flash",
+        context_window=1_048_576,
+        max_output_tokens=384_000,
+        input_cost_per_1k=0.0003,
+        output_cost_per_1k=0.0012,
+        supports_vision=True,
+    ),
     # --- Google ------------------------------------------------------------
     "google/gemini-3-flash-preview": ModelInfo(
         id="google/gemini-3-flash-preview",
@@ -308,6 +322,9 @@ _ALIASES: dict[str, str] = {
     "deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731",
     "deepseek/deepseek-v4-flash-20260731": "deepseek/deepseek-v4-flash-0731",
     "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek/deepseek-v4-flash-0731",
+    "deepseek-v4.1-flash": "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4.1-flash-20260910": "deepseek/deepseek-v4.1-flash",
+    "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek/deepseek-v4.1-flash",
     # Undated Flash ids point at the current release rather than the older
     # 0423 build they originally named.
     "deepseek/deepseek-v4-flash": "deepseek/deepseek-v4-flash-0731",
