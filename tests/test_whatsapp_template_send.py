@@ -517,3 +517,24 @@ async def test_an_already_handed_over_opener_is_not_enqueued_twice(
         sf, identity_lookup=identity_lookup, now=_utcnow(), enqueue=_enqueue,
     )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_whatsapp_program_with_no_template_fails_its_users_not_forever(
+    queued_invitation,
+):
+    # Left queued, this row was retried every tick with a warning in the
+    # log and nothing on the delivery axis. Now it is undeliverable, and the
+    # send pass records that.
+    from surogates.programs.opener import OpenerUndeliverable, make_opener_enqueue
+
+    async def _config(program_id):
+        return {"channel": "whatsapp", "channel_identifier": "127"}  # no template
+
+    enqueue = make_opener_enqueue(
+        session_store=None, redis=None, session_factory=None,
+        delivery_service=None, config_for_program=_config,
+    )
+    with pytest.raises(OpenerUndeliverable) as exc:
+        await enqueue(queued_invitation)
+    assert "template" in exc.value.reason

@@ -23,6 +23,7 @@ from surogates.db.models import (
     ProgramOccurrenceRow,
     ProgramScheduleRow,
 )
+from surogates.programs.opener import OpenerUndeliverable
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,11 @@ async def send_queued_openers(
 
             try:
                 outbox_id = await enqueue(pending)
+            except OpenerUndeliverable as exc:
+                # Retrying will not change the answer; say so on the row and
+                # free the user for the next occurrence.
+                await _fail(db, pending.id, exc.reason)
+                continue
             except Exception:
                 await _release(db, pending.id)
                 raise
@@ -299,6 +305,22 @@ def _unsent(invitation_id: Any):
         .where(ProgramInvitationRow.outbox_id.is_(None))
         .where(ProgramInvitationRow.response_state == "not_started")
     )
+
+
+async def _fail(db: Any, invitation_id: Any, reason: str) -> None:
+    """A claimed opener that can never be handed over: failed, and not awaited."""
+    await db.execute(
+        sa.update(ProgramInvitationRow)
+        .where(ProgramInvitationRow.id == invitation_id)
+        .where(ProgramInvitationRow.outbox_id.is_(None))
+        .values(
+            delivery_state="failed",
+            delivery_error=reason[:500],
+            response_state="not_started",
+            deadline_at=None,
+        )
+    )
+    await db.commit()
 
 
 async def _release(db: Any, invitation_id: Any) -> None:
