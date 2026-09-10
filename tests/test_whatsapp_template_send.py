@@ -275,9 +275,10 @@ async def test_a_dead_outbox_row_marks_the_invitation_failed(
     row = await reload_invitation(inv.id)
     assert row.delivery_state == "failed"
     assert "132001" in row.delivery_error
-    # Never asked, so the response axis is untouched — the sweep will not
-    # count them as silent.
-    assert row.response_state == "awaiting_reply"
+    # Never asked, so nobody is awaited.  ``awaiting_reply`` is an open
+    # check-in, and an open check-in suppresses the patient's next occurrence:
+    # left there, one failed send would drop them from the Program for good.
+    assert row.response_state == "not_started"
 
 
 @pytest.mark.asyncio
@@ -393,8 +394,118 @@ async def test_a_failure_mid_batch_does_not_resend_the_earlier_openers(
         )
 
     assert (await reload_invitation(first.id)).outbox_id == 101
-    # The one that failed is still queued for the next tick, not lost.
-    assert (await reload_invitation(second.id)).outbox_id is None
+    # The one that failed is still queued for the next tick, not lost — the
+    # claim taken before the enqueue is given back.
+    failed = await reload_invitation(second.id)
+    assert failed.outbox_id is None
+    assert failed.response_state == "not_started"
+    assert failed.deadline_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_opener_with_no_outbox_id_is_not_sent_again(
+    sf, make_invitation, identity_lookup, reload_invitation,
+):
+    # The state a process leaves behind when it dies between the outbox
+    # commit and the invitation learning its id.  Before the claim existed
+    # this row looked untouched and the next tick sent a second template.
+    from surogates.programs.materialize import send_queued_openers
+
+    inv = await make_invitation(
+        delivery_state="queued", response_state="awaiting_reply",
+        deadline_at=_utcnow() + timedelta(hours=24),
+    )
+    calls = []
+
+    async def _enqueue(row):
+        calls.append(row.id)
+        return 5
+
+    await send_queued_openers(
+        sf, identity_lookup=identity_lookup, now=_utcnow(), enqueue=_enqueue,
+    )
+    assert calls == []
+    row = await reload_invitation(inv.id)
+    assert row.outbox_id is None
+    assert row.response_state == "awaiting_reply"
+
+
+@pytest.mark.asyncio
+async def test_an_opener_whose_window_closed_is_skipped_not_sent_late(
+    sf, queued_invitation, identity_lookup, reload_invitation,
+):
+    # The slot's own response deadline has passed: sending "how are you this
+    # morning" now is wrong, and retrying it every tick forever is worse.
+    from surogates.programs.materialize import send_queued_openers
+
+    calls = []
+
+    async def _enqueue(row):
+        calls.append(row.id)
+        return 5
+
+    await send_queued_openers(
+        sf, identity_lookup=identity_lookup,
+        now=_utcnow() + timedelta(hours=25), enqueue=_enqueue,
+    )
+    assert calls == []
+    row = await reload_invitation(queued_invitation.id)
+    assert row.delivery_state == "skipped"
+    assert row.reason
+    assert row.outbox_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_opener_destination_carries_every_key_the_dispatcher_reads(
+    monkeypatch, queued_invitation,
+):
+    # ``dispatcher._deliver_item`` reads ``channel_identifier`` first and
+    # fails the row without it — before any adapter sees ``phone_number_id``.
+    # The reply path writes all three keys; the opener must too.
+    from surogates.programs import opener as opener_mod
+    from surogates.programs.opener import make_opener_enqueue
+
+    session_id = uuid.uuid4()
+
+    async def _session(*args, **kwargs):
+        return session_id
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", _session)
+
+    class Store:
+        async def emit_synthetic_user_message(self, *args, **kwargs):
+            return 42
+
+    class Delivery:
+        def __init__(self):
+            self.calls = []
+
+        async def enqueue(self, session_id, event_id, channel, destination, payload):
+            self.calls.append((session_id, event_id, channel, destination, payload))
+            return 99
+
+    async def _config(program_id):
+        return {
+            "template_name": "daily",
+            "template_language": "en_US",
+            "channel_identifier": "127",
+        }
+
+    delivery = Delivery()
+    enqueue = make_opener_enqueue(
+        session_store=Store(), redis=None, session_factory=None,
+        delivery_service=delivery, config_for_program=_config,
+    )
+    assert await enqueue(queued_invitation) == 99
+
+    ((sid, event_id, channel, destination, payload),) = delivery.calls
+    assert (sid, event_id, channel) == (session_id, 42, "whatsapp")
+    assert destination == {
+        "wa_id": "40746148303",
+        "phone_number_id": "127",
+        "channel_identifier": "127",
+    }
+    assert payload == {"template": {"name": "daily", "language": "en_US"}}
 
 
 @pytest.mark.asyncio

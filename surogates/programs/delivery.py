@@ -98,6 +98,11 @@ async def record_outbox_result(
         if error:
             _advance(row, "failed")
             row.delivery_error = error[:500]
+            if row.response_state == "awaiting_reply":
+                # Nobody was asked, so nobody is awaited.  Left at
+                # ``awaiting_reply`` the row counts as an open check-in and
+                # suppresses this patient's next occurrence for good.
+                row.response_state = "not_started"
         else:
             if provider_message_id:
                 row.provider_message_id = provider_message_id

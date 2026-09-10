@@ -94,7 +94,7 @@ def make_opener_enqueue(
                     platform=platform,
                     channel_id=wa_id,
                     visibility="dm",
-                    source="checkin",
+                    source={"chat_type": "private"},
                     fallback_id=session_key,
                 ),
                 "multi_party": False,
@@ -115,11 +115,14 @@ def make_opener_enqueue(
             },
         )
 
+        # Same three keys the reply path writes (``session/store.py``).  The
+        # dispatcher reads ``channel_identifier`` first and fails the row
+        # without it, before any adapter sees ``phone_number_id``.
         return await delivery_service.enqueue(
             session_id,
             event_id,
             platform,
-            {"wa_id": wa_id, "phone_number_id": sender},
+            {"wa_id": wa_id, "phone_number_id": sender, "channel_identifier": sender},
             {"template": {"name": template_name, "language": template_language}},
         )
 

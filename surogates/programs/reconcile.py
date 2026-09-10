@@ -24,6 +24,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _warn_no_slot(program_id: uuid.UUID) -> None:
+    # Ops refuses to activate an empty cadence, so reaching this means the
+    # projection drifted.  Say so: a Program parked on NULL looks healthy.
+    logger.warning(
+        "[programs] program %s has no computable slot; it will not fire", program_id,
+    )
+    return None
+
+
 async def reconcile_programs(store: Any, *, projected: list[dict]) -> None:
     """Make the runtime's schedules match *projected* exactly.
 
@@ -65,7 +74,7 @@ async def reconcile_programs(store: Any, *, projected: list[dict]) -> None:
                 org_id=org_id,
                 agent_id=agent_id,
                 config=row,
-                next_run_at=upcoming[0] if upcoming else None,
+                next_run_at=upcoming[0] if upcoming else _warn_no_slot(program_id),
             )
         except Exception:  # noqa: BLE001
             logger.exception(

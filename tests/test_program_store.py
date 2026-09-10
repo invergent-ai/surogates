@@ -88,6 +88,47 @@ async def test_deactivate_stops_a_paused_program_firing(sf):
 
 
 @pytest.mark.asyncio
+async def test_deactivate_withdraws_openers_not_yet_handed_over(
+    sf, make_invitation, reload_invitation,
+):
+    # Stopping the schedule is not enough: the send pass picks up every
+    # queued opener whoever it belongs to, so yesterday's unsent opener would
+    # still go out after the operator paused the Program.
+    store = ProgramScheduleStore(sf)
+    unsent = await make_invitation(delivery_state="queued", response_state="not_started")
+    handed_over = await make_invitation(
+        delivery_state="queued", response_state="awaiting_reply", outbox_id=7,
+    )
+
+    await store.deactivate(unsent.program_id)
+    await store.deactivate(handed_over.program_id)
+
+    row = await reload_invitation(unsent.id)
+    assert row.delivery_state == "canceled"
+    assert row.reason
+    # Already in the outbox: the dispatcher owns it now, and its verdict
+    # is what the history should show.
+    assert (await reload_invitation(handed_over.id)).delivery_state == "queued"
+
+
+@pytest.mark.asyncio
+async def test_deactivate_missing_withdraws_the_unsent_openers_too(
+    sf, make_invitation, reload_invitation,
+):
+    store = ProgramScheduleStore(sf)
+    unsent = await make_invitation(delivery_state="queued", response_state="not_started")
+    await store.ensure(
+        program_id=unsent.program_id,
+        org_id=unsent.org_id,
+        agent_id="a1",
+        config={},
+        next_run_at=_utcnow() - timedelta(minutes=1),
+    )
+    await store.deactivate_missing(set())
+    assert (await reload_invitation(unsent.id)).delivery_state == "canceled"
+
+
+@pytest.mark.asyncio
 async def test_mark_fired_moves_the_clock_and_drops_the_lock(sf):
     store = ProgramScheduleStore(sf)
     pid = uuid.uuid4()

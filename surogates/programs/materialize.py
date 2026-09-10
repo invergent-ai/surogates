@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import sqlalchemy as sa
@@ -191,63 +191,129 @@ async def send_queued_openers(
     failure on the k-th enqueue rolled back the first k-1, whose openers
     were already in the outbox — and the next tick sent them all again.
 
+    Each row is **claimed before** it is handed over: a conditional update
+    flips it to ``awaiting_reply`` and only the worker whose update took
+    effect calls *enqueue*.  The outbox row is committed inside *enqueue* and
+    the invitation learns its id in a later commit; a process that dies in
+    between used to leave a row that looked untouched, and the next tick sent
+    the patient a second approved template.  Now it leaves a claimed row with
+    no outbox id, which the deadline sweep records as a failed delivery — one
+    patient missed and visible, rather than one patient messaged twice.  The
+    same claim is what keeps two replicas from sending the same opener when
+    the leader lease lapses mid-pass.
+
     Returns the number of invitations cancelled.
     """
     cancelled = 0
     async with session_factory() as db:
         rows = (
             await db.execute(
-                sa.select(ProgramInvitationRow)
+                sa.select(ProgramInvitationRow, ProgramOccurrenceRow.scheduled_for)
+                .join(
+                    ProgramOccurrenceRow,
+                    ProgramOccurrenceRow.id == ProgramInvitationRow.occurrence_id,
+                )
                 .where(ProgramInvitationRow.delivery_state == "queued")
                 .where(ProgramInvitationRow.outbox_id.is_(None))
+                .where(ProgramInvitationRow.response_state == "not_started")
                 .order_by(ProgramInvitationRow.created_at)
             )
-        ).scalars().all()
+        ).all()
         deadlines = await _deadline_hours_by_program(
-            db, {row.program_id for row in rows},
+            db, {row.program_id for row, _ in rows},
         )
 
-    for pending in rows:
+    for pending, scheduled_for in rows:
+        window = timedelta(
+            hours=deadlines.get(pending.program_id, _DEFAULT_DEADLINE_HOURS),
+        )
         async with session_factory() as db:
-            row = await db.get(ProgramInvitationRow, pending.id)
-            if row is None or row.delivery_state != "queued" or row.outbox_id is not None:
-                continue  # another worker got here first
+            if scheduled_for is not None and _as_utc(scheduled_for) + window <= now:
+                # The slot's own response window has already closed.  A
+                # "how are you this morning" sent two days late is wrong,
+                # and retrying it every tick forever is worse.
+                await db.execute(_unsent(pending.id).values(
+                    delivery_state="skipped",
+                    reason="Opener not sent within the response window",
+                ))
+                await db.commit()
+                continue
 
             try:
                 identity = await identity_lookup(
-                    row.org_id, row.platform, row.user_id,
+                    pending.org_id, pending.platform, pending.user_id,
                 )
             except Exception:  # noqa: BLE001 — one patient, not the fleet
                 logger.exception(
                     "[programs] identity lookup failed for invitation %s; "
-                    "leaving it queued", row.id,
+                    "leaving it queued", pending.id,
                 )
                 continue
 
             if identity is None or _permission(identity) != "granted":
-                row.delivery_state = "canceled"
-                row.reason = "Permission withdrawn before the opener was sent"
-                cancelled += 1
+                withdrawn = await db.execute(_unsent(pending.id).values(
+                    delivery_state="canceled",
+                    reason="Permission withdrawn before the opener was sent",
+                ))
+                cancelled += int(withdrawn.rowcount or 0)
                 await db.commit()
                 continue
 
             if enqueue is None:
                 continue
 
-            outbox_id = await enqueue(row)
+            claimed = await db.execute(_unsent(pending.id).values(
+                response_state="awaiting_reply", deadline_at=now + window,
+            ))
+            await db.commit()
+            if int(claimed.rowcount or 0) != 1:
+                continue  # another worker got here first
+
+            try:
+                outbox_id = await enqueue(pending)
+            except Exception:
+                await _release(db, pending.id)
+                raise
             if outbox_id is None:
-                # Nothing was handed over; leave it queued so the next tick
+                # Nothing was handed over; give it back so the next tick
                 # retries rather than starting a deadline nobody was asked
                 # to meet.
+                await _release(db, pending.id)
                 continue
-            row.outbox_id = int(outbox_id)
-            row.response_state = "awaiting_reply"
-            row.deadline_at = now + timedelta(
-                hours=deadlines.get(row.program_id, _DEFAULT_DEADLINE_HOURS),
+            await db.execute(
+                sa.update(ProgramInvitationRow)
+                .where(ProgramInvitationRow.id == pending.id)
+                .values(outbox_id=int(outbox_id))
             )
             await db.commit()
 
     return cancelled
+
+
+def _unsent(invitation_id: Any):
+    """An UPDATE that only takes effect while nobody has touched the row."""
+    return (
+        sa.update(ProgramInvitationRow)
+        .where(ProgramInvitationRow.id == invitation_id)
+        .where(ProgramInvitationRow.delivery_state == "queued")
+        .where(ProgramInvitationRow.outbox_id.is_(None))
+        .where(ProgramInvitationRow.response_state == "not_started")
+    )
+
+
+async def _release(db: Any, invitation_id: Any) -> None:
+    """Undo a claim whose enqueue handed nothing over."""
+    await db.execute(
+        sa.update(ProgramInvitationRow)
+        .where(ProgramInvitationRow.id == invitation_id)
+        .where(ProgramInvitationRow.outbox_id.is_(None))
+        .values(response_state="not_started", deadline_at=None)
+    )
+    await db.commit()
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 async def _deadline_hours_by_program(db, program_ids: set) -> dict:

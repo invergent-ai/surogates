@@ -79,6 +79,38 @@ async def sweep_deadlines(session_factory: Any, *, now: datetime | None = None) 
         )
         swept += int(unfinished.rowcount or 0)
 
+        # Third case: the opener never reached them and the deadline came
+        # anyway.  A row still ``queued`` at that point had no dispatcher
+        # report at all (the outbox row was lost, or the process died between
+        # claiming and handing over): record the delivery failure so the
+        # operator sees it, rather than leaving a row that looks in flight.
+        unreported = await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.response_state == "awaiting_reply")
+            .where(ProgramInvitationRow.delivery_state == "queued")
+            .where(ProgramInvitationRow.deadline_at.isnot(None))
+            .where(ProgramInvitationRow.deadline_at <= now)
+            .values(
+                delivery_state="failed",
+                delivery_error="No delivery report by the deadline",
+            )
+        )
+        swept += int(unreported.rowcount or 0)
+
+        # Whatever the delivery failure was, an ``awaiting_reply`` that was
+        # never delivered is not an open check-in.  Left as is it suppresses
+        # the patient's next occurrence forever; ``not_started`` says what
+        # happened (they were never asked) and lets the next one reach them.
+        never_asked = await db.execute(
+            sa.update(ProgramInvitationRow)
+            .where(ProgramInvitationRow.response_state == "awaiting_reply")
+            .where(ProgramInvitationRow.delivery_state.notin_(_REACHED_STATES))
+            .where(ProgramInvitationRow.deadline_at.isnot(None))
+            .where(ProgramInvitationRow.deadline_at <= now)
+            .values(response_state="not_started")
+        )
+        swept += int(never_asked.rowcount or 0)
+
         await db.commit()
         return swept
 
@@ -115,8 +147,8 @@ class ProgramTicker:
         self._stop.set()
 
     async def tick_once(self) -> None:
-        # Backstop for a missed program_changed publish: a Program paused in
-        # ops must stop firing even if the notification never arrived.
+        # The only way a change in ops reaches the runtime: nothing is
+        # pushed, so a pause takes effect on the next tick, not before.
         if self._reconcile is not None:
             try:
                 await self._reconcile()

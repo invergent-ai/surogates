@@ -59,6 +59,9 @@ _KB_TOOLS: frozenset[str] = frozenset({
 })
 _CHANNEL_TOOLS: frozenset[str] = frozenset({
     "fetch_channel_messages", "fetch_channel_file", "mate_ambient_post",
+    # Check-ins only ever run on a channel session; the tools look the
+    # invitation up by session and have nothing to find elsewhere.
+    "checkin_outcome", "checkin_escalate",
 })
 _CRON_TOOLS: frozenset[str] = frozenset({
     "cron_create", "cron_list", "cron_delete",

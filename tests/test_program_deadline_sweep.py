@@ -97,6 +97,48 @@ async def test_a_check_in_the_agent_never_closed_expires(
 
 
 @pytest.mark.asyncio
+async def test_a_failed_send_left_awaiting_reply_is_released_at_the_deadline(
+    sf, failed_invitation, reload_invitation,
+):
+    # The send failed after the row was marked awaiting a reply.  Nobody is
+    # awaited: left open, the row suppresses this patient's next occurrence
+    # forever, with nothing terminal in the history to say why.
+    await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
+    row = await reload_invitation(failed_invitation.id)
+    assert row.delivery_state == "failed"
+    assert row.response_state == "not_started"
+
+
+@pytest.mark.asyncio
+async def test_an_opener_with_no_delivery_report_is_recorded_failed(
+    sf, make_invitation, reload_invitation,
+):
+    # Claimed, but no dispatcher verdict ever came — the outbox row was lost
+    # or the process died between claiming and handing over.  At the
+    # deadline that is a delivery failure the operator needs to see, not a
+    # row that looks in flight.
+    inv = await make_invitation(
+        delivery_state="queued", response_state="awaiting_reply",
+        deadline_at=_utcnow() + timedelta(hours=24),
+    )
+    await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
+    row = await reload_invitation(inv.id)
+    assert row.delivery_state == "failed"
+    assert row.delivery_error
+    assert row.response_state == "not_started"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_send_inside_its_deadline_is_left_alone(
+    sf, failed_invitation, reload_invitation,
+):
+    # The dispatcher may still be retrying; only the deadline settles it.
+    await sweep_deadlines(sf, now=_utcnow())
+    row = await reload_invitation(failed_invitation.id)
+    assert row.response_state == "awaiting_reply"
+
+
+@pytest.mark.asyncio
 async def test_a_replied_invitation_inside_its_deadline_is_left_alone(
     sf, replied_but_never_closed, reload_invitation,
 ):

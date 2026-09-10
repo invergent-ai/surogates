@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from surogates.db.models import ProgramScheduleRow
+from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
 from surogates.programs.cadence import next_occurrences
 
 __all__ = ["ProgramSchedule", "ProgramScheduleStore"]
@@ -245,6 +245,7 @@ class ProgramScheduleStore:
                 .where(ProgramScheduleRow.program_id == program_id)
                 .values(active=False, locked_by=None, locked_until=None)
             )
+            await _cancel_unsent(db, [program_id])
             await db.commit()
 
     async def deactivate_missing(self, keep: set[UUID]) -> None:
@@ -254,12 +255,38 @@ class ProgramScheduleStore:
         in ops would otherwise keep messaging patients on schedule.
         """
         async with self._sf() as db:
-            stmt = (
-                sa.update(ProgramScheduleRow)
-                .where(ProgramScheduleRow.active.is_(True))
-                .values(active=False, locked_by=None, locked_until=None)
+            active = sa.select(ProgramScheduleRow.program_id).where(
+                ProgramScheduleRow.active.is_(True)
             )
             if keep:
-                stmt = stmt.where(ProgramScheduleRow.program_id.notin_(keep))
-            await db.execute(stmt)
+                active = active.where(ProgramScheduleRow.program_id.notin_(keep))
+            stopping = list((await db.execute(active)).scalars().all())
+            if not stopping:
+                return
+            await db.execute(
+                sa.update(ProgramScheduleRow)
+                .where(ProgramScheduleRow.program_id.in_(stopping))
+                .values(active=False, locked_by=None, locked_until=None)
+            )
+            await _cancel_unsent(db, stopping)
             await db.commit()
+
+
+async def _cancel_unsent(db: Any, program_ids: list[UUID]) -> None:
+    """Withdraw openers that were materialised but never handed to the outbox.
+
+    Stopping the schedule alone is not enough: the send pass picks up every
+    queued opener regardless of whose Program it belongs to, so yesterday's
+    unsent opener would still go out after the operator paused the Program.
+    """
+    await db.execute(
+        sa.update(ProgramInvitationRow)
+        .where(ProgramInvitationRow.program_id.in_(program_ids))
+        .where(ProgramInvitationRow.delivery_state == "queued")
+        .where(ProgramInvitationRow.outbox_id.is_(None))
+        .values(
+            delivery_state="canceled",
+            response_state="not_started",
+            reason="Program stopped before the opener was sent",
+        )
+    )
