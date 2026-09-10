@@ -1,4 +1,4 @@
-"""Turning one due instant into an occurrence and its per-patient invitations."""
+"""Turning one due instant into an occurrence and its per-user invitations."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def _granted(platform_user_id):
     )
 
 
-def _schedule(patients):
+def _schedule(users):
     return SimpleNamespace(
         program_id=uuid.uuid4(),
         org_id=uuid.uuid4(),
@@ -47,7 +47,7 @@ def _schedule(patients):
             "template_name": "daily",
             "template_language": "en_US",
             "response_deadline_hours": 24,
-            "patients": [str(p) for p in patients],
+            "users": [str(p) for p in users],
         },
     )
 
@@ -58,7 +58,7 @@ def schedule():
 
 
 @pytest.fixture
-def schedule_with_three_patients():
+def schedule_with_three_users():
     return _schedule([uuid.uuid4(), uuid.uuid4(), uuid.uuid4()])
 
 
@@ -70,8 +70,8 @@ def identity_lookup():
 
 
 @pytest.fixture
-def identity_lookup_missing_one(schedule_with_three_patients):
-    last = schedule_with_three_patients.config["patients"][-1]
+def identity_lookup_missing_one(schedule_with_three_users):
+    last = schedule_with_three_users.config["users"][-1]
 
     async def _lookup(org_id, platform, user_id):
         if str(user_id) == last:
@@ -91,9 +91,9 @@ def identity_lookup_no_permission():
 
 @pytest_asyncio.fixture
 async def open_invitation(sf, schedule, identity_lookup):
-    # A check-in from an earlier occurrence that the patient replied to and
+    # A check-in from an earlier occurrence that the user replied to and
     # has not finished — the state the next tick must respect.
-    user_id = uuid.UUID(schedule.config["patients"][0])
+    user_id = uuid.UUID(schedule.config["users"][0])
     ident = await identity_lookup(schedule.org_id, "whatsapp", user_id)
     async with sf() as db:
         row = ProgramInvitationRow(
@@ -114,13 +114,13 @@ async def open_invitation(sf, schedule, identity_lookup):
 
 
 @pytest.mark.asyncio
-async def test_every_patient_gets_a_row_including_the_skipped(
-    sf, schedule_with_three_patients, identity_lookup_missing_one,
+async def test_every_user_gets_a_row_including_the_skipped(
+    sf, schedule_with_three_users, identity_lookup_missing_one,
 ):
-    # The history denominator is the roster. Dropping an unreachable patient
+    # The history denominator is the roster. Dropping an unreachable user
     # would quietly shrink "12 of 14" to "12 of 13".
     occ_id = await materialize_occurrence(
-        schedule_with_three_patients,
+        schedule_with_three_users,
         session_factory=sf,
         identity_lookup=identity_lookup_missing_one,
         now=_utcnow(),
@@ -133,7 +133,7 @@ async def test_every_patient_gets_a_row_including_the_skipped(
 
 
 @pytest.mark.asyncio
-async def test_a_patient_without_permission_is_skipped_not_messaged(
+async def test_a_user_without_permission_is_skipped_not_messaged(
     sf, schedule, identity_lookup_no_permission,
 ):
     occ_id = await materialize_occurrence(
@@ -151,7 +151,7 @@ async def test_a_patient_without_permission_is_skipped_not_messaged(
 async def test_firing_the_same_instant_twice_is_idempotent(
     sf, schedule, identity_lookup,
 ):
-    # A crashed or retried tick must not double-message a patient.
+    # A crashed or retried tick must not double-message a user.
     when = datetime(2026, 9, 9, 9, 0)
     a = await materialize_occurrence(
         schedule, session_factory=sf, identity_lookup=identity_lookup, now=when,
@@ -182,7 +182,7 @@ async def test_a_retried_tick_on_a_claimed_schedule_does_not_double_message(
     await store.ensure(
         program_id=pid, org_id=uuid.uuid4(), agent_id="a1",
         config={"channel": "whatsapp", "skill_ref": "s",
-                "patients": [str(uuid.uuid4())]},
+                "users": [str(uuid.uuid4())]},
         next_run_at=_utcnow() - timedelta(minutes=1),
     )
     claimed = (await store.claim_due(worker_id="w1", limit=1))[0]
@@ -201,7 +201,7 @@ async def test_a_retried_tick_on_a_claimed_schedule_does_not_double_message(
 
 
 @pytest.mark.asyncio
-async def test_a_patient_with_an_open_check_in_is_skipped(
+async def test_a_user_with_an_open_check_in_is_skipped(
     sf, schedule, identity_lookup, open_invitation,
 ):
     occ_id = await materialize_occurrence(
@@ -218,7 +218,7 @@ async def test_a_patient_with_an_open_check_in_is_skipped(
 @pytest_asyncio.fixture
 async def unanswered_invitation(sf, schedule, identity_lookup):
     """An opener already sent, still inside its response deadline."""
-    user_id = uuid.UUID(schedule.config["patients"][0])
+    user_id = uuid.UUID(schedule.config["users"][0])
     ident = await identity_lookup(schedule.org_id, "whatsapp", user_id)
     async with sf() as db:
         row = ProgramInvitationRow(
@@ -239,7 +239,7 @@ async def unanswered_invitation(sf, schedule, identity_lookup):
 
 
 @pytest.mark.asyncio
-async def test_a_patient_with_an_unanswered_opener_is_skipped(
+async def test_a_user_with_an_unanswered_opener_is_skipped(
     sf, schedule, identity_lookup, unanswered_invitation,
 ):
     # The canonical cadence is twice a day against a 24-hour deadline, so the
@@ -258,7 +258,7 @@ async def test_a_patient_with_an_unanswered_opener_is_skipped(
 
 
 @pytest.mark.asyncio
-async def test_a_reachable_patient_is_queued_not_skipped(
+async def test_a_reachable_user_is_queued_not_skipped(
     sf, schedule, identity_lookup,
 ):
     # The positive case, so the skip logic above cannot pass by skipping

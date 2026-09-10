@@ -15,9 +15,9 @@ import sqlalchemy as sa
 
 from surogates.db.models import ProgramInvitationRow, ProgramOccurrenceRow
 
-#: An invitation is still "open" while the patient has been asked and the
+#: An invitation is still "open" while the user has been asked and the
 #: agent has not recorded an outcome.  A completed or declined check-in is
-#: finished: the patient's next message is ordinary conversation.
+#: finished: the user's next message is ordinary conversation.
 _OPEN_STATES = ("awaiting_reply", "replied", "in_progress")
 
 
@@ -68,7 +68,7 @@ async def attach_reply(
     cannot close or escalate a check-in it is not part of.
 
     ``skill_bundle_version`` is recorded, not pinned — the skill itself is
-    resolved live, so a doctor correcting a wrong question reaches check-ins
+    resolved live, so an operator correcting a wrong question reaches check-ins
     already under way.
     """
     async with session_factory() as db:

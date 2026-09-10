@@ -990,7 +990,7 @@ class ProgramOccurrenceRow(Base):
         UTCDateTime(), nullable=False,
     )
     #: Which skill — not its content.  The skill is read live at reply time so
-    #: a doctor can correct a wrong question mid-check-in.
+    #: an operator can correct a wrong question mid-check-in.
     skill_ref: Mapped[str] = mapped_column(Text, nullable=False)
     #: Pinned, unlike the skill: Meta approved this exact text.
     template_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -1006,20 +1006,20 @@ class ProgramOccurrenceRow(Base):
 
 
 class ProgramInvitationRow(Base):
-    """One patient, one occurrence.
+    """One user, one occurrence.
 
     The pending record the reply path matches on, the run-history row, and the
     deadline timer — one object, because they are one fact.
 
     Delivery, response and escalation are three independent axes and must
-    never be collapsed: a send that failed is not a patient who stayed silent.
+    never be collapsed: a send that failed is not a user who stayed silent.
     """
 
     __tablename__ = "program_invitations"
     __table_args__ = (
         UniqueConstraint(
             "occurrence_id", "user_id",
-            name="uq_program_invitation_patient",
+            name="uq_program_invitation_user",
         ),
         # The inbound lookup.  agent_id is part of the key because
         # channel_identities is org-scoped and one person can be bound to
@@ -1059,7 +1059,7 @@ class ProgramInvitationRow(Base):
     )
     #: The provider's own wording for a failed send.  Kept apart from
     #: ``reason`` so a late status webhook can never overwrite the agent's
-    #: clinical note or a skip explanation — the three axes stay separate on
+    #: operational note or a skip explanation — the three axes stay separate on
     #: disk too.
     delivery_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     response_state: Mapped[str] = mapped_column(

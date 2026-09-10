@@ -2,7 +2,7 @@
 
 Neither tool takes an occurrence id.  The open invitation is found **by
 session**, because the inbound path stamped ``session_id`` on it when the
-patient replied.  That is what makes these unspoofable: an agent in an
+user replied.  That is what makes these unspoofable: an agent in an
 ordinary conversation cannot close or escalate a check-in it is not inside.
 """
 
@@ -152,7 +152,7 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
             )
 
         # inbox_items.source_event_id is NOT NULL and unique, so the
-        # escalation is first an event on the patient's own session.
+        # escalation is first an event on the user's own session.
         event = Event(
             session_id=inv.session_id,
             org_id=inv.org_id,
@@ -165,7 +165,7 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
             InboxItem(
                 org_id=inv.org_id,
                 # The designated operator, never the acting principal: an item
-                # raised against the patient reaches nobody but the patient.
+                # raised against the user reaches nobody but the user.
                 user_id=None,
                 service_account_id=target_id,
                 session_id=inv.session_id,
@@ -182,7 +182,7 @@ async def handle_checkin_escalate(arguments: dict, **kwargs: Any) -> str:
                 },
             )
         )
-        # Escalation is its own axis: raising a hand does not mean the patient
+        # Escalation is its own axis: raising a hand does not mean the user
         # has finished answering, so response_state is deliberately untouched.
         row.escalation_state = "raised"
         try:

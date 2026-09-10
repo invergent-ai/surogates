@@ -112,7 +112,7 @@ async def test_an_ordinary_message_matches_nothing(sf):
 @pytest.mark.asyncio
 async def test_a_finished_check_in_is_not_reopened_by_a_later_message(sf):
     # Once the agent has recorded an outcome, the next message from that
-    # patient is an ordinary conversation, not more of the check-in.
+    # user is an ordinary conversation, not more of the check-in.
     await _seed(sf, response_state="completed")
     found = await open_invitation_for(
         sf,

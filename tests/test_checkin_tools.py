@@ -39,7 +39,7 @@ async def _latest_inbox_item(sf):
 
 @pytest_asyncio.fixture
 async def awaiting_invitation(sf):
-    """A check-in the patient replied to, attached to their session."""
+    """A check-in the user replied to, attached to their session."""
     program_id, org_id = uuid.uuid4(), uuid.uuid4()
     async with sf() as db:
         db.add(
@@ -129,10 +129,10 @@ async def test_checkin_outcome_outside_a_check_in_writes_nothing(
 
 
 @pytest.mark.asyncio
-async def test_escalation_targets_the_operator_not_the_patient(
+async def test_escalation_targets_the_operator_not_the_user(
     sf, awaiting_invitation,
 ):
-    # An item created against the acting principal lands in the patient's own
+    # An item created against the acting principal lands in the user's own
     # inbox and reaches nobody else.
     from surogates.tools.builtin.checkin import handle_checkin_escalate
 
@@ -178,8 +178,8 @@ async def test_a_failed_escalation_is_visible(sf, awaiting_invitation):
 
 @pytest.mark.asyncio
 async def test_escalation_does_not_close_the_check_in(sf, awaiting_invitation):
-    # Escalation and response are separate axes: raising a hand to the doctor
-    # does not mean the patient finished answering.
+    # Escalation and response are separate axes: raising a hand to the operator
+    # does not mean the user finished answering.
     from surogates.tools.builtin.checkin import handle_checkin_escalate
 
     await handle_checkin_escalate(

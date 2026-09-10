@@ -5,7 +5,7 @@ operator UI has to preview the next occurrences and explain DST, and both are
 near-impossible to express over a cron string.
 
 "Every 12 hours" is expressed as two times of day, never as an interval.  An
-interval anchored to a start instant drifts, and eventually asks a patient for
+interval anchored to a start instant drifts, and eventually asks a user for
 their blood pressure at 03:00.
 """
 

@@ -94,7 +94,7 @@ class ProgramScheduleStore:
         Resuming is the third case because a Program paused past its slot
         still carries that stale instant: without recomputing, resuming it on
         Wednesday would immediately fire Monday's missed check-in at every
-        patient.
+        user.
         """
         async with self._sf() as db:
             row = (
@@ -252,7 +252,7 @@ class ProgramScheduleStore:
         """Stop every active Program that is no longer in the ops projection.
 
         This is the whole reason reconcile exists: a Program paused or deleted
-        in ops would otherwise keep messaging patients on schedule.
+        in ops would otherwise keep messaging users on schedule.
         """
         async with self._sf() as db:
             active = sa.select(ProgramScheduleRow.program_id).where(

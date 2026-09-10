@@ -55,7 +55,7 @@ async def test_an_unanswered_invitation_expires(
 async def test_a_failed_delivery_is_not_a_non_responder(
     sf, failed_invitation, reload_invitation,
 ):
-    # They were never asked. Counting them as silent would blame the patient
+    # They were never asked. Counting them as silent would blame the user
     # for our failure to reach them.
     await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
     row = await reload_invitation(failed_invitation.id)
@@ -63,7 +63,7 @@ async def test_a_failed_delivery_is_not_a_non_responder(
 
 
 @pytest.mark.asyncio
-async def test_a_skipped_patient_is_not_a_non_responder(
+async def test_a_skipped_user_is_not_a_non_responder(
     sf, skipped_invitation, reload_invitation,
 ):
     await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
@@ -85,9 +85,9 @@ async def test_a_check_in_the_agent_never_closed_expires(
     sf, replied_but_never_closed, reload_invitation,
 ):
     # Only checkin_outcome moves an invitation out of "replied". If the
-    # patient trails off mid-answer, or the session errors, or the model
+    # user trails off mid-answer, or the session errors, or the model
     # simply never calls the tool, the row would stay open forever — and
-    # because an open check-in suppresses the next one, that patient would
+    # because an open check-in suppresses the next one, that user would
     # silently drop out of the Program for good.
     await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
     row = await reload_invitation(replied_but_never_closed.id)
@@ -101,7 +101,7 @@ async def test_a_failed_send_left_awaiting_reply_is_released_at_the_deadline(
     sf, failed_invitation, reload_invitation,
 ):
     # The send failed after the row was marked awaiting a reply.  Nobody is
-    # awaited: left open, the row suppresses this patient's next occurrence
+    # awaited: left open, the row suppresses this user's next occurrence
     # forever, with nothing terminal in the history to say why.
     await sweep_deadlines(sf, now=_utcnow() + timedelta(hours=25))
     row = await reload_invitation(failed_invitation.id)
@@ -163,7 +163,7 @@ async def test_the_deadline_is_not_reached_yet(
 async def test_the_send_pass_is_skipped_when_the_leader_lock_is_lost(sf):
     # A backlog of openers is the one tick phase that can outlive the lease.
     # A replica that is no longer leader must not run the same pass over the
-    # same still-queued rows — that is every patient messaged twice.
+    # same still-queued rows — that is every user messaged twice.
     from surogates.programs.ticker import ProgramTicker
 
     class _Store:

@@ -25,7 +25,7 @@ def _projected(program_id, **over):
         "timezone": "UTC",
         "response_deadline_hours": 24,
         "escalation_service_account_id": str(uuid.uuid4()),
-        "patients": [str(uuid.uuid4())],
+        "users": [str(uuid.uuid4())],
     }
     row.update(over)
     return row
@@ -90,14 +90,14 @@ async def test_reconcile_is_idempotent(sf):
 async def test_the_roster_travels_on_the_schedule_config(sf):
     store = ProgramScheduleStore(sf)
     pid = uuid.uuid4()
-    patient = str(uuid.uuid4())
+    user = str(uuid.uuid4())
     await reconcile_programs(
-        store, projected=[_projected(pid, patients=[patient])],
+        store, projected=[_projected(pid, users=[user])],
     )
     # The tick must not have to call back into ops for the roster.
     sched = await store.get(pid)
     assert sched is not None
-    assert patient in sched.config["patients"]
+    assert user in sched.config["users"]
 
 
 @pytest.mark.asyncio
@@ -118,7 +118,7 @@ async def test_a_returning_program_is_reactivated(sf):
 @pytest.mark.asyncio
 async def test_resuming_does_not_fire_the_slot_that_was_missed(sf):
     # A Program paused past its due time still carries that stale instant.
-    # Resuming must recompute it, or every patient gets the missed check-in
+    # Resuming must recompute it, or every user gets the missed check-in
     # the moment an operator un-pauses.
     from datetime import timedelta
 
@@ -157,7 +157,7 @@ async def test_one_malformed_program_does_not_stop_the_fleet(sf):
     # Nothing validates the projection before it arrives. A single bad row
     # used to raise out of the loop, skipping every Program after it AND
     # skipping deactivate_missing — so a Program the operator had paused kept
-    # messaging patients indefinitely, every tick, because of someone else's
+    # messaging users indefinitely, every tick, because of someone else's
     # typo.
     store = ProgramScheduleStore(sf)
     good_before, good_after, paused = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()

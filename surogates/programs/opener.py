@@ -1,9 +1,9 @@
 """Hand a queued check-in opener to the outbox.
 
-Three things have to exist before an outbox row can: a session for the patient
+Three things have to exist before an outbox row can: a session for the user
 on this channel, an event on it, and the row itself.  The session is resolved
 with the **same key the inbound pipeline will compute for the reply** —
-``agent:whatsapp:dm:<wa_id>`` — so the patient's answer lands in the
+``agent:whatsapp:dm:<wa_id>`` — so the user's answer lands in the
 conversation that holds the opener, and the agent sees the question it is
 being answered to.  For a DM that key does not depend on any routing flag,
 which is what lets this run without the channel routing cache.

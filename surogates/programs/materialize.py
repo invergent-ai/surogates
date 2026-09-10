@@ -1,8 +1,8 @@
-"""Turn one due instant into an occurrence and one invitation per patient.
+"""Turn one due instant into an occurrence and one invitation per user.
 
-Every patient on the roster gets a row whatever the outcome, and a skip is
+Every user on the roster gets a row whatever the outcome, and a skip is
 recorded on that row rather than dropping it.  The roster is the denominator
-run history counts against: dropping an unreachable patient would quietly turn
+run history counts against: dropping an unreachable user would quietly turn
 "12 of 14" into "12 of 13", and the two unreachable people would vanish from
 the record instead of being the thing the operator needs to see.
 """
@@ -26,12 +26,12 @@ from surogates.db.models import (
 
 logger = logging.getLogger(__name__)
 
-#: Response states meaning "this person is mid-check-in".  A patient in one of
+#: Response states meaning "this person is mid-check-in".  A user in one of
 #: these must not be handed a second opener.
 #
 #: ``awaiting_reply`` belongs here.  The canonical cadence is twice a day and
 #: the default response deadline is a full day, so the next occurrence arrives
-#: while the first opener is still live: without it the patient is asked two
+#: while the first opener is still live: without it the user is asked two
 #: questions at once and whichever they do not answer is later swept as a
 #: non-response.  The deadline sweep is what eventually clears these — it runs
 #: first in the tick precisely so an expired opener does not suppress the next
@@ -68,11 +68,11 @@ async def _existing_occurrence(db, program_id, scheduled_for) -> uuid.UUID:
 
 
 async def _has_open_invitation(db, schedule, identity) -> bool:
-    """Is this patient already mid-check-in with this agent?
+    """Is this user already mid-check-in with this agent?
 
     Counts an unanswered opener too.  The sweep runs first in the tick, so an
     ``awaiting_reply`` row still here is one whose deadline has not passed —
-    a live question the patient has yet to answer, and not something to talk
+    a live question the user has yet to answer, and not something to talk
     over with a second one.
     """
     return (
@@ -80,7 +80,7 @@ async def _has_open_invitation(db, schedule, identity) -> bool:
             sa.select(sa.func.count())
             .select_from(ProgramInvitationRow)
             # org_id leads the open-invitations index; without it this is a
-            # sequential scan of an append-only table, once per patient per
+            # sequential scan of an append-only table, once per user per
             # occurrence, inside the claim lease.
             .where(ProgramInvitationRow.org_id == schedule.org_id)
             .where(ProgramInvitationRow.agent_id == schedule.agent_id)
@@ -103,11 +103,11 @@ async def materialize_occurrence(
     identity_lookup: Any,
     now: datetime,
 ) -> uuid.UUID:
-    """Create the occurrence and one invitation per patient.
+    """Create the occurrence and one invitation per user.
 
     Idempotent at both levels — ``(program_id, scheduled_for)`` and
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
-    rather than a second message to every patient.
+    rather than a second message to every user.
     """
     config = schedule.config or {}
     async with session_factory() as db:
@@ -129,7 +129,7 @@ async def materialize_occurrence(
             return await _existing_occurrence(db, schedule.program_id, now)
 
         platform = config.get("channel", "whatsapp")
-        for user_id in config.get("patients", []):
+        for user_id in config.get("users", []):
             reason: str | None = None
             state = "queued"
             identity = await identity_lookup(
@@ -196,9 +196,9 @@ async def send_queued_openers(
     effect calls *enqueue*.  The outbox row is committed inside *enqueue* and
     the invitation learns its id in a later commit; a process that dies in
     between used to leave a row that looked untouched, and the next tick sent
-    the patient a second approved template.  Now it leaves a claimed row with
+    the user a second approved template.  Now it leaves a claimed row with
     no outbox id, which the deadline sweep records as a failed delivery — one
-    patient missed and visible, rather than one patient messaged twice.  The
+    user missed and visible, rather than one user messaged twice.  The
     same claim is what keeps two replicas from sending the same opener when
     the leader lease lapses mid-pass.
 
@@ -243,7 +243,7 @@ async def send_queued_openers(
                 identity = await identity_lookup(
                     pending.org_id, pending.platform, pending.user_id,
                 )
-            except Exception:  # noqa: BLE001 — one patient, not the fleet
+            except Exception:  # noqa: BLE001 — one user, not the fleet
                 logger.exception(
                     "[programs] identity lookup failed for invitation %s; "
                     "leaving it queued", pending.id,
@@ -336,14 +336,14 @@ async def _deadline_hours_by_program(db, program_ids: set) -> dict:
 
 
 def identity_lookup_from(session_factory: Any):
-    """The production identity lookup: the patient's ``channel_identities`` row."""
+    """The production identity lookup: the user's ``channel_identities`` row."""
 
     async def _lookup(org_id, platform, user_id):
         async with session_factory() as db:
             # Newest first, and never scalar_one: nothing unique guards
-            # (org, platform, user), so a patient whose new number was linked
+            # (org, platform, user), so a user whose new number was linked
             # without removing the old one has two rows, and raising here
-            # would stop every opener in the fleet on this patient's account.
+            # would stop every opener in the fleet on this user's account.
             return (
                 await db.execute(
                     sa.select(ChannelIdentity)

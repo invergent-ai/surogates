@@ -750,7 +750,7 @@ class ChannelInboundPipeline:
         # replied and injecting the instruction — wait until the message has
         # cleared every gate that can still drop it, because a check-in
         # recorded as answered for a reply that was then dropped is a false
-        # record on a clinical timeline.
+        # record on an orgal timeline.
         # ------------------------------------------------------------------
         _checkin_invitation = None
         try:
@@ -871,7 +871,7 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Check-in Programs: attach the reply and inject the instruction.
         #
-        # Past every gate that can drop the message, and BEFORE the patient's
+        # Past every gate that can drop the message, and BEFORE the user's
         # own message is emitted — the agent has to read what it is being
         # asked to do, then read the answer, not the other way round.
         #
@@ -881,7 +881,7 @@ class ChannelInboundPipeline:
         # four times in a four-question check-in.
         #
         # The skill's *content* is deliberately not injected: the agent
-        # resolves it from its current bundle, so a doctor correcting a wrong
+        # resolves it from its current bundle, so an operator correcting a wrong
         # question reaches check-ins already under way.
         # ------------------------------------------------------------------
         if (
@@ -909,7 +909,7 @@ class ChannelInboundPipeline:
                         f"[Check-in] Run the '{_skill_ref}' skill with this "
                         "person now. Record the result with checkin_outcome "
                         "when the check-in ends; use checkin_escalate if "
-                        "anything needs the doctor's attention."
+                        "anything needs the operator's attention."
                     ),
                     synthetic="checkin",
                     metadata={
@@ -919,9 +919,9 @@ class ChannelInboundPipeline:
                     },
                 )
             except Exception:  # noqa: BLE001
-                # A patient's message must still reach their agent even if the
+                # A user's message must still reach their agent even if the
                 # check-in bookkeeping fails; the alternative is dropping a
-                # reply that may be clinically urgent.
+                # reply that may be urgent.
                 logger.warning(
                     "[programs] could not attach check-in for %s on %s",
                     msg.platform_user_id, routing.agent_id, exc_info=True,

@@ -10,9 +10,9 @@ outbox dispatcher and receives Meta's webhooks:
   back through it;
 * Meta's asynchronous status webhooks, via :func:`apply_status_callback`.
   ``POST /messages`` returns 200 with an id and only a later webhook says
-  the message was never delivered.  Dropping that would leave a patient we
+  the message was never delivered.  Dropping that would leave a user we
   never reached at ``awaiting_reply`` until the sweep marked them a
-  non-responder — blaming the patient for our failure.
+  non-responder — blaming the user for our failure.
 
 This module touches the **delivery** axis only.  Response and escalation are
 separate facts and must never move because of a delivery event.
@@ -101,7 +101,7 @@ async def record_outbox_result(
             if row.response_state == "awaiting_reply":
                 # Nobody was asked, so nobody is awaited.  Left at
                 # ``awaiting_reply`` the row counts as an open check-in and
-                # suppresses this patient's next occurrence for good.
+                # suppresses this user's next occurrence for good.
                 row.response_state = "not_started"
         else:
             if provider_message_id:
