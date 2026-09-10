@@ -53,6 +53,7 @@ class ToolRuntime:
             browser,
             channel_files,
             channel_messages,
+            checkin,
             coding_agent,
             coordinator,
             cron,
@@ -111,6 +112,7 @@ class ToolRuntime:
             channel_files,  # fetch_channel_file (pull a shared channel file)
             channel_messages,  # fetch_channel_messages (read recent channel messages)
             whiteboard,  # whiteboard_draw (canvas chat surface)
+            checkin,  # checkin_outcome, checkin_escalate (Program check-ins)
         ]
 
         for mod in modules:

@@ -179,6 +179,26 @@ def _field(row: Any, name: str) -> Any:
     return getattr(row, name)
 
 
+def _program_now():
+    """Aware UTC, matching what the cadence module returns."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _next_occurrences_for(row):
+    """The next fire instant for a claimed schedule, from its own config."""
+    from surogates.programs.cadence import next_occurrences
+
+    config = getattr(row, "config", None) or {}
+    return next_occurrences(
+        _program_now(),
+        weekdays=config.get("weekdays") or [],
+        times_local=config.get("times_local") or [],
+        timezone=config.get("timezone") or "UTC",
+        count=1,
+    )
+
+
 async def main(
     *,
     settings: Any,
@@ -339,6 +359,124 @@ async def main(
             tick_interval_seconds=tick_interval, claim_limit=claim_limit,
         )
 
+    # Check-in Programs: a third ticker (its own leader lock) fires due
+    # Programs, expires unanswered check-ins, and hands queued openers to the
+    # outbox.
+    program_ticker = None
+    if not _run_one_injected:  # prod path only (session_store built above)
+        from surogates.channels.delivery import DeliveryService
+        from surogates.programs.materialize import (
+            identity_lookup_from,
+            materialize_occurrence,
+            send_queued_openers,
+        )
+        from surogates.programs.opener import make_opener_enqueue
+        from surogates.programs.store import ProgramScheduleStore
+        from surogates.programs.ticker import ProgramTicker
+
+        program_store = ProgramScheduleStore(_session_factory())
+        _identity_lookup = identity_lookup_from(_session_factory())
+
+        # The delivery-status applier is NOT registered here. Meta's status
+        # webhooks arrive in the channels process, and that is where the
+        # parser that reads them runs; registering it in this process would
+        # satisfy the check and silently discard every status. See
+        # channels/runner.py.
+
+        async def _config_for_program(program_id):  # pragma: no cover - prod
+            sched = await program_store.get(program_id)
+            return sched.config if sched is not None else None
+
+        _opener_enqueue = make_opener_enqueue(
+            session_store=session_store,
+            redis=redis,
+            session_factory=_session_factory(),
+            delivery_service=DeliveryService(
+                session_factory=_session_factory(), redis_client=redis,
+            ),
+            storage=storage,
+            settings=settings,
+            config_for_program=_config_for_program,
+        )
+
+        async def _program_run_one(row):  # pragma: no cover - prod path
+            # Stamp the occurrence with the instant it was DUE, never the wall
+            # clock. The (program_id, scheduled_for) unique constraint is what
+            # makes a retried tick harmless — with a fresh clock per call it
+            # can never collide, and a pod rolled mid-tick double-messages the
+            # whole roster.
+            fired_at = await materialize_occurrence(
+                row,
+                session_factory=_session_factory(),
+                identity_lookup=_identity_lookup,
+                now=row.next_run_at or _program_now(),
+            )
+            logger.debug("[programs] materialised occurrence %s", fired_at)
+            # ponytail: the next run is computed from the wall clock, so slots
+            # missed during an outage are dropped rather than caught up. A
+            # burst of six openers after a three-day outage is worse than a
+            # gap; if catch-up is ever wanted, compute from row.next_run_at
+            # and cap the burst.
+            upcoming = _next_occurrences_for(row)
+            await program_store.mark_fired(
+                row, next_run_at=upcoming[0] if upcoming else None,
+            )
+
+        async def _program_send_openers():  # pragma: no cover - prod path
+            await send_queued_openers(
+                _session_factory(),
+                identity_lookup=_identity_lookup,
+                now=_program_now(),
+                enqueue=_opener_enqueue,
+            )
+
+        # Mirror ops' active Programs. Unconfigured by default: with no
+        # ops endpoint the ticker still fires the schedules it already has,
+        # it just never learns about new ones or notices a pause.
+        _ops_base = getattr(settings.worker, "ops_base_url", "") or ""
+        _ops_key = getattr(settings.worker, "ops_runtime_key", "") or ""
+        _program_reconcile = None
+        if _ops_base and _ops_key:
+            import httpx
+
+            from surogates.programs.ops_projection import fetch_active_programs
+            from surogates.programs.reconcile import reconcile_programs
+
+            _ops_http = httpx.AsyncClient()
+
+            async def _program_reconcile():  # pragma: no cover - prod path
+                projected = await fetch_active_programs(
+                    _ops_http, base_url=_ops_base, runtime_key=_ops_key,
+                )
+                if projected is None:
+                    # An unreachable or refused ops is not "no Programs are
+                    # active". Reconciling on that would deactivate every
+                    # schedule in the fleet, so skip this tick entirely.
+                    return
+                await reconcile_programs(program_store, projected=projected)
+        else:
+            logger.info(
+                "[programs] ops projection not configured "
+                "(worker.ops_base_url / worker.ops_runtime_key); schedules "
+                "will not be reconciled",
+            )
+
+        program_lock = RedisLeaderLock(
+            redis, key="surogates:program_ticker:leader",
+            ttl_seconds=lock_ttl, holder_id=holder_id,
+        )
+        program_ticker = ProgramTicker(
+            program_store,
+            session_factory=_session_factory(),
+            materialize=_program_run_one,
+            send_openers=_program_send_openers,
+            reconcile=_program_reconcile,
+            worker_id=worker_id,
+            leader_lock=program_lock,
+            tick_interval_seconds=tick_interval,
+            claim_limit=claim_limit,
+        )
+
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
 
@@ -346,6 +484,8 @@ async def main(
             ticker.request_stop()
             if ambient_ticker is not None:
                 ambient_ticker.request_stop()
+            if program_ticker is not None:
+                program_ticker.request_stop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
@@ -354,10 +494,12 @@ async def main(
                 pass
 
     try:
+        runners = [ticker.run()]
         if ambient_ticker is not None:
-            await asyncio.gather(ticker.run(), ambient_ticker.run())
-        else:
-            await ticker.run()
+            runners.append(ambient_ticker.run())
+        if program_ticker is not None:
+            runners.append(program_ticker.run())
+        await asyncio.gather(*runners)
     finally:
         close = getattr(redis, "aclose", None) or getattr(
             redis, "close", None,

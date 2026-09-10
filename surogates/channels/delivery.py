@@ -84,6 +84,17 @@ _PERMANENT_DELIVERY_ERRORS: frozenset[str] = frozenset({
                              # into the Phone Number ID field
     "graph error 131026 (",  # recipient not on WhatsApp / undeliverable
     "graph error 131047 (",  # 24-hour customer service window closed
+    # Template sends. All are configuration, not weather: the template
+    # does not exist, is paused, or its parameters do not match, and
+    # sixty retries over half an hour cannot change any of that.
+    "graph error 132000 (",  # parameter count mismatch
+    "graph error 132001 (",  # template name does not exist
+    "graph error 132005 (",  # hydrated text too long
+    "graph error 132007 (",  # format character policy violated
+    "graph error 132012 (",  # parameter format mismatch
+    "graph error 132015 (",  # template paused
+    "graph error 132016 (",  # template disabled
+    "template payload incomplete",  # ours: name or language missing
 })
 
 # Give up on an undelivered item once it is older than this, whatever the
@@ -286,6 +297,32 @@ class DeliveryService:
             outbox_id,
             provider_message_id,
         )
+        await self._report_to_invitation(
+            outbox_id, provider_message_id=provider_message_id, error=None,
+        )
+
+    async def _report_to_invitation(
+        self, outbox_id: int, *, provider_message_id: str | None, error: str | None,
+    ) -> None:
+        """Tell a check-in invitation, if one rides on this row, how it went.
+
+        This is the only point at which the provider's message id is known,
+        and therefore the only way a later status webhook can ever match the
+        invitation. Best-effort: a bookkeeping failure must not fail the
+        delivery that already happened.
+        """
+        from surogates.programs.delivery import record_outbox_result
+
+        try:
+            await record_outbox_result(
+                self._sf, outbox_id,
+                provider_message_id=provider_message_id, error=error,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[programs] could not report outbox %d to its invitation",
+                outbox_id, exc_info=True,
+            )
 
     async def mark_failed(self, outbox_id: int, error: str) -> None:
         """Mark an outbox item as failed.
@@ -322,6 +359,12 @@ class DeliveryService:
             )
             await db.commit()
         logger.warning("Outbox %d dropped (no retry): %s", outbox_id, error)
+        # A check-in opener that died here was never seen by the patient. Say
+        # so on the invitation, or the deadline sweep later records them as a
+        # non-responder for a question they were never asked.
+        await self._report_to_invitation(
+            outbox_id, provider_message_id=None, error=error,
+        )
 
     # ------------------------------------------------------------------
     # Real-time notifications (Redis pub/sub)

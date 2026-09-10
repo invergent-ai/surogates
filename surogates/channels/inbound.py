@@ -744,6 +744,32 @@ class ChannelInboundPipeline:
             _content = f"{_content}\n{_att_note}" if _content else _att_note
 
         # ------------------------------------------------------------------
+        # Check-in Programs: is this message the reply to a scheduled opener?
+        #
+        # Only the lookup happens here. The writes — marking the invitation
+        # replied and injecting the instruction — wait until the message has
+        # cleared every gate that can still drop it, because a check-in
+        # recorded as answered for a reply that was then dropped is a false
+        # record on a clinical timeline.
+        # ------------------------------------------------------------------
+        _checkin_invitation = None
+        try:
+            from surogates.programs.inbound import open_invitation_for
+
+            _checkin_invitation = await open_invitation_for(
+                deps.session_factory,
+                org_id=routing.org_id,
+                agent_id=routing.agent_id,
+                platform=routing.platform,
+                platform_user_id=msg.platform_user_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[programs] check-in lookup failed for %s on %s",
+                msg.platform_user_id, routing.agent_id, exc_info=True,
+            )
+
+        # ------------------------------------------------------------------
         # Gate 7: Emit USER_MESSAGE event.
         # ------------------------------------------------------------------
         event_data: dict = {
@@ -841,6 +867,65 @@ class ChannelInboundPipeline:
                     exc_info=True,
                 )
                 return InboundOutcome.DROPPED
+
+        # ------------------------------------------------------------------
+        # Check-in Programs: attach the reply and inject the instruction.
+        #
+        # Past every gate that can drop the message, and BEFORE the patient's
+        # own message is emitted — the agent has to read what it is being
+        # asked to do, then read the answer, not the other way round.
+        #
+        # Only on the first reply. Every later message of the same check-in
+        # matches the same open invitation; re-injecting the instruction
+        # before each one told the agent to start the questionnaire "now"
+        # four times in a four-question check-in.
+        #
+        # The skill's *content* is deliberately not injected: the agent
+        # resolves it from its current bundle, so a doctor correcting a wrong
+        # question reaches check-ins already under way.
+        # ------------------------------------------------------------------
+        if (
+            _checkin_invitation is not None
+            and _checkin_invitation.response_state == "awaiting_reply"
+        ):
+            try:
+                from surogates.programs.inbound import attach_reply, get_occurrence
+
+                _occurrence = await get_occurrence(
+                    deps.session_factory, _checkin_invitation.occurrence_id,
+                )
+                _skill_ref = getattr(_occurrence, "skill_ref", "") or ""
+                await attach_reply(
+                    deps.session_factory,
+                    _checkin_invitation,
+                    session_id=session_id,
+                    # The runtime config carries no bundle version today, so
+                    # this stays None rather than recording a guess.
+                    bundle_version=None,
+                )
+                await deps.session_store.emit_synthetic_user_message(
+                    session_id,
+                    content=(
+                        f"[Check-in] Run the '{_skill_ref}' skill with this "
+                        "person now. Record the result with checkin_outcome "
+                        "when the check-in ends; use checkin_escalate if "
+                        "anything needs the doctor's attention."
+                    ),
+                    synthetic="checkin",
+                    metadata={
+                        "program_id": str(_checkin_invitation.program_id),
+                        "occurrence_id": str(_checkin_invitation.occurrence_id),
+                        "skill_ref": _skill_ref,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                # A patient's message must still reach their agent even if the
+                # check-in bookkeeping fails; the alternative is dropping a
+                # reply that may be clinically urgent.
+                logger.warning(
+                    "[programs] could not attach check-in for %s on %s",
+                    msg.platform_user_id, routing.agent_id, exc_info=True,
+                )
 
         await deps.session_store.emit_event(
             session_id,

@@ -541,6 +541,13 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
 
     delivery_service = DeliveryService(session_factory=sf, redis_client=redis)
 
+    # Meta's delivery-status webhooks land in THIS process, and the parser
+    # that reads them is synchronous with no database handle. Registering
+    # anywhere else — the ticker, say — satisfies the check and silently
+    # discards every status.
+    from surogates.programs.delivery import register_status_applier
+    register_status_applier(sf)
+
     from surogates.storage.backend import create_backend
     storage = create_backend(settings)
 
