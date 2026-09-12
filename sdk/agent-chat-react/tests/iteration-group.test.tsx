@@ -85,7 +85,7 @@ describe("IterationGroup", () => {
       />,
     );
     expect(dom.textContent).toContain("Rework hero paragraph");
-    // Reasoning content stays hidden until expanded.
+    // Reasoning content stays hidden in Simple mode.
     expect(dom.textContent).not.toContain("long internal reasoning text");
   });
 
@@ -274,79 +274,49 @@ describe("IterationGroup", () => {
     expect(dom.textContent).toContain("Used 2 tools");
   });
 
-  it("clamps long reasoning to 2 paragraphs with a Show more toggle", () => {
-    const reasoning = [
-      "First paragraph of reasoning explaining the overall approach.",
-      "Second paragraph diving into the details of the plan.",
-      "Third paragraph that should be hidden until the user clicks Show more.",
-      "Fourth paragraph that also stays hidden.",
-    ].join("\n\n");
+  it("shows the reported count and hides reasoning inside expanded iterations", () => {
+    const reasoning = "Private reasoning that must stay out of Simple mode.";
     const message = buildMessage({
-      turnId: "t-1",
-      iterationIndex: 0,
       iterationSummary: {
-        iterationIndex: 0, summary: "Long thoughts",
+        iterationIndex: 0, summary: "Updated the page",
         toolCallIds: [], startedAt: "", endedAt: "",
       },
       reasoning,
+      reasoningTokens: 2500,
     });
     const dom = mount(
-      <IterationGroup
-        message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
-      />,
+      <IterationGroup message={message} sessionId="s-1" artifactFallbacks={{}} />,
     );
-    // Expand the iteration to expose the reasoning row.
     const trigger = dom.querySelector("button[aria-expanded='false']");
-    expect(trigger).not.toBeNull();
     act(() => { (trigger as HTMLButtonElement).click(); });
-
-    // First two paragraphs visible, last two hidden, Show more present.
-    expect(dom.textContent).toContain("First paragraph");
-    expect(dom.textContent).toContain("Second paragraph");
-    expect(dom.textContent).not.toContain("Third paragraph");
-    expect(dom.textContent).not.toContain("Fourth paragraph");
-    const showMore = Array.from(dom.querySelectorAll("button")).find(
-      (b) => (b.textContent ?? "").startsWith("Show more"),
-    );
-    expect(showMore).toBeDefined();
-
-    // Clicking Show more reveals the remaining paragraphs and the
-    // toggle becomes "Show less".
-    act(() => { showMore!.click(); });
-    expect(dom.textContent).toContain("Third paragraph");
-    expect(dom.textContent).toContain("Fourth paragraph");
-    const showLess = Array.from(dom.querySelectorAll("button")).find(
-      (b) => (b.textContent ?? "").startsWith("Show less"),
-    );
-    expect(showLess).toBeDefined();
+    expect(dom.textContent).toContain("Thought · 2.5k tokens");
+    expect(dom.innerHTML).not.toContain(reasoning);
+    expect(dom.textContent).not.toContain("Show more");
   });
 
-  it("does not render a Show more link when reasoning is short", () => {
-    const message = buildMessage({
-      turnId: "t-1",
-      iterationIndex: 0,
-      iterationSummary: {
-        iterationIndex: 0, summary: "Brief thought",
-        toolCallIds: [], startedAt: "", endedAt: "",
-      },
-      reasoning: "Just one short paragraph.",
-    });
+  it("updates the live count from reported usage without exposing the trace", () => {
+    const message = buildMessage({ status: "streaming", reasoning: "Private trace" });
     const dom = mount(
-      <IterationGroup
-        message={message}
-        sessionId="s-1"
-        artifactFallbacks={{}}
-      />,
+      <IterationGroup message={message} sessionId="s-1" artifactFallbacks={{}} />,
     );
-    const trigger = dom.querySelector("button[aria-expanded='false']");
-    act(() => { (trigger as HTMLButtonElement).click(); });
-    expect(dom.textContent).toContain("Just one short paragraph.");
-    const hasShowMore = Array.from(dom.querySelectorAll("button")).some(
-      (b) => (b.textContent ?? "").startsWith("Show more"),
-    );
-    expect(hasShowMore).toBe(false);
+    // Text alone never produces an estimated token count.
+    expect(dom.textContent).toBe("Thinking...");
+    for (const [tokens, label] of [[100, "100"], [500, "500"], [1200, "1.2k"], [2500, "2.5k"]] as const) {
+      act(() => {
+        root?.render(
+          <TooltipProvider>
+            <IterationGroup
+              message={{ ...message, reasoningTokens: tokens }}
+              sessionId="s-1"
+              artifactFallbacks={{}}
+            />
+          </TooltipProvider>,
+        );
+      });
+      expect(dom.textContent).toBe(`Thinking... ${label} tokens`);
+      expect(dom.innerHTML).not.toContain(message.reasoning);
+      expect(dom.querySelector("button")).toBeNull();
+    }
   });
 
   it("hides internal tools (list_files, search_files, browser_*, etc.) in Simple mode", () => {

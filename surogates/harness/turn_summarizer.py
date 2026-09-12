@@ -28,7 +28,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
-from surogates.harness.message_utils import message_texts
+from surogates.harness.message_utils import content_as_text
+from surogates.harness.auxiliary_llm import (
+    reasoning_disabled_extra_body,
+    rejects_reasoning_controls,
+)
 from surogates.harness.structured_output import (
     iter_json_objects,
     parse_json_object,
@@ -702,9 +706,29 @@ class TurnSummarizer:
         slow provider — a timeout never reraises, since retrying it
         without the parameter would blame the wrong thing.
         """
+        extra_body = reasoning_disabled_extra_body(
+            kwargs["model"], str(getattr(client, "base_url", "") or ""),
+        )
+        request_kwargs = dict(kwargs)
+        if extra_body is not None:
+            request_kwargs["extra_body"] = {
+                **kwargs.get("extra_body", {}), **extra_body,
+            }
+
+        async def request() -> Any:
+            try:
+                return await client.chat.completions.create(**request_kwargs)
+            except Exception as exc:
+                if extra_body is None or not rejects_reasoning_controls(exc):
+                    raise
+                # Keep response_format and the output bound on a gateway
+                # that rejects reasoning controls. Both attempts share
+                # the same timeout, and empty content still stays empty.
+                return await client.chat.completions.create(**kwargs)
+
         try:
             response = await asyncio.wait_for(
-                client.chat.completions.create(**kwargs),
+                request(),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -717,12 +741,23 @@ class TurnSummarizer:
             return None
 
         try:
-            message = response.choices[0].message
+            choice = response.choices[0]
+            message = choice.message
         except (AttributeError, IndexError, TypeError):
             logger.warning("summary response had unexpected shape for %s", label)
             return None
 
-        return next(iter(message_texts(message)), None)
+        # A reasoning field contains the model's working notes. It must
+        # never become a caption, recap, or list of selected files when
+        # the output allowance ends before the answer is produced.
+        raw_content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+        content = content_as_text(raw_content).strip()
+        if not content:
+            logger.warning(
+                "summary returned no content for %s (finish_reason=%s)",
+                label, getattr(choice, "finish_reason", None),
+            )
+        return content or None
 
     @staticmethod
     def _format_tool_calls(

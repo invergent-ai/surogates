@@ -1475,7 +1475,60 @@ class SessionStore:
         async with self._sf() as db:
             result = await db.execute(stmt)
             rows = result.scalars().all()
-        return [Event.model_validate(r) for r in rows]
+            events = [Event.model_validate(r) for r in rows]
+            if exclude_types and EventType.LLM_DELTA in exclude_types:
+                await self._restore_reasoning_counts(db, session_id, events)
+        return events
+
+    async def _restore_reasoning_counts(
+        self, db: AsyncSession, session_id: UUID, events: list[Event],
+    ) -> None:
+        """Recover live counts for older reasoning snapshots during replay.
+
+        Interrupted iterations may have no llm.response usage. Count the
+        stored reasoning chunks in SQL so replay keeps the number without
+        sending every delta to the browser or changing the event log.
+        """
+        missing = [
+            event for event in events
+            if event.type == EventType.LLM_THINKING
+            and event.data.get("reasoning_delta_count") is None
+            and event.data.get("reasoning_tokens") is None
+        ]
+        if not missing:
+            return
+        request = aliased(EventRow)
+        delta = aliased(EventRow)
+        request_start = (
+            select(func.max(request.id))
+            .where(
+                request.session_id == session_id,
+                request.type == EventType.LLM_REQUEST,
+                request.id < EventRow.id,
+            )
+            .correlate(EventRow)
+            .scalar_subquery()
+        )
+        count = (
+            select(func.count(delta.id))
+            .where(
+                delta.session_id == session_id,
+                delta.type == EventType.LLM_DELTA,
+                delta.id > func.coalesce(request_start, 0),
+                delta.id < EventRow.id,
+                delta.data["reasoning"].as_string() != "",
+            )
+            .correlate(EventRow)
+            .scalar_subquery()
+        )
+        result = await db.execute(
+            select(EventRow.id, count)
+            .where(EventRow.session_id == session_id, EventRow.id.in_([e.id for e in missing]))
+        )
+        counts = dict(result.all())
+        for event in missing:
+            if counts.get(event.id, 0) > 0:
+                event.data = {**event.data, "reasoning_delta_count": counts[event.id]}
 
     async def last_event_at(
         self,

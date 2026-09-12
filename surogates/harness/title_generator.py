@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from surogates.harness.message_utils import content_as_text
+from surogates.harness.auxiliary_llm import reasoning_disabled_extra_body
 from surogates.session.models import Session
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,9 @@ async def generate_session_title(
         "timeout": timeout,
         "stream": False,
     }
-    extra_body = _title_extra_body(model)
+    extra_body = reasoning_disabled_extra_body(
+        model, str(getattr(llm_client, "base_url", "") or ""),
+    )
     if extra_body is not None:
         kwargs["extra_body"] = extra_body
 
@@ -83,8 +86,7 @@ async def generate_session_title(
         response = await llm_client.chat.completions.create(
             **kwargs,
         )
-        content = response.choices[0].message.content
-        return clean_generated_title(content)
+        return _title_from_response(response, model)
     except Exception as exc:
         if _looks_like_optional_param_rejection(exc):
             try:
@@ -96,8 +98,7 @@ async def generate_session_title(
                 response = await llm_client.chat.completions.create(
                     **retry_kwargs,
                 )
-                content = response.choices[0].message.content
-                return clean_generated_title(content)
+                return _title_from_response(response, model)
             except Exception as retry_exc:
                 logger.warning(
                     "Session title generation failed after compatibility retry: %s",
@@ -126,10 +127,15 @@ def _looks_like_optional_param_rejection(exc: Exception) -> bool:
     )
 
 
-def _title_extra_body(model: str) -> dict[str, Any] | None:
-    if model.lower() == "surogate":
-        return {"chat_template_kwargs": {"enable_thinking": False}}
-    return None
+def _title_from_response(response: Any, model: str) -> str | None:
+    choice = response.choices[0]
+    title = clean_generated_title(content_as_text(choice.message.content))
+    if not title:
+        logger.warning(
+            "Session title generation returned no title (model=%s, finish_reason=%s)",
+            model, getattr(choice, "finish_reason", None),
+        )
+    return title
 
 
 async def maybe_generate_session_title(

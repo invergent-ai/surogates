@@ -10,8 +10,34 @@ import {
   applyAgentChatEvent,
   createInitialAgentChatState,
 } from "../src/runtime/reducer";
+import { streamedIterationEvents } from "./streamed-iteration-fixture";
 
 describe("llm event meta stamping", () => {
+  for (const replay of [false, true]) {
+    it(`keeps early tool results in their iteration during ${replay ? "history replay" : "live streaming"}`, () => {
+      let state = createInitialAgentChatState();
+      for (const event of streamedIterationEvents()) {
+        if (replay && event.type === "llm.delta") continue;
+        state = applyAgentChatEvent(state, event);
+      }
+      const assistants = state.messages.filter((message) => message.role === "assistant");
+      expect(assistants).toHaveLength(replay ? 2 : 3);
+      for (let i = 0; i < 2; i++) {
+        expect(assistants[i]).toMatchObject({
+          iterationIndex: i, status: "complete", reasoningTokens: [34, 143][i],
+        });
+        expect(assistants[i].toolCalls?.map((tc) => tc.id)).toEqual([
+          `tool-${i}-a`, `tool-${i}-b`,
+        ]);
+      }
+      if (!replay) {
+        expect(assistants[2]).toMatchObject({
+          iterationIndex: 2, status: "streaming", reasoningDeltaCount: 232,
+        });
+      }
+    });
+  }
+
   it("stamps turn_id and iteration_index from llm.delta on a new streaming message", () => {
     let state = createInitialAgentChatState({ isLoadingHistory: false });
     state = applyAgentChatEvent(state, {

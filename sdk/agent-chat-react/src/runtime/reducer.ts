@@ -223,13 +223,29 @@ export function applyAgentChatEvent(
     }
 
     case "harness.wake":
-    case "llm.request":
       // Sign-of-life events: clear ``terminal`` too. A late
       // ``session.pause`` from the harness's abort cleanup can land
       // after the ``/messages`` route's RESUME + USER_MESSAGE; without
       // re-clearing ``terminal`` here every subsequent gated event
       // (deltas, thinking, tool calls) would leave ``isRunning`` false.
       return { ...nextState, terminal: false, isRunning: true };
+
+    case "llm.request":
+      // A new LLM call closes prior text streams. On history replay,
+      // tool.call may arrive before llm.thinking supplies turn metadata.
+      // Completing finished iterations keeps that tool on a new message.
+      return {
+        ...nextState,
+        terminal: false,
+        isRunning: true,
+        hadDeltas: false,
+        messages: nextState.messages.map((message) =>
+          message.role === "assistant" && message.status === "streaming"
+            && !message.toolCalls?.some((tc) => tc.status === "running")
+            ? { ...message, status: "complete" }
+            : message,
+        ),
+      };
 
     case "harness.crash":
     case "stream.timeout":
@@ -519,11 +535,29 @@ function applyLlmDelta(
 ): AgentChatState {
   const deltaContent = stringValue(event.data.content);
   const deltaReasoning = stringValue(event.data.reasoning);
+  const reasoningTokens = typeof event.data.reasoning_tokens === "number"
+    && Number.isInteger(event.data.reasoning_tokens)
+    && event.data.reasoning_tokens >= 0
+      ? event.data.reasoning_tokens
+      : undefined;
   const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const lastIdx = findLastAssistantIndex(messages);
   const lastMsg = lastIdx >= 0 ? messages[lastIdx] : null;
   const hasUserAfter = lastIdx >= 0 && hasUserAfterIndex(messages, lastIdx);
+  const matchesIteration = (turnId === undefined || lastMsg?.turnId === turnId)
+    && (iterationIndex === undefined || lastMsg?.iterationIndex === iterationIndex);
+  const sameIteration = turnId !== undefined && iterationIndex !== undefined
+    && matchesIteration;
+  if (
+    reasoningTokens !== undefined && !deltaContent && !deltaReasoning
+    && lastMsg && !hasUserAfter && matchesIteration
+  ) {
+    // Usage-only updates belong to the iteration that just streamed,
+    // even if its tools have already finished executing.
+    messages[lastIdx] = { ...lastMsg, reasoningTokens };
+    return { ...state, messages };
+  }
   const allToolsDone = Boolean(
     lastMsg?.toolCalls?.length &&
       lastMsg.toolCalls.every((tc) => tc.status !== "running"),
@@ -531,8 +565,9 @@ function applyLlmDelta(
   const canAppend = Boolean(
     lastMsg &&
       lastMsg.status === "streaming" &&
-      !allToolsDone &&
-      !hasUserAfter,
+      (!allToolsDone || sameIteration) &&
+      !hasUserAfter &&
+      matchesIteration,
   );
 
   if (canAppend && lastMsg) {
@@ -542,6 +577,10 @@ function applyLlmDelta(
       reasoning: deltaReasoning
         ? (lastMsg.reasoning ?? "") + deltaReasoning
         : lastMsg.reasoning,
+      reasoningTokens: reasoningTokens ?? lastMsg.reasoningTokens,
+      reasoningDeltaCount: deltaReasoning
+        ? (lastMsg.reasoningDeltaCount ?? 0) + 1
+        : lastMsg.reasoningDeltaCount,
       turnId: turnId ?? lastMsg.turnId,
       iterationIndex: iterationIndex ?? lastMsg.iterationIndex,
     };
@@ -551,6 +590,8 @@ function applyLlmDelta(
       role: "assistant",
       content: deltaContent,
       reasoning: deltaReasoning || undefined,
+      reasoningTokens,
+      reasoningDeltaCount: deltaReasoning ? 1 : undefined,
       createdAt: new Date(),
       status: "streaming",
       turnId,
@@ -649,6 +690,12 @@ function applyLlmResponse(
 
   const inputTokens = numberValue(event.data.input_tokens);
   const outputTokens = numberValue(event.data.output_tokens);
+  const reasoningTokens = numberValue(event.data.reasoning_tokens);
+  // Some providers use zero when reasoning usage is unavailable.
+  if (reasoningTokens > 0) {
+    const responseIdx = findLastAssistantIndex(messages);
+    messages[responseIdx] = { ...messages[responseIdx]!, reasoningTokens };
+  }
   return {
     ...state,
     messages,
@@ -657,7 +704,7 @@ function applyLlmResponse(
     tokenUsage: {
       inputTokens,
       outputTokens,
-      reasoningTokens: numberValue(event.data.reasoning_tokens),
+      reasoningTokens,
       cachedInputTokens: numberValue(event.data.cache_read_tokens),
       totalTokens: inputTokens + outputTokens,
       contextWindow: numberValue(event.data.context_window),
@@ -684,6 +731,8 @@ function applyLlmThinking(
 ): AgentChatState {
   const reasoningText = stringValue(event.data.reasoning) ||
     stringValue(event.data.content);
+  const reasoningTokens = optionalNumberValue(event.data.reasoning_tokens);
+  const reasoningDeltaCount = optionalNumberValue(event.data.reasoning_delta_count);
   const { turnId, iterationIndex } = readTurnMeta(event.data);
   const messages = [...state.messages];
   const idx = findLastAssistantIndex(messages);
@@ -694,12 +743,29 @@ function applyLlmThinking(
   );
   const hasUserAfter = idx >= 0 && hasUserAfterIndex(messages, idx);
 
-  if (!prev || allToolsDone || hasUserAfter) {
+  // Tools can execute before the final reasoning snapshot arrives.
+  // Their completion does not start a new LLM iteration. During replay,
+  // the first tool message may not have received its turn metadata yet.
+  const sameIteration = turnId !== undefined && iterationIndex !== undefined
+    && (
+      (prev?.turnId === turnId && prev.iterationIndex === iterationIndex)
+      || (prev?.turnId === undefined && prev?.iterationIndex === undefined
+        && prev?.llmResponseEventId === undefined)
+    );
+  const differentIteration = !!prev && (
+    (turnId !== undefined && prev.turnId !== undefined && turnId !== prev.turnId)
+    || (iterationIndex !== undefined && prev.iterationIndex !== undefined
+      && iterationIndex !== prev.iterationIndex)
+  );
+
+  if (!prev || (allToolsDone && !sameIteration) || hasUserAfter || differentIteration) {
     messages.push({
       id: `evt-${event.eventId}`,
       role: "assistant",
       content: "",
       reasoning: reasoningText,
+      reasoningTokens: reasoningTokens ?? undefined,
+      reasoningDeltaCount: reasoningDeltaCount ?? undefined,
       createdAt: new Date(),
       status: "streaming",
       turnId,
@@ -716,6 +782,8 @@ function applyLlmThinking(
     messages[idx] = {
       ...prev,
       reasoning: appendText(prev.reasoning, reasoningText),
+      reasoningTokens: reasoningTokens ?? prev.reasoningTokens,
+      reasoningDeltaCount: reasoningDeltaCount ?? prev.reasoningDeltaCount,
       turnId: turnId ?? prev.turnId,
       iterationIndex: iterationIndex ?? prev.iterationIndex,
     };

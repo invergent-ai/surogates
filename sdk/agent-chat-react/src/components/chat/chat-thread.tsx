@@ -69,6 +69,7 @@ import { useAgentChatAdapterContext } from "../../adapter-context";
 import { ResearchSourcesPanel } from "../research/research-sources-panel";
 import { TurnFeedback } from "./turn-feedback";
 import { useSmoothStream } from "./use-smooth-stream";
+import { reasoningTokenLabel } from "../../runtime/reasoning-tokens";
 import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
@@ -1073,6 +1074,8 @@ function SimpleFinalAnswer({
 
 export interface IterationGroupProps {
   message: ChatMessageType;
+  /** Only the current iteration may display a live status in the thread. */
+  isActive?: boolean;
   sessionId: string | null;
   /** Same map AssistantGroup builds for the Expert path — see
    *  ``ChatThread`` for the full derivation. */
@@ -1093,7 +1096,9 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   // background noise that Simple mode suppresses.
   const calls = visibleToolCalls(message);
   if (calls.length === 0) {
-    return message.reasoning ? "Thought through the problem" : null;
+    return message.reasoning || message.reasoningTokens
+      ? reasoningTokenLabel(message, false)
+      : null;
   }
   // Skill loads name themselves, one or many, so they never fall
   // through to the generic "Skill × 3".
@@ -1168,7 +1173,7 @@ function hasInlineRunningIndicator(
         return false;
       }
       return isIterationLive(message)
-        && (!!message.toolCalls?.length || !message.content);
+        && (!!message.toolCalls?.length || !message.content || message.content === message.reasoning);
     }
 
     // Use the timeline's streaming rules, including its treatment of
@@ -1192,7 +1197,7 @@ function liveIterationLabel(message: ChatMessageType): string {
   const running = (message.toolCalls ?? []).filter(
     (tc) => tc.status === "running" && !isHiddenSimpleTool(tc),
   );
-  if (running.length === 0) return "Thinking…";
+  if (running.length === 0) return reasoningTokenLabel(message, true);
   // Same wording as the finished row, so it does not rename itself.
   if (running.every((tc) => tc.toolName === "skill_view")) {
     return `${skillViewLabel(running)}…`;
@@ -1269,65 +1274,8 @@ function SimpleDetailRow({ icon: Icon, children }: SimpleDetailRowProps) {
 }
 
 /**
- * Reasoning text rendered as paragraphs. By default we show the
- * first ``previewParagraphs`` paragraphs (split on blank lines) plus
- * a "Show more" link; clicking expands to the full text with a
- * matching "Show less" link.
- *
- * Paragraph split: blank-line separated when present, otherwise one
- * paragraph per source line (rare — most reasoning blocks already
- * use blank-line paragraph breaks).
- */
-function ClampedReasoning({
-  text,
-  previewParagraphs = 2,
-}: {
-  text: string;
-  previewParagraphs?: number;
-}) {
-  const paragraphs = splitReasoningParagraphs(text);
-  const [expanded, setExpanded] = useState(false);
-  const hasMore = paragraphs.length > previewParagraphs;
-  const visible = expanded || !hasMore
-    ? paragraphs
-    : paragraphs.slice(0, previewParagraphs);
-  return (
-    <div className="space-y-2">
-      {visible.map((paragraph, i) => (
-        <p key={i} className="whitespace-pre-wrap">{paragraph}</p>
-      ))}
-      {hasMore && (
-        <button
-          type="button"
-          onClick={() => setExpanded((prev) => !prev)}
-          className="text-xs font-medium text-foreground hover:text-foreground/70 cursor-pointer"
-        >
-          {expanded ? "Show less" : "Show more..."}
-        </button>
-      )}
-    </div>
-  );
-}
-
-function splitReasoningParagraphs(text: string): string[] {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
-  const blankSplit = trimmed
-    .split(/\n\s*\n+/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-  if (blankSplit.length > 1) return blankSplit;
-  // Fall back to one-paragraph-per-line so models that emit single
-  // newlines still get a clamp boundary.
-  return trimmed
-    .split(/\n+/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-}
-
-/**
  * Condensed Simple-mode expansion of an iteration: one icon + prose
- * row per tool call, plus the reasoning text and a "Done" footer
+ * row per tool call, plus the reasoning token count and a "Done" footer
  * when the iteration completed successfully.
  *
  * Deliberately DOES NOT reuse the Expert per-tool blocks (Patch
@@ -1341,21 +1289,21 @@ function IterationExpanded({
   // list — the row vanishes entirely instead of exposing infra noise
   // ("Listed .", "Searched files", failed retries, browser_* steps).
   const calls = visibleToolCalls(message);
-  const reasoning = (message.reasoning ?? "").trim();
+  const hasReasoning = !!message.reasoning || !!message.reasoningTokens;
   // "Done" reflects the user-visible state. If only hidden tools are
   // still running, the iteration looks complete to the user; we don't
   // want a stuck spinner on rows that are silent from their POV.
   const anyVisibleRunning = calls.some((tc) => tc.status === "running");
   const showDone =
-    !anyVisibleRunning && (calls.length > 0 || !!reasoning);
+    !anyVisibleRunning && (calls.length > 0 || hasReasoning);
 
-  if (!reasoning && calls.length === 0) return null;
+  if (!hasReasoning && calls.length === 0) return null;
 
   return (
     <div className="ml-2 space-y-3 border-l border-border/40 pl-4 py-1">
-      {reasoning && (
+      {hasReasoning && (
         <SimpleDetailRow icon={ClockIcon}>
-          <ClampedReasoning text={reasoning} />
+          <span>{reasoningTokenLabel(message, false)}</span>
         </SimpleDetailRow>
       )}
       {calls.map((tc) => {
@@ -1397,6 +1345,7 @@ function IterationExpanded({
 
 export function IterationGroup({
   message,
+  isActive = true,
   sessionId,
   artifactFallbacks,
   onFileSelect,
@@ -1432,7 +1381,7 @@ export function IterationGroup({
   //    rest of the turn until the next llm.response lands or the turn
   //    ends. Without this stricter check, completed iterations would
   //    stay in the shimmer state forever (user-reported bug).
-  if (isIterationLive(message)) {
+  if (isActive && isIterationLive(message)) {
     // Same hidden-tool policy as the label: a lone internal list_files
     // must not leak a "searching" orb next to the quiet "Thinking…".
     return (
@@ -1453,6 +1402,10 @@ export function IterationGroup({
     // entirely — the surrounding SimpleAssistantGroup will still
     // render the final-answer text and TurnSummaryCard.
     return null;
+  }
+  // A reasoning-only iteration has no details to expand in Simple mode.
+  if (!summary && visibleToolCalls(message).length === 0) {
+    return <p className="py-0.5 text-sm text-muted-foreground">{label}</p>;
   }
   const labelTone = summary
     ? "text-muted-foreground italic"
@@ -1598,6 +1551,7 @@ function LoopResultAffordance({ message }: { message?: ChatMessageType }) {
 
 function SimpleAssistantGroup({
   messages,
+  activeAssistantId,
   isRunning,
   sessionId,
   artifactFallbacks,
@@ -1606,6 +1560,7 @@ function SimpleAssistantGroup({
   hideTurnSummary = false,
 }: {
   messages: ChatMessageType[];
+  activeAssistantId?: string;
   isRunning: boolean;
   sessionId: string | null;
   artifactFallbacks: Record<string, string>;
@@ -1623,7 +1578,9 @@ function SimpleAssistantGroup({
   // shimmer instead.
   const tailHasTools = !!(tail?.toolCalls && tail.toolCalls.length > 0);
   const tailIsTextOnly = !!tail && !tailHasTools;
-  const finalText = tailIsTextOnly && tail!.content ? tail!.content : "";
+  const finalText = tailIsTextOnly && tail!.content !== tail!.reasoning
+    ? tail!.content
+    : "";
 
   const showErrorInfo =
     !!tail && tail.status === "error" && !!tail.errorInfo;
@@ -1714,7 +1671,9 @@ function SimpleAssistantGroup({
             // of buried inside the collapsible body.  Hidden when the
             // assistant message had no narration to surface (typed
             // ``done`` footer, no prose preamble, or empty content).
-            const rawContent = (message.content ?? "").trim();
+            const rawContent = message.content === message.reasoning
+              ? ""
+              : (message.content ?? "").trim();
             const { action, inferredNarration, cleaned } =
               stripAndParseNextAction(rawContent);
             const narrationLine = action
@@ -1738,6 +1697,7 @@ function SimpleAssistantGroup({
                 ) : null}
                 <IterationGroup
                   message={message}
+                  isActive={message.id === activeAssistantId}
                   sessionId={sessionId}
                   artifactFallbacks={artifactFallbacks}
                   onFileSelect={onFileSelect}
@@ -1778,6 +1738,7 @@ function SimpleAssistantGroup({
 
 function AssistantGroup({
   messages,
+  activeAssistantId,
   lastGlobalIndex,
   totalMessages,
   isRunning,
@@ -1789,6 +1750,7 @@ function AssistantGroup({
   hideTurnSummary = false,
 }: {
   messages: ChatMessageType[];
+  activeAssistantId?: string;
   lastGlobalIndex: number;
   totalMessages: number;
   isRunning: boolean;
@@ -1803,6 +1765,7 @@ function AssistantGroup({
     return (
       <SimpleAssistantGroup
         messages={messages}
+        activeAssistantId={activeAssistantId}
         isRunning={isRunning}
         sessionId={sessionId}
         artifactFallbacks={artifactFallbacks}
@@ -1977,6 +1940,15 @@ export function ChatThread({
   onOpenIntegrations,
 }: ChatThreadProps) {
   const groups = useMemo(() => groupMessages(messages), [messages]);
+  const activeAssistantId = useMemo(() => {
+    if (!isRunning) return undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role === "user") return undefined;
+      if (message.role === "assistant") return message.id;
+    }
+    return undefined;
+  }, [messages, isRunning]);
   // Split so the JSON parse inside the policy is keyed on the pending
   // call's args rather than the messages array, which is rebuilt on
   // every streamed token anywhere in the thread.
@@ -1987,11 +1959,19 @@ export function ChatThread({
   );
   const awaitingInput = askPolicy !== null;
   const orbActivity = useMemo(
-    () =>
-      deriveOrbActivity(
+    () => {
+      const activity = deriveOrbActivity(
         messages,
         viewMode === "simple" ? SIMPLE_MODE_ORB_OPTIONS : undefined,
-      ),
+      );
+      if (viewMode === "simple" && activity.state === "solving") {
+        const latest = [...messages].reverse().find((message) => message.role === "assistant");
+        if (latest && !latest.toolCalls?.some((tc) => tc.status === "running")) {
+          return { ...activity, label: reasoningTokenLabel(latest, true) };
+        }
+      }
+      return activity;
+    },
     [messages, viewMode],
   );
   const inlineRunningIndicator = useMemo(
@@ -2241,6 +2221,7 @@ export function ChatThread({
                   <AssistantGroup
                     key={group.messages[0].id}
                     messages={group.messages}
+                    activeAssistantId={activeAssistantId}
                     lastGlobalIndex={group.lastGlobalIndex}
                     totalMessages={messages.length}
                     isRunning={isRunning}

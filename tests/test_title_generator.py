@@ -107,6 +107,46 @@ async def test_generate_session_title_disables_thinking_for_surogate_model() -> 
     }
 
 
+@pytest.mark.parametrize(("base_url", "model"), [
+    ("https://openrouter.ai/api/v1", "deepseek/deepseek-v4-flash-0731"),
+    ("http://localhost:8888/proxy/services/_summary_llm/agents/agent-1", "@preset/summary"),
+])
+async def test_title_request_disables_reasoning_on_summary_upstream(base_url, model) -> None:
+    async def complete(**kwargs):
+        # The observed upstream spends the entire short allowance on
+        # reasoning unless the title request explicitly disables it.
+        if kwargs.get("extra_body", {}).get("reasoning", {}).get("enabled") is False:
+            return _response("Weather in Bucharest Today")
+        return _response("")
+
+    create = AsyncMock(side_effect=complete)
+    client = SimpleNamespace(
+        base_url=base_url,
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
+    title = await generate_session_title(
+        llm_client=client, model=model,
+        user_message="What is the weather in Bucharest today?",
+    )
+    assert title == "Weather in Bucharest Today"
+    assert create.await_count == 1
+    assert create.await_args.kwargs["max_tokens"] == 32
+
+
+async def test_empty_title_response_logs_finish_reason(caplog) -> None:
+    response = _response("")
+    response.choices[0].finish_reason = "length"
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=AsyncMock(return_value=response),
+    )))
+    title = await generate_session_title(
+        llm_client=client, model="reasoning-model", user_message="Weather today",
+    )
+    assert title is None
+    assert "returned no title" in caplog.text
+    assert "finish_reason=length" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_generate_session_title_retries_without_optional_params() -> None:
     create = AsyncMock(

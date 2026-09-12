@@ -66,6 +66,10 @@ export interface AgentChatMessage {
   status: AgentChatMessageStatus;
   toolCalls?: AgentChatToolCallInfo[];
   reasoning?: string;
+  /** Provider-reported reasoning usage for this iteration, when available. */
+  reasoningTokens?: number;
+  /** Incoming reasoning chunks counted live, before provider usage arrives. */
+  reasoningDeltaCount?: number;
   systemKind?: AgentChatSystemKind;
   systemMeta?: Record<string, unknown>;
   errorInfo?: AgentChatErrorInfo;

@@ -343,6 +343,19 @@ def _extract_cached_tokens(usage: Any) -> int:
     return 0
 
 
+def _extract_reasoning_tokens(usage: Any) -> int | None:
+    """Return the provider's reasoning count without estimating from text."""
+    details = getattr(usage, "completion_tokens_details", None)
+    value = (
+        details.get("reasoning_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "reasoning_tokens", None)
+    )
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def extract_status_code(exc: Exception) -> int | None:
     """Extract HTTP status code from OpenAI/httpx exceptions."""
     # Check for openai.APIStatusError.status_code
@@ -1277,6 +1290,7 @@ async def call_llm_streaming_inner(
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    reasoning_tokens: int | None = None
 
     # Stale stream detection: wall-clock timestamp of the last real
     # streaming chunk.  If no real chunk arrives within the timeout,
@@ -1405,6 +1419,26 @@ async def call_llm_streaming_inner(
                 await _close_stream()
                 interrupted = True
                 break
+            reported_reasoning_tokens = _extract_reasoning_tokens(
+                getattr(chunk, "usage", None),
+            )
+            if (
+                reported_reasoning_tokens is not None
+                and reported_reasoning_tokens > 0
+                and reported_reasoning_tokens != reasoning_tokens
+            ):
+                reasoning_tokens = reported_reasoning_tokens
+                await store.emit_event(
+                    session.id,
+                    EventType.LLM_DELTA,
+                    _stamp_turn_meta(
+                        {"reasoning_tokens": reasoning_tokens, "iteration": iteration},
+                        iteration=iteration,
+                        turn_id=turn_id,
+                        iteration_index=iteration_index,
+                    ),
+                )
+
             if not chunk.choices:
                 # Final chunk may carry usage without choices.
                 if hasattr(chunk, "usage") and chunk.usage:
@@ -1643,6 +1677,10 @@ async def call_llm_streaming_inner(
         "cache_read_tokens": cache_read_tokens,
         "finish_reason": "interrupted" if interrupted else (finish_reason or "stop"),
     }
+    if reasoning_tokens is not None:
+        usage_data["reasoning_tokens"] = reasoning_tokens
+    if reasoning_parts:
+        usage_data["reasoning_delta_count"] = len(reasoning_parts)
     if interrupted and stop_reason is not None:
         usage_data["stream_error_reason"] = stop_reason
     if partial_tool_names:
@@ -1794,6 +1832,9 @@ async def call_llm_non_streaming(
         "cache_read_tokens": cache_read_tokens,
         "finish_reason": choice.finish_reason,
     }
+    reasoning_tokens = _extract_reasoning_tokens(usage)
+    if reasoning_tokens is not None:
+        usage_data["reasoning_tokens"] = reasoning_tokens
 
     # Flatten first: content may still be a list of blocks here (the loop
     # coerces it to text only after this returns), and is_upstream_error_sentinel

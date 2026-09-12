@@ -303,7 +303,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent?.match(/Thinking…/g)).toHaveLength(1);
+    expect(dom.textContent?.match(/Thinking\.\.\./g)).toHaveLength(1);
     expect(dom.textContent).not.toContain("Working on it");
   });
 });

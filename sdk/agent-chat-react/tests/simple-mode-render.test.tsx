@@ -15,6 +15,8 @@ import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-con
 import { ChatThread } from "../src/components/chat/chat-thread";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { AgentChatAdapter, ChatMessage } from "../src/types";
+import { applyAgentChatEvent, createInitialAgentChatState } from "../src/runtime/reducer";
+import { streamedIterationEvents } from "./streamed-iteration-fixture";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -119,6 +121,140 @@ const noop = () => Promise.resolve();
 
 
 describe("Simple mode ChatThread rendering", () => {
+  it("shows the saved count for an interrupted reasoning row after history replay", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.thinking", eventId: 1,
+      data: {
+        reasoning: "Interrupted private reasoning",
+        reasoning_delta_count: 293, turn_id: "turn-1", iteration_index: 2,
+      },
+    });
+    state = applyAgentChatEvent(state, { type: "session.pause", eventId: 2, data: {} });
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1" messages={state.messages} isRunning={state.isRunning}
+        terminal={false} onSend={noop} onStop={noop} viewMode="simple"
+      />,
+    );
+    expect(dom.textContent).toContain("Thought · 293 tokens");
+    expect(dom.innerHTML).not.toContain("Interrupted private reasoning");
+    expect(dom.textContent).not.toContain("Thinking...");
+  });
+
+  it("shows only the current thinking row after tools finish before the reasoning snapshot", () => {
+    const state = streamedIterationEvents().reduce(applyAgentChatEvent, createInitialAgentChatState());
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1" messages={state.messages} isRunning={state.isRunning}
+        terminal={false} onSend={noop} onStop={noop} viewMode="simple"
+      />,
+    );
+    expect(dom.textContent?.match(/Thinking\.\.\./g)).toHaveLength(1);
+    expect(dom.textContent).toContain("Thinking... 232 tokens");
+    expect(dom.textContent).not.toContain("Thinking... 34 tokens");
+    expect(dom.textContent).not.toContain("Thinking... 143 tokens");
+  });
+
+  it("limits stale streaming messages across assistant groups to one active status", () => {
+    const messages: ChatMessage[] = [
+      ...[34, 143, 232].map((count, index): ChatMessage => ({
+        id: `stale-${index}`, role: "assistant", content: "",
+        reasoningTokens: count, createdAt: new Date(), status: "streaming",
+      })),
+    ];
+    // System markers split assistant groups. A trailing marker must
+    // still allow the latest assistant to own the live status.
+    const marker = (id: string): ChatMessage => ({
+      id, role: "system", content: "Skill loaded", systemKind: "skill_invoked",
+      status: "complete", createdAt: new Date(),
+    });
+    messages.splice(1, 0, marker("marker-1"));
+    messages.push(marker("marker-2"));
+    const thread = (isRunning: boolean) => (
+      <ChatThread
+        sessionId="s-1" messages={messages} isRunning={isRunning}
+        terminal={false} onSend={noop} onStop={noop} viewMode="simple"
+      />
+    );
+    const dom = mount(thread(true));
+    expect(dom.textContent?.match(/Thinking\.\.\./g)).toHaveLength(1);
+    expect(dom.textContent).toContain("Thinking... 232 tokens");
+    expect(dom.textContent).toContain("Thought · 34 tokens");
+    expect(dom.textContent).toContain("Thought · 143 tokens");
+    rerender(thread(false));
+    expect(dom.textContent).not.toContain("Thinking...");
+  });
+
+  it("replaces streamed reasoning with a growing counter and reconciles final usage", () => {
+    let state = createInitialAgentChatState();
+    const thread = () => (
+      <ChatThread
+        sessionId="s-1"
+        messages={state.messages}
+        isRunning={state.isRunning}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="simple"
+      />
+    );
+    const dom = mount(thread());
+    let eventId = 0;
+    let received = 0;
+    for (const [total, label] of [[100, "100"], [500, "500"], [1200, "1.2k"], [2500, "2.5k"]] as const) {
+      while (received < total) {
+        received++;
+        state = applyAgentChatEvent(state, {
+          type: "llm.delta", eventId: ++eventId,
+          data: { reasoning: "Private reasoning. ", turn_id: "t-1", iteration_index: 0 },
+        });
+      }
+      rerender(thread());
+      expect(dom.textContent).toContain(`Thinking... ${label} tokens`);
+      expect(dom.innerHTML).not.toContain("Private reasoning");
+      expect(dom.textContent?.match(/Thinking\.\.\./g)).toHaveLength(1);
+      expect(dom.textContent).not.toContain("Solving");
+    }
+    state = applyAgentChatEvent(state, {
+      type: "llm.thinking", eventId: ++eventId,
+      data: { reasoning: state.messages[0]?.reasoning, turn_id: "t-1", iteration_index: 0 },
+    });
+    rerender(thread());
+    expect(dom.textContent).toContain("Thinking... 2.5k tokens");
+
+    state = applyAgentChatEvent(state, {
+      type: "llm.delta", eventId: ++eventId,
+      data: { reasoning_tokens: 2600, turn_id: "t-1", iteration_index: 0 },
+    });
+    rerender(thread());
+    expect(dom.textContent).toContain("Thinking... 2.6k tokens");
+    expect(dom.innerHTML).not.toContain("Private reasoning");
+  });
+
+  it("keeps the reasoning trace available in Expert mode", () => {
+    const dom = mount(
+      <ChatThread
+        sessionId="s-1"
+        messages={[{
+          id: "m-1", role: "assistant", content: "",
+          reasoning: "Expert reasoning trace.", reasoningDeltaCount: 100,
+          createdAt: new Date(), status: "complete",
+        }]}
+        isRunning={false}
+        terminal={false}
+        onSend={noop}
+        onStop={noop}
+        viewMode="expert"
+      />,
+    );
+    const trigger = Array.from(dom.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Thought for"),
+    );
+    expect(trigger).toBeDefined();
+    act(() => trigger!.click());
+    expect(dom.textContent).toContain("Expert reasoning trace.");
+  });
+
   for (const viewMode of ["simple", "expert"] as const) {
     it(`${viewMode}: keeps one live status as reasoning starts and ends`, () => {
       const message: ChatMessage = {
@@ -140,7 +276,7 @@ describe("Simple mode ChatThread rendering", () => {
         />
       );
       const dom = mount(thread([message]));
-      expect(dom.textContent?.match(/Thinking…|Working on it\.\.\./g)).toHaveLength(1);
+      expect(dom.textContent?.match(/Thinking(?:…|\.\.\.)|Working on it\.\.\./g)).toHaveLength(1);
 
       const reasoning = { ...message, reasoning: "Let me work through this." };
       rerender(thread([reasoning]));
@@ -806,13 +942,9 @@ describe("Simple mode ChatThread rendering", () => {
     expect(dom.textContent).toContain("Writing…");
   });
 
-  it("renders skill-only iterations so reasoning stays accessible", () => {
-    // Previously these iterations were hidden outright, leaving Simple
-    // mode showing only "Working on it..." while the model was producing
-    // useful reasoning + a meaningful iteration summary. We now surface
-    // them as a normal collapsible row so the user can read the
-    // reasoning on demand — same access as Expert mode's "Thought
-    // for a few seconds" entries.
+  it("renders skill-only iterations with a compact thinking status", () => {
+    // Skill summaries stay visible while the footer covers the gap
+    // before the next iteration starts.
     const messages: ChatMessage[] = [
       {
         id: "user-1",
@@ -858,6 +990,6 @@ describe("Simple mode ChatThread rendering", () => {
     // The running indicator also still appears below — the iteration is
     // complete but the session is still running, and the live reasoning
     // stream derives the "solving" orb activity.
-    expect(dom.textContent).toContain("Solving…");
+    expect(dom.textContent).toContain("Thinking...");
   });
 });

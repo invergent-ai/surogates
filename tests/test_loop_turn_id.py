@@ -241,7 +241,8 @@ async def test_llm_thinking_payload_carries_turn_id_and_iteration_index(
                     "tool_calls": None,
                 },
                 {"model": "test-model", "finish_reason": "stop",
-                 "input_tokens": 1, "output_tokens": 2},
+                 "input_tokens": 1, "output_tokens": 2,
+                 "reasoning_tokens": 300, "reasoning_delta_count": 293},
             ),
         ],
         monkeypatch=monkeypatch,
@@ -252,6 +253,8 @@ async def test_llm_thinking_payload_carries_turn_id_and_iteration_index(
     payload = thinking_emits[0]
     assert "turn_id" in payload
     assert payload["iteration_index"] == 0
+    assert payload["reasoning_tokens"] == 300
+    assert payload["reasoning_delta_count"] == 293
 
 
 @pytest.mark.asyncio

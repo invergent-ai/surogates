@@ -1979,6 +1979,11 @@ class AgentHarness(
                         "reasoning": reasoning_text,
                         "turn_id": turn_id,
                         "iteration_index": turn_iteration_index,
+                        **{
+                            key: usage_data[key]
+                            for key in ("reasoning_tokens", "reasoning_delta_count")
+                            if isinstance(usage_data.get(key), int) and usage_data[key] > 0
+                        },
                     },
                 )
                 # Strip thinking blocks from content before storing.

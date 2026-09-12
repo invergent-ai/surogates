@@ -71,6 +71,7 @@ describe("applyAgentChatEvent", () => {
       });
     }
     expect(state.messages[0]?.reasoning).toBe(reasoning);
+    expect(state.messages[0]?.reasoningDeltaCount).toBe(3);
 
     const next = applyAgentChatEvent(state, {
       type: "llm.thinking",
@@ -80,6 +81,62 @@ describe("applyAgentChatEvent", () => {
 
     expect(next.messages).toHaveLength(1);
     expect(next.messages[0]?.reasoning).toBe(reasoning);
+    expect(next.messages[0]?.reasoningDeltaCount).toBe(3);
+  });
+
+  it("keeps the live stream count separate from reported reasoning totals", () => {
+    let state = createInitialAgentChatState();
+    for (let eventId = 1; eventId <= 5; eventId++) {
+      state = applyAgentChatEvent(state, {
+        type: "llm.delta", eventId,
+        data: { reasoning: "Many tokens in one chunk. " },
+      });
+    }
+    expect(state.messages[0]?.reasoningTokens).toBeUndefined();
+    expect(state.messages[0]?.reasoningDeltaCount).toBe(5);
+    for (const reasoning_tokens of [100, 500, 1200, 1200, 2500]) {
+      state = applyAgentChatEvent(state, {
+        type: "llm.delta", eventId: 10,
+        data: { reasoning_tokens },
+      });
+      expect(state.messages).toHaveLength(1);
+      expect(state.messages[0]?.reasoningTokens).toBe(reasoning_tokens);
+      expect(state.messages[0]?.reasoningDeltaCount).toBe(5);
+    }
+    state = applyAgentChatEvent(state, {
+      type: "llm.thinking", eventId: 11,
+      data: { reasoning: state.messages[0]?.reasoning },
+    });
+    expect(state.messages[0]?.reasoningTokens).toBe(2500);
+    state = applyAgentChatEvent(state, {
+      type: "llm.response", eventId: 12,
+      data: { message: { content: "Done" }, reasoning_tokens: 2600 },
+    });
+    expect(state.messages[0]?.reasoningTokens).toBe(2600);
+  });
+
+  it("preserves reported reasoning usage on replay without streamed deltas", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.thinking", eventId: 1,
+      data: { reasoning: "Historical trace" },
+    });
+    state = applyAgentChatEvent(state, {
+      type: "llm.response", eventId: 2,
+      data: { message: { content: "Done" }, reasoning_tokens: 1200 },
+    });
+    expect(state.messages[0]?.reasoningTokens).toBe(1200);
+  });
+
+  it("restores snapshot counts without adding them to live deltas", () => {
+    let state = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "llm.delta", eventId: 1, data: { reasoning: "Partial" },
+    });
+    state = applyAgentChatEvent(state, {
+      type: "llm.thinking", eventId: 2,
+      data: { reasoning: "Partial", reasoning_delta_count: 293, reasoning_tokens: 300 },
+    });
+    expect(state.messages[0]?.reasoningDeltaCount).toBe(293);
+    expect(state.messages[0]?.reasoningTokens).toBe(300);
   });
 
   it("keeps running true across harness.crash and exposes retry indicator", () => {
