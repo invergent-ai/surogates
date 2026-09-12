@@ -291,7 +291,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
     expect(chips).toContain("Three a week");
   });
 
-  it("still shows 'Working on it' when the running tool is NOT an ask", () => {
+  it("shows the inline tool status while a tool runs in Simple mode", () => {
     const dom = mount(
       <ChatThread
         sessionId="s-1"
@@ -303,6 +303,7 @@ describe("Working-on-it indicator vs. awaiting user input", () => {
         viewMode="simple"
       />,
     );
-    expect(dom.textContent).toContain("Working on it");
+    expect(dom.textContent?.match(/Thinking…/g)).toHaveLength(1);
+    expect(dom.textContent).not.toContain("Working on it");
   });
 });

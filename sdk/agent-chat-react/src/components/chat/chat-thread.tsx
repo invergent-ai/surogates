@@ -1152,6 +1152,34 @@ function isIterationLive(message: ChatMessageType): boolean {
   return message.status === "streaming";
 }
 
+function hasInlineRunningIndicator(
+  messages: ChatMessageType[],
+  viewMode: "simple" | "expert",
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user") return false;
+    if (message.role !== "assistant") continue;
+
+    if (viewMode === "simple") {
+      // The question widget owns ask iterations. Text-only tails with
+      // content render as the final answer instead of an iteration row.
+      if (message.toolCalls?.some((tc) => tc.toolName === "ask_user_question")) {
+        return false;
+      }
+      return isIterationLive(message)
+        && (!!message.toolCalls?.length || !message.content);
+    }
+
+    // Use the timeline's streaming rules, including its treatment of
+    // trailing system markers and content that repeats the reasoning.
+    return messageToEntries(message, i === messages.length - 1, {}).some(
+      (entry) => entry.kind === "reasoning" && entry.isStreaming,
+    );
+  }
+  return false;
+}
+
 /**
  * Shimmer label for a live iteration. Derives a useful name from
  * currently-running tools so the user sees "Running List Files…"
@@ -1966,10 +1994,14 @@ export function ChatThread({
       ),
     [messages, viewMode],
   );
-  // Suppress the running shimmer while parked on a pending
-  // ask_user_question — the agent is waiting on the user, not working.
+  const inlineRunningIndicator = useMemo(
+    () => hasInlineRunningIndicator(messages, viewMode),
+    [messages, viewMode],
+  );
+  // Keep the footer for gaps where no message already shows a live
+  // status. A pending question also suppresses it while awaiting input.
   const showWorkingOnIt =
-    useDelayedRunningIndicator(isRunning) && !awaitingInput;
+    useDelayedRunningIndicator(isRunning) && !awaitingInput && !inlineRunningIndicator;
   // A conversational ask leaves the composer open — it IS the answer
   // field, and ``awaitingAnswer`` keeps Enter from stopping the session
   // (isRunning stays true while the agent is parked). A multi-question

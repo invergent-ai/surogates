@@ -119,6 +119,78 @@ const noop = () => Promise.resolve();
 
 
 describe("Simple mode ChatThread rendering", () => {
+  for (const viewMode of ["simple", "expert"] as const) {
+    it(`${viewMode}: keeps one live status as reasoning starts and ends`, () => {
+      const message: ChatMessage = {
+        id: "reasoning-1",
+        role: "assistant",
+        content: "",
+        createdAt: new Date(),
+        status: "streaming",
+      };
+      const thread = (messages: ChatMessage[], isRunning = true) => (
+        <ChatThread
+          sessionId="s-1"
+          messages={messages}
+          isRunning={isRunning}
+          terminal={false}
+          onSend={noop}
+          onStop={noop}
+          viewMode={viewMode}
+        />
+      );
+      const dom = mount(thread([message]));
+      expect(dom.textContent?.match(/Thinking…|Working on it\.\.\./g)).toHaveLength(1);
+
+      const reasoning = { ...message, reasoning: "Let me work through this." };
+      rerender(thread([reasoning]));
+      expect(dom.textContent?.match(/Thinking(?:…|\.\.\.)/g)).toHaveLength(1);
+      expect(dom.textContent).not.toContain("Solving");
+      expect(dom.textContent).not.toContain("Working on it");
+
+      // Once the reasoning row finishes, the footer covers the gap.
+      const complete = { ...reasoning, status: "complete" as const };
+      rerender(thread([complete]));
+      expect(dom.textContent?.match(/Working on it/g)).toHaveLength(1);
+      expect(dom.textContent).not.toMatch(/Thinking(?:…|\.\.\.)/);
+
+      rerender(thread([complete], false));
+      expect(dom.textContent).not.toContain("Working on it");
+    });
+
+    it(`${viewMode}: keeps one live status with a trailing system marker`, () => {
+      const dom = mount(
+        <ChatThread
+          sessionId="s-1"
+          messages={[
+            {
+              id: "reasoning-1",
+              role: "assistant",
+              content: "",
+              reasoning: "Let me work through this.",
+              createdAt: new Date(),
+              status: "streaming",
+            },
+            {
+              id: "skill-1",
+              role: "system",
+              content: "Loaded skill",
+              systemKind: "skill_invoked",
+              createdAt: new Date(),
+              status: "complete",
+            },
+          ]}
+          isRunning={true}
+          onSend={noop}
+          onStop={noop}
+          viewMode={viewMode}
+          terminal={false}
+        />,
+      );
+      expect(dom.textContent?.match(/Thinking(?:…|\.\.\.)|Solving…/g)).toHaveLength(1);
+    });
+  }
+
   it("shows the iteration summary line, hides per-tool entries by default, shows the recap", () => {
     const messages = [
       // Iteration 0 with tool calls; iteration summary attached.
