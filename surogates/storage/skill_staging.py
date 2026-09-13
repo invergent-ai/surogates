@@ -34,6 +34,7 @@ from uuid import UUID
 from surogates.storage.backend import StorageBackend
 from surogates.storage.keys import prefixed
 from surogates.storage.tenant import session_workspace_key
+from surogates.tools.builtin.skill_validation import GRAPH_FILE
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -300,12 +301,14 @@ class SkillStager:
 
         prefix = f"skills/{skill_name}/"
         paths = await bundle.list(prefix)
-        # ``SKILL.md`` lives in the bundle but doesn't need to land in
-        # the session workspace — the LLM has it inline already.  Any
-        # other path under ``skills/<name>/`` is supporting content.
+        # ``SKILL.md`` and ``SKILL.graph.json`` live in the bundle but don't need to
+        # land in the session workspace — the LLM has the body inline already and never
+        # reads the graph.  Any other path under ``skills/<name>/`` is supporting content.
         rel_paths = [
             p[len(prefix):] for p in paths
-            if p.startswith(prefix) and not p.endswith("/SKILL.md")
+            if p.startswith(prefix)
+            and not p.endswith("/SKILL.md")
+            and not p.endswith(f"/{GRAPH_FILE}")
         ]
         rel_paths = [r for r in rel_paths if r]
         if not rel_paths:

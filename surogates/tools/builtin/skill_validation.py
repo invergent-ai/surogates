@@ -22,6 +22,11 @@ MAX_SKILL_FILE_BYTES = 1_048_576  # 1 MiB per supporting file
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 ALLOWED_SUBDIRS = frozenset({"references", "templates", "scripts", "assets"})
 
+# The one root-level file besides SKILL.md: the procedure graph a
+# graph-backed skill's body is compiled from.  Authored in Studio, never
+# read by the runtime, so staging skips it like SKILL.md.
+GRAPH_FILE = "SKILL.graph.json"
+
 
 # ---------------------------------------------------------------------------
 # Validators — return error message or None
@@ -123,6 +128,9 @@ def validate_file_path(file_path: str) -> str | None:
 
     if ".." in normalized.parts:
         return "Path traversal ('..') is not allowed."
+
+    if normalized.parts == (GRAPH_FILE,):
+        return None
 
     if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
         allowed = ", ".join(sorted(ALLOWED_SUBDIRS))

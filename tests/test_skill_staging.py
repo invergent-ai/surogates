@@ -131,3 +131,34 @@ class TestConcurrentStaging:
         )
         assert results[0] == results[1]
         assert content_writes == 2  # SKILL.md + scripts/a.py, copied once
+
+
+class _FakeBundle:
+    def __init__(self, files: dict[str, bytes]):
+        self._files = files
+
+    async def list(self, prefix: str) -> list[str]:
+        return [p for p in self._files if p.startswith(prefix)]
+
+    async def read_bytes(self, path: str) -> bytes:
+        return self._files[path]
+
+
+class TestStageFromBundle:
+    async def test_skips_skill_md_and_graph_file(
+        self, stager: SkillStager, backend: LocalBackend,
+    ):
+        await backend.create_bucket(STORAGE_BUCKET)
+        bundle = _FakeBundle({
+            "skills/proc/SKILL.md": b"body",
+            "skills/proc/SKILL.graph.json": b"{}",
+            "skills/proc/references/notes.md": b"notes",
+        })
+        session_id = uuid4()
+
+        await stager.stage_from_bundle(session_id, "proc", bundle)
+
+        keys = await backend.list_keys(STORAGE_BUCKET, prefix=f"{session_id}/.skills/")
+        assert session_workspace_key(session_id, ".skills/proc/references/notes.md") in keys
+        assert session_workspace_key(session_id, ".skills/proc/SKILL.md") not in keys
+        assert session_workspace_key(session_id, ".skills/proc/SKILL.graph.json") not in keys
