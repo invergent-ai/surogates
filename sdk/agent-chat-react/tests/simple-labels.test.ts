@@ -11,7 +11,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  deriveSingleToolLabel,
   extractToolDetail,
+  sameToolGroupLabel,
   skillViewLabel,
   toolRowLabel,
 } from "../src/components/chat/simple-labels";
@@ -99,6 +101,58 @@ describe("arguments are model output, not a contract", () => {
   it("survives a non-string path", () => {
     expect(toolRowLabel(call("patch", { path: { nested: true } }))).toBe(
       "Edited a file",
+    );
+  });
+});
+
+describe("knowledge base tools", () => {
+  it("names the search query", () => {
+    const tc = call("kb_search_pages", { query: "franciza incendiu" });
+    expect(toolRowLabel(tc)).toBe('Searched the knowledge base for "franciza incendiu"');
+    expect(deriveSingleToolLabel(tc)).toBe("Knowledge base search · franciza incendiu");
+  });
+
+  it("names a document lookup differently", () => {
+    expect(
+      toolRowLabel(call("kb_search_pages", { query: "CG-LOC-2024", mode: "documents" })),
+    ).toBe('Looked up document "CG-LOC-2024"');
+  });
+
+  it("names the page read and its page span", () => {
+    expect(
+      toolRowLabel(call("kb_read_page", { path: "sources/conditii-generale.json", pages: "7-11" })),
+    ).toBe("Read conditii-generale, pages 7-11");
+    expect(toolRowLabel(call("kb_read_page", { path: "concepts/franciza.md" }))).toBe(
+      "Read franciza",
+    );
+  });
+
+  it("counts a run of the same tool in words", () => {
+    expect(sameToolGroupLabel("kb_read_page", 2)).toBe("Read 2 knowledge base pages");
+    expect(sameToolGroupLabel("kb_search_pages", 3)).toBe("Ran 3 knowledge base searches");
+    expect(sameToolGroupLabel("merge_experiment", 2)).toBe("Merge experiment × 2");
+  });
+});
+
+describe("other one-liner tools", () => {
+  it("labels web_crawl by the url it takes", () => {
+    expect(toolRowLabel(call("web_crawl", { url: "https://www.example.com/docs" }))).toBe(
+      "Crawled example.com",
+    );
+  });
+
+  it("labels session_search by its query", () => {
+    expect(toolRowLabel(call("session_search", { query: "invoice" }))).toBe(
+      'Searched session for "invoice"',
+    );
+  });
+
+  it("labels vision_analyze by the image, never a data URL", () => {
+    expect(toolRowLabel(call("vision_analyze", { image: "shots/home.png" }))).toBe(
+      "Looked at home.png",
+    );
+    expect(toolRowLabel(call("vision_analyze", { image: "data:image/png;base64,AAAA" }))).toBe(
+      "Looked at an image",
     );
   });
 });
