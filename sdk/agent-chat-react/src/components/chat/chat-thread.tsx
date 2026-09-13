@@ -57,6 +57,7 @@ import {
   cancelledToolLabel,
   deriveSingleToolLabel,
   extractToolDetail,
+  sameToolGroupLabel,
   skillViewLabel,
   toolRowLabel,
 } from "./simple-labels";
@@ -84,10 +85,12 @@ import {
   ChevronRight,
   CircleCheckIcon,
   ClockIcon,
+  EyeIcon,
   FileEditIcon,
   FileTextIcon,
   FolderIcon,
   GlobeIcon,
+  LibraryIcon,
   ListIcon,
   MessageSquareIcon,
   PenLineIcon,
@@ -1113,8 +1116,7 @@ function deriveIterationLabel(message: ChatMessageType): string | null {
   const firstName = calls[0]!.toolName;
   const allSame = calls.every((tc) => tc.toolName === firstName);
   if (allSame) {
-    const human = cancelledToolLabel(firstName);
-    return `${human} × ${calls.length}`;
+    return sameToolGroupLabel(firstName, calls.length);
   }
   return `Used ${calls.length} tools`;
 }
@@ -1247,6 +1249,10 @@ const _TOOL_ROW_ICON: Record<string, LucideIcon> = {
   research_outline: ListIcon,
   run_coding_agent: BotIcon,
   code_run: BotIcon,
+  kb_search_pages: LibraryIcon,
+  kb_list_pages: LibraryIcon,
+  kb_read_page: LibraryIcon,
+  vision_analyze: EyeIcon,
 };
 
 function _toolRowIcon(toolName: string): LucideIcon {

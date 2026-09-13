@@ -66,7 +66,10 @@ export function cancelledToolLabel(toolName: string): string {
     idea_tree: "Idea tree",
     dispatch_experiments: "Dispatch experiments",
     merge_experiment: "Merge experiment",
-
+    kb_search_pages: "Knowledge base search",
+    kb_list_pages: "Knowledge base index",
+    kb_read_page: "Knowledge base page",
+    vision_analyze: "Image analysis",
   };
   if (map[toolName]) return map[toolName];
   // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
@@ -168,19 +171,28 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
       return code ? truncate(code.split("\n")[0] ?? "", 40) : null;
     }
     case "web_search":
-    case "web_crawl":
+    case "session_search":
       return stringArg("query");
+    // web_crawl takes a start ``url``, not a query.
+    case "web_crawl":
     case "web_extract": {
       const url = stringArg("url");
-      if (!url) return null;
-      // Hostname is much more readable in a one-line chip than the
-      // full URL; falls back to the raw value for unparseable inputs
-      // (file://, data:, etc.).
-      try {
-        return new URL(url).hostname.replace(/^www\./, "");
-      } catch {
-        return truncate(url, 40);
-      }
+      return url ? hostOf(url) : null;
+    }
+    case "kb_search_pages": {
+      const query = stringArg("query");
+      return query ? truncate(query, 60) : null;
+    }
+    case "kb_read_page": {
+      const path = stringArg("path");
+      if (!path) return null;
+      const pages = stringArg("pages");
+      return pages ? `${kbPageName(path)} · pages ${pages}` : kbPageName(path);
+    }
+    case "vision_analyze": {
+      const image = stringArg("image");
+      // A data: URL is a base64 blob, not a name.
+      return image && !image.startsWith("data:") ? lastPathSegment(image) : null;
     }
     case "skill_view":
     case "skill_manage":
@@ -218,14 +230,7 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
         const title = stringArg("title");
         if (title) return truncate(title, 60);
         const url = stringArg("url");
-        if (url) {
-          try {
-            return new URL(url).hostname.replace(/^www\./, "");
-          } catch {
-            return truncate(url, 40);
-          }
-        }
-        return null;
+        return url ? hostOf(url) : null;
       }
       if (action === "retrieve") {
         return stringArg("query");
@@ -266,6 +271,43 @@ function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/** Hostname reads better in one line than the full URL; unparseable
+ * inputs (file://, data:, …) fall back to the raw value. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "") || truncate(url, 40);
+  } catch {
+    return truncate(url, 40);
+  }
+}
+
+/** "sources/conditii-generale.json" → "conditii-generale". */
+function kbPageName(path: string): string {
+  return lastPathSegment(path).replace(/\.(md|json)$/, "");
+}
+
+const _PLURAL_LABEL: Record<string, (n: number) => string> = {
+  read_file: (n) => `Read ${n} files`,
+  write_file: (n) => `Wrote ${n} files`,
+  patch: (n) => `Edited ${n} files`,
+  search_files: (n) => `Ran ${n} file searches`,
+  terminal: (n) => `Ran ${n} commands`,
+  web_search: (n) => `Ran ${n} web searches`,
+  web_extract: (n) => `Fetched ${n} pages`,
+  session_search: (n) => `Ran ${n} session searches`,
+  kb_search_pages: (n) => `Ran ${n} knowledge base searches`,
+  kb_read_page: (n) => `Read ${n} knowledge base pages`,
+  vision_analyze: (n) => `Looked at ${n} images`,
+  consult_expert: (n) => `Consulted ${n} experts`,
+  delegate_task: (n) => `Delegated ${n} tasks`,
+};
+
+/** Header for an iteration whose calls all use one tool. */
+export function sameToolGroupLabel(toolName: string, count: number): string {
+  return _PLURAL_LABEL[toolName]?.(count)
+    ?? `${cancelledToolLabel(toolName)} × ${count}`;
+}
+
 /**
  * Verb-first prose line for a tool call ("Edited landing.html",
  * "Read the frontend-design skill"). Falls back to the human tool
@@ -304,7 +346,26 @@ export function toolRowLabel(tc: ToolCallInfo): string {
     case "web_search":
       return detail ? `Searched the web for "${detail}"` : "Searched the web";
     case "web_crawl":
-      return detail ? `Crawled "${detail}"` : "Crawled the web";
+      return detail ? `Crawled ${detail}` : "Crawled a site";
+    case "kb_search_pages": {
+      if (!detail) return "Searched the knowledge base";
+      return stringField(parseArgs(tc.args), "mode") === "documents"
+        ? `Looked up document "${detail}"`
+        : `Searched the knowledge base for "${detail}"`;
+    }
+    case "kb_list_pages":
+      return "Browsed the knowledge base index";
+    case "kb_read_page": {
+      const args = parseArgs<Record<string, unknown>>(tc.args);
+      const path = stringField(args, "path");
+      if (!path) return "Read a knowledge base page";
+      const pages = stringField(args, "pages");
+      return pages
+        ? `Read ${kbPageName(path)}, pages ${pages}`
+        : `Read ${kbPageName(path)}`;
+    }
+    case "vision_analyze":
+      return detail ? `Looked at ${detail}` : "Looked at an image";
     case "web_extract":
       return detail ? `Fetched ${detail}` : "Fetched a page";
     case "session_search":

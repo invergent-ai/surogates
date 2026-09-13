@@ -235,7 +235,7 @@ describe("IterationGroup", () => {
     expect(trigger).not.toBeNull();
   });
 
-  it("collapses multiple same-tool runs into a 'Tool × N' label", () => {
+  it("collapses multiple same-tool runs into a counted label", () => {
     const message = buildMessage({
       turnId: "t-1",
       iterationIndex: 0,
@@ -252,7 +252,7 @@ describe("IterationGroup", () => {
         artifactFallbacks={{}}
       />,
     );
-    expect(dom.textContent).toMatch(/Patch.+×.+3/);
+    expect(dom.textContent).toContain("Edited 3 files");
   });
 
   it("falls back to 'Used N tools' for mixed tool batches without a summary", () => {
