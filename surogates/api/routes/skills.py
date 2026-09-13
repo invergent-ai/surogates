@@ -590,16 +590,19 @@ async def view_skill(
         existing = await ts.skill_exists(name)
         if existing:
             files = await ts.list_skill_files(existing["key_prefix"])
-            detail.linked_files = [f for f in files if f != "SKILL.md"]
+            from surogates.tools.builtin.skill_validation import GRAPH_FILE
+            detail.linked_files = [f for f in files if f != "SKILL.md" and f != GRAPH_FILE]
     elif bundle is not None:
         # Bundle-backed platform skill: enumerate the bundle's
-        # ``skills/{name}/`` prefix.  SKILL.md is excluded so the list
-        # contains only the auxiliary files that get auto-staged.
+        # ``skills/{name}/`` prefix.  SKILL.md and SKILL.graph.json are excluded
+        # so the list contains only the auxiliary files that get auto-staged.
+        from surogates.tools.builtin.skill_validation import GRAPH_FILE
         prefix = f"skills/{name}/"
         bundle_paths = await bundle.list(prefix)
         detail.linked_files = sorted(
             p[len(prefix):] for p in bundle_paths
             if p.startswith(prefix) and not p.endswith("/SKILL.md")
+            and not p.endswith(f"/{GRAPH_FILE}")
             and p != prefix
         )
 
@@ -651,6 +654,13 @@ async def read_skill_file(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Path traversal ('..') is not allowed.",
+        )
+
+    from surogates.tools.builtin.skill_validation import GRAPH_FILE
+    if path == GRAPH_FILE:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"File '{GRAPH_FILE}' is not readable by agents.",
         )
 
     from surogates.tools.loader import SKILL_SOURCE_PLATFORM
