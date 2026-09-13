@@ -128,7 +128,6 @@ class SkillDef:
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
     # Conditional activation fields (parsed from frontmatter).
-    platforms: list[str] | None = None  # e.g. ["linux", "macos"]
     fallback_for_tools: list[str] | None = None  # show only when these tools are unavailable
     requires_tools: list[str] | None = None  # show only when these tools ARE available
     trigger: str | None = None  # trigger description
@@ -773,7 +772,7 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
     """Convert a :class:`~surogates.db.models.Skill` ORM row to a :class:`SkillDef`.
 
     DB columns supply the primary fields.  Optional activation and expert
-    fields (``trigger``, ``tags``, ``platforms``, ``expert_tools``, etc.)
+    fields (``trigger``, ``tags``, ``requires_tools``, ``expert_tools``, etc.)
     are stored in the ``config`` JSONB column.
 
     The ``content`` column may contain the full ``SKILL.md`` text
@@ -796,7 +795,6 @@ def _skill_from_db_row(row: Any, source: str) -> SkillDef:
             "type": row.type or "skill",
             "category": cfg.get("category"),
             "tags": cfg.get("tags"),
-            "platforms": cfg.get("platforms"),
             "fallback_for_tools": cfg.get("fallback_for_tools"),
             "requires_tools": cfg.get("requires_tools"),
             "trigger": cfg.get("trigger"),
@@ -1002,7 +1000,6 @@ def _build_skill_def(
         category=category,
         category_description=category_description,
         tags=parsed.get("tags"),
-        platforms=parsed.get("platforms"),
         fallback_for_tools=parsed.get("fallback_for_tools"),
         requires_tools=parsed.get("requires_tools"),
         trigger=parsed.get("trigger"),
@@ -1023,8 +1020,8 @@ def _parse_skill_frontmatter(
     """Extract YAML frontmatter and body from a skill file.
 
     Returns a dict with keys: ``name``, ``description``, ``content``,
-    and optional ``platforms``, ``fallback_for_tools``, ``requires_tools``,
-    ``trigger``, ``tags``.
+    and optional ``fallback_for_tools``, ``requires_tools``, ``trigger``,
+    ``tags``.
     """
     result: dict[str, Any] = {
         "name": fallback_name,
@@ -1046,7 +1043,7 @@ def _parse_skill_frontmatter(
             result["description"] = fm.get("description", "")
 
             # Conditional activation fields.
-            for key in ("platforms", "fallback_for_tools", "requires_tools"):
+            for key in ("fallback_for_tools", "requires_tools"):
                 val = fm.get(key)
                 if val:
                     if isinstance(val, str):

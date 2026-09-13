@@ -37,10 +37,9 @@ You are a code reviewer. When asked to review code:
 | `name` | string | yes | Unique skill name (lowercase, alphanumeric + hyphens) |
 | `description` | string | yes | Human-readable description |
 | `trigger` | string/list | no | Comma-separated keywords or phrases that activate a prompt-based skill or select an expert for routing |
-| `tools` | list | no | Tools the skill uses (for progressive disclosure) |
+| `tools` | list | no | For `type: expert`, the tools the expert may call in its mini-loop. On a regular skill it is author metadata only: the runtime does not read it. Use `requires_tools` to gate on tool availability. |
 | `type` | string | no | `skill` (default) or `expert` (see [Experts](../experts/index.md)) |
 | `tags` | list | no | Metadata tags for categorisation and discovery |
-| `platforms` | list | no | Restrict to specific platforms (e.g. `["linux", "macos"]`) |
 | `requires_tools` | list | no | Only activate when **all** listed tools are available |
 | `fallback_for_tools` | list | no | Only activate when **any** listed tool is unavailable |
 
