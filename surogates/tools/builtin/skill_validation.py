@@ -22,6 +22,16 @@ MAX_SKILL_FILE_BYTES = 1_048_576  # 1 MiB per supporting file
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 ALLOWED_SUBDIRS = frozenset({"references", "templates", "scripts", "assets"})
 
+# The one root-level file besides SKILL.md: the procedure graph a
+# graph-backed skill's body is compiled from.  Authored in Studio, never
+# read by the runtime, so staging skips it like SKILL.md.
+GRAPH_FILE = "SKILL.graph.json"
+
+
+def is_graph_file(path: str) -> bool:
+    """True if *path* names the root SKILL.graph.json (``./`` and ``/`` variants, any case)."""
+    return tuple(p.casefold() for p in Path(path.lstrip("/")).parts) == (GRAPH_FILE.casefold(),)
+
 
 # ---------------------------------------------------------------------------
 # Validators — return error message or None

@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -503,6 +504,20 @@ async def _skill_view_handler(
                 ensure_ascii=False,
             )
 
+        # The graph file is authored in Studio and never read by the agent.
+        # is_graph_file() only matches the root file (case-insensitive,
+        # "./" and "/" variants) -- a same-named file inside a subdirectory
+        # (e.g. "references/SKILL.graph.json") is an ordinary file.
+        if is_graph_file(file_path):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"File '{GRAPH_FILE}' is not readable by the agent.",
+                    "hint": "The graph file is used internally for visualization only.",
+                },
+                ensure_ascii=False,
+            )
+
         target_file = skill_dir / file_path
 
         # Security: Verify resolved path is still within skill directory
@@ -539,7 +554,7 @@ async def _skill_view_handler(
             }
 
             for f in skill_dir.rglob("*"):
-                if f.is_file() and f.name != "SKILL.md":
+                if f.is_file() and f.name != "SKILL.md" and f.name != GRAPH_FILE:
                     rel = str(f.relative_to(skill_dir))
                     if rel.startswith("references/"):
                         available_files["references"].append(rel)

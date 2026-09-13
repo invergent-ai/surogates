@@ -12,6 +12,7 @@ create/edit/delete skills.
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -249,3 +250,192 @@ async def test_sa_token_rejected_on_v1_skills_without_api_prefix(
     # bare service-account tokens off the `/v1/api/*` allow-list with a
     # 403 so the failure message names the prefix that *would* work.
     assert response.status_code == 403
+
+
+async def test_read_skill_file_rejects_graph_file(
+    app, client: AsyncClient, session_factory,
+):
+    """read_skill_file endpoint must reject SKILL.graph.json with 422."""
+    _write_builtin(app.state._test_bundle)
+    # Add the graph file to the bundle
+    app.state._test_bundle.add(
+        "skills/demo-skill/SKILL.graph.json",
+        '{"version": 1, "nodes": []}',
+    )
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-graph-file",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill/file",
+        params={"path": "SKILL.graph.json", "agent_id": AGENT_ID},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "graph" in response.json()["detail"].lower() or "not readable" in response.json()["detail"].lower()
+
+
+async def test_read_skill_file_rejects_graph_file_variant(
+    app, client: AsyncClient, session_factory,
+):
+    """read_skill_file endpoint must reject normalized variants like ./SKILL.graph.json."""
+    _write_builtin(app.state._test_bundle)
+    app.state._test_bundle.add(
+        "skills/demo-skill/SKILL.graph.json",
+        '{"version": 1, "nodes": []}',
+    )
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-graph-variant",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill/file",
+        params={"path": "./SKILL.graph.json", "agent_id": AGENT_ID},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "graph" in response.json()["detail"].lower() or "not readable" in response.json()["detail"].lower()
+
+
+async def test_read_skill_file_rejects_graph_file_leading_slash(
+    app, client: AsyncClient, session_factory,
+):
+    """read_skill_file endpoint must reject /SKILL.graph.json (leading slash) with 422."""
+    _write_builtin(app.state._test_bundle)
+    app.state._test_bundle.add(
+        "skills/demo-skill/SKILL.graph.json",
+        '{"version": 1, "nodes": []}',
+    )
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-graph-leading-slash",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill/file",
+        params={"path": "/SKILL.graph.json", "agent_id": AGENT_ID},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "graph" in response.json()["detail"].lower() or "not readable" in response.json()["detail"].lower()
+
+
+async def test_view_skill_bundle_backed_excludes_graph_file(
+    app, client: AsyncClient, session_factory,
+):
+    """view_skill on bundle-backed skill must not include SKILL.graph.json in linked_files."""
+    _write_builtin(app.state._test_bundle)
+    # Add graph file and a reference file
+    app.state._test_bundle.add(
+        "skills/demo-skill/SKILL.graph.json",
+        '{"version": 1, "nodes": []}',
+    )
+    app.state._test_bundle.add(
+        "skills/demo-skill/references/notes.md",
+        "Reference notes",
+    )
+
+    org_id = await create_org(session_factory)
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-view-bundle",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/demo-skill",
+        params={"agent_id": AGENT_ID},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    linked_files = body.get("linked_files", [])
+
+    # Flatten the linked_files list if it's a dict
+    if isinstance(linked_files, dict):
+        all_files = []
+        for file_list in linked_files.values():
+            all_files.extend(file_list)
+    else:
+        all_files = linked_files
+
+    # SKILL.graph.json must not appear, but references/notes.md should
+    assert not any("SKILL.graph.json" in f for f in all_files), \
+        f"SKILL.graph.json must not appear in linked_files, got: {all_files}"
+    assert "references/notes.md" in all_files or any("notes.md" in f for f in all_files)
+
+
+async def test_view_skill_tenant_bucket_excludes_graph_file(
+    app, client: AsyncClient, session_factory,
+):
+    """view_skill on the tenant-bucket branch must not list SKILL.graph.json.
+
+    The branch at ``surogates/api/routes/skills.py`` around
+    ``view_skill`` triggers for any ``skill_def.source`` other than
+    ``SKILL_SOURCE_PLATFORM``. An org-wide DB skill row (loaded as
+    ``source="org_db"`` by ``ResourceLoader.load_skills``) reaches it
+    without any per-user scope, so this SA-token request (``user_id``
+    is ``None`` on the harness side) is enough to exercise it -- no
+    JWT/user fixture needed. ``existing["key_prefix"]`` then comes
+    from ``TenantStorage.skill_exists``, which is looked up by name
+    against the tenant bucket independently of the DB row's content,
+    so the graph file and reference file are written straight into
+    that bucket via the same ``TenantStorage`` API the route reads.
+    """
+    from sqlalchemy import text
+
+    from surogates.storage.tenant import TenantStorage
+
+    app.state.settings.storage.bucket = "test-skills-sa-tenant-view"
+
+    org_id = await create_org(session_factory)
+
+    skill_content = (
+        "---\nname: tenant-skill\ndescription: Tenant bucket skill\n---\nBody\n"
+    )
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO skills (id, org_id, name, content, enabled) "
+                "VALUES (:id, :org_id, :name, :content, true)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "org_id": org_id,
+                "name": "tenant-skill",
+                "content": skill_content,
+            },
+        )
+        await db.commit()
+
+    ts = TenantStorage(
+        backend=app.state.storage,
+        org_id=org_id,
+        user_id=None,
+        bucket=app.state.settings.storage.bucket,
+    )
+    key_prefix = await ts.write_skill("tenant-skill", skill_content)
+    await ts.write_skill_file(key_prefix, "SKILL.graph.json", '{"nodes": []}')
+    await ts.write_skill_file(key_prefix, "references/a.md", "reference body")
+
+    sa = await issue_service_account_token(
+        session_factory, org_id, name="ops-chat-sa-tenant-view",
+    )
+
+    response = await client.get(
+        "/v1/api/skills/tenant-skill",
+        params={"agent_id": AGENT_ID},
+        headers={"Authorization": f"Bearer {sa.token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    linked_files = response.json()["linked_files"]
+    assert "references/a.md" in linked_files
+    assert "SKILL.graph.json" not in linked_files

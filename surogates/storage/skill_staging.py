@@ -34,6 +34,7 @@ from uuid import UUID
 from surogates.storage.backend import StorageBackend
 from surogates.storage.keys import prefixed
 from surogates.storage.tenant import session_workspace_key
+from surogates.tools.builtin.skill_validation import GRAPH_FILE
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -300,12 +301,22 @@ class SkillStager:
 
         prefix = f"skills/{skill_name}/"
         paths = await bundle.list(prefix)
-        # ``SKILL.md`` lives in the bundle but doesn't need to land in
-        # the session workspace — the LLM has it inline already.  Any
-        # other path under ``skills/<name>/`` is supporting content.
+        # ``SKILL.md`` and the root ``SKILL.graph.json`` live in the bundle
+        # but don't need to land in the session workspace — the LLM has the
+        # body inline already and never reads the graph.  Any other path
+        # under ``skills/<name>/`` is supporting content.  The graph-file
+        # exclusion is anchored at the root (exact match on
+        # ``{prefix}{GRAPH_FILE}``) rather than ``endswith``, so a
+        # same-named file inside a subdirectory (e.g.
+        # ``references/SKILL.graph.json``) stages normally.
+        # ``stage_from_object_store`` deliberately copies whole trees,
+        # including SKILL.md, so it was never a hiding path and is left
+        # alone.
         rel_paths = [
             p[len(prefix):] for p in paths
-            if p.startswith(prefix) and not p.endswith("/SKILL.md")
+            if p.startswith(prefix)
+            and not p.endswith("/SKILL.md")
+            and p != f"{prefix}{GRAPH_FILE}"
         ]
         rel_paths = [r for r in rel_paths if r]
         if not rel_paths:
