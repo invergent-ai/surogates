@@ -147,3 +147,44 @@ class TestSkillViewHidesGraphFile:
         # The graph file read must be rejected with an error
         assert payload["success"] is False
         assert "graph" in payload["error"].lower() or "not readable" in payload["error"].lower() or "not found" in payload["error"].lower()
+
+    async def test_graph_file_read_rejected_with_variant_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """skill_view with file_path='./SKILL.graph.json' (normalized variant) returns an error."""
+        skill_dir = tmp_path / "skills" / "proc"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: proc\ndescription: Procedure skill\n---\n# Proc\nbody\n",
+            encoding="utf-8",
+        )
+
+        (skill_dir / "SKILL.graph.json").write_text(
+            '{"version": 1, "nodes": []}',
+            encoding="utf-8",
+        )
+
+        disk_skill = SkillDef(
+            name="proc",
+            description="Procedure skill",
+            content="# Proc\nbody\n",
+            source=SKILL_SOURCE_PLATFORM,
+        )
+        _stub_load_all_skills(monkeypatch, [disk_skill])
+        monkeypatch.setattr(
+            skills_mod,
+            "_resolve_skill_dir",
+            lambda *a, **kw: skill_dir,
+        )
+
+        payload = json.loads(
+            await _skill_view_handler(
+                {"name": "proc", "file_path": "./SKILL.graph.json"},
+                tenant=_make_tenant(tmp_path),
+            )
+        )
+
+        # The normalized graph file read must also be rejected
+        assert payload["success"] is False
+        assert "graph" in payload["error"].lower() or "not readable" in payload["error"].lower() or "not found" in payload["error"].lower()

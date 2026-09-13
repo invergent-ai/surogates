@@ -657,7 +657,8 @@ async def read_skill_file(
         )
 
     from surogates.tools.builtin.skill_validation import GRAPH_FILE
-    if path == GRAPH_FILE:
+    # Use normalized path to catch variants like "./SKILL.graph.json".
+    if Path(path).parts == (GRAPH_FILE,):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"File '{GRAPH_FILE}' is not readable by agents.",

@@ -505,7 +505,8 @@ async def _skill_view_handler(
             )
 
         # The graph file is authored in Studio and never read by the agent.
-        if file_path == GRAPH_FILE:
+        # Use normalized path to catch variants like "./SKILL.graph.json".
+        if normalized_path.parts == (GRAPH_FILE,):
             return json.dumps(
                 {
                     "success": False,
