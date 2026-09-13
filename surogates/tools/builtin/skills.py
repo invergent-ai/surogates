@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from surogates.tools.builtin.skill_validation import GRAPH_FILE
+from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -505,8 +505,10 @@ async def _skill_view_handler(
             )
 
         # The graph file is authored in Studio and never read by the agent.
-        # Use normalized path to catch variants like "./SKILL.graph.json" or "/SKILL.graph.json".
-        if Path(file_path.lstrip("/")).parts == (GRAPH_FILE,):
+        # is_graph_file() only matches the root file (case-insensitive,
+        # "./" and "/" variants) -- a same-named file inside a subdirectory
+        # (e.g. "references/SKILL.graph.json") is an ordinary file.
+        if is_graph_file(file_path):
             return json.dumps(
                 {
                     "success": False,

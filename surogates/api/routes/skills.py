@@ -590,19 +590,23 @@ async def view_skill(
         existing = await ts.skill_exists(name)
         if existing:
             files = await ts.list_skill_files(existing["key_prefix"])
-            from surogates.tools.builtin.skill_validation import GRAPH_FILE
-            detail.linked_files = [f for f in files if f != "SKILL.md" and f != GRAPH_FILE]
+            from surogates.tools.builtin.skill_validation import is_graph_file
+            detail.linked_files = [f for f in files if f != "SKILL.md" and not is_graph_file(f)]
     elif bundle is not None:
         # Bundle-backed platform skill: enumerate the bundle's
-        # ``skills/{name}/`` prefix.  SKILL.md and SKILL.graph.json are excluded
-        # so the list contains only the auxiliary files that get auto-staged.
+        # ``skills/{name}/`` prefix.  SKILL.md and the root SKILL.graph.json
+        # are excluded so the list contains only the auxiliary files that
+        # get auto-staged.  The graph-file exclusion is anchored at the
+        # root (exact match on ``{prefix}{GRAPH_FILE}``) rather than
+        # ``endswith``, so a same-named file inside a subdirectory (e.g.
+        # ``references/SKILL.graph.json``) is a normal, listed file.
         from surogates.tools.builtin.skill_validation import GRAPH_FILE
         prefix = f"skills/{name}/"
         bundle_paths = await bundle.list(prefix)
         detail.linked_files = sorted(
             p[len(prefix):] for p in bundle_paths
             if p.startswith(prefix) and not p.endswith("/SKILL.md")
-            and not p.endswith(f"/{GRAPH_FILE}")
+            and p != f"{prefix}{GRAPH_FILE}"
             and p != prefix
         )
 
@@ -656,12 +660,14 @@ async def read_skill_file(
             detail="Path traversal ('..') is not allowed.",
         )
 
-    from surogates.tools.builtin.skill_validation import GRAPH_FILE
-    # Use normalized path to catch variants like "./SKILL.graph.json" or "/SKILL.graph.json".
-    if Path(path.lstrip("/")).parts == (GRAPH_FILE,):
+    from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
+    # is_graph_file() only matches the root file (case-insensitive, "./" and
+    # "/" variants) -- a same-named file inside a subdirectory (e.g.
+    # "references/SKILL.graph.json") is an ordinary, readable file.
+    if is_graph_file(path):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"File '{GRAPH_FILE}' is not readable by agents.",
+            detail=f"File '{GRAPH_FILE}' is not readable by the agent.",
         )
 
     from surogates.tools.loader import SKILL_SOURCE_PLATFORM

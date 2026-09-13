@@ -28,6 +28,11 @@ ALLOWED_SUBDIRS = frozenset({"references", "templates", "scripts", "assets"})
 GRAPH_FILE = "SKILL.graph.json"
 
 
+def is_graph_file(path: str) -> bool:
+    """True if *path* names the root SKILL.graph.json (``./`` and ``/`` variants, any case)."""
+    return tuple(p.casefold() for p in Path(path.lstrip("/")).parts) == (GRAPH_FILE.casefold(),)
+
+
 # ---------------------------------------------------------------------------
 # Validators — return error message or None
 # ---------------------------------------------------------------------------
@@ -128,9 +133,6 @@ def validate_file_path(file_path: str) -> str | None:
 
     if ".." in normalized.parts:
         return "Path traversal ('..') is not allowed."
-
-    if normalized.parts == (GRAPH_FILE,):
-        return None
 
     if not normalized.parts or normalized.parts[0] not in ALLOWED_SUBDIRS:
         allowed = ", ".join(sorted(ALLOWED_SUBDIRS))

@@ -50,7 +50,18 @@ class TestSkillViewHidesGraphFile:
     async def test_graph_file_not_in_linked_files_listing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A skill with SKILL.md, SKILL.graph.json, and references/ lists only references/."""
+        """The not-found fallback's available_files listing hides SKILL.graph.json.
+
+        Requesting a missing file takes the not-found branch, which globs the
+        whole skill tree to build ``available_files``.  With SKILL.md,
+        SKILL.graph.json, and references/notes.md on disk, only
+        references/notes.md should be offered back.
+
+        This request does NOT go through the main listing path (that one
+        only globs the four supporting subdirs and can never surface a
+        root-level file either way, so it can't tell this filter apart
+        from "no root files are ever listed").
+        """
         skill_dir = tmp_path / "skills" / "proc"
         skill_dir.mkdir(parents=True)
 
@@ -86,22 +97,17 @@ class TestSkillViewHidesGraphFile:
 
         payload = json.loads(
             await _skill_view_handler(
-                {"name": "proc"},
+                {"name": "proc", "file_path": "nope.md"},
                 tenant=_make_tenant(tmp_path),
             )
         )
 
-        assert payload["success"] is True
-        # The graph file must NOT appear in linked_files
-        linked_files = payload.get("linked_files", {})
-        all_files = []
-        for file_list in linked_files.values():
-            all_files.extend(file_list)
+        assert payload["success"] is False
+        available_files = payload.get("available_files", {})
+        all_files = [f for file_list in available_files.values() for f in file_list]
 
         assert all_files == ["references/notes.md"], \
             f"Expected only ['references/notes.md'], got {all_files}"
-        assert not any("SKILL.graph.json" in f for f in all_files), \
-            "SKILL.graph.json must not appear in linked_files"
 
     async def test_graph_file_read_rejected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -229,3 +235,86 @@ class TestSkillViewHidesGraphFile:
         # The leading-slash graph file read must also be rejected
         assert payload["success"] is False
         assert "graph" in payload["error"].lower() or "not readable" in payload["error"].lower() or "not found" in payload["error"].lower()
+
+    async def test_subdir_file_named_like_graph_file_is_readable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A same-named file inside a subdirectory is a normal file, not the graph file.
+
+        ``is_graph_file`` only matches the root SKILL.graph.json.
+        ``references/SKILL.graph.json`` must read like any other reference.
+        """
+        skill_dir = tmp_path / "skills" / "proc"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: proc\ndescription: Procedure skill\n---\n# Proc\nbody\n",
+            encoding="utf-8",
+        )
+
+        refs = skill_dir / "references"
+        refs.mkdir()
+        (refs / "SKILL.graph.json").write_text('{"not": "the graph"}', encoding="utf-8")
+
+        disk_skill = SkillDef(
+            name="proc",
+            description="Procedure skill",
+            content="# Proc\nbody\n",
+            source=SKILL_SOURCE_PLATFORM,
+        )
+        _stub_load_all_skills(monkeypatch, [disk_skill])
+        monkeypatch.setattr(
+            skills_mod,
+            "_resolve_skill_dir",
+            lambda *a, **kw: skill_dir,
+        )
+
+        payload = json.loads(
+            await _skill_view_handler(
+                {"name": "proc", "file_path": "references/SKILL.graph.json"},
+                tenant=_make_tenant(tmp_path),
+            )
+        )
+
+        assert payload["success"] is True
+        assert payload["content"] == '{"not": "the graph"}'
+
+    async def test_graph_file_read_rejected_mixed_case(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """skill_view with file_path='Skill.Graph.JSON' (mixed case) is still refused."""
+        skill_dir = tmp_path / "skills" / "proc"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: proc\ndescription: Procedure skill\n---\n# Proc\nbody\n",
+            encoding="utf-8",
+        )
+
+        (skill_dir / "SKILL.graph.json").write_text(
+            '{"version": 1, "nodes": []}',
+            encoding="utf-8",
+        )
+
+        disk_skill = SkillDef(
+            name="proc",
+            description="Procedure skill",
+            content="# Proc\nbody\n",
+            source=SKILL_SOURCE_PLATFORM,
+        )
+        _stub_load_all_skills(monkeypatch, [disk_skill])
+        monkeypatch.setattr(
+            skills_mod,
+            "_resolve_skill_dir",
+            lambda *a, **kw: skill_dir,
+        )
+
+        payload = json.loads(
+            await _skill_view_handler(
+                {"name": "proc", "file_path": "Skill.Graph.JSON"},
+                tenant=_make_tenant(tmp_path),
+            )
+        )
+
+        assert payload["success"] is False
+        assert "graph" in payload["error"].lower() or "not readable" in payload["error"].lower()
