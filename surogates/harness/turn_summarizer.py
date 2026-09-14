@@ -185,16 +185,22 @@ _MARKUP_LEAK_MARKERS: tuple[str, ...] = (
 )
 
 
+# Tools whose arguments already say everything the iteration did: a skill
+# load names the skill, a step marker names the step. A caption could only
+# restate them, less reliably, for the price of a model call.
+_SELF_DESCRIBING_TOOLS = frozenset({"skill_view", "skill_step"})
+
+
 def _is_self_describing_iteration(
     tool_calls: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
 ) -> bool:
     """True when the iteration's arguments already say everything.
 
-    A successful ``skill_view`` is the only such iteration: its whole
-    content is *which skill was loaded*, which the arguments state
-    exactly. A caption can only restate that, less reliably, for the
-    price of a model call.
+    A successful ``skill_view`` or ``skill_step`` call is such an
+    iteration: its whole content is *which skill was loaded* or *which
+    step was marked*, which the arguments state exactly. A caption can
+    only restate that, less reliably, for the price of a model call.
 
     The qualifiers all guard against a caption that would have carried
     real information:
@@ -211,7 +217,7 @@ def _is_self_describing_iteration(
         (tc.get("function") or {}).get("name") or tc.get("name")
         for tc in tool_calls
     }
-    if names != {"skill_view"}:
+    if not names or not names <= _SELF_DESCRIBING_TOOLS:
         return False
     return not any(_is_error_result(tr) for tr in tool_results)
 
