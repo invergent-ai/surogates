@@ -70,6 +70,7 @@ export function cancelledToolLabel(toolName: string): string {
     kb_list_pages: "Knowledge base index",
     kb_read_page: "Knowledge base page",
     vision_analyze: "Image analysis",
+    skill_step: "Procedure step",
   };
   if (map[toolName]) return map[toolName];
   // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
@@ -193,6 +194,11 @@ export function extractToolDetail(tc: ToolCallInfo): string | null {
       const image = stringArg("image");
       // A data: URL is a base64 blob, not a name.
       return image && !image.startsWith("data:") ? lastPathSegment(image) : null;
+    }
+    case "skill_step": {
+      const step = stringArg("step");
+      const status = stringArg("status");
+      return step && status ? `${step} ${status}` : null;
     }
     case "skill_view":
     case "skill_manage":
@@ -386,6 +392,8 @@ export function toolRowLabel(tc: ToolCallInfo): string {
       return detail ? `Memory ${detail}` : "Updated memory";
     case "todo":
       return detail ? `Todo ${detail}` : "Updated todo list";
+    case "skill_step":
+      return detail ? `Step ${detail}` : "Recorded a procedure step";
     case "run_coding_agent":
     case "code_run": {
       const a = parseArgs<{ agent?: string; provider?: string }>(tc.args);

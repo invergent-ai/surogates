@@ -172,3 +172,12 @@ describe("legacy target aliases", () => {
     ).toBe('Searched files for "invoice"');
   });
 });
+
+describe("skill_step", () => {
+  it("names the step and its status in expert mode", () => {
+    const tc = call("skill_step", { skill: "kubectl-diagnose", step: "s3", status: "started" });
+    expect(toolRowLabel(tc)).toBe("Step s3 started");
+    expect(extractToolDetail(tc)).toBe("s3 started");
+    expect(toolRowLabel(call("skill_step", {}))).toBe("Recorded a procedure step");
+  });
+});
