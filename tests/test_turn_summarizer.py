@@ -101,3 +101,28 @@ async def test_summary_reads_text_content_parts():
         {"type": "text", "text": '{"caption":"Found the Bucharest forecast"}'},
     ], reasoning="Working notes"))
     assert await caption(summarizer(create, managed=False)) == "Found the Bucharest forecast"
+
+
+async def test_mixed_iteration_caption_omits_the_step_marker():
+    # A skill_step call alongside real work still gets a caption, but the
+    # marker adds nothing worth telling the caption model about.
+    create = AsyncMock(return_value=response('{"caption":"Listed the directory"}'))
+    s = summarizer(create)
+    await s.summarize_iteration(
+        iteration_id="turn-1:0", reasoning="",
+        tool_calls=[
+            {"id": "c1", "function": {
+                "name": "skill_step",
+                "arguments": '{"skill":"x","step":"s1","status":"started"}',
+            }},
+            {"id": "c2", "function": {"name": "terminal", "arguments": '{"command":"ls"}'}},
+        ],
+        tool_results=[
+            {"tool_call_id": "c1", "content": '{"ok": true}'},
+            {"tool_call_id": "c2", "content": "file1\nfile2"},
+        ],
+        prior_iteration_summaries=[],
+    )
+    sent = create.await_args.kwargs["messages"][1]["content"]
+    assert "terminal" in sent
+    assert "skill_step" not in sent

@@ -207,9 +207,9 @@ def _is_self_describing_iteration(
 
     * an empty batch is a text-only iteration — nothing to restate;
     * uncaptured results cannot be confirmed successful;
-    * a *failed* load is news, and consumers that drop errored calls
-      would otherwise show nothing at all. The prompt asks for exactly
-      this ("if a call failed, say so").
+    * a *failed* load or marker is news, and consumers that drop
+      errored calls would otherwise show nothing at all. The prompt
+      asks for exactly this ("if a call failed, say so").
     """
     if not tool_calls or not tool_results:
         return False
@@ -467,7 +467,23 @@ class TurnSummarizer:
         if _is_self_describing_iteration(tool_calls, tool_results or []):
             return None
 
-        tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
+        # A mixed iteration (a marker call alongside real work) should
+        # still be captioned, but the marker adds nothing worth telling
+        # the caption model about, so it and its result are left out.
+        caption_calls = [
+            tc for tc in tool_calls
+            if ((tc.get("function") or {}).get("name") or tc.get("name"))
+            not in _SELF_DESCRIBING_TOOLS
+        ]
+        if tool_calls and not caption_calls:
+            return None
+        caption_call_ids = {str(tc.get("id") or "") for tc in caption_calls}
+        caption_results = [
+            tr for tr in (tool_results or [])
+            if str(tr.get("tool_call_id") or "") in caption_call_ids
+        ]
+
+        tool_lines = self._format_tool_calls(caption_calls, caption_results)
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)
