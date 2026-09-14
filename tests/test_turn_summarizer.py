@@ -126,3 +126,15 @@ async def test_mixed_iteration_caption_omits_the_step_marker():
     sent = create.await_args.kwargs["messages"][1]["content"]
     assert "terminal" in sent
     assert "skill_step" not in sent
+
+
+async def test_a_failed_marker_alone_is_still_captioned():
+    create = AsyncMock(return_value=response('{"caption": "The step marker was rejected"}'))
+    s = summarizer(create)
+    calls = [{"id": "c1", "function": {"name": "skill_step", "arguments": '{"skill": "proc", "step": "s9", "status": "started"}'}}]
+    results = [{"tool_call_id": "c1", "name": "skill_step", "content": '{"error": "step must be the id from the step heading, such as s3."}'}]
+    out = await s.summarize_iteration(
+        iteration_id="turn-1:0", reasoning="", tool_calls=calls, tool_results=results, prior_iteration_summaries=[],
+    )
+    assert out is not None
+    assert create.await_count == 1

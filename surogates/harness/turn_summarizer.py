@@ -469,11 +469,20 @@ class TurnSummarizer:
 
         # A mixed iteration (a marker call alongside real work) should
         # still be captioned, but the marker adds nothing worth telling
-        # the caption model about, so it and its result are left out.
+        # the caption model about, so it and its result are left out --
+        # unless the marker itself failed, which is news worth keeping.
+        failed_ids = {
+            str(tr.get("tool_call_id") or "")
+            for tr in (tool_results or [])
+            if _is_error_result(tr)
+        }
         caption_calls = [
             tc for tc in tool_calls
-            if ((tc.get("function") or {}).get("name") or tc.get("name"))
-            not in _SELF_DESCRIBING_TOOLS
+            if not (
+                ((tc.get("function") or {}).get("name") or tc.get("name"))
+                in _SELF_DESCRIBING_TOOLS
+                and str(tc.get("id") or "") not in failed_ids
+            )
         ]
         if tool_calls and not caption_calls:
             return None
