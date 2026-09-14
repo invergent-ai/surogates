@@ -3929,8 +3929,11 @@ class AgentHarness(
         from surogates.harness.procedure_tools import gate_skill_step
 
         result = self._tool_filter_for_session_impl(session)
+        # A stand-in prompt builder (some tests) has no skill catalog at
+        # all; treat that as no skills, so it simply gets no skill_step.
+        skills = getattr(self._prompt, "skills", None) or ()
         return gate_skill_step(
-            result, all_tools=self._tools.tool_names, skills=self._prompt.skills,
+            result, all_tools=self._tools.tool_names, skills=skills,
         )
 
     def _tool_filter_for_session_impl(self, session: Session) -> set[str] | None:
