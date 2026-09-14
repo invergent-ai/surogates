@@ -71,6 +71,8 @@ async def _skill_step_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     status = str(arguments.get("status") or "").strip().lower()
     if not skill:
         return _error("skill is required: the skill name from the procedure preamble.")
+    if len(skill) > 200:
+        return _error("skill must be at most 200 characters.")
     if not STEP_ID.match(step):
         return _error("step must be the id from the step heading, such as s3.")
     if status not in STATUSES:

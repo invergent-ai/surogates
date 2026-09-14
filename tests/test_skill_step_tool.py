@@ -44,6 +44,7 @@ async def test_a_marker_emits_one_event_and_confirms():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("args, field", [
     ({"step": "s3", "status": "started"}, "skill"),
+    ({"skill": "x" * 201, "step": "s3", "status": "started"}, "skill"),
     ({"skill": "x", "step": "step 3", "status": "started"}, "step"),
     ({"skill": "x", "step": "s12345678", "status": "started"}, "step"),
     ({"skill": "x", "step": "s3", "status": "in_progress"}, "status"),
