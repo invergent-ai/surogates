@@ -171,3 +171,19 @@ async def test_load_skills_per_agent_only() -> None:
     )
 
     assert [s.name for s in skills if not s.is_expert] == ["foo"]
+
+
+@pytest.mark.asyncio
+async def test_graph_file_beside_skill_md_marks_the_skill_graph_backed() -> None:
+    bundle = _FakeBundle({
+        "skills/proc/SKILL.md": _skill_md("proc", "agent"),
+        "skills/proc/SKILL.graph.json": "{}",
+        "skills/plain/SKILL.md": _skill_md("plain", "agent"),
+    })
+    loader = ResourceLoader()
+    skills = await loader._load_skills_from_bundle(
+        bundle, source=SKILL_SOURCE_PLATFORM, root_prefix="skills/",
+    )
+    by_name = {s.name: s for s in skills}
+    assert by_name["proc"].has_graph is True
+    assert by_name["plain"].has_graph is False

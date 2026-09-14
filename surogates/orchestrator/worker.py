@@ -20,6 +20,7 @@ from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
 from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
+from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
 from surogates.runtime.entitlements import (
     capability_allowed as _entitlement_capability_allowed,
@@ -1991,6 +1992,16 @@ async def run_worker(settings: Settings) -> None:
         )
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
+
+        # ``skill_step`` is bookkeeping for procedure skills: only offer it
+        # (prompt surface here; schema surface is the harness's
+        # ``_tool_filter_for_session``, which must agree) when a
+        # graph-backed skill is in this session's catalog.
+        effective_tools = gate_skill_step(
+            effective_tools,
+            all_tools=tool_registry.tool_names,
+            skills=available_skills,
+        ) or effective_tools
 
         # Pre-load SOUL.md / AGENT.md from the bundle resolved
         # above.  The PromptBuilder stays sync; the loaders return

@@ -124,6 +124,7 @@ class SkillDef:
     # ``source`` cannot be used to tell the two apart — consumers that
     # want "framework built-in vs tenant-authored" must read this flag.
     builtin: bool = False
+    has_graph: bool = False  # SKILL.graph.json beside SKILL.md: a procedure skill compiled from a graph
     type: str = "skill"  # "skill" (prompt-based) or "expert" (model-backed)
     category: str | None = None  # subdirectory grouping
     tags: list[str] | None = None  # metadata tags
@@ -521,6 +522,7 @@ class ResourceLoader:
             )
             return []
 
+        present = set(paths)
         skills: list[SkillDef] = []
         seen_names: set[str] = set()
         for path in paths:
@@ -540,7 +542,9 @@ class ResourceLoader:
                 if name in seen_names:
                     continue
                 seen_names.add(name)
-                skills.append(_build_skill_def(parsed, source))
+                skill_def = _build_skill_def(parsed, source)
+                skill_def.has_graph = f"{root_prefix}{inner}/SKILL.graph.json" in present
+                skills.append(skill_def)
             except Exception:
                 logger.exception(
                     "Failed to parse bundle skill at %s", path,
