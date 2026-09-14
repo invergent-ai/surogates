@@ -124,6 +124,11 @@ class EventType(str, Enum):
     # recovery reads the latest row rather than folding a delta log.
     TODO_UPDATED = "todo.updated"
 
+    # One procedure-skill transition (skill_step tool): which step of the
+    # compiled procedure the agent started, completed or skipped. The
+    # canvas replays a session over the skill's graph from these.
+    SKILL_STEP = "skill.step"
+
     # Sub-agent delegation (delegate_task tool)
     DELEGATION_START = "delegation.start"
     DELEGATION_COMPLETE = "delegation.complete"
