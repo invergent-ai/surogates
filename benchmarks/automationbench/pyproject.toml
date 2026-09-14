@@ -1,0 +1,40 @@
+[project]
+name = "abbench"
+version = "0.1.0"
+description = "Local AutomationBench experiment for the Surogate agent harness"
+requires-python = ">=3.13"
+dependencies = [
+    # <1: respx 0.23 still targets the 0.x transport API, and uv is
+    # otherwise happy to resolve the 1.0 dev pre-release.
+    "httpx>=0.27,<1",
+    "httpx-sse>=0.4",
+    # The vendored automation-bench package (installed editable from
+    # vendor/AutomationBench, see README) brings the environment, tools
+    # and rubric; its checkout is pinned by PIN. verifiers and datasets
+    # are its under-declared runtime deps: the version upstream's
+    # uv.lock pins (uv otherwise resolves a dev pre-release whose
+    # module layout differs), and the dataset loader's import.
+    "verifiers==0.2.1",
+    "datasets>=3.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+]
+
+[project.scripts]
+abbench = "abbench.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["abbench"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
