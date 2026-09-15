@@ -3919,7 +3919,24 @@ class AgentHarness(
         Session-scoped only.  A whiteboard turn additionally narrows this
         per turn -- see :func:`_whiteboard_sketch_filter`, applied at the
         call site so this method keeps one shape for every caller.
+
+        Wraps :meth:`_tool_filter_for_session_impl` with the
+        ``skill_step`` gate so both return sites there agree with the
+        prompt surface (``worker.py``'s ``effective_tools``): the tool
+        is offered exactly when a graph-backed skill is in this
+        session's catalog.
         """
+        from surogates.harness.procedure_tools import gate_skill_step
+
+        result = self._tool_filter_for_session_impl(session)
+        # A stand-in prompt builder (some tests) has no skill catalog at
+        # all; treat that as no skills, so it simply gets no skill_step.
+        skills = getattr(self._prompt, "skills", None) or ()
+        return gate_skill_step(
+            result, all_tools=self._tools.tool_names, skills=skills,
+        )
+
+    def _tool_filter_for_session_impl(self, session: Session) -> set[str] | None:
         config = session.config or {}
         explicit_allowed = bool(config.get("allowed_tools"))
 

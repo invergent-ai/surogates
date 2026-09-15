@@ -43,4 +43,8 @@ describe("SIMPLE_MODE_HIDDEN_TOOLS", () => {
     expect(isHiddenSimpleTool(call("browser_click"))).toBe(true);
     expect(isHiddenSimpleTool(call("browser_navigate"))).toBe(true);
   });
+
+  it("hides procedure step markers: bookkeeping the user never asked to see", () => {
+    expect(isHiddenSimpleTool(call("skill_step"))).toBe(true);
+  });
 });

@@ -31,6 +31,8 @@ export const SIMPLE_MODE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   // command + output block.
   "terminal",
   "execute_code",
+  // Procedure step markers are bookkeeping for the Studio canvas, not conversation.
+  "skill_step",
 ]);
 
 export function isHiddenSimpleTool(tc: AgentChatToolCallInfo): boolean {

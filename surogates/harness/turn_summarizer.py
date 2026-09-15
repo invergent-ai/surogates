@@ -185,25 +185,31 @@ _MARKUP_LEAK_MARKERS: tuple[str, ...] = (
 )
 
 
+# Tools whose arguments already say everything the iteration did: a skill
+# load names the skill, a step marker names the step. A caption could only
+# restate them, less reliably, for the price of a model call.
+_SELF_DESCRIBING_TOOLS = frozenset({"skill_view", "skill_step"})
+
+
 def _is_self_describing_iteration(
     tool_calls: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
 ) -> bool:
     """True when the iteration's arguments already say everything.
 
-    A successful ``skill_view`` is the only such iteration: its whole
-    content is *which skill was loaded*, which the arguments state
-    exactly. A caption can only restate that, less reliably, for the
-    price of a model call.
+    A successful ``skill_view`` or ``skill_step`` call is such an
+    iteration: its whole content is *which skill was loaded* or *which
+    step was marked*, which the arguments state exactly. A caption can
+    only restate that, less reliably, for the price of a model call.
 
     The qualifiers all guard against a caption that would have carried
     real information:
 
     * an empty batch is a text-only iteration — nothing to restate;
     * uncaptured results cannot be confirmed successful;
-    * a *failed* load is news, and consumers that drop errored calls
-      would otherwise show nothing at all. The prompt asks for exactly
-      this ("if a call failed, say so").
+    * a *failed* load or marker is news, and consumers that drop
+      errored calls would otherwise show nothing at all. The prompt
+      asks for exactly this ("if a call failed, say so").
     """
     if not tool_calls or not tool_results:
         return False
@@ -211,7 +217,7 @@ def _is_self_describing_iteration(
         (tc.get("function") or {}).get("name") or tc.get("name")
         for tc in tool_calls
     }
-    if names != {"skill_view"}:
+    if not names or not names <= _SELF_DESCRIBING_TOOLS:
         return False
     return not any(_is_error_result(tr) for tr in tool_results)
 
@@ -461,7 +467,32 @@ class TurnSummarizer:
         if _is_self_describing_iteration(tool_calls, tool_results or []):
             return None
 
-        tool_lines = self._format_tool_calls(tool_calls, tool_results or [])
+        # A mixed iteration (a marker call alongside real work) should
+        # still be captioned, but the marker adds nothing worth telling
+        # the caption model about, so it and its result are left out --
+        # unless the marker itself failed, which is news worth keeping.
+        failed_ids = {
+            str(tr.get("tool_call_id") or "")
+            for tr in (tool_results or [])
+            if _is_error_result(tr)
+        }
+        caption_calls = [
+            tc for tc in tool_calls
+            if not (
+                ((tc.get("function") or {}).get("name") or tc.get("name"))
+                in _SELF_DESCRIBING_TOOLS
+                and str(tc.get("id") or "") not in failed_ids
+            )
+        ]
+        if tool_calls and not caption_calls:
+            return None
+        caption_call_ids = {str(tc.get("id") or "") for tc in caption_calls}
+        caption_results = [
+            tr for tr in (tool_results or [])
+            if str(tr.get("tool_call_id") or "") in caption_call_ids
+        ]
+
+        tool_lines = self._format_tool_calls(caption_calls, caption_results)
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)

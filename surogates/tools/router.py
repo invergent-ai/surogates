@@ -70,6 +70,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "run_coding_agent": ToolLocation.HARNESS,
     "github": ToolLocation.HARNESS,
     "todo": ToolLocation.HARNESS,
+    # Procedure step markers: an event append, nothing to isolate.
+    "skill_step": ToolLocation.HARNESS,
     "process": ToolLocation.HARNESS,
     "create_artifact": ToolLocation.HARNESS,
     # Whiteboard canvas — validation only, but it must not route to the

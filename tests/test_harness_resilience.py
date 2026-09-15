@@ -14,6 +14,7 @@ from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
 from surogates.sandbox.pool import SandboxPool
 from surogates.session.models import Session
+from surogates.tools.registry import ToolRegistry, ToolSchema
 
 
 def _make_harness(**overrides: Any) -> AgentHarness:
@@ -214,3 +215,23 @@ class TestRateLimitWait:
         # after failing over would strand the session on a stale cooldown.
         assert guard.remaining_seconds.await_count == 1
         assert calls[-1]["create_kwargs"]["model"] == "fallback-model"
+
+
+def test_tool_filter_tolerates_a_prompt_builder_without_skills() -> None:
+    """A stand-in prompt builder with no ``skills`` attribute (as several
+    other tests in this file use) must not crash the skill_step gate --
+    it simply means no skills, so the tool is dropped like any agent
+    without a graph-backed skill."""
+    registry = ToolRegistry()
+    registry.register(
+        "skill_step",
+        ToolSchema(name="skill_step", description="d", parameters={}),
+        AsyncMock(),
+    )
+    harness = _make_harness(
+        tool_registry=registry,
+        prompt_builder=SimpleNamespace(has_agents=False),
+    )
+    tool_filter = harness._tool_filter_for_session(_session_with_config({}))
+    assert tool_filter is not None
+    assert "skill_step" not in tool_filter
