@@ -69,7 +69,14 @@ include = ["surogates*"]
 # installed package location (site-packages/surogates/web/dist).
 # Prompt fragments (markdown + YAML frontmatter) are read from the
 # installed package path by surogates.harness.prompt_library.
-surogates = ["web/dist/**/*", "harness/prompts/**/*.md", "security/*.yaml"]
+surogates = [
+    "web/dist/**/*",
+    "harness/prompts/**/*.md",
+    "security/*.yaml",
+    # DDL scripts surogates.db.engine applies at migration time; the ops
+    # server installs this package as a wheel and runs those migrations.
+    "db/*.sql",
+]
 
 [tool.setuptools_scm]
 fallback_version = "0.0.0"
