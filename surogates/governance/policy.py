@@ -33,7 +33,6 @@ _SHELL_VAR_RE: re.Pattern[str] = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-
 from agent_os import PolicyEngine as AGTPolicyEngine
 from agent_os.egress_policy import EgressDecision, EgressPolicy, EgressRule
 from agent_os.sandbox import ExecutionSandbox, SandboxConfig
-from surogates.governance.transparency import TransparencyInterceptor, TransparencyLevel, ToolCallRequest
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +94,6 @@ class GovernanceGate:
         *,
         enabled: bool = True,
         egress_policy: EgressPolicy | None = None,
-        transparency: TransparencyInterceptor | None = None,
         require_approval: set[str] | None = None,
     ) -> None:
         self._enabled: bool = enabled
@@ -120,11 +118,6 @@ class GovernanceGate:
         # AGT EgressPolicy — controls which domains/ports tools can reach.
         # When None, egress is unchecked (all outbound allowed).
         self._egress_policy: EgressPolicy | None = egress_policy
-
-        # AGT TransparencyInterceptor — EU AI Act Art. 13/50 compliance.
-        # When set, tool calls are blocked until AI disclosure is confirmed
-        # for the session.  When None, transparency is not enforced.
-        self._transparency: TransparencyInterceptor | None = transparency
 
         # Resolve effective allow-set.
         if allowed_tools is not None:
@@ -188,26 +181,6 @@ class GovernanceGate:
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # Transparency (EU AI Act)
-    # ------------------------------------------------------------------
-
-    def confirm_disclosure(self, session_id: str) -> None:
-        """Mark AI disclosure as confirmed for a session.
-
-        Must be called before tool execution when transparency is enabled.
-        Typically called when the user starts a new session and the
-        frontend has shown the AI disclosure notice.
-        """
-        if self._transparency is not None:
-            self._transparency.confirm_disclosure(session_id)
-
-    def is_disclosure_confirmed(self, session_id: str) -> bool:
-        """Check if AI disclosure has been confirmed for a session."""
-        if self._transparency is None:
-            return True
-        return self._transparency.is_disclosure_confirmed(session_id)
-
-    # ------------------------------------------------------------------
     # Check
     # ------------------------------------------------------------------
 
@@ -229,28 +202,11 @@ class GovernanceGate:
         - Conditional permissions (ABAC)
         - **Workspace sandbox** — path containment via AGT ExecutionSandbox
         - **Egress policy** — network egress control via AGT EgressPolicy
-        - **Transparency** — EU AI Act Art. 13/50 disclosure enforcement
         """
         if not self._enabled:
             return PolicyDecision(
                 allowed=True, reason="governance disabled", tool_name=tool_name
             )
-
-        # Transparency check — blocks until AI disclosure is confirmed.
-        if self._transparency is not None and session_id:
-            tc_request = ToolCallRequest(
-                tool_name=tool_name,
-                arguments=arguments or {},
-                agent_id=session_id,
-                metadata={"session_id": session_id},
-            )
-            tc_result = self._transparency.intercept(tc_request)
-            if not tc_result.allowed:
-                return PolicyDecision(
-                    allowed=False,
-                    reason=tc_result.reason or "AI disclosure not confirmed",
-                    tool_name=tool_name,
-                )
 
         # Fast deny-list check (before AGT role check).
         if tool_name in self._denied_tools:
@@ -630,7 +586,6 @@ class GovernanceGate:
             denied_tools=new_denied if new_denied else None,
             enabled=self._enabled,
             egress_policy=new_egress,
-            transparency=self._transparency,
             require_approval=new_require_approval or None,
         )
         composed.freeze()
