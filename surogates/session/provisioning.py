@@ -88,6 +88,14 @@ async def create_agent_session(
     sid = session_id or uuid4()
 
     merged_config = dict(config or {})
+    # Server-owned, never caller-supplied: ``sandbox_root_session_id`` is what
+    # :func:`~surogates.sandbox.pool.sandbox_session_key` returns, and
+    # ``_build_session_sandbox_spec`` mounts the workspace prefix for that key.
+    # Sessions share one bucket keyed by session id, so a caller naming
+    # another session here would mount that session's workspace into its own
+    # sandbox.  Only :func:`create_child_session` stamps it, from the real
+    # parent.
+    merged_config.pop("sandbox_root_session_id", None)
     # Tool paths that receive only ``session_config`` (media_gen, vision)
     # reconstruct a minimal session shape for boundary resolution; carry the
     # channel so a managed-channel session without a pinned workspace_boundary
