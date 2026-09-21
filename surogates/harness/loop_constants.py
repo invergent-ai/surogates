@@ -38,6 +38,12 @@ _MAX_EMPTY_RESPONSE_RETRIES: int = 3
 #: gives the model a single chance to act and then accepts what it has.
 _MAX_UNFINISHED_RETRIES: int = 1
 
+#: Nudges for a turn ending without a file the user named. One, for the
+#: same reason: the check reads the transcript rather than the filesystem,
+#: so a model insisting the file exists is more likely right than the
+#: guard is, and a second nudge would just argue with it.
+_MAX_DELIVERABLE_RETRIES: int = 1
+
 #: Retries for a provider that returns finish_reason="error" and no content.
 #: Low because the common cause is not transient -- an over-sized request
 #: fails identically however many times it is re-sent -- so the value of the

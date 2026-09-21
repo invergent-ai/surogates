@@ -113,9 +113,14 @@ from surogates.harness.loop_attachments import (
     _render_inlined_attachments,  # noqa: F401
 )
 from surogates.harness.loop_conclusion import conclude_from_transcript
+from surogates.harness.loop_deliverables import (
+    deliverable_nudge,
+    missing_deliverables,
+)
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
+    _MAX_DELIVERABLE_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
     _LEASE_TTL_SECONDS,
@@ -1531,6 +1536,7 @@ class AgentHarness(
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         unfinished_retries = 0    # nudges for a turn that trails off without acting
+        deliverable_retries = 0   # nudges for a named file that was never written
         provider_error_retries = 0  # bounded retries for finish_reason='error'
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
@@ -2430,6 +2436,35 @@ class AgentHarness(
                         "content": _UNFINISHED_RESPONSE_NUDGE,
                     })
                     continue
+
+                # The turn is ending and a file the user named by name was
+                # never written.  Two workspace-bench sessions finished this
+                # way with the work done -- staged drafts that were never
+                # assembled, sources that were read and never written up --
+                # and both scored zero.  Nudged once, on the same terms as
+                # the guard above: costs nothing when the file is there,
+                # costs one turn when it is not.
+                if deliverable_retries < _MAX_DELIVERABLE_RETRIES:
+                    absent = missing_deliverables(
+                        _latest_user_event_text(all_events or []), messages
+                    )
+                    if absent:
+                        deliverable_retries += 1
+                        logger.info(
+                            "Session %s: turn ending without requested "
+                            "file(s) %s; nudging to produce them (%d/%d)",
+                            session.id, absent,
+                            deliverable_retries, _MAX_DELIVERABLE_RETRIES,
+                        )
+                        await _persist_response()
+                        messages.append(
+                            {"role": "assistant", "content": final_content}
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": deliverable_nudge(absent),
+                        })
+                        continue
 
                 # The nudge is spent and the model is still trailing off. Its
                 # own text is not an answer, but the work it did may contain
