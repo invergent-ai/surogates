@@ -334,22 +334,14 @@ class DockerSandbox:
             if mcp_token:
                 env["MCP_PROXY_TOKEN"] = mcp_token
 
-        # KB env passthrough from the worker process, URLs rewritten for the
-        # bridged container. Mirrors the K8s manifest's KB var loop.
-        for kb_var in (
-            "SUROGATES_AGENT_ID",
-            "SUROGATES_OPS_DB_URL",
-            "SUROGATES_KB_HUB_ENDPOINT_URL",
-            "SUROGATES_KB_HUB_ACCESS_KEY_ID",
-            "SUROGATES_KB_HUB_SECRET_ACCESS_KEY",
-        ):
-            val = os.environ.get(kb_var, "")
-            if val:
-                env[kb_var] = (
-                    _rewrite_host_for_container(val)
-                    if kb_var.endswith("_URL")
-                    else val
-                )
+        # The worker's own environment stays in the worker. The KB tools
+        # that read the ops database and the Hub are HARNESS-located
+        # (``surogates.tools.router.TOOL_LOCATIONS``) and run in the worker
+        # process, which takes its ops connection from ``settings.ops_db``
+        # -- nothing in the container ever read these. Copying them here
+        # would hand an untrusted container the ops database URL and the
+        # Hub key pair; a sandbox reaches platform data through the MCP
+        # proxy, with the scoped token minted above.
         return env
 
     def _mint_mcp_token(self, spec: SandboxSpec, sandbox_id: str) -> str:

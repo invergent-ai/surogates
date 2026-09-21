@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import secrets
 import socket
 import time
@@ -422,20 +421,15 @@ class K8sSandbox:
         for k, v in spec.env.items():
             env_vars.append(client.V1EnvVar(name=k, value=v))
 
-        # Propagate KB-related env vars from the worker so that tool
-        # handlers running inside the sandbox can reach the ops DB and
-        # Hub.  Only added when non-empty so non-KB deployments are
-        # unaffected.
-        for kb_var in (
-            "SUROGATES_AGENT_ID",
-            "SUROGATES_OPS_DB_URL",
-            "SUROGATES_KB_HUB_ENDPOINT_URL",
-            "SUROGATES_KB_HUB_ACCESS_KEY_ID",
-            "SUROGATES_KB_HUB_SECRET_ACCESS_KEY",
-        ):
-            val = os.environ.get(kb_var, "")
-            if val:
-                env_vars.append(client.V1EnvVar(name=kb_var, value=val))
+        # The worker's own environment stays in the worker. The KB tools
+        # that read the ops database and the Hub are HARNESS-located
+        # (``surogates.tools.router.TOOL_LOCATIONS``) and run in the worker
+        # process, which takes its ops connection from ``settings.ops_db``
+        # -- nothing in the pod ever read these. Copying them here would
+        # hand an untrusted container the ops database URL and the Hub key
+        # pair; a sandbox reaches platform data through the MCP proxy, with
+        # the scoped token minted above. ``SUROGATES_AGENT_ID`` arrives on
+        # ``spec.env`` above, resolved per session rather than per worker.
 
         # Main sandbox container.
         sandbox_container = client.V1Container(
