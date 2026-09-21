@@ -94,4 +94,4 @@ If the sandbox pod dies, a new pod mounts the same path and the workspace is int
 
 ### Cleanup
 
-A background CronJob (`cleanup_sessions`) sweeps orphaned `sessions/{session_id}/` prefixes that no longer have a corresponding active session. This is a safety net for cases where the normal cleanup path fails.
+A background CronJob (`platform_cleanup`) sweeps the workspace prefixes no session claims any more: an archived session's, left behind when the delete failed part-way, and any prefix with no session row at all. It is a safety net for a cleanup path that did not finish, not a retention policy — a session the user still has keeps its files.
