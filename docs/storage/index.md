@@ -61,19 +61,32 @@ tenant-{org_id}/
 
 ## Session Workspaces
 
-Each agent gets one bucket. Each session gets an ephemeral path
-inside that bucket:
+Session workspaces share one bucket, named by `storage.bucket`. A
+session's files sit directly under its own id, with no intervening
+segment:
 
 ```
-{configured-agent-bucket}/
-  sessions/{session_id}/
+{storage.bucket}/
+  {storage.key_prefix}{session_id}/
   (workspace files -- whatever the agent creates or modifies)
 ```
 
+`storage.key_prefix` is stamped into the session's config when the
+session is created and is empty in the shared runtime, which makes the
+session id the whole of the path. A deployment that serves a single
+agent can set it (`{project_id}/{agent_id}`) to slice the bucket per
+agent.
+
+Two cases do not get a path of their own. A managed-channel thread
+(Slack, Telegram) shares one workspace across its participants at
+`{storage.key_prefix}boundaries/{boundary}/workspace/`, and a delegation
+child works in its root ancestor's path rather than an empty one of its
+own.
+
 ### Lifecycle
 
-1. **Session created** -- API server ensures the configured agent bucket exists.
-2. **First sandbox tool call** -- sandbox pod is provisioned with `sessions/{session_id}/` FUSE-mounted as `/workspace`.
+1. **Session created** -- API server ensures the workspace bucket exists.
+2. **First sandbox tool call** -- sandbox pod is provisioned with the session's prefix FUSE-mounted as `/workspace`.
 3. **Agent works** -- reads and writes files at `/workspace`. All changes are immediately durable in Garage.
 4. **Session ends** -- sandbox pod is destroyed, and the session prefix is deleted.
 
@@ -88,7 +101,7 @@ If the sandbox pod dies, a new pod mounts the same path and the workspace is int
 ## Security
 
 - **Tenant buckets** (`tenant-{org_id}`) are accessible only by the API server.
-- **Agent buckets** store session paths under `sessions/{session_id}/`.
+- **The workspace bucket** stores each session's files under its own id, and the prefix a sandbox mounts is derived server-side from the session, never from the request that created it.
 - Sandboxes cannot access other sessions' paths or tenant storage.
 - Even if the LLM is compromised, the sandbox can only access the current session's workspace files.
 

@@ -120,7 +120,7 @@ A retry worker can also call `worker_context` to read the full structured detail
 
 ## Multi-tenancy
 
-Every task carries `org_id` (FK to `orgs`). `task_links` and `sessions.task_id` inherit scope via FK. The `spawn_task` tool refuses cross-org parents -- a task in org A cannot list a task in org B in its `parents=[...]`. The dispatcher tick processes tasks regardless of org (one orchestrator process serves one `agent_id`, which is org-scoped via the Redis work queue key).
+Every task carries `org_id` (FK to `orgs`). `task_links` and `sessions.task_id` inherit scope via FK. The `spawn_task` tool refuses cross-org parents -- a task in org A cannot list a task in org B in its `parents=[...]`. The dispatcher tick processes tasks regardless of org. In the shared runtime one worker process serves every agent and resolves the agent and org per session, so the scope a task is confined to comes from its own `org_id` and from the checks above, not from which process picked it up. A dedicated single-agent deployment additionally has one process per `agent_id`, org-scoped through the Redis work-queue key.
 
 ## Workspace inheritance
 
