@@ -86,15 +86,6 @@ export function normalizePoint(
   return { x, y };
 }
 
-function hostOf(url: string): { origin: string; rest: string } {
-  try {
-    const parsed = new URL(url);
-    return { origin: parsed.host, rest: `${parsed.pathname}${parsed.search}` };
-  } catch {
-    return { origin: url, rest: "" };
-  }
-}
-
 const ICON = "flex size-[26px] shrink-0 items-center justify-center rounded-[5px] " +
   "text-muted-foreground transition-colors hover:bg-secondary " +
   "hover:text-foreground disabled:pointer-events-none disabled:opacity-40";
@@ -119,6 +110,12 @@ export function BrowserShell({
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [nav, setNav] = useState({ url: "", title: "" });
   const [menuOpen, setMenuOpen] = useState(false);
+  // The address bar is editable: the user types a URL and presses Enter to
+  // navigate (the server protocol carries `navigate`). While the field is
+  // focused, server-side updates must not clobber what is being typed —
+  // a nav event arriving mid-typing would otherwise rewrite the text.
+  const [address, setAddress] = useState("");
+  const editingRef = useRef(false);
 
   useEffect(() => {
     setState("connecting");
@@ -162,7 +159,9 @@ export function BrowserShell({
         // The tabs snapshot is the only address the server sends at connect
         // and after a tab switch — nav messages only arrive on navigation.
         const active = next.find((tab) => tab.active);
-        if (active) setNav({ url: active.url, title: active.title });
+        if (active) {
+          setNav({ url: active.url, title: active.title });
+        }
       } else if (message.t === "nav") {
         setNav({
           url: String(message.url ?? ""),
@@ -170,7 +169,6 @@ export function BrowserShell({
         });
       }
     };
-
     return () => {
       // Detach before closing so an intentional unmount does not look like a
       // drop — only externally-driven closes reach onDisconnect.
@@ -185,6 +183,13 @@ export function BrowserShell({
       socketRef.current = null;
     };
   }, [src]);
+
+  // Server-driven address sync: the tabs snapshot and nav messages are the
+  // truth about where the tab is. Skipped while the user is editing, so a
+  // mid-typing navigation cannot rewrite their text.
+  useEffect(() => {
+    if (!editingRef.current) setAddress(nav.url);
+  }, [nav.url]);
 
   const send = useCallback((message: Record<string, unknown>) => {
     const socket = socketRef.current;
@@ -237,7 +242,6 @@ export function BrowserShell({
     }
   };
 
-  const { origin, rest } = hostOf(nav.url);
   const showTabs = tabs.length > 1;
 
   return (
@@ -299,10 +303,36 @@ export function BrowserShell({
               state === "connected" ? "bg-emerald-500" : "bg-muted-foreground"
             }`}
           />
-          <span className="truncate">
-            {origin}
-            <span className="text-muted-foreground">{rest}</span>
-          </span>
+          <input
+            type="text"
+            aria-label="Address"
+            placeholder="Type a URL and press Enter"
+            className="h-full min-w-0 flex-grow bg-transparent outline-none placeholder:text-muted-foreground"
+            disabled={!hasControl}
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            onFocus={() => {
+              editingRef.current = true;
+            }}
+            onBlur={() => {
+              editingRef.current = false;
+              setAddress(nav.url);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              (event.target as HTMLInputElement).blur();
+              const typed = address.trim();
+              if (!typed) return;
+              // The server rejects anything without an http(s) scheme, so a
+              // bare domain is completed rather than silently dropped.
+              const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(typed)
+                ? typed
+                : `https://${typed}`;
+              setAddress(url);
+              command({ t: "navigate", url });
+            }}
+          />
         </div>
         <div className="relative">
           <button
