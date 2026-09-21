@@ -80,6 +80,21 @@ const TABS = [
   { id: "t2", title: "Stripe Docs", url: "https://docs.stripe.com/", active: false },
 ];
 
+/** React ignores a bare value assignment on a controlled input. */
+async function typeInto(field: HTMLInputElement, text: string): Promise<void> {
+  await act(async () => {
+    field.focus();
+  });
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  await act(async () => {
+    setter?.call(field, text);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
 describe("normalizePoint", () => {
   // object-fit: contain letterboxes, so the rendered image is not the element
   // box. Normalizing against the element would drift by the letterbox.
@@ -182,15 +197,79 @@ describe("BrowserShell", () => {
     // nor keep the previous tab's address after a switch.
     const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
     await push({ t: "tabs", tabs: TABS });
-    const field = node.querySelector("[data-testid='browser-shell-url']");
-    expect(field?.textContent).toContain("en.wikipedia.org");
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    );
+    expect(field?.value).toContain("en.wikipedia.org");
   });
 
   it("shows the url from a nav message", async () => {
     const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
     await push({ t: "nav", url: "https://example.com/page", title: "Example" });
-    const field = node.querySelector("[data-testid='browser-shell-url']");
-    expect(field?.textContent).toContain("example.com");
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    );
+    expect(field?.value).toContain("example.com");
+  });
+
+  it("does not clobber the address the user is typing", async () => {
+    // A nav event arriving while the field is focused must not rewrite the
+    // text mid-keystroke.
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    await push({ t: "tabs", tabs: TABS });
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    )!;
+    await act(async () => {
+      field.focus();
+    });
+    await typeInto(field, "example.co");
+    await push({ t: "nav", url: "https://en.wikipedia.org/", title: "Wikipedia" });
+    expect(field.value).toBe("example.co");
+  });
+
+  it("navigates on Enter, completing a bare domain to https", async () => {
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    )!;
+    await typeInto(field, "example.com");
+    await act(async () => {
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(FakeSocket.last?.messages()).toContainEqual({
+      t: "navigate",
+      url: "https://example.com",
+    });
+  });
+
+  it("keeps an explicit scheme typed by the user", async () => {
+    const node = await render(<BrowserShell src="wss://x/shell" hasControl />);
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    )!;
+    await typeInto(field, "http://example.com/page");
+    await act(async () => {
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(FakeSocket.last?.messages()).toContainEqual({
+      t: "navigate",
+      url: "http://example.com/page",
+    });
+  });
+
+  it("offers no navigation without control", async () => {
+    const node = await render(
+      <BrowserShell src="wss://x/shell" hasControl={false} />,
+    );
+    const field = node.querySelector<HTMLInputElement>(
+      "[data-testid='browser-shell-url'] input",
+    )!;
+    expect(field.disabled).toBe(true);
   });
 
   it("sends normalized coordinates, never pixels", async () => {
