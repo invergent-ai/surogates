@@ -34,14 +34,35 @@ hard 24.3% rubric accuracy. Two failure structures dominate:
    wait, task `107` after 20 min of work, one step before writing its
    report. Same defect claweval's `general-004` recorded. Top fix on
    the list; these 15 become its regression probe.
-2. **Output-spec noncompliance (most `completed` rows below).** Agents
-   do the substance but ignore the prescribed deliverable: own
-   filenames instead of the required ones, `.md` instead of
-   `.docx`/`.doc`/`.pptx`/`.pdf`, own worksheet names/headers/chart
-   choices. 43/70 tasks missed at least one expected output by name;
-   6 completed sessions produced no files at all. The agent has a docx
-   skill and rarely reaches for it — a prompting/skill-routing
-   question, not missing tooling.
+2. **Output-spec noncompliance (most `completed` rows below) — but
+   mostly ours, not the agent's.** 43/70 tasks missed at least one
+   expected output by name, and the first reading was that agents ignore
+   the prescribed deliverable. Checking the prompts actually sent (PROD
+   `events`, agent `30397e4f`): **26 of the 39 expected outputs across
+   the failed tasks were never named in any prompt the agent received.**
+   The dataset carries them in `output_files`, the rubrics are written
+   against them and the benchmark scored them — but the instruction
+   usually does not say them out loud and `build_prompt` did not add
+   them. The run measured whether the agent could guess a filename.
+
+   The agents did the work: `companyadministrative-chart_-_.docx`,
+   `financial-table-key-expense-analysis-concise-version.xlsx`, several
+   PDFs, some written correctly to `../outputs/` — sensible names of
+   their own. `judge.py` is then handed `EXPECTED OUTPUT FILES` and told
+   that a rubric about a file which was not produced fails, so a name
+   the agent was never given became a zero on every rubric citing it.
+
+   The skill-routing half of that reading was wrong too: `skill_view`
+   fired in 28 of 73 sessions (xlsx 15, docx 13, pptx 2, pdf 1). No
+   `.docx`/`.pptx`/`.pdf` came through `write_file` because those are
+   binary — the skills correctly route through a generated script and
+   `terminal`, which is where those files appear.
+
+   Fixed by naming the required files in the prompt. **This re-baselines
+   the benchmark: dev-001 is not comparable to any run after it.** What
+   remains once the naming is fair — worksheet names, headers, chart
+   choices — is the real output-spec question, and needs a fresh
+   baseline to size.
 
 Also seen once each, in the traces: a sandbox died mid-task
 (`sandbox_unavailable`, task `3`, session still reported `completed`)

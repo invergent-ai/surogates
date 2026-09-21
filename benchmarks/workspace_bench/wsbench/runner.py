@@ -46,7 +46,20 @@ some do not.
 the root of your workspace (create it if it does not exist), using exactly \
 the filenames the task asks for.
 - Actually produce the files -- a description of what you would do is a \
-failed task."""
+failed task.{required_outputs}"""
+
+#: Appended when the task declares its deliverables. The dataset carries the
+#: required filenames in ``output_files``, and the rubrics are written against
+#: them -- but for most tasks the instruction itself never says them out loud.
+#: They were used for scoring and never shown to the agent, so a run measured
+#: whether it could guess a name rather than whether it could follow a spec.
+#: On the first prod run 26 of 39 expected outputs across the failed tasks were
+#: never named in any prompt the agent received; the agents produced the
+#: deliverables under sensible names of their own and were marked missing.
+_REQUIRED_OUTPUTS_BLOCK = """
+- The task requires these files by name, spelled exactly like this: {names}. \
+Use these names and these extensions -- a `.docx` deliverable written as \
+Markdown does not count."""
 
 
 @dataclass
@@ -70,11 +83,17 @@ class RolloutResult:
 
 
 def build_prompt(task: Task) -> str:
+    required = ""
+    if task.output_files:
+        required = _REQUIRED_OUTPUTS_BLOCK.format(
+            names=", ".join(f"`{posixpath.basename(f)}`" for f in task.output_files)
+        )
     return PROMPT_TEMPLATE.format(
         persona=task.persona or "a knowledge worker",
         instruction=task.instruction.strip(),
         workdir=WORKDIR,
         output_dir=OUTPUT_DIR,
+        required_outputs=required,
     )
 
 

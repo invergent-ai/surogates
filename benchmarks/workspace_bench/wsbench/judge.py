@@ -84,8 +84,11 @@ def make_openai_complete(
     timeout: float = 300.0,
     # Reasoning models can burn thousands of hidden tokens before the
     # JSON: an 8k cap produced an empty reply (finish_reason=length) on
-    # a 31-rubric task, so leave generous headroom.
-    max_tokens: int = 20000,
+    # a 31-rubric task, and 20k did the same on a 15-rubric one -- the
+    # spend is reasoning, not verdicts, so it does not scale with rubric
+    # count and there is no cap that is "enough" by arithmetic. This is
+    # the model's output ceiling; past it, treat length as a real bug.
+    max_tokens: int = 64000,
 ) -> CompleteFn:
     """Build the ``complete(messages, schema)`` callable ``judge_task`` expects."""
     url = f"{base_url.rstrip('/')}/chat/completions"

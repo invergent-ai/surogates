@@ -133,3 +133,49 @@ def test_final_assistant_message_takes_last():
         Event(2, "llm.response", {"message": {"content": "last"}}),
     ]
     assert final_assistant_message(events) == "last"
+
+
+class TestRequiredOutputsInPrompt:
+    """The agent must be told the filenames it is scored against.
+
+    The dataset carries the required names in output_files and the rubrics
+    are written against them, but for most tasks the instruction never says
+    them out loud. They were used for scoring and never shown to the agent.
+
+    On the first prod run (dev-001, agent 30397e4f) 26 of 39 expected outputs
+    across the failed tasks appeared in no prompt the agent received. The
+    agents produced the deliverables under sensible names of their own --
+    companyadministrative-chart_-_.docx,
+    financial-table-key-expense-analysis-concise-version.xlsx -- and were
+    marked missing. The judge is handed the expected names and told a rubric
+    about a file that was not produced fails, so the mismatch scored zero.
+    """
+
+    def _task(self, output_files):
+        from wsbench.dataset import Task
+        return Task(task_id="t", persona="p", instruction="do the thing",
+                    difficulty="easy", output_files=tuple(output_files),
+                    rubrics=(), rubric_types=(), tested_capabilities=(),
+                    manifest=(), local_dir="")
+
+    def test_declared_outputs_are_named_verbatim(self) -> None:
+        from wsbench.runner import build_prompt
+        p = build_prompt(self._task(["outputs/Report_2024.docx", "outputs/data.xlsx"]))
+        assert "`Report_2024.docx`" in p
+        assert "`data.xlsx`" in p
+
+    def test_directory_prefix_is_stripped(self) -> None:
+        """Collection matches by basename, so the prompt names basenames --
+        telling the agent 'outputs/x.docx' twice over invites outputs/outputs/."""
+        from wsbench.runner import build_prompt
+        assert "`outputs/Report_2024.docx`" not in build_prompt(
+            self._task(["outputs/Report_2024.docx"]))
+
+    def test_extension_is_called_out(self) -> None:
+        """.md standing in for .docx was the single commonest miss."""
+        from wsbench.runner import build_prompt
+        assert "does not count" in build_prompt(self._task(["outputs/a.docx"]))
+
+    def test_no_block_when_the_task_declares_none(self) -> None:
+        from wsbench.runner import build_prompt
+        assert "spelled exactly" not in build_prompt(self._task([]))
