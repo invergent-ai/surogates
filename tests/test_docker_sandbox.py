@@ -292,18 +292,26 @@ class TestHostServiceEnv:
         assert "MCP_PROXY_TOKEN=mcp-tok" in joined
         await backend.aclose()
 
-    async def test_kb_env_passed_with_url_rewrite(
+    async def test_worker_credentials_never_reach_the_container(
         self, healthz_transport, monkeypatch
     ):
+        """The sandbox runs untrusted code. The ops database URL and the
+        Hub key pair are the worker's, and the KB tools that use them run
+        in the worker process, so nothing in the container has any use for
+        them -- and everything to gain from having them."""
         monkeypatch.setenv("SUROGATES_OPS_DB_URL", "postgresql://localhost:5432/ops")
+        monkeypatch.setenv("SUROGATES_KB_HUB_ENDPOINT_URL", "http://localhost:9000")
         monkeypatch.setenv("SUROGATES_KB_HUB_ACCESS_KEY_ID", "ak-1")
+        monkeypatch.setenv("SUROGATES_KB_HUB_SECRET_ACCESS_KEY", "sk-1")
         docker = FakeDocker()
         backend = _backend(docker, healthz_transport)
         await backend.provision(SandboxSpec(session_id="root-1"))
         run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
         joined = " ".join(run_call)
-        assert "SUROGATES_OPS_DB_URL=postgresql://host.docker.internal:5432/ops" in joined
-        assert "SUROGATES_KB_HUB_ACCESS_KEY_ID=ak-1" in joined
+        assert "SUROGATES_OPS_DB_URL" not in joined
+        assert "SUROGATES_KB_HUB_ENDPOINT_URL" not in joined
+        assert "ak-1" not in joined
+        assert "sk-1" not in joined
         await backend.aclose()
 
     async def test_no_mcp_env_when_proxy_url_unset(self, healthz_transport):
