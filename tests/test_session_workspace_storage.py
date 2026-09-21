@@ -254,6 +254,30 @@ async def test_create_web_session_uses_agent_bucket_and_session_path():
     )
 
 
+async def test_create_session_drops_client_supplied_sandbox_root():
+    org_id = uuid4()
+    user_id = uuid4()
+    victim_session_id = uuid4()
+    store = _Store(org_id)
+    storage = _RecordingStorage()
+    request = _request(store, storage, _Redis())
+
+    await sessions_route.create_session(
+        sessions_route.CreateSessionRequest(
+            config={"sandbox_root_session_id": str(victim_session_id)},
+        ),
+        request,
+        Response(),
+        _tenant(org_id, user_id),
+        _runtime(store.agent_id, org_id),
+    )
+
+    assert "sandbox_root_session_id" not in store.session.config
+    assert store.session.config["workspace_path"] == (
+        f"/bucket-root/ops-agent-bucket/{store.session.id}"
+    )
+
+
 async def test_delete_session_deletes_session_prefix_not_agent_bucket():
     org_id = uuid4()
     session_id = uuid4()
