@@ -14,6 +14,7 @@ import { ChevronRightIcon, ThumbsDownIcon, ThumbsUpIcon } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { Textarea } from "../../ui/textarea";
 import { Button } from "../../ui/button";
+import { MessageResponse } from "../../ai-elements/message";
 import { parseArgs } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 import type { AgentChatExpertFeedbackRating } from "../../../types";
@@ -112,12 +113,6 @@ export function ExpertToolBlock({ tc }: { tc: ToolCallInfo }) {
         )}
         {failed && <span className="text-red-500">· failed</span>}
       </button>
-
-      {result?.summary && !expanded && (
-        <div className="ml-6 rounded-md border-l-2 border-primary/50 bg-muted/30 px-3 py-2 text-sm text-foreground/90">
-          {result.summary}
-        </div>
-      )}
 
       {expanded && (
         <div className="ml-6 mt-0.5 space-y-1.5 text-sm">
@@ -231,9 +226,9 @@ function ExpertDetail({
       <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground/70">
         {label}
       </div>
-      <div className="whitespace-pre-wrap wrap-break-word text-foreground/90">
+      <MessageResponse className="wrap-break-word text-foreground/90">
         {content}
-      </div>
+      </MessageResponse>
     </div>
   );
 }

@@ -165,6 +165,14 @@ function setTextareaValue(
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+// The expert frame is collapsed by default -- its question and response
+// only render once the header toggle is clicked.
+function expandExpert(container: HTMLElement): void {
+  Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+    .find((button) => button.textContent?.includes("Consulted expert"))
+    ?.click();
+}
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
@@ -1161,6 +1169,13 @@ describe("AgentChat", () => {
 
     expect(container.textContent).toContain("Consulted expert");
     expect(container.textContent).toContain("Architecture reviewer");
+    // Collapsed: the header only -- the response stays behind the toggle.
+    expect(container.textContent).not.toContain(
+      "The architecture is appropriate for an SDK example.",
+    );
+
+    act(() => expandExpert(container!));
+
     expect(container.textContent).toContain(
       "The architecture is appropriate for an SDK example.",
     );
@@ -1203,6 +1218,7 @@ describe("AgentChat", () => {
     // The synthesized frame renders just like the LLM-initiated one.
     expect(container.textContent).toContain("Consulted expert");
     expect(container.textContent).toContain("sql_writer");
+    act(() => expandExpert(container!));
     expect(container.textContent).toContain("SELECT * FROM orders LIMIT 10;");
     // And the user's raw slash message is preserved in the thread.
     expect(container.textContent).toContain("/sql_writer");
