@@ -82,9 +82,9 @@ SKILL_VIEW_SCHEMA = ToolSchema(
     description=(
         "Skills allow for loading information about specific tasks and workflows, "
         "as well as scripts and templates. Load a skill's full content or access "
-        "its linked files (references, templates, scripts). First call returns "
-        "SKILL.md content plus a 'linked_files' dict showing available "
-        "references/templates/scripts.\n\n"
+        "its linked files (references, templates, scripts, examples). First "
+        "call returns SKILL.md content plus a 'linked_files' dict showing "
+        "available references/templates/scripts/examples.\n\n"
         "When a skill has supporting files, its entire tree is automatically "
         "staged into the sandbox workspace and the response includes a "
         "'staged_at' absolute path. Relative paths in SKILL.md (e.g. "
@@ -550,6 +550,7 @@ async def _skill_view_handler(
                 "templates": [],
                 "assets": [],
                 "scripts": [],
+                "examples": [],
                 "other": [],
             }
 
@@ -564,6 +565,8 @@ async def _skill_view_handler(
                         available_files["assets"].append(rel)
                     elif rel.startswith("scripts/"):
                         available_files["scripts"].append(rel)
+                    elif rel.startswith("examples/"):
+                        available_files["examples"].append(rel)
                     elif f.suffix in [
                         ".md", ".py", ".yaml", ".yml", ".json", ".tex", ".sh",
                     ]:
@@ -625,11 +628,12 @@ async def _skill_view_handler(
     # Parse frontmatter for metadata
     frontmatter = _parse_skill_frontmatter_dict(content)
 
-    # Get reference, template, asset, and script files
+    # Get reference, template, asset, script, and example files
     reference_files: list[str] = []
     template_files: list[str] = []
     asset_files: list[str] = []
     script_files: list[str] = []
+    example_files: list[str] = []
 
     references_dir = skill_dir / "references"
     if references_dir.exists():
@@ -657,6 +661,12 @@ async def _skill_view_handler(
                 [str(f.relative_to(skill_dir)) for f in scripts_dir.glob(ext)]
             )
 
+    examples_dir = skill_dir / "examples"
+    if examples_dir.exists():
+        for f in examples_dir.rglob("*"):
+            if f.is_file():
+                example_files.append(str(f.relative_to(skill_dir)))
+
     # Read tags/related_skills: check metadata.hermes.* first, fall back to top-level
     hermes_meta: dict[str, Any] = {}
     metadata = frontmatter.get("metadata")
@@ -678,6 +688,8 @@ async def _skill_view_handler(
         linked_files["assets"] = asset_files
     if script_files:
         linked_files["scripts"] = script_files
+    if example_files:
+        linked_files["examples"] = example_files
 
     # Session-scoped override: serve the candidate body for THIS session
     # while keeping the original skill's supporting-file listing.  Mirrors

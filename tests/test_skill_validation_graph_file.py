@@ -22,6 +22,13 @@ def test_other_root_files_stay_rejected():
     assert validate_file_path("nested/SKILL.graph.json") is not None
 
 
+def test_examples_is_a_supporting_file_folder():
+    # Worked inputs a skill's scripts run against; imports already carried
+    # them, so writes have to accept them too.
+    assert validate_file_path("examples/timesheet/transcript.json") is None
+    assert validate_file_path("examples") is not None
+
+
 def test_is_graph_file_matches_root_variants_case_insensitively():
     assert is_graph_file("SKILL.graph.json") is True
     assert is_graph_file("./SKILL.graph.json") is True
