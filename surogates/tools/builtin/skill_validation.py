@@ -20,7 +20,9 @@ MAX_SKILL_CONTENT_CHARS = 100_000
 MAX_SKILL_FILE_BYTES = 1_048_576  # 1 MiB per supporting file
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-ALLOWED_SUBDIRS = frozenset({"references", "templates", "scripts", "assets"})
+ALLOWED_SUBDIRS = frozenset(
+    {"references", "templates", "scripts", "assets", "examples"}
+)
 
 # The one root-level file besides SKILL.md: the procedure graph a
 # graph-backed skill's body is compiled from.  Authored in Studio, never

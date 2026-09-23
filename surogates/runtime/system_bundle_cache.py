@@ -2,7 +2,8 @@
 
 The system bundle is a single Hub repository whose root IS the
 platform-skill catalog (``<skill-name>/SKILL.md`` + optional
-``references/`` / ``templates/`` / ``scripts/`` / ``assets/`` subtrees,
+``references/`` / ``templates/`` / ``scripts/`` / ``assets/`` /
+``examples/`` subtrees,
 no nested ``skills/`` directory).  Every shared-runtime agent in the
 cluster reads from the same snapshot, so the cache is NOT keyed by
 ``agent_id`` — it holds at most one ``AgentFileBundle`` accessor at any
