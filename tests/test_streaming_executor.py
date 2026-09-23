@@ -377,6 +377,37 @@ class TestDiscard:
         assert "skipped" in content.lower() or "cancelled" in content.lower()
 
     @pytest.mark.asyncio
+    async def test_settle_lets_running_tool_finish_and_skips_queued(self) -> None:
+        """A cut-off response must not hide a call that already ran.
+
+        The running write finishes and reports its real result; the write
+        queued behind it never starts.
+        """
+        release = asyncio.Event()
+        started: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            started.append(args.get("path", ""))
+            await release.wait()
+            return json.dumps({"ok": True})
+
+        tools = _make_registry("write_file")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools)
+        executor.add_tool(_make_tool_call("write_file", {"path": "a"}, call_id="tc_1"))
+        executor.add_tool(_make_tool_call("write_file", {"path": "b"}, call_id="tc_2"))
+        await asyncio.sleep(0.01)
+
+        settling = asyncio.create_task(executor.settle())
+        await asyncio.sleep(0.01)
+        release.set()
+        executed = await settling
+
+        assert list(executed) == ["tc_1"]
+        assert "cancelled" not in executed["tc_1"]["content"]
+        assert started == ["a"]
+
+    @pytest.mark.asyncio
     async def test_discard_prevents_new_tools(self) -> None:
         """After discard, add_tool should be a no-op."""
         executor = _make_executor()

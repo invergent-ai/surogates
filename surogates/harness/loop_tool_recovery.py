@@ -118,10 +118,25 @@ def collapse_repeated_tool_rounds(messages: list[dict]) -> list[dict]:
     return repaired
 
 
-def build_partial_tool_call_recovery_results(tool_calls: list[dict]) -> list[dict]:
-    """Build model-visible tool results for truncated tool-call arguments."""
+def build_partial_tool_call_recovery_results(
+    tool_calls: list[dict],
+    executed: dict[str, dict] | None = None,
+) -> list[dict]:
+    """Build model-visible tool results for a response cut off mid-batch.
+
+    ``executed`` maps tool-call id to the real result of every call that
+    ran before the cut (the streaming executor dispatches complete calls
+    while the response is still arriving).  Those keep their real result:
+    telling the model a call that already committed needs retrying makes
+    it redo the work.  Every other call gets the retry notice.
+    """
+    executed = executed or {}
     results: list[dict] = []
     for tc in tool_calls:
+        done = executed.get(tc.get("id", ""))
+        if done is not None:
+            results.append(done)
+            continue
         fn = tc.get("function", {})
         tool_name = fn.get("name", "")
         results.append(
@@ -131,9 +146,12 @@ def build_partial_tool_call_recovery_results(tool_calls: list[dict]) -> list[dic
                 "content": json.dumps(
                     {
                         "error": (
-                            "Partial tool call arguments detected. The provider "
-                            "ended the response before the JSON arguments were "
-                            "complete. Retry this tool call with complete JSON."
+                            "Not run: the response hit the output limit before "
+                            "this batch of tool calls was complete, so this call "
+                            "was not executed. Re-issue it with complete JSON, "
+                            "and send fewer or smaller tool calls per response. "
+                            "Calls in this batch that did run have their own "
+                            "results."
                         ),
                         "tool": tool_name,
                     },

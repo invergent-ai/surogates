@@ -281,3 +281,28 @@ async def test_one_partial_tool_call_still_retries(
     assert EventType.LLM_RESPONSE in emits
     # The refund kept the retry off the budget.
     assert harness._budget.used == 1
+
+
+def test_recovery_keeps_the_real_result_of_a_call_that_ran() -> None:
+    """Only calls that never ran are told to retry.
+
+    A write that committed before the response was cut off must report
+    its own result; a retry notice makes the model redo committed work.
+    """
+    import json
+
+    from surogates.harness.loop_tool_recovery import (
+        build_partial_tool_call_recovery_results,
+    )
+
+    calls = [
+        {"id": "c1", "function": {"name": "write_file", "arguments": "{}"}},
+        {"id": "c2", "function": {"name": "write_file", "arguments": "{}"}},
+    ]
+    ran = {"role": "tool", "tool_call_id": "c1", "content": '{"ok": true}'}
+
+    results = build_partial_tool_call_recovery_results(calls, {"c1": ran})
+
+    assert results[0] is ran
+    assert results[1]["tool_call_id"] == "c2"
+    assert json.loads(results[1]["content"])["error"].startswith("Not run")
