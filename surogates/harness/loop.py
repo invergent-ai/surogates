@@ -2134,6 +2134,10 @@ class AgentHarness(
                 # provider alternating truncated and unparseable arguments
                 # would otherwise keep both streaks below their own caps
                 # forever.
+                executed = (
+                    await streaming_executor.settle()
+                    if streaming_executor is not None else {}
+                )
                 if partial_tool_call_retries < _MAX_PARTIAL_TOOL_CALL_RETRIES:
                     partial_tool_call_retries += 1
                     logger.warning(
@@ -2145,13 +2149,13 @@ class AgentHarness(
                         partial_tool_call_retries,
                         _MAX_PARTIAL_TOOL_CALL_RETRIES,
                     )
-                    if streaming_executor is not None:
-                        streaming_executor.discard()
                     self._budget.refund()
                     await _persist_response()
                     messages.append(assistant_message)
                     messages.extend(
-                        build_partial_tool_call_recovery_results(tool_calls_raw)
+                        build_partial_tool_call_recovery_results(
+                            tool_calls_raw, executed,
+                        )
                     )
                     continue
 
@@ -2161,12 +2165,12 @@ class AgentHarness(
                     session.id,
                     _MAX_PARTIAL_TOOL_CALL_RETRIES,
                 )
-                if streaming_executor is not None:
-                    streaming_executor.discard()
                 await _persist_response()
                 messages.append(assistant_message)
                 messages.extend(
-                    build_partial_tool_call_recovery_results(tool_calls_raw)
+                    build_partial_tool_call_recovery_results(
+                        tool_calls_raw, executed,
+                    )
                 )
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,

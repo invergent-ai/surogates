@@ -288,6 +288,28 @@ class StreamingToolExecutor:
             if tool.task is not None and not tool.task.done():
                 tool.task.cancel()
 
+    async def settle(self) -> dict[str, dict[str, Any]]:
+        """Stop dispatching, let running tools finish, return results by call id.
+
+        Used when the response was cut off mid-batch.  A call already sent
+        to its backend has happened -- a Hub commit, an MCP write --
+        and cancelling our side of it only hides the outcome, so the model
+        re-issues work that is already done.  Running tools therefore
+        finish and report; queued ones never start.
+        """
+        self._discarded = True
+        running = [
+            t.task for t in self._tracked
+            if t.task is not None and not t.task.done()
+        ]
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+        return {
+            t.tool_call.get("id", ""): t.result
+            for t in self._tracked
+            if t.result is not None
+        }
+
     @property
     def stats(self) -> dict[str, Any]:
         """Return execution statistics for logging and telemetry."""
