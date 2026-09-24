@@ -133,6 +133,19 @@ async def _consult_expert_handler(
             expert_name, loaded_skills, kwargs,
         )
 
+    from surogates.tools.builtin.advisor_expert import (
+        ADVISOR_EXPERT_NAME,
+        advisor_available,
+        is_advisor_expert,
+    )
+
+    # A Pro-tier session is already on the advisor's model, so the
+    # advisor is withheld; this is the hard gate behind the prompt roster.
+    if not advisor_available(kwargs.get("model")):
+        available = [n for n in available if n != ADVISOR_EXPERT_NAME]
+        if expert is not None and is_advisor_expert(expert):
+            expert = None
+
     if expert is None:
         return json.dumps({
             "error": f"Expert '{expert_name}' not found or not active.",
@@ -144,8 +157,6 @@ async def _consult_expert_handler(
     # restatement of it. Domain experts keep the explicit task/context
     # contract -- handing every expert the transcript would multiply the
     # cost of every consult on a long session.
-    from surogates.tools.builtin.advisor_expert import is_advisor_expert
-
     platform_client = None
     if is_advisor_expert(expert):
         # The advisor runs on the session's own LLM route; its tier comes
