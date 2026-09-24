@@ -262,7 +262,13 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/session_search"))
         # Advisor timing is model-driven, so the only lever on when it
         # fires is this guidance. Without it the executor under-calls.
-        if "consult_expert" in self._available_tools:
+        # Absent from the catalog (Pro-tier sessions), it must not be
+        # advertised either.
+        from surogates.tools.builtin.advisor_expert import is_advisor_expert
+
+        if "consult_expert" in self._available_tools and any(
+            is_advisor_expert(s) for s in self.skills
+        ):
             parts.append(self._prompts.get("guidance/advisor"))
         # Skills guidance loads whenever the agent can either view or manage
         # skills. The body covers both invocation (skill_view) and maintenance

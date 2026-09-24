@@ -125,6 +125,15 @@ def is_advisor_expert(skill: object) -> bool:
     )
 
 
+def advisor_available(model: str | None) -> bool:
+    """Whether a session running on *model* may consult the advisor.
+
+    A session already on the Pro tier would consult its own model: a
+    second Pro-rate completion that brings no stronger opinion.
+    """
+    return model != ADVISOR_MODEL_SENTINEL
+
+
 def build_expert_transcript(messages: list[dict]) -> str:
     """Render the recent conversation for an expert that reads it.
 

@@ -1889,6 +1889,16 @@ async def run_worker(settings: Settings) -> None:
             bundle=bundle,
             system_bundle=system_bundle,
         )
+        # A Pro-tier session would consult its own model, so the advisor
+        # leaves the prompt roster (and with it the advisor guidance).
+        from surogates.tools.builtin.advisor_expert import (
+            advisor_available, is_advisor_expert,
+        )
+
+        if not advisor_available(model_id):
+            available_skills = [
+                s for s in available_skills if not is_advisor_expert(s)
+            ]
 
         # Knowledge bases attached to this agent. Empty list when
         # KB tools are unavailable (no ops DB) or no KBs are wired

@@ -63,6 +63,61 @@ class TestAdvisorIsNotReadable:
         assert out["content"] == "# How to do the thing"
 
 
+class TestNoAdvisorOnProTier:
+    """A Pro-tier session already runs on the advisor's model.
+
+    Consulting it would be a second Pro-rate completion from the same
+    model, so the handler refuses it even when the catalog offers it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_consult_refuses_the_advisor_for_a_pro_session(self):
+        from types import SimpleNamespace
+        from surogates.tools.builtin.expert import _consult_expert_handler
+
+        advisor = build_advisor_expert()
+
+        class _Api:
+            async def get_skill(self, name):
+                return {
+                    "name": advisor.name, "description": advisor.description,
+                    "content": advisor.content, "source": advisor.source,
+                    "builtin": True, "type": "expert",
+                    "expert_status": advisor.expert_status,
+                    "expert_model": advisor.expert_model,
+                }
+
+            async def list_skills(self, category=None):
+                return json.dumps({"skills": [
+                    {"name": "sql", "type": "expert", "expert_status": "active"},
+                    {"name": ADVISOR_EXPERT_NAME, "type": "expert",
+                     "expert_status": "active"},
+                ]})
+
+        async def consult(model):
+            return json.loads(await _consult_expert_handler(
+                {"expert": ADVISOR_EXPERT_NAME, "task": "review"},
+                tenant=SimpleNamespace(org_id=None),
+                session_id=str(__import__("uuid").uuid4()),
+                tool_registry=object(),
+                api_client=_Api(),
+                model=model,
+            ))
+
+        # Base tier resolves the advisor (and stops only for want of a client).
+        assert "No LLM client" in (await consult("surogate"))["error"]
+
+        out = await consult(ADVISOR_MODEL_SENTINEL)
+        assert "not found" in out["error"]
+        assert ADVISOR_EXPERT_NAME not in out["available_experts"]
+
+    def test_base_tier_keeps_the_advisor(self):
+        from surogates.tools.builtin.advisor_expert import advisor_available
+
+        assert advisor_available("surogate")
+        assert not advisor_available(ADVISOR_MODEL_SENTINEL)
+
+
 class TestAdvisorNeedsNoEndpoint:
     """The whole point: a platform expert declares a model, not a URL.
 

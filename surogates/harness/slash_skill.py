@@ -189,6 +189,7 @@ async def expand_slash_skill(
     sandbox_pool: Any | None = None,
     credential_vault: Any | None = None,
     llm_client: Any | None = None,
+    model: str | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Try to expand a ``/<name> args...`` user message.
 
@@ -225,7 +226,19 @@ async def expand_slash_skill(
         )
         catalog = []
 
+    from surogates.tools.builtin.advisor_expert import (
+        advisor_available, is_advisor_expert,
+    )
+
     matched = next((s for s in catalog if s.name == name), None)
+    # A Pro-tier session is already on the advisor's model; ``/advisor``
+    # falls through to the skill path, which refuses experts.
+    if (
+        matched is not None
+        and is_advisor_expert(matched)
+        and not advisor_available(model)
+    ):
+        matched = None
     if matched is not None and getattr(matched, "is_active_expert", False):
         return await _expand_expert(
             expert=matched,
