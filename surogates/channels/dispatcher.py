@@ -178,6 +178,14 @@ class ChannelWebhookDispatcher:
                 methods=["GET"],
             )
 
+        # Provider-wide callbacks that belong to no tenant (WhatsApp's
+        # app-level webhook). With no tenant there is nothing for the secure
+        # front-half to resolve, so the platform owns these handlers outright.
+        app_routes = getattr(platform, "app_routes", None)
+        if app_routes is not None:
+            for path, methods, endpoint in app_routes(self._settings):
+                app.add_api_route(path, endpoint, methods=methods)
+
     # ------------------------------------------------------------------
     # Shared secure front-half
     # ------------------------------------------------------------------

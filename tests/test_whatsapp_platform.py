@@ -505,3 +505,79 @@ class TestSendFiles:
         assert await p.send_files(
             _item(""), creds={"access_token": ""}, files=files,
         ) == []
+
+
+# ---------------------------------------------------------------------------
+# App-level webhook
+# ---------------------------------------------------------------------------
+
+# surogate-ops pins the same key → token pair (whatsapp_app_verify_token in
+# channel_provisioning). If this vector changes, change it there too, or Meta
+# rejects the token the connect page shows.
+APP_KEY = "ZmFrZS1rZXktZm9yLXRlc3RzLW9ubHktMzItYnl0ZXM="
+APP_TOKEN = "9f23d0744f7fd2d5db656e2df1baac5a"
+
+
+def test_app_verify_token_matches_the_vector_ops_pins():
+    from surogates.channels.platforms.whatsapp import app_verify_token
+
+    assert app_verify_token(APP_KEY) == APP_TOKEN
+    # A secret mounted with a trailing newline must not change the token.
+    assert app_verify_token(APP_KEY + "\n") == APP_TOKEN
+
+
+def _app_level_client(encryption_key: str = APP_KEY) -> httpx.AsyncClient:
+    from surogates.channels.dispatcher import ChannelWebhookDispatcher
+    from surogates.channels.registry import ChannelRegistry
+
+    reg = ChannelRegistry()
+    reg.register(WhatsAppPlatform())
+    app = ChannelWebhookDispatcher(
+        cache=None,
+        vault=None,
+        pipeline=None,
+        deps_factory=lambda *a: None,
+        settings=SimpleNamespace(
+            channels={"whatsapp": SimpleNamespace(enabled=True)},
+            encryption_key=encryption_key,
+        ),
+        registry=reg,
+    ).build_app()
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://test",
+    )
+
+
+def _handshake(token: str) -> dict:
+    return {
+        "hub.mode": "subscribe",
+        "hub.verify_token": token,
+        "hub.challenge": "1158201444",
+    }
+
+
+async def test_app_level_handshake_echoes_the_challenge():
+    async with _app_level_client() as c:
+        r = await c.get("/whatsapp", params=_handshake(APP_TOKEN))
+    assert r.status_code == 200
+    assert r.text == "1158201444"
+
+
+async def test_app_level_handshake_rejects_a_wrong_token():
+    async with _app_level_client() as c:
+        r = await c.get("/whatsapp", params=_handshake("wrong"))
+    assert r.status_code == 401
+
+
+async def test_app_level_handshake_refuses_without_an_encryption_key():
+    # No key means no token to compare against; an empty token must not pass.
+    async with _app_level_client(encryption_key="") as c:
+        r = await c.get("/whatsapp", params=_handshake(""))
+    assert r.status_code == 401
+
+
+async def test_app_level_event_is_acknowledged_and_dropped():
+    # A non-200 makes Meta retry and eventually disable the app's webhook.
+    async with _app_level_client() as c:
+        r = await c.post("/whatsapp", json=_text_message())
+    assert r.status_code == 200

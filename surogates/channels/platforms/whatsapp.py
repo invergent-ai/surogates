@@ -37,6 +37,8 @@ import logging
 from typing import Any
 
 import httpx
+from fastapi import Request
+from fastapi.responses import PlainTextResponse, Response
 
 from surogates.channels.base import SendResult
 from surogates.channels.inbound import InboundFileRef, InboundMessage
@@ -141,6 +143,32 @@ def _verify_handshake(request: Any, *, creds: dict) -> VerificationResult:
         return VerificationResult(accepted=False)
 
     return VerificationResult(accepted=True, response_body=challenge, status_code=200)
+
+
+#: The app-level callback. Meta refuses the per-number
+#: ``override_callback_uri`` that ops registers until the Meta app has a
+#: webhook of its own with the ``messages`` field subscribed, and the
+#: per-number path cannot pass that first verification: it answers only for a
+#: number that is already connected. This path belongs to no tenant.
+APP_WEBHOOK_PATH = "/whatsapp"
+
+
+def app_verify_token(encryption_key: str) -> str:
+    """The verify token for :data:`APP_WEBHOOK_PATH`, derived from the vault key.
+
+    surogate-ops derives the same value to show the operator, so the two
+    sides share no extra setting. Both repositories pin the same test vector;
+    change the label or the length on one side and verification breaks.
+
+    The token is the same for every tenant of a deployment. That is harmless:
+    it only lets a Meta app point its app-level webhook here, and events that
+    arrive here are dropped.
+    """
+    return hmac.new(
+        encryption_key.strip().encode("utf-8"),
+        b"whatsapp-app-webhook",
+        hashlib.sha256,
+    ).hexdigest()[:32]
 
 
 def _verify_signature(app_secret: str, raw_body: bytes, header: str) -> bool:
@@ -526,6 +554,35 @@ class WhatsAppPlatform:
         if identifier is None:
             return "/whatsapp/{phone_number_id}"
         return f"/whatsapp/{identifier}"
+
+    def app_routes(self, settings: Any) -> list[tuple[str, list[str], Any]]:
+        """Routes for the app-level callback, mounted by the dispatcher as-is.
+
+        GET answers Meta's verification with :func:`app_verify_token`. POST
+        acknowledges and drops: an event lands here only for an account that
+        has no per-number override yet, and without a tenant there is no app
+        secret to check its signature against.
+        """
+        key = (settings.encryption_key or "").strip()
+        expected = app_verify_token(key) if key else ""
+
+        async def handshake(request: Request) -> Response:
+            result = _verify_handshake(request, creds={"verify_token": expected})
+            if not result.accepted:
+                return Response(status_code=401)
+            return PlainTextResponse(result.response_body)
+
+        async def event(request: Request) -> Response:
+            logger.info(
+                "[whatsapp] dropped an event sent to the app-level webhook — "
+                "its business account has no per-number callback override",
+            )
+            return Response(status_code=200)
+
+        return [
+            (APP_WEBHOOK_PATH, ["GET"], handshake),
+            (APP_WEBHOOK_PATH, ["POST"], event),
+        ]
 
     # ------------------------------------------------------------------
     # identifier_of / verify / parse — delegates to module functions

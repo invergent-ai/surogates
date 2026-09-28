@@ -35,9 +35,15 @@ Meta → POST https://<channels-host>/whatsapp/{phone_number_id}
   tenant's `phone_number_id` and Graph `api_version` ride alongside them,
   because the outbound path receives only the outbox row and the resolved
   credentials.
-- **Webhook registration** — manual. Meta has no `setWebhook` equivalent
-  for the callback URL, so the operator pastes it into the App Dashboard.
-  Studio renders the exact URL and verify token to copy.
+- **Webhook registration** — two levels. Meta routes a business account's
+  events to its app's webhook unless that account carries a per-number
+  override, and it only accepts the override from an app that already has a
+  webhook with `messages` subscribed. So the operator sets the app's webhook
+  once, by hand, to `https://<channels-host>/whatsapp` with a verify token
+  derived from the deployment's encryption key; Studio shows both. Connecting
+  a number in Studio then subscribes its business account and sets the
+  override to `/whatsapp/{phone_number_id}` through the Graph API. Events
+  that still reach the app-level path are acknowledged and dropped.
 - **The agent never initiates.** WhatsApp only permits free-form messages
   inside a 24-hour window that the *user* opens by messaging first, so this
   channel replies and never starts a conversation. It is excluded from
@@ -47,9 +53,8 @@ Meta → POST https://<channels-host>/whatsapp/{phone_number_id}
 
 1. At [developers.facebook.com/apps](https://developers.facebook.com/apps),
    create an app with the **"Connect with customers through WhatsApp"** use
-   case. A WhatsApp Business Account is created with it. Note the **Phone
-   Number ID** in *WhatsApp → API Setup* — it sits just below the *From*
-   dropdown and is 15–17 digits. It is **not** the phone number itself.
+   case. A WhatsApp Business Account is created with it; its ID is shown in
+   *WhatsApp → API Setup* and in Business settings under *WhatsApp accounts*.
 2. Create a permanent token at
    [business.facebook.com](https://business.facebook.com/latest/settings) →
    *System users* → add an Admin system user → *Assign Assets* (the app with
@@ -61,16 +66,18 @@ Meta → POST https://<channels-host>/whatsapp/{phone_number_id}
    System User token in production.
 3. Copy the **App Secret** from *App Settings → Basic* (32 lowercase hex
    characters).
-4. In Studio, open the agent → **Channels** → **WhatsApp**, paste the Phone
-   Number ID, access token, app secret and WABA ID, and **save**. Saving
-   writes the routing row and mints the verify token; the webhook handshake
-   cannot succeed until this has happened.
-5. Back in the Meta dashboard, *WhatsApp → Configuration → Edit webhook*:
-   paste the **Callback URL** and **Verify Token** that Studio now shows,
-   then *Verify and save*.
-6. Still in *Configuration*, click *Manage* on webhook fields and subscribe
-   to **`messages`**. Skipping this is the classic "verification succeeded
-   but nothing arrives".
+4. In the Meta dashboard, *WhatsApp → Configuration → Edit webhook*: paste
+   the **Callback URL** and **Verify Token** that Studio's WhatsApp connect
+   page shows, then *Verify and save*. This is once per Meta app, and the
+   channels host must be reachable from the internet.
+5. Still in *Configuration*, click *Manage* on webhook fields and subscribe
+   to **`messages`**. Without it Meta refuses the per-number override with
+   `(#100) Before override the current callback uri, your app must be
+   subscribed to receive messages`.
+6. In Studio, open the agent → **Channels** → **WhatsApp**, paste the access
+   token, app secret and WABA ID, and **connect**. Studio reads the phone
+   number from the business account, subscribes the account and sets its
+   per-number callback, so Meta verifies the number's URL on the spot.
 7. While the app is in development mode, Meta only delivers to numbers on
    its recipient list (*API Setup → To → Manage phone number list*, five
    maximum). This is Meta's list of who the business may message, and is a
