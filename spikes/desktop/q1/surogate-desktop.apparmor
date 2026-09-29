@@ -1,0 +1,8 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+profile surogate-desktop /home/*/.local/share/surogate/versions/*/surogate flags=(unconfined) {
+  userns,
+
+  include if exists <local/surogate-desktop>
+}

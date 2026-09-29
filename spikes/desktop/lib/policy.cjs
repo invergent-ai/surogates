@@ -17,14 +17,19 @@ function toolchainDirs() {
 // folder and other user-data mounts only. Q2 records which one srt accepts.
 function buildPolicy({ folder, tmp, allowedDomains, variant = 'root-deny', extraRead = [] }) {
   const root = fs.realpathSync(folder);
+  // srt runs its bundled apply-seccomp helper inside the sandbox, so the app's
+  // install folder (read-only, no secrets) must stay visible there.
+  const appDir = path.dirname(process.execPath);
   const denyRead = variant === 'root-deny'
     ? ['/']
     : [os.homedir(), '/mnt', '/media', '/srv', '/tmp', '/var/tmp'];
+  const ownBwrap = path.join(appDir, 'bin/bwrap');
   return {
+    ...(process.env.SPIKE_SYSTEM_BWRAP || !fs.existsSync(ownBwrap) ? {} : { bwrapPath: ownBwrap }),
     network: { allowedDomains, deniedDomains: [], allowLocalBinding: true },
     filesystem: {
       denyRead,
-      allowRead: [...SYSTEM_READ, root, tmp, ...toolchainDirs(), ...extraRead],
+      allowRead: [...SYSTEM_READ, appDir, root, tmp, ...toolchainDirs(), ...extraRead],
       allowWrite: [root, tmp],
       denyWrite: [],
     },
