@@ -30,6 +30,7 @@ Setup notes:
 | 4 | Installed browsers, launch flags, downloads, network guard | PARTIAL | Chrome/Edge .deb verified; `ignoreDefaultArgs` for Playwright's weakening defaults; pinning proxy is the network boundary; no per-session private-network grants in a shared profile; `navigate` rejects non-http(s) |
 | 5 | Worker recovery without repeating an effect | NO today; YES for the Section 2 protocol (model) | durable invocation replay between `_rebuild_messages` and the first LLM call, so `sanitize_tool_pairs` never stubs a desktop call; reuse `lease_token` fencing |
 | 7 | File-operation boundary under races | PARTIAL | helper inside srt + `O_NOFOLLOW`/`fstat`/`nlink`; host `chdir`s to the folder; raw API enforces protected files itself; refuse multiply-linked files at binding |
+| 8 | Process trees after a host or app crash | YES | rely on srt's `--die-with-parent` + PID namespace; tool host is bwrap's direct parent; no systemd scope needed; *started* without result → interrupted |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -201,3 +202,28 @@ Design consequence (Section 4):
 2. Each per-root tool host `chdir`s to the session folder before initialising srt, so srt's mandatory denies apply to the folder.
 3. The raw file API enforces the protected-file list itself (`.git/config`, `.git/hooks/*`, `.bashrc`, … plus the harness's `.env*` list) on every operation, because srt's denies are fixed at sandbox launch. For long-lived sandboxes (the Q3 session runner), the runner is restarted when a protected path appears in the folder, or commands that do not need background processes run in fresh per-command sandboxes. This choice goes to implementation planning with both options stated.
 4. Hard links: at binding time the app scans the folder for regular files with `nlink > 1` and refuses to bind until the user removes them or confirms in the native prompt that those files may be changed; the helper refuses them always. Hard links created during a session by processes outside the sandbox remain a documented residual risk.
+
+## Q8: Process trees after a host or app crash
+
+Result: YES. Killing the tool host or the Electron main process with SIGKILL leaves no sandboxed descendants, with or without a systemd user manager, and recovery reports the unfinished operations as interrupted.
+
+Environment: both VMs, `root-deny`, tool host `chdir`ed to the folder. Each run starts `sleep 600 & setsid sleep 600 & (sleep 600 &); wait` through srt, marked with `SPIKE_MARK`, once spawned directly ("plain") and once through `systemd-run --user --scope` ("scope"), after writing and `fsync`ing a *started* record for each.
+
+Evidence (identical on 24.04 and 26.04):
+
+| Scenario | Marked processes just before the kill | Survivors after the kill | Reported on recovery |
+|---|---|---|---|
+| SIGKILL the tool host, user manager running | plain: 10 (bwrap, shell, apply-seccomp, the three `sleep`s incl. `setsid` and double-fork) | 0 | `q8-plain`, `q8-scope` interrupted |
+| SIGKILL the Electron main process, user manager running | plain: 10 | 0 | both interrupted |
+| same two, no user manager (`systemctl --user`: "Failed to connect to bus") | plain: 10 | 0 | both interrupted |
+
+- srt wraps with `bwrap --die-with-parent` (`startInfo.dieWithParent: true`). When the tool host dies, bwrap is killed, and with it the sandbox's PID namespace, which ends every process inside it, including ones that called `setsid` or double-forked. Killing the main process ends the utility process and therefore the same way.
+- The "scope" variant never started (0 marked processes, no unit): `systemd-run --user` needs `XDG_RUNTIME_DIR`/the session bus, which the app deliberately does not pass to commands (Q2). It is not needed.
+- A *started* record without a result is reported as interrupted, including for the scope operation that never ran; nothing reruns automatically.
+- Not covered here: the browser process started by Playwright is outside bwrap. Whether it ends when its browser host is killed is left to the browser-host implementation (Chrome is expected to exit when its debugging pipe closes; to verify).
+- JSON: `~/q8-with-manager/` and `~/surogate-spike-results/q8-*` on both VMs (`q8-prekill-<victim>.json`, `q8-<victim>-ubuntu.json`).
+
+Design consequence (Section 1):
+1. Supervision relies on srt's `bwrap --die-with-parent` plus the sandbox's PID namespace. The tool host spawns bwrap directly (no intermediate double-fork) so the tool host is bwrap's parent. No systemd user scope is required, so the app works in sessions without a user manager.
+2. A replacement host, before accepting work, reads the operation journal and reports every *started* operation without a result as interrupted. As a defensive check it may also confirm that no process carrying the old host's marker survives.
+3. The browser host must guarantee the same for its browser process; verify when it is built.
