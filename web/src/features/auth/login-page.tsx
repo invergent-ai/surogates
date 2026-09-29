@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import {
+  authFetch,
   exchangeFirebaseToken,
   fetchAuthConfig,
   type AuthConfigResponse,
@@ -192,6 +193,24 @@ export function LoginPage() {
       stashed ? (JSON.parse(stashed) as SignupProfile) : undefined,
     );
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
+    const handoff = new URLSearchParams(window.location.search);
+    const desktopState = handoff.get("desktop_state");
+    if (desktopState) {
+      const response = await authFetch("/api/v1/auth/desktop/code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          state: desktopState,
+          code_challenge: handoff.get("code_challenge"),
+          port: Number(handoff.get("port")),
+        }),
+      });
+      if (response.ok) {
+        const { code, redirect_uri } = (await response.json()) as { code: string; redirect_uri: string };
+        window.location.assign(`${redirect_uri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(desktopState)}`);
+        return;
+      }
+    }
     // Best-effort: a failed profile write must not block sign-in; the
     // stash is cleared either way and the user can edit their profile
     // later.

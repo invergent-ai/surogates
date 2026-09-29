@@ -696,6 +696,7 @@ def create_app() -> FastAPI:
         ask_user_question,
         auth,
         board,
+        desktop_auth,
         browser,
         browser_profiles,
         channel_files,
@@ -724,6 +725,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, tags=["health"])
     app.include_router(auth.router, prefix="/v1", tags=["auth"])
+    app.include_router(desktop_auth.router, prefix="/v1", tags=["auth"])
     app.include_router(sessions.router, prefix="/v1", tags=["sessions"])
     app.include_router(commerce.router, prefix="/v1", tags=["commerce"])
     # Root-mounted: the Firebase SDK addresses /__/auth/* on the page
