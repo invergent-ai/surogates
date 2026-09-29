@@ -26,6 +26,7 @@ Setup notes:
 |---|---|---|---|
 | 1 | Electron and srt under AppArmor | YES (with changes) | install-time AppArmor profile; app ships its own `bwrap` (`bwrapPath`); app folder readable in the sandbox |
 | 2 | Per-root isolation, read policy, package installs | YES (with changes) | `denyRead: ["/"]` + explicit re-allows incl. srt's bridge sockets; spawn with app env only; per-host `CLAUDE_CODE_TMPDIR`; session allows are app state |
+| 3 | Background servers across commands and from the browser | NO per command; YES with a runner | one long-lived sandboxed runner per root session; browser access by explicit forwarding over an inherited descriptor |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -83,3 +84,21 @@ Design consequence:
 2. Section 4, Environment: spawn commands with the app-built environment only; never merge srt's returned `env` on Linux.
 3. Section 4, Writes: set `CLAUDE_CODE_TMPDIR` per tool host to the session temp folder; never rely on srt's shared `/tmp/claude`.
 4. Section 4, Approvals: "Allow for this session" is app state applied with `updateConfig`; srt's ask callback is asked every time otherwise.
+
+## Q3: Background servers across commands and from the browser
+
+Result: NO for one sandbox per command; YES with a session runner and explicit forwarding.
+
+Environment: both VMs, `SPIKE_VARIANT=root-deny`, `allowLocalBinding: true`.
+
+Evidence (identical on 24.04 and 26.04):
+- One sandbox per command: `python3 -m http.server 18765` started in the background by one command is unreachable from the next command (`curl: (7) Failed to connect to 127.0.0.1 port 18765 … Couldn't connect to server`) and from outside the sandbox (`ECONNREFUSED`). Each srt command gets its own network namespace, so its loopback is private.
+- Session runner (`q3/runner.cjs` inside one long-lived srt sandbox; commands are its children): a server started by one runner command is reachable by the next runner command (`200`).
+- Forwarding: the host listens on `127.0.0.1:18768` and tunnels each connection over an inherited socketpair (fd 3) that bwrap passes into the sandbox; the runner connects it to `127.0.0.1:18767` inside. A request from outside the sandbox gets `200`. The browser is outside the sandbox, so it reaches the server the same way.
+- Killing the runner with SIGKILL ends the whole tree: the runner is gone and no `http.server 18767` survives (only the `pgrep` itself matched), because the sandbox's PID namespace goes down with its init.
+- JSON: `results/{u24,u26}/q3-ubuntu.json`.
+
+Design consequence (Section 4):
+1. Commands of one root session run inside one long-lived sandboxed runner, not one sandbox per command, whenever background processes are involved. A runner per root also matches the per-root tool host model from Q2.
+2. Browser access to a session's local server goes through explicit forwarding: the tool host listens on a loopback port for a port the user approved and tunnels it into the runner over an inherited descriptor. The runner never exposes a port on the host's loopback by itself.
+3. Killing the runner is a reliable way to end a session's process tree (confirmed again in Q8).
