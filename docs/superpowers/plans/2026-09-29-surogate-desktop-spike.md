@@ -4,7 +4,7 @@
 
 **Goal:** Answer the eight platform and recovery questions in Section 10 of the design with a written result and evidence each, before any implementation planning.
 
-**Architecture:** Throwaway probes under `spikes/desktop/` on a spike branch. One Electron app (`main.cjs`) dispatches to a probe per question; shared helpers in `spikes/desktop/lib/` fork `utilityProcess` tool hosts that initialise `srt` and run sandboxed commands. Probes run on clean Ubuntu 24.04 and 26.04 VMs (the only supported platforms), except the sign-in probe (Q6), which runs on the developer workstation against the local dev stack. Each probe writes a JSON result under `~/surogate-spike-results/`, and each task records its conclusion in one results document.
+**Architecture:** Throwaway probes under `spikes/desktop/` on a spike branch. One Electron app (`main.cjs`) dispatches to a probe per question; shared helpers in `spikes/desktop/lib/` fork `utilityProcess` tool hosts that initialise `srt` and run sandboxed commands. Probes run on clean Ubuntu 24.04 and 26.04 VMs (the oldest and newest supported LTS releases), except the sign-in probe (Q6), which runs on the developer workstation against the local dev stack. Each probe writes a JSON result under `~/surogate-spike-results/`, and each task records its conclusion in one results document.
 
 **Tech Stack:** Electron (`utilityProcess`, `BrowserWindow`), `@anthropic-ai/sandbox-runtime` (`SandboxManager`), `playwright-core`, Node 22, libvirt/`virt-install` with cloud images, Python 3.12 + pytest (surogates venv), FastAPI (surogates api), React (surogates web).
 
@@ -15,7 +15,7 @@
 - Probe code is throwaway. It lives on branch `spike/desktop-platform` under `spikes/desktop/` and is never merged. Only the results document and design edits move to `docs/desktop-client-design`.
 - Record the exact Electron, `srt` and `playwright-core` versions. Install them with `npm install --save-exact`.
 - Never disable a sandbox: no `--no-sandbox`, no `chromiumSandbox: false`, no `enableWeakerNestedSandbox`, no `ELECTRON_DISABLE_SANDBOX`.
-- Test machines: clean Ubuntu 24.04 LTS and 26.04 LTS VMs (x64), both with `kernel.apparmor_restrict_unprivileged_userns = 1`. No other distribution is tested or supported. Q6 runs on the workstation against the local dev stack only, never against PROD.
+- Test machines: clean Ubuntu 24.04 LTS and 26.04 LTS VMs (x64), both with `kernel.apparmor_restrict_unprivileged_userns = 1`. Only Ubuntu LTS releases from 24.04 on are supported; no other distribution or interim release is tested. Q6 runs on the workstation against the local dev stack only, never against PROD.
 - Each question's result states YES, NO or PARTIAL, the versions, the commands run, output excerpts, the JSON result path, and the consequence for the design.
 - Python probes run with `/work/surogates/.venv/bin/python`, never `uv run`.
 - Commits follow Conventional Commits and carry no `Co-Authored-By` trailer.

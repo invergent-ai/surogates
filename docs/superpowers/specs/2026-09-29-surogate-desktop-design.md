@@ -29,8 +29,9 @@ billing, that the user reaches in the web client.
 
 - Windows and macOS. Ubuntu first, Windows second, macOS last. Nothing in the
   first release may depend on a macOS-only or Windows-only mechanism.
-- Linux distributions other than Ubuntu. The supported releases are Ubuntu
-  24.04 LTS and 26.04 LTS on x64.
+- Linux distributions other than Ubuntu, and Ubuntu interim releases (such as
+  24.10 or 25.04). The supported releases are Ubuntu 24.04 LTS and every later
+  LTS release (26.04 LTS today), on x64.
 - Agent builders. Studio stays a web app. The desktop app is for people using
   agents.
 - Running the harness, the LLM loop or a local model on the laptop.
@@ -47,7 +48,7 @@ this review. The spike gates the technical choices that still need proof.
 | Who is it for? | Agent users only. |
 | What runs where? | Reasoning in the cloud, hands on the laptop. File, terminal and browser tools act on the user's computer. Every other tool stays in the cloud. |
 | New UI or the existing web client? | The existing web client, loaded from the agent's URL in an Electron window, plus a small bridge. No second chat UI. |
-| First platforms | Ubuntu 24.04 LTS and 26.04 LTS, then Windows, then macOS. No other Linux distributions. |
+| First platforms | Ubuntu LTS from 24.04 on (24.04, 26.04 and later LTS releases), then Windows, then macOS. No interim Ubuntu releases and no other Linux distributions. |
 | Local isolation | Anthropic Sandbox Runtime (`srt`), used as a Node library (`@anthropic-ai/sandbox-runtime`). |
 | Workspace | The local folder is the session's only workspace. Uploads, artifacts, the whiteboard and research notes live there. |
 | Folder binding | One folder per session. Defaults to the last folder used with that agent. A fresh folder is created when none is picked. Fixed once the chat starts. Sub-agents share it. |
@@ -822,9 +823,10 @@ by the script, so an air-gapped install never contacts us.
 
 `curl -fsSL <base>/desktop/install.sh | bash`
 
-1. Check `/etc/os-release` and the architecture. Continue only on Ubuntu 24.04
-   or 26.04 on x64. Anything else stops with "Surogate Desktop supports Ubuntu
-   24.04 and 26.04 (x64)" before any change is made.
+1. Check `/etc/os-release` and the architecture. Continue only when `ID` is
+   `ubuntu`, `VERSION` contains `LTS`, `VERSION_ID` is 24.04 or later, and the
+   machine is x64. Anything else stops with "Surogate Desktop supports Ubuntu
+   24.04 LTS or a later LTS release (x64)" before any change is made.
 2. Explain what needs `sudo`, ask once, then install `bubblewrap`, `socat` and
    `ripgrep` with apt, and, when `kernel.apparmor_restrict_unprivileged_userns=1`
    (the default on both releases), an AppArmor profile allowing user namespaces
@@ -866,7 +868,8 @@ macOS requires code signing and notarization, with its own release job.
 
 ## 10. Testing and the first spike
 
-First spike on clean Ubuntu 24.04 and 26.04 VMs. Record the exact Electron,
+First spike on clean Ubuntu 24.04 and 26.04 VMs, the oldest and newest
+supported LTS releases. Record the exact Electron,
 `srt` and `playwright-core` versions, with a written result and evidence for each
 question. Passing these checks is required before planning the implementation.
 
