@@ -29,6 +29,7 @@ Setup notes:
 | 3 | Background servers across commands and from the browser | NO per command; YES with a runner | one long-lived sandboxed runner per root session; browser access by explicit forwarding over an inherited descriptor |
 | 4 | Installed browsers, launch flags, downloads, network guard | PARTIAL | Chrome/Edge .deb verified; `ignoreDefaultArgs` for Playwright's weakening defaults; pinning proxy is the network boundary; no per-session private-network grants in a shared profile; `navigate` rejects non-http(s) |
 | 5 | Worker recovery without repeating an effect | NO today; YES for the Section 2 protocol (model) | durable invocation replay between `_rebuild_messages` and the first LLM call, so `sanitize_tool_pairs` never stubs a desktop call; reuse `lease_token` fencing |
+| 7 | File-operation boundary under races | PARTIAL | helper inside srt + `O_NOFOLLOW`/`fstat`/`nlink`; host `chdir`s to the folder; raw API enforces protected files itself; refuse multiply-linked files at binding |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -170,3 +171,33 @@ Design consequence (Section 2):
 1. Durable invocation replay plugs into `AgentHarness.wake` between `_rebuild_messages` (`loop.py:1175`) and the first LLM call: for every unanswered tool call of a desktop session that has `device_operations` rows, resume the recorded operation sequence (same operation IDs, read committed results) and emit its `tool.result` before the LLM runs. Otherwise `sanitize_tool_pairs` would stub it as "unavailable" and the model could redo a completed effect.
 2. Lease fencing reuses the existing `lease_token` check pattern of `advance_harness_cursor` for journal dispatch and result commit.
 3. No correction to the Section 2 state machine was needed; the model encodes it as written.
+
+## Q7: The file-operation boundary under races
+
+Result: PARTIAL. The candidate primitive holds against symlink and rename races, special files and magic links. Pre-existing hard links and protected files created after a sandbox starts are real gaps.
+
+Environment: both VMs, `root-deny` policy. Candidate A: file-operation helper (`q7/fsop.cjs`, Electron as Node) running inside the session's srt sandbox, opening with `O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC` and refusing non-regular files and `nlink > 1` after `fstat`. Baseline B: `realpath` check, then an ordinary write, in the unsandboxed host.
+
+Evidence (identical on 24.04 and 26.04):
+
+| Case | Result |
+|---|---|
+| race: a sandboxed command flips `sub/` between a directory and a symlink to `~/.config/…`, 5000 writes each | A: 0 files outside. B: 0 files outside (race not reproduced; not evidence that B is safe) |
+| sandboxed `ln ~/.nvm/nvm.sh ./hl` | fails: `Invalid cross-device link` (bind mounts are separate mounts) |
+| helper write through a hard link the user made to `~/Documents/q7-outside.txt` | refused: `EMLINK` |
+| **sandboxed command `echo … >> hl-user` through that hard link** | **succeeds; the outside file now contains `pwned-by-command`** (Review Focus 1) |
+| helper read of a FIFO | refused `ENOTREG` in ≤ 1 ms, no hang |
+| helper read through `z -> /dev/zero` | refused `ELOOP` |
+| helper read through `pr -> /proc/self/root` to a denied file | `ENOENT` (denied paths do not exist in the sandbox) |
+| `.git/config` in the folder, host started in `~/spike` | helper write succeeds; command write succeeds |
+| same, host `chdir`ed to the session folder before srt runs | command write fails `Read-only file system`; the long-lived helper (sandboxed before the file existed) still writes it |
+
+Finding on mandatory denies: srt computes its mandatory deny list (`.bashrc`, `.gitconfig`, `.git/config`, `.git/hooks`, …) from the host process's current directory and only for files that exist when a command is wrapped (the debug log showed `Skipping non-existent deny path … /home/spike/spike/.bashrc`). A sandbox that lives longer than one command does not protect files created after it started.
+
+JSON: `results/{u24,u26}/q7-ubuntu.json` (host in the folder), `q7nochdir-ubuntu.json` (host in `~/spike`).
+
+Design consequence (Section 4):
+1. Adopt candidate A for raw file operations: the helper runs inside the session's srt sandbox with `O_NOFOLLOW`, `fstat`-based regular-file and `nlink` checks. The mount namespace, not a `realpath` check, is the containment boundary. No native `openat2` helper is needed for the first release.
+2. Each per-root tool host `chdir`s to the session folder before initialising srt, so srt's mandatory denies apply to the folder.
+3. The raw file API enforces the protected-file list itself (`.git/config`, `.git/hooks/*`, `.bashrc`, … plus the harness's `.env*` list) on every operation, because srt's denies are fixed at sandbox launch. For long-lived sandboxes (the Q3 session runner), the runner is restarted when a protected path appears in the folder, or commands that do not need background processes run in fresh per-command sandboxes. This choice goes to implementation planning with both options stated.
+4. Hard links: at binding time the app scans the folder for regular files with `nlink > 1` and refuses to bind until the user removes them or confirms in the native prompt that those files may be changed; the helper refuses them always. Hard links created during a session by processes outside the sandbox remain a documented residual risk.
