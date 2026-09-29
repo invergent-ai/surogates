@@ -1,0 +1,10 @@
+{
+  "name": "surogate-desktop-spike",
+  "private": true,
+  "main": "main.cjs",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
+    "electron": "44.5.0",
+    "playwright-core": "1.63.0"
+  }
+}
