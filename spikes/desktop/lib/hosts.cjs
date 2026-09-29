@@ -1,8 +1,11 @@
 const { utilityProcess } = require('electron');
 const path = require('node:path');
 
-function forkHost(name, { policy, onAsk }) {
-  const child = utilityProcess.fork(path.join(__dirname, 'host.cjs'), [], { serviceName: name, stdio: 'inherit' });
+// `tmp`: the session temp folder; srt sets the sandbox's TMPDIR from the host
+// process's CLAUDE_CODE_TMPDIR (default: the shared /tmp/claude).
+function forkHost(name, { policy, onAsk, tmp }) {
+  const env = tmp ? { ...process.env, CLAUDE_CODE_TMPDIR: tmp } : process.env;
+  const child = utilityProcess.fork(path.join(__dirname, 'host.cjs'), [], { serviceName: name, stdio: 'inherit', env });
   const waiters = new Map();
   let seq = 0;
   let readyResolve;

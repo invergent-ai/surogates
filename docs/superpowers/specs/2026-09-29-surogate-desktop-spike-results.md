@@ -25,6 +25,7 @@ Setup notes:
 | # | Question | Result | Design change |
 |---|---|---|---|
 | 1 | Electron and srt under AppArmor | YES (with changes) | install-time AppArmor profile; app ships its own `bwrap` (`bwrapPath`); app folder readable in the sandbox |
+| 2 | Per-root isolation, read policy, package installs | YES (with changes) | `denyRead: ["/"]` + explicit re-allows incl. srt's bridge sockets; spawn with app env only; per-host `CLAUDE_CODE_TMPDIR`; session allows are app state |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -49,3 +50,36 @@ Design consequence:
    `profile surogate-desktop /home/*/.local/share/surogate/versions/*/surogate flags=(unconfined) { userns, include if exists <local/surogate-desktop> }`.
 2. Section 4 and 9: the app ships its own `bwrap` in `<version>/bin/bwrap` and passes it to srt as `bwrapPath`. Ubuntu 26.04's `bwrap-userns-restrict` otherwise breaks srt's seccomp helper. This deliberately gives the app's `bwrap` the same user-namespace permission the app itself has, which is exactly the 24.04 behaviour. bubblewrap is LGPL-2.0-or-later, so bundling needs its licence notice.
 3. Section 4: the read policy always re-allows the app's install folder (read-only), because srt executes `vendor/seccomp/<arch>/apply-seccomp` from there inside the sandbox.
+
+## Q2: Per-root isolation, the read policy and package installs
+
+Result: YES, after four corrections to how the tool host drives srt (see Design consequence).
+
+Environment: both VMs; three roots running concurrently, one `utilityProcess` host each: `A` (plain), `B My Files ü` (spaces and non-ASCII, Review Focus 2) and `C-link` → `/mnt/spike-data/C` (symlinked root on a separate loop-mounted ext4, Review Focus 3); both variants `root-deny` (`denyRead: ["/"]` + re-allows) and `home-deny` (`denyRead: [home, /mnt, /media, /srv, /tmp, /var/tmp]`).
+
+Evidence (final run, both releases, both variants, all three roots, 0 failed checks; scoring script `q2-score.jq` in the plan workspace):
+- Own folder write/read works; `~/Documents/private.txt`, `~/.ssh/spike_secret`, the other root's seed file and a write into the other root all fail with "No such file or directory": denied paths are absent inside the sandbox, not merely unreadable.
+- `/tmp` is private per sandbox: a marker written to `/tmp` by one root is invisible to the other (`crossTmp` both directions fail).
+- `TMPDIR` points at that root's session folder and is writable; `node` (nvm), `git` and `python3` run; `npm install left-pad` and `pip install six` succeed with caches in the session temp folder.
+- `registry.npmjs.org` (allowed) returns 200; `example.com` triggers the ask callback per root; root A (allowed) gets 200, roots B and C (denied) do not; A's allow does not reach B or C.
+- No Docker socket is reachable; `busctl --user` fails with "Failed to connect to bus: Operation not permitted".
+- The symlinked root on another mount works with a policy built from its resolved path; the non-ASCII root behaves exactly like A.
+- `getLinuxGlobPatternWarnings()` is empty in every host.
+
+Failures found and corrected on the way (each confirmed by a before/after run, diagnostic probe `q9`):
+1. `wrapWithSandboxArgv` returns the caller's own `process.env` as `env` on Linux (the proxy settings are baked into `argv`). Spreading it over the command's environment replaced our `PATH` (`node: command not found`) and would leak the host process's environment into every command. The host now spawns with the environment it built, only.
+2. srt sets the sandbox's `TMPDIR` from the host process's `CLAUDE_CODE_TMPDIR`, defaulting to `/tmp/claude`, which is shared by every sandbox and did not exist. Each root's host now starts with `CLAUDE_CODE_TMPDIR` set to that session's temp folder.
+3. With `/tmp` hidden (either variant), every connection failed with `curl: (56) Proxy CONNECT aborted` and the ask callback never ran: srt's in-sandbox relay reaches the host proxy through Unix sockets in the host's `/tmp` (`/tmp/claude-http-<id>.sock`). After `initialize`, the host re-allows exactly `getLinuxHttpSocketPath()` and `getLinuxSocksSocketPath()` through `updateConfig`; the rest of `/tmp` stays hidden.
+4. The probe's `npm init -y` failed only in `B My Files ü` because npm derives an invalid package name (`b-my-files-ü`) from the folder name. Not a sandbox issue; the probe writes a fixed `package.json`.
+
+Other observations:
+- srt does not remember an "allow" answer: root A was asked again on its second request to `example.com`. "Allow for this session" must be implemented by the app (add the domain to that root's `allowedDomains` with `updateConfig`, which applies network changes live).
+- `root-deny` is chosen for the remaining probes (`SPIKE_VARIANT=root-deny`): it passes everything and also hides other mounts without listing them.
+
+JSON: `results/{u24,u26}/q2-ubuntu.json`, `q9-ubuntu.json` (plan workspace).
+
+Design consequence:
+1. Section 4, Reads: adopt `denyRead: ["/"]` with `allowRead` = system runtime paths (`/usr /bin /sbin /lib /lib64 /etc /opt /proc /sys /dev /run`), the app's install folder, the session folder (resolved path), the session temp folder, the discovered toolchain folders, and srt's two proxy-bridge sockets. Verified on both releases.
+2. Section 4, Environment: spawn commands with the app-built environment only; never merge srt's returned `env` on Linux.
+3. Section 4, Writes: set `CLAUDE_CODE_TMPDIR` per tool host to the session temp folder; never rely on srt's shared `/tmp/claude`.
+4. Section 4, Approvals: "Allow for this session" is app state applied with `updateConfig`; srt's ask callback is asked every time otherwise.
