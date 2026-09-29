@@ -28,6 +28,7 @@ Setup notes:
 | 2 | Per-root isolation, read policy, package installs | YES (with changes) | `denyRead: ["/"]` + explicit re-allows incl. srt's bridge sockets; spawn with app env only; per-host `CLAUDE_CODE_TMPDIR`; session allows are app state |
 | 3 | Background servers across commands and from the browser | NO per command; YES with a runner | one long-lived sandboxed runner per root session; browser access by explicit forwarding over an inherited descriptor |
 | 4 | Installed browsers, launch flags, downloads, network guard | PARTIAL | Chrome/Edge .deb verified; `ignoreDefaultArgs` for Playwright's weakening defaults; pinning proxy is the network boundary; no per-session private-network grants in a shared profile; `navigate` rejects non-http(s) |
+| 5 | Worker recovery without repeating an effect | NO today; YES for the Section 2 protocol (model) | durable invocation replay between `_rebuild_messages` and the first LLM call, so `sanitize_tool_pairs` never stubs a desktop call; reuse `lease_token` fencing |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -142,3 +143,30 @@ Design consequence (Section 5):
 4. Private-network access cannot be scoped to one session in a shared profile: redirects, SharedWorkers and WebSockets escape per-session attribution. The first release offers no private-network access in the agent browser except the session's own forwarded ports (Q3), which the proxy admits by exact loopback port. Per-session grants, if wanted later, need a separate browser (profile) per granted session.
 5. The `navigate` operation itself rejects anything but `http:`/`https:`; the route guard does not stop `chrome://`, `edge://` or `view-source:`. Page-initiated navigation to those schemes and to `file:` is already refused by the browser.
 6. Downloads: keep the browser's suggested name, take its basename, save inside the folder with the same conflict rules as file writes; never intercept a response that may become a download.
+
+## Q5: Worker recovery without repeating an effect
+
+Result: NO today (replay neither resumes nor reports the unfinished call); YES for the Section 2 protocol, whose executable model passes every fault case.
+
+Environment: workstation, surogates venv (`/work/surogates/.venv/bin/python`), pytest.
+
+Evidence, current replay:
+- `q5/test_replay_unanswered_tool_call.py` (passes): for an event log `user.message → llm.request → llm.response(tool_calls=[call_1]) → tool.call(call_1)` with no `tool.result`, `AgentHarness._rebuild_messages` (`surogates/harness/loop_context_replay.py:194`) returns a history ending in the assistant's tool call with no tool message.
+- Wake then rebuilds from the full event log (`surogates/harness/loop.py:1175`). Before every LLM request, `sanitize_tool_pairs` (`surogates/harness/llm_call.py:600`) inserts a stub tool result for each unmatched call (`surogates/harness/sanitize.py:146-168`): `"[Result unavailable — see context summary above]"`. The call is never re-dispatched; the model decides whether to retry, without knowing whether the effect happened.
+- The harness cursor advances only through `advance_harness_cursor` (`loop.py:4500`), which is already fenced: it takes the lease row `FOR UPDATE` and refuses when `lease_token` differs (`surogates/session/store.py:2144-2152`).
+
+Evidence, protocol model (`q5/journal_model.py`, `q5/test_journal_model.py`, 11 passed; written test-first, collection failed before the model existed):
+- happy path runs once; a lost Redis nudge is recovered by the heartbeat reconcile; a laptop crash after *received* runs the operation exactly once after reconnect;
+- a crash after *started* (before or after the effect) reports `{"interrupted": true, "outcome": "unknown"}` and never reruns (effects 0 and 1 respectively);
+- a crash after *result* returns the stored result (effect once);
+- a new worker after the result was committed reads it without re-dispatching;
+- a worker holding a stale lease token can neither dispatch nor commit;
+- the same operation ID with a changed payload is a protocol error;
+- a cancellation persisted while offline is applied before pending work, and the operation never runs;
+- a delayed retry after the payload was reclaimed returns the compact record, not a rerun.
+- Mutation check: removing the *started → interrupted* rule turns exactly the two interrupted-outcome tests red.
+
+Design consequence (Section 2):
+1. Durable invocation replay plugs into `AgentHarness.wake` between `_rebuild_messages` (`loop.py:1175`) and the first LLM call: for every unanswered tool call of a desktop session that has `device_operations` rows, resume the recorded operation sequence (same operation IDs, read committed results) and emit its `tool.result` before the LLM runs. Otherwise `sanitize_tool_pairs` would stub it as "unavailable" and the model could redo a completed effect.
+2. Lease fencing reuses the existing `lease_token` check pattern of `advance_harness_cursor` for journal dispatch and result commit.
+3. No correction to the Section 2 state machine was needed; the model encodes it as written.
