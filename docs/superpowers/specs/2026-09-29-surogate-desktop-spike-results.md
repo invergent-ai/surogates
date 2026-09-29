@@ -27,6 +27,7 @@ Setup notes:
 | 1 | Electron and srt under AppArmor | YES (with changes) | install-time AppArmor profile; app ships its own `bwrap` (`bwrapPath`); app folder readable in the sandbox |
 | 2 | Per-root isolation, read policy, package installs | YES (with changes) | `denyRead: ["/"]` + explicit re-allows incl. srt's bridge sockets; spawn with app env only; per-host `CLAUDE_CODE_TMPDIR`; session allows are app state |
 | 3 | Background servers across commands and from the browser | NO per command; YES with a runner | one long-lived sandboxed runner per root session; browser access by explicit forwarding over an inherited descriptor |
+| 4 | Installed browsers, launch flags, downloads, network guard | PARTIAL | Chrome/Edge .deb verified; `ignoreDefaultArgs` for Playwright's weakening defaults; pinning proxy is the network boundary; no per-session private-network grants in a shared profile; `navigate` rejects non-http(s) |
 
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
@@ -102,3 +103,42 @@ Design consequence (Section 4):
 1. Commands of one root session run inside one long-lived sandboxed runner, not one sandbox per command, whenever background processes are involved. A runner per root also matches the per-root tool host model from Q2.
 2. Browser access to a session's local server goes through explicit forwarding: the tool host listens on a loopback port for a port the user approved and tunnels it into the runner over an inherited descriptor. The runner never exposes a port on the host's loopback by itself.
 3. Killing the runner is a reliable way to end a session's process tree (confirmed again in Q8).
+
+## Q4: Installed browsers, launch flags, downloads and the network guard
+
+Result: PARTIAL. Launch, sandboxing, downloads and file inputs are YES. The network guard is YES only with the pinning proxy; per-session private-network grants are NOT enforceable in a shared profile.
+
+Environment: both VMs, Google Chrome 154.0.8037.92 and Microsoft Edge 154.0.4258.37 (.deb), launched from the browser host (`utilityProcess`) by `playwright-core` 1.63.0 with `launchPersistentContext(…, { chromiumSandbox: true })`. Brave and Vivaldi were not installed (untested). Ubuntu's Chromium is the Snap (`/snap/bin/chromium` → `/usr/bin/snap`).
+
+Evidence (same on 24.04 and 26.04 unless noted):
+
+| Check | Chrome 154 | Edge 154 |
+|---|---|---|
+| launched over `--remote-debugging-pipe`, no `--remote-debugging-port` | yes | yes |
+| no `--no-sandbox`; renderers `Seccomp: 2` | yes | yes |
+| second launch on the same profile (Review Focus 4) | clean error: "Opening in existing browser session" | same |
+| route guard, session B (no grant) → loopback canary | 0 hits | 0 hits |
+| route guard, session A (granted `http://127.0.0.1:18081`) | 0 hits (Chrome's Local Network Access blocks it) | same |
+| same, with `--disable-features=LocalNetworkAccessChecks` (24.04) | A: 10 request types reach it; **B leaks via SharedWorker and via a public→loopback redirect** | same |
+| pinning proxy (`--proxy-server` + `--proxy-bypass-list=<-loopback>`), no grants | 0 hits; proxy refused fetch, XHR, img, iframe, prefetch, beacon, EventSource, workers, shared workers, WebSocket CONNECT, `localhost`, and the httpbin redirect target | same |
+| `file:///etc/hostname` via `goto` | blocked (`ERR_BLOCKED_BY_CLIENT`) | blocked |
+| `chrome://version` / `view-source:` via `goto` | not stopped by the route guard (commit late, then load) | 26.04: navigated to `edge://version/` and to `https://example.com/` |
+| `window.open('file:///etc/hostname')` from the page | no popup | no popup |
+| download named `../../escape.txt` | browser suggests `_.._escape.txt`; saved inside the folder; nothing outside | same |
+| `<input type=file>` click with a `filechooser` listener | intercepted, no native dialog | same |
+| service workers allowed | no canary hits | no canary hits |
+
+Other observations:
+- Chrome rewrites its process title: `/proc/<pid>/cmdline` of the browser process is one space-joined string, so flag checks must split it.
+- Playwright's default arguments weaken the browser a person uses, among them `--disable-popup-blocking`, `--disable-client-side-phishing-detection`, `--disable-component-update` (no Safe Browsing or CRL updates), `--disable-background-networking`, `--password-store=basic` with `--use-mock-keychain` (saved logins without the OS keyring), and `HttpsUpgrades` in `--disable-features`.
+- A download of a response fulfilled by Playwright's route is cancelled by Chromium (`download.saveAs: canceled`); downloads must be real responses, not intercepted ones.
+- Route interception attributes requests to a session for pages and dedicated workers, but not for WebSockets (no page) and not for redirect targets or SharedWorker requests.
+- JSON: `results/{u24,u26}/q4-ubuntu.json`, `results/u24/q4lna-ubuntu.json`.
+
+Design consequence (Section 5):
+1. Supported matrix for the first release: Google Chrome and Microsoft Edge `.deb` builds, verified at 154. Brave and Vivaldi stay "detected, unverified" until tested. Detection checks `/snap/bin/chromium` and treats any path resolving to `/usr/bin/snap` as unsupported.
+2. Launch through `ignoreDefaultArgs` so the agent browser keeps the protections a person expects: drop at least `--disable-popup-blocking`, `--disable-client-side-phishing-detection`, `--disable-component-update`, `--disable-background-networking`, `--password-store=basic` and `--use-mock-keychain`, and the `HttpsUpgrades` disable. Needs its own verification when the browser host is built.
+3. Network enforcement uses the pinning proxy with `--proxy-bypass-list=<-loopback>` as the boundary (it resolves once and connects to that address, so it also stops DNS rebinding), keeps Chrome's Local Network Access checks on, and keeps `serviceWorkers: 'block'`. The route guard stays only for fixture-style interception and logging, never as the security boundary.
+4. Private-network access cannot be scoped to one session in a shared profile: redirects, SharedWorkers and WebSockets escape per-session attribution. The first release offers no private-network access in the agent browser except the session's own forwarded ports (Q3), which the proxy admits by exact loopback port. Per-session grants, if wanted later, need a separate browser (profile) per granted session.
+5. The `navigate` operation itself rejects anything but `http:`/`https:`; the route guard does not stop `chrome://`, `edge://` or `view-source:`. Page-initiated navigation to those schemes and to `file:` is already refused by the browser.
+6. Downloads: keep the browser's suggested name, take its basename, save inside the folder with the same conflict rules as file writes; never intercept a response that may become a download.
