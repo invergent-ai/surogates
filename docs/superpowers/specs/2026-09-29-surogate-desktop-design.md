@@ -27,8 +27,10 @@ billing, that the user reaches in the web client.
 
 ## Non-goals for the first release
 
-- Windows and macOS. Linux first, Windows second, macOS last. Nothing in the
+- Windows and macOS. Ubuntu first, Windows second, macOS last. Nothing in the
   first release may depend on a macOS-only or Windows-only mechanism.
+- Linux distributions other than Ubuntu. The supported releases are Ubuntu
+  24.04 LTS and 26.04 LTS on x64.
 - Agent builders. Studio stays a web app. The desktop app is for people using
   agents.
 - Running the harness, the LLM loop or a local model on the laptop.
@@ -45,7 +47,7 @@ this review. The spike gates the technical choices that still need proof.
 | Who is it for? | Agent users only. |
 | What runs where? | Reasoning in the cloud, hands on the laptop. File, terminal and browser tools act on the user's computer. Every other tool stays in the cloud. |
 | New UI or the existing web client? | The existing web client, loaded from the agent's URL in an Electron window, plus a small bridge. No second chat UI. |
-| First platforms | Linux, then Windows, then macOS. |
+| First platforms | Ubuntu 24.04 LTS and 26.04 LTS, then Windows, then macOS. No other Linux distributions. |
 | Local isolation | Anthropic Sandbox Runtime (`srt`), used as a Node library (`@anthropic-ai/sandbox-runtime`). |
 | Workspace | The local folder is the session's only workspace. Uploads, artifacts, the whiteboard and research notes live there. |
 | Folder binding | One folder per session. Defaults to the last folder used with that agent. A fresh folder is created when none is picked. Fixed once the chat starts. Sub-agents share it. |
@@ -61,7 +63,7 @@ this review. The spike gates the technical choices that still need proof.
 ## Architecture
 
 ```
-Desktop app (Linux first)                              Surogate server (surogate.ai or enterprise)
+Desktop app (Ubuntu first)                             Surogate server (surogate.ai or enterprise)
 ┌─────────────────────────────────────┐               ┌───────────────────────────────────────┐
 │ Main process                        │  device link  │ api                                   │
 │  windows · tray · start at login    │◀─── wss ─────▶│  device socket, presence in Redis     │
@@ -527,15 +529,19 @@ page.
 - Firefox is not offered (Playwright drives only its own patched Firefox). The
   setting says so.
 - Snap and Flatpak builds are not supported: their confinement interferes with
-  the profile folder and pipe control.
+  the profile folder and pipe control. Ubuntu ships Chromium only as a Snap, so
+  on a standard Ubuntu install the supported browsers are the `.deb` builds of
+  Chrome, Edge, Brave and Vivaldi. Chromium counts only when installed from a
+  non-Snap source.
 - A change applies the next time an agent's browser starts. Pin `playwright-core`
   and maintain a tested browser/version matrix. Detection alone cannot promise
   support for Brave, Vivaldi or a newly updated Chromium build. See
   [Playwright's executable-path guidance](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-option-executable-path).
 
 No supported browser. Browser tools return "No supported browser on this
-computer. Install Chrome, Chromium, Edge, Brave or Vivaldi (not the Snap or
-Flatpak build), or pick one in Settings → Browser." The agent continues with its
+computer. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or pick one
+in Settings → Browser. The Snap build of Chromium is not supported." The agent
+continues with its
 other tools. The web client's browser pane shows the same message with a button
 to desktop Settings → Browser.
 
@@ -816,12 +822,13 @@ by the script, so an air-gapped install never contacts us.
 
 `curl -fsSL <base>/desktop/install.sh | bash`
 
-1. Detect architecture and package manager (apt, dnf, pacman, zypper).
-2. Explain what needs `sudo`, ask once, then install `bubblewrap`, `socat`,
-   `ripgrep`, and on Ubuntu 24.04+ with
-   `kernel.apparmor_restrict_unprivileged_userns=1` an AppArmor profile allowing
-   user namespaces for the app and `bwrap`. The app never runs with
-   `--no-sandbox`.
+1. Check `/etc/os-release` and the architecture. Continue only on Ubuntu 24.04
+   or 26.04 on x64. Anything else stops with "Surogate Desktop supports Ubuntu
+   24.04 and 26.04 (x64)" before any change is made.
+2. Explain what needs `sudo`, ask once, then install `bubblewrap`, `socat` and
+   `ripgrep` with apt, and, when `kernel.apparmor_restrict_unprivileged_userns=1`
+   (the default on both releases), an AppArmor profile allowing user namespaces
+   for the app and `bwrap`. The app never runs with `--no-sandbox`.
 3. Verify the signed manifest and tarball, then extract into a new staging
    directory. Reject archive paths and link targets outside that directory.
    Move the verified tree into `~/.local/share/surogate/versions/<version>/`
@@ -859,7 +866,7 @@ macOS requires code signing and notarization, with its own release job.
 
 ## 10. Testing and the first spike
 
-First spike on clean Ubuntu 24.04 and Fedora VMs. Record the exact Electron,
+First spike on clean Ubuntu 24.04 and 26.04 VMs. Record the exact Electron,
 `srt` and `playwright-core` versions, with a written result and evidence for each
 question. Passing these checks is required before planning the implementation.
 
@@ -927,7 +934,8 @@ a command and expect interrupted on restart. Drop the connection around result
 receipt and verify that the effect occurs once. Test binding failure before the
 first attachment upload and pause during an offline wait.
 
-Run installer and AppArmor acceptance checks in clean desktop VMs with the
+Run installer and AppArmor acceptance checks in clean Ubuntu 24.04 and 26.04
+desktop VMs with the
 restriction explicitly enabled. A hosted CI image alone does not establish
 behavior on a fresh Ubuntu installation.
 

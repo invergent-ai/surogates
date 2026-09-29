@@ -4,7 +4,7 @@
 
 **Goal:** Answer the eight platform and recovery questions in Section 10 of the design with a written result and evidence each, before any implementation planning.
 
-**Architecture:** Throwaway probes under `spikes/desktop/` on a spike branch. One Electron app (`main.cjs`) dispatches to a probe per question; shared helpers in `spikes/desktop/lib/` fork `utilityProcess` tool hosts that initialise `srt` and run sandboxed commands. Probes run on clean Ubuntu 24.04 and Fedora VMs, except the sign-in probe (Q6), which runs on the developer workstation against the local dev stack. Each probe writes a JSON result under `~/surogate-spike-results/`, and each task records its conclusion in one results document.
+**Architecture:** Throwaway probes under `spikes/desktop/` on a spike branch. One Electron app (`main.cjs`) dispatches to a probe per question; shared helpers in `spikes/desktop/lib/` fork `utilityProcess` tool hosts that initialise `srt` and run sandboxed commands. Probes run on clean Ubuntu 24.04 and 26.04 VMs (the only supported platforms), except the sign-in probe (Q6), which runs on the developer workstation against the local dev stack. Each probe writes a JSON result under `~/surogate-spike-results/`, and each task records its conclusion in one results document.
 
 **Tech Stack:** Electron (`utilityProcess`, `BrowserWindow`), `@anthropic-ai/sandbox-runtime` (`SandboxManager`), `playwright-core`, Node 22, libvirt/`virt-install` with cloud images, Python 3.12 + pytest (surogates venv), FastAPI (surogates api), React (surogates web).
 
@@ -15,7 +15,7 @@
 - Probe code is throwaway. It lives on branch `spike/desktop-platform` under `spikes/desktop/` and is never merged. Only the results document and design edits move to `docs/desktop-client-design`.
 - Record the exact Electron, `srt` and `playwright-core` versions. Install them with `npm install --save-exact`.
 - Never disable a sandbox: no `--no-sandbox`, no `chromiumSandbox: false`, no `enableWeakerNestedSandbox`, no `ELECTRON_DISABLE_SANDBOX`.
-- Test machines: a clean Ubuntu 24.04 VM with `kernel.apparmor_restrict_unprivileged_userns = 1`, and a clean current Fedora VM. Q6 runs on the workstation against the local dev stack only, never against PROD.
+- Test machines: clean Ubuntu 24.04 LTS and 26.04 LTS VMs (x64), both with `kernel.apparmor_restrict_unprivileged_userns = 1`. No other distribution is tested or supported. Q6 runs on the workstation against the local dev stack only, never against PROD.
 - Each question's result states YES, NO or PARTIAL, the versions, the commands run, output excerpts, the JSON result path, and the consequence for the design.
 - Python probes run with `/work/surogates/.venv/bin/python`, never `uv run`.
 - Commits follow Conventional Commits and carry no `Co-Authored-By` trailer.
@@ -45,7 +45,7 @@ All paths are relative to `/work/surogates` on branch `spike/desktop-platform`.
 | `spikes/desktop/lib/host.cjs` | generic tool host (`utilityProcess`): initialises `srt`, runs commands, relays the network ask callback |
 | `spikes/desktop/lib/hosts.cjs` | main-process side: fork a host, send commands, answer asks |
 | `spikes/desktop/vm/create.sh` | creates a libvirt VM from a cloud image with cloud-init |
-| `spikes/desktop/vm/provision-ubuntu.sh`, `provision-fedora.sh` | install probe prerequisites inside a VM |
+| `spikes/desktop/vm/provision-ubuntu.sh` | installs probe prerequisites inside either VM |
 | `spikes/desktop/q1/…` … `spikes/desktop/q8/…` | one folder per question |
 | `docs/superpowers/specs/2026-09-29-surogate-desktop-spike-results.md` | the written results, one section per question |
 
@@ -56,7 +56,7 @@ Q5 is Python and runs inside the surogates repo's test environment. Q6 adds thro
 ### Task 1: Spike workspace, shared helpers and VMs
 
 **Files:**
-- Create: `spikes/desktop/package.json`, `spikes/desktop/main.cjs`, `spikes/desktop/stage.sh`, `spikes/desktop/lib/results.cjs`, `spikes/desktop/lib/policy.cjs`, `spikes/desktop/lib/env.cjs`, `spikes/desktop/lib/host.cjs`, `spikes/desktop/lib/hosts.cjs`, `spikes/desktop/vm/create.sh`, `spikes/desktop/vm/provision-ubuntu.sh`, `spikes/desktop/vm/provision-fedora.sh`, `spikes/desktop/.gitignore`
+- Create: `spikes/desktop/package.json`, `spikes/desktop/main.cjs`, `spikes/desktop/stage.sh`, `spikes/desktop/lib/results.cjs`, `spikes/desktop/lib/policy.cjs`, `spikes/desktop/lib/env.cjs`, `spikes/desktop/lib/host.cjs`, `spikes/desktop/lib/hosts.cjs`, `spikes/desktop/vm/create.sh`, `spikes/desktop/vm/provision-ubuntu.sh`, `spikes/desktop/.gitignore`
 - Create: `docs/superpowers/specs/2026-09-29-surogate-desktop-spike-results.md`
 
 **Interfaces:**
@@ -375,7 +375,7 @@ virt-install --connect qemu:///system --name "$NAME" --memory 6144 --vcpus 4 \
 echo "wait ~60s, then: virsh -c qemu:///system domifaddr $NAME"
 ```
 
-`spikes/desktop/vm/provision-ubuntu.sh` (runs inside the Ubuntu VM):
+`spikes/desktop/vm/provision-ubuntu.sh` (runs inside either VM; the `t64` package names exist on both 24.04 and 26.04):
 
 ```bash
 #!/usr/bin/env bash
@@ -395,49 +395,30 @@ bash -lic 'nvm install 22 && node --version'
 sysctl kernel.apparmor_restrict_unprivileged_userns
 ```
 
-`spikes/desktop/vm/provision-fedora.sh` (runs inside the Fedora VM):
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-sudo dnf install -y bubblewrap socat ripgrep xorg-x11-server-Xvfb xorg-x11-xauth curl git jq rsync \
-  python3 nss-tools gtk3 nss alsa-lib libXScrnSaver mesa-libgbm chromium
-sudo dnf install -y https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
-sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
-sudo dnf config-manager addrepo --from-repofile=https://packages.microsoft.com/yumrepos/edge/config.repo \
-  || sudo dnf config-manager --add-repo https://packages.microsoft.com/yumrepos/edge
-sudo dnf install -y microsoft-edge-stable
-curl -fsSL -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
-bash -lic 'nvm install 22 && node --version'
-getenforce
-```
-
 ```bash
 chmod +x /work/surogates/spikes/desktop/vm/*.sh
 ```
 
 - [ ] **Step 7: Create both VMs and copy the spike in**
 
-Run on the workstation. It needs `sudo` for `/var/lib/libvirt/images`. Take the Fedora image URL from https://fedoraproject.org/cloud/download ("Cloud Base Generic", x86_64 qcow2) and record its release in the results document.
+Run on the workstation. It needs `sudo` for `/var/lib/libvirt/images`. Record each image's build serial (`/etc/cloud/build.info` inside the VM) in the results document.
 
 ```bash
 cd /work/surogates/spikes/desktop
-./vm/create.sh sgd-ubuntu https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-./vm/create.sh sgd-fedora "$FEDORA_IMAGE_URL"
+./vm/create.sh sgd-u24 https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img
+./vm/create.sh sgd-u26 https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img
 sleep 90
-for vm in sgd-ubuntu sgd-fedora; do virsh -c qemu:///system domifaddr "$vm"; done
+for vm in sgd-u24 sgd-u26; do virsh -c qemu:///system domifaddr "$vm"; done
 ```
 
-Put the two IPs in `UBU` and `FED`, then:
+Put the two IPs in `U24` and `U26`, then:
 
 ```bash
-for ip in "$UBU" "$FED"; do rsync -a --exclude node_modules ./ "spike@$ip:spike/"; done
-ssh "spike@$UBU" 'bash spike/vm/provision-ubuntu.sh'
-ssh "spike@$FED" 'bash spike/vm/provision-fedora.sh'
-for ip in "$UBU" "$FED"; do ssh "spike@$ip" 'cd spike && bash -lic "npm ci" && ./stage.sh'; done
+for ip in "$U24" "$U26"; do rsync -a --exclude node_modules ./ "spike@$ip:spike/"; done
+for ip in "$U24" "$U26"; do ssh "spike@$ip" 'bash spike/vm/provision-ubuntu.sh && cd spike && bash -lic "npm ci" && ./stage.sh'; done
 ```
 
-Expected: `sysctl` prints `kernel.apparmor_restrict_unprivileged_userns = 1` on Ubuntu; `getenforce` prints `Enforcing` on Fedora; `stage.sh` prints `/home/spike/.local/share/surogate/versions/spike/surogate` on both.
+Expected on both VMs: `sysctl` prints `kernel.apparmor_restrict_unprivileged_userns = 1`, and `stage.sh` prints `/home/spike/.local/share/surogate/versions/spike/surogate`. If 26.04 prints `0`, record it and set it to `1` with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1`, since the probes must run under the restriction.
 
 - [ ] **Step 8: Smoke-test the host pair on both VMs**
 
@@ -465,10 +446,10 @@ exports.run = async () => {
 Then:
 
 ```bash
-for ip in "$UBU" "$FED"; do rsync -a --exclude node_modules ./ "spike@$ip:spike/"; ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q0; cat ~/surogate-spike-results/q0-*.json'; done
+for ip in "$U24" "$U26"; do rsync -a --exclude node_modules ./ "spike@$ip:spike/"; ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q0; cat ~/surogate-spike-results/q0-*.json'; done
 ```
 
-Expected on Fedora: `echo.stdout` contains `sandboxed-ok`. Expected on Ubuntu: Electron itself may abort before `q0` runs, because the AppArmor profile doesn't exist yet. Q1 covers that. Record the exact error text for Task 2.
+Expected on both VMs: Electron may abort before `q0` runs, because the AppArmor profile doesn't exist yet. Q1 covers that; record the exact error text for Task 2. Rerun this step after Task 2 Step 3 installs the profile: `echo.stdout` must then contain `sandboxed-ok`, which confirms the helpers work before the other tasks rely on them.
 
 - [ ] **Step 9: Start the results document**
 
@@ -488,8 +469,8 @@ Probe code: branch `spike/desktop-platform`, `spikes/desktop/` (not merged).
 | Electron | (exact version from package.json) |
 | @anthropic-ai/sandbox-runtime | (exact version) |
 | playwright-core | (exact version) |
-| Ubuntu VM | 24.04, kernel (uname -r), apparmor_restrict_unprivileged_userns = 1 |
-| Fedora VM | (release), kernel (uname -r), SELinux (getenforce) |
+| Ubuntu 24.04 VM | build serial, kernel (uname -r), AppArmor version (apparmor_parser --version), apparmor_restrict_unprivileged_userns = 1 |
+| Ubuntu 26.04 VM | build serial, kernel (uname -r), AppArmor version (apparmor_parser --version), apparmor_restrict_unprivileged_userns = 1 |
 | Workstation (Q6) | (os-release, kernel) |
 
 ## Summary
@@ -583,22 +564,28 @@ profile surogate-desktop /home/*/.local/share/surogate/versions/*/surogate flags
 }
 ```
 
-- [ ] **Step 2: Run on Ubuntu without the profile and record the failure**
+- [ ] **Step 2: Run on both VMs without the profile and record the failure**
 
 ```bash
-rsync -a --exclude node_modules spikes/desktop/ "spike@$UBU:spike/"
-ssh "spike@$UBU" 'cd spike && ./stage.sh >/dev/null; xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q1 2>&1 | tail -20'
-ssh "spike@$UBU" 'bwrap --ro-bind / / --unshare-user --unshare-net -- true; echo "bwrap exit=$?"'
+for ip in "$U24" "$U26"; do
+  rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
+  ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null; xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q1 2>&1 | tail -20'
+  ssh "spike@$ip" 'bwrap --ro-bind / / --unshare-user --unshare-net -- true; echo "bwrap exit=$?"'
+done
 ```
 
-Expected: Electron aborts with a sandbox error, such as the SUID helper message or "No usable sandbox". Record the exact text, and the plain `bwrap` exit code and message.
+Expected on both: Electron aborts with a sandbox error, such as the SUID helper message or "No usable sandbox". Record the exact text per release, and the plain `bwrap` exit code and message.
 
-- [ ] **Step 3: Install the profile and rerun**
+- [ ] **Step 3: Install the profile and rerun on both VMs**
 
 ```bash
-ssh "spike@$UBU" 'sudo cp spike/q1/surogate-desktop.apparmor /etc/apparmor.d/surogate-desktop && sudo apparmor_parser -r /etc/apparmor.d/surogate-desktop && sudo aa-status | grep surogate'
-ssh "spike@$UBU" 'xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q1 && cat ~/surogate-spike-results/q1-*.json'
+for ip in "$U24" "$U26"; do
+  ssh "spike@$ip" 'sudo cp spike/q1/surogate-desktop.apparmor /etc/apparmor.d/surogate-desktop && sudo apparmor_parser -r /etc/apparmor.d/surogate-desktop && sudo aa-status | grep surogate'
+  ssh "spike@$ip" 'xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q1 && cat ~/surogate-spike-results/q1-*.json'
+done
 ```
+
+If 26.04's AppArmor rejects `abi <abi/4.0>`, record the parser error and retry with the ABI that release ships (`ls /etc/apparmor.d/abi/`). The install script must write a profile both releases accept.
 
 The result passes when all of these hold:
 - the renderer (`type: "Tab"`) has a `userns` different from `mainUserns`, and `seccomp` `"2"`;
@@ -616,17 +603,11 @@ Only if Step 3 shows the command failing with a user-namespace error. Add to `su
   /usr/bin/bwrap rix,
 ```
 
-Reload with `apparmor_parser -r`, rerun Step 3, and record which variant works. Never add `--no-sandbox` or `enableWeakerNestedSandbox`.
+Reload with `apparmor_parser -r`, rerun Step 3, and record which variant works on each release. Never add `--no-sandbox` or `enableWeakerNestedSandbox`.
 
-- [ ] **Step 5: Run on Fedora**
+- [ ] **Step 5: Rerun the Task 1 smoke test**
 
-```bash
-rsync -a --exclude node_modules spikes/desktop/ "spike@$FED:spike/"
-ssh "spike@$FED" 'cd spike && ./stage.sh >/dev/null && xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q1 && cat ~/surogate-spike-results/q1-*.json'
-ssh "spike@$FED" 'sudo ausearch -m avc -ts recent 2>/dev/null | tail -5 || true'
-```
-
-Expected: the same pass criteria with no profile, and no SELinux denials.
+Rerun Task 1 Step 8 on both VMs. `echo.stdout` must contain `sandboxed-ok` before Task 3 starts.
 
 - [ ] **Step 6: Record Q1**
 
@@ -640,8 +621,8 @@ Environment: (both VMs, versions)
 Evidence:
 - Without the profile: (Electron error text), plain bwrap exit (code, message)
 - With the profile: renderer userns (value) ≠ main (value), seccomp 2, command stdout (excerpt), AppArmor label inside the command (value)
-- Fedora: (pass/fail, AVC lines if any)
-- JSON: ~/surogate-spike-results/q1-sgd-ubuntu.json, q1-sgd-fedora.json
+- Differences between 24.04 and 26.04: (ABI, parser errors, labels, or "none")
+- JSON: ~/surogate-spike-results/q1-sgd-u24.json, q1-sgd-u26.json
 Design consequence: (the exact profile the install script must write, or "none")
 ```
 
@@ -762,7 +743,7 @@ The three roots run concurrently, each in its own host, while the checks within 
 - [ ] **Step 3: Run on both VMs**
 
 ```bash
-for ip in "$UBU" "$FED"; do
+for ip in "$U24" "$U26"; do
   rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
   ssh "spike@$ip" 'bash spike/q2/seed.sh && cd spike && ./stage.sh >/dev/null && xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q2'
   ssh "spike@$ip" 'jq ".results | map_values(.checks | map_values(if type==\"object\" and has(\"code\") then {code, out: .stdout[0:120], err: .stderr[0:200]} else . end))" ~/surogate-spike-results/q2-*.json'
@@ -964,7 +945,7 @@ exports.run = async () => {
 - [ ] **Step 4: Run on both VMs**
 
 ```bash
-for ip in "$UBU" "$FED"; do
+for ip in "$U24" "$U26"; do
   rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
   ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && SPIKE_VARIANT=<variant from Q2> xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q3 && jq . ~/surogate-spike-results/q3-*.json'
 done
@@ -1309,7 +1290,7 @@ exports.run = async () => {
 - [ ] **Step 5: Run on both VMs**
 
 ```bash
-for ip in "$UBU" "$FED"; do
+for ip in "$U24" "$U26"; do
   rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
   ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && xvfb-run -a -s "-screen 0 1280x800x24" ~/.local/share/surogate/versions/spike/surogate q4'
   ssh "spike@$ip" 'jq ".escapedFileExists, (.results[] | {name, skipped, missing, error, version, flags, secondLaunch, bLeaks, schemes, popupFile, download, fileChooserIntercepted, serviceWorkersAllowedHits, proxyHits})" ~/surogate-spike-results/q4-*.json'
@@ -2213,7 +2194,7 @@ exports.run = async () => {
 - [ ] **Step 4: Run on both VMs**
 
 ```bash
-for ip in "$UBU" "$FED"; do
+for ip in "$U24" "$U26"; do
   rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
   ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && SPIKE_VARIANT=<variant from Q2> xvfb-run -a ~/.local/share/surogate/versions/spike/surogate q7 && jq . ~/surogate-spike-results/q7-*.json'
 done
@@ -2389,12 +2370,12 @@ chmod +x /work/surogates/spikes/desktop/q8/scenario.sh
 - [ ] **Step 4: Run on both VMs, then without a user manager**
 
 ```bash
-for ip in "$UBU" "$FED"; do
+for ip in "$U24" "$U26"; do
   rsync -a --exclude node_modules spikes/desktop/ "spike@$ip:spike/"
   ssh "spike@$ip" 'cd spike && ./stage.sh >/dev/null && SPIKE_VARIANT=<variant from Q2> ./q8/scenario.sh'
 done
 # Review Focus 5: a session with no systemd user manager.
-ssh "spike@$UBU" 'sudo systemd-run --uid=$(id -u) --pty --quiet env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash -lc "cd spike && ./q8/scenario.sh" || true'
+ssh "spike@$U24" 'sudo systemd-run --uid=$(id -u) --pty --quiet env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS bash -lc "cd spike && ./q8/scenario.sh" || true'
 ```
 
 Record these findings for each victim:
@@ -2463,5 +2444,5 @@ Expected: the docs branch has the results document and the updated design, but n
 - [ ] **Step 5: Tear down the VMs** (only after the human partner has reviewed the results)
 
 ```bash
-for vm in sgd-ubuntu sgd-fedora; do virsh -c qemu:///system destroy "$vm"; virsh -c qemu:///system undefine "$vm" --remove-all-storage; done
+for vm in sgd-u24 sgd-u26; do virsh -c qemu:///system destroy "$vm"; virsh -c qemu:///system undefine "$vm" --remove-all-storage; done
 ```
