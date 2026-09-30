@@ -701,6 +701,7 @@ def create_app() -> FastAPI:
         channel_files,
         coding_agents,
         composio,
+        devices,
         git_credentials,
         events,
         feedback,
@@ -793,6 +794,7 @@ def create_app() -> FastAPI:
         ask_user_question.router, prefix="/v1", tags=["ask_user_question"],
     )
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
+    app.include_router(devices.router, prefix="/v1", tags=["devices"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
     # OpenAI-compatible facade. Mounted at /v1 so its own "/api/..." paths
     # land on /v1/api/chat/completions -- inside the service-account path
