@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import errno
+import io
 import json
 import logging
 import multiprocessing
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
 
 logger = logging.getLogger(__name__)
 
@@ -491,6 +493,16 @@ def _is_image(path: str) -> bool:
     return ext in IMAGE_EXTENSIONS
 
 
+def _decode(
+    data: bytes,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+    newline: str | None = None,
+) -> io.TextIOWrapper:
+    """Text view of *data*, decoded exactly as a text-mode file read would decode it."""
+    return io.TextIOWrapper(io.BytesIO(data), encoding=encoding, errors=errors, newline=newline)
+
+
 # ---------------------------------------------------------------------------
 # Linters by file extension — run syntax check after write/patch
 # ---------------------------------------------------------------------------
@@ -548,7 +560,7 @@ def _check_lint(filepath: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _suggest_similar_files(path: str) -> list[str]:
+async def _suggest_similar_files(wio: WorkspaceIO, path: str) -> list[str]:
     """Return up to 5 similar filenames in the same directory.
 
     Uses difflib.get_close_matches for fuzzy filename matching.
@@ -557,9 +569,8 @@ def _suggest_similar_files(path: str) -> list[str]:
     filename = os.path.basename(path)
 
     try:
-        resolved_dir = str(Path(dir_path).expanduser().resolve())
-        entries = os.listdir(resolved_dir)
-    except OSError:
+        entries = await wio.list_dir(await wio.resolve(dir_path))
+    except (OSError, WorkspaceSandboxError):
         return []
 
     matches = difflib.get_close_matches(filename, entries, n=5, cutoff=0.4)
@@ -1298,7 +1309,7 @@ async def _read_file_handler(
       * everything else — treated as text by ``_handle_text``.
     """
     path = arguments.get("path", "")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     if not path:
         return _tool_error("No path provided")
@@ -1315,14 +1326,14 @@ async def _read_file_handler(
                 ),
             })
 
-        resolved = Path(_resolve_user_path(path, workspace_path))
-        ext = resolved.suffix.lower()
+        key = await wio.resolve(path)
+        ext = Path(key).suffix.lower()
 
         # ── Image file guard ─────────────────────────────────────────
         # Defensive fallback only.  Production routes images through the
         # worker pre-dispatch branch in ``tool_exec`` because the sandbox
         # has no vision LLM client.
-        if _is_image(str(resolved)):
+        if _is_image(key):
             return json.dumps({
                 "error": (
                     f"Image file detected: '{path}'. "
@@ -1332,11 +1343,11 @@ async def _read_file_handler(
 
         # ── Document branch ──────────────────────────────────────────
         if ext in _DOCUMENT_EXTENSIONS:
-            return await _handle_document(path, resolved, arguments, **kwargs)
+            return await _handle_document(wio, path, key, arguments)
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block remaining binary files by extension (no I/O).
-        if has_binary_extension(str(resolved)):
+        if has_binary_extension(key):
             return json.dumps({
                 "error": (
                     f"Cannot read binary file '{path}' ({ext}). "
@@ -1344,16 +1355,16 @@ async def _read_file_handler(
                 ),
             })
 
-        return await _handle_text(path, resolved, arguments, **kwargs)
+        return await _handle_text(wio, path, key, arguments, **kwargs)
     except Exception as exc:
         return _tool_error(str(exc))
 
 
 async def _handle_document(
+    wio: WorkspaceIO,
     path: str,
-    resolved: Path,
+    key: str,
     arguments: dict[str, Any],
-    **kwargs: Any,  # noqa: ARG001 — kwargs accepted for signature parity with _handle_text
 ) -> str:
     """Parse a PDF/docx/xlsx/pptx via liteparse and return its text.
 
@@ -1366,18 +1377,17 @@ async def _handle_document(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
-    if not resolved.exists():
+    if await wio.stat(key) is None:
         return json.dumps(
             {"error": f"File not found: {path}"},
             ensure_ascii=False,
         )
 
     try:
-        markdown = await default_cache().get_or_parse(
-            resolved, _parse_document_to_text,
-        )
+        async with wio.local_file(key) as local:
+            markdown = await default_cache().get_or_parse(local, _parse_document_to_text)
     except DocumentParseError as exc:
-        ext = resolved.suffix.lower().lstrip(".")
+        ext = Path(key).suffix.lower().lstrip(".")
         return _tool_error(
             f"Could not parse {path} as a {ext} document: {exc.reason}. "
             "You can retry with a subprocess fallback: try running "
@@ -1401,7 +1411,7 @@ async def _handle_document(
     logger.info(
         "event=document.parse path=%s ext=%s bytes_md=%d total_lines=%d "
         "lines_shown=%d truncated=%s",
-        path, resolved.suffix.lower(), len(markdown), total_lines,
+        path, Path(key).suffix.lower(), len(markdown), total_lines,
         lines_shown, truncated,
     )
 
@@ -1420,8 +1430,9 @@ async def _handle_document(
 
 
 async def _handle_text(
+    wio: WorkspaceIO,
     path: str,
-    resolved: Path,
+    key: str,
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
@@ -1435,37 +1446,32 @@ async def _handle_text(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
     task_id = kwargs.get("task_id", "default")
-    resolved_str = str(resolved)
 
     # ── Dedup check ───────────────────────────────────────────────
     # If we already read this exact (path, offset, limit) and the
     # file hasn't been modified since, return a lightweight stub
     # instead of re-sending the same content.  Saves context tokens.
-    dedup_key = (resolved_str, offset, limit)
+    dedup_key = (key, offset, limit)
     task_data = _init_task_data(task_id)
     with _read_tracker_lock:
         cached_mtime = task_data.get("dedup", {}).get(dedup_key)
 
-    if cached_mtime is not None:
-        try:
-            current_mtime = os.path.getmtime(resolved_str)
-            if current_mtime == cached_mtime:
-                return json.dumps({
-                    "content": (
-                        "File unchanged since last read. The content from "
-                        "the earlier read_file result in this conversation is "
-                        "still current — refer to that instead of re-reading."
-                    ),
-                    "path": path,
-                    "dedup": True,
-                }, ensure_ascii=False)
-        except OSError:
-            pass  # stat failed — fall through to full read
+    st = await wio.stat(key)
+    if cached_mtime is not None and st is not None and st.mtime == cached_mtime:
+        return json.dumps({
+            "content": (
+                "File unchanged since last read. The content from "
+                "the earlier read_file result in this conversation is "
+                "still current — refer to that instead of re-reading."
+            ),
+            "path": path,
+            "dedup": True,
+        }, ensure_ascii=False)
 
     # ── Perform the read ──────────────────────────────────────────
-    if not os.path.exists(resolved_str):
+    if st is None:
         result_dict: dict[str, Any] = {"error": f"File not found: {path}"}
-        similar = _suggest_similar_files(path)
+        similar = await _suggest_similar_files(wio, path)
         if similar:
             result_dict["similar_files"] = similar
             result_dict["hint"] = (
@@ -1474,13 +1480,12 @@ async def _handle_text(
             )
         return json.dumps(result_dict, ensure_ascii=False)
 
-    file_size = os.path.getsize(resolved_str)
+    file_size = st.size
 
     # Try to detect encoding; fall back to utf-8
     encoding = "utf-8"
     try:
-        with open(resolved_str, "rb") as fb:
-            raw_head = fb.read(8192)
+        raw_head = await wio.read(key, max_bytes=8192)
         # Check for UTF-16/UTF-32 BOM
         if raw_head.startswith(b"\xff\xfe\x00\x00"):
             encoding = "utf-32-le"
@@ -1505,8 +1510,7 @@ async def _handle_text(
         pass  # Proceed with utf-8
 
     try:
-        with open(resolved_str, encoding=encoding, errors="replace") as fh:
-            lines = fh.readlines()
+        lines = _decode(await wio.read(key), encoding, errors="replace").readlines()
     except (OSError, UnicodeDecodeError) as exc:
         return _tool_error(f"Failed to read file: {exc}")
 
@@ -1538,6 +1542,7 @@ async def _handle_text(
         )
 
     # ── Track for consecutive-loop detection ──────────────────────
+    after = await wio.stat(key)
     read_key = ("read", path, offset, limit)
     with _read_tracker_lock:
         task_data["read_history"].add((path, offset, limit))
@@ -1552,13 +1557,10 @@ async def _handle_text(
         # 1. Dedup: skip identical re-reads of unchanged files.
         # 2. Staleness: warn on write/patch if the file changed since
         #    the agent last read it (external edit, concurrent agent, etc.).
-        try:
-            _mtime_now = os.path.getmtime(resolved_str)
-            task_data["dedup"][dedup_key] = _mtime_now
-            task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+        if after is not None:
+            task_data["dedup"][dedup_key] = after.mtime
+            task_data.setdefault("read_timestamps", {})[key] = after.mtime
             _cap_read_tracker_data(task_data)
-        except OSError:
-            pass  # Can't stat — skip tracking for this entry
 
     if count >= 4:
         # Hard block: stop returning content to break the loop

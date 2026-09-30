@@ -147,7 +147,7 @@ async def call(handler, ws: Ws, **arguments: Any) -> dict[str, Any]:
     return json.loads(raw.split("\n\n[Hint:")[0])
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestReadFile:
     async def test_reads_lines(self, ws):
         (ws.real / "a.txt").write_text("one\ntwo\n")
@@ -451,3 +451,25 @@ async def test_remapped_workspace_serves_the_real_directory(tmp_path):
     assert key == f"{VIRTUAL_ROOT}/a.txt"
     assert await wio.read(key) == b"x"
     assert not os.path.exists(key)
+
+
+class CountingIO(LocalWorkspaceIO):
+    def __init__(self, root: str) -> None:
+        super().__init__(workspace_path=root)
+        self.bytes_read = 0
+
+    async def read(self, key, max_bytes=None):
+        data = await super().read(key, max_bytes)
+        self.bytes_read += len(data)
+        return data
+
+
+async def test_binary_file_is_refused_after_reading_only_its_head(tmp_path):
+    root = tmp_path.resolve()
+    (root / "big.log").write_bytes(b"\x00" + b"x" * (1 << 20))
+    wio = CountingIO(str(root))
+    out = json.loads(
+        await file_ops._read_file_handler({"path": str(root / "big.log")}, workspace_io=wio),
+    )
+    assert out["error"].startswith("Cannot read binary file")
+    assert 0 < wio.bytes_read <= 8192
