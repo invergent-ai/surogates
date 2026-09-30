@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from surogates.db.agent_users import purge_user_account
+from surogates.devices.store import DeviceStore
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
@@ -105,7 +106,7 @@ async def test_a_blank_or_long_name_is_rejected(api, name):
 
 
 async def test_a_user_sees_and_revokes_only_their_own_devices(api, session_factory):
-    other_id, other_token = await add_user(session_factory, api.org_id)
+    _, other_token = await add_user(session_factory, api.org_id)
     mine = await register(api)
     theirs = await register(api, name="Other laptop", token=other_token)
 
@@ -167,8 +168,65 @@ async def test_deleting_the_user_deletes_their_devices(api, session_factory):
     async with session_factory() as db:
         await purge_user_account(db, org_id=api.org_id, user_id=api.user_id)
         await db.commit()
-    from surogates.devices.store import DeviceStore
-
     assert await DeviceStore(session_factory).list_for_user(
         org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
     ) == []
+
+
+async def test_a_device_belongs_to_one_agent(api, monkeypatch):
+    from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+
+    issued = await register(api)
+    device_url = f"/v1/devices/{issued['id']}"
+
+    monkeypatch.setitem(
+        api.app.dependency_overrides,
+        agent_runtime_context_dep,
+        lambda: build_agent_runtime_context({
+            "agent_id": "agent-other",
+            "org_id": str(api.org_id),
+            "project_id": "test-project",
+            "enabled": True,
+            "version": 1,
+            "storage_key_prefix": "",
+        }),
+    )
+    assert (await api.client.get("/v1/devices", headers=api.auth())).json() == []
+    assert (await api.client.delete(device_url, headers=api.auth())).status_code == 404
+    assert (await api.client.post(f"{device_url}/reauthorize", headers=api.auth())).status_code == 404
+
+    monkeypatch.undo()
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert [(d["id"], d["revoked_at"], d["token_prefix"]) for d in listed] == [
+        (issued["id"], None, issued["token_prefix"]),
+    ]
+
+
+async def test_token_rotation_and_revocation_at_the_store(api, session_factory):
+    store = DeviceStore(session_factory)
+    owner = {"org_id": api.org_id, "agent_id": AGENT_ID, "user_id": api.user_id}
+
+    created = await store.create(name="Desk", **owner)
+    assert created.device.credential_generation == 1
+    found = await store.get_by_token(created.token)
+    assert found is not None and found.id == created.device.id
+    assert await store.get_by_token("not-a-device-token") is None
+
+    rotated = await store.reauthorize(created.device.id, **owner)
+    assert rotated is not None and rotated.token != created.token
+    assert rotated.device.credential_generation == 2
+    current = await store.get_by_token(rotated.token)
+    assert current is not None
+    assert (current.id, current.credential_generation, current.revoked_at) == (
+        created.device.id, 2, None,
+    )
+    assert await store.get_by_token(created.token) is None
+
+    await store.revoke(created.device.id, **owner)
+    assert await store.get_by_token(rotated.token) is None
+
+    touched = await store.touch(created.device.id)
+    assert touched is not None
+    assert touched.last_seen_at is not None
+    assert touched.revoked_at is not None
+    assert await store.touch(uuid.uuid4()) is None
