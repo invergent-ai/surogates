@@ -319,7 +319,7 @@ class TestPatch:
 
 
 @needs_rg
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestSearch:
     async def test_content_matches_with_line_numbers(self, ws):
         (ws.real / "a.py").write_text("x = 1\nneedle = 2\n")

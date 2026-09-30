@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
 import pytest
 
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import FileStat, LocalWorkspaceIO, workspace_io_from
+from surogates.tools.workspace_io import FileStat, LocalWorkspaceIO, RipgrepError, workspace_io_from
+from surogates.tools.workspace_io import local as local_module
 
 
 @pytest.fixture
@@ -176,3 +178,31 @@ async def test_check_write_refuses_credentials_and_system_paths(wio):
 
 async def test_check_write_allows_the_workspace(wio, root):
     assert await wio.check_write(str(root / "a.txt")) is None
+
+
+needs_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep")
+
+
+@needs_rg
+async def test_ripgrep_modes(wio, root):
+    (root / "a.py").write_text("hit\nmiss\nhit\n")
+    (root / "b.txt").write_text("hit\n")
+    files = await wio.ripgrep(str(root), mode="files", pattern="*.py")
+    assert files.splitlines() == [str(root / "a.py")]
+    counts = await wio.ripgrep(str(root), mode="count", pattern="hit", glob="*.py")
+    assert counts.splitlines() == [f"{root / 'a.py'}:2"]
+    stream = await wio.ripgrep(str(root), mode="json", pattern="miss", context=1)
+    assert '"type":"match"' in stream
+    assert '"type":"context"' in stream
+
+
+@needs_rg
+async def test_ripgrep_reports_a_bad_regex(wio, root):
+    with pytest.raises(RipgrepError, match="rg exited 2"):
+        await wio.ripgrep(str(root), mode="json", pattern="(")
+
+
+async def test_ripgrep_missing_binary(wio, root, monkeypatch):
+    monkeypatch.setattr(local_module, "_RIPGREP_PATH", None)
+    with pytest.raises(RipgrepError, match="ripgrep \\(rg\\) not found on PATH"):
+        await wio.ripgrep(str(root), mode="files", pattern="*")

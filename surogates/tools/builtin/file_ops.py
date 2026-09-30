@@ -20,7 +20,6 @@ import logging
 import multiprocessing
 import os
 import re
-import shutil
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -380,22 +379,6 @@ async def _parse_document_to_text(path: Path) -> str:
         raise DocumentParseError(path, str(exc)) from exc
 
 
-# Ripgrep binary path, resolved at import time.  search_files routes
-# through rg -- the worker and sandbox images both install it, and
-# config.py declares it as a worker requirement alongside srt/bubblewrap/
-# socat, so callers can rely on it being present.  If it's missing we
-# raise from the handler with a clear "install ripgrep" message rather
-# than silently degrading to a slow Python loop.
-_RIPGREP_PATH: str | None = shutil.which("rg")
-
-
-def _resolve_user_path(path: str, workspace_path: str | None = None) -> str:
-    """Resolve a user-supplied path, enforcing workspace containment when set."""
-    if workspace_path:
-        return validate_workspace_path(workspace_path, path)
-    return str(Path(os.path.expanduser(path)).resolve())
-
-
 # ---------------------------------------------------------------------------
 # Image extensions — subset of binary that we can redirect to vision tools
 # ---------------------------------------------------------------------------
@@ -507,10 +490,7 @@ async def _suggest_similar_files(wio: WorkspaceIO, path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
-from surogates.tools.utils.workspace_sandbox import (
-    WorkspaceSandboxError,
-    validate_path as validate_workspace_path,
-)
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 
 # ---------------------------------------------------------------------------
@@ -2118,61 +2098,27 @@ async def _write_patched(
     }
 
 
-class _RipgrepError(RuntimeError):
-    """Raised when ripgrep exits non-{0,1} (rc=1 just means no matches)."""
-
-
-async def _run_ripgrep(args: list[str]) -> str:
-    """Run ripgrep with *args* and return stdout.
-
-    Exit codes: 0 = matches found, 1 = no matches (not an error), 2+ =
-    real failure (invalid regex, I/O error, etc.).  rc>=2 raises so the
-    caller surfaces a useful error to the agent instead of silently
-    returning an empty result set.
-    """
-    if _RIPGREP_PATH is None:
-        raise _RipgrepError(
-            "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf "
-            "install ripgrep) or rebuild the worker image"
-        )
-    proc = await asyncio.create_subprocess_exec(
-        _RIPGREP_PATH, *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    rc = proc.returncode or 0
-    if rc not in (0, 1):
-        raise _RipgrepError(
-            f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
-        )
-    return stdout.decode("utf-8", errors="replace")
-
-
 async def _files_target_rg(
+    wio: WorkspaceIO,
     pattern: str,
-    expanded: str,
+    key: str,
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
-    """Find files matching glob *pattern* under *expanded* via ripgrep.
+    """Find files matching glob *pattern* under *key* via ripgrep.
 
-    ``--no-ignore`` preserves the legacy behaviour of NOT respecting
-    .gitignore; hidden files/dirs are skipped (rg default).  Results
-    are sorted by modification time (newest first) to match the legacy
-    glob-based path.
+    Results are sorted by modification time (newest first) to match the
+    legacy glob-based path.
     """
-    out = await _run_ripgrep([
-        "--no-ignore",
-        "--files",
-        "-g", pattern,
-        expanded,
-    ])
+    out = await wio.ripgrep(key, mode="files", pattern=pattern)
     files = [line for line in out.splitlines() if line]
-    files.sort(
-        key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-        reverse=True,
-    )
+    # ponytail: one stat per result; batch them when a remote workspace
+    # makes each stat a round trip.
+    mtimes: dict[str, float] = {}
+    for p in files:
+        st = await wio.stat(p)
+        mtimes[p] = st.mtime if st else 0
+    files.sort(key=lambda p: mtimes[p], reverse=True)
     total_count = len(files)
     paginated = files[offset : offset + limit]
     return {
@@ -2184,8 +2130,9 @@ async def _files_target_rg(
 
 
 async def _content_target_rg(
+    wio: WorkspaceIO,
     pattern: str,
-    expanded: str,
+    key: str,
     file_glob: str | None,
     output_mode: str,
     context: int,
@@ -2201,14 +2148,8 @@ async def _content_target_rg(
     rg's automatic binary-file detection replaces the legacy extension
     blocklist.
     """
-    base_args = ["--no-ignore"]
-    if file_glob:
-        base_args += ["-g", file_glob]
-
     if output_mode in ("files_only", "count"):
-        out = await _run_ripgrep(
-            base_args + ["-c", "-e", pattern, expanded],
-        )
+        out = await wio.ripgrep(key, mode="count", pattern=pattern, glob=file_glob)
         file_counts: list[tuple[str, int]] = []
         total_matches = 0
         for ln in out.splitlines():
@@ -2238,11 +2179,9 @@ async def _content_target_rg(
         }
 
     # output_mode == "content"
-    args = base_args + ["--json"]
-    if context > 0:
-        args += ["-C", str(context)]
-    args += ["-e", pattern, expanded]
-    out = await _run_ripgrep(args)
+    out = await wio.ripgrep(
+        key, mode="json", pattern=pattern, glob=file_glob, context=context,
+    )
     return _parse_rg_json_content(out, context, offset, limit)
 
 
@@ -2353,7 +2292,7 @@ async def _search_files_handler(
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
     task_id = kwargs.get("task_id", "default")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     # Map legacy target names
     target_map = {"grep": "content", "find": "files"}
@@ -2395,15 +2334,13 @@ async def _search_files_handler(
                 "already_searched": count,
             }, ensure_ascii=False)
 
-        expanded = _resolve_user_path(path, workspace_path)
+        key = await wio.resolve(path)
 
         if target == "files":
-            result_dict = await _files_target_rg(
-                pattern, expanded, offset, limit,
-            )
+            result_dict = await _files_target_rg(wio, pattern, key, offset, limit)
         else:
             result_dict = await _content_target_rg(
-                pattern, expanded, file_glob, output_mode,
+                wio, pattern, key, file_glob, output_mode,
                 context, offset, limit,
             )
 

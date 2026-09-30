@@ -25,7 +25,7 @@ from surogates.tools.utils.workspace_sandbox import (
     validate_path,
     validate_workdir,
 )
-from surogates.tools.workspace_io.base import FileStat, RunResult
+from surogates.tools.workspace_io.base import FileStat, RipgrepError, RipgrepMode, RunResult
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +442,15 @@ def _check_sensitive_path(filepath: str) -> str | None:
     return None
 
 
+# Ripgrep binary path, resolved at import time.  search_files routes
+# through rg -- the worker and sandbox images both install it, and
+# config.py declares it as a worker requirement alongside srt/bubblewrap/
+# socat, so callers can rely on it being present.  If it's missing we
+# raise from the handler with a clear "install ripgrep" message rather
+# than silently degrading to a slow Python loop.
+_RIPGREP_PATH: str | None = shutil.which("rg")
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -497,6 +506,50 @@ class LocalWorkspaceIO:
 
     async def which(self, name: str) -> bool:
         return shutil.which(name) is not None
+
+    async def ripgrep(
+        self,
+        key: str,
+        *,
+        mode: RipgrepMode,
+        pattern: str,
+        glob: str | None = None,
+        context: int = 0,
+    ) -> str:
+        # ``--no-ignore`` keeps the legacy behaviour of NOT respecting
+        # .gitignore; hidden files/dirs are skipped (rg default).
+        if _RIPGREP_PATH is None:
+            raise RipgrepError(
+                "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf "
+                "install ripgrep) or rebuild the worker image"
+            )
+        args = ["--no-ignore"]
+        if mode == "files":
+            args += ["--files", "-g", pattern]
+        else:
+            if glob:
+                args += ["-g", glob]
+            if mode == "count":
+                args.append("-c")
+            else:
+                args.append("--json")
+                if context > 0:
+                    args += ["-C", str(context)]
+            args += ["-e", pattern]
+        args.append(key)
+
+        proc = await asyncio.create_subprocess_exec(
+            _RIPGREP_PATH, *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        rc = proc.returncode or 0
+        if rc not in (0, 1):
+            raise RipgrepError(
+                f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
+            )
+        return stdout.decode("utf-8", errors="replace")
 
     def _workdir(self, requested: str | None) -> str:
         """The directory a command runs in: *requested*, contained to the workspace.
