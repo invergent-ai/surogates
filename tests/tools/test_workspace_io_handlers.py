@@ -389,7 +389,7 @@ class TestTerminal:
         assert out["output"] == "[]"
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestProcess:
     async def test_background_command_runs_and_reports(self, ws):
         started = await call(
@@ -451,6 +451,44 @@ class TestProcess:
             await asyncio.sleep(0.1)
         os.killpg(pid, signal.SIGKILL)
         pytest.fail(f"process {pid} was still running 5 s after kill")
+
+
+class StubProcesses:
+    root = None
+
+    async def poll(self, session_id):
+        return {"status": "stub", "session_id": session_id}
+
+
+async def test_process_tool_asks_the_workspace():
+    out = json.loads(
+        await raw_call(
+            registry_module._handle_process,
+            Ws("", Path("/"), {"workspace_io": StubProcesses()}),
+            action="poll", session_id="proc_x",
+        )
+    )
+    assert out == {"status": "stub", "session_id": "proc_x"}
+
+
+@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+async def test_wait_leaves_the_event_loop_free(ws):
+    started = await call(terminal._terminal_handler, ws, command="sleep 1", background=True)
+    ticks = 0
+
+    async def tick():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.05)
+
+    ticker = asyncio.create_task(tick())
+    await call(
+        registry_module._handle_process, ws,
+        action="wait", session_id=started["session_id"], timeout=10,
+    )
+    ticker.cancel()
+    assert ticks >= 5
 
 
 @pytest.mark.parametrize("ws", LOCAL, indirect=True)

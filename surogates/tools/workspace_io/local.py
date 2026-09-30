@@ -640,3 +640,23 @@ class LocalWorkspaceIO:
         if watcher_interval:
             session.watcher_interval = watcher_interval
         return {"session_id": session.id, "pid": session.pid}
+
+    async def poll(self, session_id: str) -> dict[str, Any]:
+        return process_registry.poll(session_id)
+
+    async def read_output(self, session_id: str, *, offset: int, limit: int) -> dict[str, Any]:
+        return process_registry.read_log(session_id, offset=offset, limit=limit)
+
+    async def wait(self, session_id: str, *, timeout: int | None) -> dict[str, Any]:
+        # ProcessRegistry.wait sleeps in a loop; run it off the event loop so
+        # the worker keeps serving other sessions while one agent waits.
+        return await asyncio.to_thread(process_registry.wait, session_id, timeout=timeout)
+
+    async def kill(self, session_id: str) -> dict[str, Any]:
+        return process_registry.kill_process(session_id)
+
+    async def write_stdin(self, session_id: str, data: str) -> dict[str, Any]:
+        return process_registry.write_stdin(session_id, data)
+
+    async def list_processes(self, task_id: str | None) -> list[dict[str, Any]]:
+        return process_registry.list_sessions(task_id=task_id)
