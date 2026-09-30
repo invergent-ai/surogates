@@ -117,3 +117,49 @@ def test_workspace_io_from_falls_back_to_workspace_path(root):
 
 def test_workspace_io_from_without_a_workspace_is_unbound():
     assert workspace_io_from({}).root is None
+
+
+async def test_run_reports_output_and_exit_code(wio, root):
+    result = await wio.run("echo out; echo err >&2; exit 3", workdir=None, timeout=10)
+    assert result.output == "out\n\nerr\n"
+    assert result.returncode == 3
+    assert not result.timed_out
+
+
+async def test_run_times_out(wio):
+    result = await wio.run("sleep 5", workdir=None, timeout=1)
+    assert result.timed_out
+    assert result.returncode == 124
+    assert result.output == "Command timed out after 1 seconds"
+
+
+async def test_run_sets_home_to_the_root(wio, root):
+    result = await wio.run("echo $HOME", workdir=None, timeout=10)
+    assert result.output.strip() == str(root)
+
+
+async def test_run_blocks_a_workdir_outside_the_root(wio):
+    with pytest.raises(WorkspaceSandboxError, match="All commands must run within"):
+        await wio.run("pwd", workdir="/etc", timeout=10)
+
+
+async def test_run_blocks_shell_metacharacters_in_workdir(tmp_path):
+    with pytest.raises(WorkspaceSandboxError, match="disallowed character"):
+        await LocalWorkspaceIO().run("pwd", workdir=str(tmp_path) + ";rm", timeout=10)
+
+
+async def test_start_returns_a_process_handle(wio, tmp_path, monkeypatch):
+    from surogates.tools.utils import process_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "CHECKPOINT_PATH", tmp_path / "processes.json")
+    started = await wio.start(
+        "sleep 5", workdir=None, task_id="t", pty=False,
+        notify_on_complete=True, watcher_interval=60,
+    )
+    session = registry_module.process_registry.get(started["session_id"])
+    try:
+        assert session.pid == started["pid"]
+        assert session.notify_on_complete is True
+        assert session.watcher_interval == 60
+    finally:
+        registry_module.process_registry.kill_process(started["session_id"])

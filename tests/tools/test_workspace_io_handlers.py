@@ -332,7 +332,7 @@ class TestSearch:
         assert "[Hint: Results truncated. Use offset=2" in raw
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestTerminal:
     async def test_runs_in_workspace_with_home_there(self, ws):
         out = await call(terminal._terminal_handler, ws, command="pwd; echo $HOME")

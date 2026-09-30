@@ -1,4 +1,4 @@
-"""Tests for ``surogates.tools.builtin.terminal`` child-env construction.
+"""Tests for ``surogates.tools.workspace_io.local`` child-env construction.
 
 The terminal tool strips most environment variables from the subprocess
 to prevent secrets in the worker's env from leaking into LLM-controlled
@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from surogates.tools.builtin import terminal as term
+from surogates.tools.workspace_io import local as term
 
 
 class TestAlwaysInherit:

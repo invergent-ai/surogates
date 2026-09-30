@@ -1,9 +1,9 @@
 """Builtin terminal tool -- executes shell commands locally via subprocess.
 
-Commands run directly via ``asyncio.create_subprocess_shell``.
+Commands run through the session's WorkspaceIO (``run`` and ``start``); in the cloud sandbox that is a local subprocess.
 
 Features:
-- Local subprocess execution with timeout and output capture
+- Execution with timeout and output capture
 - ANSI escape stripping so the model never sees terminal formatting
 - Output truncation (40 % head / 60 % tail split)
 - Exit code interpretation for common CLI tools
@@ -25,26 +25,15 @@ import re
 import tempfile
 import time
 import traceback
-from pathlib import Path
 from typing import Any, Optional
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
-from surogates.tools.utils.env_passthrough import is_env_passthrough
-from surogates.tools.utils.process_registry import process_registry
 from surogates.tools.utils.tool_output_limits import get_max_bytes
-from surogates.tools.utils.workspace_sandbox import (
-    WorkspaceSandboxError,
-    validate_workdir as validate_workspace_workdir,
-)
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.workspace_io import RunResult, workspace_io_from
 
 logger = logging.getLogger(__name__)
-
-# Writable dir for the generated ssh config, known_hosts and PATH wrappers.
-# ``ssh`` reads its user config from the passwd home (read-only in the sandbox),
-# so we can't rely on ``$HOME/.ssh/config``; the wrappers under ``bin/`` force
-# ``-F <this dir>/config`` instead.
-_SSH_DIR = "/tmp/surogates-ssh"
 
 
 # ---------------------------------------------------------------------------
@@ -61,199 +50,6 @@ DISK_USAGE_WARNING_THRESHOLD_GB = float(
 
 _DEFAULT_TIMEOUT = int(os.getenv("TERMINAL_TIMEOUT", "180"))
 """Default command timeout in seconds."""
-
-_DEFAULT_CWD = os.getenv("TERMINAL_CWD", os.getcwd())
-"""Default working directory for commands."""
-
-
-
-# ---------------------------------------------------------------------------
-# Anthropic Sandbox Runtime (srt) integration
-# ---------------------------------------------------------------------------
-
-
-def _ssh_hosts_from_env() -> list[str]:
-    """Sorted SSH target hosts from the sandbox env, or empty when SSH is off.
-
-    Presence of any host means the session is SSH-enabled: ``~/.ssh`` (which
-    then holds only the non-secret config/known_hosts — the private key is in
-    the isolated ssh-agent) becomes readable, and the hosts join the srt
-    network allowlist.
-    """
-    raw = os.environ.get("SUROGATES_SSH_TARGETS", "")
-    if not raw:
-        return []
-    try:
-        targets = json.loads(raw)
-    except ValueError:
-        return []
-    return sorted({str(t.get("host", "")) for t in targets if t.get("host")})
-
-
-def _setup_ssh_home(child_env: dict[str, str]) -> None:
-    """Install a writable ssh config + a PATH ``ssh`` wrapper that loads it.
-
-    No-op unless the session is SSH-enabled (``SUROGATES_SSH_TARGETS`` set to a
-    non-empty JSON list).  ``ssh`` reads its user config from the *passwd* home
-    (read-only in the sandbox), not ``$HOME``, so a config written under the
-    child's HOME is never loaded.  Instead we write config/known_hosts into a
-    fixed writable dir and shadow ``ssh``/``scp``/``sftp`` on PATH with thin
-    wrappers that force ``-F <config>``.  Rewriting on every command re-pins the
-    strict host-key config so the agent cannot persistently weaken it.  All
-    files are non-secret (the private key lives in the isolated ssh-agent).
-    """
-    raw = os.environ.get("SUROGATES_SSH_TARGETS", "")
-    if not raw:
-        return
-    try:
-        targets = json.loads(raw)
-    except ValueError:
-        return
-    if not targets:
-        return
-    from surogates.ssh_access.resolve import build_ssh_config
-
-    bin_dir = os.path.join(_SSH_DIR, "bin")
-    os.makedirs(bin_dir, exist_ok=True)
-    os.chmod(_SSH_DIR, 0o700)
-
-    known_hosts_path = os.path.join(_SSH_DIR, "known_hosts")
-    with open(known_hosts_path, "w", encoding="utf-8") as fh:
-        fh.write(os.environ.get("SUROGATES_SSH_KNOWN_HOSTS", ""))
-    os.chmod(known_hosts_path, 0o600)
-
-    config_path = os.path.join(_SSH_DIR, "config")
-    with open(config_path, "w", encoding="utf-8") as fh:
-        fh.write(build_ssh_config(targets, known_hosts_path=known_hosts_path))
-    os.chmod(config_path, 0o600)
-
-    for tool in ("ssh", "scp", "sftp"):
-        wrapper = os.path.join(bin_dir, tool)
-        with open(wrapper, "w", encoding="utf-8") as fh:
-            fh.write(
-                f"#!/bin/sh\nexec /usr/bin/{tool} -F {config_path} \"$@\"\n",
-            )
-        os.chmod(wrapper, 0o755)
-
-    child_env["PATH"] = bin_dir + ":" + child_env.get("PATH", "")
-
-
-def _get_srt_settings_path(workspace_path: str) -> str:
-    """Return the path to the per-workspace srt settings file.
-
-    Creates the file if it doesn't exist.  The settings restrict writes
-    to the workspace directory and block reads of secrets.  For SSH-enabled
-    sessions the host allowlist and ``~/.ssh`` read policy differ, so the
-    SSH host set feeds the settings-file hash to force a regenerate.
-    """
-    import hashlib
-
-    ssh_hosts = _ssh_hosts_from_env()
-    ssh_enabled = bool(ssh_hosts)
-    seed = workspace_path + ("|ssh:" + ",".join(ssh_hosts) if ssh_enabled else "")
-    ws_hash = hashlib.sha256(seed.encode()).hexdigest()[:12]
-    from surogates.config import load_settings
-    settings_dir = Path(load_settings().sandbox.srt_settings_dir)
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    settings_path = settings_dir / f"srt-{ws_hash}.json"
-
-    if not settings_path.exists():
-        deny_read = [
-            "~/.aws",
-            "~/.gnupg",
-            "~/.kube",
-            "~/.docker",
-            # /code run credentials live pod-local under
-            # /tmp/.code-runs and in the vendor CLI config dirs.  Deny
-            # reads so code the agent runs via the terminal can't
-            # exfiltrate the user's coding-agent plan token.
-            "/tmp/.code-runs",
-            "auth.json",
-            "$CODEX_HOME",
-            "$CLAUDE_CONFIG_DIR",
-        ]
-        # Only deny ~/.ssh when SSH is NOT enabled.  With SSH enabled the dir
-        # holds only the non-secret config + known_hosts (the private key never
-        # touches the main container), and ssh must read them.
-        if not ssh_enabled:
-            deny_read.insert(0, "~/.ssh")
-        allowed_domains = [
-            "github.com",
-            "*.github.com",
-            "*.githubusercontent.com",
-            "pypi.org",
-            "*.pypi.org",
-            "files.pythonhosted.org",
-            "npmjs.org",
-            "*.npmjs.org",
-            "registry.npmjs.org",
-            # Coding-agent (/code) vendor API endpoints.
-            "api.anthropic.com",
-            "api.openai.com",
-            "chatgpt.com",
-        ] + ssh_hosts
-        settings = {
-            "filesystem": {
-                "denyRead": deny_read,
-                "allowWrite": [workspace_path],
-                "denyWrite": [
-                    ".env",
-                    ".env.local",
-                    ".env.production",
-                    "credentials.json",
-                    "secrets.yaml",
-                ],
-            },
-            "network": {
-                "allowedDomains": allowed_domains,
-                "deniedDomains": [],
-            },
-            "mandatoryDenySearchDepth": 3,
-        }
-        settings_path.write_text(
-            json.dumps(settings, indent=2), encoding="utf-8"
-        )
-
-    return str(settings_path)
-
-
-def _wrap_with_srt(command: str, workspace_path: str) -> str:
-    """Wrap a shell command with the Anthropic Sandbox Runtime.
-
-    Uses ``srt -c`` which passes the command string directly to a shell
-    (like ``sh -c``), avoiding double-quoting issues.
-    """
-    settings_path = _get_srt_settings_path(workspace_path)
-    escaped = command.replace("'", "'\\''")
-    return f"srt --settings '{settings_path}' -c '{escaped}'"
-
-
-# ---------------------------------------------------------------------------
-# Working directory validation
-# ---------------------------------------------------------------------------
-
-_WORKDIR_SAFE_RE = re.compile(r"^[A-Za-z0-9/_\-.~ +@=,]+$")
-
-
-def _validate_workdir(workdir: str) -> str | None:
-    """Reject workdir values that don't look like a filesystem path.
-
-    Uses an allowlist of safe characters rather than a deny-list, so novel
-    shell metacharacters can't slip through.
-
-    Returns None if safe, or an error message string if dangerous.
-    """
-    if not workdir:
-        return None
-    if not _WORKDIR_SAFE_RE.match(workdir):
-        for ch in workdir:
-            if not _WORKDIR_SAFE_RE.match(ch):
-                return (
-                    f"Blocked: workdir contains disallowed character {repr(ch)}. "
-                    "Use a simple filesystem path without shell metacharacters."
-                )
-        return "Blocked: workdir contains disallowed characters."
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -319,58 +115,6 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Environment variable filtering
-# ---------------------------------------------------------------------------
-
-# Variables that are always inherited by the child process regardless of
-# passthrough config.  These are required for basic shell operation.
-#
-# ``PYTHONUSERBASE`` is included because the sandbox image installs pip
-# packages into ``$PYTHONUSERBASE`` (off the s3fs mount — see
-# images/sandbox/Dockerfile) and the agent's ``pip install X && python -c
-# "import X"`` flow needs Python's site module to find them.  Without
-# propagation, Python falls back to ``$HOME/.local`` — and we override
-# HOME to the workspace below, which would point Python at the wrong
-# (and s3fs-backed) location.
-#
-# ``UV_CACHE_DIR`` and ``XDG_CACHE_HOME`` are inherited for the same
-# reason: uv's default cache is ``$XDG_CACHE_HOME/uv`` (else
-# ``$HOME/.cache/uv``).  With our HOME override they would land on s3fs,
-# and s3fs's locking/rename semantics deadlock uv mid-install.
-_ALWAYS_INHERIT = frozenset({
-    "HOME",
-    # The isolated ssh-agent socket for SSH-enabled sessions; lets `ssh`
-    # authenticate without ever seeing the private key.
-    "SSH_AUTH_SOCK",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOGNAME",
-    "PATH",
-    "PYTHONUSERBASE",
-    "SHELL",
-    "TERM",
-    "TMPDIR",
-    "USER",
-    "UV_CACHE_DIR",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-})
-
-
-def _build_child_env() -> dict[str, str]:
-    """Build a restricted environment dict for the child process.
-
-    Starts from the current process environment but strips variables that
-    are not in the always-inherit set or the passthrough allowlist.  This
-    prevents secrets from leaking into commands the model runs.
-    """
-    env: dict[str, str] = {}
-    for key, value in os.environ.items():
-        if key in _ALWAYS_INHERIT or is_env_passthrough(key):
-            env[key] = value
-    return env
 
 
 # ---------------------------------------------------------------------------
@@ -431,50 +175,6 @@ def _truncate_output(output: str) -> str:
     return output[:head_chars] + truncated_notice + output[-tail_chars:]
 
 
-# ---------------------------------------------------------------------------
-# Subprocess execution
-# ---------------------------------------------------------------------------
-
-async def _run_command(
-    command: str,
-    *,
-    cwd: str,
-    timeout: int,
-    env: dict[str, str],
-) -> dict[str, Any]:
-    """Run *command* via ``asyncio.create_subprocess_shell`` and return the result.
-
-    Returns a dict with ``output`` (str) and ``returncode`` (int).
-    """
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-        )
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return {
-                "output": f"Command timed out after {timeout} seconds",
-                "returncode": 124,
-            }
-
-        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
-        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-        output = stdout
-        if stderr:
-            output = output + "\n" + stderr if output else stderr
-
-        return {"output": output, "returncode": proc.returncode or 0}
-    except Exception as exc:
-        return {"output": str(exc), "returncode": -1}
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +279,14 @@ TERMINAL_SCHEMA = {
 # Core handler
 # ---------------------------------------------------------------------------
 
+def _blocked(error: str) -> str:
+    """The result for a command refused before it ran."""
+    return json.dumps(
+        {"output": "", "exit_code": -1, "error": error, "status": "blocked"},
+        ensure_ascii=False,
+    )
+
+
 async def _terminal_handler(
     arguments: dict[str, Any],
     **kwargs: Any,
@@ -586,13 +294,12 @@ async def _terminal_handler(
     """Execute a shell command locally and return the JSON result.
 
     Steps:
-    1. Parse command, workdir, timeout from arguments.
-    2. Validate workdir.
-    3. Run command via ``asyncio.create_subprocess_shell`` with restricted env.
-    4. Capture stdout + stderr with timeout.
-    5. Truncate output if needed.
-    6. Interpret exit code.
-    7. Return JSON result.
+    1. Parse arguments.
+    2. Run through the workspace's ``run`` (or ``start``), which validates
+       the workdir and sandboxes the command.
+    3. Truncate output if needed.
+    4. Interpret exit code.
+    5. Return JSON result.
     """
     try:
         command = arguments.get("command", "")
@@ -601,92 +308,29 @@ async def _terminal_handler(
         check_interval = arguments.get("check_interval")
         notify_on_complete = arguments.get("notify_on_complete", False)
 
-        # --- Resolve workdir (workspace-sandboxed) -------------------------
-        # workspace_path from session config is the only trusted CWD.
-        # User-supplied workdir is allowed only if it resolves inside
-        # the workspace.
-        workspace_path = kwargs.get("workspace_path")
+        # The workspace validates and sandboxes the workdir; a refusal comes
+        # back as WorkspaceSandboxError, worded for the model.
         requested_workdir = arguments.get("workdir")
-
-        # Normalize common shell variables to the workspace path.
-        if requested_workdir and workspace_path:
-            if requested_workdir in ("$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"):
-                requested_workdir = workspace_path
-
-        if workspace_path:
-            try:
-                workdir = validate_workspace_workdir(
-                    workspace_path,
-                    requested_workdir,
-                )
-            except WorkspaceSandboxError as exc:
-                logger.warning(
-                    "Blocked workdir outside workspace: %s (workspace: %s)",
-                    str(requested_workdir)[:200],
-                    workspace_path[:200],
-                )
-                return json.dumps(
-                    {
-                        "output": "",
-                        "exit_code": -1,
-                        "error": (
-                            f"Blocked: {exc} All commands must run within "
-                            "the workspace directory."
-                        ),
-                        "status": "blocked",
-                    },
-                    ensure_ascii=False,
-                )
-        else:
-            workdir = requested_workdir or _DEFAULT_CWD
-
-        # --- Validate workdir characters -----------------------------------
-        if workdir:
-            workdir_error = _validate_workdir(workdir)
-            if workdir_error:
-                logger.warning(
-                    "Blocked dangerous workdir: %s (command: %s)",
-                    workdir[:200],
-                    command[:200],
-                )
-                return json.dumps(
-                    {
-                        "output": "",
-                        "exit_code": -1,
-                        "error": workdir_error,
-                        "status": "blocked",
-                    },
-                    ensure_ascii=False,
-                )
+        wio = workspace_io_from(kwargs)
 
         # --- Background execution ------------------------------------------
         if background:
-            task_id = kwargs.get("task_id", "default")
-            use_pty = arguments.get("pty", False)
-            bg_env = _build_child_env()
-            if workspace_path:
-                bg_env["HOME"] = workspace_path
-                bg_env.pop("CDPATH", None)
-            _setup_ssh_home(bg_env)
-            session = process_registry.spawn(
-                command=command,
-                cwd=workdir,
-                task_id=task_id,
-                use_pty=use_pty,
-                env_vars=bg_env,
-            )
-
-            if notify_on_complete:
-                session.notify_on_complete = True
-
-            if check_interval:
-                effective_interval = max(30, check_interval)
-                session.watcher_interval = effective_interval
+            try:
+                started = await wio.start(
+                    command,
+                    workdir=requested_workdir,
+                    task_id=kwargs.get("task_id", "default"),
+                    pty=arguments.get("pty", False),
+                    notify_on_complete=notify_on_complete,
+                    watcher_interval=max(30, check_interval) if check_interval else None,
+                )
+            except WorkspaceSandboxError as exc:
+                return _blocked(str(exc))
 
             result_data: dict[str, Any] = {
                 "output": "Background process started",
-                "session_id": session.id,
-                "pid": session.pid,
+                "session_id": started["session_id"],
+                "pid": started["pid"],
                 "exit_code": 0,
                 "error": None,
             }
@@ -702,46 +346,17 @@ async def _terminal_handler(
             return json.dumps(result_data, ensure_ascii=False)
 
         # --- Foreground execution with retry logic -------------------------
-        child_env = _build_child_env()
-
-        # Sandbox the environment when workspace_path is set.
-        # Override HOME so `cd ~`, `~/...` paths, and `$HOME` all resolve
-        # inside the workspace.  Clear CDPATH to prevent `cd` from jumping
-        # to directories outside the workspace.
-        if workspace_path:
-            child_env["HOME"] = workspace_path
-            child_env.pop("CDPATH", None)
-            # Prevent git from reading/writing config files that srt
-            # blocks as mandatory deny paths (.gitconfig, .gitmodules).
-            child_env["GIT_CONFIG_GLOBAL"] = "/dev/null"
-            child_env["GIT_CONFIG_SYSTEM"] = "/dev/null"
-            child_env["GIT_CONFIG_NOSYSTEM"] = "1"
-            # XDG config dir — redirect to workspace to avoid srt denials
-            # on $HOME/.config/ access attempts.
-            child_env["XDG_CONFIG_HOME"] = os.path.join(workspace_path, ".config")
-
-        # Pin the ssh config/known_hosts into the child HOME for SSH-enabled
-        # sessions (no-op otherwise).  Must happen before srt-wrapping so the
-        # files exist when `ssh` reads them.
-        _setup_ssh_home(child_env)
-
-        # Wrap command with Anthropic Sandbox Runtime (srt) for OS-level
-        # filesystem and network isolation via bubblewrap + seccomp.
-        # This prevents shell escapes (cd ~, echo > /etc/passwd, etc.)
-        # that application-level checks cannot catch.
-        from surogates.config import load_settings as _load_settings
-        if _load_settings().sandbox.srt_enabled and workspace_path:
-            command = _wrap_with_srt(command, workspace_path)
-
         max_retries = 3
         retry_count = 0
-        result: dict[str, Any] | None = None
+        result: RunResult | None = None
 
         while retry_count <= max_retries:
             try:
-                result = await _run_command(
-                    command, cwd=workdir, timeout=timeout, env=child_env
+                result = await wio.run(
+                    command, workdir=requested_workdir, timeout=timeout,
                 )
+            except WorkspaceSandboxError as exc:
+                return _blocked(str(exc))
             except Exception as exc:
                 error_str = str(exc).lower()
                 if "timeout" in error_str:
@@ -795,18 +410,15 @@ async def _terminal_handler(
         assert result is not None
 
         # --- Post-process output -------------------------------------------
-        output = result.get("output", "")
-        returncode = result.get("returncode", 0)
-
-        output = _truncate_output(output)
+        output = _truncate_output(result.output)
         output = strip_ansi(output)
         output = output.strip() if output else ""
 
-        exit_note = _interpret_exit_code(command, returncode)
+        exit_note = _interpret_exit_code(command, result.returncode)
 
         result_dict: dict[str, Any] = {
             "output": output,
-            "exit_code": returncode,
+            "exit_code": result.returncode,
             "error": None,
         }
         if exit_note:
