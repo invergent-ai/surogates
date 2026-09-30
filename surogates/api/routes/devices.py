@@ -6,6 +6,7 @@ accepted only by the device link.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -13,10 +14,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, StringConstraints
 
+from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceRecord, DeviceStore, IssuedDevice
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/devices")
 
@@ -35,6 +39,7 @@ class DeviceOut(BaseModel):
     created_at: datetime
     last_seen_at: datetime | None
     revoked_at: datetime | None
+    online: bool
 
 
 class DeviceIssued(DeviceOut):
@@ -54,7 +59,24 @@ def _store(request: Request) -> DeviceStore:
     return DeviceStore(request.app.state.session_factory)
 
 
-def _out(device: DeviceRecord) -> DeviceOut:
+def _presence(request: Request) -> DevicePresence:
+    return DevicePresence(request.app.state.redis)
+
+
+async def _notify(request: Request, device_id: UUID, message: str) -> None:
+    """Tell the device's connection, best effort.
+
+    The change is already committed, so failing the request now would hide it
+    (for reauthorization, it would lose the only copy of the new token).  The
+    link's periodic database check closes a connection whose message was lost.
+    """
+    try:
+        await _presence(request).publish(device_id, message)
+    except Exception:
+        logger.warning("could not notify device %s", device_id, exc_info=True)
+
+
+def _out(device: DeviceRecord, *, online: bool) -> DeviceOut:
     return DeviceOut(
         id=device.id,
         name=device.name,
@@ -62,11 +84,13 @@ def _out(device: DeviceRecord) -> DeviceOut:
         created_at=device.created_at,
         last_seen_at=device.last_seen_at,
         revoked_at=device.revoked_at,
+        online=online,
     )
 
 
 def _issued(issued: IssuedDevice) -> DeviceIssued:
-    return DeviceIssued(**_out(issued.device).model_dump(), token=issued.token)
+    # A token just issued has not connected yet.
+    return DeviceIssued(**_out(issued.device, online=False).model_dump(), token=issued.token)
 
 
 @router.post("", response_model=DeviceIssued, status_code=status.HTTP_201_CREATED)
@@ -80,7 +104,8 @@ async def register_device(
 @router.get("", response_model=list[DeviceOut])
 async def list_devices(request: Request, ctx: AgentRuntime, tenant: Tenant) -> list[DeviceOut]:
     devices = await _store(request).list_for_user(**_owner(tenant, ctx))
-    return [_out(device) for device in devices]
+    online = await _presence(request).online([device.id for device in devices])
+    return [_out(device, online=device.id in online) for device in devices]
 
 
 @router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -90,6 +115,7 @@ async def revoke_device(
     device = await _store(request).revoke(device_id, **_owner(tenant, ctx))
     if device is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
+    await _notify(request, device_id, f"revoked:{device.credential_generation}")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -100,4 +126,5 @@ async def reauthorize_device(
     issued = await _store(request).reauthorize(device_id, **_owner(tenant, ctx))
     if issued is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
+    await _notify(request, device_id, f"rotated:{issued.device.credential_generation}")
     return _issued(issued)

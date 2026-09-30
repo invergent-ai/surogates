@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from surogates.db.agent_users import purge_user_account
+from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.store import DeviceStore
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -230,3 +232,87 @@ async def test_token_rotation_and_revocation_at_the_store(api, session_factory):
     assert touched.last_seen_at is not None
     assert touched.revoked_at is not None
     assert await store.touch(uuid.uuid4()) is None
+
+
+async def next_control(pubsub, timeout: float = 2.0) -> str:
+    async def read() -> str:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if message is not None:
+                return message["data"].decode()
+
+    return await asyncio.wait_for(read(), timeout)
+
+
+async def test_presence_belongs_to_the_connection_that_claimed_it(redis_client):
+    presence = DevicePresence(redis_client)
+    device_id = uuid.uuid4()
+
+    await presence.claim(device_id, "pod-a:1")
+    ttl = await redis_client.ttl(presence_key(device_id))
+    assert PRESENCE_TTL_S - 5 < ttl <= PRESENCE_TTL_S
+    assert await presence.refresh(device_id, "pod-a:1")
+
+    await presence.claim(device_id, "pod-b:2")
+    assert not await presence.refresh(device_id, "pod-a:1")
+    assert not await presence.holds(device_id, "pod-a:1")
+    assert await presence.holds(device_id, "pod-b:2")
+    await presence.release(device_id, "pod-a:1")
+    assert await presence.online([device_id]) == {device_id}
+
+    await presence.release(device_id, "pod-b:2")
+    assert await presence.online([device_id]) == set()
+    # An expired claim is no one's: the connection that still holds the socket takes it back.
+    assert await presence.refresh(device_id, "pod-a:1")
+    assert await presence.online([device_id]) == {device_id}
+
+
+async def test_claiming_tells_older_connections_to_close(redis_client):
+    presence = DevicePresence(redis_client)
+    device_id = uuid.uuid4()
+    pubsub = await presence.subscribe(device_id)
+    try:
+        await presence.claim(device_id, "pod-a:1")
+        assert await next_control(pubsub) == "superseded:pod-a:1"
+    finally:
+        await pubsub.aclose()
+
+
+async def test_the_list_shows_which_devices_are_online(api, redis_client):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert listed[0]["online"] is False
+
+    await DevicePresence(redis_client).claim(device_id, "pod-a:1")
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert listed[0]["online"] is True
+
+
+async def test_revoking_and_reauthorizing_notify_the_connection(api, redis_client):
+    issued = await register(api)
+    pubsub = await DevicePresence(redis_client).subscribe(UUID(issued["id"]))
+    try:
+        await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+        assert await next_control(pubsub) == "revoked:1"
+        await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
+        assert await next_control(pubsub) == "rotated:2"
+    finally:
+        await pubsub.aclose()
+
+
+async def test_a_failed_notification_does_not_fail_the_change(api, monkeypatch):
+    issued = await register(api)
+
+    async def broken_publish(self, device_id, message):
+        raise ConnectionError("redis went away")
+
+    monkeypatch.setattr(DevicePresence, "publish", broken_publish)
+    revoked = await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    assert revoked.status_code == 204
+    restored = await api.client.post(
+        f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth(),
+    )
+    # The new token must reach the user: the old one no longer works.
+    assert restored.status_code == 200
+    assert restored.json()["token"].startswith("surg_dev_")
