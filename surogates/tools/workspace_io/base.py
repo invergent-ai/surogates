@@ -54,7 +54,12 @@ class WorkspaceIO(Protocol):
     """Raw workspace operations.  Every rule about using them stays in the handlers."""
 
     root: str | None
-    """The workspace this IO is bound to, spelled as a key; None when unbound."""
+    """The workspace as the dispatcher named it, or None when unbound.
+
+    Not a key: it is not resolved, so it may differ from the prefix of keys.
+    Handlers use it only to tell whether a workspace is bound, never to compare
+    with or build keys; :meth:`resolve` does that.
+    """
 
     # -- files -----------------------------------------------------------
 

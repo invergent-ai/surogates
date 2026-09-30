@@ -38,6 +38,16 @@ async def test_resolve_follows_symlinks_before_checking_containment(wio, root, t
         await wio.resolve("link/x.txt")
 
 
+async def test_root_is_the_path_as_given_and_keys_are_resolved(root):
+    real = root / "real"
+    real.mkdir()
+    link = root / "link"
+    link.symlink_to(real)
+    wio = LocalWorkspaceIO(workspace_path=str(link))
+    assert wio.root == str(link)
+    assert await wio.resolve("a.txt") == os.path.join(os.path.realpath(real), "a.txt")
+
+
 async def test_unbound_resolve_is_absolute_from_the_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert await LocalWorkspaceIO().resolve("x.txt") == str(tmp_path.resolve() / "x.txt")
