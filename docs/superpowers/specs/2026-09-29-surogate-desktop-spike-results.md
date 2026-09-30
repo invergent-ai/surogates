@@ -33,6 +33,33 @@ Setup notes:
 | 7 | File-operation boundary under races | PARTIAL | helper inside srt + `O_NOFOLLOW`/`fstat`/`nlink`; host `chdir`s to the folder; raw API enforces protected files itself; refuse multiply-linked files at binding |
 | 8 | Process trees after a host or app crash | YES | rely on srt's `--die-with-parent` + PID namespace; tool host is bwrap's direct parent; no systemd scope needed; *started* without result → interrupted |
 
+### Decisions for planning
+
+Each is applied to the design document in the section named.
+
+- Section 1: one tool host per root session `chdir`s to the session folder, sets `CLAUDE_CODE_TMPDIR` to the session temp folder, spawns commands with the app-built environment only, and is the direct parent of srt's `bwrap`. Supervision relies on `--die-with-parent` and the sandbox's PID namespace; no systemd scope (Q2, Q7, Q8).
+- Section 1 and 4: commands that start background processes run inside one long-lived sandboxed session runner per root; the browser reaches a session's server only through a forwarded port (Q3).
+- Section 2: durable invocation replay runs in `AgentHarness.wake` between `_rebuild_messages` and the first LLM call; journal dispatch and commit reuse the `lease_token` fencing of `advance_harness_cursor` (Q5).
+- Section 4, Reads: `denyRead: ["/"]`, re-allowing system runtime paths, the app's install folder, the session folder (resolved), the session temp folder, discovered toolchain folders, and srt's two proxy-bridge sockets (Q1, Q2).
+- Section 4, isolation: the app ships its own `bwrap` and passes it as srt's `bwrapPath` (Q1).
+- Section 4, files: raw file operations run in a helper inside the session sandbox with `O_NOFOLLOW`, `fstat` regular-file and `nlink` checks; the raw API enforces the protected-file list itself; binding refuses folders containing multiply-linked files unless the user confirms (Q7).
+- Section 4, approvals: "Allow for this session" is app state applied with `updateConfig` (Q2).
+- Section 5: Chrome and Edge `.deb` are the verified browsers; launch through `ignoreDefaultArgs`; the pinning proxy with `<-loopback>` is the network boundary with Local Network Access checks kept on and service workers blocked; no private-network access except forwarded session ports; `navigate` accepts only `http:`/`https:`; downloads keep the browser's suggested basename and are never intercepted (Q4).
+- Section 7: the login page runs the handoff after every successful sign-in path (Q6).
+- Section 9: the install script writes the Q1 AppArmor profile; the build runs Electron's `install.js`; the launcher clears `ELECTRON_RUN_AS_NODE` (Q1, Q6).
+
+### Open decisions (for the human partner)
+
+1. **Where the app is installed.** The AppArmor profile grants unrestricted user namespaces to `/home/*/.local/share/surogate/versions/*/surogate`, a path the user can write. Any program running as that user can put a binary there and escape Ubuntu's user-namespace restriction for that account. Ubuntu's own profiles attach to root-owned paths (for example `/opt/google/chrome/chrome`). The alternatives are a root-owned install folder (updates then need privilege: the install script re-run with `sudo`, or a small root-owned updater), or accepting this for the user's account and documenting it.
+2. **Protected files in long-lived sandboxes** (Q7). Either restart the session runner when a protected path appears in the folder, or run commands without background processes in fresh per-command sandboxes and use the runner only for background work.
+
+### Still to verify during implementation
+
+- Google and GitHub sign-in against an agent with Firebase (Q6).
+- Brave and Vivaldi (not installed on the VMs, Q4).
+- The agent browser ends when its browser host is killed (outside bwrap, not covered by Q8).
+- The `ignoreDefaultArgs` launch keeps pipe control, the sandbox and the proxy working (Q4).
+
 <!-- One section per question follows, each with: Result, Environment, Evidence, Design consequence. -->
 
 ## Q1: Electron and srt under Ubuntu's AppArmor restriction

@@ -1,11 +1,14 @@
 # Surogate Desktop Design
 
-Status: design approved. The first spike gates implementation planning
-Date: 2026-09-29
+Status: design approved and spike-validated. Two open decisions (install
+location, protected files in long-lived sandboxes) are listed in the spike
+results and need answers before implementation planning.
+Date: 2026-09-29 (spike results applied 2026-09-30)
 
 Review scope: checked against the current repository and upstream runtime
-documentation. The first spike must validate the remaining platform assumptions
-before implementation planning.
+documentation, then validated by the first spike on Ubuntu 24.04 and 26.04. The
+evidence for every statement marked "(spike Qn)" is in
+`2026-09-29-surogate-desktop-spike-results.md`.
 
 ## Problem
 
@@ -41,7 +44,7 @@ billing, that the user reaches in the web client.
 ## Decisions
 
 Product choices from brainstorming, with implementation details corrected by
-this review. The spike gates the technical choices that still need proof.
+this review and by the first spike (Section 10).
 
 | Question | Decision |
 |---|---|
@@ -135,13 +138,33 @@ The runtime holds configuration and proxy state in module globals, so changing
 one shared manager per command would mix concurrent sessions' permissions.
 See the [SandboxManager implementation](https://github.com/anthropics/sandbox-runtime/blob/main/src/sandbox/sandbox-manager.ts).
 
+Each tool host, before it initialises srt:
+- changes its working directory to the session folder, because srt derives its
+  mandatory denies (`.git/config`, `.bashrc`, …) from the process's working
+  directory (spike Q7);
+- sets `CLAUDE_CODE_TMPDIR` to the session temp folder, because srt sets the
+  sandbox's `TMPDIR` from it and otherwise uses the shared `/tmp/claude`
+  (spike Q2).
+
+It spawns commands with the environment the app built, never with the `env`
+srt returns (on Linux that is the host's own `process.env`, spike Q2), and it
+is the direct parent of srt's `bwrap`. Commands that start background processes
+run inside one long-lived sandboxed session runner per root session, because
+each srt command otherwise gets its own network namespace and cannot reach a
+server another command started (spike Q3).
+
 A separate browser host owns each agent identity's browser process (Section 5).
 The main process routes operations and native approval decisions to these hosts.
 Each host enforces the relevant local policy. A host crash interrupts its
-unfinished operations. Supervision must terminate its complete command process
-trees before a replacement host accepts work, including after an app crash.
-The spike must verify this lifecycle. Idle hosts may exit when they have no
-running processes.
+unfinished operations. Supervision relies on srt's `bwrap --die-with-parent`
+and the sandbox's PID namespace: killing a tool host or the Electron main
+process with SIGKILL ends every sandboxed descendant, including ones that
+called `setsid` or double-forked, with or without a systemd user manager
+(spike Q8). A replacement host reports every *started* operation without a
+result as interrupted before accepting work. The browser host must give the
+same guarantee for its browser process, which runs outside bwrap; verify it when
+the browser host is built. Idle hosts may exit when they have no running
+processes.
 
 Screens the desktop draws itself. Local pages, never loaded from a server:
 the Agents window, Settings, approval prompts, quit and add-agent confirmations,
@@ -233,6 +256,16 @@ worker                       Postgres / Redis             api                 de
 - Keep results until the harness commits its tool result or the API request
   reaches a terminal state. A destructive `BLPOP` reply cannot be the only copy.
   Replay resumes the original invocation before asking the model for more work.
+  Today replay neither resumes nor reports an unfinished call:
+  `_rebuild_messages` leaves it unanswered and `sanitize_tool_pairs`
+  (`surogates/harness/llm_call.py:600`) stubs it as "[Result unavailable — see
+  context summary above]" before every LLM request, so the model may redo a
+  completed effect (spike Q5). The replay step therefore runs in
+  `AgentHarness.wake` after `_rebuild_messages` (`surogates/harness/loop.py:1175`)
+  and before the first LLM call: for each unanswered tool call of a desktop
+  session with `device_operations` rows, it resumes the recorded operation
+  sequence and emits the real `tool.result`. An executable model of this
+  protocol passed every crash point (spike Q5).
   A worker that loses its session lease cannot dispatch more operations or
   commit results under the old generation. The existing `lease_token` is the
   generation: `try_acquire_lease` issues a fresh one on every acquisition,
@@ -399,21 +432,39 @@ Process output is capped and paged by offset. Process handles are opaque and
 scoped to the root binding. A host restart invalidates its live process handles.
 
 Cost. Patch requires at least a read and a write round trip, plus any stat
-or lint work. Measure latency and large-file transfer behavior in the spike.
-Network delay and document size determine the cost.
+or lint work. Network delay and document size determine the cost. The first
+spike did not measure relay latency or large transfers (it had no relay); measure
+them with the first device-link build.
 
 ## 4. Rules on the laptop, and approvals
 
 The tool and browser hosts enforce local rules. The worker receives operation
 outcomes and cannot change those rules.
 
-Reads. Build an explicit allowlist for the chosen folder and session temp
-directory. Re-admit the system runtime paths needed by installed tools, plus
-specific locally discovered toolchain directories. Start with a broad read deny
-and verify the generated mounts in the spike. Denying only `~` would leave user
-data on other mounts readable. Avoid granting whole trees such as `~/.cargo`
-that can also hold credentials. The app's data and browser profiles stay denied,
-including when XDG paths place them outside the home directory.
+Reads. `denyRead: ["/"]`, with `allowRead` re-admitting exactly:
+- the system runtime paths `/usr /bin /sbin /lib /lib64 /etc /opt /proc /sys /dev /run`;
+- the app's install folder, read-only, because srt runs its bundled
+  `apply-seccomp` helper from there inside the sandbox (spike Q1);
+- the session folder (its resolved path) and the session temp folder;
+- specific discovered toolchain folders (`~/.nvm`, `~/.pyenv`, `~/.rustup`,
+  `~/.cargo/bin`, `~/.local/bin`, `~/.local/lib`, `~/go`, `~/.bun`, `~/.deno`,
+  `~/.sdkman`), never whole trees such as `~/.cargo` that can hold credentials;
+- srt's two proxy-bridge sockets (`getLinuxHttpSocketPath()`,
+  `getLinuxSocksSocketPath()`), re-allowed with `updateConfig` right after
+  `initialize`. They live in the host's `/tmp`; hiding them breaks all command
+  networking with `Proxy CONNECT aborted` (spike Q2).
+
+Verified on both releases with three concurrent roots, including a non-ASCII
+path with spaces and a symlinked root on another mount: denied paths do not
+exist inside the sandbox, `/tmp` is private per sandbox, and the app's data and
+browser profiles are unreachable (spike Q2).
+
+Isolation binary. The app ships its own `bwrap` in its install folder and
+passes it to srt as `bwrapPath`. Ubuntu 26.04's `bwrap-userns-restrict` profile
+attaches to `/usr/bin/bwrap` and denies the capabilities srt's seccomp helper
+needs in its nested user namespace; the app's own copy inherits the app's
+AppArmor profile instead (spike Q1). bubblewrap is LGPL-2.0-or-later; ship its
+licence notice.
 
 Writes. Allow the folder and a per-session temporary directory under
 `~/.local/share/surogate/tmp/<session>`, with explicit protected paths. Preserve
@@ -423,32 +474,61 @@ Writes. Allow the folder and a per-session temporary directory under
 runtime and isolate temporary data between roots. Reject `/`, the home directory,
 and any root that would grant access to the app's own state or credentials.
 
-Pin the `srt` version and test its effective mounts. Linux write rules accept
-literal paths. A pattern such as `.env*` is not a supported blanket write deny.
-Read globs expand against files present at command launch. Build explicit paths
-for the command policy and test protected files created or renamed during a
-command. Keep any stronger filename filtering in raw file APIs explicit.
+Pin the `srt` version (0.0.77 was validated) and test its effective mounts.
+Linux write rules accept literal paths. A pattern such as `.env*` is not a
+supported blanket write deny. srt computes its mandatory denies from the host
+process's working directory and only for files that exist when a command is
+wrapped (spike Q7): a sandbox that outlives one command does not protect a
+`.git/config` created after it started. The raw file API therefore enforces the
+protected-file list itself on every operation. For the session runner, either
+restart it when a protected path appears in the folder or run commands without
+background processes in fresh per-command sandboxes; this choice is open (see
+the spike results).
 See the [runtime's filesystem rules](https://github.com/anthropics/sandbox-runtime#filesystem-configuration).
 
 Network. Commands start with the package-host allowlist in
 `surogates/tools/builtin/terminal.py`. Other destinations invoke the native
 approval callback. Each root's proxy enforces its own grants. Deny local IPC
 sockets, including Docker and the user session bus, and fail closed if the
-required enforcement is unavailable. File operations make no network calls.
+required enforcement is unavailable (verified: no Docker socket, and
+`busctl --user` fails with "Operation not permitted", spike Q2). File operations
+make no network calls.
+
+Session servers. Each srt sandbox has a private loopback, so a server started
+by one command is unreachable from the next command and from the host (spike
+Q3). Commands of a root session that start background processes therefore run
+inside the session runner (Section 1), where they share one network namespace.
+When the user approves a session server port for the browser, the tool host
+listens on a loopback port and tunnels each connection into the runner over an
+inherited descriptor, which bwrap passes into the sandbox; the runner connects
+it to the server inside. The browser's proxy (Section 5) admits exactly that
+loopback port for the agent identity's browser.
 
 Environment. Build it explicitly from trusted local settings: `HOME`,
 `LANG`, `TMPDIR`, cache variables and a locally discovered toolchain `PATH`.
-Retain the proxy variables required by `srt`. Validate the operation's `env`
+srt bakes its proxy variables into the wrapped command itself; spawn with the
+app-built environment only (spike Q2). Validate the operation's `env`
 overrides. They cannot replace the sandbox's policy or protected environment
 settings. Do not inherit the main process's credentials or run project-supplied
 shell startup files outside the sandbox.
 
 Path checks. Authorize normalized paths by directory components. Validate
 existing targets and the parent of a new file. A `realpath` check followed by an
-ordinary file open is vulnerable to symlink replacement. Use a filesystem
-boundary or descriptor-relative helper that enforces containment during the
-actual operation, and test symlink and rename races. Apply the same policy to
-searches and downloads. Refuse special files and magic links.
+ordinary file open is vulnerable to symlink replacement. Raw file operations
+therefore run in a helper inside the session's own srt sandbox, so the mount
+namespace is the containment boundary. The helper opens with
+`O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC`, then `fstat`s and refuses non-regular files
+and files with more than one hard link. Validated against a sandboxed command
+flipping a directory and a symlink to outside the folder (5000 writes, 0
+outside), FIFOs (refused in ≤ 1 ms), `/dev/zero` links and `/proc/self/root`
+magic links (spike Q7). Apply the same policy to searches and downloads.
+
+Hard links. A sandboxed command can modify a file outside the folder through a
+hard link that already exists in the folder (spike Q7); neither mounts nor path
+checks can see it. At binding time the app scans the folder for regular files
+with `nlink > 1` and refuses to bind until the user removes them or confirms in
+the native prompt that those files may be changed. Hard links created during a
+session by processes outside the sandbox are a documented residual risk.
 
 Outside-folder grants name an exact file or directory and specify read or write
 access. Only native approval creates one. Protected app state remains denied.
@@ -467,7 +547,10 @@ or path). Focus starts on Deny.
 
 - Buttons: Allow and Deny. Allow for this session for a domain or a
   path. Stop asking for this session in "Ask every time", which switches the
-  session to "Work freely".
+  session to "Work freely". srt does not remember an allow answer, so "Allow
+  for this session" is app state: the tool host adds the domain to that root's
+  `allowedDomains` with `updateConfig`, which applies network changes live
+  (spike Q2).
 - An approval is bound to the immutable operation ID and request digest. A
   reconnect reopens the same pending prompt without granting or executing twice.
   Local state owns the mode for the root and all its children.
@@ -538,6 +621,11 @@ page.
   and maintain a tested browser/version matrix. Detection alone cannot promise
   support for Brave, Vivaldi or a newly updated Chromium build. See
   [Playwright's executable-path guidance](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-option-executable-path).
+- Verified matrix for the first release (spike Q4): Google Chrome 154 and
+  Microsoft Edge 154 `.deb` builds with `playwright-core` 1.63.0 on Ubuntu 24.04
+  and 26.04. Brave and Vivaldi are listed as "detected, unverified" until tested.
+  Detection also checks `/snap/bin/chromium` and treats any executable resolving
+  to `/usr/bin/snap` as the unsupported Snap build.
 
 No supported browser. Browser tools return "No supported browser on this
 computer. Install Google Chrome, Microsoft Edge, Brave or Vivaldi, or pick one
@@ -559,28 +647,57 @@ debugging port is opened. Playwright's Chromium sandbox option defaults to false
 so assert the actual launch flags in tests. See the
 [launch options](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-option-chromium-sandbox).
 Do not copy the user's normal browser profile or attach to their existing
-browser process.
+browser process. Verified: pipe control, no debugging port, no `--no-sandbox`,
+renderers at `Seccomp: 2`, and a clean error ("Opening in existing browser
+session") on a second launch against the same profile (spike Q4). Chrome
+rewrites its process title, so flag checks read `/proc/<pid>/cmdline` as one
+space-joined string.
+
+Playwright's default arguments weaken the browser a person uses. Launch with
+`ignoreDefaultArgs` removing at least `--disable-popup-blocking`,
+`--disable-client-side-phishing-detection`, `--disable-component-update`,
+`--disable-background-networking`, `--password-store=basic` and
+`--use-mock-keychain`, and the `HttpsUpgrades` entry of `--disable-features`
+(spike Q4). Verify that pipe control, the sandbox and the proxy still work with
+these removed.
 
 Downloads and uploads. Stage downloads in a private temporary directory,
 then save to an authorized path in the session folder. Validate suggested names
 and enforce the same conflict and approval rules as file writes. File inputs
 accept locally authorized files only. Block agent-triggered native file pickers
-that could bypass path checks.
+that could bypass path checks. Verified (spike Q4): the browser itself rewrites
+a hostile `download="../../escape.txt"` to `_.._escape.txt`, the basename is
+saved inside the folder, and a `filechooser` listener intercepts file inputs so
+no native dialog opens. Chromium cancels downloads of responses fulfilled by a
+Playwright route, so responses that may become downloads are never intercepted.
 
 Navigation and network policy. Chrome uses its own sandbox and is not
-wrapped in `srt`. Agent-controlled navigation permits HTTP and HTTPS. Block file
-and browser-internal schemes, including through redirects and popups. New tabs
-inherit the calling session's policy before any agent action.
+wrapped in `srt`. The `navigate` operation itself accepts only `http:` and
+`https:` URLs: Playwright route interception does not stop `chrome://`,
+`edge://` or `view-source:` navigations (Edge navigated to `edge://version/` in
+the spike), while page-initiated navigation to those schemes and to `file:` is
+already refused by the browser (spike Q4). New tabs inherit the calling
+session's policy before any agent action.
 
-Top-level URL checks alone do not protect local services. The browser network
-guard must also cover subresources, page JavaScript requests and WebSockets,
-including requests from workers. Check resolved IPv4 and IPv6 destinations and
-redirects to prevent DNS rebinding into loopback or private networks. A native
-approval grants a specific local/private origin to one session. The browser
-spike must prove that the shared-profile design can enforce this scope and that
-requests cannot bypass the guard. If it cannot, change the browser isolation
-model before offering private-network access. Unsupported request paths fail
-closed.
+The network boundary is a pinning proxy owned by the browser host: the browser
+launches with `--proxy-server=<proxy>` and `--proxy-bypass-list=<-loopback>`, and
+the proxy resolves each host once, refuses loopback, link-local and private
+IPv4/IPv6 destinations, and connects to the address it resolved, which also
+stops DNS rebinding. In the spike it refused every loopback attempt: fetch, XHR,
+images, iframes, prefetch, beacons, EventSource, dedicated and shared workers,
+WebSockets, `localhost`, and a public-to-loopback redirect (spike Q4). Chrome's
+Local Network Access checks stay on, and service workers are blocked. Route
+interception is not a security boundary: with Local Network Access disabled, a
+session without a grant still reached loopback through a SharedWorker and a
+redirect.
+
+Private-network access cannot be scoped to one session in a shared profile:
+redirects, SharedWorkers and WebSockets escape per-session attribution (spike
+Q4). The first release therefore offers no private-network access in the agent
+browser, except the session's own forwarded ports (Section 4, spike Q3), which
+the proxy admits by exact loopback port for the agent identity's browser.
+Per-session private-network grants, if wanted later, need a separate browser
+profile per granted session. Unsupported request paths fail closed.
 
 Watching and taking over. The window is on the user's screen. The cloud live
 view is not used. The web client's browser pane shows "The browser is open on
@@ -699,7 +816,14 @@ without a tray, launching the app again shows the Agents window.
 
 Sign-in. Username/password and Firebase email/password work in the window
 unchanged. Google and GitHub use a system-browser handoff with a loopback
-redirect and PKCE (RFC 8252). Google requires the external browser flow.
+redirect and PKCE (RFC 8252). Google requires the external browser flow. In the
+system browser the person may sign in with any method the login page offers,
+so the page runs the handoff after every successful sign-in path (local,
+Firebase email, Google, GitHub). Validated end to end with a local account, and
+against ten rejection cases: unauthenticated mint, wrong verifier, a correct
+verifier after one failed attempt, wrong redirect, wrong state, replay, a low
+port, a malformed challenge and expiry (spike Q6). Google and GitHub still need
+one run against an agent with Firebase before release.
 
 1. The web client calls `desktop.signInExternally("google")` instead of
    `signInWithPopup`. GitHub uses the same provider-scoped handoff.
@@ -813,7 +937,10 @@ Artifact. `surogate-desktop-<version>-linux-x64.tar.gz` (electron-builder
 sha256}` plus a detached Ed25519 signature over the exact manifest bytes.
 The installer and app embed the trusted public key. Verify the manifest before
 using its URL, then verify the archive's hash and platform. Build in a new
-release-workflow job on GitHub-hosted runners. arm64 later.
+release-workflow job on GitHub-hosted runners. arm64 later. The build runs
+`node_modules/electron/install.js` itself: Electron 44 has no `postinstall`, so
+`npm ci` leaves no binary (spike setup). The archive includes `<version>/bin/bwrap`
+(Section 4) with its licence notice.
 
 Hosting. surogate.ai serves `https://surogate.ai/desktop/install.sh`. The
 tarballs and `latest.json` live on Cloudflare R2. Enterprise installs host the
@@ -829,14 +956,23 @@ by the script, so an air-gapped install never contacts us.
    24.04 LTS or a later LTS release (x64)" before any change is made.
 2. Explain what needs `sudo`, ask once, then install `bubblewrap`, `socat` and
    `ripgrep` with apt, and, when `kernel.apparmor_restrict_unprivileged_userns=1`
-   (the default on both releases), an AppArmor profile allowing user namespaces
-   for the app and `bwrap`. The app never runs with `--no-sandbox`.
+   (the default on both releases), this AppArmor profile, which both releases'
+   parsers accept (spike Q1):
+   `abi <abi/4.0>, include <tunables/global> profile surogate-desktop /home/*/.local/share/surogate/versions/*/surogate flags=(unconfined) { userns, include if exists <local/surogate-desktop> }`.
+   The app runs its own `bwrap` from `<version>/bin/bwrap`, which inherits this
+   profile (Section 4). The app never runs with `--no-sandbox`. Open decision:
+   the profile attaches to a path the user can write, so any program running as
+   that user can use it to escape the user-namespace restriction; a root-owned
+   install folder avoids that at the cost of privileged updates (see the spike
+   results).
 3. Verify the signed manifest and tarball, then extract into a new staging
    directory. Reject archive paths and link targets outside that directory.
    Move the verified tree into `~/.local/share/surogate/versions/<version>/`
    and atomically replace the `current` symlink.
 4. Add `~/.local/bin/surogate`, a `.desktop` entry with an icon, and the
-   `surogates://` handler via `xdg-mime`.
+   `surogates://` handler via `xdg-mime`. The launcher clears
+   `ELECTRON_RUN_AS_NODE` before starting the app: VS Code exports it to its
+   terminals, and Electron then starts as plain Node (spike Q6).
 5. Check for a supported browser. Print a note if none (no failure).
 6. Optional `--ca-cert <file>`: configure the company CA for the Electron and
    Chromium trust path, installing `certutil` if needed. Also configure the
@@ -872,6 +1008,14 @@ First spike on clean Ubuntu 24.04 and 26.04 VMs, the oldest and newest
 supported LTS releases. Record the exact Electron,
 `srt` and `playwright-core` versions, with a written result and evidence for each
 question. Passing these checks is required before planning the implementation.
+
+Done on 2026-09-30 with Electron 44.5.0, srt 0.0.77 and playwright-core 1.63.0.
+Results, evidence and the resulting decisions are in
+`2026-09-29-surogate-desktop-spike-results.md`: Q1, Q2, Q3 (with a session
+runner), Q6 (local account) and Q8 pass; Q4 and Q7 pass with the changes and
+limits recorded in Sections 4 and 5; Q5 shows today's replay stubs unfinished
+calls, and the protocol model passes. The table below keeps the questions as
+asked.
 
 | # | Question | If no |
 |---|---|---|
@@ -951,8 +1095,9 @@ native take-over, revocation recovery and an update with existing bindings.
 The work splits into sub-projects that can each be planned separately. A
 suggested order, each ending in something demonstrable:
 
-1. First spike (Section 10). Resolve the platform and recovery gates before
-   building on them. Record any required changes to this design.
+1. First spike (Section 10). Done; its changes are applied to this design.
+   Two open decisions remain before planning: the install location (Section 9)
+   and protected files in long-lived sandboxes (Section 4).
 2. `WorkspaceIO` refactor of `file_ops`, `terminal`, `process_registry` and
    the research tools, with `LocalWorkspaceIO` only. Cloud behaviour unchanged,
    proven by the existing tests.
