@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
+import uvicorn
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from surogates.db.agent_users import purge_user_account
+from surogates.devices import link as link_module
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.store import DeviceStore
 from surogates.session.store import SessionStore
@@ -342,3 +348,286 @@ async def test_subscribing_closes_the_pubsub_when_it_fails(redis_client, monkeyp
     with pytest.raises(ConnectionError):
         await DevicePresence(redis_client).subscribe(uuid.uuid4())
     assert closed == [True]
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def link_url(api):
+    """The app, served by a real uvicorn server in the test's own event loop."""
+    server = uvicorn.Server(uvicorn.Config(
+        api.app, host="127.0.0.1", port=0, lifespan="off", log_config=None,
+    ))
+    task = asyncio.create_task(server.serve())
+    for _ in range(500):
+        if server.started:
+            break
+        await asyncio.sleep(0.01)
+    assert server.started, "uvicorn did not start"
+    port = server.servers[0].sockets[0].getsockname()[1]
+    yield f"ws://127.0.0.1:{port}/api/v1/devices/connect?agent_id={AGENT_ID}"
+    server.should_exit = True
+    await task
+
+
+def headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def send(ws, frame: dict) -> None:
+    await ws.send(json.dumps(frame))
+
+
+async def receive(ws, timeout: float = 5.0) -> dict:
+    return json.loads(await asyncio.wait_for(ws.recv(), timeout))
+
+
+async def close_code(ws, timeout: float = 5.0) -> int:
+    with pytest.raises(ConnectionClosed) as closed:
+        while True:
+            await asyncio.wait_for(ws.recv(), timeout)
+    return closed.value.rcvd.code
+
+
+@asynccontextmanager
+async def linked(url: str, token: str):
+    """A device connection past the handshake."""
+    async with connect(url, additional_headers=headers(token)) as ws:
+        await send(ws, {"type": "hello", "protocols": [1]})
+        welcome = await receive(ws)
+        assert welcome["type"] == "welcome", welcome
+        yield ws, welcome
+
+
+async def online(api) -> bool:
+    return (await api.client.get("/v1/devices", headers=api.auth())).json()[0]["online"]
+
+
+async def offline(api) -> bool:
+    return not await online(api)
+
+
+async def eventually(check, timeout: float = 3.0) -> None:
+    for _ in range(int(timeout / 0.05)):
+        if await check():
+            return
+        await asyncio.sleep(0.05)
+    assert await check()
+
+
+@pytest.mark.parametrize(
+    "case", ["unknown", "revoked", "other agent", "no agent", "no header"],
+)
+async def test_a_refused_device_is_closed_with_4401(api, link_url, case):
+    issued = await register(api)
+    url, extra = link_url, headers(issued["token"])
+    if case == "unknown":
+        extra = headers("surg_dev_" + "x" * 44)
+    elif case == "revoked":
+        await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    elif case == "other agent":
+        url = link_url.replace(f"agent_id={AGENT_ID}", "agent_id=another-agent")
+    elif case == "no agent":
+        url = link_url.split("?", 1)[0]
+    elif case == "no header":
+        extra = {}
+    async with connect(url, additional_headers=extra) as ws:
+        assert await close_code(ws) == 4401
+
+
+async def test_a_connected_device_is_online_until_it_leaves(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, welcome):
+        assert welcome == {
+            "type": "welcome",
+            "protocol": 1,
+            "device_id": issued["id"],
+            "org_id": str(api.org_id),
+            "agent_id": AGENT_ID,
+            "user_id": str(api.user_id),
+            "name": "Flavius's ThinkPad",
+            "heartbeat_s": 15,
+        }
+        assert await online(api) is True
+        await send(ws, {"type": "ping"})
+        assert await receive(ws) == {"type": "pong"}
+
+    await eventually(lambda: offline(api))
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert listed[0]["last_seen_at"] is not None
+
+
+async def test_an_unsupported_protocol_is_refused(api, link_url):
+    issued = await register(api)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        await send(ws, {"type": "hello", "protocols": [2]})
+        assert await receive(ws) == {
+            "type": "error", "code": "unsupported_protocol", "supported": [1],
+        }
+        assert await close_code(ws) == 4400
+
+
+@pytest.mark.parametrize("frame", ["not json", "[1]", json.dumps({"type": "ping"})])
+async def test_a_first_frame_that_is_not_hello_is_a_protocol_error(api, link_url, frame):
+    issued = await register(api)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        await ws.send(frame)
+        assert await close_code(ws) == 4400
+
+
+async def test_an_oversized_frame_is_a_protocol_error(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        await send(ws, {"type": "ping", "padding": "x" * 70_000})
+        assert await close_code(ws) == 4400
+
+
+async def test_no_hello_in_time_is_a_protocol_error(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "HELLO_TIMEOUT_S", 0.2)
+    issued = await register(api)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        assert await close_code(ws) == 4400
+
+
+async def test_a_silent_device_is_closed(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "IDLE_TIMEOUT_S", 0.3)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        assert await close_code(ws) == 4408
+
+
+async def test_a_new_connection_supersedes_the_old_one(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (old, _):
+        async with linked(link_url, issued["token"]) as (new, _):
+            assert await close_code(old) == 4409
+            # The old connection's cleanup must leave the new one's presence alone.
+            await asyncio.sleep(0.2)
+            assert await online(api) is True
+            await send(new, {"type": "ping"})
+            assert await receive(new) == {"type": "pong"}
+
+
+async def test_two_connections_opened_together_leave_exactly_one(api, link_url):
+    issued = await register(api)
+
+    async def open_link():
+        ws = await connect(link_url, additional_headers=headers(issued["token"]))
+        await send(ws, {"type": "hello", "protocols": [1]})
+        assert (await receive(ws))["type"] == "welcome"
+        return ws
+
+    async def outcome(ws) -> str:
+        try:
+            await send(ws, {"type": "ping"})
+            reply = await receive(ws, timeout=2.0)
+            return "live" if reply == {"type": "pong"} else f"unexpected {reply}"
+        except ConnectionClosed as closed:
+            return str(closed.rcvd.code)
+
+    first, second = await asyncio.gather(open_link(), open_link())
+    try:
+        await asyncio.sleep(0.5)
+        assert sorted([await outcome(first), await outcome(second)]) == ["4409", "live"]
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_revocation_closes_the_link(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+        assert await close_code(ws) == 4403
+
+
+async def test_a_late_revocation_message_leaves_a_restored_device_connected(
+    api, link_url, redis_client,
+):
+    issued = await register(api)
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    restored = (await api.client.post(
+        f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth(),
+    )).json()
+    async with linked(link_url, restored["token"]) as (ws, _):
+        # Generation 1's revocation, delivered after generation 2 connected.
+        await DevicePresence(redis_client).publish(UUID(issued["id"]), "revoked:1")
+        await asyncio.sleep(0.3)
+        await send(ws, {"type": "ping"})
+        assert await receive(ws) == {"type": "pong"}
+
+
+async def test_reauthorization_closes_the_old_link_and_admits_the_new_token(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        response = await api.client.post(
+            f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth(),
+        )
+        assert await close_code(ws) == 4403
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        assert await close_code(ws) == 4401
+    async with linked(link_url, response.json()["token"]) as (_, welcome):
+        assert welcome["device_id"] == issued["id"]
+
+
+async def test_the_app_can_revoke_its_own_device(api, link_url):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        await send(ws, {"type": "revoke"})
+        assert await close_code(ws) == 4403
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert listed[0]["revoked_at"] is not None
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        assert await close_code(ws) == 4401
+
+
+async def test_a_lost_revocation_message_is_caught_at_the_next_check(
+    api, link_url, session_factory, monkeypatch,
+):
+    monkeypatch.setattr(link_module, "LAST_SEEN_INTERVAL_S", 0.0)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        # Revoke in the database only, as if the control message were lost.
+        await DeviceStore(session_factory).revoke(
+            UUID(issued["id"]), org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+        )
+        await send(ws, {"type": "ping"})
+        assert await close_code(ws) == 4403
+
+
+async def test_deleting_the_user_closes_the_link(api, link_url, session_factory, monkeypatch):
+    monkeypatch.setattr(link_module, "LAST_SEEN_INTERVAL_S", 0.0)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        async with session_factory() as db:
+            await purge_user_account(db, org_id=api.org_id, user_id=api.user_id)
+            await db.commit()
+        await send(ws, {"type": "ping"})
+        assert await close_code(ws) == 4403
+
+
+async def test_a_rotation_before_the_subscription_still_closes_the_link(
+    api, link_url, session_factory, monkeypatch,
+):
+    issued = await register(api)
+    subscribe = DevicePresence.subscribe
+
+    async def rotate_then_subscribe(self, device_id):
+        # Rotate in the database only, before this connection listens: no
+        # message will reach it, so only the post-claim check can catch it.
+        await DeviceStore(session_factory).reauthorize(
+            device_id, org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+        )
+        return await subscribe(self, device_id)
+
+    monkeypatch.setattr(DevicePresence, "subscribe", rotate_then_subscribe)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        await send(ws, {"type": "hello", "protocols": [1]})
+        assert await close_code(ws) == 4403
+
+
+async def test_a_redis_failure_closes_the_link_for_a_retry(api, link_url, redis_client):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        # Drop every pub/sub connection, as a Redis failover would.
+        await redis_client.execute_command("CLIENT", "KILL", "TYPE", "pubsub")
+        assert await close_code(ws) == 1011
+    await eventually(lambda: offline(api))

@@ -111,11 +111,18 @@ class DeviceStore:
     async def revoke(
         self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID,
     ) -> DeviceRecord | None:
-        """Revoke the device's token.  Revoking again keeps the first revocation time."""
+        """Revoke the user's device.  Revoking again keeps the first revocation time."""
+        return await self._revoke(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
+
+    async def revoke_by_id(self, device_id: UUID) -> DeviceRecord | None:
+        """Revoke a device at its own request, made over its authenticated link."""
+        return await self._revoke(Device.id == device_id)
+
+    async def _revoke(self, *where: Any) -> DeviceRecord | None:
         async with self._sf() as db:
             row = (await db.execute(
                 update(Device)
-                .where(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
+                .where(*where)
                 .values(revoked_at=func.coalesce(Device.revoked_at, func.now()))
                 .returning(Device)
             )).scalar_one_or_none()

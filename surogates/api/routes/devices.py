@@ -11,9 +11,10 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket, status
 from pydantic import BaseModel, StringConstraints
 
+from surogates.devices.link import serve_device_link
 from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceRecord, DeviceStore, IssuedDevice
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
@@ -128,3 +129,13 @@ async def reauthorize_device(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
     await _notify(request, device_id, f"rotated:{issued.device.credential_generation}")
     return _issued(issued)
+
+
+@router.websocket("/connect")
+async def device_link(websocket: WebSocket) -> None:
+    """The desktop's device link.  Authenticated by the device token, not by a user."""
+    await serve_device_link(
+        websocket,
+        store=DeviceStore(websocket.app.state.session_factory),
+        presence=DevicePresence(websocket.app.state.redis),
+    )
