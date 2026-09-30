@@ -10,9 +10,11 @@ the user's laptop.
 
 Keys: :meth:`WorkspaceIO.resolve` turns a path as the model wrote it into a
 key, an absolute path in the workspace's own namespace.  Every other file
-method takes a key.  Handlers may compare and show keys and take their
-suffix or basename, but never hand one to this host's filesystem: for a
-laptop workspace it names a file on another machine.
+method takes a key, except :meth:`WorkspaceIO.check_write`, which takes the
+path as written because handlers call it before ``resolve``.  Handlers may
+compare and show keys and take their suffix or basename, but never hand one to
+this host's filesystem: for a laptop workspace it names a file on another
+machine.
 
 Implementations are request-scoped and must not change the process's
 working directory or environment.
@@ -66,16 +68,25 @@ class WorkspaceIO(Protocol):
     async def resolve(self, path: str) -> str:
         """Return the key for *path* as the model wrote it.
 
-        Relative paths start at :attr:`root`.  Raises
+        Relative paths start at :attr:`root`; an unbound IO resolves them from
+        the process's working directory.  Raises
         :class:`~surogates.tools.utils.workspace_sandbox.WorkspaceSandboxError`
         when *path* leaves the workspace.
         """
 
     async def check_write(self, path: str) -> str | None:
-        """Why writing *path* is refused, worded for the model, or None."""
+        """Why writing *path* is refused, worded for the model, or None.
+
+        Unlike the other file methods this takes *path* as the model wrote it,
+        not a key: handlers call it before :meth:`resolve`.
+        """
 
     async def stat(self, key: str) -> FileStat | None:
-        """The file at *key*, or None when nothing is there."""
+        """The file at *key*, or None when it cannot be stat'ed for any reason.
+
+        Missing, permission denied, a symlink loop and an invalid path all give
+        None; handlers treat None as "not found".
+        """
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         """The file's bytes, or only its first *max_bytes*.  Raises OSError."""
@@ -109,7 +120,9 @@ class WorkspaceIO(Protocol):
         ``files`` lists files matching the glob *pattern*.  ``count`` prints
         ``path:count`` per file for the regex *pattern*.  ``json`` streams
         ``rg --json`` events with *context* lines.  *glob* filters the files
-        searched in ``count`` and ``json`` modes.  Raises :class:`RipgrepError`.
+        searched in ``count`` and ``json`` modes.  Paths in the output are keys:
+        handlers ``stat`` them and show them to the model.  Raises
+        :class:`RipgrepError`.
         """
 
     async def which(self, name: str) -> bool:
