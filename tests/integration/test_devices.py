@@ -365,6 +365,8 @@ async def link_url(api):
     port = server.servers[0].sockets[0].getsockname()[1]
     yield f"ws://127.0.0.1:{port}/api/v1/devices/connect?agent_id={AGENT_ID}"
     server.should_exit = True
+    # A handler stuck in a stalled call must fail its test, not hang the suite.
+    server.force_exit = True
     await task
 
 
@@ -631,3 +633,32 @@ async def test_a_redis_failure_closes_the_link_for_a_retry(api, link_url, redis_
         await redis_client.execute_command("CLIENT", "KILL", "TYPE", "pubsub")
         assert await close_code(ws) == 1011
     await eventually(lambda: offline(api))
+
+
+async def hang(*args, **kwargs):
+    """A dependency call that never answers, as a blackholed Redis or Postgres does."""
+    await asyncio.sleep(3600)
+
+
+async def test_a_stalled_dependency_after_welcome_closes_the_link_for_a_retry(
+    api, link_url, monkeypatch,
+):
+    monkeypatch.setattr(link_module, "DEPENDENCY_TIMEOUT_S", 0.2)
+    # Every ping refreshes presence, so the first ping reaches the stalled call.
+    monkeypatch.setattr(link_module, "MIN_REFRESH_INTERVAL_S", 0.0)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        monkeypatch.setattr(DevicePresence, "refresh", hang)
+        await send(ws, {"type": "ping"})
+        assert await close_code(ws, timeout=2.0) == 1011
+
+
+async def test_a_stalled_dependency_before_welcome_closes_the_link_for_a_retry(
+    api, link_url, monkeypatch,
+):
+    monkeypatch.setattr(link_module, "DEPENDENCY_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(DevicePresence, "claim", hang)
+    issued = await register(api)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        await send(ws, {"type": "hello", "protocols": [1]})
+        assert await close_code(ws, timeout=2.0) == 1011

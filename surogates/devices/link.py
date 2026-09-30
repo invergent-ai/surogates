@@ -18,6 +18,9 @@ a refused token from a proxy's HTTP error:
   4408  no frame for IDLE_TIMEOUT_S: the app reconnects
   4409  another connection of this device took over: this one ends
   1011  server trouble, as is any other close: the app reconnects with backoff
+
+The app also drops the connection, and reconnects with backoff, when no welcome
+arrives within 10 s of connecting, or no pong within 2 x heartbeat_s of a ping.
 """
 
 from __future__ import annotations
@@ -27,7 +30,8 @@ import contextlib
 import json
 import logging
 import time
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, TypeVar
 
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio.client import PubSub
@@ -43,8 +47,13 @@ from surogates.runtime.resolver import resolve_agent_id_soft
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 PROTOCOL_VERSION = 1
 HELLO_TIMEOUT_S = 10.0
+# The longest one Redis or database call may take before the link closes with
+# 1011: a stalled dependency must not leave the socket open with no pong.
+DEPENDENCY_TIMEOUT_S = 5.0
 # A device that sends nothing for as long as its presence lasts is gone.
 IDLE_TIMEOUT_S = float(PRESENCE_TTL_S)
 # How often a connected device's row is read back (and ``last_seen_at``
@@ -59,6 +68,16 @@ CLOSE_UNAUTHENTICATED = 4401
 CLOSE_REVOKED = 4403
 CLOSE_IDLE = 4408
 CLOSE_SUPERSEDED = 4409
+
+
+async def _bounded(call: Awaitable[_T]) -> _T:
+    """Await one Redis or database call for at most DEPENDENCY_TIMEOUT_S.
+
+    Its TimeoutError is not the receive timeout: keep it out of any
+    ``except TimeoutError`` that maps to CLOSE_IDLE, so the link ends in 1011.
+    """
+    async with asyncio.timeout(DEPENDENCY_TIMEOUT_S):
+        return await call
 
 
 class _Close(Exception):
@@ -90,13 +109,13 @@ async def serve_device_link(
     try:
         await _hello(websocket)
         # Listen before claiming, so every message sent after the claim is seen.
-        pubsub = await presence.subscribe(device.id)
+        pubsub = await _bounded(presence.subscribe(device.id))
         # Set before the claim: release is compare-and-delete, so it is safe
         # even when the claim fails between its SET and its PUBLISH.
         claimed = True
-        await presence.claim(device.id, holder)
+        await _bounded(presence.claim(device.id, holder))
         # A revocation or rotation published before the subscription was missed.
-        _check_current(await store.touch(device.id), device)
+        _check_current(await _bounded(store.touch(device.id)), device)
         await websocket.send_json({
             "type": "welcome",
             "protocol": PROTOCOL_VERSION,
@@ -224,18 +243,18 @@ async def _heartbeats(
             raise _Close(CLOSE_IDLE, "heartbeat timeout") from None
         kind = frame.get("type")
         if kind == "revoke":
-            await store.revoke_by_id(device.id)
+            await _bounded(store.revoke_by_id(device.id))
             raise _Close(CLOSE_REVOKED, "revoked")
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
         now = time.monotonic()
         if now - last_refresh >= MIN_REFRESH_INTERVAL_S:
             last_refresh = now
-            if not await presence.refresh(device.id, holder):
+            if not await _bounded(presence.refresh(device.id, holder)):
                 raise _Close(CLOSE_SUPERSEDED, "superseded")
         if now - last_check >= LAST_SEEN_INTERVAL_S:
             last_check = now
-            _check_current(await store.touch(device.id), device)
+            _check_current(await _bounded(store.touch(device.id)), device)
         await websocket.send_json({"type": "pong"})
 
 
