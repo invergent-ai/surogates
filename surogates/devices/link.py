@@ -13,8 +13,11 @@ Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
 
   4400  protocol error, including an unsupported protocol or an oversized frame
-  4401  token unknown or revoked, for another agent, or no agent here: the app stops
-  4403  revoked, credentials rotated, or the device's user removed: the app stops
+  4401  token unknown, including one replaced by reauthorization, or the address
+        names another agent or none: the app stops reconnecting and suspends local work
+  4403  the revocation case: revoked (also when a revoked device reconnects),
+        credentials rotated, or the device's user removed. The app stops
+        reconnecting, suspends local work and shows that local access was revoked
   4408  no frame for IDLE_TIMEOUT_S: the app reconnects
   4409  another connection of this device took over: this one ends
   1011  server trouble, as is any other close: the app reconnects with backoff
@@ -102,6 +105,9 @@ async def serve_device_link(
     if device is None:
         await websocket.close(code=CLOSE_UNAUTHENTICATED, reason="unauthenticated")
         return
+    if device.revoked_at is not None:
+        await websocket.close(code=CLOSE_REVOKED, reason="revoked")
+        return
 
     holder = new_holder()
     pubsub: PubSub | None = None
@@ -149,10 +155,11 @@ async def _authenticate(websocket: WebSocket, store: DeviceStore) -> DeviceRecor
     scheme, _, token = (websocket.headers.get("authorization") or "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         return None
-    device = await store.get_by_token(token.strip())
+    device = await store.find_by_token(token.strip())
     if device is None:
         return None
-    # The address must name the device's own agent.
+    # The address must name the device's own agent, or a refusal would disclose
+    # that another agent's device is revoked.
     if await resolve_agent_id_soft(websocket) != device.agent_id:  # type: ignore[arg-type]
         return None
     return device

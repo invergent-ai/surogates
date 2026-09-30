@@ -159,16 +159,17 @@ class DeviceStore:
             await db.commit()
         return IssuedDevice(_record(row), token) if row is not None else None
 
-    async def get_by_token(self, token: str) -> DeviceRecord | None:
-        """The live device *token* belongs to, or None when it is unknown or revoked."""
+    async def find_by_token(self, token: str) -> DeviceRecord | None:
+        """The device *token* belongs to in any state, or None when it is unknown.
+
+        A revoked device is returned too, so callers must check ``revoked_at``.
+        A token replaced by reauthorization is unknown: its hash is gone.
+        """
         if not token.startswith(TOKEN_PREFIX):
             return None
         async with self._sf() as db:
             row = (await db.execute(
-                select(Device).where(
-                    Device.token_hash == hash_token(token),
-                    Device.revoked_at.is_(None),
-                )
+                select(Device).where(Device.token_hash == hash_token(token))
             )).scalar_one_or_none()
         return _record(row) if row is not None else None
 

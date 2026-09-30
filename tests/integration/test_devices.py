@@ -216,22 +216,25 @@ async def test_token_rotation_and_revocation_at_the_store(api, session_factory):
 
     created = await store.create(name="Desk", **owner)
     assert created.device.credential_generation == 1
-    found = await store.get_by_token(created.token)
+    found = await store.find_by_token(created.token)
     assert found is not None and found.id == created.device.id
-    assert await store.get_by_token("not-a-device-token") is None
+    assert await store.find_by_token("not-a-device-token") is None
 
     rotated = await store.reauthorize(created.device.id, **owner)
     assert rotated is not None and rotated.token != created.token
     assert rotated.device.credential_generation == 2
-    current = await store.get_by_token(rotated.token)
+    current = await store.find_by_token(rotated.token)
     assert current is not None
     assert (current.id, current.credential_generation, current.revoked_at) == (
         created.device.id, 2, None,
     )
-    assert await store.get_by_token(created.token) is None
+    assert await store.find_by_token(created.token) is None
 
     await store.revoke(created.device.id, **owner)
-    assert await store.get_by_token(rotated.token) is None
+    # A revoked device is still found by its token: the caller checks revoked_at.
+    revoked = await store.find_by_token(rotated.token)
+    assert revoked is not None and revoked.id == created.device.id
+    assert revoked.revoked_at is not None
 
     touched = await store.touch(created.device.id)
     assert touched is not None
@@ -416,23 +419,33 @@ async def eventually(check, timeout: float = 3.0) -> None:
 
 
 @pytest.mark.parametrize(
-    "case", ["unknown", "revoked", "other agent", "no agent", "no header"],
+    ("case", "code"),
+    [
+        ("unknown", 4401),
+        ("revoked", 4403),
+        ("revoked, other agent", 4401),
+        ("other agent", 4401),
+        ("no agent", 4401),
+        ("no header", 4401),
+    ],
 )
-async def test_a_refused_device_is_closed_with_4401(api, link_url, case):
+async def test_a_refused_device_is_closed_with_the_code_that_says_why(
+    api, link_url, case, code,
+):
     issued = await register(api)
     url, extra = link_url, headers(issued["token"])
     if case == "unknown":
         extra = headers("surg_dev_" + "x" * 44)
-    elif case == "revoked":
+    if case.startswith("revoked"):
         await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
-    elif case == "other agent":
+    if case in ("other agent", "revoked, other agent"):
         url = link_url.replace(f"agent_id={AGENT_ID}", "agent_id=another-agent")
     elif case == "no agent":
         url = link_url.split("?", 1)[0]
     elif case == "no header":
         extra = {}
     async with connect(url, additional_headers=extra) as ws:
-        assert await close_code(ws) == 4401
+        assert await close_code(ws) == code
 
 
 async def test_a_connected_device_is_online_until_it_leaves(api, link_url):
@@ -578,7 +591,7 @@ async def test_the_app_can_revoke_its_own_device(api, link_url):
     listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
     assert listed[0]["revoked_at"] is not None
     async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
-        assert await close_code(ws) == 4401
+        assert await close_code(ws) == 4403
 
 
 async def test_a_lost_revocation_message_is_caught_at_the_next_check(
