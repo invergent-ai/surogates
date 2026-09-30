@@ -93,10 +93,15 @@ class DevicePresence:
         makes "subscribed" true before a caller relies on it.
         """
         pubsub = self._redis.pubsub()
-        await pubsub.subscribe(control_channel(device_id))
-        for _ in range(5):
-            message = await pubsub.get_message(timeout=1.0)
-            if message is not None and message["type"] == "subscribe":
-                return pubsub
-        await pubsub.aclose()
-        raise ConnectionError("Redis did not confirm the control subscription")
+        try:
+            await pubsub.subscribe(control_channel(device_id))
+            for _ in range(5):
+                message = await pubsub.get_message(timeout=1.0)
+                if message is not None and message["type"] == "subscribe":
+                    return pubsub
+            raise ConnectionError("Redis did not confirm the control subscription")
+        except BaseException:
+            # The caller never receives the PubSub, so it would hold its pool
+            # connection for good.  Cancellation closes it too.
+            await pubsub.aclose()
+            raise

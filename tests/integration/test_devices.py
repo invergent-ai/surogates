@@ -316,3 +316,29 @@ async def test_a_failed_notification_does_not_fail_the_change(api, monkeypatch):
     # The new token must reach the user: the old one no longer works.
     assert restored.status_code == 200
     assert restored.json()["token"].startswith("surg_dev_")
+
+
+@pytest.mark.parametrize("failing", ["subscribe", "get_message"])
+async def test_subscribing_closes_the_pubsub_when_it_fails(redis_client, monkeypatch, failing):
+    closed: list[bool] = []
+    real_pubsub = redis_client.pubsub
+
+    def tracked_pubsub():
+        pubsub = real_pubsub()
+        real_aclose = pubsub.aclose
+
+        async def broken(*args, **kwargs):
+            raise ConnectionError("redis went away")
+
+        async def aclose():
+            closed.append(True)
+            await real_aclose()
+
+        monkeypatch.setattr(pubsub, failing, broken)
+        monkeypatch.setattr(pubsub, "aclose", aclose)
+        return pubsub
+
+    monkeypatch.setattr(redis_client, "pubsub", tracked_pubsub)
+    with pytest.raises(ConnectionError):
+        await DevicePresence(redis_client).subscribe(uuid.uuid4())
+    assert closed == [True]
