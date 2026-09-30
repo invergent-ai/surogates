@@ -1,0 +1,8 @@
+spike-q8-8UHJVO: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q8-Wo9fYF: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q8-aWwNGk: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q8-dIfuGT: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q8-h4Hoz0: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q8-hEVksu: .mcp.json .gitmodules .gitconfig .zshrc .vscode .ripgreprc .idea .zprofile .bashrc .bash_profile .profile .claude 
+spike-q7-pw4YEN: .claude 
+spike-q7-tv3m7L: 

@@ -10,7 +10,8 @@ const { fixture } = require('./fixture.cjs');
 const { isPrivate, guardProxy } = require('./guard-proxy.cjs');
 const { writeResult } = require('../lib/results.cjs');
 
-const ORIGIN = 'https://spike.example';
+const ORIGIN = 'http://spike.example';   // plain http: no mixed-content blocking of http targets
+const LAN = Object.values(os.networkInterfaces()).flat().find((a) => a && a.family === 'IPv4' && !a.internal)?.address;
 const CANDIDATES = [['chrome', '/usr/bin/google-chrome'], ['chromium', '/usr/bin/chromium'], ['chromium-snap', '/snap/bin/chromium'], ['chromium-browser', '/usr/bin/chromium-browser'],
   ['edge', '/usr/bin/microsoft-edge'], ['brave', '/usr/bin/brave-browser'], ['vivaldi', '/usr/bin/vivaldi']];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -30,11 +31,12 @@ function processes(match) {
 function canary() {
   const hits = [];
   const web = http.createServer((req, res) => { hits.push(req.url); res.end('canary'); });
+  const lan = http.createServer((req, res) => { hits.push(`lan:${req.url}`); res.end('canary'); });
   const ws = net.createServer((s) => { hits.push('ws-connect'); s.destroy(); });
   return {
     hits,
-    start: () => Promise.all([new Promise((r) => web.listen(18081, '127.0.0.1', r)), new Promise((r) => ws.listen(18082, '127.0.0.1', r))]),
-    stop: () => { web.close(); web.closeAllConnections(); ws.close(); },
+    start: () => Promise.all([new Promise((r) => web.listen(18081, '127.0.0.1', r)), new Promise((r) => ws.listen(18082, '127.0.0.1', r)), new Promise((r) => (LAN ? lan.listen(18083, LAN, r) : r()))]),
+    stop: () => { web.close(); web.closeAllConnections(); ws.close(); lan.close(); lan.closeAllConnections(); },
   };
 }
 
@@ -56,7 +58,7 @@ async function installGuard(context, sessionOf, grants, log) {
     let page = null;
     try { page = req.frame().page(); } catch { /* worker or service-worker request: no frame */ }
     if (url.origin === ORIGIN) {
-      const f = fixture(url.pathname, page ? sessionOf(page) : 'none');
+      const f = fixture(url.pathname, page ? sessionOf(page) : 'none', LAN);
       return route.fulfill({ status: f.status, contentType: f.contentType, body: f.body });
     }
     const d = await decide(page, req.url());
@@ -150,6 +152,19 @@ async function probeBrowser(name, exe, folder) {
           await sleep(1000);
           out.fileChooserIntercepted = chooser;
         });
+        await phase(out, 'pageSchemes', async () => {
+          out.pageSchemes = {};
+          for (const u of ['chrome://version', 'view-source:https://example.com', 'file:///etc/hostname']) {
+            await pageB.goto(`${ORIGIN}/`, { waitUntil: 'domcontentloaded' });
+            await pageB.evaluate((x) => { location.href = x; }, u).catch(() => {});
+            await sleep(2500);
+            const popupWait = context.waitForEvent('page', { timeout: 3000 }).catch(() => null);
+            await pageB.evaluate((x) => { window.open(x); }, u).catch(() => {});
+            const popup = await popupWait;
+            out.pageSchemes[u] = { locationAfter: pageB.url(), popup: popup ? popup.url() : null };
+            if (popup) await popup.close().catch(() => {});
+          }
+        });
         await phase(out, 'schemes', async () => {
           out.schemes = {};
           for (const u of ['file:///etc/hostname', 'chrome://version', 'view-source:https://example.com']) {
@@ -182,13 +197,21 @@ async function probeBrowser(name, exe, folder) {
       await new Promise((r) => proxy.listen(18090, '127.0.0.1', r));
       try {
         const pxProfile = fs.mkdtempSync(path.join(os.homedir(), `.config/surogate-spike-px-${name}-`));
+        if (process.env.SPIKE_WEBRTC_PREF) {
+          // The agent profile is the app's own, so the WebRTC policy can be set as a profile preference.
+          fs.mkdirSync(path.join(pxProfile, 'Default'), { recursive: true });
+          fs.writeFileSync(path.join(pxProfile, 'Default', 'Preferences'), JSON.stringify({ webrtc: { ip_handling_policy: 'disable_non_proxied_udp' } }));
+          out.webrtcPref = true;
+        }
+        const webrtcFlag = process.env.SPIKE_WEBRTC_FLAG ? ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp'] : [];
+        out.webrtcFlag = webrtcFlag.length > 0;
         const pxCtx = await chromium.launchPersistentContext(pxProfile, {
           executablePath: exe, headless: false, chromiumSandbox: true, serviceWorkers: 'block',
-          args: ['--proxy-server=http://127.0.0.1:18090', '--proxy-bypass-list=<-loopback>'],
+          args: ['--proxy-server=http://127.0.0.1:18090', '--proxy-bypass-list=<-loopback>', ...webrtcFlag],
         });
         try {
           await pxCtx.route(`${ORIGIN}/**`, (route) => {
-            const f = fixture(new URL(route.request().url()).pathname, 'P');
+            const f = fixture(new URL(route.request().url()).pathname, 'P', LAN);
             return route.fulfill({ status: f.status, contentType: f.contentType, body: f.body });
           });
           const pxPage = await pxCtx.newPage();
@@ -196,6 +219,7 @@ async function probeBrowser(name, exe, folder) {
           await pxPage.goto(`${ORIGIN}/`, { waitUntil: 'domcontentloaded' });
           await sleep(6000);
           out.proxyHits = cn.hits.slice(beforePx);
+          out.proxyIce = await pxPage.evaluate(() => window.__ice);
           out.proxyBlocked = proxyLog;
         } finally { await pxCtx.close(); }
       } finally { proxy.close(); proxy.closeAllConnections?.(); }

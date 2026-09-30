@@ -1,0 +1,10 @@
+{
+  "question": "q6-local",
+  "host": "flavius-pc",
+  "at": "2026-09-30T03:39:44.537Z",
+  "provider": "local",
+  "exchangeStatus": 200,
+  "meStatus": 200,
+  "browserLandedOn": "/callback",
+  "windowOrigin": "http://localhost:5173"
+}

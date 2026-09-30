@@ -5,7 +5,9 @@ const path = require('node:path');
 
 const port = process.parentPort;
 const statusOf = (url) => new Promise((resolve) => {
-  http.get(url, (r) => { r.resume(); resolve(r.statusCode); }).on('error', (e) => resolve(String(e.code || e)));
+  const req = http.get(url, (r) => { r.resume(); resolve(r.statusCode); });
+  req.on('error', (e) => resolve(String(e.code || e.message || e)));
+  req.setTimeout(5000, () => req.destroy(new Error('timeout after 5s')));
 });
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -42,6 +44,9 @@ port.on('message', async ({ data }) => {
   await new Promise((r) => server.listen(18768, '127.0.0.1', r));
   res.forwardSetup = await call({ id: 3, forward: { port: 18767 } });
   res.forwardedFromOutside = await statusOf('http://127.0.0.1:18768/');
+  // Review fix pass: two connections through the one inherited descriptor.
+  res.secondSequential = await statusOf('http://127.0.0.1:18768/');
+  res.twoParallel = await Promise.all([statusOf('http://127.0.0.1:18768/'), statusOf('http://127.0.0.1:18768/')]);
   res.runnerPid = child.pid;
   res.serverPidInsideRunner = res.start.pid;
   child.kill('SIGKILL');

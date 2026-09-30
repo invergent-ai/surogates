@@ -1,0 +1,883 @@
+{
+  "question": "q4",
+  "host": "ubuntu",
+  "at": "2026-09-30T04:03:27.531Z",
+  "folder": "/home/spike/spike-q4-OBDIjd",
+  "escapedFileExists": false,
+  "results": [
+    {
+      "name": "chrome",
+      "exe": "/usr/bin/google-chrome",
+      "version": "Google Chrome 154.0.8037.92",
+      "flags": {
+        "pipe": true,
+        "port": false,
+        "noSandbox": false,
+        "rendererSeccomp": [
+          "2",
+          "2",
+          "2"
+        ]
+      },
+      "secondLaunch": "browserType.launchPersistentContext: Opening in existing browser session. This usually means that the profile is already in use by another instance of Chromium.",
+      "canaryHits": [],
+      "bLeaks": [],
+      "guardLogSample": [
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/img?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/fetch?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://192.168.150.88:18083/lan?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "192.168.150.88"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/xhr?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "ws",
+          "url": "ws://127.0.0.1:18082/ws?t=A",
+          "allow": false,
+          "why": "private",
+          "session": null,
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/iframe?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://localhost:18081/localhost?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1.nip.io:18081/nip?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "https://httpbin.org/redirect-to?url=http%3A%2F%2F127.0.0.1%3A18081%2Fredirect%3Ft%3DA",
+          "noFrame": false,
+          "allow": true,
+          "why": "public",
+          "session": "A",
+          "addrs": [
+            "107.21.166.194",
+            "54.172.131.225",
+            "54.159.186.149",
+            "34.227.237.26",
+            "32.194.24.163",
+            "44.221.208.192",
+            "44.219.150.215",
+            "3.217.138.231"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/prefetch?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/img?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/beacon?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/iframe?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/prefetch?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/fetch?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://192.168.150.88:18083/lan?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "192.168.150.88"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/xhr?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "ws",
+          "url": "ws://127.0.0.1:18082/ws?t=B",
+          "allow": false,
+          "why": "private",
+          "session": null,
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://localhost:18081/localhost?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1.nip.io:18081/nip?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "https://httpbin.org/redirect-to?url=http%3A%2F%2F127.0.0.1%3A18081%2Fredirect%3Ft%3DB",
+          "noFrame": false,
+          "allow": true,
+          "why": "public",
+          "session": "B",
+          "addrs": [
+            "44.221.208.192",
+            "54.159.186.149",
+            "34.227.237.26",
+            "32.194.24.163",
+            "107.21.166.194",
+            "44.219.150.215",
+            "54.172.131.225",
+            "3.217.138.231"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/beacon?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/worker?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/worker?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        }
+      ],
+      "popupFile": "no popup",
+      "download": {
+        "raw": "_.._escape.txt",
+        "saved": "/home/spike/spike-q4-OBDIjd/_.._escape.txt",
+        "inFolder": true
+      },
+      "fileChooserIntercepted": true,
+      "pageSchemes": {
+        "chrome://version": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        },
+        "view-source:https://example.com": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        },
+        "file:///etc/hostname": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        }
+      },
+      "schemes": {
+        "file:///etc/hostname": "blocked: page.goto: net::ERR_BLOCKED_BY_CLIENT at file:///etc/hostname",
+        "chrome://version": "blocked: page.goto: Navigation to \"chrome://version\" is interrupted by another navigation to \"chrome-error://chromewebdata/\"",
+        "view-source:https://example.com": "blocked: page.goto: Navigation to \"view-source:https://example.com\" is interrupted by another navigation to \"chrome://version/\""
+      },
+      "errors": {
+        "schemes": "page.goto: Navigation to \"http://spike.example/\" is interrupted by another navigation to \"https://example.com/\"\nCall log:\n  - navigating to \"http://spike.example/\", waiting until \"domcontentloaded\"\n\n    at /home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:173:23\n    at async phase (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:77:9)\n    at async /home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:168:9\n    at async phase (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:77:9)\n    at async probeBrowser (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:92:5)\n    at async ParentPort.<anonymous> (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:231:24)"
+      },
+      "serviceWorkersAllowedHits": [],
+      "webrtcFlag": false,
+      "proxyHits": [],
+      "proxyIce": [
+        "candidate:1654836364 1 udp 2113937151 2fd20ab4-a2c2-4698-8e02-5cdd57e1f496.local 55650 typ host generation 0 ufrag bplJ network-cost 999",
+        "candidate:2975424993 1 udp 1677729535 82.76.172.76 55650 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag bplJ network-cost 999"
+      ],
+      "proxyBlocked": [
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/img?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/iframe?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "127.0.0.1:18082",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "127.0.0.1:18082",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/beacon?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/fetch?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://localhost:18081/localhost?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1.nip.io:18081/nip?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://192.168.150.88:18083/lan?t=P",
+          "address": "192.168.150.88"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/shared?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/xhr?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/prefetch?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/sse?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/worker?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/redirect?t=P",
+          "address": "127.0.0.1"
+        }
+      ]
+    },
+    {
+      "name": "chromium",
+      "exe": "/usr/bin/chromium",
+      "missing": true
+    },
+    {
+      "name": "chromium-snap",
+      "exe": "/snap/bin/chromium",
+      "skipped": "unsupported package: /usr/bin/snap"
+    },
+    {
+      "name": "chromium-browser",
+      "exe": "/usr/bin/chromium-browser",
+      "missing": true
+    },
+    {
+      "name": "edge",
+      "exe": "/usr/bin/microsoft-edge",
+      "version": "Microsoft Edge 154.0.4258.37",
+      "flags": {
+        "pipe": true,
+        "port": false,
+        "noSandbox": false,
+        "rendererSeccomp": [
+          "2",
+          "2"
+        ]
+      },
+      "secondLaunch": "browserType.launchPersistentContext: Opening in existing browser session. This usually means that the profile is already in use by another instance of Chromium.",
+      "canaryHits": [],
+      "bLeaks": [],
+      "guardLogSample": [
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/img?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/img?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/fetch?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://192.168.150.88:18083/lan?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "192.168.150.88"
+          ]
+        },
+        {
+          "kind": "ws",
+          "url": "ws://127.0.0.1:18082/ws?t=B",
+          "allow": false,
+          "why": "private",
+          "session": null,
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/fetch?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://localhost:18081/localhost?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://localhost:18081/localhost?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://192.168.150.88:18083/lan?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "192.168.150.88"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/xhr?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "ws",
+          "url": "ws://127.0.0.1:18082/ws?t=A",
+          "allow": false,
+          "why": "private",
+          "session": null,
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/xhr?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1.nip.io:18081/nip?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1.nip.io:18081/nip?t=A",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "https://httpbin.org/redirect-to?url=http%3A%2F%2F127.0.0.1%3A18081%2Fredirect%3Ft%3DA",
+          "noFrame": false,
+          "allow": true,
+          "why": "public",
+          "session": "A",
+          "addrs": [
+            "54.172.131.225",
+            "54.159.186.149",
+            "34.227.237.26",
+            "107.21.166.194",
+            "44.221.208.192",
+            "44.219.150.215",
+            "32.194.24.163",
+            "3.217.138.231"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "https://httpbin.org/redirect-to?url=http%3A%2F%2F127.0.0.1%3A18081%2Fredirect%3Ft%3DB",
+          "noFrame": false,
+          "allow": true,
+          "why": "public",
+          "session": "B",
+          "addrs": [
+            "107.21.166.194",
+            "34.227.237.26",
+            "44.221.208.192",
+            "54.159.186.149",
+            "3.217.138.231",
+            "44.219.150.215",
+            "54.172.131.225",
+            "32.194.24.163"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/iframe?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/iframe?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/prefetch?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/prefetch?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/beacon?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/beacon?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/worker?t=A",
+          "noFrame": false,
+          "allow": true,
+          "why": "private",
+          "session": "A",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/worker?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        },
+        {
+          "kind": "http",
+          "url": "http://127.0.0.1:18081/sse?t=B",
+          "noFrame": false,
+          "allow": false,
+          "why": "private",
+          "session": "B",
+          "addrs": [
+            "127.0.0.1"
+          ]
+        }
+      ],
+      "popupFile": "no popup",
+      "download": {
+        "raw": "_.._escape.txt",
+        "saved": "/home/spike/spike-q4-OBDIjd/_.._escape.txt",
+        "inFolder": true
+      },
+      "fileChooserIntercepted": true,
+      "pageSchemes": {
+        "chrome://version": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        },
+        "view-source:https://example.com": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        },
+        "file:///etc/hostname": {
+          "locationAfter": "http://spike.example/",
+          "popup": null
+        }
+      },
+      "schemes": {
+        "file:///etc/hostname": "blocked: page.goto: net::ERR_BLOCKED_BY_CLIENT at file:///etc/hostname",
+        "chrome://version": "blocked: page.goto: Navigation to \"chrome://version\" is interrupted by another navigation to \"chrome-error://chromewebdata/\"",
+        "view-source:https://example.com": "blocked: page.goto: Navigation to \"view-source:https://example.com\" is interrupted by another navigation to \"edge://version/\""
+      },
+      "errors": {
+        "schemes": "page.goto: Navigation to \"http://spike.example/\" is interrupted by another navigation to \"https://example.com/\"\nCall log:\n  - navigating to \"http://spike.example/\", waiting until \"domcontentloaded\"\n\n    at /home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:173:23\n    at async phase (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:77:9)\n    at async /home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:168:9\n    at async phase (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:77:9)\n    at async probeBrowser (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:92:5)\n    at async ParentPort.<anonymous> (/home/spike/.local/share/surogate/versions/spike/resources/app/q4/browser-host.cjs:231:24)"
+      },
+      "serviceWorkersAllowedHits": [],
+      "webrtcFlag": false,
+      "proxyHits": [],
+      "proxyIce": [
+        "candidate:2580472331 1 udp 2113937151 8db5e2c5-32a0-40f4-8511-746ca78a9578.local 47748 typ host generation 0 ufrag hSv8 network-cost 999",
+        "candidate:1245007718 1 udp 1677729535 82.76.172.76 47748 typ srflx raddr 0.0.0.0 rport 0 generation 0 ufrag hSv8 network-cost 999"
+      ],
+      "proxyBlocked": [
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/iframe?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/img?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "127.0.0.1:18082",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/prefetch?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/beacon?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/fetch?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://localhost:18081/localhost?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://192.168.150.88:18083/lan?t=P",
+          "address": "192.168.150.88"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1.nip.io:18081/nip?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/xhr?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/sse?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/worker?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/shared?t=P",
+          "address": "127.0.0.1"
+        },
+        {
+          "proxyBlocked": "http://127.0.0.1:18081/redirect?t=P",
+          "address": "127.0.0.1"
+        }
+      ]
+    },
+    {
+      "name": "brave",
+      "exe": "/usr/bin/brave-browser",
+      "missing": true
+    },
+    {
+      "name": "vivaldi",
+      "exe": "/usr/bin/vivaldi",
+      "missing": true
+    }
+  ]
+}

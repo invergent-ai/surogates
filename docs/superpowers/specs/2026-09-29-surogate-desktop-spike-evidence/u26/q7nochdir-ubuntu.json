@@ -1,0 +1,49 @@
+{
+  "question": "q7",
+  "host": "ubuntu",
+  "at": "2026-09-29T21:50:53.186Z",
+  "landedOutside_A": 0,
+  "landedOutside_B": 0,
+  "sandboxedHardlinkToToolchain": {
+    "code": 0,
+    "out": "ln: failed to create hard link '/home/spike/.nvm/nvm.sh' => './hl-toolchain': Invalid cross-device link\nexit=1\n"
+  },
+  "helperWriteThroughUserHardlink": {
+    "id": 5001,
+    "ok": false,
+    "code": "EMLINK",
+    "message": "file has more than one hard link"
+  },
+  "commandWriteThroughUserHardlink": {
+    "code": 0,
+    "out": "exit=0\n"
+  },
+  "outsideFileAfter": "original\npwned-by-command\n",
+  "readFifo": {
+    "id": 5002,
+    "ok": false,
+    "code": "ENOTREG",
+    "message": "not a regular file",
+    "ms": 1
+  },
+  "readDevZeroLink": {
+    "id": 5003,
+    "ok": false,
+    "code": "ELOOP",
+    "message": "ELOOP: too many symbolic links encountered, open 'z'"
+  },
+  "readThroughMagicLink": {
+    "id": 5004,
+    "ok": false,
+    "code": "ENOENT",
+    "message": "ENOENT: no such file or directory, open 'pr/home/spike/Documents/q7-outside.txt'"
+  },
+  "helperWriteGitConfig": {
+    "id": 5005,
+    "ok": true
+  },
+  "commandWriteGitConfig": {
+    "code": 0,
+    "out": "exit=0\n"
+  }
+}

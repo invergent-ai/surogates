@@ -1,0 +1,12 @@
+{
+  "wrongVerifier": 400,
+  "correctAfterFailedAttempt": 400,
+  "wrongRedirect": 400,
+  "wrongState": 400,
+  "valid": 200,
+  "replay": 400,
+  "lowPort": 400,
+  "badChallenge": 400,
+  "noAuthMint": 401,
+  "expired": 400
+}

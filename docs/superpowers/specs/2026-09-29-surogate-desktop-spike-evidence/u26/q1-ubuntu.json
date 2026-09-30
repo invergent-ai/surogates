@@ -1,0 +1,78 @@
+{
+  "question": "q1",
+  "host": "ubuntu",
+  "at": "2026-09-29T21:08:21.384Z",
+  "restrictUserns": "1",
+  "mainUserns": "user:[4026531837]",
+  "processes": [
+    {
+      "type": "Browser",
+      "pid": 12248,
+      "apparmor": "surogate-desktop (unconfined)",
+      "userns": "user:[4026531837]",
+      "seccomp": "0",
+      "cmdline": []
+    },
+    {
+      "type": "GPU",
+      "pid": 12278,
+      "apparmor": "surogate-desktop (unconfined)",
+      "userns": "user:[4026531837]",
+      "seccomp": "0",
+      "cmdline": []
+    },
+    {
+      "type": "Utility",
+      "pid": 12280,
+      "apparmor": "surogate-desktop (unconfined)",
+      "userns": "user:[4026531837]",
+      "seccomp": "0",
+      "cmdline": [
+        "/home/spike/.local/share/surogate/versions/spike/surogate --type=utility --utility-sub-type=network.mojom.NetworkService --lang=en-US --service-sandbox-type=none --enable-crash-reporter=a57ce233-934c-461f-81cd-9dc0a9616866,no_channel --user-data-dir=/home/spike/.config/surogate-desktop-spike --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,12885223384375882687,14317358120562665479,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=7,i,11682683755322413436,11001108092050319898,4 --trace-process-track-uuid=3190708989122997041"
+      ]
+    },
+    {
+      "type": "Tab",
+      "pid": 12289,
+      "apparmor": "surogate-desktop (unconfined)",
+      "userns": "user:[4026532603]",
+      "seccomp": "2",
+      "cmdline": [
+        "/home/spike/.local/share/surogate/versions/spike/surogate --type=renderer --enable-crash-reporter=a57ce233-934c-461f-81cd-9dc0a9616866,no_channel --user-data-dir=/home/spike/.config/surogate-desktop-spike --app-path=/home/spike/.local/share/surogate/versions/spike/resources/app --enable-sandbox --ozone-platform=x11 --lang=en-US --num-raster-threads=2 --enable-main-frame-before-activation --renderer-client-id=4 --launch-time-ticks=1194022556 --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,12885223384375882687,14317358120562665479,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=7,i,11682683755322413"
+      ]
+    },
+    {
+      "type": "Utility",
+      "pid": 12304,
+      "apparmor": "surogate-desktop (unconfined)",
+      "userns": "user:[4026531837]",
+      "seccomp": "0",
+      "cmdline": [
+        "/home/spike/.local/share/surogate/versions/spike/surogate --type=utility --utility-sub-type=node.mojom.NodeService --lang=en-US --service-sandbox-type=none --enable-crash-reporter=a57ce233-934c-461f-81cd-9dc0a9616866,no_channel --user-data-dir=/home/spike/.config/surogate-desktop-spike --shared-files=v8_context_snapshot_data:100 --field-trial-handle=3,i,12885223384375882687,14317358120562665479,262144 --enable-features=PdfUseShowSaveFilePicker --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=7,i,11682683755322413436,11001108092050319898,4 --trace-process-track-uuid=3190708990997080739"
+      ]
+    }
+  ],
+  "ready": {
+    "type": "ready",
+    "pid": 12304,
+    "deps": {
+      "errors": [],
+      "warnings": []
+    },
+    "globWarnings": []
+  },
+  "cmd": {
+    "type": "result",
+    "id": "q1-1",
+    "code": 0,
+    "signal": null,
+    "argv": [
+      "/bin/bash",
+      "-c",
+      "/home/spike/.local/share/surogate/versions/spike/bin/bwrap --new-session --die-with-parent --unshare-net --bind /tmp/claude-http-0c2f20a46e094567.sock /tmp/claude-http-0c2f20a46e094567.sock --setenv SANDBOX_RUNTIME 1 --setenv TMPDIR /tmp/claude --setenv NO_PROXY localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 --setenv no_proxy localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 --setenv HTTP_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv HTTPS_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv http_proxy 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv https_proxy 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv GIT_CONFIG_PARAMETERS ''\"'\"'http.proxyAuthMethod=basic'\"'\"'' --setenv ALL_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv all_proxy 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv GRPC_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv grpc_proxy 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv GIT_SSH_COMMAND 'ssh -o ControlMaster=no -o ControlPath=none -o ProxyCommand='\"'\"'socat - PROXY:localhost:%h:%p,proxyport=3128,proxyauth=srt.cTEtMQ==:744eb43e7b8c1c0a906d0b06c48e4dcc'\"'\"'' --setenv FTP_PROXY 'socks5h://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:1080' --setenv ftp_proxy 'socks5h://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:1080' --setenv RSYNC_PROXY localhost:1080 --setenv DOCKER_HTTP_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv DOCKER_HTTPS_PROXY 'http://srt.cTEtMQ%3D%3D:744eb43e7b8c1c0a906d0b06c48e4dcc@localhost:3128' --setenv CLOUDSDK_PROXY_TYPE http --setenv CLOUDSDK_PROXY_ADDRESS localhost --setenv CLOUDSDK_PROXY_PORT 3128 --setenv CLOUDSDK_PROXY_USERNAME srt.cTEtMQ== --setenv CLOUDSDK_PROXY_PASSWORD 744eb43e7b8c1c0a906d0b06c48e4dcc --setenv JAVA_TOOL_OPTIONS -javaagent:/home/spike/.local/share/surogate/versions/spike/resources/app/node_modules/@anthropic-ai/sandbox-runtime/vendor/java-proxy-agent/srt-proxy-agent.jar --setenv CLAUDE_CODE_HOST_HTTP_PROXY_PORT 38235 --setenv CLAUDE_CODE_HOST_SOCKS_PROXY_PORT 38235 --ro-bind / / --bind /home/spike/spike-q1-DIR6RG /home/spike/spike-q1-DIR6RG --bind /home/spike/.local/share/surogate/tmp/q1-12248 /home/spike/.local/share/surogate/tmp/q1-12248 --tmpfs /mnt --tmpfs /media --tmpfs /srv --tmpfs /tmp --tmpfs /home/spike --bind /home/spike/spike-q1-DIR6RG /home/spike/spike-q1-DIR6RG --bind /home/spike/.local/share/surogate/tmp/q1-12248 /home/spike/.local/share/surogate/tmp/q1-12248 --ro-bind /home/spike/.local/share/surogate/versions/spike /home/spike/.local/share/surogate/versions/spike --ro-bind /home/spike/.nvm /home/spike/.nvm --ro-bind /home/spike/.local/share/surogate/versions/spike/resources/app/node_modules/@anthropic-ai/sandbox-runtime/vendor/java-proxy-agent/srt-proxy-agent.jar /home/spike/.local/share/surogate/versions/spike/resources/app/node_modules/@anthropic-ai/sandbox-runtime/vendor/java-proxy-agent/srt-proxy-agent.jar --tmpfs /var/tmp --tmpfs /etc/ssh/ssh_config.d --dev /dev --unshare-pid --unshare-user --cap-drop ALL --proc /proc -- /usr/bin/bash -c '/usr/bin/bash -c '\"'\"'socat TCP-LISTEN:3128,fork,reuseaddr UNIX-CONNECT:/tmp/claude-http-0c2f20a46e094567.sock >/dev/null 2>&1 &\nsocat TCP-LISTEN:1080,fork,reuseaddr UNIX-CONNECT:/tmp/claude-http-0c2f20a46e094567.sock >/dev/null 2>&1 &\ntrap \"kill %1 %2 2>/dev/null; exit\" EXIT\n/home/spike/.local/share/surogate/versions/spike/resources/app/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/x64/apply-seccomp /usr/bin/bash -c '\"'\"'\"'\"'\"'\"'\"'\"'id -u; cat /proc/self/attr/current; readlink /proc/self/ns/user; touch ok && echo wrote'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"''"
+    ],
+    "stdout": "1000\nsurogate-desktop (unconfined)\nuser:[4026532666]\nwrote\n",
+    "stderr": ""
+  },
+  "wroteInFolder": true
+}
