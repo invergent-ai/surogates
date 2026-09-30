@@ -163,3 +163,16 @@ async def test_start_returns_a_process_handle(wio, tmp_path, monkeypatch):
         assert session.watcher_interval == 60
     finally:
         registry_module.process_registry.kill_process(started["session_id"])
+
+
+async def test_check_write_refuses_credentials_and_system_paths(wio):
+    assert await wio.check_write("/etc/passwd") == (
+        "Write denied: '/etc/passwd' is a protected system/credential file."
+    )
+    assert (await wio.check_write("/etc/hosts")).startswith(
+        "Refusing to write to sensitive system path: /etc/hosts"
+    )
+
+
+async def test_check_write_allows_the_workspace(wio, root):
+    assert await wio.check_write(str(root / "a.txt")) is None

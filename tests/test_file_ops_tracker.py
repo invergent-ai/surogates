@@ -6,9 +6,10 @@ import os
 from pathlib import Path
 
 from surogates.tools.builtin import file_ops
+from surogates.tools.workspace_io import LocalWorkspaceIO
 
 
-def test_update_read_timestamp_invalidates_dedup_for_written_path(tmp_path: Path) -> None:
+async def test_update_read_timestamp_invalidates_dedup_for_written_path(tmp_path: Path) -> None:
     file_path = tmp_path / "notes.txt"
     file_path.write_text("before", encoding="utf-8")
     task_id = "dedup-invalidation"
@@ -21,13 +22,13 @@ def test_update_read_timestamp_invalidates_dedup_for_written_path(tmp_path: Path
     task_data["dedup"][(str((tmp_path / "other.txt").resolve()), 1, 500)] = 1.0
 
     file_path.write_text("after", encoding="utf-8")
-    file_ops._update_read_timestamp(str(file_path), task_id)
+    await file_ops._update_read_timestamp(LocalWorkspaceIO(), resolved, task_id)
 
     remaining_paths = {key[0] for key in task_data["dedup"]}
     assert resolved not in remaining_paths
 
 
-def test_update_read_timestamp_caps_tracker_state(tmp_path: Path) -> None:
+async def test_update_read_timestamp_caps_tracker_state(tmp_path: Path) -> None:
     file_path = tmp_path / "current.txt"
     file_path.write_text("current", encoding="utf-8")
     task_id = "tracker-cap"
@@ -41,7 +42,7 @@ def test_update_read_timestamp_caps_tracker_state(tmp_path: Path) -> None:
         task_data["dedup"][(old_path, 1, 500)] = float(i)
         task_data["read_timestamps"][old_path] = float(i)
 
-    file_ops._update_read_timestamp(str(file_path), task_id)
+    await file_ops._update_read_timestamp(LocalWorkspaceIO(), resolved, task_id)
 
     assert len(task_data["read_history"]) < 1300
     assert len(task_data["dedup"]) < 1300

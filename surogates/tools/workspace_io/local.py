@@ -331,6 +331,117 @@ async def _run_command(
         return RunResult(output=str(exc), returncode=-1)
 
 
+# ---------------------------------------------------------------------------
+# Write-path deny list — blocks writes to sensitive system/credential files
+# ---------------------------------------------------------------------------
+
+_HOME = str(Path.home())
+
+WRITE_DENIED_PATHS = {
+    os.path.realpath(p) for p in [
+        os.path.join(_HOME, ".ssh", "authorized_keys"),
+        os.path.join(_HOME, ".ssh", "id_rsa"),
+        os.path.join(_HOME, ".ssh", "id_ed25519"),
+        os.path.join(_HOME, ".ssh", "config"),
+        os.path.join(_HOME, ".bashrc"),
+        os.path.join(_HOME, ".zshrc"),
+        os.path.join(_HOME, ".profile"),
+        os.path.join(_HOME, ".bash_profile"),
+        os.path.join(_HOME, ".zprofile"),
+        os.path.join(_HOME, ".netrc"),
+        os.path.join(_HOME, ".pgpass"),
+        os.path.join(_HOME, ".npmrc"),
+        os.path.join(_HOME, ".pypirc"),
+        "/etc/sudoers",
+        "/etc/passwd",
+        "/etc/shadow",
+    ]
+}
+
+WRITE_DENIED_PREFIXES = [
+    os.path.realpath(p) + os.sep for p in [
+        os.path.join(_HOME, ".ssh"),
+        os.path.join(_HOME, ".aws"),
+        os.path.join(_HOME, ".gnupg"),
+        os.path.join(_HOME, ".kube"),
+        "/etc/sudoers.d",
+        "/etc/systemd",
+        os.path.join(_HOME, ".docker"),
+        os.path.join(_HOME, ".azure"),
+        os.path.join(_HOME, ".config", "gh"),
+    ]
+]
+
+
+def _get_safe_write_root() -> str | None:
+    """Return the resolved SUROGATES_WRITE_SAFE_ROOT path, or None if unset.
+
+    When set, all write_file/patch operations are constrained to this
+    directory tree.  Writes outside it are denied even if the target is
+    not on the static deny list.  Opt-in hardening for gateway/messaging
+    deployments that should only touch a workspace checkout.
+    """
+    root = os.getenv("SUROGATES_WRITE_SAFE_ROOT", "")
+    if not root:
+        return None
+    try:
+        return os.path.realpath(os.path.expanduser(root))
+    except Exception:
+        return None
+
+
+def _is_write_denied(path: str) -> bool:
+    """Return True if path is on the write deny list.
+
+    Checks the static deny list of sensitive system/credential files,
+    then the optional safe-root sandbox (SUROGATES_WRITE_SAFE_ROOT).
+    """
+    resolved = os.path.realpath(os.path.expanduser(str(path)))
+
+    # 1) Static deny list
+    if resolved in WRITE_DENIED_PATHS:
+        return True
+    for prefix in WRITE_DENIED_PREFIXES:
+        if resolved.startswith(prefix):
+            return True
+
+    # 2) Optional safe-root sandbox
+    safe_root = _get_safe_write_root()
+    if safe_root:
+        if not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Sensitive path protection — refuse writes to system-critical locations
+# without going through the terminal tool's approval system.
+# ---------------------------------------------------------------------------
+_SENSITIVE_PATH_PREFIXES = ("/etc/", "/boot/", "/usr/lib/systemd/")
+_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+
+
+def _check_sensitive_path(filepath: str) -> str | None:
+    """Return an error message if the path targets a sensitive system location."""
+    try:
+        resolved = os.path.realpath(os.path.expanduser(filepath))
+    except (OSError, ValueError):
+        resolved = filepath
+    for prefix in _SENSITIVE_PATH_PREFIXES:
+        if resolved.startswith(prefix):
+            return (
+                f"Refusing to write to sensitive system path: {filepath}\n"
+                "Use the terminal tool with sudo if you need to modify system files."
+            )
+    if resolved in _SENSITIVE_EXACT_PATHS:
+        return (
+            f"Refusing to write to sensitive system path: {filepath}\n"
+            "Use the terminal tool with sudo if you need to modify system files."
+        )
+    return None
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -341,6 +452,11 @@ class LocalWorkspaceIO:
         if self.root:
             return validate_path(self.root, path)
         return str(Path(os.path.expanduser(path)).resolve())
+
+    async def check_write(self, path: str) -> str | None:
+        if _is_write_denied(path):
+            return f"Write denied: '{path}' is a protected system/credential file."
+        return _check_sensitive_path(path)
 
     async def stat(self, key: str) -> FileStat | None:
         try:

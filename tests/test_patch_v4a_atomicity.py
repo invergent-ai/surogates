@@ -5,16 +5,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from surogates.tools.builtin.file_ops import _apply_v4a_patch
+from surogates.tools.workspace_io import LocalWorkspaceIO
 
 
-def test_v4a_patch_validation_failure_leaves_all_files_unchanged(tmp_path: Path, monkeypatch) -> None:
+async def test_v4a_patch_validation_failure_leaves_all_files_unchanged(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("alpha\n", encoding="utf-8")
     second.write_text("beta\n", encoding="utf-8")
 
-    result = _apply_v4a_patch(
+    result = await _apply_v4a_patch(
+        LocalWorkspaceIO(),
         """*** Begin Patch
 *** Update File: first.txt
 @@

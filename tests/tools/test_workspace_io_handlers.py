@@ -193,7 +193,7 @@ class TestReadFile:
         assert "Path traversal blocked" in out["error"]
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestWriteFile:
     async def test_creates_file_and_parents(self, ws):
         out = await call(
@@ -238,7 +238,7 @@ class TestWriteFile:
         assert "SyntaxError" in bad["lint"]["output"]
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestPatch:
     async def test_replace_returns_diff(self, ws):
         (ws.real / "a.txt").write_text("x = 1\ny = 2\n")
@@ -290,6 +290,32 @@ class TestPatch:
         assert (ws.real / "u.txt").read_text() == "alpha\nBETA\n"
         assert (ws.real / "new" / "n.txt").read_text() == "fresh"
         assert not (ws.real / "gone.txt").exists()
+
+    async def test_v4a_update_keeps_an_executable_bit(self, ws):
+        script = ws.real / "run.sh"
+        script.write_text("echo 1\n")
+        script.chmod(0o755)
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {ws.path('run.sh')}\n"
+            "-echo 1\n"
+            "+echo 2\n"
+            "*** End Patch"
+        )
+        out = await call(file_ops._patch_handler, ws, mode="patch", patch=patch)
+        assert out["status"] == "ok"
+        assert script.read_text() == "echo 2\n"
+        assert script.stat().st_mode & 0o777 == 0o755
+
+    async def test_non_utf8_file_is_left_untouched(self, ws):
+        original = b"caf\xe9 = 1\n"
+        (ws.real / "latin1.txt").write_bytes(original)
+        out = await call(
+            file_ops._patch_handler, ws,
+            mode="replace", path=ws.path("latin1.txt"), old_string="= 1", new_string="= 2",
+        )
+        assert "codec can't decode" in out["error"]
+        assert (ws.real / "latin1.txt").read_bytes() == original
 
 
 @needs_rg
