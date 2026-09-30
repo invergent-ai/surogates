@@ -122,6 +122,7 @@ class WorkspaceIO(Protocol):
 
         *workdir* is as the model wrote it; None means the root.  Raises
         WorkspaceSandboxError, worded for the model, when it is not allowed.
+        Any other exception means the command may have run; callers do not retry.
         """
 
     async def start(

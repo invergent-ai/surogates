@@ -377,6 +377,14 @@ class TestTerminal:
         assert "All commands must run within the workspace directory" in out["error"]
         assert time.monotonic() - started < 1.0
 
+    async def test_setup_failure_is_reported_at_once_not_retried(self, ws):
+        started = time.monotonic()
+        out = await call(terminal._terminal_handler, ws, command="pwd", workdir="a\x00b")
+        assert time.monotonic() - started < 1.0
+        assert out["status"] == "error"
+        assert out["error"] == "Failed to execute command: embedded null byte"
+        assert "traceback" in out
+
     async def test_exit_code_meaning_for_grep(self, ws):
         (ws.real / "a.txt").write_text("x\n")
         out = await call(terminal._terminal_handler, ws, command="grep nothere a.txt")

@@ -9,7 +9,6 @@ Features:
 - Exit code interpretation for common CLI tools
 - Working directory validation (allowlist-based)
 - Background execution support
-- Transient error retry with exponential back-off
 - Environment variable filtering via ``env_passthrough``
 
 Registers the ``terminal`` tool with the tool registry.
@@ -17,7 +16,6 @@ Registers the ``terminal`` tool with the tool registry.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -31,7 +29,7 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
 from surogates.tools.utils.tool_output_limits import get_max_bytes
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import RunResult, workspace_io_from
+from surogates.tools.workspace_io import workspace_io_from
 
 logger = logging.getLogger(__name__)
 
@@ -345,69 +343,13 @@ async def _terminal_handler(
 
             return json.dumps(result_data, ensure_ascii=False)
 
-        # --- Foreground execution with retry logic -------------------------
-        max_retries = 3
-        retry_count = 0
-        result: RunResult | None = None
-
-        while retry_count <= max_retries:
-            try:
-                result = await wio.run(
-                    command, workdir=requested_workdir, timeout=timeout,
-                )
-            except WorkspaceSandboxError as exc:
-                return _blocked(str(exc))
-            except Exception as exc:
-                error_str = str(exc).lower()
-                if "timeout" in error_str:
-                    return json.dumps(
-                        {
-                            "output": "",
-                            "exit_code": 124,
-                            "error": f"Command timed out after {timeout} seconds",
-                        },
-                        ensure_ascii=False,
-                    )
-
-                if retry_count < max_retries:
-                    retry_count += 1
-                    wait_time = 2 ** retry_count
-                    logger.warning(
-                        "Execution error, retrying in %ds (attempt %d/%d) "
-                        "- Command: %s - Error: %s: %s",
-                        wait_time,
-                        retry_count,
-                        max_retries,
-                        command[:200],
-                        type(exc).__name__,
-                        exc,
-                    )
-                    await asyncio.sleep(wait_time)
-                    continue
-
-                logger.error(
-                    "Execution failed after %d retries - Command: %s "
-                    "- Error: %s: %s",
-                    max_retries,
-                    command[:200],
-                    type(exc).__name__,
-                    exc,
-                )
-                return json.dumps(
-                    {
-                        "output": "",
-                        "exit_code": -1,
-                        "error": (
-                            f"Command execution failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-
-            break
-
-        assert result is not None
+        # --- Foreground execution ------------------------------------------
+        # Run once: any exception other than a refused workdir means the
+        # command may already have run, so it is not retried.
+        try:
+            result = await wio.run(command, workdir=requested_workdir, timeout=timeout)
+        except WorkspaceSandboxError as exc:
+            return _blocked(str(exc))
 
         # --- Post-process output -------------------------------------------
         output = _truncate_output(result.output)
