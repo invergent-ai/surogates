@@ -114,9 +114,15 @@ class DeviceStore:
         """Revoke the user's device.  Revoking again keeps the first revocation time."""
         return await self._revoke(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
 
-    async def revoke_by_id(self, device_id: UUID) -> DeviceRecord | None:
-        """Revoke a device at its own request, made over its authenticated link."""
-        return await self._revoke(Device.id == device_id)
+    async def revoke_by_id(self, device_id: UUID, generation: int) -> DeviceRecord | None:
+        """Revoke a device at its own request, made over its authenticated link.
+
+        Only the credentials the link connected with may do it: after a
+        reauthorization, a socket still open under the old token matches no row.
+        """
+        return await self._revoke(
+            Device.id == device_id, Device.credential_generation == generation,
+        )
 
     async def _revoke(self, *where: Any) -> DeviceRecord | None:
         async with self._sf() as db:

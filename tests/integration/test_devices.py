@@ -662,3 +662,20 @@ async def test_a_stalled_dependency_before_welcome_closes_the_link_for_a_retry(
     async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
         await send(ws, {"type": "hello", "protocols": [1]})
         assert await close_code(ws, timeout=2.0) == 1011
+
+
+async def test_a_revoke_from_an_old_generation_socket_leaves_the_restored_device(
+    api, link_url, session_factory,
+):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (old, _):
+        # Rotate in the database only, so no message reaches the old socket.
+        restored = await DeviceStore(session_factory).reauthorize(
+            UUID(issued["id"]), org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+        )
+        await send(old, {"type": "revoke"})
+        assert await close_code(old) == 4403
+    listed = (await api.client.get("/v1/devices", headers=api.auth())).json()
+    assert listed[0]["revoked_at"] is None
+    async with linked(link_url, restored.token) as (_, welcome):
+        assert welcome["device_id"] == issued["id"]

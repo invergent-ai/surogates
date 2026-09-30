@@ -243,7 +243,7 @@ async def _heartbeats(
             raise _Close(CLOSE_IDLE, "heartbeat timeout") from None
         kind = frame.get("type")
         if kind == "revoke":
-            await _bounded(store.revoke_by_id(device.id))
+            await _bounded(store.revoke_by_id(device.id, device.credential_generation))
             raise _Close(CLOSE_REVOKED, "revoked")
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
