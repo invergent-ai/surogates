@@ -193,24 +193,7 @@ export function LoginPage() {
       stashed ? (JSON.parse(stashed) as SignupProfile) : undefined,
     );
     storeAuthTokens(tokens.access_token, tokens.refresh_token);
-    const handoff = new URLSearchParams(window.location.search);
-    const desktopState = handoff.get("desktop_state");
-    if (desktopState) {
-      const response = await authFetch("/api/v1/auth/desktop/code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          state: desktopState,
-          code_challenge: handoff.get("code_challenge"),
-          port: Number(handoff.get("port")),
-        }),
-      });
-      if (response.ok) {
-        const { code, redirect_uri } = (await response.json()) as { code: string; redirect_uri: string };
-        window.location.assign(`${redirect_uri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(desktopState)}`);
-        return;
-      }
-    }
+    if (await completeDesktopHandoff()) return;
     // Best-effort: a failed profile write must not block sign-in; the
     // stash is cleared either way and the user can edit their profile
     // later.
@@ -442,6 +425,7 @@ export function LoginPage() {
           token_type: string;
         };
         storeAuthTokens(payload.access_token, payload.refresh_token);
+        if (await completeDesktopHandoff()) return;
         void navigate({ to: getPostAuthRoute() });
         return;
       }
@@ -835,4 +819,24 @@ export function LoginPage() {
       </div>
     </div>
   );
+}
+
+/** Spike only: hand a fresh sign-in to the desktop app waiting on a loopback port. */
+async function completeDesktopHandoff(): Promise<boolean> {
+  const handoff = new URLSearchParams(window.location.search);
+  const desktopState = handoff.get("desktop_state");
+  if (!desktopState) return false;
+  const response = await authFetch("/api/v1/auth/desktop/code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      state: desktopState,
+      code_challenge: handoff.get("code_challenge"),
+      port: Number(handoff.get("port")),
+    }),
+  });
+  if (!response.ok) return false;
+  const { code, redirect_uri } = (await response.json()) as { code: string; redirect_uri: string };
+  window.location.assign(`${redirect_uri}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(desktopState)}`);
+  return true;
 }

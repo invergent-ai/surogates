@@ -29,6 +29,7 @@ Setup notes:
 | 3 | Background servers across commands and from the browser | NO per command; YES with a runner | one long-lived sandboxed runner per root session; browser access by explicit forwarding over an inherited descriptor |
 | 4 | Installed browsers, launch flags, downloads, network guard | PARTIAL | Chrome/Edge .deb verified; `ignoreDefaultArgs` for Playwright's weakening defaults; pinning proxy is the network boundary; no per-session private-network grants in a shared profile; `navigate` rejects non-http(s) |
 | 5 | Worker recovery without repeating an effect | NO today; YES for the Section 2 protocol (model) | durable invocation replay between `_rebuild_messages` and the first LLM call, so `sanitize_tool_pairs` never stubs a desktop call; reuse `lease_token` fencing |
+| 6 | Loopback + S256 PKCE sign-in | YES (local account); Google/GitHub not run | handoff after every sign-in path; launcher clears `ELECTRON_RUN_AS_NODE`; one Firebase run before release |
 | 7 | File-operation boundary under races | PARTIAL | helper inside srt + `O_NOFOLLOW`/`fstat`/`nlink`; host `chdir`s to the folder; raw API enforces protected files itself; refuse multiply-linked files at binding |
 | 8 | Process trees after a host or app crash | YES | rely on srt's `--die-with-parent` + PID namespace; tool host is bwrap's direct parent; no systemd scope needed; *started* without result → interrupted |
 
@@ -227,3 +228,35 @@ Design consequence (Section 1):
 1. Supervision relies on srt's `bwrap --die-with-parent` plus the sandbox's PID namespace. The tool host spawns bwrap directly (no intermediate double-fork) so the tool host is bwrap's parent. No systemd user scope is required, so the app works in sessions without a user manager.
 2. A replacement host, before accepting work, reads the operation journal and reports every *started* operation without a result as interrupted. As a defensive check it may also confirm that no process carrying the old host's marker survives.
 3. The browser host must guarantee the same for its browser process; verify when it is built.
+
+## Q6: Loopback + S256 PKCE sign-in
+
+Result: YES for the desktop handoff and every rejection case. Google and GitHub: not run, because the dev agent has no Firebase project (`/auth/config` returns `"firebase": null`).
+
+Environment: workstation (Ubuntu 24.04.4, kernel 7.0.0-28), local dev stack from this branch (surogate-ops on :8888, surogates api on :8000, surogates web dev server on http://localhost:5173 for agent `ag11-b14zft`), local account `user1@dev.local`. Electron 44.5.0 from `node_modules`, run under xvfb with `chrome-sandbox` temporarily `root 4755` (reverted to `flavius 755` right after). Throwaway routes `surogates/api/routes/desktop_auth.py`; the login page calls the handoff after both the local and the Firebase sign-in paths.
+
+Evidence:
+- End to end (`q6-local`): the app listened on a random `127.0.0.1` port and opened `…/login?desktop_state=…&code_challenge=…&port=…`. A headless Chrome driven by Playwright stood in for the person at the system browser, signed in with the local account, and was redirected to the app's `/callback`. The app exchanged the code with its PKCE verifier (`200`), wrote the tokens into the agent window's storage, reloaded, and `/api/v1/auth/me` returned `200` from the window, which was still on `http://localhost:5173`.
+- Rejection checks (`q6/negative.mjs`):
+
+| Case | Status |
+|---|---|
+| valid exchange | 200 |
+| mint a code without authentication | 401 |
+| wrong verifier | 400 |
+| correct verifier after one failed attempt (any attempt consumes the code) | 400 |
+| wrong redirect URI | 400 |
+| wrong state | 400 |
+| replay of a used code | 400 |
+| port 80 | 400 |
+| malformed challenge | 400 |
+| code older than 60 s | 400 |
+
+- Launching the app from a VS Code terminal started it as plain Node (`require('electron').app` undefined): VS Code exports `ELECTRON_RUN_AS_NODE=1` to its terminals and child processes.
+- JSON: `results/workstation/q6-local-flavius-pc.json`, `q6-negative-flavius-pc.json` (plan workspace).
+
+Design consequence:
+1. Section 7: the handoff works as specified. Codes are single-use under any attempt (`GETDEL`), bound to challenge, state, redirect URI, origin and user; minting needs an authenticated user.
+2. Section 7: the login page calls the handoff after every successful sign-in path (local, Firebase email, Google, GitHub), not only the popup ones.
+3. Section 9: the launcher (`~/.local/bin/surogate` and the `.desktop` entry) clears `ELECTRON_RUN_AS_NODE` before starting the app.
+4. Google and GitHub still need one run against an agent with Firebase before release. The Electron-specific risk (embedded sign-in) is avoided by construction, since the provider pages load in the system browser.
