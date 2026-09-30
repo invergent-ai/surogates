@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import shutil
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,7 +93,7 @@ class TestReadFile:
     async def test_utf16_bom_is_decoded(self, ws):
         (ws.real / "u.txt").write_bytes("héllo\n".encode("utf-16"))
         out = await call(file_ops._read_file_handler, ws, path=ws.path("u.txt"))
-        assert out["content"].lstrip("﻿") == "héllo\n"
+        assert out["content"].lstrip("\ufeff") == "héllo\n"
 
     async def test_second_identical_read_is_a_dedup_stub(self, ws):
         (ws.real / "a.txt").write_text("one\n")
@@ -326,13 +327,33 @@ class TestProcess:
         assert (waited["status"], waited["exit_code"]) == ("exited", 0)
         assert "ping" in waited["output"]
 
-    async def test_kill_stops_a_running_process(self, ws):
-        started = await call(terminal._terminal_handler, ws, command="sleep 5", background=True)
+    async def test_kill_ends_the_process(self, ws):
+        # The shell writes its own PID, so the test can tell that the process
+        # is gone and not just that the tool says "killed".  The PID file is
+        # written only once the shell is up, which is also when it starts
+        # honouring SIGTERM.
+        started = await call(
+            terminal._terminal_handler, ws, command="echo $$ > pid; sleep 30", background=True,
+        )
         sid = started["session_id"]
+        pid = 0
+        for _ in range(50):
+            text = (ws.real / "pid").read_text() if (ws.real / "pid").exists() else ""
+            if text.endswith("\n"):
+                pid = int(text)
+                break
+            await asyncio.sleep(0.1)
+        assert pid, "the background command never wrote its PID"
         killed = await call(registry_module._handle_process, ws, action="kill", session_id=sid)
         assert killed["status"] == "killed"
-        polled = await call(registry_module._handle_process, ws, action="poll", session_id=sid)
-        assert polled["status"] == "exited"
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            await asyncio.sleep(0.1)
+        os.killpg(pid, signal.SIGKILL)
+        pytest.fail(f"process {pid} was still running 5 s after kill")
 
 
 @pytest.mark.parametrize("ws", LOCAL, indirect=True)
