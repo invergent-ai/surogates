@@ -2,9 +2,8 @@
 
 Both persist to the **shared tenant workspace** under ``.research/`` so a
 parent planner session and a child writer session see the same evidence
-bank and outline.  This mirrors how ``file_ops`` uses the
-``workspace_path`` kwarg injected by the harness; no API server or
-database is involved.
+bank and outline.  Like ``file_ops``, they reach the workspace through
+the dispatched WorkspaceIO; no API server or database is involved.
 
 Wire-level shape of the tool result (single JSON string on every
 return so the LLM can parse it without branching):
@@ -21,8 +20,8 @@ session log rather than a silent miss.
 
 from __future__ import annotations
 
+import io
 import json
-import os
 from dataclasses import asdict
 from typing import Any
 
@@ -34,6 +33,7 @@ from surogates.research.memory_bank import (
 )
 from surogates.research.outline import normalize_outline, outline_sections
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
 
 __all__ = ["register"]
 
@@ -46,11 +46,11 @@ _MEMORY_FILE = "memory.jsonl"
 _OUTLINE_FILE = "outline.md"
 
 
-def _research_root(workspace_path: str) -> str:
-    """Return ``{workspace}/.research``, creating it on demand."""
-    root = os.path.join(workspace_path, _RESEARCH_DIR)
-    os.makedirs(root, exist_ok=True)
-    return root
+async def _read_text(wio: WorkspaceIO, key: str) -> str:
+    """The file at *key* as text, or "" when it does not exist yet."""
+    if await wio.stat(key) is None:
+        return ""
+    return io.TextIOWrapper(io.BytesIO(await wio.read(key)), encoding="utf-8").read()
 
 
 def _err(msg: str) -> str:
@@ -129,18 +129,14 @@ _MEMORY_SCHEMA = ToolSchema(
 async def _research_memory_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
-    workspace_path = kwargs.get("workspace_path")
-    if not workspace_path:
+    wio = workspace_io_from(kwargs)
+    if not wio.root:
         return _err(
             "research_memory requires a workspace; none is available.",
         )
 
-    path = os.path.join(_research_root(workspace_path), _MEMORY_FILE)
-    text = ""
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-    entries = parse_jsonl(text)
+    key = await wio.resolve(f"{_RESEARCH_DIR}/{_MEMORY_FILE}")
+    entries = parse_jsonl(await _read_text(wio, key))
 
     action = arguments.get("action", "")
 
@@ -155,8 +151,7 @@ async def _research_memory_handler(
             summary=arguments.get("summary", "") or "",
             evidence=arguments.get("evidence") or [],
         )
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(serialize_jsonl(entries))
+        await wio.write(key, serialize_jsonl(entries).encode("utf-8"))
         return _ok({
             "source_id": entry.source_id,
             "url": entry.url,
@@ -214,26 +209,22 @@ _OUTLINE_SCHEMA = ToolSchema(
 async def _research_outline_handler(
     arguments: dict[str, Any], **kwargs: Any,
 ) -> str:
-    workspace_path = kwargs.get("workspace_path")
-    if not workspace_path:
+    wio = workspace_io_from(kwargs)
+    if not wio.root:
         return _err(
             "research_outline requires a workspace; none is available.",
         )
 
-    path = os.path.join(_research_root(workspace_path), _OUTLINE_FILE)
+    key = await wio.resolve(f"{_RESEARCH_DIR}/{_OUTLINE_FILE}")
     action = arguments.get("action", "")
 
     if action == "set":
         outline = normalize_outline(arguments.get("outline", "") or "")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(outline)
+        await wio.write(key, outline.encode("utf-8"))
         return _ok({"sections": outline_sections(outline)})
 
     if action == "get":
-        outline = ""
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as fh:
-                outline = fh.read()
+        outline = await _read_text(wio, key)
         return _ok({
             "outline": outline,
             "sections": outline_sections(outline),

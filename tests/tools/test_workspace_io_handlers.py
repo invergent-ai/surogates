@@ -491,7 +491,7 @@ async def test_wait_leaves_the_event_loop_free(ws):
     assert ticks >= 5
 
 
-@pytest.mark.parametrize("ws", LOCAL, indirect=True)
+@pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestResearch:
     async def test_memory_and_outline_round_trip(self, ws):
         added = await call(
