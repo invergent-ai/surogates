@@ -23,9 +23,78 @@ import pytest
 from surogates.tools.builtin import file_ops, research, terminal
 from surogates.tools.utils import document_cache
 from surogates.tools.utils import process_registry as registry_module
+from surogates.tools.workspace_io import LocalWorkspaceIO, RunResult
 from tests.tools.fixtures.build_documents import build_minimal_docx
 
 LOCAL = ["local"]
+BOTH = ["local", "remapped"]
+VIRTUAL_ROOT = "/nonexistent-virtual-workspace"
+
+
+class RemappingWorkspaceIO:
+    """A real directory served under VIRTUAL_ROOT, which does not exist here.
+
+    Keys are virtual.  Each call translates them to the real directory and
+    delegates to LocalWorkspaceIO, so a handler that opens, stats or lists a
+    key itself finds nothing and its remapped test fails.
+    """
+
+    def __init__(self, real_root: str) -> None:
+        self._inner = LocalWorkspaceIO(workspace_path=real_root)
+        self._real = real_root
+        self.root = VIRTUAL_ROOT
+
+    def _to_real(self, text: str) -> str:
+        return text.replace(VIRTUAL_ROOT, self._real)
+
+    def _to_virtual(self, text: str) -> str:
+        return text.replace(self._real, VIRTUAL_ROOT)
+
+    async def resolve(self, path):
+        return self._to_virtual(await self._inner.resolve(self._to_real(path)))
+
+    async def check_write(self, path):
+        refusal = await self._inner.check_write(self._to_real(path))
+        return refusal and self._to_virtual(refusal)
+
+    async def stat(self, key):
+        return await self._inner.stat(self._to_real(key))
+
+    async def read(self, key, max_bytes=None):
+        return await self._inner.read(self._to_real(key), max_bytes)
+
+    async def write(self, key, data):
+        await self._inner.write(self._to_real(key), data)
+
+    async def delete(self, key):
+        await self._inner.delete(self._to_real(key))
+
+    async def list_dir(self, key):
+        return await self._inner.list_dir(self._to_real(key))
+
+    def local_file(self, key):
+        return self._inner.local_file(self._to_real(key))
+
+    async def ripgrep(self, key, **options):
+        return self._to_virtual(await self._inner.ripgrep(self._to_real(key), **options))
+
+    async def which(self, name):
+        return await self._inner.which(name)
+
+    async def run(self, command, *, workdir, timeout):
+        result = await self._inner.run(
+            self._to_real(command), workdir=workdir and self._to_real(workdir), timeout=timeout,
+        )
+        return RunResult(self._to_virtual(result.output), result.returncode, result.timed_out)
+
+    async def start(self, command, *, workdir, **options):
+        return await self._inner.start(
+            self._to_real(command), workdir=workdir and self._to_real(workdir), **options,
+        )
+
+    def __getattr__(self, name):
+        # poll, read_output, wait, kill, write_stdin, list_processes: no keys.
+        return getattr(self._inner, name)
 
 needs_rg = pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep")
 needs_python = pytest.mark.skipif(
@@ -49,6 +118,8 @@ def ws(request, tmp_path) -> Ws:
     real.mkdir()
     if request.param == "local":
         return Ws(str(real), real, {"workspace_path": str(real)})
+    if request.param == "remapped":
+        return Ws(VIRTUAL_ROOT, real, {"workspace_io": RemappingWorkspaceIO(str(real))})
     raise ValueError(f"unknown workspace kind {request.param}")
 
 
@@ -370,3 +441,13 @@ class TestResearch:
         got = await call(research._research_outline_handler, ws, action="get")
         assert got["outline"].startswith("## One")
         assert (ws.real / ".research" / "memory.jsonl").is_file()
+
+
+async def test_remapped_workspace_serves_the_real_directory(tmp_path):
+    real = tmp_path.resolve()
+    (real / "a.txt").write_text("x")
+    wio = RemappingWorkspaceIO(str(real))
+    key = await wio.resolve("a.txt")
+    assert key == f"{VIRTUAL_ROOT}/a.txt"
+    assert await wio.read(key) == b"x"
+    assert not os.path.exists(key)
