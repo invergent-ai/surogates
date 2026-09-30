@@ -237,6 +237,15 @@ class TestWriteFile:
         assert bad["lint"]["status"] == "error"
         assert "SyntaxError" in bad["lint"]["output"]
 
+    @needs_python
+    async def test_lint_does_not_run_shell_in_the_filename(self, ws):
+        out = await call(
+            file_ops._write_file_handler, ws,
+            path=ws.path("it's$(touch pwned).py"), content="x = 1\n",
+        )
+        assert out["lint"] == {"status": "ok"}
+        assert not list(ws.real.rglob("pwned"))
+
 
 @pytest.mark.parametrize("ws", BOTH, indirect=True)
 class TestPatch:

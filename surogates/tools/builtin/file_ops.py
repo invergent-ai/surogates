@@ -20,6 +20,7 @@ import logging
 import multiprocessing
 import os
 import re
+import shlex
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -442,7 +443,7 @@ async def _check_lint(wio: WorkspaceIO, key: str) -> dict[str, Any] | None:
     if not await wio.which(base_cmd):
         return None
 
-    cmd = linter_template.format(file=repr(key))
+    cmd = linter_template.format(file=shlex.quote(key))
     try:
         result = await wio.run(cmd, workdir=None, timeout=30)
     except Exception:
