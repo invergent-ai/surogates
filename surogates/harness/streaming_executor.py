@@ -151,7 +151,6 @@ class StreamingToolExecutor:
         governance_gate: Any | None = None,
         tool_guardrails: Any | None = None,
         bundle: Any | None = None,
-        turn_gate: Any | None = None,
         platform_client: Any | None = None,
         expert_transcript: Any | None = None,
     ) -> None:
@@ -184,7 +183,6 @@ class StreamingToolExecutor:
         self._saga = saga
         self._tool_guardrails = tool_guardrails
         self._bundle = bundle
-        self._turn_gate = turn_gate
         self._platform_client = platform_client
         self._expert_transcript = expert_transcript
 
@@ -433,7 +431,6 @@ class StreamingToolExecutor:
                 log_policy_allowed=self._log_policy_allowed,
                 governance_gate=self._governance_gate,
                 bundle=self._bundle,
-                turn_gate=self._turn_gate,
                 platform_client=self._platform_client,
                 expert_transcript=self._expert_transcript,
                 interrupt_check=self._interrupt_check,

@@ -1474,12 +1474,10 @@ async def run_worker(settings: Settings) -> None:
     worker_id = settings.worker_id or f"worker-{id(asyncio.get_event_loop()):x}"
     settings.worker_id = worker_id
 
-    # Construct the TurnConcurrencyGate before the harness_factory
-    # closure so harnesses can hold a reference and release/re-acquire
-    # their slot during idle waits (e.g. delegate_task polling a child).
-    # Without this, a parent that's just sleeping waiting for its
-    # child still counts against the per-tenant cap, and a deep
-    # delegation chain can saturate the gate on a single user prompt.
+    # The per-tenant turn gate.  The dispatcher takes a slot on dequeue and
+    # owns each turn's slots through ``TurnSlots``, which gives them back
+    # while the whole turn waits (a child session, an answer, the user's
+    # computer) and takes them again before it works.
     from surogates.config import SHARED_WORK_QUEUE_KEY  # noqa: F401  -- consumed at orchestrator construction below
     from surogates.runtime import TurnConcurrencyGate
 
@@ -2158,11 +2156,6 @@ async def run_worker(settings: Settings) -> None:
             # PromptBuilder catalog load; threading it here avoids a
             # second file_bundle_cache lookup per session.
             bundle=bundle,
-            # Share the turn gate so the harness can release the
-            # slot while idle-waiting for a delegated child.  This
-            # closes the per-tenant cap leak that used to choke
-            # deep-research and other fan-out workflows.
-            turn_gate=turn_gate,
             # Per-agent MCP tool set discovered above; the harness uses
             # it to filter the shared registry's prompt schemas down to
             # this agent's own MCP tools.
@@ -2201,9 +2194,9 @@ async def run_worker(settings: Settings) -> None:
         return harness
 
     # 8. Orchestrator — consumes from the shared work queue.
-    # Per-tenant isolation is enforced by the ``turn_gate`` built
-    # above and shared with both the dispatcher (acquire on dequeue)
-    # and every harness (release/re-acquire around idle waits).
+    # Per-tenant isolation is enforced by the ``turn_gate`` built above;
+    # the dispatcher acquires on dequeue and owns each turn's slots
+    # through ``TurnSlots``.
 
     # Build the tenant-for-task callable used by ``tasks_tick`` to spawn
     # child sessions on behalf of subagent tasks. The tick runs as a

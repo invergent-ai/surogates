@@ -1,9 +1,14 @@
 """Workspace tools through their handlers, on each kind of workspace access.
 
 Each class runs against a plain workspace path ("local").  Once a class's
-handlers take a WorkspaceIO it also runs "remapped": the same directory
-served under a root that does not exist on this host, so a handler that
-touches the filesystem without its WorkspaceIO finds nothing and fails.
+handlers take a WorkspaceIO it also runs on the other kinds:
+
+- "local": a plain workspace path.
+- "remapped": a real directory under a root that does not exist on this host,
+  so a handler that touches the filesystem without its WorkspaceIO finds
+  nothing and fails.
+- "device": the remapped directory reached through device operations and their
+  JSON, the way a session's folder on the user's computer is.
 """
 
 from __future__ import annotations
@@ -20,14 +25,16 @@ from typing import Any
 
 import pytest
 
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.builtin import file_ops, research, terminal
 from surogates.tools.utils import document_cache
 from surogates.tools.utils import process_registry as registry_module
 from surogates.tools.workspace_io import LocalWorkspaceIO, RunResult
+from tests.fake_laptop import InProcessRunner
 from tests.tools.fixtures.build_documents import build_minimal_docx
 
 LOCAL = ["local"]
-BOTH = ["local", "remapped"]
+EVERY_IO = ["local", "remapped", "device"]
 VIRTUAL_ROOT = "/nonexistent-virtual-workspace"
 
 
@@ -120,6 +127,13 @@ def ws(request, tmp_path) -> Ws:
         return Ws(str(real), real, {"workspace_path": str(real)})
     if request.param == "remapped":
         return Ws(VIRTUAL_ROOT, real, {"workspace_io": RemappingWorkspaceIO(str(real))})
+    if request.param == "device":
+        # The laptop runs on the remapped folder, so a handler that bypassed
+        # its WorkspaceIO would fail here too.
+        laptop = RemappingWorkspaceIO(str(real))
+        return Ws(VIRTUAL_ROOT, real, {
+            "workspace_io": DeviceWorkspaceIO(InProcessRunner(laptop), root=VIRTUAL_ROOT),
+        })
     raise ValueError(f"unknown workspace kind {request.param}")
 
 
@@ -147,7 +161,7 @@ async def call(handler, ws: Ws, **arguments: Any) -> dict[str, Any]:
     return json.loads(raw.split("\n\n[Hint:")[0])
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestReadFile:
     async def test_reads_lines(self, ws):
         (ws.real / "a.txt").write_text("one\ntwo\n")
@@ -193,7 +207,7 @@ class TestReadFile:
         assert "Path traversal blocked" in out["error"]
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestWriteFile:
     async def test_creates_file_and_parents(self, ws):
         out = await call(
@@ -247,7 +261,7 @@ class TestWriteFile:
         assert not list(ws.real.rglob("pwned"))
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestPatch:
     async def test_replace_returns_diff(self, ws):
         (ws.real / "a.txt").write_text("x = 1\ny = 2\n")
@@ -328,7 +342,7 @@ class TestPatch:
 
 
 @needs_rg
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestSearch:
     async def test_content_matches_with_line_numbers(self, ws):
         (ws.real / "a.py").write_text("x = 1\nneedle = 2\n")
@@ -367,7 +381,7 @@ class TestSearch:
         assert "[Hint: Results truncated. Use offset=2" in raw
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestTerminal:
     async def test_runs_in_workspace_with_home_there(self, ws):
         out = await call(terminal._terminal_handler, ws, command="pwd; echo $HOME")
@@ -400,13 +414,20 @@ class TestTerminal:
         assert out["exit_code"] == 1
         assert out["exit_code_meaning"] == "No matches found (not an error)"
 
+    async def test_long_output_spills_into_the_workspace(self, ws, monkeypatch):
+        monkeypatch.setattr(terminal, "get_max_bytes", lambda: 1000)
+        out = await call(terminal._terminal_handler, ws, command="yes x | head -n 5000")
+        assert ".surogates-results/terminal-output-" in out["output"]
+        [spill] = (ws.real / ".surogates-results").glob("terminal-output-*.log")
+        assert spill.read_text() == "x\n" * 5000
+
     async def test_secrets_are_not_inherited(self, ws, monkeypatch):
         monkeypatch.setenv("SUROGATES_TEST_SECRET", "s3cret")
         out = await call(terminal._terminal_handler, ws, command='echo "[$SUROGATES_TEST_SECRET]"')
         assert out["output"] == "[]"
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestProcess:
     async def test_background_command_runs_and_reports(self, ws):
         started = await call(
@@ -508,7 +529,7 @@ async def test_wait_leaves_the_event_loop_free(ws):
     assert ticks >= 5
 
 
-@pytest.mark.parametrize("ws", BOTH, indirect=True)
+@pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
 class TestResearch:
     async def test_memory_and_outline_round_trip(self, ws):
         added = await call(

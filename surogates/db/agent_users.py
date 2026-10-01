@@ -31,6 +31,7 @@ from surogates.db.models import (
     BrowserProfile,
     ChannelIdentity,
     Credential,
+    Device,
     Event,
     InboxItem,
     McpServer,
@@ -156,7 +157,7 @@ async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -
     def scoped(model):
         return (model.user_id == user_id, model.org_id == org_id)
 
-    owned = (ChannelIdentity, InboxItem, Credential, AgentUser)
+    owned = (ChannelIdentity, InboxItem, Credential, AgentUser, Device)
     attributed = (
         Session, Event, AuditLog, Mission,
         ScheduledSession, BrowserProfile, Skill, Agent, McpServer,

@@ -9,7 +9,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import (
@@ -21,7 +21,7 @@ from fastapi import (
     Response,
     status,
 )
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
 from sqlalchemy import text as _sql_text
 
 from surogates.api.routes.workspace import (
@@ -34,6 +34,7 @@ from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _apply_inline_total_budget,
 )
 from surogates.api.session_guards import (
+    require_bound_session,
     require_session_visible,
     require_user_writable_session,
 )
@@ -53,6 +54,8 @@ from surogates.api.routes._commerce_turn import (
     firebase_buyer_identity,
     runtime_commerce_payload,
 )
+from surogates.devices.operations import DeviceOperations
+from surogates.devices.store import DeviceStore
 from surogates.session.events import SEED_SYNTHETIC_MARKER, EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
@@ -111,6 +114,27 @@ class SeedTurn(BaseModel):
     content: str
 
 
+class DeviceExecution(BaseModel):
+    """Work on a folder of the user's computer instead of a cloud workspace."""
+
+    kind: Literal["device"]
+    device_id: UUID
+    #: The folder as the computer showed it to the user: for display and
+    #: ``workspace_path``.  The computer runs in the folder it recorded.
+    folder: Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+    #: Names the user's confirmation of that folder on the computer.
+    nonce: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{16,128}$")]
+
+    @field_validator("folder")
+    @classmethod
+    def _storable(cls, v: str) -> str:
+        # Session config is jsonb, which refuses NUL.  (A lone surrogate never
+        # gets this far: FastAPI refuses the body first.)
+        if "\x00" in v:
+            raise ValueError("folder must be text with no NUL character")
+        return v
+
+
 class CreateSessionRequest(BaseModel):
     system: str | None = None
     config: dict = Field(default_factory=dict)
@@ -127,6 +151,10 @@ class CreateSessionRequest(BaseModel):
     seed_turns: list[SeedTurn] | None = Field(
         default=None, max_length=MAX_SEED_TURNS,
     )
+    #: Where the session's workspace lives; absent means the cloud.  Only a
+    #: signed-in user's web chat may name a device: any other caller gets an
+    #: error, never a cloud session in place of the folder they chose.
+    execution: DeviceExecution | None = None
 
     @model_validator(mode="after")
     def _cap_seed_content(self) -> CreateSessionRequest:
@@ -699,6 +727,33 @@ def _screen_seed_turns(turns: list[SeedTurn]) -> None:
             )
 
 
+async def _require_local_device(
+    request: Request,
+    tenant: TenantContext,
+    agent_id: str,
+    execution: DeviceExecution,
+    *,
+    channel: str,
+    user_id: UUID | None,
+) -> None:
+    """Refuse unless *execution* names the caller's own live device, saying why."""
+    if channel != "web" or user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only a signed-in user's chat can work on a folder of their computer.",
+        )
+    device = await DeviceStore(request.app.state.session_factory).find(
+        execution.device_id, org_id=tenant.org_id, agent_id=agent_id, user_id=user_id,
+    )
+    if device is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown device.")
+    if device.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Local access to this computer was revoked.",
+        )
+
+
 async def _create_session(
     body: CreateSessionRequest,
     request: Request,
@@ -732,6 +787,14 @@ async def _create_session(
     if rejection:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=rejection)
 
+    # Checked before creating anything: a refusal afterwards would leave a
+    # session row and a workspace nobody uses.
+    execution = body.execution
+    if execution is not None:
+        await _require_local_device(
+            request, tenant, agent_id, execution, channel=channel, user_id=user_id,
+        )
+
     config = apply_eval_isolation(body.config.copy(), channel=channel)
     if body.system:
         config["system"] = body.system
@@ -749,7 +812,16 @@ async def _create_session(
         channel=channel,
         config=config,
         service_account_id=service_account_id,
+        device_id=execution.device_id if execution is not None else None,
+        folder=execution.folder if execution is not None else None,
     )
+    if execution is not None:
+        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).bind(
+            session_id=session.id,
+            device_id=execution.device_id,
+            folder=execution.folder,
+            nonce=execution.nonce,
+        )
 
     return session
 
@@ -782,6 +854,12 @@ async def create_session(
     Archiving the dedicated session is how a user deliberately starts
     over.
     """
+    if body.execution is not None and not agent_runtime.multi_session:
+        # The one conversation such an agent keeps is a cloud one.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This agent keeps a single conversation, which cannot work on a local folder.",
+        )
     # The canonical-conversation stamp is server-owned: a client-supplied
     # value would let users pre-stamp sessions while multi-session is on
     # and keep them past a later lockdown.
@@ -947,6 +1025,7 @@ async def send_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(
@@ -1631,6 +1710,7 @@ async def resume_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status != "paused":
         raise HTTPException(
@@ -1673,6 +1753,7 @@ async def retry_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status not in ("failed", "paused"):
         raise HTTPException(

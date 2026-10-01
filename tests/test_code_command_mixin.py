@@ -213,3 +213,18 @@ async def test_run_interrupt_cancels():
     assert any(a == "cancel" for a, _ in pool.calls)
     result_data = next(d for et, d in h._store.events if et == EventType.CODE_RUN_RESULT)
     assert "interrupt" in (result_data["error"] or "").lower()
+
+
+async def test_code_is_not_available_for_a_session_on_a_local_folder():
+    pool = _FakeSandboxPool([])
+    h = _Harness(vault=_FakeVault(), sandbox_pool=pool)
+    session = SimpleNamespace(
+        id=uuid4(),
+        config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+    )
+
+    await h._handle_code_command(session, '/code claude "do it"', _lease())
+
+    assert _last_message(h) == "/code is not available for sessions on a local folder"
+    assert pool.ensured is False
+    assert pool.calls == []

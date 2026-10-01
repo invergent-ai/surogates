@@ -20,16 +20,17 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 import traceback
+import uuid
 from typing import Any, Optional
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.ansi_strip import strip_ansi
 from surogates.tools.utils.tool_output_limits import get_max_bytes
+from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import workspace_io_from
+from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
 
 logger = logging.getLogger(__name__)
 
@@ -127,31 +128,35 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
 _TRUNCATE_HEAD_FRACTION = 0.2
 
 
-def _spill_full_output(output: str) -> str | None:
+async def _spill_full_output(output: str, wio: WorkspaceIO) -> str | None:
     """Persist untruncated output so the model can go back for the middle.
 
-    Written to the local temp dir of whichever process ran the command --
-    the sandbox pod for sandboxed sessions -- which is the same filesystem
-    ``read_file`` and ``search_files`` resolve against, so the returned path
-    is directly usable.  Returns ``None`` if the spill fails; a failed spill
-    must never fail the command whose output it was trying to save.
+    Written into the session workspace through *wio* -- the same WorkspaceIO
+    ``read_file`` uses -- so the returned workspace-relative path is readable
+    wherever the command ran: the sandbox pod, or the user's computer for a
+    local-folder session, never this host's temp dir.  Returns ``None`` when
+    no workspace is bound or the spill fails; a failed spill must never fail
+    the command whose output it was trying to save.
     """
+    if not wio.root:
+        return None
+    path = f"{WORKSPACE_STORAGE_DIR}/terminal-output-{uuid.uuid4().hex}.log"
     try:
-        fd, path = tempfile.mkstemp(prefix="terminal-output-", suffix=".log")
-        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
-            fh.write(output)
+        await wio.write(
+            await wio.resolve(path), output.encode("utf-8", errors="replace"),
+        )
         return path
-    except OSError:
+    except Exception:
         logger.debug("Failed to spill full terminal output", exc_info=True)
         return None
 
 
-def _truncate_output(output: str) -> str:
+async def _truncate_output(output: str, wio: WorkspaceIO) -> str:
     """Cap output at the configured budget, keeping the head and the tail.
 
-    The omitted middle is not lost: the full output is written to a file and
-    its path named in the notice, so recovering it costs one targeted read
-    instead of re-running the command.
+    The omitted middle is not lost: the full output is written into the
+    workspace through *wio* and its path named in the notice, so recovering
+    it costs one targeted read instead of re-running the command.
     """
     max_output_chars = get_max_bytes()
     if len(output) <= max_output_chars:
@@ -161,7 +166,7 @@ def _truncate_output(output: str) -> str:
     tail_chars = max_output_chars - head_chars
     omitted = len(output) - head_chars - tail_chars
 
-    full_path = _spill_full_output(output)
+    full_path = await _spill_full_output(output, wio)
     recovery = (
         f" Full output: {full_path}" if full_path
         else " Re-run with a narrower command to see the omitted section."
@@ -352,7 +357,7 @@ async def _terminal_handler(
             return _blocked(str(exc))
 
         # --- Post-process output -------------------------------------------
-        output = _truncate_output(result.output)
+        output = await _truncate_output(result.output, wio)
         output = strip_ansi(output)
         output = output.strip() if output else ""
 

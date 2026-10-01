@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from surogates.devices.binding import device_of
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
@@ -1037,7 +1038,9 @@ class PromptBuilder:
             )
 
         workspace = self._get_workspace_path()
-        if workspace:
+        # A folder on the user's computer is not on this host: its project
+        # files cannot be read here.
+        if workspace and device_of(self._session.config) is None:
             project_ctx = load_project_context(workspace)
             if project_ctx:
                 parts.append(f"## Project Context\n{project_ctx}")

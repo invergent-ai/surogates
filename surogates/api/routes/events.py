@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.api.session_guards import (
+    require_bound_session,
     require_session_visible,
     require_user_writable_session,
 )
@@ -184,6 +185,7 @@ async def send_session_events(
     await _verify_session_access(request, store, session_id, tenant)
     session = await store.get_session(session_id)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     sent: list[SentSessionEvent] = []
     for event in body.events:

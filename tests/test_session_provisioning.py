@@ -421,3 +421,79 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
     assert cfg["memory_boundary"] == "slack:c:G1"
     assert cfg["workspace_boundary"] == "slack:c:G1"
     assert cfg["sandbox_root_session_id"] == str(parent.id)
+
+
+@pytest.mark.asyncio
+async def test_create_agent_session_stamps_device_execution_after_the_cloud_workspace():
+    device_id = uuid4()
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    await create_agent_session(
+        store=store,
+        storage=storage,
+        settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
+        org_id=uuid4(),
+        user_id=uuid4(),
+        agent_id="a-1",
+        channel="web",
+        device_id=device_id,
+        folder="/home/flavius/notes",
+    )
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["execution"] == {"kind": "device", "device_id": str(device_id)}
+    assert cfg["workspace_path"] == "/home/flavius/notes"
+    # Kept for create_child_session, never used for a session on a device.
+    assert cfg["storage_bucket"] == "tenant-bucket"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_session_ignores_caller_supplied_execution():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    storage = SimpleNamespace(
+        create_bucket=AsyncMock(),
+        resolve_workspace_path=lambda bucket, sid: f"/workspace/{bucket}/{sid}",
+    )
+    await create_agent_session(
+        store=store,
+        storage=storage,
+        settings=SimpleNamespace(storage=SimpleNamespace(bucket="tenant-bucket")),
+        org_id=uuid4(),
+        user_id=uuid4(),
+        agent_id="a-1",
+        channel="web",
+        config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+    )
+    assert "execution" not in store.create_session.await_args.kwargs["config"]
+
+
+@pytest.mark.asyncio
+async def test_create_child_session_inherits_device_execution():
+    execution = {"kind": "device", "device_id": str(uuid4())}
+    parent = _make_session(config={
+        **_workspace_config(), "execution": execution, "workspace_path": "/home/flavius/notes",
+    })
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    await create_child_session(
+        store=store,
+        parent=parent,
+        channel="delegation",
+        config={"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/etc"},
+    )
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["execution"] == execution
+    assert cfg["workspace_path"] == "/home/flavius/notes"
+
+
+@pytest.mark.asyncio
+async def test_create_child_session_of_a_cloud_parent_cannot_set_execution():
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+    await create_child_session(
+        store=store,
+        parent=_make_session(config=_workspace_config()),
+        channel="delegation",
+        config={"execution": {"kind": "device", "device_id": str(uuid4())}},
+    )
+    assert "execution" not in store.create_session.await_args.kwargs["config"]

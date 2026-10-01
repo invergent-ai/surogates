@@ -19,6 +19,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
+from surogates.devices.binding import device_of
+from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.tool_guardrails import (
@@ -30,6 +32,7 @@ from surogates.harness.tool_guardrails import (
 )
 from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import floor_gate
+from surogates.runtime.turn_slots import turn_activity
 from surogates.storage.tenant import boundary_workspace_prefix
 
 # ---------------------------------------------------------------------------
@@ -78,8 +81,19 @@ async def _build_session_sandbox_spec(
     appending the workspace mount or env passthrough never bleeds
     across sessions sharing the same tenant context.
     """
-    from surogates.sandbox.base import Resource, SandboxSpec, default_sandbox_spec
+    from surogates.sandbox.base import (
+        Resource,
+        SandboxSpec,
+        SandboxUnavailableError,
+        default_sandbox_spec,
+    )
     from surogates.tools.utils.env_passthrough import get_sandbox_env
+
+    if device_of(session.config) is not None:
+        raise SandboxUnavailableError(
+            "This session's folder is on the user's computer; "
+            "it never gets a cloud sandbox",
+        )
 
     baseline = getattr(tenant, "sandbox_spec", None)
     if baseline is None:
@@ -245,6 +259,10 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         return data
     # Normalise: ensure no trailing slash for consistent replacement.
     ws = workspace_path.rstrip("/")
+    if not ws:
+        # A workspace at "/" has no prefix to hide: replacing "" would
+        # insert the token between every character.
+        return data
     if isinstance(data, str):
         return data.replace(ws, _WORKSPACE_TOKEN)
     if isinstance(data, dict):
@@ -738,7 +756,6 @@ async def execute_tool_calls(
     governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -796,7 +813,6 @@ async def execute_tool_calls(
             log_policy_allowed=log_policy_allowed,
             governance_gate=governance_gate,
             bundle=bundle,
-            turn_gate=turn_gate,
             platform_client=platform_client,
         expert_transcript=expert_transcript,
         )
@@ -831,7 +847,6 @@ async def execute_tool_calls(
         governance_gate=governance_gate,
         tool_guardrails=tool_guardrails,
         bundle=bundle,
-        turn_gate=turn_gate,
         platform_client=platform_client,
         expert_transcript=expert_transcript,
     )
@@ -869,7 +884,6 @@ async def execute_tool_calls_sequential(
     governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -928,7 +942,6 @@ async def execute_tool_calls_sequential(
             log_policy_allowed=log_policy_allowed,
             governance_gate=governance_gate,
             bundle=bundle,
-            turn_gate=turn_gate,
             platform_client=platform_client,
             expert_transcript=expert_transcript,
             interrupt_check=interrupt_check,
@@ -984,7 +997,6 @@ async def execute_tool_calls_concurrent(
     log_policy_allowed: bool = False,
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -1050,7 +1062,6 @@ async def execute_tool_calls_concurrent(
                 log_policy_allowed=log_policy_allowed,
                 governance_gate=governance_gate,
                 bundle=bundle,
-                turn_gate=turn_gate,
                 platform_client=platform_client,
                 expert_transcript=expert_transcript,
                 interrupt_check=interrupt_check,
@@ -1127,7 +1138,25 @@ async def execute_tool_calls_concurrent(
     return [r for r in results if r is not None]
 
 
-async def execute_single_tool(
+async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
+    """Execute a single tool call: emit events, dispatch, return result message.
+
+    *interrupt_check* is this session's stop flag; it is handed to the tool
+    handler so long-running tools can poll it without a process-wide signal.
+
+    When *log_policy_allowed* is True, every governance check that passes
+    also emits a ``policy.allowed`` event.  Off by default because each
+    successful ``tool.call`` is already an implicit allow; enable for
+    compliance audits that require an explicit per-decision record.
+
+    The call is an activity of its turn: while it runs, the turn keeps its
+    worker slots unless every activity of the turn is waiting.
+    """
+    async with turn_activity():
+        return await _run_single_tool(tc, **kwargs)
+
+
+async def _run_single_tool(
     tc: dict[str, Any],
     *,
     session: Session,
@@ -1158,21 +1187,10 @@ async def execute_single_tool(
     log_policy_allowed: bool = False,
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
 ) -> dict:
-    """Execute a single tool call: emit events, dispatch, return result message.
-
-    *interrupt_check* is this session's stop flag; it is handed to the tool
-    handler so long-running tools can poll it without a process-wide signal.
-
-    When *log_policy_allowed* is True, every governance check that passes
-    also emits a ``policy.allowed`` event.  Off by default because each
-    successful ``tool.call`` is already an implicit allow; enable for
-    compliance audits that require an explicit per-decision record.
-    """
     from surogates.trace import get_trace, new_span
 
     # Each tool call gets its own child span for fine-grained tracing.
@@ -1201,6 +1219,9 @@ async def execute_single_tool(
     # the workspace absolute path with __WORKSPACE__ so real filesystem
     # paths never leak to the frontend.
     workspace_path = session.config.get("workspace_path")
+    # A session on the user's computer reaches its folder only through the
+    # device: the folder is never a path on this host.
+    on_device = device_of(session.config) is not None
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
@@ -1266,7 +1287,9 @@ async def execute_single_tool(
     # is never instantiated, so it is not passed: disclosure is delivered
     # by the channel pipeline, not by blocking tool calls.
     decision = gate.check(
-        tool_name, tool_args, workspace_path=workspace_path,
+        tool_name, tool_args,
+        # The computer checks containment; this host cannot resolve its paths.
+        workspace_path=None if on_device else workspace_path,
     )
     if not decision.allowed and decision.overridable:
         # A human may already have approved this exact call.  The grant
@@ -1458,10 +1481,26 @@ async def execute_single_tool(
     # SANDBOX tools are dispatched to the sandbox pod where the real Python
     # tool handlers run (the sandbox image includes the surogates package).
     # HARNESS tools run in-process in the worker.
+    #
+    # One call, one journal runner: the invocation is this tool.call event,
+    # since providers can reuse or blank tool-call ids.
+    device_call = (
+        device_call_for(
+            session,
+            tools=tools,
+            invocation_id=f"{_call_event_id}:{tool_call_id}",
+            lease_token=str(lease.lease_token),
+            session_factory=session_factory,
+            redis=redis,
+        )
+        if on_device
+        else None
+    )
     start = time.monotonic()
     tool_failed = False
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+        from surogates.sandbox.pool import sandbox_session_key
         # MCP tools are remote calls (HTTP/stdio) dispatched by the
         # in-process MCP client; they never need a sandbox pod. Without
         # this short-circuit the dict default (SANDBOX) tries to spin up
@@ -1478,7 +1517,8 @@ async def execute_single_tool(
         # in-process and reshape the response as a read_file envelope so
         # the LLM never sees vision_analyze unless it called it directly.
         image_dispatched = False
-        if tool_name == "read_file" and isinstance(tool_args, dict):
+        # On the user's computer an image is read through the device like any file.
+        if device_call is None and tool_name == "read_file" and isinstance(tool_args, dict):
             from surogates.tools.builtin.file_ops import IMAGE_EXTENSIONS
             image_path_arg = tool_args.get("path")
             if isinstance(image_path_arg, str) and image_path_arg:
@@ -1515,12 +1555,17 @@ async def execute_single_tool(
                             "tool_call_id": tool_call_id,
                             "lease_token": lease.lease_token,
                             "session_config": session.config,
+                            "task_id": sandbox_session_key(session),
                         },
                     )
                     image_dispatched = True
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
+        elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
+            result_content = refusal(tool_name)
+        elif device_call is not None and location == ToolLocation.SANDBOX:
+            result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key
             sandbox_owner = sandbox_session_key(session)
@@ -1561,12 +1606,13 @@ async def execute_single_tool(
                 redis=redis,
                 budget=budget,
                 memory_manager=memory_manager,
-                sandbox_pool=sandbox_pool,
+                sandbox_pool=device_call if device_call is not None else sandbox_pool,
                 credential_vault=credential_vault,
                 browser_pool=browser_pool,
                 browser_control=browser_control,
                 storage=storage,
-                workspace_path=workspace_path,
+                workspace_path=None if device_call is not None else workspace_path,
+                workspace_io=device_call.workspace_io if device_call is not None else None,
                 api_client=api_client,
                 session_factory=session_factory,
                 llm_client=llm_client,
@@ -1581,10 +1627,10 @@ async def execute_single_tool(
                 lease_token=lease.lease_token,
                 session_config=session.config,
                 bundle=bundle,
-                turn_gate=turn_gate,
                 platform_client=platform_client,
                 expert_transcript=expert_transcript,
                 interrupt_check=interrupt_check,
+                task_id=sandbox_session_key(session),
             )
     except KeyError:
         tool_failed = True
@@ -1651,15 +1697,17 @@ async def execute_single_tool(
 
     # Layer 2: persist oversized results instead of truncating.  The spill
     # must land where ``read_file`` will run -- in the sandbox when there is
-    # one, otherwise on this filesystem.
+    # one, otherwise on this filesystem.  On the user's computer it goes
+    # through the call, so its operations keep counting in order.
     from surogates.tools.utils.tool_result_storage import (
         make_sandbox_writer,
         maybe_persist_tool_result,
     )
 
-    if sandbox_pool is not None:
+    spill_pool = device_call if device_call is not None else sandbox_pool
+    if spill_pool is not None:
         from surogates.sandbox.pool import sandbox_session_key
-        spill_writer = make_sandbox_writer(sandbox_pool, sandbox_session_key(session))
+        spill_writer = make_sandbox_writer(spill_pool, sandbox_session_key(session))
     else:
         spill_writer = None
 

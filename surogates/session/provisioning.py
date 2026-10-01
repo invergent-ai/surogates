@@ -84,6 +84,8 @@ async def create_agent_session(
     parent_id: UUID | None = None,
     idempotency_key: str | None = None,
     session_id: UUID | None = None,
+    device_id: UUID | None = None,
+    folder: str | None = None,
 ) -> Session:
     sid = session_id or uuid4()
 
@@ -96,6 +98,9 @@ async def create_agent_session(
     # sandbox.  Only :func:`create_child_session` stamps it, from the real
     # parent.
     merged_config.pop("sandbox_root_session_id", None)
+    # Server-owned too: where a session runs is decided from a device the API
+    # checked, never by caller-supplied config.
+    merged_config.pop("execution", None)
     # Tool paths that receive only ``session_config`` (media_gen, vision)
     # reconstruct a minimal session shape for boundary resolution; carry the
     # channel so a managed-channel session without a pinned workspace_boundary
@@ -105,6 +110,12 @@ async def create_agent_session(
     await stamp_workspace_config(
         merged_config, storage=storage, settings=settings, session_id=sid,
     )
+    if device_id is not None:
+        # After the cloud stamp, so the folder on the computer is the
+        # workspace.  The storage fields stay for create_child_session;
+        # nothing may read or write them for a session on a device.
+        merged_config["execution"] = {"kind": "device", "device_id": str(device_id)}
+        merged_config["workspace_path"] = folder
     if service_account_id is not None:
         merged_config["service_account_id"] = str(service_account_id)
 
@@ -156,6 +167,8 @@ async def create_child_session(
     ``None`` (the default), keeping their existing semantics unchanged.
     """
     merged_config = dict(config or {})
+    # A child runs where its root runs: on the same computer, when it names one.
+    merged_config.pop("execution", None)
 
     parent_config = parent.config or {}
     missing = [f for f in _WORKSPACE_SHARING_FIELDS if f not in parent_config]
@@ -172,6 +185,9 @@ async def create_child_session(
     for field in _BOUNDARY_SHARING_FIELDS:
         if field in parent_config:
             merged_config[field] = parent_config[field]
+
+    if "execution" in parent_config:
+        merged_config["execution"] = parent_config["execution"]
 
     merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
 

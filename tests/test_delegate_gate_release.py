@@ -1,27 +1,26 @@
-"""``delegate_task`` releases the parent's TurnConcurrencyGate slot
-during the child-polling window.
+"""``delegate_task`` gives the parent turn's slots back during the child-polling window.
 
-The parent's slot is meant to track *active worker consumption*.
+The parent's slots are meant to track *active worker consumption*.
 A parent that's sleeping inside ``_poll_child_completion`` waiting
 for its child to finish is not consuming worker CPU -- it's idle.
-Counting it as 1 slot during that window is a category error and
-causes deep delegation chains to self-saturate the per-tenant cap.
-This module pins:
+Counting it as holding a worker slot and a tenant slot during that window is
+a category error and causes deep delegation chains to self-saturate the
+per-tenant cap and the worker.  The wait runs through the turn's record
+(``current_turn``).  This module pins:
 
-  * Release fires when the parent enters delegation.
-  * Re-acquire fires when delegation returns.
-  * Counter ends at the same value it started at when the child
-    completes (so a happy-path turn doesn't leak/overcount).
-  * Release fires even if ``asyncio.gather`` raises (finally branch).
-  * ``_reacquire_gate_with_backoff`` returns True immediately when a
-    slot is free, retries when at cap, and gives up after the
-    deadline rather than blocking forever.
+  * Both the worker's semaphore slot and the tenant's gate slot are given
+    back while the parent waits for its children.
+  * Both are taken back when delegation returns, so a happy-path turn
+    doesn't leak or overcount.
+  * A failed child creation still leaves both slots held afterwards.
+  * A call outside a dispatched turn (no turn record) completes normally.
 """
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -30,27 +29,14 @@ import pytest
 
 import surogates.tools.builtin.delegate as delegate_module
 from surogates.harness.budget import IterationBudget
-from surogates.runtime.turn_gate import TurnConcurrencyGate
+from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session
 
+from tests.test_turn_slots import as_tool_call, held_turn
+
 
 pytestmark = pytest.mark.asyncio
-
-
-class _FakeRedisGate:
-    """Minimal in-memory shim of the gate's Redis backend."""
-
-    def __init__(self) -> None:
-        self.values: dict[str, int] = {}
-
-    async def incr(self, key: str) -> int:
-        self.values[key] = self.values.get(key, 0) + 1
-        return self.values[key]
-
-    async def decr(self, key: str) -> int:
-        self.values[key] = self.values.get(key, 0) - 1
-        return self.values[key]
 
 
 def _parent_session() -> Session:
@@ -71,13 +57,15 @@ def _parent_session() -> Session:
 class _CompletingChildStore:
     """Session store whose child immediately reports SESSION_COMPLETE
     so the polling loop exits on the first tick.  Lets the test
-    exercise the release/re-acquire pair without spinning up a real
+    exercise the give-back/take-back pair without spinning up a real
     child harness."""
 
     def __init__(self, parent: Session) -> None:
         self._parent = parent
         self._child_id: UUID | None = None
         self.parent_emitted: list[tuple[EventType, dict[str, Any]]] = []
+        # Called the first time the child is polled, i.e. while the parent waits.
+        self.on_first_poll: Callable[[], None] | None = None
 
     def set_child_id(self, child_id: UUID) -> None:
         self._child_id = child_id
@@ -95,6 +83,9 @@ class _CompletingChildStore:
         return 1
 
     async def get_events(self, session_id: UUID) -> list[Event]:
+        if self.on_first_poll is not None:
+            self.on_first_poll()
+            self.on_first_poll = None
         # Single LLM_RESPONSE + SESSION_COMPLETE on the child --
         # _poll_child_completion exits on the first poll tick.
         return [
@@ -174,11 +165,28 @@ def _install_enqueue_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+async def _delegate_in_turn(slots: TurnSlots, store: _CompletingChildStore, parent: Session) -> str:
+    """Run the handler as a tool call of a dispatched turn."""
+    token = current_turn.set(slots)
+    try:
+        async with as_tool_call(slots):
+            return await delegate_module._delegate_handler(
+                {"goal": "x", "agent_type": "engineer"},
+                session_store=store,
+                redis=None,
+                tenant=object(),
+                session_id=str(parent.id),
+                budget=IterationBudget(max_total=10),
+            )
+    finally:
+        current_turn.reset(token)
+
+
 async def test_delegate_releases_and_reacquires_gate_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Happy path: gate counter ends at the same value it started
-    at, after a release/reacquire pair around the child wait."""
+    """Happy path: both slots are given back while the parent waits for
+    its child, and held again when delegation returns."""
     parent = _parent_session()
     store = _CompletingChildStore(parent)
     _install_child_session_stub(monkeypatch, store)
@@ -189,37 +197,27 @@ async def test_delegate_releases_and_reacquires_gate_slot(
         delegate_module, "_POLL_INTERVAL_SECONDS", 0.01,
     )
 
-    gate_redis = _FakeRedisGate()
-    gate = TurnConcurrencyGate(gate_redis, default_max=10)
-    counter_key = f"surogates:turns:{parent.org_id}:{parent.agent_id}"
+    slots, semaphore, gate = await held_turn()
+    observed: list[tuple[bool, int]] = []
+    store.on_first_poll = lambda: observed.append((semaphore.locked(), gate.held))
 
-    # Parent has its dispatcher-acquired slot already held.
-    gate_redis.values[counter_key] = 1
+    await _delegate_in_turn(slots, store, parent)
 
-    await delegate_module._delegate_handler(
-        {"goal": "x", "agent_type": "engineer"},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-        turn_gate=gate,
+    assert observed == [(False, 0)], (
+        "both the worker's slot and the tenant's must be given back while "
+        "the parent waits for its child"
     )
-
-    # The slot was released for the wait window and re-acquired on
-    # return -- net zero change.
-    assert gate_redis.values[counter_key] == 1, (
-        "release + re-acquire should net to zero change; final "
-        f"counter = {gate_redis.values[counter_key]}"
+    assert semaphore.locked() and gate.held == 1, (
+        "both slots must be taken again when delegation returns"
     )
 
 
 async def test_release_fires_even_when_no_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gate parameter is optional; standalone tests / single-tenant
-    deployments without a gate must still complete delegation
-    normally."""
+    """The turn record is optional; standalone tests / single-tenant
+    deployments run outside a dispatched turn and must still complete
+    delegation normally."""
     parent = _parent_session()
     store = _CompletingChildStore(parent)
     _install_child_session_stub(monkeypatch, store)
@@ -236,17 +234,17 @@ async def test_release_fires_even_when_no_gate(
         tenant=object(),
         session_id=str(parent.id),
         budget=IterationBudget(max_total=10),
-        # No turn_gate kwarg.
+        # No turn record.
     )
     # Single-goal path returns the child's text directly, not JSON.
     assert "Delegation failed" not in result
 
 
-async def test_release_fires_in_finally_when_gather_raises(
+async def test_a_failed_child_creation_leaves_the_slots_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An exception inside the delegation must not leak the released
-    slot.  finally branch must run the re-acquire."""
+    """A child that cannot be created ends the delegation with an error
+    envelope, and the turn still holds both slots afterwards."""
     parent = _parent_session()
     store = _CompletingChildStore(parent)
     _install_resolver_stub(monkeypatch)
@@ -260,26 +258,15 @@ async def test_release_fires_in_finally_when_gather_raises(
         provisioning_module, "create_child_session", _failing_child_session,
     )
 
-    gate_redis = _FakeRedisGate()
-    gate = TurnConcurrencyGate(gate_redis, default_max=10)
-    counter_key = f"surogates:turns:{parent.org_id}:{parent.agent_id}"
-    gate_redis.values[counter_key] = 1
+    slots, semaphore, gate = await held_turn()
 
-    result = await delegate_module._delegate_handler(
-        {"goal": "x", "agent_type": "engineer"},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-        turn_gate=gate,
-    )
+    result = await _delegate_in_turn(slots, store, parent)
+
     # The handler catches and converts to an error envelope.
     parsed = json.loads(result)
     assert "error" in parsed
-    # Despite the crash, the re-acquire in the finally restored the
-    # slot to its pre-release value.
-    assert gate_redis.values[counter_key] == 1, (
-        "finally branch must re-acquire the slot even when "
-        f"asyncio.gather raises; final = {gate_redis.values[counter_key]}"
+    # Despite the failure, both slots are held.
+    assert semaphore.locked() and gate.held == 1, (
+        "the turn must hold both slots after a failed child creation; "
+        f"semaphore.locked() = {semaphore.locked()}, gate.held = {gate.held}"
     )

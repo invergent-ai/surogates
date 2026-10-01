@@ -1240,6 +1240,91 @@ class ServiceAccount(Base):
     )
 
 
+class Device(Base):
+    """A computer running Surogate Desktop, registered by one user for one agent.
+
+    The desktop authenticates its device link with a ``surg_dev_`` bearer
+    token.  As for service accounts, only the token's SHA-256 digest is
+    stored; the raw token is returned once, on creation or reauthorization.
+    ``credential_generation`` advances on every reauthorization, so a socket
+    still open under an older token can be recognised and closed.
+    """
+
+    __tablename__ = "devices"
+    __table_args__ = (Index("idx_devices_owner", "org_id", "agent_id", "user_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    # Logical reference to the ops ``Agent.id`` (another database, so no FK).
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    credential_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1"), default=1
+    )
+
+
+class DeviceOperation(Base):
+    """One operation a worker asked a device to run: the durable journal entry.
+
+    Postgres is the authority for requests and outcomes; Redis only wakes the
+    API connection that delivers an operation and the worker that waits for
+    it.  An operation is identified by its calling session, its invocation
+    (the tool call) and its ordinal within that invocation, so running the
+    same tool call again asks for the same operations and gets their recorded
+    outcomes back instead of repeating them.
+    """
+
+    __tablename__ = "device_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "calling_session_id", "invocation_id", "ordinal",
+            name="uq_device_operations_invocation",
+        ),
+        Index(
+            "idx_device_operations_open", "device_id", "created_at",
+            postgresql_where=text("completed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False
+    )
+    root_session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    calling_session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    invocation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON, not JSONB: command output and paths may contain NUL characters,
+    # which jsonb rejects.
+    args: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # SHA-256 of the immutable request; see OperationRequest.digest.
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    # The session lease that asked for it: the execution generation.
+    lease_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    outcome: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------

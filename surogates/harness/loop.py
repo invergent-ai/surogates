@@ -28,6 +28,8 @@ from uuid import UUID, uuid4
 
 from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
+from surogates.devices.binding import device_of
+from surogates.devices.sandbox import enter_device_session, leave_device_session
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -79,10 +81,13 @@ from surogates.harness.tool_schemas import (
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
+from surogates.runtime.turn_slots import turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from openai import AsyncOpenAI
     from redis.asyncio import Redis
 
@@ -461,7 +466,6 @@ class AgentHarness(
         media_gen: Any | None = None,
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
-        turn_gate: Any | None = None,
         mcp_tool_names: frozenset[str] | None = None,
         composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
@@ -546,16 +550,6 @@ class AgentHarness(
         # builder, future skill staging).  ``None`` for agents
         # whose first publish hasn't landed yet.
         self._bundle: Any | None = bundle
-
-        # Per-tenant TurnConcurrencyGate.  Wired through the tool
-        # executor's kwargs so handlers that block on something
-        # external (delegate_task polling a child, future
-        # long-running waits) can ``release()`` their slot while
-        # idle and ``try_acquire()`` it back before the parent
-        # resumes producing work.  Optional -- standalone harness
-        # tests don't construct one and the tools no-op when it's
-        # absent.
-        self._turn_gate: Any | None = turn_gate
 
         # Optional dedicated vision client.  When the active LLM does not
         # support image input, ``_prepare_messages_for_model_vision_support``
@@ -1007,6 +1001,7 @@ class AgentHarness(
         session: Session | None = None
         lease: Any | None = None
         renewal_task: asyncio.Task[None] | None = None
+        device_token: Token[frozenset[str]] | None = None
 
         try:
             # Connection health: proactively clean up dead connections
@@ -1029,6 +1024,9 @@ class AgentHarness(
             # /code and the coding tool can resolve them (the fetched row does
             # not carry them).
             session = self._overlay_repos(session)
+            # From here every sandbox request for this session, whoever
+            # makes it, goes through its device or is refused.
+            device_token = enter_device_session(session)
 
             # A browser-setup session is interactive-only: provision a fresh
             # browser + grant the user control on the first wake, and release it
@@ -1410,6 +1408,8 @@ class AgentHarness(
                     logger.debug("Failed to notify parent on crash", exc_info=True)
             raise
         finally:
+            leave_device_session(device_token)
+
             # Stop the background renewal task before touching the
             # lease.  ``None`` when the wake bailed before the lease
             # was acquired (status=paused short-circuit, lease held
@@ -1568,9 +1568,13 @@ class AgentHarness(
         # allowed to grow again.
         tool_guardrails.seed_from_messages(messages)
 
-        # Subdirectory hint tracker -- discovers context files as the agent navigates.
-        hint_tracker = SubdirectoryHintTracker(
-            initial_cwd=session.config.get("workspace_path"),
+        # Subdirectory hint tracker -- discovers context files as the agent
+        # navigates.  It reads this host's filesystem, so a folder on the
+        # user's computer gets none.
+        hint_tracker = (
+            None
+            if device_of(session.config) is not None
+            else SubdirectoryHintTracker(initial_cwd=session.config.get("workspace_path"))
         )
 
         # --- Prefilled context injection ---
@@ -1911,7 +1915,6 @@ class AgentHarness(
                     governance_gate=self._governance_gate,
                     tool_guardrails=tool_guardrails,
                     bundle=self._bundle,
-                    turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
                     expert_transcript=expert_transcript,
                 )
@@ -2139,10 +2142,11 @@ class AgentHarness(
                 # provider alternating truncated and unparseable arguments
                 # would otherwise keep both streaks below their own caps
                 # forever.
-                executed = (
-                    await streaming_executor.settle()
-                    if streaming_executor is not None else {}
-                )
+                if streaming_executor is not None:
+                    async with turn_joining():
+                        executed = await streaming_executor.settle()
+                else:
+                    executed = {}
                 if partial_tool_call_retries < _MAX_PARTIAL_TOOL_CALL_RETRIES:
                     partial_tool_call_retries += 1
                     logger.warning(
@@ -2734,7 +2738,9 @@ class AgentHarness(
                 # of letting them run to their tool-level timeout.
                 self._active_executor = streaming_executor
                 try:
-                    all_results = await streaming_executor.get_all_results()
+                    # The loop waits for its tool calls; they count for the turn meanwhile.
+                    async with turn_joining():
+                        all_results = await streaming_executor.get_all_results()
                 finally:
                     self._active_executor = None
 
@@ -2760,40 +2766,40 @@ class AgentHarness(
                     )
             else:
                 # ── Existing path ────────────────────────────────────
-                tool_results = await execute_tool_calls(
-                    tool_calls_raw,
-                    session=session,
-                    lease=lease,
-                    store=self._store,
-                    tools=self._tools,
-                    tenant=self._tenant,
-                    interrupt_check=self._check_interrupt,
-                    redis=self._redis,
-                    budget=self._budget,
-                    memory_manager=self._memory_manager,
-                    hint_tracker=hint_tracker,
-                    sandbox_pool=self._sandbox_pool,
-                    credential_vault=self._credential_vault,
-                    browser_pool=self._browser_pool,
-                    browser_control=self._browser_control,
-                    storage=self._storage,
-                    api_client=self._api_client,
-                    session_factory=self._session_factory,
-                    llm_client=self._llm,
-                    model=model_id,
-                    vision_llm_client=self._vision_client,
-                    vision_model=self._vision_model,
-                    summary_llm_client=self._summary_client,
-                    summary_model=self._summary_model,
-                    media_gen=self._media_gen,
-                    saga=saga,
-                    log_policy_allowed=self._log_policy_allowed,
-                    governance_gate=self._governance_gate,
-                    bundle=self._bundle,
-                    turn_gate=self._turn_gate,
-                    platform_client=self._platform_client,
-                    expert_transcript=expert_transcript,
-                )
+                async with turn_joining():
+                    tool_results = await execute_tool_calls(
+                        tool_calls_raw,
+                        session=session,
+                        lease=lease,
+                        store=self._store,
+                        tools=self._tools,
+                        tenant=self._tenant,
+                        interrupt_check=self._check_interrupt,
+                        redis=self._redis,
+                        budget=self._budget,
+                        memory_manager=self._memory_manager,
+                        hint_tracker=hint_tracker,
+                        sandbox_pool=self._sandbox_pool,
+                        credential_vault=self._credential_vault,
+                        browser_pool=self._browser_pool,
+                        browser_control=self._browser_control,
+                        storage=self._storage,
+                        api_client=self._api_client,
+                        session_factory=self._session_factory,
+                        llm_client=self._llm,
+                        model=model_id,
+                        vision_llm_client=self._vision_client,
+                        vision_model=self._vision_model,
+                        summary_llm_client=self._summary_client,
+                        summary_model=self._summary_model,
+                        media_gen=self._media_gen,
+                        saga=saga,
+                        log_policy_allowed=self._log_policy_allowed,
+                        governance_gate=self._governance_gate,
+                        bundle=self._bundle,
+                        platform_client=self._platform_client,
+                        expert_transcript=expert_transcript,
+                    )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
