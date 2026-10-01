@@ -245,6 +245,10 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         return data
     # Normalise: ensure no trailing slash for consistent replacement.
     ws = workspace_path.rstrip("/")
+    if not ws:
+        # A workspace at "/" has no prefix to hide: replacing "" would
+        # insert the token between every character.
+        return data
     if isinstance(data, str):
         return data.replace(ws, _WORKSPACE_TOKEN)
     if isinstance(data, dict):
@@ -1462,6 +1466,7 @@ async def execute_single_tool(
     tool_failed = False
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+        from surogates.sandbox.pool import sandbox_session_key
         # MCP tools are remote calls (HTTP/stdio) dispatched by the
         # in-process MCP client; they never need a sandbox pod. Without
         # this short-circuit the dict default (SANDBOX) tries to spin up
@@ -1515,6 +1520,7 @@ async def execute_single_tool(
                             "tool_call_id": tool_call_id,
                             "lease_token": lease.lease_token,
                             "session_config": session.config,
+                            "task_id": sandbox_session_key(session),
                         },
                     )
                     image_dispatched = True
@@ -1585,6 +1591,7 @@ async def execute_single_tool(
                 platform_client=platform_client,
                 expert_transcript=expert_transcript,
                 interrupt_check=interrupt_check,
+                task_id=sandbox_session_key(session),
             )
     except KeyError:
         tool_failed = True

@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.harness.tool_exec import (
+    _sanitize_paths,
     execute_single_tool,
 )
 from surogates.session.events import EventType
@@ -342,3 +343,41 @@ async def test_replayed_tool_result_matches_what_the_llm_saw_live() -> None:
     assert replayed[0]["content"] == live["content"]
     assert "__WORKSPACE__" not in replayed[0]["content"]
     assert replayed[0]["content"] == raw_output
+
+
+def test_a_workspace_at_the_filesystem_root_leaves_events_readable() -> None:
+    # "/".rstrip("/") is "", and str.replace("", token) would put the token
+    # between every character of every event.
+    assert _sanitize_paths({"command": "cat /etc/hosts"}, "/") == {"command": "cat /etc/hosts"}
+
+
+@pytest.mark.asyncio
+async def test_an_in_process_tool_gets_its_sessions_task_id() -> None:
+    registry = _make_terminal_registry("ok")
+    session = _make_session("/tmp/ws")
+    await execute_single_tool(
+        {"id": "tc_1", "function": {"name": "terminal", "arguments": '{"command": "pwd"}'}},
+        session=session,
+        lease=_make_lease(),
+        store=_make_store(),
+        tools=registry,
+        tenant=MagicMock(asset_root="/tmp/test"),
+    )
+    assert registry.get("terminal").handler.call_args.kwargs["task_id"] == str(session.id)
+
+
+@pytest.mark.asyncio
+async def test_a_child_shares_its_roots_task_id() -> None:
+    registry = _make_terminal_registry("ok")
+    session = _make_session("/tmp/ws")
+    root = str(uuid4())
+    session.config["sandbox_root_session_id"] = root
+    await execute_single_tool(
+        {"id": "tc_1", "function": {"name": "terminal", "arguments": '{"command": "pwd"}'}},
+        session=session,
+        lease=_make_lease(),
+        store=_make_store(),
+        tools=registry,
+        tenant=MagicMock(asset_root="/tmp/test"),
+    )
+    assert registry.get("terminal").handler.call_args.kwargs["task_id"] == root
