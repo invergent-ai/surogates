@@ -7,7 +7,9 @@ from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 
+from surogates.db.models import Session
 from surogates.devices.binding import Binding, binding_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
@@ -130,8 +132,14 @@ async def test_a_malformed_local_folder_request_is_refused(api, changes):
     assert await journal(api).pending(UUID(device["id"]), 1) == []
 
 
+async def session_count(api) -> int:
+    async with api.app.state.session_factory() as db:
+        return await db.scalar(select(func.count()).select_from(Session).where(Session.user_id == api.user_id))
+
+
 async def test_a_folder_that_is_not_valid_unicode_creates_nothing(api):
     device = await register(api)
+    sessions_before = await session_count(api)
     # FastAPI refuses the body, then cannot render its own 422 (the error
     # echoes the input) and fails with 500: the status is not ours to choose,
     # creating nothing is.  A client of its own, so that failure comes back as
@@ -147,6 +155,7 @@ async def test_a_folder_that_is_not_valid_unicode_creates_nothing(api):
         )
     assert response.status_code != 201, response.text
     assert await journal(api).pending(UUID(device["id"]), 1) == []
+    assert await session_count(api) == sessions_before
 
 
 async def test_only_a_signed_in_users_chat_can_use_a_local_folder(api, session_factory):
