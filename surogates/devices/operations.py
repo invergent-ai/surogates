@@ -93,6 +93,9 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
     )
     if (request.kind == BIND) != is_binding:
         raise ValueError("Only the root session's own first operation is its binding")
+    if is_binding and (root.config or {}).get("sandbox_root_session_id"):
+        # A session created under another works in that session's folder.
+        raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
 

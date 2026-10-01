@@ -1484,6 +1484,43 @@ async def test_only_the_root_records_its_binding(api, session_factory, redis_cli
         await DeviceOperations(session_factory, redis_client).run(request)
 
 
+async def test_an_ordinary_operation_cannot_take_the_bindings_place(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    root = await device_session(api, device_id)
+    slot = OperationRequest(**{
+        **_fields(request_for(device_id, root)), "invocation_id": BIND, "ordinal": 0,
+    })
+    with pytest.raises(ValueError, match="binding"):
+        await DeviceOperations(session_factory, redis_client).run(slot)
+    assert await binding(api, root) == Binding("failed", "The computer was never asked to set it up")
+
+
+async def test_only_a_bind_row_counts_as_the_binding(api, session_factory):
+    device_id = UUID((await register(api))["id"])
+    root = await device_session(api, device_id)
+    async with session_factory() as db:
+        # A row in the binding's slot that is not a binding, as a bug could write it.
+        db.add(DeviceOperation(
+            device_id=device_id, root_session_id=root, calling_session_id=root,
+            invocation_id=BIND, ordinal=0, kind="which", args={"name": "sh"},
+            digest="x", outcome={"ok": True}, completed_at=func.now(),
+        ))
+        await db.commit()
+    assert (await binding(api, root)).state != "bound"
+
+
+async def test_a_child_session_is_never_bound_on_its_own(api, session_factory, redis_client):
+    issued, root = await bound_device(api)
+    store = SessionStore(session_factory)
+    child = await create_child_session(
+        store=store, parent=await store.get_session(root), channel="delegation",
+    )
+    with pytest.raises(ValueError, match="root"):
+        await DeviceOperations(session_factory, redis_client).bind(
+            session_id=child.id, device_id=UUID(issued["id"]), folder=FOLDER, nonce=NONCE,
+        )
+
+
 def device_io(ops: DeviceOperations, device_id: UUID, root: UUID, folder: Path) -> DeviceWorkspaceIO:
     """A WorkspaceIO for one tool call on *folder*, through the journal."""
     return DeviceWorkspaceIO(

@@ -41,11 +41,15 @@ class Binding:
 
 async def binding_of(db: AsyncSession, root_session_id: UUID) -> Binding:
     """Whether the computer accepted the root session's folder."""
+    # Not filtered by device: a bind row is recorded only after the root was
+    # confirmed to name that device, and the server never changes a session's
+    # ``execution``, so the root's one bind row is always its device's.
     row = (await db.execute(
         select(DeviceOperation.outcome).where(
             DeviceOperation.calling_session_id == root_session_id,
             DeviceOperation.invocation_id == BIND,
             DeviceOperation.ordinal == 0,
+            DeviceOperation.kind == BIND,
         )
     )).one_or_none()
     if row is None:
