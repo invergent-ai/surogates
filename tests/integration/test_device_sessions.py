@@ -13,6 +13,8 @@ from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceStore
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+from surogates.tools.workspace_io import LocalWorkspaceIO
+from tests.fake_laptop import FakeLaptop
 
 from .conftest import issue_service_account_token
 from .test_devices import (
@@ -21,6 +23,8 @@ from .test_devices import (
     NONCE,
     add_user,
     api,  # noqa: F401  (a fixture)
+    eventually,
+    link_url,  # noqa: F401  (a fixture)
     next_control,
     register,
 )
@@ -191,3 +195,89 @@ async def test_the_server_offers_local_folder_chats(api):
     response = await api.client.get("/v1/auth/config")
     assert response.status_code == 200, response.text
     assert response.json()["desktop_sessions"] is True
+
+
+async def is_bound(api, session_id: str) -> bool:
+    return (await binding(api, session_id)).state == "bound"
+
+
+async def has_failed(api, session_id: str) -> bool:
+    return (await binding(api, session_id)).state == "failed"
+
+
+async def send(api, session_id: str):
+    return await api.client.post(
+        f"/v1/sessions/{session_id}/messages", json={"content": "Tidy up my notes"}, headers=api.auth(),
+    )
+
+
+async def test_messages_wait_for_the_computer_to_accept_the_folder(api, link_url, tmp_path):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    refused = await send(api, session_id)
+    assert refused.status_code == 409, refused.text
+    assert "still being set up" in refused.json()["detail"]
+
+    # The app was offline when the chat was created; it binds the chat when it connects.
+    laptop = FakeLaptop(link_url, device["token"], LocalWorkspaceIO(str(tmp_path)))
+    laptop.prepare(NONCE, FOLDER)
+    await laptop.connect()
+    try:
+        await eventually(lambda: is_bound(api, session_id))
+        assert laptop.bindings == {session_id: FOLDER}
+        accepted = await send(api, session_id)
+        assert accepted.status_code == 202, accepted.text
+    finally:
+        await laptop.disconnect()
+
+
+async def test_a_folder_the_user_did_not_confirm_fails_the_chat(api, link_url, tmp_path):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    laptop = FakeLaptop(link_url, device["token"], LocalWorkspaceIO(str(tmp_path)))
+    await laptop.connect()  # nothing prepared: the user never confirmed this folder
+    try:
+        await eventually(lambda: has_failed(api, session_id))
+        refused = await send(api, session_id)
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["detail"] == (
+            "This chat's folder could not be set up: "
+            "This folder was not confirmed on this computer. Start a new chat."
+        )
+    finally:
+        await laptop.disconnect()
+
+
+async def test_uploads_wait_for_the_binding(api):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    response = await api.client.post(
+        f"/v1/sessions/{session_id}/workspace/upload",
+        files={"file": ("notes.txt", b"draft")},
+        headers=api.auth(),
+    )
+    assert response.status_code == 409, response.text
+
+
+async def test_a_defined_outcome_waits_for_the_binding(api):
+    # It writes a user message and wakes the worker, like a message does.
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    response = await api.client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"events": [{
+            "type": "user.define_outcome",
+            "description": "Tidy up my notes",
+            "rubric": {"type": "text", "content": "- every note has a title"},
+            "max_iterations": 5,
+        }]},
+        headers=api.auth(),
+    )
+    assert response.status_code == 409, response.text
+
+
+async def test_a_cloud_chat_takes_messages_at_once(api):
+    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert created.status_code == 201, created.text
+    accepted = await send(api, created.json()["id"])
+    assert accepted.status_code == 202, accepted.text

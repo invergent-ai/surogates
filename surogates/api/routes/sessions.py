@@ -34,6 +34,7 @@ from surogates.session.attachment_ingest import (  # re-exported for back-compat
     _apply_inline_total_budget,
 )
 from surogates.api.session_guards import (
+    require_bound_session,
     require_session_visible,
     require_user_writable_session,
 )
@@ -1024,6 +1025,7 @@ async def send_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
         raise HTTPException(

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import time
+from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 
+from surogates.devices.binding import binding_of, device_of
+from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
 from surogates.tenant.context import get_tenant
 
@@ -129,4 +132,26 @@ def require_user_writable_session(session: Session) -> None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=SCHEDULED_RUN_READ_ONLY_DETAIL,
+        )
+
+
+async def require_bound_session(request: Request, session: Session) -> None:
+    """409 until the computer a local-folder chat works on has accepted its folder.
+
+    Before that the computer has no folder to run the chat's work in, and an
+    upload has nowhere to go.
+    """
+    if device_of(session.config) is None:
+        return
+    async with request.app.state.session_factory() as db:
+        binding = await binding_of(db, UUID(sandbox_session_key(session)))
+    if binding.state == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This chat's folder is still being set up on your computer.",
+        )
+    if binding.state == "failed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This chat's folder could not be set up: {binding.message}. Start a new chat.",
         )
