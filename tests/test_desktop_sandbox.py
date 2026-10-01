@@ -172,3 +172,10 @@ async def test_long_terminal_output_spills_onto_the_computer_not_this_host(lapto
     [spill] = (laptop.folder / ".surogates-results").glob("terminal-output-*.log")
     assert spill.read_text().strip() == "x" * 60000
     assert host_spills() == before
+
+
+@pytest.mark.parametrize("arguments", ["[]", "null"])
+async def test_arguments_that_are_not_an_object_are_an_error_not_a_crash(laptop, arguments):
+    reply = json.loads(await laptop.call.execute("any", "read_file", arguments))
+    assert "JSON object" in reply["error"]
+    assert laptop.runner.kinds == []

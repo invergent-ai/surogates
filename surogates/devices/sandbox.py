@@ -83,6 +83,8 @@ class DeviceCall:
             args = json.loads(input) if input else {}
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON arguments: {exc}"})
+        if not isinstance(args, dict):
+            return json.dumps({"error": "Tool arguments must be a JSON object"})
         args.pop("_trace_context", None)
         return await self.dispatch(name, args)
 
