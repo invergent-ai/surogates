@@ -36,6 +36,10 @@ An error names the exception the worker raises again:
                                           "revoked" (local access was revoked) and
                                           "too_large"
 
+Data is standard base64 (RFC 4648 section 4: the "+" and "/" alphabet, padded
+with "=", no line breaks).  A reply in any other form is refused, never decoded
+loosely.
+
 Sizes.  Every args object and every outcome, serialized, fits in
 MAX_MESSAGE_CHARS, so it fits in one link frame:
 
@@ -145,7 +149,13 @@ class DeviceWorkspaceIO:
         return None if value is None else FileStat(**value)
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
-        return base64.b64decode(await self._call("read", key=key, max_bytes=max_bytes))
+        data = await self._call("read", key=key, max_bytes=max_bytes)
+        try:
+            # Strict: a lenient decode drops what it does not know, such as the
+            # "-" and "_" of base64url, and a patch would write the result back.
+            return base64.b64decode(data, validate=True)
+        except (ValueError, TypeError):
+            raise DeviceOperationError("The computer returned invalid data") from None
 
     async def write(self, key: str, data: bytes) -> None:
         if len(data) > MAX_PAYLOAD_BYTES:

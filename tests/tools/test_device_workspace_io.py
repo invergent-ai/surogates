@@ -13,6 +13,7 @@ import pytest
 from surogates.devices.workspace import (
     MAX_PAYLOAD_BYTES,
     OUTPUT_CAP_CHARS,
+    DeviceOperationError,
     DeviceWorkspaceIO,
 )
 from surogates.tools.builtin import file_ops
@@ -116,6 +117,33 @@ async def test_output_is_capped_by_its_encoded_size(wio, command, kept):
     assert "chars omitted by the computer" in result.output
     assert result.output.startswith(kept) and result.output.endswith(kept)
     assert OUTPUT_CAP_CHARS // 2 < len(json.dumps(result.output)) < OUTPUT_CAP_CHARS + 200
+
+
+class _Answers:
+    """A laptop that answers every operation with one fixed result."""
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+    async def run(self, kind, args):
+        return {"ok": self.value}
+
+
+async def test_data_in_standard_base64_is_decoded():
+    laptop = DeviceWorkspaceIO(_Answers("+/8="), root="/")
+    assert await laptop.read("/f") == b"\xfb\xff"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["-__-", "-_8=", "AA", "AAAA\nAAAA", "AA AA", "é", None, 7],
+    ids=["base64url", "base64url padded", "unpadded", "line break", "space", "non-ascii", "null", "number"],
+)
+async def test_data_that_is_not_standard_base64_is_an_error_not_a_corrupt_read(value):
+    # A lenient decode drops what it does not know, and a patch would write the result back.
+    laptop = DeviceWorkspaceIO(_Answers(value), root="/")
+    with pytest.raises(DeviceOperationError, match="invalid data"):
+        await laptop.read("/f")
 
 
 class _Folder:
