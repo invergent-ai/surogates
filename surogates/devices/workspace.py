@@ -45,7 +45,10 @@ MAX_MESSAGE_CHARS, so it fits in one link frame:
     tail around a "chars omitted by the computer" marker, together at most
     OUTPUT_CAP_CHARS measured JSON-encoded (NUL and non-ASCII characters
     count as their \\uXXXX escapes, the most any JSON encoder writes);
-  - ripgrep output is cut after the last whole line within that encoded size;
+  - ripgrep output over OUTPUT_CAP_CHARS, measured JSON-encoded, is answered with
+    a ripgrep error asking the model to narrow the search, never cut, because
+    the handlers count and page what they get and would report a partial result
+    as complete;
   - list_dir returns at most MAX_NAMES names;
   - anything still too large is answered with {"type": "too_large"}.
 """

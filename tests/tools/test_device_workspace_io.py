@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,10 @@ from surogates.devices.workspace import (
     OUTPUT_CAP_CHARS,
     DeviceWorkspaceIO,
 )
+from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import FileStat, LocalWorkspaceIO
-from tests.fake_laptop import InProcessRunner, perform
+from surogates.tools.workspace_io import FileStat, LocalWorkspaceIO, RipgrepError
+from tests.fake_laptop import InProcessRunner
 
 
 @pytest.fixture
@@ -124,15 +126,41 @@ class _Folder:
         return self.output
 
 
+async def _search(output: str) -> str:
+    laptop = DeviceWorkspaceIO(InProcessRunner(_Folder(output)), root="/")
+    return await laptop.ripgrep("/", mode="count", pattern="p")
+
+
 @pytest.mark.parametrize(
     "line", ["a" * 59 + "\n", "\x00" * 49 + "\n", "中" * 9 + "\n"], ids=["ascii", "nul", "non-ascii"],
 )
-async def test_search_output_is_cut_after_a_whole_line_within_its_encoded_size(line):
-    text = line * (600_000 // len(line))
-    args = {"key": "k", "mode": "count", "pattern": "p", "glob": None, "context": 0}
-    kept = (await perform(_Folder(text), "ripgrep", args))["ok"]
-    assert kept and kept.endswith("\n") and text.startswith(kept)
-    assert OUTPUT_CAP_CHARS // 2 < len(json.dumps(kept)) <= OUTPUT_CAP_CHARS
+async def test_search_output_over_the_cap_is_refused_not_cut(line):
+    with pytest.raises(RipgrepError, match="narrow the pattern"):
+        await _search(line * (600_000 // len(line)))
+
+
+async def test_search_output_within_the_cap_comes_back_whole():
+    text = "a" * (OUTPUT_CAP_CHARS - 4) + "\n"  # encoded: quotes, the text, and "\n" as two characters
+    assert await _search(text) == text
+    with pytest.raises(RipgrepError):
+        await _search(text + "a")
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="needs ripgrep")
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"output_mode": "count"}, {"target": "files", "pattern": "*.txt"}],
+    ids=["content", "count", "files"],
+)
+async def test_the_search_tool_reports_a_search_too_large_for_one_operation(wio, root, arguments):
+    for number in range(8000):
+        (root / f"match-{number}.txt").write_text("needle\n")
+    raw = await file_ops._search_files_handler(
+        {"pattern": "needle", "path": str(root), "limit": 100_000, **arguments},
+        workspace_io=wio, task_id="search-too-large",
+    )
+    error = json.loads(raw)["error"]
+    assert "Search failed" in error and "narrow the pattern" in error
 
 
 async def test_a_write_over_the_cap_fails_before_it_is_sent(wio, runner, root):

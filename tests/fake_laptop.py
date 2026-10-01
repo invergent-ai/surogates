@@ -78,16 +78,6 @@ def _cap_strings(value: Any) -> Any:
     return value
 
 
-def _cap_lines(text: str) -> str:
-    end = len(text)
-    while True:
-        kept = text[: text.rfind("\n", 0, end) + 1] if end < len(text) else text
-        size = _encoded(kept)
-        if size <= OUTPUT_CAP_CHARS:
-            return kept
-        end = min(len(kept) - 1, len(kept) * OUTPUT_CAP_CHARS // size)
-
-
 async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
     if kind in _PROCESS_KINDS:
         return _cap_strings(await _run_process(folder, kind, a))
@@ -114,9 +104,15 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
     if kind == "list_dir":
         return (await folder.list_dir(a["key"]))[:MAX_NAMES]
     if kind == "ripgrep":
-        return _cap_lines(await folder.ripgrep(
+        found = await folder.ripgrep(
             a["key"], mode=a["mode"], pattern=a["pattern"], glob=a["glob"], context=a["context"],
-        ))
+        )
+        if _encoded(found) > OUTPUT_CAP_CHARS:
+            # Cutting would hand the handlers a partial result that looks complete.
+            raise RipgrepError(
+                f"search output over {OUTPUT_CAP_CHARS} characters; narrow the pattern, path or glob"
+            )
+        return found
     if kind == "which":
         return await folder.which(a["name"])
     if kind == "run":
