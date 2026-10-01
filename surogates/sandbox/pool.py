@@ -77,6 +77,14 @@ class SandboxPool:
         If the existing sandbox is not healthy (status != ``RUNNING``), it is
         destroyed and a fresh one is provisioned.
         """
+        # Imported here: surogates.devices.sandbox imports this module.
+        from surogates.devices.sandbox import DEVICE_SANDBOX_ID, is_device_owner
+
+        if is_device_owner(session_id):
+            # A session on the user's computer never gets a cloud sandbox,
+            # and an offline computer is not a dead sandbox to replace.
+            return DEVICE_SANDBOX_ID
+
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.get(session_id)
@@ -118,6 +126,12 @@ class SandboxPool:
 
         Raises :class:`ValueError` if the session has no associated sandbox.
         """
+        from surogates.devices.sandbox import is_device_owner, refusal
+
+        if is_device_owner(session_id):
+            # Outside a tool call there is no invocation to journal the work under.
+            return refusal(name)
+
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.get(session_id)

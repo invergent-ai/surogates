@@ -10,6 +10,7 @@ device runs nothing for it.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 from uuid import UUID
@@ -22,6 +23,11 @@ from surogates.db.models import DeviceOperation
 # The binding's kind, and the invocation it is recorded under: a tool call's
 # invocation id never takes this form, and its ordinals start at 1.
 BIND = "bind"
+
+# The sandbox keys of the session on the user's computer this task works for,
+# set by AgentHarness.wake (see surogates.devices.sandbox).  Here, not there,
+# so the workspace fallback can read it without importing the device journal.
+device_owners: ContextVar[frozenset[str]] = ContextVar("surogates_device_owners", default=frozenset())
 
 
 def device_of(config: dict[str, Any] | None) -> UUID | None:
