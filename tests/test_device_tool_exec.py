@@ -13,9 +13,11 @@ from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall, enter_device_se
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
+from surogates.runtime.turn_slots import current_turn, turn_waiting
 from surogates.sandbox.base import SandboxUnavailableError
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
+from tests.test_turn_slots import held_turn
 
 pytestmark = pytest.mark.asyncio
 
@@ -197,3 +199,35 @@ async def test_project_files_are_not_read_from_this_host_for_a_local_folder(tmp_
         "workspace_path": str(tmp_path),
         "execution": {"kind": "device", "device_id": str(uuid4())},
     })
+
+
+async def test_a_tool_call_is_activity_of_its_turn():
+    slots, semaphore, gate = await held_turn()
+    seen: list[bool] = []
+
+    async def handler(arguments, **kwargs):
+        async with turn_waiting():
+            seen.append(semaphore.locked())
+        return '{"ok": true}'
+
+    registry = ToolRegistry()
+    registry.register(
+        "read_file",
+        ToolSchema(name="read_file", description="read", parameters={"type": "object", "properties": {}}),
+        handler=handler,
+    )
+    token = current_turn.set(slots)
+    try:
+        await execute_single_tool(
+            {"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}},
+            session=SimpleNamespace(id=uuid4(), parent_id=None, agent_id="a", model="m", config={}),
+            lease=SimpleNamespace(lease_token=uuid4()),
+            store=make_store(),
+            tools=registry,
+            tenant=MagicMock(asset_root="/tmp/test"),
+        )
+    finally:
+        current_turn.reset(token)
+    # The lone tool call waited, so all of the turn waited and gave its slot back.
+    assert seen == [False]
+    assert semaphore.locked() and gate.held == 1

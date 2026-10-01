@@ -41,6 +41,7 @@ from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.harness.tool_exec import execute_single_tool
+from surogates.runtime.turn_slots import current_turn
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
@@ -52,6 +53,7 @@ from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop, perform
+from tests.test_turn_slots import held_turn
 
 from .conftest import create_org, create_user
 
@@ -846,6 +848,49 @@ async def test_an_operation_waits_for_its_outcome(api, session_factory, redis_cl
         assert await ops.pending(device_id, 1) == []
     finally:
         await control.aclose()
+
+
+async def test_a_quick_answer_keeps_the_turns_slots(api, session_factory, redis_client, tmp_path):
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    slots, semaphore, gate = await held_turn()
+    token = current_turn.set(slots)
+    try:
+        async with slots.activity():
+            waiting = asyncio.create_task(ops.run(request_for(device_id, root)))
+            await eventually(lambda: has_pending(ops, device_id))
+            assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+            assert await asyncio.wait_for(waiting, 2.0) == {"ok": True}
+    finally:
+        current_turn.reset(token)
+    assert gate.calls == [], "an operation answered within the grace churned the turn's slots"
+
+
+async def test_a_slow_operation_gives_the_turns_slots_back(
+    api, session_factory, redis_client, tmp_path, monkeypatch,
+):
+    # raising=False: the attribute does not exist before the change.
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1, raising=False)
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    slots, semaphore, gate = await held_turn()
+
+    async def released() -> bool:
+        return not semaphore.locked()
+
+    token = current_turn.set(slots)
+    try:
+        async with slots.activity():
+            waiting = asyncio.create_task(ops.run(request_for(device_id, root)))
+            await eventually(released)
+            assert gate.held == 0
+            assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+            assert await asyncio.wait_for(waiting, 3.0) == {"ok": True}
+            assert semaphore.locked() and gate.held == 1
+    finally:
+        current_turn.reset(token)
 
 
 async def test_a_repeated_request_gets_the_recorded_outcome(api, session_factory, redis_client, tmp_path):

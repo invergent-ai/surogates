@@ -81,6 +81,7 @@ from surogates.harness.tool_schemas import (
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
+from surogates.runtime.turn_slots import turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
@@ -2153,10 +2154,11 @@ class AgentHarness(
                 # provider alternating truncated and unparseable arguments
                 # would otherwise keep both streaks below their own caps
                 # forever.
-                executed = (
-                    await streaming_executor.settle()
-                    if streaming_executor is not None else {}
-                )
+                if streaming_executor is not None:
+                    async with turn_joining():
+                        executed = await streaming_executor.settle()
+                else:
+                    executed = {}
                 if partial_tool_call_retries < _MAX_PARTIAL_TOOL_CALL_RETRIES:
                     partial_tool_call_retries += 1
                     logger.warning(
@@ -2748,7 +2750,9 @@ class AgentHarness(
                 # of letting them run to their tool-level timeout.
                 self._active_executor = streaming_executor
                 try:
-                    all_results = await streaming_executor.get_all_results()
+                    # The loop waits for its tool calls; they count for the turn meanwhile.
+                    async with turn_joining():
+                        all_results = await streaming_executor.get_all_results()
                 finally:
                     self._active_executor = None
 
@@ -2774,40 +2778,41 @@ class AgentHarness(
                     )
             else:
                 # ── Existing path ────────────────────────────────────
-                tool_results = await execute_tool_calls(
-                    tool_calls_raw,
-                    session=session,
-                    lease=lease,
-                    store=self._store,
-                    tools=self._tools,
-                    tenant=self._tenant,
-                    interrupt_check=self._check_interrupt,
-                    redis=self._redis,
-                    budget=self._budget,
-                    memory_manager=self._memory_manager,
-                    hint_tracker=hint_tracker,
-                    sandbox_pool=self._sandbox_pool,
-                    credential_vault=self._credential_vault,
-                    browser_pool=self._browser_pool,
-                    browser_control=self._browser_control,
-                    storage=self._storage,
-                    api_client=self._api_client,
-                    session_factory=self._session_factory,
-                    llm_client=self._llm,
-                    model=model_id,
-                    vision_llm_client=self._vision_client,
-                    vision_model=self._vision_model,
-                    summary_llm_client=self._summary_client,
-                    summary_model=self._summary_model,
-                    media_gen=self._media_gen,
-                    saga=saga,
-                    log_policy_allowed=self._log_policy_allowed,
-                    governance_gate=self._governance_gate,
-                    bundle=self._bundle,
-                    turn_gate=self._turn_gate,
-                    platform_client=self._platform_client,
-                    expert_transcript=expert_transcript,
-                )
+                async with turn_joining():
+                    tool_results = await execute_tool_calls(
+                        tool_calls_raw,
+                        session=session,
+                        lease=lease,
+                        store=self._store,
+                        tools=self._tools,
+                        tenant=self._tenant,
+                        interrupt_check=self._check_interrupt,
+                        redis=self._redis,
+                        budget=self._budget,
+                        memory_manager=self._memory_manager,
+                        hint_tracker=hint_tracker,
+                        sandbox_pool=self._sandbox_pool,
+                        credential_vault=self._credential_vault,
+                        browser_pool=self._browser_pool,
+                        browser_control=self._browser_control,
+                        storage=self._storage,
+                        api_client=self._api_client,
+                        session_factory=self._session_factory,
+                        llm_client=self._llm,
+                        model=model_id,
+                        vision_llm_client=self._vision_client,
+                        vision_model=self._vision_model,
+                        summary_llm_client=self._summary_client,
+                        summary_model=self._summary_model,
+                        media_gen=self._media_gen,
+                        saga=saga,
+                        log_policy_allowed=self._log_policy_allowed,
+                        governance_gate=self._governance_gate,
+                        bundle=self._bundle,
+                        turn_gate=self._turn_gate,
+                        platform_client=self._platform_client,
+                        expert_transcript=expert_transcript,
+                    )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,

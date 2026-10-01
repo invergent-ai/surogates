@@ -33,12 +33,17 @@ from surogates.devices.binding import BIND, binding_of, device_of
 from surogates.devices.presence import control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
+from surogates.runtime.turn_slots import turn_waiting
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
 RECHECK_INTERVAL_S = 5.0
+
+# How long a device operation may take before its turn gives its worker slots
+# back: an operation the computer answers at once must not churn them.
+WAIT_GRACE_S = 2.0
 
 
 def operation_channel(operation_id: UUID) -> str:
@@ -186,6 +191,20 @@ class DeviceOperations:
         if outcome is not None:
             return outcome
         await self._announce(control_channel(request.device_id), f"op:{operation_id}")
+        # One wait, never interrupted: a deadline here could cancel a query mid-flight.
+        waiter = asyncio.ensure_future(self._wait_forever(operation_id))
+        try:
+            done, _ = await asyncio.wait({waiter}, timeout=WAIT_GRACE_S)
+            if done:
+                return waiter.result()
+            # Still running, or the computer is away: the turn need not hold the worker meanwhile.
+            async with turn_waiting():
+                return await waiter
+        finally:
+            waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
+
+    async def _wait_forever(self, operation_id: UUID) -> dict[str, Any]:
+        """Wait for the operation's outcome as long as it takes."""
         # ponytail: one pub/sub connection per waiting operation; share one
         # subscriber per worker when waits number in the thousands.
         while True:

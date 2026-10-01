@@ -32,6 +32,7 @@ from surogates.harness.tool_guardrails import (
 )
 from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import floor_gate
+from surogates.runtime.turn_slots import turn_activity
 from surogates.storage.tenant import boundary_workspace_prefix
 
 # ---------------------------------------------------------------------------
@@ -1144,7 +1145,25 @@ async def execute_tool_calls_concurrent(
     return [r for r in results if r is not None]
 
 
-async def execute_single_tool(
+async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
+    """Execute a single tool call: emit events, dispatch, return result message.
+
+    *interrupt_check* is this session's stop flag; it is handed to the tool
+    handler so long-running tools can poll it without a process-wide signal.
+
+    When *log_policy_allowed* is True, every governance check that passes
+    also emits a ``policy.allowed`` event.  Off by default because each
+    successful ``tool.call`` is already an implicit allow; enable for
+    compliance audits that require an explicit per-decision record.
+
+    The call is an activity of its turn: while it runs, the turn keeps its
+    worker slots unless every activity of the turn is waiting.
+    """
+    async with turn_activity():
+        return await _run_single_tool(tc, **kwargs)
+
+
+async def _run_single_tool(
     tc: dict[str, Any],
     *,
     session: Session,
@@ -1180,16 +1199,6 @@ async def execute_single_tool(
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
 ) -> dict:
-    """Execute a single tool call: emit events, dispatch, return result message.
-
-    *interrupt_check* is this session's stop flag; it is handed to the tool
-    handler so long-running tools can poll it without a process-wide signal.
-
-    When *log_policy_allowed* is True, every governance check that passes
-    also emits a ``policy.allowed`` event.  Off by default because each
-    successful ``tool.call`` is already an implicit allow; enable for
-    compliance audits that require an explicit per-decision record.
-    """
     from surogates.trace import get_trace, new_span
 
     # Each tool call gets its own child span for fine-grained tracing.
