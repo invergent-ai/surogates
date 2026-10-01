@@ -961,6 +961,54 @@ async def test_a_database_error_that_is_not_a_blip_is_not_retried(
         await asyncio.wait_for(ops.run(request_for(device_id)), 2.0)
 
 
+class StalledRedis:
+    """The worker's Redis with one call that never answers, as a blackholed connection does.
+
+    The worker's client sets no socket timeout, so nothing else ends the call.
+    """
+
+    def __init__(self, stalled: str) -> None:
+        self.stalled = stalled
+
+    def pubsub(self):
+        return self
+
+    async def publish(self, channel, message):
+        if self.stalled == "publish":
+            await hang()
+        return 0
+
+    async def subscribe(self, *channels):
+        if self.stalled == "subscribe":
+            await hang()
+        if self.stalled == "close":
+            raise RedisConnectionError("redis went away")
+
+    async def get_message(self, **options):
+        if self.stalled == "get_message":
+            await hang()
+        await asyncio.sleep(options["timeout"])
+
+    async def aclose(self):
+        if self.stalled == "close":
+            await hang()
+
+
+@pytest.mark.parametrize("stalled", ["publish", "subscribe", "get_message", "close"])
+async def test_a_stalled_redis_does_not_stop_the_recheck(
+    api, session_factory, redis_client, tmp_path, stalled,
+):
+    device_id = UUID((await register(api))["id"])
+    worker = DeviceOperations(session_factory, StalledRedis(stalled), recheck_interval_s=0.2)
+    waiting = asyncio.create_task(worker.run(request_for(device_id)))
+    await eventually(lambda: has_pending(worker, device_id))
+    # Long enough for the worker to be inside the stalled call.
+    await asyncio.sleep(0.6)
+    api_side = DeviceOperations(session_factory, redis_client)
+    await complete_pending(api_side, device_id, LocalWorkspaceIO(str(tmp_path)))
+    assert await asyncio.wait_for(waiting, 3.0) == {"ok": True}
+
+
 async def test_completing_checks_device_digest_and_credentials(api, session_factory, redis_client):
     first = UUID((await register(api))["id"])
     second = UUID((await register(api, name="Other laptop"))["id"])

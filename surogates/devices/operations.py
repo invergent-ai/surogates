@@ -151,17 +151,22 @@ class DeviceOperations:
         while True:
             pubsub = self._redis.pubsub()
             try:
-                await pubsub.subscribe(operation_channel(operation_id))
+                await self._within_redis_patience(pubsub.subscribe(operation_channel(operation_id)))
                 while True:
                     outcome = await self._while_database_recovers(
                         "waiting for", lambda: self._outcome(operation_id),
                     )
                     if outcome is not None:
                         return outcome
-                    await pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=self._recheck_interval_s,
+                    # It waits up to one interval for a message by itself; the
+                    # bound is for a connection that never answers.
+                    await self._within_redis_patience(
+                        pubsub.get_message(
+                            ignore_subscribe_messages=True, timeout=self._recheck_interval_s,
+                        ),
+                        intervals=2,
                     )
-            except RedisError:
+            except (RedisError, TimeoutError):
                 # Postgres is the authority: keep checking it while Redis recovers.
                 logger.warning("waiting for operation %s without Redis", operation_id, exc_info=True)
                 outcome = await self._while_database_recovers(
@@ -172,7 +177,7 @@ class DeviceOperations:
                 await asyncio.sleep(self._recheck_interval_s)
             finally:
                 with contextlib.suppress(Exception):
-                    await pubsub.aclose()
+                    await self._within_redis_patience(pubsub.aclose())
 
     async def _while_database_recovers(
         self, what: str, call: Callable[[], Awaitable[_T]],
@@ -191,10 +196,19 @@ class DeviceOperations:
                 logger.warning("%s an operation: database unavailable (%s); retrying", what, type(exc).__name__)
                 await asyncio.sleep(self._recheck_interval_s)
 
+    async def _within_redis_patience(self, call: Awaitable[_T], *, intervals: float = 1) -> _T:
+        """Await one Redis call for at most *intervals* recheck intervals.
+
+        The worker's Redis client sets no socket timeout, so a blackholed
+        Redis would otherwise hold the wait forever, with Postgres never rechecked.
+        """
+        async with asyncio.timeout(self._recheck_interval_s * intervals):
+            return await call
+
     async def _announce(self, channel: str, message: str) -> None:
         """Publish a wake-up, best effort: the next reconcile or recheck covers a lost one."""
         try:
-            await self._redis.publish(channel, message)
+            await self._within_redis_patience(self._redis.publish(channel, message))
         except Exception:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
