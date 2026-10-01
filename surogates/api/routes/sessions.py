@@ -1710,6 +1710,7 @@ async def resume_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status != "paused":
         raise HTTPException(
@@ -1752,6 +1753,7 @@ async def retry_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    await require_bound_session(request, session)
 
     if session.status not in ("failed", "paused"):
         raise HTTPException(

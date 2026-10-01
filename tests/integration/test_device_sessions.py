@@ -281,3 +281,26 @@ async def test_a_cloud_chat_takes_messages_at_once(api):
     assert created.status_code == 201, created.text
     accepted = await send(api, created.json()["id"])
     assert accepted.status_code == 202, accepted.text
+
+
+async def paused_local_chat(api) -> str:
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])
+    paused = await api.client.post(f"/v1/sessions/{session_id}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    return session_id
+
+
+# Resuming and retrying emit a resume event and wake the worker, like a message does.
+async def test_resuming_a_chat_waits_for_the_binding(api):
+    session_id = await paused_local_chat(api)
+    response = await api.client.post(f"/v1/sessions/{session_id}/resume", headers=api.auth())
+    assert response.status_code == 409, response.text
+    assert "still being set up" in response.json()["detail"]
+
+
+async def test_retrying_a_chat_waits_for_the_binding(api):
+    session_id = await paused_local_chat(api)
+    response = await api.client.post(f"/v1/sessions/{session_id}/retry", headers=api.auth())
+    assert response.status_code == 409, response.text
+    assert "still being set up" in response.json()["detail"]
