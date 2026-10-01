@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from surogates.runtime import turn_slots as turn_slots_module
 from surogates.runtime.turn_slots import (
     TurnSlots,
     current_turn,
@@ -176,14 +177,64 @@ async def test_a_resumed_turn_takes_its_tenant_slot_even_at_the_cap():
         assert gate.held == 2
 
 
-async def test_a_gate_outage_on_resume_runs_on_without_the_tenant_slot():
+async def test_a_gate_outage_on_resume_counts_the_slot_as_taken():
     slots, semaphore, gate = await held_turn()
     async with slots.activity():
         async with slots.waiting():
             gate.fail_acquire = True
-        assert semaphore.locked()
+        assert semaphore.locked()  # the turn runs on
     await slots.release_owned()
-    assert gate.calls.count("release") == 1, "a tenant slot it no longer held was released again"
+    # The first release is the original give-back; the second is the end of the
+    # turn giving back the slot the failed take-back may have taken.
+    assert gate.calls.count("release") == 2
+
+
+async def test_a_take_back_that_times_out_is_given_back_at_the_end(monkeypatch):
+    monkeypatch.setattr(turn_slots_module, "GATE_CALL_TIMEOUT_S", 0.05)
+
+    class LateReplyGate(CountingGate):
+        async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+            self.calls.append("try_acquire")
+            self.held += 1  # the INCR landed
+            await asyncio.sleep(0.2)  # the reply comes after the timeout
+            return True
+
+    slots, semaphore, gate = await held_turn(gate=LateReplyGate(held=1))
+    async with slots.activity():
+        async with slots.waiting():
+            pass
+        assert semaphore.locked()  # the turn runs on
+    await slots.release_owned()
+    assert gate.held == 0, "a tenant slot that was taken and never given back stays counted"
+
+
+async def test_a_cancelled_take_back_is_given_back_at_the_end():
+    class BlockedGate(CountingGate):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.in_take_back = asyncio.Event()
+
+        async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+            self.calls.append("try_acquire")
+            self.held += 1  # the INCR landed
+            self.in_take_back.set()
+            await asyncio.Event().wait()  # the reply never comes
+            return True
+
+    slots, semaphore, gate = await held_turn(gate=BlockedGate(held=1))
+
+    async def turn() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                pass  # leaving the wait starts the take-back
+
+    task = asyncio.create_task(turn())
+    await asyncio.wait_for(gate.in_take_back.wait(), 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await slots.release_owned()
+    assert gate.held == 0, "a tenant slot that was taken and never given back stays counted"
 
 
 async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end():

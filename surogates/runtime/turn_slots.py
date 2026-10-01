@@ -157,14 +157,26 @@ class TurnSlots:
                     self._gate_held = await self._gate.try_acquire(
                         self._org_id, self._agent_id, limit=sys.maxsize,
                     )
+            except asyncio.CancelledError:
+                # The take-back is a single INCR that has most likely landed.
+                # Count the slot as held, so the end of the turn gives it back:
+                # a slot given back that was never taken only floors at zero
+                # and heals when the tenant goes idle, while one taken and
+                # never given back stays counted forever.
+                self._gate_held = True
+                raise
             except Exception:
+                # Unknown outcome (a timeout or an error), counted as held for
+                # the same reason; run on rather than wait on Redis.
+                self._gate_held = True
                 logger.warning(
-                    "could not take back the turn slot of org=%s agent=%s; running on without it",
+                    "could not confirm taking back the turn slot of org=%s agent=%s; "
+                    "running on and counting it as held",
                     self._org_id, self._agent_id, exc_info=True,
                 )
             if not self._gate_held:
-                # Rather than wait on Redis, run on without it: the cap is a
-                # guideline, not a correctness constraint.
+                # The gate refused outright: run on without a tenant slot. The
+                # cap is a guideline, not a correctness constraint.
                 self._uses_gate = False
         if not self._semaphore_held:
             await self._semaphore.acquire()
