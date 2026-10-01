@@ -111,6 +111,16 @@ class DeviceStore:
             )).scalars().all()
         return [_record(row) for row in rows]
 
+    async def find(
+        self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID,
+    ) -> DeviceRecord | None:
+        """The user's device for this agent, revoked or not, or None if they have no such device."""
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(Device).where(Device.id == device_id, *_owned_by(org_id, agent_id, user_id))
+            )).scalar_one_or_none()
+        return _record(row) if row is not None else None
+
     async def revoke(
         self, device_id: UUID, *, org_id: UUID, agent_id: str, user_id: UUID,
     ) -> DeviceRecord | None:

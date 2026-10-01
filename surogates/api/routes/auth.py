@@ -104,6 +104,10 @@ class AuthConfigResponse(BaseModel):
     # picker (the agent's browser_* tools are already removed server-side).
     # Defaults True so an older backend keeps browser affordances visible.
     browser_enabled: bool = True
+    # Chats can work on a folder of the user's computer through Surogate
+    # Desktop.  An older server omits it, and the desktop then offers cloud
+    # chats only.
+    desktop_sessions: bool = True
     # Active messaging channels an end-user can link their identity to
     # (subset of slack/teams/telegram).  Empty means the agent has no
     # such channel, so the SPA hides "Connected Channels" entirely.
