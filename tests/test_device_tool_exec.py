@@ -153,6 +153,8 @@ async def test_an_oversized_result_spills_onto_the_computer():
     write = registry.get("write_file").handler
     assert write.call_args.args[0]["path"].startswith(".surogates-results/")
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
+    # The spill reuses the runner of the call that produced the result.
+    assert write.call_args.kwargs["workspace_io"] is registry.get("search_files").handler.call_args.kwargs["workspace_io"]
 
 
 async def test_a_local_folder_session_never_gets_a_cloud_sandbox_spec():
