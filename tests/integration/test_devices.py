@@ -1442,3 +1442,86 @@ async def test_a_pong_does_not_wait_for_the_delivery_after_it(api, link_url, mon
             await asyncio.wait_for(started.wait(), 2.0)
         finally:
             release.set()
+
+
+def slow_deliveries(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
+    """Make every delivery batch stay in flight until the test releases it."""
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(self):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(link_module._Link, "deliver", slow)
+    return started, release
+
+
+async def test_a_ping_is_answered_during_the_delivery_at_welcome(api, link_url, monkeypatch):
+    issued = await register(api)
+    started, release = slow_deliveries(monkeypatch)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        try:
+            # The offline backlog is being sent; the app's heartbeat must not wait for it.
+            await asyncio.wait_for(started.wait(), 2.0)
+            await send(ws, {"type": "ping"})
+            assert await receive(ws, timeout=2.0) == {"type": "pong"}
+        finally:
+            release.set()
+
+
+async def test_pings_are_answered_during_a_delivery_that_a_ping_started(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "MIN_REFRESH_INTERVAL_S", 0.0)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        started, release = slow_deliveries(monkeypatch)
+        try:
+            await send(ws, {"type": "ping"})
+            assert await receive(ws, timeout=2.0) == {"type": "pong"}
+            await asyncio.wait_for(started.wait(), 2.0)
+            await send(ws, {"type": "ping"})
+            assert await receive(ws, timeout=2.0) == {"type": "pong"}
+        finally:
+            release.set()
+
+
+async def test_a_revocation_closes_the_link_during_a_delivery(api, link_url, redis_client, monkeypatch):
+    issued = await register(api)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        started, release = slow_deliveries(monkeypatch)
+        try:
+            # A worker's announcement starts a delivery that does not finish.
+            await DevicePresence(redis_client).publish(UUID(issued["id"]), f"op:{uuid.uuid4()}")
+            await asyncio.wait_for(started.wait(), 2.0)
+            await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+            assert await close_code(ws, timeout=2.0) == 4403
+        finally:
+            release.set()
+
+
+async def test_an_announcement_during_a_delivery_is_delivered_after_it(
+    api, link_url, redis_client, monkeypatch,
+):
+    issued = await register(api)
+    calls: list[int] = []
+    first_started, release = asyncio.Event(), asyncio.Event()
+
+    async def deliver(self):
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            first_started.set()
+            await release.wait()
+
+    monkeypatch.setattr(link_module._Link, "deliver", deliver)
+    async with linked(link_url, issued["token"]):
+        try:
+            await asyncio.wait_for(first_started.wait(), 2.0)  # the delivery at welcome
+            await DevicePresence(redis_client).publish(UUID(issued["id"]), f"op:{uuid.uuid4()}")
+            await asyncio.sleep(0.3)
+            assert calls == [1]
+        finally:
+            release.set()
+
+        async def delivered_again() -> bool:
+            return len(calls) == 2
+
+        await eventually(delivered_again)

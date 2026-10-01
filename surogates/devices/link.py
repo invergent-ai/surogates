@@ -32,17 +32,21 @@ a refused token from a proxy's HTTP error:
 Operations (kinds, arguments, outcomes and size limits:
 surogates.devices.workspace) go only to the connection holding the device's
 presence, under its current credentials.  Each is sent once per connection:
-after welcome, when a worker announces it, or just after a ping's pong (at
-most once a second).  A new connection is sent every operation still open, up
-to 100 at a time, so the app can see one again; the rest follow at the next
-reconcile or announcement.
+after welcome, when a worker announces it, or after a ping (at most once a
+second).  A task of its own sends them, so a long batch never delays a pong, a
+reply's acknowledgement or a revocation.  A new connection is sent every
+operation still open, up to 100 at a time, so the app can see one again; the
+rest follow at the next reconcile or announcement.
 The app keeps a journal by operation id: it runs each operation once and
 answers a repeat with the recorded outcome.  A reply for an operation this
 device was not given, or with another digest, is a protocol error (4400); a
 reply under rotated-out credentials closes with 4403.
 
 The app also drops the connection, and reconnects with backoff, when no welcome
-arrives within 10 s of connecting, or no pong within 2 x heartbeat_s of a ping.
+arrives within 10 s of connecting, or no frame from the server within
+2 x heartbeat_s of a ping.  Any frame counts as liveness, not only a pong:
+behind a buffering proxy a pong still queues behind the operation frames sent
+before it.
 """
 
 from __future__ import annotations
@@ -143,11 +147,26 @@ class _Link:
         self._operations = operations
         self._send_lock = asyncio.Lock()
         self._delivered: set[UUID] = set()
+        self._delivery_wanted = asyncio.Event()
 
     async def send(self, frame: dict[str, Any]) -> None:
         async with self._send_lock:
             async with asyncio.timeout(SEND_TIMEOUT_S):
                 await self._websocket.send_json(frame)
+
+    def deliver_soon(self) -> None:
+        """Ask the delivery task for a delivery; never waits for one."""
+        self._delivery_wanted.set()
+
+    async def deliveries(self) -> None:
+        """Deliver each time one is asked for, until the connection ends.
+
+        Asks that arrive during a delivery are answered by the next one.
+        """
+        while True:
+            await self._delivery_wanted.wait()
+            self._delivery_wanted.clear()
+            await self.deliver()
 
     async def deliver(self) -> None:
         """Send the device its open operations not yet sent on this connection.
@@ -247,7 +266,7 @@ async def serve_device_link(
             "name": device.name,
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
         })
-        await link.deliver()
+        link.deliver_soon()
         await _serve(link, pubsub, device=device, holder=holder, store=store, presence=presence)
     except _Close as close:
         with contextlib.suppress(Exception):
@@ -333,12 +352,17 @@ async def _serve(
     store: DeviceStore,
     presence: DevicePresence,
 ) -> None:
-    """Run the heartbeat and the control listener until either ends the connection."""
+    """Run the heartbeat, the control listener and the deliveries until one ends the connection.
+
+    Neither of the first two waits for a delivery: a long batch of frames
+    must not hold up a ping, a reply or a revocation.
+    """
     tasks = {
         asyncio.create_task(
             _heartbeats(link, device=device, holder=holder, store=store, presence=presence),
         ),
         asyncio.create_task(_control(link, pubsub, device=device, holder=holder, presence=presence)),
+        asyncio.create_task(link.deliveries()),
     }
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -383,11 +407,9 @@ async def _heartbeats(
             last_check = now
             _check_current(await _bounded(store.touch(device.id)), device)
         await link.send({"type": "pong"})
-        # After the pong, so a long batch of frames cannot outlast the app's
-        # pong deadline.  At most once a second, so a lost announcement
-        # strands nothing.
+        # At most once a second, so a lost announcement strands nothing.
         if reconcile:
-            await link.deliver()
+            link.deliver_soon()
 
 
 async def _control(
@@ -409,7 +431,7 @@ async def _control(
         kind, _, value = text.partition(":")
         # A worker announced an operation.
         if kind == "op":
-            await link.deliver()
+            link.deliver_soon()
             continue
         generation = int(value) if value.isdigit() else None
         # A revocation of an older generation predates this connection's token.
