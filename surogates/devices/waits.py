@@ -52,8 +52,13 @@ class DeviceWaitNotice:
             })
 
     async def _name(self, device_id: UUID) -> str:
-        async with self._sf() as db:
-            name = (await db.execute(select(Device.name).where(Device.id == device_id))).scalar_one_or_none()
+        # The name is a nicety: a database that cannot give it must not fail the wait.
+        try:
+            async with self._sf() as db:
+                name = (await db.execute(select(Device.name).where(Device.id == device_id))).scalar_one_or_none()
+        except Exception:
+            logger.warning("could not look up the name of device %s", device_id, exc_info=True)
+            return "your computer"
         return name or "your computer"
 
     async def _emit(self, session_id: UUID, event_type: EventType, data: dict[str, Any]) -> None:

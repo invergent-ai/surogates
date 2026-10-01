@@ -2222,3 +2222,30 @@ async def test_a_quick_answer_tells_no_one(laptop_rig, session_factory, redis_cl
     ops = noticing_journal(session_factory, redis_client)
     assert await asyncio.wait_for(ops.run(request_for(rig.device_id, rig.root)), 5.0) == {"ok": True}
     assert await device_wait_events(session_factory, rig.root) == []
+
+
+class UnreachableDatabase:
+    """A session factory whose sessions fail the moment they are used."""
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        raise OperationalError("SELECT 1", {}, ConnectionError("database unreachable"))
+
+    async def __aexit__(self, *exc) -> None:
+        return None
+
+
+async def test_a_failed_name_lookup_does_not_fail_the_wait_notice(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    request = request_for(rig.device_id, rig.root)
+    notice = DeviceWaitNotice(SessionStore(session_factory, redis_client), UnreachableDatabase())
+    await notice.away(request)  # must not raise
+    try:
+        events = await device_wait_events(session_factory, rig.root)
+        assert events == [("device.waiting", {
+            "device_id": str(rig.device_id), "device_name": "your computer", "reason": "offline",
+        })]
+    finally:
+        await notice.back(request)  # leave the process-wide count as it was
