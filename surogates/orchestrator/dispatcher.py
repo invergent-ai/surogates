@@ -479,6 +479,7 @@ class Orchestrator:
             agent_id=dequeued.agent_id if dequeued is not None else "",
             # The dispatch loop took a tenant slot only for a dequeued session.
             gate_held=dequeued is not None and self._turn_gate is not None,
+            session_id=str(session_id),
         )
         token = current_turn.set(slots)
         try:

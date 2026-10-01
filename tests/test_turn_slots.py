@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
@@ -51,12 +52,16 @@ class CountingGate:
         return True
 
 
-async def held_turn(*, gate: CountingGate | None = None) -> tuple[TurnSlots, asyncio.Semaphore, CountingGate]:
+async def held_turn(
+    *, gate: CountingGate | None = None, session_id: str = "",
+) -> tuple[TurnSlots, asyncio.Semaphore, CountingGate]:
     """A turn as the dispatcher starts one: its tenant slot and the worker's only semaphore slot taken."""
     semaphore = asyncio.Semaphore(1)
     await semaphore.acquire()
     gate = gate if gate is not None else CountingGate(held=1)
-    slots = TurnSlots(semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True)
+    slots = TurnSlots(
+        semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True, session_id=session_id,
+    )
     return slots, semaphore, gate
 
 
@@ -248,7 +253,7 @@ async def test_a_cancelled_take_back_is_given_back_at_the_end():
     assert gate.held == 0, "a tenant slot that was taken and never given back stays counted"
 
 
-async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end():
+async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end(caplog):
     slots, semaphore, gate = await held_turn(gate=CountingGate(held=1, fail_release=1))
     async with slots.activity():
         async with slots.waiting():
@@ -258,6 +263,21 @@ async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end():
     await slots.release_owned()
     assert gate.held == 0
     assert gate.calls.count("release") == 2
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], "a slot given back at the end did not leak"
+
+
+async def test_a_tenant_slot_that_cannot_be_given_back_at_the_end_is_logged_as_a_leak(caplog):
+    # The mid-turn give-back fails and so does the end of the turn: the gate has no TTL.
+    slots, semaphore, gate = await held_turn(gate=CountingGate(held=1, fail_release=2), session_id="sess-42")
+    async with slots.activity():
+        async with slots.waiting():
+            pass
+    await slots.release_owned()
+    assert gate.held == 1
+    leaks = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(leaks) == 1
+    message = leaks[0].getMessage()
+    assert "leaked" in message and "sess-42" in message and "org=org" in message and "agent=agent" in message
 
 
 async def test_a_new_activity_takes_the_slots_back_first():

@@ -44,11 +44,13 @@ class TurnSlots:
         org_id: str,
         agent_id: str,
         gate_held: bool,
+        session_id: str = "",
     ) -> None:
         self._semaphore = semaphore
         self._gate = gate
         self._org_id = org_id
         self._agent_id = agent_id
+        self._session_id = session_id
         # A turn that never had a tenant slot never takes one.
         self._uses_gate = gate is not None and gate_held
         self._gate_held = self._uses_gate
@@ -124,6 +126,12 @@ class TurnSlots:
         async with self._lock:
             self._ended = True
             await self._give_back()
+        if self._gate_held:
+            # Nothing gives it back later, and the gate has no TTL.
+            logger.error(
+                "tenant slot of org=%s agent=%s leaked by session %s (the turn gate has no TTL)",
+                self._org_id, self._agent_id, self._session_id,
+            )
 
     async def _give_back_if_all_waiting(self) -> None:
         if self._active > 0 and self._waiting >= self._active:

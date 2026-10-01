@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import uuid4
 
 import pytest
@@ -83,3 +84,18 @@ async def test_a_turn_without_a_dequeued_slot_releases_no_gate_slot(monkeypatch)
     await orchestrator._guarded_process(uuid4())
     assert gate.calls == []
     assert not orchestrator.semaphore.locked()
+
+
+async def test_a_tenant_slot_that_cannot_be_given_back_is_logged_with_its_session(monkeypatch, caplog):
+    gate = CountingGate(held=1, fail_release=1)
+    orchestrator = orchestrator_with(gate)
+    await orchestrator.semaphore.acquire()
+
+    async def process(session_id, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(orchestrator, "_process", process)
+    session_id = uuid4()
+    await orchestrator._guarded_process(session_id, dequeued=dequeued())
+    leaks = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(leaks) == 1 and str(session_id) in leaks[0].getMessage()
