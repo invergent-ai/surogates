@@ -16,16 +16,29 @@ import uvicorn
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy import select
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from surogates.db.agent_users import purge_user_account
+from surogates.db.models import DeviceOperation
 from surogates.devices import link as link_module
+from surogates.devices.operations import (
+    DeviceOperations,
+    JournalRunner,
+    OperationConflict,
+    OperationRequest,
+    operation_channel,
+)
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.store import DeviceStore
+from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
+from surogates.tools.workspace_io import LocalWorkspaceIO
+from tests.fake_laptop import perform
 
 from .conftest import create_org, create_user
 
@@ -722,3 +735,263 @@ async def test_a_stalled_release_still_closes_the_control_subscription(api, link
         return len(opened) == 1 and opened[0].connection is None
 
     await eventually(closed)
+
+
+ROOT = uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+
+def request_for(device_id: UUID, *, ordinal: int = 1, args: dict | None = None) -> OperationRequest:
+    return OperationRequest(
+        device_id=device_id,
+        root_session_id=ROOT,
+        calling_session_id=ROOT,
+        invocation_id=f"call-{uuid.uuid4()}",
+        ordinal=ordinal,
+        kind="which",
+        args=args if args is not None else {"name": "sh"},
+    )
+
+
+async def stop(task: asyncio.Task) -> None:
+    """Cancel a waiting operation and let it finish its cleanup."""
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def complete_pending(ops: DeviceOperations, device_id: UUID, folder, generation: int = 1) -> int:
+    """Act as the laptop once: run every open operation and record its outcome."""
+    done = 0
+    for op in await ops.pending(device_id, generation):
+        outcome = await perform(folder, op.kind, op.args)
+        await ops.complete(device_id, generation, op.id, op.digest, outcome)
+        done += 1
+    return done
+
+
+async def has_pending(ops: DeviceOperations, device_id: UUID, generation: int = 1) -> bool:
+    return bool(await ops.pending(device_id, generation))
+
+
+async def test_an_operation_waits_for_its_outcome(api, session_factory, redis_client, tmp_path):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    control = await DevicePresence(redis_client).subscribe(device_id)
+    try:
+        waiting = asyncio.create_task(ops.run(request_for(device_id)))
+        assert (await next_control(control)).startswith("op:")
+        await asyncio.sleep(0.1)
+        assert not waiting.done()
+        assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+        assert await asyncio.wait_for(waiting, 2.0) == {"ok": True}
+        assert await ops.pending(device_id, 1) == []
+    finally:
+        await control.aclose()
+
+
+async def test_a_repeated_request_gets_the_recorded_outcome(api, session_factory, redis_client, tmp_path):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id)
+    first = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path)))
+    assert await asyncio.wait_for(first, 2.0) == {"ok": True}
+    # The same tool call again, as after a worker crash: nothing new is queued.
+    assert await asyncio.wait_for(ops.run(request), 1.0) == {"ok": True}
+    assert await ops.pending(device_id, 1) == []
+
+
+def _fields(request: OperationRequest) -> dict:
+    return {name: getattr(request, name) for name in OperationRequest.__dataclass_fields__}
+
+
+async def test_a_changed_request_under_the_same_ordinal_is_a_conflict(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id)
+    waiting = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    changed = OperationRequest(**{**_fields(request), "args": {"name": "bash"}})
+    with pytest.raises(OperationConflict):
+        await ops.run(changed)
+    await stop(waiting)
+
+
+def test_an_operation_needs_an_invocation_id():
+    with pytest.raises(ValueError):
+        OperationRequest(**{**_fields(request_for(uuid.uuid4())), "invocation_id": ""})
+
+
+async def test_a_lost_completion_notice_is_caught_by_the_recheck(api, session_factory, redis_client, tmp_path):
+    device_id = UUID((await register(api))["id"])
+    worker = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+
+    class Silent:
+        async def publish(self, channel, message):
+            return 0
+
+    api_side = DeviceOperations(session_factory, Silent())
+    waiting = asyncio.create_task(worker.run(request_for(device_id)))
+    await eventually(lambda: has_pending(worker, device_id))
+    await complete_pending(api_side, device_id, LocalWorkspaceIO(str(tmp_path)))
+    assert await asyncio.wait_for(waiting, 2.0) == {"ok": True}
+
+
+async def test_a_redis_outage_while_waiting_does_not_fail_the_operation(
+    api, session_factory, redis_client, tmp_path,
+):
+    device_id = UUID((await register(api))["id"])
+
+    class Failing:
+        """The worker's Redis, refusing to publish."""
+
+        def pubsub(self):
+            return redis_client.pubsub()
+
+        async def publish(self, channel, message):
+            raise RedisConnectionError("redis went away")
+
+    worker = DeviceOperations(session_factory, Failing(), recheck_interval_s=0.2)
+    waiting = asyncio.create_task(worker.run(request_for(device_id)))
+    await eventually(lambda: has_pending(worker, device_id))
+    # Drop every pub/sub connection, as a Redis failover would.
+    await redis_client.execute_command("CLIENT", "KILL", "TYPE", "pubsub")
+    api_side = DeviceOperations(session_factory, redis_client)
+    await complete_pending(api_side, device_id, LocalWorkspaceIO(str(tmp_path)))
+    assert await asyncio.wait_for(waiting, 3.0) == {"ok": True}
+
+
+async def test_completing_checks_device_digest_and_credentials(api, session_factory, redis_client):
+    first = UUID((await register(api))["id"])
+    second = UUID((await register(api, name="Other laptop"))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(first)))
+    await eventually(lambda: has_pending(ops, first))
+    [op] = await ops.pending(first, 1)
+    assert await ops.pending(second, 1) == []
+
+    assert await ops.complete(second, 1, op.id, op.digest, {"ok": True}) == "rejected"
+    assert await ops.complete(first, 1, op.id, "0" * 64, {"ok": True}) == "rejected"
+    assert await ops.complete(first, 1, uuid.uuid4(), op.digest, {"ok": True}) == "rejected"
+    assert await ops.complete(first, 2, op.id, op.digest, {"ok": True}) == "stale"
+    assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "completed"
+    assert await ops.complete(first, 1, op.id, op.digest, {"ok": True}) == "duplicate"
+    assert await asyncio.wait_for(waiting, 2.0) == {"ok": True}
+
+
+async def test_old_credentials_are_offered_no_operations(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    await DeviceStore(session_factory).reauthorize(
+        device_id, org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+    )
+    assert await ops.pending(device_id, 1) == []
+    [op] = await ops.pending(device_id, 2)
+    assert await ops.complete(device_id, 1, op.id, op.digest, {"ok": True}) == "stale"
+    await stop(waiting)
+
+
+async def test_pending_skips_operations_already_delivered(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waits = [asyncio.create_task(ops.run(request_for(device_id))) for _ in range(3)]
+
+    async def three() -> bool:
+        return len(await ops.pending(device_id, 1)) == 3
+
+    await eventually(three)
+    first, second, third = await ops.pending(device_id, 1)
+    assert await ops.pending(device_id, 1, exclude={first.id, second.id}) == [third]
+    assert [op.id for op in await ops.pending(device_id, 1, limit=1, exclude={first.id})] == [second.id]
+    for task in waits:
+        await stop(task)
+
+
+async def test_revoking_fails_the_devices_open_operations(api, session_factory, redis_client):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    assert await asyncio.wait_for(waiting, 2.0) == {"error": {
+        "type": "revoked", "message": "Local access to this computer was revoked",
+    }}
+    # Restoring the device does not bring the cancelled work back.
+    await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
+    assert await ops.pending(device_id, 2) == []
+
+
+async def test_a_nul_in_an_operation_is_kept(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(device_id, args={"name": "a\x00b"})))
+    await eventually(lambda: has_pending(ops, device_id))
+    [op] = await ops.pending(device_id, 1)
+    assert op.args == {"name": "a\x00b"}
+    assert await ops.complete(device_id, 1, op.id, op.digest, {"ok": "x\x00y"}) == "completed"
+    assert await asyncio.wait_for(waiting, 2.0) == {"ok": "x\x00y"}
+
+
+async def test_a_completion_is_announced_on_the_operation_channel(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    [op] = await ops.pending(device_id, 1)
+    listener = redis_client.pubsub()
+    await listener.subscribe(operation_channel(op.id))
+    try:
+        await ops.complete(device_id, 1, op.id, op.digest, {"ok": False})
+        assert await next_control(listener) == "completed"
+    finally:
+        await listener.aclose()
+    assert await asyncio.wait_for(waiting, 2.0) == {"ok": False}
+
+
+async def test_a_tool_calls_operations_are_numbered_in_order(api, session_factory, redis_client, tmp_path):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    folder = LocalWorkspaceIO(str(tmp_path.resolve()))
+    invocation = f"call-{uuid.uuid4()}"
+    wio = DeviceWorkspaceIO(
+        JournalRunner(
+            ops, device_id=device_id, root_session_id=ROOT, calling_session_id=ROOT,
+            invocation_id=invocation,
+        ),
+        root=str(tmp_path.resolve()),
+    )
+
+    async def laptop() -> None:
+        while True:
+            await complete_pending(ops, device_id, folder)
+            await asyncio.sleep(0.05)
+
+    serving = asyncio.create_task(laptop())
+    try:
+        key = await asyncio.wait_for(wio.resolve("n.txt"), 5.0)
+        await asyncio.wait_for(wio.write(key, b"one"), 5.0)
+        assert await asyncio.wait_for(wio.read(key), 5.0) == b"one"
+    finally:
+        await stop(serving)
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeviceOperation.ordinal, DeviceOperation.kind)
+            .where(DeviceOperation.invocation_id == invocation)
+            .order_by(DeviceOperation.ordinal)
+        )).all()
+    assert [(r.ordinal, r.kind) for r in rows] == [(1, "resolve"), (2, "write"), (3, "read")]
+
+
+async def test_a_waiter_whose_device_is_deleted_gets_an_error(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    async with session_factory() as db:
+        await purge_user_account(db, org_id=api.org_id, user_id=api.user_id)
+        await db.commit()
+    with pytest.raises(DeviceOperationError):
+        await asyncio.wait_for(waiting, 2.0)

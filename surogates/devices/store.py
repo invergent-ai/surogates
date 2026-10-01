@@ -17,13 +17,16 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from surogates.db.models import Device
+from surogates.db.models import Device, DeviceOperation
 from surogates.tenant.auth.service_account import hash_token
 
 TOKEN_PREFIX = "surg_dev_"
 _DISPLAY_PREFIX_LEN = len(TOKEN_PREFIX) + 8
 # 33 raw bytes -> 44 chars of base64url: 264 bits, as for surg_sk_ keys.
 _SECRET_BYTES = 33
+
+#: The outcome of an operation cancelled because its device was revoked.
+REVOKED_OUTCOME = {"error": {"type": "revoked", "message": "Local access to this computer was revoked"}}
 
 
 def generate_token() -> str:
@@ -132,6 +135,18 @@ class DeviceStore:
                 .values(revoked_at=func.coalesce(Device.revoked_at, func.now()))
                 .returning(Device)
             )).scalar_one_or_none()
+            if row is not None:
+                # Revocation cancels the device's queued and running work, so a
+                # later reauthorization cannot run it.  Waiters see the outcome
+                # at their next recheck.
+                await db.execute(
+                    update(DeviceOperation)
+                    .where(
+                        DeviceOperation.device_id == row.id,
+                        DeviceOperation.completed_at.is_(None),
+                    )
+                    .values(outcome=REVOKED_OUTCOME, completed_at=func.now())
+                )
             await db.commit()
         return _record(row) if row is not None else None
 
