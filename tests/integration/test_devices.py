@@ -8,6 +8,8 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -37,8 +39,10 @@ from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
+from surogates.tools.builtin import file_ops
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
-from tests.fake_laptop import perform
+from tests.fake_laptop import FakeLaptop, perform
 
 from .conftest import create_org, create_user
 
@@ -504,7 +508,7 @@ async def test_a_first_frame_that_is_not_hello_is_a_protocol_error(api, link_url
 async def test_an_oversized_frame_is_a_protocol_error(api, link_url):
     issued = await register(api)
     async with linked(link_url, issued["token"]) as (ws, _):
-        await send(ws, {"type": "ping", "padding": "x" * 70_000})
+        await send(ws, {"type": "ping", "padding": "x" * (2 * 1024 * 1024 + 16)})
         assert await close_code(ws) == 4400
 
 
@@ -1052,3 +1056,227 @@ async def test_revoking_cancels_work_nobody_is_waiting_for(api, session_factory,
     # The same tool call again gets the cancellation back and queues nothing.
     assert await asyncio.wait_for(ops.run(request), 1.0) == REVOKED_OUTCOME
     assert await ops.pending(device_id, 2) == []
+
+
+def device_io(ops: DeviceOperations, device_id: UUID, folder: Path) -> DeviceWorkspaceIO:
+    """A WorkspaceIO for one tool call on *folder*, through the journal."""
+    return DeviceWorkspaceIO(
+        JournalRunner(
+            ops, device_id=device_id, root_session_id=ROOT, calling_session_id=ROOT,
+            invocation_id=f"call-{uuid.uuid4()}",
+        ),
+        root=str(folder),
+    )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def laptop_rig(api, link_url, session_factory, redis_client, tmp_path):
+    """A registered device, its folder, a worker-side journal, and a disconnected fake laptop."""
+    issued = await register(api)
+    folder = (tmp_path / "laptop").resolve()
+    folder.mkdir()
+    laptop = FakeLaptop(link_url, issued["token"], LocalWorkspaceIO(str(folder)))
+    rig = SimpleNamespace(
+        device_id=UUID(issued["id"]),
+        token=issued["token"],
+        folder=folder,
+        ops=DeviceOperations(session_factory, redis_client),
+        laptop=laptop,
+    )
+    yield rig
+    await laptop.disconnect()
+
+
+async def _first_op(ws) -> dict:
+    while True:
+        frame = await receive(ws)
+        if frame["type"] == "op":
+            return frame
+
+
+async def test_operations_run_on_the_laptop(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    key = await asyncio.wait_for(wio.resolve("notes.txt"), 5.0)
+    await asyncio.wait_for(wio.write(key, b"hello"), 5.0)
+    assert (rig.folder / "notes.txt").read_bytes() == b"hello"
+    assert await asyncio.wait_for(wio.read(key), 5.0) == b"hello"
+    result = await asyncio.wait_for(wio.run("cat notes.txt", workdir=None, timeout=10), 5.0)
+    assert result.output == "hello"
+    assert rig.laptop.ran == ["resolve", "write", "read", "run"]
+
+    async def all_acked() -> bool:
+        return rig.laptop.acked == set(rig.laptop.outcomes)
+
+    await eventually(all_acked)
+
+
+async def test_errors_cross_the_link_as_their_own_types(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    with pytest.raises(FileNotFoundError) as remote:
+        await asyncio.wait_for(wio.read(str(rig.folder / "missing.txt")), 5.0)
+    with pytest.raises(FileNotFoundError) as here:
+        await LocalWorkspaceIO(str(rig.folder)).read(str(rig.folder / "missing.txt"))
+    assert str(remote.value) == str(here.value)
+    with pytest.raises(WorkspaceSandboxError):
+        await asyncio.wait_for(wio.resolve("../outside.txt"), 5.0)
+
+
+async def test_large_and_binary_output_crosses_the_link(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    nul = await asyncio.wait_for(wio.run("printf 'a\\000b'", workdir=None, timeout=10), 5.0)
+    assert nul.output == "a\x00b"
+    big = await asyncio.wait_for(
+        wio.run("head -c 3000000 /dev/zero | tr '\\000' x", workdir=None, timeout=30), 10.0,
+    )
+    assert "chars omitted by the computer" in big.output
+    assert rig.laptop.connected
+
+
+async def test_a_tool_handler_works_over_the_link(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    written = json.loads(await asyncio.wait_for(file_ops._write_file_handler(
+        {"path": "plan.md", "content": "# Plan\n"},
+        workspace_io=device_io(rig.ops, rig.device_id, rig.folder),
+    ), 5.0))
+    assert written["status"] == "ok", written
+    assert (rig.folder / "plan.md").read_text() == "# Plan\n"
+    read = json.loads(await asyncio.wait_for(file_ops._read_file_handler(
+        {"path": "plan.md"}, workspace_io=device_io(rig.ops, rig.device_id, rig.folder),
+    ), 5.0))
+    assert read["content"] == "# Plan\n"
+
+
+async def test_an_operation_waits_for_the_laptop_to_connect(laptop_rig):
+    rig = laptop_rig
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    writing = asyncio.create_task(wio.write(str(rig.folder / "later.txt"), b"queued"))
+    await asyncio.sleep(0.3)
+    assert not writing.done()
+    await rig.laptop.connect()
+    await asyncio.wait_for(writing, 5.0)
+    assert (rig.folder / "later.txt").read_bytes() == b"queued"
+
+
+async def test_a_dropped_connection_does_not_run_an_operation_twice(laptop_rig):
+    rig = laptop_rig
+    rig.laptop.reply = False
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    running = asyncio.create_task(wio.run("echo once >> log.txt", workdir=None, timeout=10))
+
+    async def dropped() -> bool:
+        return rig.laptop.ran == ["run"] and not rig.laptop.connected
+
+    await eventually(dropped)
+    await rig.laptop.disconnect()
+    rig.laptop.reply = True
+    await rig.laptop.connect()
+    result = await asyncio.wait_for(running, 5.0)
+    assert result.returncode == 0
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+    # Delivered twice, run once.
+    assert len(rig.laptop.received) == 2 and len(set(rig.laptop.received)) == 1
+    assert rig.laptop.ran == ["run"]
+
+
+async def test_a_lost_announcement_is_delivered_at_a_ping(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+
+    class Silent:
+        """The worker's Redis, with its announcement lost."""
+
+        def pubsub(self):
+            return redis_client.pubsub()
+
+        async def publish(self, channel, message):
+            return 0
+
+    wio = device_io(DeviceOperations(session_factory, Silent()), rig.device_id, rig.folder)
+    assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
+
+
+async def test_a_reply_for_another_devices_operation_closes_the_link(api, link_url, laptop_rig):
+    rig = laptop_rig
+    other = await register(api, name="Other laptop")
+    waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    async with linked(link_url, other["token"]) as (ws, _):
+        await send(ws, {"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": True}})
+        assert await close_code(ws) == 4400
+    assert await rig.ops.pending(rig.device_id, 1) != []
+    await stop(waiting)
+
+
+@pytest.mark.parametrize("change", [
+    {"digest": "0" * 64},
+    {"digest": 7},
+    {"id": "not-a-uuid"},
+    {"outcome": {"neither": True}},
+    {"outcome": {"ok": True, "error": {"type": "os"}}},
+    {"outcome": {"error": "not an object"}},
+])
+async def test_a_bad_reply_closes_the_link_and_records_nothing(laptop_rig, link_url, change):
+    rig = laptop_rig
+    waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        await send(ws, {
+            "type": "op_result", "id": op["id"], "digest": op["digest"], "outcome": {"ok": True},
+            **change,
+        })
+        assert await close_code(ws) == 4400
+    assert await rig.ops.pending(rig.device_id, 1) != []
+    await stop(waiting)
+
+
+async def test_a_repeated_reply_is_acknowledged_again(laptop_rig, link_url):
+    rig = laptop_rig
+    waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        reply = {"type": "op_result", "id": op["id"], "digest": op["digest"], "outcome": {"ok": True}}
+        await send(ws, reply)
+        assert await receive(ws) == {"type": "op_ack", "id": op["id"]}
+        await send(ws, reply)
+        assert await receive(ws) == {"type": "op_ack", "id": op["id"]}
+    assert await asyncio.wait_for(waiting, 2.0) is True
+
+
+async def test_old_credentials_get_no_operations_and_cannot_reply(
+    api, laptop_rig, link_url, session_factory,
+):
+    rig = laptop_rig
+    async with linked(link_url, rig.token) as (ws, _):
+        # Rotate in the database only, as if the rotation notice were lost.
+        await DeviceStore(session_factory).reauthorize(
+            rig.device_id, org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+        )
+        waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+        await eventually(lambda: has_pending(rig.ops, rig.device_id, 2))
+        await send(ws, {"type": "ping"})
+        assert await receive(ws) == {"type": "pong"}
+        [op] = await rig.ops.pending(rig.device_id, 2)
+        await send(ws, {"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": True}})
+        assert await close_code(ws) == 4403
+    assert await rig.ops.pending(rig.device_id, 2) != []
+    await stop(waiting)
+
+
+async def test_operations_go_to_the_connection_that_took_over(laptop_rig, link_url):
+    rig = laptop_rig
+    async with linked(link_url, rig.token) as (old, _):
+        async with linked(link_url, rig.token) as (new, _):
+            assert await close_code(old) == 4409
+            waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+            op = await _first_op(new)
+            assert op["kind"] == "which"
+            await stop(waiting)

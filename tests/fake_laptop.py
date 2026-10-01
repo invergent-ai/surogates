@@ -8,10 +8,14 @@ the outcome the app would send.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import json
 from typing import Any
+
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed
 
 from surogates.devices.workspace import (
     MAX_MESSAGE_CHARS,
@@ -161,3 +165,81 @@ class InProcessRunner:
         wire = json.dumps(outcome)
         assert len(wire) <= MAX_MESSAGE_CHARS, f"{kind} outcome breaks the size contract"
         return json.loads(wire)
+
+
+class FakeLaptop:
+    """Surogate Desktop's side of the device link, in a test.
+
+    Keeps each operation's outcome by id, like the app's journal, so an
+    operation delivered again is answered without being run again.
+    """
+
+    def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
+        self.url = url
+        self.token = token
+        self.folder = folder
+        self.ping_interval_s = ping_interval_s
+        self.ran: list[str] = []
+        self.received: list[str] = []
+        self.outcomes: dict[str, dict[str, Any]] = {}
+        self.acked: set[str] = set()
+        self.reply = True
+        self.connected = False
+        self._ws: ClientConnection | None = None
+        self._tasks: list[asyncio.Task] = []
+
+    async def connect(self) -> None:
+        # The link's frames may be up to 2 MiB: one operation's 1 MiB of file
+        # data, base64-encoded, plus its envelope.
+        self._ws = await connect(
+            self.url,
+            additional_headers={"Authorization": f"Bearer {self.token}"},
+            max_size=4 * 1024 * 1024,
+        )
+        await self._ws.send(json.dumps({"type": "hello", "protocols": [1]}))
+        welcome = json.loads(await self._ws.recv())
+        assert welcome["type"] == "welcome", welcome
+        self.connected = True
+        self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._ping())]
+
+    async def disconnect(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._ws is not None:
+            await self._ws.close()
+        self.connected = False
+
+    async def _ping(self) -> None:
+        while True:
+            await asyncio.sleep(self.ping_interval_s)
+            await self._ws.send(json.dumps({"type": "ping"}))
+
+    async def _read(self) -> None:
+        try:
+            async for raw in self._ws:
+                frame = json.loads(raw)
+                if frame["type"] == "op":
+                    await self._handle(frame)
+                elif frame["type"] == "op_ack":
+                    self.acked.add(frame["id"])
+        except ConnectionClosed:
+            pass
+        finally:
+            self.connected = False
+
+    async def _handle(self, frame: dict[str, Any]) -> None:
+        operation_id = frame["id"]
+        self.received.append(operation_id)
+        if operation_id not in self.outcomes:
+            self.ran.append(frame["kind"])
+            self.outcomes[operation_id] = await perform(self.folder, frame["kind"], frame["args"])
+        if not self.reply:
+            await self._ws.close()
+            return
+        await self._ws.send(json.dumps({
+            "type": "op_result",
+            "id": operation_id,
+            "digest": frame["digest"],
+            "outcome": self.outcomes[operation_id],
+        }))

@@ -1,6 +1,7 @@
 """The device link: one authenticated WebSocket per connected desktop device.
 
-Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS.
+Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS (2 MiB); the app must
+accept frames that large.
 
   app -> server   {"type": "hello", "protocols": [1]}   first frame, within HELLO_TIMEOUT_S
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
@@ -8,6 +9,12 @@ Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS.
   app -> server   {"type": "ping"}                      every heartbeat_s
   server -> app   {"type": "pong"}
   app -> server   {"type": "revoke"}                    the app removes this device
+  server -> app   {"type": "op", "id", "session_id", "calling_session_id",
+                   "invocation_id", "ordinal", "kind", "args", "digest"}
+                                                         an operation to run
+  app -> server   {"type": "op_result", "id", "digest", "outcome"}
+                                                         outcome is {"ok": v} or {"error": {...}}
+  server -> app   {"type": "op_ack", "id"}               the outcome is recorded durably
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -22,6 +29,16 @@ a refused token from a proxy's HTTP error:
   4409  another connection of this device took over: this one ends
   1011  server trouble, as is any other close: the app reconnects with backoff
 
+Operations (kinds, arguments, outcomes and size limits:
+surogates.devices.workspace) go only to the connection holding the device's
+presence, under its current credentials.  Each is sent once per connection:
+after welcome, when a worker announces it, or at a ping's reconcile.  A new
+connection is sent every operation still open, so the app can see one again.
+The app keeps a journal by operation id: it runs each operation once and
+answers a repeat with the recorded outcome.  A reply for an operation this
+device was not given, or with another digest, is a protocol error (4400); a
+reply under rotated-out credentials closes with 4403.
+
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no pong within 2 x heartbeat_s of a ping.
 """
@@ -35,10 +52,12 @@ import logging
 import time
 from collections.abc import Awaitable
 from typing import Any, TypeVar
+from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio.client import PubSub
 
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import (
     HEARTBEAT_INTERVAL_S,
     PRESENCE_TTL_S,
@@ -64,7 +83,11 @@ IDLE_TIMEOUT_S = float(PRESENCE_TTL_S)
 LAST_SEEN_INTERVAL_S = 60.0
 # Pings faster than this are answered without touching Redis.
 MIN_REFRESH_INTERVAL_S = 1.0
-MAX_FRAME_CHARS = 64 * 1024
+# One operation's 1 MiB of file data, base64-encoded, plus its envelope (the
+# operation contract keeps every args object and outcome under 1.5 MiB).
+MAX_FRAME_CHARS = 2 * 1024 * 1024
+# A client that stops reading must not stall the connection's other work.
+SEND_TIMEOUT_S = 10.0
 
 CLOSE_PROTOCOL = 4400
 CLOSE_UNAUTHENTICATED = 4401
@@ -92,8 +115,82 @@ class _Close(Exception):
         self.reason = reason
 
 
+class _Link:
+    """One connection's sending side.
+
+    Frames go out one at a time, each within SEND_TIMEOUT_S.  Each open
+    operation is delivered once per connection; a repeat across connections is
+    harmless, because the app's journal answers it without running it again.
+    """
+
+    def __init__(
+        self,
+        websocket: WebSocket,
+        *,
+        device: DeviceRecord,
+        holder: str,
+        presence: DevicePresence,
+        operations: DeviceOperations,
+    ) -> None:
+        self._websocket = websocket
+        self._device = device
+        self._holder = holder
+        self._presence = presence
+        self._operations = operations
+        self._send_lock = asyncio.Lock()
+        self._delivered: set[UUID] = set()
+
+    async def send(self, frame: dict[str, Any]) -> None:
+        async with self._send_lock:
+            async with asyncio.timeout(SEND_TIMEOUT_S):
+                await self._websocket.send_json(frame)
+
+    async def deliver(self) -> None:
+        """Send the device its open operations not yet sent on this connection.
+
+        Only the connection holding the device's presence delivers, so a
+        superseded one that has not closed yet runs nothing.
+        """
+        if not await _bounded(self._presence.holds(self._device.id, self._holder)):
+            return
+        for operation in await _bounded(self._operations.pending(
+            self._device.id, self._device.credential_generation, exclude=self._delivered,
+        )):
+            # Marked before sending, so two concurrent deliveries cannot both send it.
+            self._delivered.add(operation.id)
+            await self.send(operation.frame())
+
+    async def record(self, frame: dict[str, Any]) -> None:
+        """Record an ``op_result`` durably, then acknowledge it."""
+        try:
+            operation_id = UUID(str(frame["id"]))
+        except (KeyError, ValueError):
+            raise _Close(CLOSE_PROTOCOL, "malformed op_result") from None
+        digest = frame.get("digest")
+        outcome = frame.get("outcome")
+        if (
+            not isinstance(digest, str)
+            or not isinstance(outcome, dict)
+            or len({"ok", "error"} & outcome.keys()) != 1
+            or ("error" in outcome and not isinstance(outcome["error"], dict))
+        ):
+            raise _Close(CLOSE_PROTOCOL, "malformed op_result")
+        status = await _bounded(self._operations.complete(
+            self._device.id, self._device.credential_generation, operation_id, digest, outcome,
+        ))
+        if status == "stale":
+            raise _Close(CLOSE_REVOKED, "credentials rotated")
+        if status == "rejected":
+            raise _Close(CLOSE_PROTOCOL, "result for an operation this device was not given")
+        await self.send({"type": "op_ack", "id": str(operation_id)})
+
+
 async def serve_device_link(
-    websocket: WebSocket, *, store: DeviceStore, presence: DevicePresence,
+    websocket: WebSocket,
+    *,
+    store: DeviceStore,
+    presence: DevicePresence,
+    operations: DeviceOperations,
 ) -> None:
     await websocket.accept()
     try:
@@ -122,7 +219,10 @@ async def serve_device_link(
         await _bounded(presence.claim(device.id, holder))
         # A revocation or rotation published before the subscription was missed.
         _check_current(await _bounded(store.touch(device.id)), device)
-        await websocket.send_json({
+        link = _Link(
+            websocket, device=device, holder=holder, presence=presence, operations=operations,
+        )
+        await link.send({
             "type": "welcome",
             "protocol": PROTOCOL_VERSION,
             "device_id": str(device.id),
@@ -132,7 +232,8 @@ async def serve_device_link(
             "name": device.name,
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
         })
-        await _serve(websocket, pubsub, device=device, holder=holder, store=store, presence=presence)
+        await link.deliver()
+        await _serve(link, pubsub, device=device, holder=holder, store=store, presence=presence)
     except _Close as close:
         with contextlib.suppress(Exception):
             await websocket.close(code=close.code, reason=close.reason)
@@ -209,7 +310,7 @@ def _check_current(current: DeviceRecord | None, device: DeviceRecord) -> None:
 
 
 async def _serve(
-    websocket: WebSocket,
+    link: _Link,
     pubsub: PubSub,
     *,
     device: DeviceRecord,
@@ -220,9 +321,9 @@ async def _serve(
     """Run the heartbeat and the control listener until either ends the connection."""
     tasks = {
         asyncio.create_task(
-            _heartbeats(websocket, device=device, holder=holder, store=store, presence=presence),
+            _heartbeats(link, device=device, holder=holder, store=store, presence=presence),
         ),
-        asyncio.create_task(_control(pubsub, device=device, holder=holder, presence=presence)),
+        asyncio.create_task(_control(link, pubsub, device=device, holder=holder, presence=presence)),
     }
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -235,7 +336,7 @@ async def _serve(
 
 
 async def _heartbeats(
-    websocket: WebSocket,
+    link: _Link,
     *,
     device: DeviceRecord,
     holder: str,
@@ -245,13 +346,16 @@ async def _heartbeats(
     last_check = last_refresh = time.monotonic()
     while True:
         try:
-            frame = await asyncio.wait_for(_receive_frame(websocket), IDLE_TIMEOUT_S)
+            frame = await asyncio.wait_for(_receive_frame(link._websocket), IDLE_TIMEOUT_S)
         except TimeoutError:
             raise _Close(CLOSE_IDLE, "heartbeat timeout") from None
         kind = frame.get("type")
         if kind == "revoke":
             await _bounded(store.revoke_by_id(device.id, device.credential_generation))
             raise _Close(CLOSE_REVOKED, "revoked")
+        if kind == "op_result":
+            await link.record(frame)
+            continue
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
         now = time.monotonic()
@@ -259,14 +363,22 @@ async def _heartbeats(
             last_refresh = now
             if not await _bounded(presence.refresh(device.id, holder)):
                 raise _Close(CLOSE_SUPERSEDED, "superseded")
+            # Reconcile at most once a second, so a lost announcement strands
+            # nothing.
+            await link.deliver()
         if now - last_check >= LAST_SEEN_INTERVAL_S:
             last_check = now
             _check_current(await _bounded(store.touch(device.id)), device)
-        await websocket.send_json({"type": "pong"})
+        await link.send({"type": "pong"})
 
 
 async def _control(
-    pubsub: PubSub, *, device: DeviceRecord, holder: str, presence: DevicePresence,
+    link: _Link,
+    pubsub: PubSub,
+    *,
+    device: DeviceRecord,
+    holder: str,
+    presence: DevicePresence,
 ) -> None:
     # ponytail: one pub/sub connection per device socket; share one subscriber
     # per pod when connected devices number in the thousands.
@@ -277,6 +389,10 @@ async def _control(
         data = message["data"]
         text = data.decode() if isinstance(data, bytes) else str(data)
         kind, _, value = text.partition(":")
+        # A worker announced an operation.
+        if kind == "op":
+            await link.deliver()
+            continue
         generation = int(value) if value.isdigit() else None
         # A revocation of an older generation predates this connection's token.
         if kind == "revoked" and generation is not None and generation >= device.credential_generation:

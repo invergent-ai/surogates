@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSoc
 from pydantic import BaseModel, StringConstraints
 
 from surogates.devices.link import serve_device_link
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
 from surogates.devices.store import DeviceRecord, DeviceStore, IssuedDevice
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
@@ -138,4 +139,7 @@ async def device_link(websocket: WebSocket) -> None:
         websocket,
         store=DeviceStore(websocket.app.state.session_factory),
         presence=DevicePresence(websocket.app.state.redis),
+        operations=DeviceOperations(
+            websocket.app.state.session_factory, websocket.app.state.redis,
+        ),
     )
