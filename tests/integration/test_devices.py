@@ -20,12 +20,14 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import DeviceOperation
 from surogates.devices import link as link_module
+from surogates.devices import operations as operations_module
 from surogates.devices.operations import (
     DeviceOperations,
     JournalRunner,
@@ -863,6 +865,100 @@ async def test_a_redis_outage_while_waiting_does_not_fail_the_operation(
     api_side = DeviceOperations(session_factory, redis_client)
     await complete_pending(api_side, device_id, LocalWorkspaceIO(str(tmp_path)))
     assert await asyncio.wait_for(waiting, 3.0) == {"ok": True}
+
+
+def a_dropped_connection() -> OperationalError:
+    """What a failover or reset makes the next database call raise."""
+    return OperationalError(
+        "SELECT ...", {}, ConnectionResetError("connection was closed in the middle of operation"),
+    )
+
+
+async def test_a_database_blip_while_waiting_does_not_fail_the_operation(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    real = DeviceOperations._outcome
+    rechecks = []
+
+    async def flaky(self, operation_id):
+        rechecks.append(operation_id)
+        if len(rechecks) == 2:  # the wait's second recheck
+            raise a_dropped_connection()
+        return await real(self, operation_id)
+
+    monkeypatch.setattr(DeviceOperations, "_outcome", flaky)
+    worker = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    writing = asyncio.create_task(
+        device_io(worker, rig.device_id, rig.folder).write(str(rig.folder / "deploy.txt"), b"ran\n"),
+    )
+
+    async def blipped() -> bool:
+        return len(rechecks) >= 2
+
+    await eventually(blipped)
+    # The laptop was already given the operation; the worker must still be there for its answer.
+    await rig.laptop.connect()
+    await asyncio.wait_for(writing, 5.0)
+    assert (rig.folder / "deploy.txt").read_bytes() == b"ran\n"
+    assert rig.laptop.ran == ["write"]
+    assert len(rechecks) >= 3
+
+
+async def test_a_database_blip_while_recording_does_not_fail_the_operation(
+    api, session_factory, redis_client, tmp_path, monkeypatch,
+):
+    device_id = UUID((await register(api))["id"])
+    real = DeviceOperations._record
+    attempts = []
+
+    async def flaky(self, request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise a_dropped_connection()
+        return await real(self, request)
+
+    monkeypatch.setattr(DeviceOperations, "_record", flaky)
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path)))
+    assert await asyncio.wait_for(waiting, 3.0) == {"ok": True}
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "blip"),
+    [
+        (a_dropped_connection(), True),
+        (InterfaceError("SELECT ...", {}, Exception("connection is closed")), True),
+        (DBAPIError("SELECT ...", {}, Exception("terminating connection"), connection_invalidated=True), True),
+        (ConnectionRefusedError("the primary is restarting"), True),
+        (TimeoutError("pool timeout"), True),
+        (DBAPIError("SELECT ...", {}, Exception("some other failure")), False),
+        (IntegrityError("INSERT ...", {}, Exception("duplicate key")), False),
+        (ProgrammingError("SELECT ...", {}, Exception("no such column")), False),
+        (OperationConflict("changed"), False),
+        (ValueError("bad"), False),
+    ],
+    ids=lambda case: type(case).__name__ if not isinstance(case, bool) else str(case),
+)
+async def test_only_a_database_out_of_reach_is_worth_waiting_out(error, blip):
+    assert operations_module._database_unavailable(error) is blip
+
+
+async def test_a_database_error_that_is_not_a_blip_is_not_retried(
+    api, session_factory, redis_client, monkeypatch,
+):
+    device_id = UUID((await register(api))["id"])
+
+    async def broken(self, operation_id):
+        raise ProgrammingError("SELECT ...", {}, Exception("column does not exist"))
+
+    monkeypatch.setattr(DeviceOperations, "_outcome", broken)
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    with pytest.raises(ProgrammingError):
+        await asyncio.wait_for(ops.run(request_for(device_id)), 2.0)
 
 
 async def test_completing_checks_device_digest_and_credentials(api, session_factory, redis_client):

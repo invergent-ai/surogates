@@ -14,15 +14,17 @@ import contextlib
 import hashlib
 import json
 import logging
-from collections.abc import Collection
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation
@@ -32,12 +34,26 @@ from surogates.devices.workspace import DeviceOperationError
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 RECHECK_INTERVAL_S = 5.0
 
 
 def operation_channel(operation_id: UUID) -> str:
     """Where the API announces that an operation's outcome was recorded."""
     return f"surogates:device_operation:{operation_id}"
+
+
+def _database_unavailable(exc: Exception) -> bool:
+    """Whether *exc* is the database being briefly out of reach, not a bug or a refusal.
+
+    A failover, a reset connection or an exhausted pool is.  An integrity or
+    programming error is not: asking again gets the same answer.
+    """
+    if isinstance(exc, DBAPIError):
+        # A failover's shutdown arrives as the generic DBAPIError, with its connection invalidated.
+        return isinstance(exc, (OperationalError, InterfaceError)) or exc.connection_invalidated
+    return isinstance(exc, (PoolTimeoutError, ConnectionError, TimeoutError))
 
 
 class OperationConflict(RuntimeError):
@@ -124,7 +140,9 @@ class DeviceOperations:
         joined, never repeated: its outcome comes back when the device reports
         it, or at once if it already has.
         """
-        operation_id, outcome = await self._record(request)
+        operation_id, outcome = await self._while_database_recovers(
+            "recording", lambda: self._record(request),
+        )
         if outcome is not None:
             return outcome
         await self._announce(control_channel(request.device_id), f"op:{operation_id}")
@@ -135,7 +153,9 @@ class DeviceOperations:
             try:
                 await pubsub.subscribe(operation_channel(operation_id))
                 while True:
-                    outcome = await self._outcome(operation_id)
+                    outcome = await self._while_database_recovers(
+                        "waiting for", lambda: self._outcome(operation_id),
+                    )
                     if outcome is not None:
                         return outcome
                     await pubsub.get_message(
@@ -144,13 +164,32 @@ class DeviceOperations:
             except RedisError:
                 # Postgres is the authority: keep checking it while Redis recovers.
                 logger.warning("waiting for operation %s without Redis", operation_id, exc_info=True)
-                outcome = await self._outcome(operation_id)
+                outcome = await self._while_database_recovers(
+                    "waiting for", lambda: self._outcome(operation_id),
+                )
                 if outcome is not None:
                     return outcome
                 await asyncio.sleep(self._recheck_interval_s)
             finally:
                 with contextlib.suppress(Exception):
                     await pubsub.aclose()
+
+    async def _while_database_recovers(
+        self, what: str, call: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        """Await *call*, asking again every recheck interval while the database is unreachable.
+
+        The device may already be running the operation, so a failed wait
+        would tell the model it failed while a retry started it again.
+        """
+        while True:
+            try:
+                return await call()
+            except Exception as exc:
+                if not _database_unavailable(exc):
+                    raise
+                logger.warning("%s an operation: database unavailable (%s); retrying", what, type(exc).__name__)
+                await asyncio.sleep(self._recheck_interval_s)
 
     async def _announce(self, channel: str, message: str) -> None:
         """Publish a wake-up, best effort: the next reconcile or recheck covers a lost one."""
