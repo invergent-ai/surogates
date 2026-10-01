@@ -36,7 +36,7 @@ from typing import Any
 from uuid import UUID
 
 from surogates.config import enqueue_session
-from surogates.runtime.turn_gate import released_for_wait
+from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -255,7 +255,6 @@ async def _delegate_handler(
     session_factory = kwargs.get("session_factory")
     memory_manager = kwargs.get("memory_manager")
     bundle = kwargs.get("bundle")
-    turn_gate = kwargs.get("turn_gate")
 
     if session_store is None:
         return json.dumps({"error": "session_store not available for delegation"})
@@ -327,16 +326,11 @@ async def _delegate_handler(
     remaining = budget.remaining if budget else _CHILD_MAX_ITERATIONS
     per_child_budget = max(1, remaining // max(1, len(tasks)))
 
-    # The parent is about to spend up to 15 minutes idle inside
-    # _poll_child_completion waiting for the child, so it gives its gate slot
-    # back for the duration -- otherwise a deep delegation chain saturates
-    # its own per-tenant cap with sleepers.
-    parent_org_id = str(parent_session.org_id)
-    parent_agent_id = parent_session.agent_id
-
-    async with released_for_wait(
-        turn_gate, parent_org_id, parent_agent_id, context="delegate_task",
-    ):
+    # The parent is about to spend up to an hour idle inside
+    # _poll_child_completion waiting for its children, so its turn gives its
+    # worker and tenant slots back for the duration -- otherwise a deep
+    # delegation chain saturates its own per-tenant cap with sleepers.
+    async with turn_waiting():
         results = await asyncio.gather(*[
             _run_single_delegation(
                 task=task,
