@@ -174,10 +174,6 @@ class TurnSlots:
                     "running on and counting it as held",
                     self._org_id, self._agent_id, exc_info=True,
                 )
-            if not self._gate_held:
-                # The gate refused outright: run on without a tenant slot. The
-                # cap is a guideline, not a correctness constraint.
-                self._uses_gate = False
         if not self._semaphore_held:
             await self._semaphore.acquire()
             self._semaphore_held = True
