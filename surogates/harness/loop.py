@@ -466,7 +466,6 @@ class AgentHarness(
         media_gen: Any | None = None,
         turn_summarizer: Any | None = None,
         bundle: Any | None = None,
-        turn_gate: Any | None = None,
         mcp_tool_names: frozenset[str] | None = None,
         composio_tool_names: frozenset[str] | None = None,
         slash_commands: SlashCommandConfig | None = None,
@@ -551,16 +550,6 @@ class AgentHarness(
         # builder, future skill staging).  ``None`` for agents
         # whose first publish hasn't landed yet.
         self._bundle: Any | None = bundle
-
-        # Per-tenant TurnConcurrencyGate.  Wired through the tool
-        # executor's kwargs so handlers that block on something
-        # external (delegate_task polling a child, future
-        # long-running waits) can ``release()`` their slot while
-        # idle and ``try_acquire()`` it back before the parent
-        # resumes producing work.  Optional -- standalone harness
-        # tests don't construct one and the tools no-op when it's
-        # absent.
-        self._turn_gate: Any | None = turn_gate
 
         # Optional dedicated vision client.  When the active LLM does not
         # support image input, ``_prepare_messages_for_model_vision_support``
@@ -1926,7 +1915,6 @@ class AgentHarness(
                     governance_gate=self._governance_gate,
                     tool_guardrails=tool_guardrails,
                     bundle=self._bundle,
-                    turn_gate=self._turn_gate,
                     platform_client=self._platform_client,
                     expert_transcript=expert_transcript,
                 )
@@ -2809,7 +2797,6 @@ class AgentHarness(
                         log_policy_allowed=self._log_policy_allowed,
                         governance_gate=self._governance_gate,
                         bundle=self._bundle,
-                        turn_gate=self._turn_gate,
                         platform_client=self._platform_client,
                         expert_transcript=expert_transcript,
                     )

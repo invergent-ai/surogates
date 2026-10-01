@@ -756,7 +756,6 @@ async def execute_tool_calls(
     governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -814,7 +813,6 @@ async def execute_tool_calls(
             log_policy_allowed=log_policy_allowed,
             governance_gate=governance_gate,
             bundle=bundle,
-            turn_gate=turn_gate,
             platform_client=platform_client,
         expert_transcript=expert_transcript,
         )
@@ -849,7 +847,6 @@ async def execute_tool_calls(
         governance_gate=governance_gate,
         tool_guardrails=tool_guardrails,
         bundle=bundle,
-        turn_gate=turn_gate,
         platform_client=platform_client,
         expert_transcript=expert_transcript,
     )
@@ -887,7 +884,6 @@ async def execute_tool_calls_sequential(
     governance_gate: GovernanceGate | None = None,
     tool_guardrails: ToolGuardrails | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -946,7 +942,6 @@ async def execute_tool_calls_sequential(
             log_policy_allowed=log_policy_allowed,
             governance_gate=governance_gate,
             bundle=bundle,
-            turn_gate=turn_gate,
             platform_client=platform_client,
             expert_transcript=expert_transcript,
             interrupt_check=interrupt_check,
@@ -1002,7 +997,6 @@ async def execute_tool_calls_concurrent(
     log_policy_allowed: bool = False,
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
 ) -> list[dict]:
@@ -1068,7 +1062,6 @@ async def execute_tool_calls_concurrent(
                 log_policy_allowed=log_policy_allowed,
                 governance_gate=governance_gate,
                 bundle=bundle,
-                turn_gate=turn_gate,
                 platform_client=platform_client,
                 expert_transcript=expert_transcript,
                 interrupt_check=interrupt_check,
@@ -1194,7 +1187,6 @@ async def _run_single_tool(
     log_policy_allowed: bool = False,
     governance_gate: GovernanceGate | None = None,
     bundle: Any | None = None,
-    turn_gate: Any | None = None,
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
@@ -1635,7 +1627,6 @@ async def _run_single_tool(
                 lease_token=lease.lease_token,
                 session_config=session.config,
                 bundle=bundle,
-                turn_gate=turn_gate,
                 platform_client=platform_client,
                 expert_transcript=expert_transcript,
                 interrupt_check=interrupt_check,
