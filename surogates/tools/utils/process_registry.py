@@ -1036,12 +1036,16 @@ PROCESS_SCHEMA = {
 # Process tool handler
 # ---------------------------------------------------------------------------
 
-def _handle_process(args: dict[str, Any], **kw: Any) -> str:
+async def _handle_process(args: dict[str, Any], **kw: Any) -> str:
     """Handle ``process`` tool invocations.
 
-    Dispatches to the appropriate :class:`ProcessRegistry` method based on
-    the ``action`` field in *args*.
+    Dispatches the ``action`` field in *args* to the session's workspace,
+    which owns its background processes.
     """
+    # workspace_io.local imports this module, so import it here, not at the top.
+    from surogates.tools.workspace_io import workspace_io_from
+
+    wio = workspace_io_from(kw)
     task_id = kw.get("task_id")
     action = args.get("action", "")
     # Coerce to string -- some models send session_id as an integer
@@ -1053,10 +1057,10 @@ def _handle_process(args: dict[str, Any], **kw: Any) -> str:
 
     if action == "list":
         return json.dumps(
-            {"processes": process_registry.list_sessions(task_id=task_id)},
+            {"processes": await wio.list_processes(task_id)},
             ensure_ascii=False,
         )
-    elif action in ("poll", "log", "wait", "kill", "write", "submit"):
+    if action in ("poll", "log", "wait", "kill", "write", "submit"):
         if not session_id:
             return json.dumps(
                 {
@@ -1066,44 +1070,22 @@ def _handle_process(args: dict[str, Any], **kw: Any) -> str:
                 ensure_ascii=False,
             )
         if action == "poll":
-            return json.dumps(
-                process_registry.poll(session_id), ensure_ascii=False
-            )
+            result = await wio.poll(session_id)
         elif action == "log":
-            return json.dumps(
-                process_registry.read_log(
-                    session_id,
-                    offset=args.get("offset", 0),
-                    limit=args.get("limit", 200),
-                ),
-                ensure_ascii=False,
+            result = await wio.read_output(
+                session_id,
+                offset=args.get("offset", 0),
+                limit=args.get("limit", 200),
             )
         elif action == "wait":
-            return json.dumps(
-                process_registry.wait(
-                    session_id, timeout=args.get("timeout")
-                ),
-                ensure_ascii=False,
-            )
+            result = await wio.wait(session_id, timeout=args.get("timeout"))
         elif action == "kill":
-            return json.dumps(
-                process_registry.kill_process(session_id),
-                ensure_ascii=False,
-            )
+            result = await wio.kill(session_id)
         elif action == "write":
-            return json.dumps(
-                process_registry.write_stdin(
-                    session_id, str(args.get("data", ""))
-                ),
-                ensure_ascii=False,
-            )
-        elif action == "submit":
-            return json.dumps(
-                process_registry.submit_stdin(
-                    session_id, str(args.get("data", ""))
-                ),
-                ensure_ascii=False,
-            )
+            result = await wio.write_stdin(session_id, str(args.get("data", "")))
+        else:  # submit: data + Enter, for answering prompts
+            result = await wio.write_stdin(session_id, str(args.get("data", "")) + "\n")
+        return json.dumps(result, ensure_ascii=False)
     return json.dumps(
         {
             "status": "error",
@@ -1140,5 +1122,4 @@ def register(registry: Any) -> None:
         ),
         handler=_handle_process,
         toolset="terminal",
-        is_async=False,
     )
