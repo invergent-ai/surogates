@@ -32,7 +32,7 @@ from surogates.devices.operations import (
     operation_channel,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
-from surogates.devices.store import DeviceStore
+from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -1006,3 +1006,49 @@ async def test_an_operation_for_a_revoked_device_fails_at_once(api, session_fact
         "type": "revoked", "message": "Local access to this computer was revoked",
     }}
     assert await ops.pending(device_id, 1) == []
+
+
+async def test_a_reply_that_races_a_reauthorization_is_stale(
+    api, session_factory, redis_client, monkeypatch,
+):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(device_id)))
+    await eventually(lambda: has_pending(ops, device_id))
+    [op] = await ops.pending(device_id, 1)
+
+    current = DeviceOperations._current
+    rotations = []
+
+    async def rotating(self, db, device, generation):
+        """The credentials check out, then rotate before the reply is written."""
+        valid = await current(self, db, device, generation)
+        if not rotations:
+            rotations.append(await DeviceStore(session_factory).reauthorize(
+                device, org_id=api.org_id, agent_id=AGENT_ID, user_id=api.user_id,
+            ))
+        return valid
+
+    with monkeypatch.context() as patched:
+        patched.setattr(DeviceOperations, "_current", rotating)
+        assert await ops.complete(device_id, 1, op.id, op.digest, {"ok": "forged"}) == "stale"
+    assert rotations
+    assert not waiting.done()
+    assert [pending.id for pending in await ops.pending(device_id, 2)] == [op.id]
+    await stop(waiting)
+
+
+async def test_revoking_cancels_work_nobody_is_waiting_for(api, session_factory, redis_client):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id)
+    waiting = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    await stop(waiting)  # the worker is gone before the device is revoked
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
+    assert await ops.pending(device_id, 2) == []
+    # The same tool call again gets the cancellation back and queues nothing.
+    assert await asyncio.wait_for(ops.run(request), 1.0) == REVOKED_OUTCOME
+    assert await ops.pending(device_id, 2) == []

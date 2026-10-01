@@ -21,7 +21,7 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -287,6 +287,9 @@ class DeviceOperations:
         "duplicate": already recorded.  "rejected": unknown, another device's,
         or asked for with a different digest.  "stale": the reply came under
         rotated-out or revoked credentials.
+
+        The credential check is part of the write, not a step before it, so a
+        reauthorization or revocation cannot land between the two.
         """
         async with self._sf() as db:
             if not await self._current(db, device_id, generation):
@@ -298,6 +301,11 @@ class DeviceOperations:
                     DeviceOperation.device_id == device_id,
                     DeviceOperation.digest == digest,
                     DeviceOperation.completed_at.is_(None),
+                    exists().where(
+                        Device.id == DeviceOperation.device_id,
+                        Device.credential_generation == generation,
+                        Device.revoked_at.is_(None),
+                    ),
                 )
                 .values(outcome=outcome, completed_at=func.now())
                 .returning(DeviceOperation.id)
@@ -305,6 +313,10 @@ class DeviceOperations:
             await db.commit()
             row = None
             if completed is None:
+                # Credentials only move forward, so a write refused for them
+                # is still stale when read back.
+                if not await self._current(db, device_id, generation):
+                    return "stale"
                 row = (await db.execute(
                     select(DeviceOperation.device_id, DeviceOperation.digest)
                     .where(DeviceOperation.id == operation_id)
