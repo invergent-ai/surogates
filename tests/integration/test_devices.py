@@ -28,7 +28,7 @@ from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Device, DeviceOperation
 from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
-from surogates.devices.binding import BIND, Binding, binding_of
+from surogates.devices.binding import BIND, Binding, binding_of, device_of
 from surogates.devices.operations import (
     DeviceOperations,
     JournalRunner,
@@ -1423,6 +1423,11 @@ async def test_a_session_whose_binding_was_never_recorded_has_failed(api):
     device_id = UUID((await register(api))["id"])
     root = await device_session(api, device_id)
     assert await binding(api, root) == Binding("failed", "The computer was never asked to set it up")
+
+
+async def test_a_malformed_execution_config_names_no_device():
+    for config in ({"execution": "device"}, {"execution": ["device"]}, {"execution": None}, None):
+        assert device_of(config) is None
 
 
 async def test_a_binding_on_a_revoked_device_fails(api, session_factory, redis_client):

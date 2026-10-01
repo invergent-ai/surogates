@@ -26,8 +26,8 @@ BIND = "bind"
 
 def device_of(config: dict[str, Any] | None) -> UUID | None:
     """The device a session works on, or None for a session in the cloud."""
-    execution = (config or {}).get("execution") or {}
-    if execution.get("kind") != "device":
+    execution = (config or {}).get("execution")
+    if not isinstance(execution, dict) or execution.get("kind") != "device":
         return None
     return UUID(execution["device_id"])
 
