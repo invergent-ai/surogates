@@ -1280,3 +1280,24 @@ async def test_operations_go_to_the_connection_that_took_over(laptop_rig, link_u
             op = await _first_op(new)
             assert op["kind"] == "which"
             await stop(waiting)
+
+
+async def test_a_pong_does_not_wait_for_the_delivery_after_it(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "MIN_REFRESH_INTERVAL_S", 0.0)
+    issued = await register(api)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_delivery(self):
+        started.set()
+        await release.wait()
+
+    async with linked(link_url, issued["token"]) as (ws, _):
+        monkeypatch.setattr(link_module._Link, "deliver", slow_delivery)
+        await send(ws, {"type": "ping"})
+        # The delivery cannot finish until the test releases it, so a pong
+        # that waited for it would never arrive.
+        try:
+            assert await receive(ws) == {"type": "pong"}
+            await asyncio.wait_for(started.wait(), 2.0)
+        finally:
+            release.set()

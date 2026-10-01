@@ -32,8 +32,10 @@ a refused token from a proxy's HTTP error:
 Operations (kinds, arguments, outcomes and size limits:
 surogates.devices.workspace) go only to the connection holding the device's
 presence, under its current credentials.  Each is sent once per connection:
-after welcome, when a worker announces it, or at a ping's reconcile.  A new
-connection is sent every operation still open, so the app can see one again.
+after welcome, when a worker announces it, or just after a ping's pong (at
+most once a second).  A new connection is sent every operation still open, up
+to 100 at a time, so the app can see one again; the rest follow at the next
+reconcile or announcement.
 The app keeps a journal by operation id: it runs each operation once and
 answers a repeat with the recorded outcome.  A reply for an operation this
 device was not given, or with another digest, is a protocol error (4400); a
@@ -119,8 +121,9 @@ class _Link:
     """One connection's sending side.
 
     Frames go out one at a time, each within SEND_TIMEOUT_S.  Each open
-    operation is delivered once per connection; a repeat across connections is
-    harmless, because the app's journal answers it without running it again.
+    operation is delivered once per connection, and ``_delivered`` holds the
+    ones sent but not yet answered; a repeat across connections is harmless,
+    because the app's journal answers it without running it again.
     """
 
     def __init__(
@@ -156,7 +159,10 @@ class _Link:
         for operation in await _bounded(self._operations.pending(
             self._device.id, self._device.credential_generation, exclude=self._delivered,
         )):
-            # Marked before sending, so two concurrent deliveries cannot both send it.
+            # Another delivery may have sent it while this one's query ran.
+            # Checked and marked with no await between, so only one sends it.
+            if operation.id in self._delivered:
+                continue
             self._delivered.add(operation.id)
             await self.send(operation.frame())
 
@@ -182,6 +188,10 @@ class _Link:
             raise _Close(CLOSE_REVOKED, "credentials rotated")
         if status == "rejected":
             raise _Close(CLOSE_PROTOCOL, "result for an operation this device was not given")
+        # Answered operations never come back from pending(), so only the
+        # unanswered ones need excluding; this keeps the set, and the query
+        # that carries it, bounded on a long-lived connection.
+        self._delivered.discard(operation_id)
         await self.send({"type": "op_ack", "id": str(operation_id)})
 
 
@@ -359,17 +369,20 @@ async def _heartbeats(
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
         now = time.monotonic()
-        if now - last_refresh >= MIN_REFRESH_INTERVAL_S:
+        reconcile = now - last_refresh >= MIN_REFRESH_INTERVAL_S
+        if reconcile:
             last_refresh = now
             if not await _bounded(presence.refresh(device.id, holder)):
                 raise _Close(CLOSE_SUPERSEDED, "superseded")
-            # Reconcile at most once a second, so a lost announcement strands
-            # nothing.
-            await link.deliver()
         if now - last_check >= LAST_SEEN_INTERVAL_S:
             last_check = now
             _check_current(await _bounded(store.touch(device.id)), device)
         await link.send({"type": "pong"})
+        # After the pong, so a long batch of frames cannot outlast the app's
+        # pong deadline.  At most once a second, so a lost announcement
+        # strands nothing.
+        if reconcile:
+            await link.deliver()
 
 
 async def _control(
