@@ -182,6 +182,10 @@ class FakeLaptop:
         self.ran: list[str] = []
         self.received: list[str] = []
         self.outcomes: dict[str, dict[str, Any]] = {}
+        # What the user confirmed with prepareFolder: nonce -> folder.
+        self.prepared: dict[str, str] = {}
+        # Root session id -> the folder the app bound it to.
+        self.bindings: dict[str, str] = {}
         self.acked: set[str] = set()
         self.reply = True
         self.connected = False
@@ -201,6 +205,10 @@ class FakeLaptop:
         assert welcome["type"] == "welcome", welcome
         self.connected = True
         self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._ping())]
+
+    def prepare(self, nonce: str, folder: str) -> None:
+        """Stand in for the user confirming *folder* for a new chat."""
+        self.prepared[nonce] = folder
 
     async def disconnect(self) -> None:
         for task in self._tasks:
@@ -228,12 +236,24 @@ class FakeLaptop:
         finally:
             self.connected = False
 
+    def _bind(self, frame: dict[str, Any]) -> dict[str, Any]:
+        args = frame["args"]
+        # One use, like the app's preparation token.
+        folder = self.prepared.pop(args["nonce"], None)
+        if folder is None or folder != args["folder"]:
+            return {"error": {"type": "binding", "message": "This folder was not confirmed on this computer"}}
+        self.bindings[frame["session_id"]] = folder
+        return {"ok": None}
+
     async def _handle(self, frame: dict[str, Any]) -> None:
         operation_id = frame["id"]
         self.received.append(operation_id)
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
-            self.outcomes[operation_id] = await perform(self.folder, frame["kind"], frame["args"])
+            self.outcomes[operation_id] = (
+                self._bind(frame) if frame["kind"] == "bind"
+                else await perform(self.folder, frame["kind"], frame["args"])
+            )
         if not self.reply:
             await self._ws.close()
             return

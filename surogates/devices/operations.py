@@ -28,6 +28,8 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation
+from surogates.db.models import Session as SessionRow
+from surogates.devices.binding import BIND, binding_of, device_of
 from surogates.devices.presence import control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
@@ -58,6 +60,41 @@ def _database_unavailable(exc: Exception) -> bool:
 
 class OperationConflict(RuntimeError):
     """The same invocation and ordinal were recorded with a different request."""
+
+
+async def _check_session(db: AsyncSession, request: OperationRequest, device: Any) -> None:
+    """Refuse a request for a session that is not this device's, or not bound to it yet.
+
+    The root session must name the device and belong to the device's user and
+    agent; the calling session must be the root, or a session created under it.
+    """
+    rows = (await db.execute(
+        select(SessionRow.id, SessionRow.org_id, SessionRow.agent_id, SessionRow.user_id, SessionRow.config)
+        .where(SessionRow.id.in_([request.root_session_id, request.calling_session_id]))
+    )).all()
+    sessions = {row.id: row for row in rows}
+    root = sessions.get(request.root_session_id)
+    calling = sessions.get(request.calling_session_id)
+    if (
+        root is None
+        or calling is None
+        or device_of(root.config) != request.device_id
+        or (root.org_id, root.agent_id, root.user_id) != (device.org_id, device.agent_id, device.user_id)
+        or (
+            request.calling_session_id != request.root_session_id
+            and (calling.config or {}).get("sandbox_root_session_id") != str(request.root_session_id)
+        )
+    ):
+        raise DeviceOperationError("This session does not work on this computer")
+    is_binding = (
+        request.calling_session_id == request.root_session_id
+        and request.invocation_id == BIND
+        and request.ordinal == 0
+    )
+    if (request.kind == BIND) != is_binding:
+        raise ValueError("Only the root session's own first operation is its binding")
+    if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
+        raise DeviceOperationError("This session's folder is not set up on this computer yet")
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +249,25 @@ class DeviceOperations:
         except Exception:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
+    async def bind(self, *, session_id: UUID, device_id: UUID, folder: str, nonce: str) -> None:
+        """Ask the device to bind a new root session to *folder*, without waiting.
+
+        The app answers once its user has confirmed that folder under *nonce*.
+        For an HTTP request, so a database outage fails it rather than holding
+        it open.
+        """
+        operation_id, outcome = await self._record(OperationRequest(
+            device_id=device_id,
+            root_session_id=session_id,
+            calling_session_id=session_id,
+            invocation_id=BIND,
+            ordinal=0,
+            kind=BIND,
+            args={"folder": folder, "nonce": nonce},
+        ))
+        if outcome is None:
+            await self._announce(control_channel(device_id), f"op:{operation_id}")
+
     async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
         """Record *request*, or find it already recorded.
 
@@ -231,12 +287,13 @@ class DeviceOperations:
             # update sees the new operation.  Without it the insert could commit
             # just after that update and run once the device is reauthorized.
             device = (await db.execute(
-                select(Device.revoked_at)
+                select(Device.revoked_at, Device.org_id, Device.agent_id, Device.user_id)
                 .where(Device.id == request.device_id)
                 .with_for_update(read=True)
             )).one_or_none()
             if device is None:
                 raise DeviceOperationError("This computer was removed")
+            await _check_session(db, request, device)
             refused = (
                 {"outcome": REVOKED_OUTCOME, "completed_at": func.now()}
                 if device.revoked_at is not None

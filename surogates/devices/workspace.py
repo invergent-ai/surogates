@@ -6,6 +6,7 @@ laptop runs against the session's bound folder, answered by an outcome,
 enforces its rules; the worker never touches the folder.
 
   kind            args                                          ok value
+  bind            folder, nonce                                 null
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
   stat            key                                           {is_dir, size, mtime} or null
@@ -24,6 +25,14 @@ enforces its rules; the worker never touches the folder.
   kill            session_id                                    process status (object)
   write_stdin     session_id, data                              status (object)
   list_processes  task_id                                       [process summary]
+
+bind is a session's first operation, sent when the server creates a chat that
+works on a folder of this computer.  The app answers it only after its user
+confirmed that folder for this agent under the same nonce, and after it
+recorded the binding; it refuses one it cannot match with
+{"type": "binding", "message"}.  Every other operation is for a session the
+app bound, or one created under it, and runs in the folder the app recorded,
+whatever the request says.
 
 An error names the exception the worker raises again:
 
