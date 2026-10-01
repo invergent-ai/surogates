@@ -304,3 +304,16 @@ async def test_retrying_a_chat_waits_for_the_binding(api):
     response = await api.client.post(f"/v1/sessions/{session_id}/retry", headers=api.auth())
     assert response.status_code == 409, response.text
     assert "still being set up" in response.json()["detail"]
+
+
+async def test_the_orphan_sweep_leaves_a_waiting_local_chat_alone(api):
+    device = await register(api)
+    local_id = await local_chat(api, device["id"])
+    cloud = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert cloud.status_code == 201, cloud.text
+    orphans = await api.app.state.session_store.find_orphaned_sessions(
+        stale_seconds=0, agent_id=AGENT_ID, limit=10000,
+    )
+    found = {str(s.id) for s in orphans}
+    assert local_id not in found
+    assert cloud.json()["id"] in found

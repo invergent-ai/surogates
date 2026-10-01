@@ -2327,7 +2327,14 @@ class SessionStore:
                 SessionRow.updated_at
                 < func.now() - text(f"make_interval(secs => {int(stale_seconds)})"),
                 or_(
-                    latest_event_type.is_(None),
+                    # A chat on a folder of the user's computer with no events
+                    # is waiting for its folder or its first message.  ``wake``
+                    # has nothing to do for it, and recovering it repeatedly
+                    # would fail it before the user typed anything.
+                    and_(
+                        latest_event_type.is_(None),
+                        SessionRow.config["execution"]["kind"].astext.is_distinct_from("device"),
+                    ),
                     not_(latest_event_ended_work),
                 ),
             )
