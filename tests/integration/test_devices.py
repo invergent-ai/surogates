@@ -1772,6 +1772,90 @@ async def test_parallel_tool_calls_keep_their_own_journals(laptop_rig, session_f
     assert (rig.folder / "b.md").read_text() == "b"
 
 
+async def another_bound_root(api: Api, device_id: UUID) -> UUID:
+    """A second root session bound to *device_id*, as if its app had accepted the binding."""
+    root = await device_session(api, device_id)
+    ops = DeviceOperations(api.app.state.session_factory, api.app.state.redis)
+    await ops.bind(session_id=root, device_id=device_id, folder=FOLDER, nonce=NONCE)
+    [bind] = [op for op in await ops.pending(device_id, 1) if op.root_session_id == root]
+    assert await ops.complete(device_id, 1, bind.id, bind.digest, {"ok": None}) == "completed"
+    return root
+
+
+async def test_a_computer_with_its_fill_of_waiting_sessions_refuses_another(
+    api, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1, raising=False)
+    issued, first = await bound_device(api)
+    device_id = UUID(issued["id"])
+    second = await another_bound_root(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(device_id, first)))
+    await eventually(lambda: has_pending(ops, device_id))
+    with pytest.raises(DeviceOperationError, match="Too many sessions are waiting for Flavius's ThinkPad"):
+        await asyncio.wait_for(ops.run(request_for(device_id, second)), 2.0)
+    assert [op.calling_session_id for op in await ops.pending(device_id, 1)] == [first]
+    await stop(waiting)
+
+
+async def test_a_waiting_session_may_keep_asking(api, session_factory, redis_client, monkeypatch):
+    issued, first = await bound_device(api)
+    device_id = UUID(issued["id"])
+    second = await another_bound_root(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    waits = [asyncio.create_task(ops.run(request_for(device_id, root))) for root in (first, second)]
+
+    async def both_waiting() -> bool:
+        return len(await ops.pending(device_id, 1)) == 2
+
+    await eventually(both_waiting)
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1, raising=False)  # now past its fill
+    again = asyncio.create_task(ops.run(request_for(device_id, second)))
+
+    async def recorded() -> bool:
+        return len(await ops.pending(device_id, 1)) == 3
+
+    await eventually(recorded)
+    for task in (*waits, again):
+        await stop(task)
+
+
+async def test_a_binding_never_counts_as_a_waiting_session(api, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1, raising=False)
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    unbound = await device_session(api, device_id)
+    await ops.bind(session_id=unbound, device_id=device_id, folder=FOLDER, nonce=NONCE)  # waits for its user
+    waiting = asyncio.create_task(ops.run(request_for(device_id, root)))
+
+    async def recorded() -> bool:
+        return any(op.calling_session_id == root for op in await ops.pending(device_id, 1))
+
+    await eventually(recorded)
+    await stop(waiting)
+
+
+async def test_a_replayed_operation_gets_its_outcome_on_a_full_computer(
+    api, session_factory, redis_client, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1, raising=False)
+    issued, first = await bound_device(api)
+    device_id = UUID(issued["id"])
+    second = await another_bound_root(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id, first)
+    done = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+    assert await asyncio.wait_for(done, 2.0) == {"ok": True}
+    parked = asyncio.create_task(ops.run(request_for(device_id, second)))  # the computer is now full
+    await eventually(lambda: has_pending(ops, device_id))
+    # The first session's worker restarted and asks again: it gets what happened.
+    assert await asyncio.wait_for(ops.run(request), 2.0) == {"ok": True}
+    await stop(parked)
+
+
 async def test_a_tool_call_waits_for_the_computer_to_come_back(laptop_rig, session_factory, redis_client):
     rig = laptop_rig  # the laptop starts disconnected
     store = SessionStore(session_factory)
