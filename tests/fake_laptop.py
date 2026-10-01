@@ -49,12 +49,23 @@ async def perform(folder: WorkspaceIO, kind: str, args: dict[str, Any]) -> dict[
     return outcome
 
 
+def _encoded(text: str) -> int:
+    # What the text costs on the wire.  ensure_ascii escapes NUL and every
+    # non-ASCII character to \uXXXX, which no JSON encoder exceeds.
+    return len(json.dumps(text))
+
+
 def _cap_text(text: str) -> str:
-    if len(text) <= OUTPUT_CAP_CHARS:
+    if _encoded(text) <= OUTPUT_CAP_CHARS:
         return text
     half = OUTPUT_CAP_CHARS // 2
+    while half:
+        size = _encoded(text[:half]) + _encoded(text[len(text) - half:])
+        if size <= OUTPUT_CAP_CHARS:
+            break
+        half = min(half - 1, half * OUTPUT_CAP_CHARS // size)
     omitted = len(text) - 2 * half
-    return f"{text[:half]}\n... [{omitted} chars omitted by the computer] ...\n{text[-half:]}"
+    return f"{text[:half]}\n... [{omitted} chars omitted by the computer] ...\n{text[len(text) - half:]}"
 
 
 def _cap_strings(value: Any) -> Any:
@@ -68,9 +79,13 @@ def _cap_strings(value: Any) -> Any:
 
 
 def _cap_lines(text: str) -> str:
-    if len(text) <= OUTPUT_CAP_CHARS:
-        return text
-    return text[: text.rfind("\n", 0, OUTPUT_CAP_CHARS) + 1]
+    end = len(text)
+    while True:
+        kept = text[: text.rfind("\n", 0, end) + 1] if end < len(text) else text
+        size = _encoded(kept)
+        if size <= OUTPUT_CAP_CHARS:
+            return kept
+        end = min(len(kept) - 1, len(kept) * OUTPUT_CAP_CHARS // size)
 
 
 async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:

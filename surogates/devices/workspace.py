@@ -41,10 +41,11 @@ MAX_MESSAGE_CHARS, so it fits in one link frame:
 
   - a read or write carries at most MAX_PAYLOAD_BYTES of file data; a read
     that would return more fails with EFBIG (and TOO_LARGE) instead;
-  - command output, and every string in a process outcome, keeps its first and
-    last OUTPUT_CAP_CHARS / 2 characters around a "chars omitted by the
-    computer" marker;
-  - ripgrep output is cut after the last whole line within OUTPUT_CAP_CHARS;
+  - command output, and every string in a process outcome, keeps a head and a
+    tail around a "chars omitted by the computer" marker, together at most
+    OUTPUT_CAP_CHARS measured JSON-encoded (NUL and non-ASCII characters
+    count as their \\uXXXX escapes, the most any JSON encoder writes);
+  - ripgrep output is cut after the last whole line within that encoded size;
   - list_dir returns at most MAX_NAMES names;
   - anything still too large is answered with {"type": "too_large"}.
 """
