@@ -30,6 +30,7 @@ from surogates.config import (
     parse_queue_member,
 )
 from surogates.harness.error_classify import classify_harness_error
+from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
 from surogates.session.store import SessionNotFoundError
 
@@ -470,27 +471,26 @@ class Orchestrator:
         *,
         dequeued: DequeuedSession | None = None,
     ) -> None:
-        """Wrapper that always releases the semaphore + TurnConcurrencyGate slot."""
+        """Run one turn holding the slots it was given, and release whatever it still holds."""
+        slots = TurnSlots(
+            semaphore=self.semaphore,
+            gate=self._turn_gate,
+            org_id=dequeued.org_id if dequeued is not None else "",
+            agent_id=dequeued.agent_id if dequeued is not None else "",
+            # The dispatch loop took a tenant slot only for a dequeued session.
+            gate_held=dequeued is not None and self._turn_gate is not None,
+        )
+        token = current_turn.set(slots)
         try:
-            await self._process(session_id)
+            # The turn's own work is an activity; the loop steps out of it
+            # while it waits for its tool calls.
+            async with slots.activity():
+                await self._process(session_id)
         finally:
-            self.semaphore.release()
-            # release the gate slot acquired in
-            # the dispatch loop so the tenant's next queued session
-            # can come off the queue.
-            if dequeued is not None and self._turn_gate is not None:
-                try:
-                    await self._turn_gate.release(
-                        dequeued.org_id, dequeued.agent_id,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to release TurnConcurrencyGate slot for "
-                        "org=%s agent=%s; the counter is bounded at zero "
-                        "by release() so this won't drive it negative",
-                        dequeued.org_id, dequeued.agent_id,
-                        exc_info=True,
-                    )
+            current_turn.reset(token)
+            # The turn may have given its slots back while it waited, and ended
+            # before taking them again: release only what it holds.
+            await slots.release_owned()
 
     async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
