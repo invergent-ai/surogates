@@ -145,22 +145,22 @@ async def serve_device_link(
     finally:
         if claimed:
             with contextlib.suppress(Exception):
-                await presence.release(device.id, holder)
+                await _bounded(presence.release(device.id, holder))
         if pubsub is not None:
             with contextlib.suppress(Exception):
-                await pubsub.aclose()
+                await _bounded(pubsub.aclose())
 
 
 async def _authenticate(websocket: WebSocket, store: DeviceStore) -> DeviceRecord | None:
     scheme, _, token = (websocket.headers.get("authorization") or "").partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         return None
-    device = await store.find_by_token(token.strip())
+    device = await _bounded(store.find_by_token(token.strip()))
     if device is None:
         return None
     # The address must name the device's own agent, or a refusal would disclose
     # that another agent's device is revoked.
-    if await resolve_agent_id_soft(websocket) != device.agent_id:  # type: ignore[arg-type]
+    if await _bounded(resolve_agent_id_soft(websocket)) != device.agent_id:  # type: ignore[arg-type]
         return None
     return device
 

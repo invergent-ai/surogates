@@ -692,3 +692,33 @@ async def test_a_revoke_from_an_old_generation_socket_leaves_the_restored_device
     assert listed[0]["revoked_at"] is None
     async with linked(link_url, restored.token) as (_, welcome):
         assert welcome["device_id"] == issued["id"]
+
+
+async def test_a_stalled_token_lookup_closes_the_link_for_a_retry(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "DEPENDENCY_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(DeviceStore, "find_by_token", hang)
+    issued = await register(api)
+    async with connect(link_url, additional_headers=headers(issued["token"])) as ws:
+        assert await close_code(ws, timeout=2.0) == 1011
+
+
+async def test_a_stalled_release_still_closes_the_control_subscription(api, link_url, monkeypatch):
+    monkeypatch.setattr(link_module, "DEPENDENCY_TIMEOUT_S", 0.2)
+    subscribe = DevicePresence.subscribe
+    opened = []
+
+    async def recording_subscribe(self, device_id):
+        pubsub = await subscribe(self, device_id)
+        opened.append(pubsub)
+        return pubsub
+
+    monkeypatch.setattr(DevicePresence, "subscribe", recording_subscribe)
+    monkeypatch.setattr(DevicePresence, "release", hang)
+    issued = await register(api)
+    async with linked(link_url, issued["token"]):
+        pass
+
+    async def closed() -> bool:
+        return len(opened) == 1 and opened[0].connection is None
+
+    await eventually(closed)
