@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -156,3 +158,17 @@ async def test_a_cloud_session_is_not_marked():
 async def test_malformed_arguments_are_an_error_not_a_crash(laptop):
     reply = json.loads(await laptop.call.execute("any", "read_file", "{not json"))
     assert "Invalid JSON arguments" in reply["error"]
+
+
+async def test_long_terminal_output_spills_onto_the_computer_not_this_host(laptop, monkeypatch):
+    monkeypatch.setattr("surogates.tools.builtin.terminal.get_max_bytes", lambda: 1000)
+    host_spills = lambda: set(Path(tempfile.gettempdir()).glob("terminal-output-*.log"))  # noqa: E731
+    before = host_spills()
+
+    command = "python3 -c \"print('x' * 60000)\""
+    reply = json.loads(await laptop.call.execute("any", "terminal", json.dumps({"command": command})))
+
+    assert ".surogates-results/terminal-output-" in reply["output"], reply
+    [spill] = (laptop.folder / ".surogates-results").glob("terminal-output-*.log")
+    assert spill.read_text().strip() == "x" * 60000
+    assert host_spills() == before

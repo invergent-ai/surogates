@@ -414,6 +414,13 @@ class TestTerminal:
         assert out["exit_code"] == 1
         assert out["exit_code_meaning"] == "No matches found (not an error)"
 
+    async def test_long_output_spills_into_the_workspace(self, ws, monkeypatch):
+        monkeypatch.setattr(terminal, "get_max_bytes", lambda: 1000)
+        out = await call(terminal._terminal_handler, ws, command="yes x | head -n 5000")
+        assert ".surogates-results/terminal-output-" in out["output"]
+        [spill] = (ws.real / ".surogates-results").glob("terminal-output-*.log")
+        assert spill.read_text() == "x\n" * 5000
+
     async def test_secrets_are_not_inherited(self, ws, monkeypatch):
         monkeypatch.setenv("SUROGATES_TEST_SECRET", "s3cret")
         out = await call(terminal._terminal_handler, ws, command='echo "[$SUROGATES_TEST_SECRET]"')
