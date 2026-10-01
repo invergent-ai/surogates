@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import Device, DeviceOperation
 from surogates.devices.presence import control_channel
 from surogates.devices.store import REVOKED_OUTCOME
-from surogates.devices.workspace import DeviceOperationError
+from surogates.devices.workspace import DeviceOperationError, is_well_formed
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,11 @@ class DeviceOperations:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
     async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
+        if not is_well_formed(request.args):
+            # Stored, it would be sent to the device as a frame the link cannot
+            # encode, and every connection would end before reaching the
+            # operations behind it.
+            raise ValueError("Operation arguments must be valid Unicode")
         digest = request.digest
         async with self._sf() as db:
             inserted = (await db.execute(

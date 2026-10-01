@@ -67,6 +67,7 @@ from surogates.devices.presence import (
     new_holder,
 )
 from surogates.devices.store import DeviceRecord, DeviceStore
+from surogates.devices.workspace import is_well_formed
 from surogates.runtime.resolver import resolve_agent_id_soft
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,10 @@ class _Link:
             or ("error" in outcome and not isinstance(outcome["error"], dict))
         ):
             raise _Close(CLOSE_PROTOCOL, "malformed op_result")
+        if not is_well_formed(outcome):
+            # Recorded, not refused: the app sends its journaled reply again on
+            # every reconnect, so a refusal would loop.
+            outcome = {"error": {"type": "other", "message": "The computer's result was not valid Unicode"}}
         status = await _bounded(self._operations.complete(
             self._device.id, self._device.credential_generation, operation_id, digest, outcome,
         ))

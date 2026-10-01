@@ -1051,6 +1051,21 @@ async def test_a_completion_is_announced_on_the_operation_channel(api, session_f
     assert await asyncio.wait_for(waiting, 2.0) == {"ok": False}
 
 
+async def test_an_operation_that_is_not_valid_unicode_is_refused_and_records_nothing(
+    api, session_factory, redis_client,
+):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id, args={"name": "sh\ud83d"})
+    with pytest.raises(ValueError, match="valid Unicode"):
+        await asyncio.wait_for(ops.run(request), 2.0)
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeviceOperation.id).where(DeviceOperation.device_id == device_id)
+        )).all()
+    assert rows == []
+
+
 async def test_a_tool_calls_operations_are_numbered_in_order(api, session_factory, redis_client, tmp_path):
     device_id = UUID((await register(api))["id"])
     ops = DeviceOperations(session_factory, redis_client)
@@ -1345,6 +1360,36 @@ async def test_a_repeated_reply_is_acknowledged_again(laptop_rig, link_url):
         await send(ws, reply)
         assert await receive(ws) == {"type": "op_ack", "id": op["id"]}
     assert await asyncio.wait_for(waiting, 2.0) is True
+
+
+async def test_a_refused_operation_does_not_wedge_the_link(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.folder)
+    with pytest.raises(ValueError, match="valid Unicode"):
+        await asyncio.wait_for(wio.which("sh\ud83d"), 2.0)
+    assert await asyncio.wait_for(wio.which("sh"), 5.0) is True
+    assert rig.laptop.ran == ["which"]
+    assert rig.laptop.connected
+
+
+async def test_a_result_that_is_not_valid_unicode_is_recorded_as_an_error(laptop_rig, link_url):
+    rig = laptop_rig
+    waiting = asyncio.create_task(device_io(rig.ops, rig.device_id, rig.folder).which("sh"))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        await send(ws, {
+            "type": "op_result", "id": op["id"], "digest": op["digest"],
+            "outcome": {"ok": "half a pair: \ud83d"},
+        })
+        # Acknowledged, not closed: the app sends its journaled reply again on
+        # every reconnect, so a refusal would loop.
+        assert await receive(ws) == {"type": "op_ack", "id": op["id"]}
+        await send(ws, {"type": "ping"})
+        assert await receive(ws) == {"type": "pong"}
+    with pytest.raises(DeviceOperationError, match="not valid Unicode"):
+        await asyncio.wait_for(waiting, 2.0)
+    assert await rig.ops.pending(rig.device_id, 1) == []
 
 
 async def test_old_credentials_get_no_operations_and_cannot_reply(

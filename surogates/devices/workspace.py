@@ -51,6 +51,11 @@ MAX_MESSAGE_CHARS, so it fits in one link frame:
     as complete;
   - list_dir returns at most MAX_NAMES names;
   - anything still too large is answered with {"type": "too_large"}.
+
+Text.  Every string in an args object or an outcome is well-formed Unicode: a
+lone UTF-16 surrogate cannot be sent as UTF-8, so the server refuses a request
+that holds one and records a reply that holds one as an error.  (In Node,
+String.prototype.toWellFormed() repairs a string.)
 """
 
 from __future__ import annotations
@@ -81,6 +86,15 @@ class DeviceOperationError(RuntimeError):
 class OperationRunner(Protocol):
     async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
         """Run one operation on the laptop and return its outcome."""
+
+
+def is_well_formed(value: Any) -> bool:
+    """Whether *value*, a JSON value, encodes as UTF-8: it holds no lone UTF-16 surrogate."""
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _raise(error: dict[str, Any]) -> None:
