@@ -218,14 +218,17 @@ async def test_a_tool_call_is_activity_of_its_turn():
     )
     token = current_turn.set(slots)
     try:
-        await execute_single_tool(
-            {"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}},
-            session=SimpleNamespace(id=uuid4(), parent_id=None, agent_id="a", model="m", config={}),
-            lease=SimpleNamespace(lease_token=uuid4()),
-            store=make_store(),
-            tools=registry,
-            tenant=MagicMock(asset_root="/tmp/test"),
-        )
+        # As the loop runs it: the turn's own activity, joining while it waits for the call.
+        async with slots.activity():
+            async with slots.joining():
+                await execute_single_tool(
+                    {"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}},
+                    session=SimpleNamespace(id=uuid4(), parent_id=None, agent_id="a", model="m", config={}),
+                    lease=SimpleNamespace(lease_token=uuid4()),
+                    store=make_store(),
+                    tools=registry,
+                    tenant=MagicMock(asset_root="/tmp/test"),
+                )
     finally:
         current_turn.reset(token)
     # The lone tool call waited, so all of the turn waited and gave its slot back.

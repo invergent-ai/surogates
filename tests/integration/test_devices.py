@@ -53,7 +53,7 @@ from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop, perform
-from tests.test_turn_slots import held_turn
+from tests.test_turn_slots import as_tool_call, held_turn
 
 from .conftest import create_org, create_user
 
@@ -850,14 +850,16 @@ async def test_an_operation_waits_for_its_outcome(api, session_factory, redis_cl
         await control.aclose()
 
 
-async def test_a_quick_answer_keeps_the_turns_slots(api, session_factory, redis_client, tmp_path):
+async def test_a_quick_answer_keeps_the_turns_slots(api, session_factory, redis_client, tmp_path, monkeypatch):
     issued, root = await bound_device(api)
     device_id = UUID(issued["id"])
+    # Far longer than the test takes: a slow machine cannot outlast the grace.
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 30)
     ops = DeviceOperations(session_factory, redis_client)
     slots, semaphore, gate = await held_turn()
     token = current_turn.set(slots)
     try:
-        async with slots.activity():
+        async with as_tool_call(slots):
             waiting = asyncio.create_task(ops.run(request_for(device_id, root)))
             await eventually(lambda: has_pending(ops, device_id))
             assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
@@ -882,7 +884,7 @@ async def test_a_slow_operation_gives_the_turns_slots_back(
 
     token = current_turn.set(slots)
     try:
-        async with slots.activity():
+        async with as_tool_call(slots):
             waiting = asyncio.create_task(ops.run(request_for(device_id, root)))
             await eventually(released)
             assert gate.held == 0

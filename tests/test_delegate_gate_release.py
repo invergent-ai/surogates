@@ -12,7 +12,7 @@ per-tenant cap and the worker.  The wait runs through the turn's record
     back while the parent waits for its children.
   * Both are taken back when delegation returns, so a happy-path turn
     doesn't leak or overcount.
-  * They are taken back even if ``asyncio.gather`` raises.
+  * A failed child creation still leaves both slots held afterwards.
   * A call outside a dispatched turn (no turn record) completes normally.
 """
 
@@ -33,7 +33,7 @@ from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session
 
-from tests.test_turn_slots import held_turn
+from tests.test_turn_slots import as_tool_call, held_turn
 
 
 pytestmark = pytest.mark.asyncio
@@ -166,10 +166,10 @@ def _install_enqueue_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def _delegate_in_turn(slots: TurnSlots, store: _CompletingChildStore, parent: Session) -> str:
-    """Run the handler as a tool call of a dispatched turn: inside the turn's activity."""
+    """Run the handler as a tool call of a dispatched turn."""
     token = current_turn.set(slots)
     try:
-        async with slots.activity():
+        async with as_tool_call(slots):
             return await delegate_module._delegate_handler(
                 {"goal": "x", "agent_type": "engineer"},
                 session_store=store,
@@ -240,11 +240,11 @@ async def test_release_fires_even_when_no_gate(
     assert "Delegation failed" not in result
 
 
-async def test_release_fires_in_finally_when_gather_raises(
+async def test_a_failed_child_creation_leaves_the_slots_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An exception inside the delegation must not leak the slots the
-    parent gave up: the turn takes them back on the way out."""
+    """A child that cannot be created ends the delegation with an error
+    envelope, and the turn still holds both slots afterwards."""
     parent = _parent_session()
     store = _CompletingChildStore(parent)
     _install_resolver_stub(monkeypatch)
@@ -265,8 +265,8 @@ async def test_release_fires_in_finally_when_gather_raises(
     # The handler catches and converts to an error envelope.
     parsed = json.loads(result)
     assert "error" in parsed
-    # Despite the crash, both slots are held again.
+    # Despite the failure, both slots are held.
     assert semaphore.locked() and gate.held == 1, (
-        "the turn must take its slots back even when asyncio.gather raises; "
+        "the turn must hold both slots after a failed child creation; "
         f"semaphore.locked() = {semaphore.locked()}, gate.held = {gate.held}"
     )

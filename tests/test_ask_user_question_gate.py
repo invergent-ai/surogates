@@ -29,7 +29,7 @@ from surogates.tools.builtin.ask_user_question import (
 )
 
 from tests.test_ask_user_question import FakeSessionStore
-from tests.test_turn_slots import CountingGate, held_turn
+from tests.test_turn_slots import CountingGate, as_tool_call, held_turn
 
 
 class _IdentifiedStore(FakeSessionStore):
@@ -62,10 +62,10 @@ async def _answer_after(store: FakeSessionStore, session_id, tool_call_id) -> No
 
 
 async def _invoke(store, session_id, tool_call_id, slots) -> str:
-    """Run the handler as a tool call of a dispatched turn: inside the turn's activity."""
+    """Run the handler as a tool call of a dispatched turn."""
     token = current_turn.set(slots)
     try:
-        async with slots.activity():
+        async with as_tool_call(slots):
             return await _ask_user_question_handler(
                 {"questions": [{"prompt": "q"}]},
                 session_id=session_id,
@@ -195,6 +195,7 @@ async def test_release_failure_does_not_break_the_wait():
     )
 
     assert json.loads(raw)["cancelled"] is False
+    assert "release" in gate.calls, "the wait never tried to give the slot back"
     assert "try_acquire" not in gate.calls, (
         "a slot that was never given back must not be taken again -- that would "
         "hand the tenant a slot it never gave up"

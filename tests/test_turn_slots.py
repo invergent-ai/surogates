@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -56,6 +58,15 @@ async def held_turn(*, gate: CountingGate | None = None) -> tuple[TurnSlots, asy
     gate = gate if gate is not None else CountingGate(held=1)
     slots = TurnSlots(semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True)
     return slots, semaphore, gate
+
+
+@contextlib.asynccontextmanager
+async def as_tool_call(slots: TurnSlots) -> AsyncIterator[None]:
+    """A tool call as production runs it: the turn's activity, the loop joining, the tool's own activity."""
+    async with slots.activity():
+        async with slots.joining():
+            async with slots.activity():
+                yield
 
 
 async def test_a_lone_wait_gives_both_slots_back():
