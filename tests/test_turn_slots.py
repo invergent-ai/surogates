@@ -300,6 +300,40 @@ async def test_a_new_activity_takes_the_slots_back_first():
     await running
 
 
+async def test_an_error_leaving_a_wait_takes_the_slots_back():
+    # A device operation that fails ends its wait with an error, not a cancellation.
+    slots, semaphore, gate = await held_turn()
+    async with slots.activity():
+        with pytest.raises(RuntimeError):
+            async with slots.waiting():
+                assert not semaphore.locked() and gate.held == 0
+                raise RuntimeError("the operation failed")
+        assert semaphore.locked() and gate.held == 1
+
+
+async def test_an_error_leaving_a_join_takes_the_slots_back():
+    slots, semaphore, gate = await held_turn()
+    waiting = asyncio.Event()
+
+    async def tool() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                waiting.set()
+                await asyncio.Event().wait()
+
+    async with slots.activity():
+        task = asyncio.create_task(tool())
+        with pytest.raises(RuntimeError):
+            async with slots.joining():
+                await waiting.wait()
+                assert not semaphore.locked() and gate.held == 0  # the whole turn waits
+                raise RuntimeError("the turn failed while it waited")
+        # The turn goes on, so it holds its slots again.
+        assert semaphore.locked() and gate.held == 1
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_the_turn_stops_counting_while_it_waits_for_its_tools():
     slots, semaphore, gate = await held_turn()
     async with slots.activity():  # the turn's own work
