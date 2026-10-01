@@ -212,11 +212,12 @@ class DeviceOperations:
         except Exception:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
-    async def _record(self, request: OperationRequest) -> tuple[UUID | None, dict[str, Any] | None]:
+    async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
         """Record *request*, or find it already recorded.
 
-        Returns the operation's id and its outcome if it has one.  A revoked
-        device gets no operation: the outcome is the revocation, with no id.
+        Returns the operation's id and its outcome if it has one.  A request
+        for a revoked device is recorded as already answered with the
+        revocation, so the same request after a reauthorization cannot run.
         """
         if not is_well_formed(request.args):
             # Stored, it would be sent to the device as a frame the link cannot
@@ -236,8 +237,11 @@ class DeviceOperations:
             )).one_or_none()
             if device is None:
                 raise DeviceOperationError("This computer was removed")
-            if device.revoked_at is not None:
-                return None, REVOKED_OUTCOME
+            refused = (
+                {"outcome": REVOKED_OUTCOME, "completed_at": func.now()}
+                if device.revoked_at is not None
+                else {}
+            )
             inserted = (await db.execute(
                 pg_insert(DeviceOperation)
                 .values(
@@ -250,13 +254,14 @@ class DeviceOperations:
                     args=request.args,
                     digest=digest,
                     lease_token=request.lease_token,
+                    **refused,
                 )
                 .on_conflict_do_nothing(constraint="uq_device_operations_invocation")
                 .returning(DeviceOperation.id)
             )).scalar_one_or_none()
             await db.commit()
             if inserted is not None:
-                return inserted, None
+                return inserted, REVOKED_OUTCOME if refused else None
             row = (await db.execute(
                 select(DeviceOperation.id, DeviceOperation.digest, DeviceOperation.outcome)
                 .where(

@@ -1186,13 +1186,19 @@ async def test_an_operation_for_a_removed_device_is_an_error_and_records_nothing
         await asyncio.wait_for(ops.run(request_for(uuid.uuid4())), 2.0)
 
 
-async def test_an_operation_for_a_revoked_device_records_nothing(api, session_factory, redis_client):
+async def test_an_operation_for_a_revoked_device_is_recorded_as_refused(api, session_factory, redis_client):
     issued = await register(api)
     device_id = UUID(issued["id"])
     await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
     ops = DeviceOperations(session_factory, redis_client)
-    assert await asyncio.wait_for(ops.run(request_for(device_id)), 2.0) == REVOKED_OUTCOME
-    assert await operation_rows(session_factory, device_id) == []
+    request = request_for(device_id)
+    assert await asyncio.wait_for(ops.run(request), 2.0) == REVOKED_OUTCOME
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeviceOperation.outcome, DeviceOperation.completed_at)
+            .where(DeviceOperation.invocation_id == request.invocation_id)
+        )).all()
+    assert [(row.outcome, row.completed_at is not None) for row in rows] == [(REVOKED_OUTCOME, True)]
 
 
 async def test_recording_waits_for_a_revocation_in_flight(api, session_factory, redis_client):
@@ -1213,7 +1219,7 @@ async def test_recording_waits_for_a_revocation_in_flight(api, session_factory, 
         assert await operation_rows(session_factory, device_id) == []
         await db.commit()
     assert await asyncio.wait_for(recording, 3.0) == REVOKED_OUTCOME
-    assert await operation_rows(session_factory, device_id) == []
+    assert await ops.pending(device_id, 1) == []
 
 
 async def test_a_reply_that_races_a_reauthorization_is_stale(
@@ -1258,6 +1264,36 @@ async def test_revoking_cancels_work_nobody_is_waiting_for(api, session_factory,
     await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
     assert await ops.pending(device_id, 2) == []
     # The same tool call again gets the cancellation back and queues nothing.
+    assert await asyncio.wait_for(ops.run(request), 1.0) == REVOKED_OUTCOME
+    assert await ops.pending(device_id, 2) == []
+
+
+async def test_a_repeated_request_on_a_revoked_device_gets_its_recorded_outcome(
+    api, session_factory, redis_client, tmp_path,
+):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id)
+    waiting = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+    assert await asyncio.wait_for(waiting, 2.0) == {"ok": True}
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    # It ran before the revocation: a worker replaying the tool call must learn that.
+    assert await asyncio.wait_for(ops.run(request), 1.0) == {"ok": True}
+
+
+async def test_a_request_refused_for_revocation_stays_refused_after_reauthorization(
+    api, session_factory, redis_client,
+):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id)
+    assert await asyncio.wait_for(ops.run(request), 2.0) == REVOKED_OUTCOME
+    await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
     assert await asyncio.wait_for(ops.run(request), 1.0) == REVOKED_OUTCOME
     assert await ops.pending(device_id, 2) == []
 
