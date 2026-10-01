@@ -19,6 +19,8 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
+from surogates.devices.binding import device_of
+from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.tool_guardrails import (
@@ -1205,6 +1207,9 @@ async def execute_single_tool(
     # the workspace absolute path with __WORKSPACE__ so real filesystem
     # paths never leak to the frontend.
     workspace_path = session.config.get("workspace_path")
+    # A session on the user's computer reaches its folder only through the
+    # device: the folder is never a path on this host.
+    on_device = device_of(session.config) is not None
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
@@ -1270,7 +1275,9 @@ async def execute_single_tool(
     # is never instantiated, so it is not passed: disclosure is delivered
     # by the channel pipeline, not by blocking tool calls.
     decision = gate.check(
-        tool_name, tool_args, workspace_path=workspace_path,
+        tool_name, tool_args,
+        # The computer checks containment; this host cannot resolve its paths.
+        workspace_path=None if on_device else workspace_path,
     )
     if not decision.allowed and decision.overridable:
         # A human may already have approved this exact call.  The grant
@@ -1462,6 +1469,21 @@ async def execute_single_tool(
     # SANDBOX tools are dispatched to the sandbox pod where the real Python
     # tool handlers run (the sandbox image includes the surogates package).
     # HARNESS tools run in-process in the worker.
+    #
+    # One call, one journal runner: the invocation is this tool.call event,
+    # since providers can reuse or blank tool-call ids.
+    device_call = (
+        device_call_for(
+            session,
+            tools=tools,
+            invocation_id=f"{_call_event_id}:{tool_call_id}",
+            lease_token=str(lease.lease_token),
+            session_factory=session_factory,
+            redis=redis,
+        )
+        if on_device
+        else None
+    )
     start = time.monotonic()
     tool_failed = False
     try:
@@ -1483,7 +1505,8 @@ async def execute_single_tool(
         # in-process and reshape the response as a read_file envelope so
         # the LLM never sees vision_analyze unless it called it directly.
         image_dispatched = False
-        if tool_name == "read_file" and isinstance(tool_args, dict):
+        # On the user's computer an image is read through the device like any file.
+        if device_call is None and tool_name == "read_file" and isinstance(tool_args, dict):
             from surogates.tools.builtin.file_ops import IMAGE_EXTENSIONS
             image_path_arg = tool_args.get("path")
             if isinstance(image_path_arg, str) and image_path_arg:
@@ -1527,6 +1550,10 @@ async def execute_single_tool(
 
         if image_dispatched:
             pass  # result_content already set by the image branch.
+        elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
+            result_content = refusal(tool_name)
+        elif device_call is not None and location == ToolLocation.SANDBOX:
+            result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
             from surogates.sandbox.pool import sandbox_session_key
             sandbox_owner = sandbox_session_key(session)
@@ -1567,12 +1594,13 @@ async def execute_single_tool(
                 redis=redis,
                 budget=budget,
                 memory_manager=memory_manager,
-                sandbox_pool=sandbox_pool,
+                sandbox_pool=device_call if device_call is not None else sandbox_pool,
                 credential_vault=credential_vault,
                 browser_pool=browser_pool,
                 browser_control=browser_control,
                 storage=storage,
-                workspace_path=workspace_path,
+                workspace_path=None if device_call is not None else workspace_path,
+                workspace_io=device_call.workspace_io if device_call is not None else None,
                 api_client=api_client,
                 session_factory=session_factory,
                 llm_client=llm_client,
@@ -1658,15 +1686,17 @@ async def execute_single_tool(
 
     # Layer 2: persist oversized results instead of truncating.  The spill
     # must land where ``read_file`` will run -- in the sandbox when there is
-    # one, otherwise on this filesystem.
+    # one, otherwise on this filesystem.  On the user's computer it goes
+    # through the call, so its operations keep counting in order.
     from surogates.tools.utils.tool_result_storage import (
         make_sandbox_writer,
         maybe_persist_tool_result,
     )
 
-    if sandbox_pool is not None:
+    spill_pool = device_call if device_call is not None else sandbox_pool
+    if spill_pool is not None:
         from surogates.sandbox.pool import sandbox_session_key
-        spill_writer = make_sandbox_writer(sandbox_pool, sandbox_session_key(session))
+        spill_writer = make_sandbox_writer(spill_pool, sandbox_session_key(session))
     else:
         spill_writer = None
 

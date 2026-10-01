@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -25,7 +26,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from surogates.db.agent_users import purge_user_account
-from surogates.db.models import Device, DeviceOperation
+from surogates.db.models import Device, DeviceOperation, Event
 from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
 from surogates.devices.binding import BIND, Binding, binding_of, device_of
@@ -39,11 +40,15 @@ from surogates.devices.operations import (
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
+from surogates.harness.tool_exec import execute_single_tool
+from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin import file_ops
+from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop, perform
@@ -746,7 +751,7 @@ async def test_a_stalled_release_still_closes_the_control_subscription(api, link
 
 
 NONCE = "binding-nonce-0001"
-FOLDER = "/home/flavius/Surogate/agent-devices/notes"
+FOLDER = "/nonexistent/Surogate/agent-devices/notes"
 
 
 async def device_session(
@@ -1636,6 +1641,102 @@ async def test_the_app_refuses_a_folder_its_user_did_not_confirm(laptop_rig, api
     await eventually(binding_is(api, root, "failed"))
     assert await binding(api, root) == Binding("failed", "This folder was not confirmed on this computer")
     assert rig.laptop.bindings == {}
+
+
+def builtin_tools() -> ToolRegistry:
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    return registry
+
+
+async def tool_call(rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory) -> dict:
+    """One tool call of the rig's bound session, as the harness makes it."""
+    return await asyncio.wait_for(execute_single_tool(
+        {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}},
+        session=await store.get_session(rig.root),
+        lease=SimpleNamespace(lease_token=uuid.uuid4()),
+        store=store,
+        tools=tools,
+        tenant=MagicMock(asset_root="/tmp/test"),
+        redis=redis_client,
+        session_factory=session_factory,
+    ), 15.0)
+
+
+async def test_an_agent_edits_a_file_on_the_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    await tool_call(rig, store, tools, "call_1", "write_file", {"path": "notes.md", "content": "from the agent\n"}, **io)
+    assert (rig.folder / "notes.md").read_text() == "from the agent\n"
+    read = await tool_call(rig, store, tools, "call_2", "read_file", {"path": "notes.md"}, **io)
+    assert "from the agent" in read["content"]
+
+
+async def test_a_tool_call_is_journaled_under_its_own_event(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store = SessionStore(session_factory)
+    await tool_call(
+        rig, store, builtin_tools(), "call_1", "write_file", {"path": "a.md", "content": "a"},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    async with session_factory() as db:
+        call_event = (await db.execute(
+            select(Event.id)
+            .where(Event.session_id == rig.root, Event.type == EventType.TOOL_CALL.value)
+            .order_by(Event.id.desc())
+            .limit(1)
+        )).scalar_one()
+        invocations = set((await db.execute(
+            select(DeviceOperation.invocation_id)
+            .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.kind != BIND)
+        )).scalars())
+    assert invocations == {f"{call_event}:call_1"}
+
+
+async def test_the_process_tool_asks_the_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    await tool_call(
+        rig, SessionStore(session_factory), builtin_tools(), "call_1", "process", {"action": "list"},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    assert "list_processes" in rig.laptop.ran
+    async with session_factory() as db:
+        args = (await db.execute(
+            select(DeviceOperation.args)
+            .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.kind == "list_processes")
+        )).scalar_one()
+    assert args == {"task_id": str(rig.root)}
+
+
+async def test_parallel_tool_calls_keep_their_own_journals(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    await asyncio.gather(
+        tool_call(rig, store, tools, "call_a", "write_file", {"path": "a.md", "content": "a"}, **io),
+        tool_call(rig, store, tools, "call_b", "write_file", {"path": "b.md", "content": "b"}, **io),
+    )
+    assert (rig.folder / "a.md").read_text() == "a"
+    assert (rig.folder / "b.md").read_text() == "b"
+
+
+async def test_a_tool_call_waits_for_the_computer_to_come_back(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig  # the laptop starts disconnected
+    store = SessionStore(session_factory)
+    call = asyncio.create_task(tool_call(
+        rig, store, builtin_tools(), "call_1", "write_file", {"path": "late.md", "content": "late"},
+        redis_client=redis_client, session_factory=session_factory,
+    ))
+    await asyncio.sleep(0.5)
+    assert not call.done()
+    await rig.laptop.connect()
+    await asyncio.wait_for(call, 15.0)
+    assert (rig.folder / "late.md").read_text() == "late"
 
 
 async def test_an_operation_waits_for_the_laptop_to_connect(laptop_rig):
