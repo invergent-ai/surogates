@@ -12,7 +12,8 @@ import pytest
 from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.harness.prompt import PromptBuilder
-from surogates.harness.tool_exec import execute_single_tool
+from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
+from surogates.sandbox.base import SandboxUnavailableError
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
 
@@ -152,6 +153,11 @@ async def test_an_oversized_result_spills_onto_the_computer():
     write = registry.get("write_file").handler
     assert write.call_args.args[0]["path"].startswith(".surogates-results/")
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
+
+
+async def test_a_local_folder_session_never_gets_a_cloud_sandbox_spec():
+    with pytest.raises(SandboxUnavailableError, match="computer"):
+        await _build_session_sandbox_spec(device_session(), MagicMock(), "owner")
 
 
 async def test_nothing_in_a_local_folder_wake_falls_back_to_this_host():

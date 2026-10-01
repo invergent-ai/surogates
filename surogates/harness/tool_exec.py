@@ -80,8 +80,19 @@ async def _build_session_sandbox_spec(
     appending the workspace mount or env passthrough never bleeds
     across sessions sharing the same tenant context.
     """
-    from surogates.sandbox.base import Resource, SandboxSpec, default_sandbox_spec
+    from surogates.sandbox.base import (
+        Resource,
+        SandboxSpec,
+        SandboxUnavailableError,
+        default_sandbox_spec,
+    )
     from surogates.tools.utils.env_passthrough import get_sandbox_env
+
+    if device_of(session.config) is not None:
+        raise SandboxUnavailableError(
+            "This session's folder is on the user's computer; "
+            "it never gets a cloud sandbox",
+        )
 
     baseline = getattr(tenant, "sandbox_spec", None)
     if baseline is None:
