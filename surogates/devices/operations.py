@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Device, DeviceOperation
 from surogates.devices.presence import control_channel
+from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError
 
 logger = logging.getLogger(__name__)
@@ -196,14 +197,34 @@ class DeviceOperations:
         return row.id, row.outcome
 
     async def _outcome(self, operation_id: UUID) -> dict[str, Any] | None:
+        """The recorded outcome, or None while the device has not answered.
+
+        An operation still open on a revoked device is failed here, so a
+        request recorded after the revocation, or one that raced with it,
+        cannot wait forever.
+        """
         async with self._sf() as db:
             row = (await db.execute(
-                select(DeviceOperation.outcome).where(DeviceOperation.id == operation_id)
+                select(DeviceOperation.outcome, Device.revoked_at)
+                .join(Device, Device.id == DeviceOperation.device_id)
+                .where(DeviceOperation.id == operation_id)
             )).one_or_none()
-        if row is None:
-            # Deleted with its device: nothing will ever answer.
-            raise DeviceOperationError("This computer was removed")
-        return row.outcome
+            if row is None:
+                # Deleted with its device: nothing will ever answer.
+                raise DeviceOperationError("This computer was removed")
+            if row.outcome is not None or row.revoked_at is None:
+                return row.outcome
+            failed = (await db.execute(
+                update(DeviceOperation)
+                .where(DeviceOperation.id == operation_id, DeviceOperation.completed_at.is_(None))
+                .values(outcome=REVOKED_OUTCOME, completed_at=func.now())
+                .returning(DeviceOperation.id)
+            )).scalar_one_or_none()
+            await db.commit()
+        if failed is None:
+            # The device's own outcome landed first: return that one.
+            return await self._outcome(operation_id)
+        return REVOKED_OUTCOME
 
     # -- the link's side -------------------------------------------------
 

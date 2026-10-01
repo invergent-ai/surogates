@@ -817,7 +817,7 @@ async def test_a_changed_request_under_the_same_ordinal_is_a_conflict(api, sessi
     await stop(waiting)
 
 
-def test_an_operation_needs_an_invocation_id():
+async def test_an_operation_needs_an_invocation_id():
     with pytest.raises(ValueError):
         OperationRequest(**{**_fields(request_for(uuid.uuid4())), "invocation_id": ""})
 
@@ -995,3 +995,14 @@ async def test_a_waiter_whose_device_is_deleted_gets_an_error(api, session_facto
         await db.commit()
     with pytest.raises(DeviceOperationError):
         await asyncio.wait_for(waiting, 2.0)
+
+
+async def test_an_operation_for_a_revoked_device_fails_at_once(api, session_factory, redis_client):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    assert await asyncio.wait_for(ops.run(request_for(device_id)), 2.0) == {"error": {
+        "type": "revoked", "message": "Local access to this computer was revoked",
+    }}
+    assert await ops.pending(device_id, 1) == []
