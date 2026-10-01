@@ -19,13 +19,13 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from surogates.db.agent_users import purge_user_account
-from surogates.db.models import DeviceOperation
+from surogates.db.models import Device, DeviceOperation
 from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
 from surogates.devices.operations import (
@@ -1121,6 +1121,51 @@ async def test_an_operation_for_a_revoked_device_fails_at_once(api, session_fact
         "type": "revoked", "message": "Local access to this computer was revoked",
     }}
     assert await ops.pending(device_id, 1) == []
+
+
+async def operation_rows(session_factory, device_id: UUID) -> list:
+    async with session_factory() as db:
+        return (await db.execute(
+            select(DeviceOperation.id).where(DeviceOperation.device_id == device_id)
+        )).all()
+
+
+async def test_an_operation_for_a_removed_device_is_an_error_and_records_nothing(
+    api, session_factory, redis_client,
+):
+    ops = DeviceOperations(session_factory, redis_client)
+    with pytest.raises(DeviceOperationError, match="removed"):
+        await asyncio.wait_for(ops.run(request_for(uuid.uuid4())), 2.0)
+
+
+async def test_an_operation_for_a_revoked_device_records_nothing(api, session_factory, redis_client):
+    issued = await register(api)
+    device_id = UUID(issued["id"])
+    await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
+    ops = DeviceOperations(session_factory, redis_client)
+    assert await asyncio.wait_for(ops.run(request_for(device_id)), 2.0) == REVOKED_OUTCOME
+    assert await operation_rows(session_factory, device_id) == []
+
+
+async def test_recording_waits_for_a_revocation_in_flight(api, session_factory, redis_client):
+    device_id = UUID((await register(api))["id"])
+    ops = DeviceOperations(session_factory, redis_client, recheck_interval_s=0.2)
+    async with session_factory() as db:
+        # A revocation that has cancelled the device's open operations and not yet committed.
+        await db.execute(update(Device).where(Device.id == device_id).values(revoked_at=func.now()))
+        await db.execute(
+            update(DeviceOperation)
+            .where(DeviceOperation.device_id == device_id, DeviceOperation.completed_at.is_(None))
+            .values(outcome=REVOKED_OUTCOME, completed_at=func.now())
+        )
+        recording = asyncio.create_task(ops.run(request_for(device_id)))
+        await asyncio.sleep(0.5)
+        # An insert that committed now would be missed by the update above, and
+        # would run after the device was reauthorized.
+        assert await operation_rows(session_factory, device_id) == []
+        await db.commit()
+    assert await asyncio.wait_for(recording, 3.0) == REVOKED_OUTCOME
+    assert await operation_rows(session_factory, device_id) == []
 
 
 async def test_a_reply_that_races_a_reauthorization_is_stale(

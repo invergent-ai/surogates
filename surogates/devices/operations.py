@@ -198,7 +198,12 @@ class DeviceOperations:
         except Exception:
             logger.warning("could not publish %s on %s", message, channel, exc_info=True)
 
-    async def _record(self, request: OperationRequest) -> tuple[UUID, dict[str, Any] | None]:
+    async def _record(self, request: OperationRequest) -> tuple[UUID | None, dict[str, Any] | None]:
+        """Record *request*, or find it already recorded.
+
+        Returns the operation's id and its outcome if it has one.  A revoked
+        device gets no operation: the outcome is the revocation, with no id.
+        """
         if not is_well_formed(request.args):
             # Stored, it would be sent to the device as a frame the link cannot
             # encode, and every connection would end before reaching the
@@ -206,6 +211,19 @@ class DeviceOperations:
             raise ValueError("Operation arguments must be valid Unicode")
         digest = request.digest
         async with self._sf() as db:
+            # A shared lock on the device row, held until the insert commits: a
+            # revocation's update of that row waits for it, so its cancelling
+            # update sees the new operation.  Without it the insert could commit
+            # just after that update and run once the device is reauthorized.
+            device = (await db.execute(
+                select(Device.revoked_at)
+                .where(Device.id == request.device_id)
+                .with_for_update(read=True)
+            )).one_or_none()
+            if device is None:
+                raise DeviceOperationError("This computer was removed")
+            if device.revoked_at is not None:
+                return None, REVOKED_OUTCOME
             inserted = (await db.execute(
                 pg_insert(DeviceOperation)
                 .values(
