@@ -1,0 +1,291 @@
+"""A turn gives its worker slots back while all of it waits, and takes them back before it works."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from surogates.runtime.turn_slots import (
+    TurnSlots,
+    current_turn,
+    turn_activity,
+    turn_joining,
+    turn_waiting,
+)
+
+pytestmark = pytest.mark.asyncio
+
+
+class CountingGate:
+    """A tenant gate with a cap that records its calls in order, and can fail on demand."""
+
+    def __init__(
+        self, *, held: int = 1, cap: int = 10, order: list[str] | None = None, fail_release: int = 0,
+    ) -> None:
+        self.held = held
+        self.cap = cap
+        self.calls: list[str] = []
+        self.order = order if order is not None else []
+        self.fail_release = fail_release
+        self.fail_acquire = False
+
+    async def release(self, org_id: str, agent_id: str) -> None:
+        self.calls.append("release")
+        if self.fail_release > 0:
+            self.fail_release -= 1
+            raise RuntimeError("redis blip")
+        self.held = max(0, self.held - 1)
+
+    async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+        self.calls.append("try_acquire")
+        self.order.append("gate")
+        if self.fail_acquire:
+            raise RuntimeError("redis down")
+        if self.held >= (limit if limit is not None else self.cap):
+            return False
+        self.held += 1
+        return True
+
+
+async def held_turn(*, gate: CountingGate | None = None) -> tuple[TurnSlots, asyncio.Semaphore, CountingGate]:
+    """A turn as the dispatcher starts one: its tenant slot and the worker's only semaphore slot taken."""
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    gate = gate if gate is not None else CountingGate(held=1)
+    slots = TurnSlots(semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True)
+    return slots, semaphore, gate
+
+
+async def test_a_lone_wait_gives_both_slots_back():
+    slots, semaphore, gate = await held_turn()
+    async with slots.activity():
+        async with slots.waiting():
+            assert not semaphore.locked()
+            assert gate.held == 0
+        assert semaphore.locked()
+        assert gate.held == 1
+
+
+async def test_a_wait_keeps_the_slots_while_a_sibling_still_runs():
+    slots, semaphore, gate = await held_turn()
+    sibling_running = asyncio.Event()
+    waiting = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def waiter() -> None:
+        await sibling_running.wait()
+        async with slots.activity():
+            async with slots.waiting():
+                waiting.set()
+                await finish.wait()
+                await asyncio.sleep(0.01)
+
+    async def sibling() -> None:
+        async with slots.activity():
+            sibling_running.set()
+            await waiting.wait()
+            # The sibling still works, so the turn kept its slots all along.
+            assert semaphore.locked() and gate.held == 1
+            assert gate.calls == []
+            finish.set()
+        # Only the wait is left: the whole turn waits.
+        assert not semaphore.locked() and gate.held == 0
+
+    await asyncio.gather(waiter(), sibling())
+    assert semaphore.locked() and gate.held == 1
+
+
+async def test_nested_waits_count_once():
+    slots, semaphore, gate = await held_turn()
+    sibling_running = asyncio.Event()
+    nested = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def waiter() -> None:
+        await sibling_running.wait()
+        async with slots.activity():
+            async with slots.waiting():
+                async with slots.waiting():
+                    nested.set()
+                    await finish.wait()
+
+    async def sibling() -> None:
+        async with slots.activity():
+            sibling_running.set()
+            await nested.wait()
+            # One activity waits (twice over) and one runs: the turn keeps its slots.
+            assert semaphore.locked() and gate.calls == []
+            finish.set()
+
+    await asyncio.gather(waiter(), sibling())
+
+
+async def test_resuming_takes_the_tenant_slot_before_the_semaphore():
+    order: list[str] = []
+
+    class RecordingSemaphore(asyncio.Semaphore):
+        async def acquire(self) -> bool:
+            order.append("semaphore")
+            return await super().acquire()
+
+    semaphore = RecordingSemaphore(1)
+    await semaphore.acquire()
+    order.clear()
+    gate = CountingGate(held=1, order=order)
+    slots = TurnSlots(semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True)
+    async with slots.activity():
+        async with slots.waiting():
+            pass
+    assert order == ["gate", "semaphore"]
+
+
+async def test_resuming_waits_for_a_free_worker_slot():
+    slots, semaphore, gate = await held_turn()
+    other_done = asyncio.Event()
+
+    async def other_session() -> None:
+        await semaphore.acquire()  # dequeued into the slot the waiting turn gave back
+        await other_done.wait()
+        semaphore.release()
+
+    async def turn() -> asyncio.Task:
+        async with slots.activity():
+            async with slots.waiting():
+                other = asyncio.create_task(other_session())
+                await asyncio.sleep(0.01)
+            # Reached only once the other session freed the worker's only slot.
+            assert other_done.is_set()
+        return other
+
+    running = asyncio.create_task(turn())
+    await asyncio.sleep(0.05)
+    assert not running.done()
+    other_done.set()
+    other = await asyncio.wait_for(running, 1.0)
+    await other
+
+
+async def test_a_resumed_turn_takes_its_tenant_slot_even_at_the_cap():
+    slots, semaphore, gate = await held_turn(gate=CountingGate(held=1, cap=1))
+    async with slots.activity():
+        async with slots.waiting():
+            gate.held = 1  # another session of the tenant took the freed slot
+        # Admitted already: the cap governs new turns, not this one.
+        assert semaphore.locked()
+        assert gate.held == 2
+
+
+async def test_a_gate_outage_on_resume_runs_on_without_the_tenant_slot():
+    slots, semaphore, gate = await held_turn()
+    async with slots.activity():
+        async with slots.waiting():
+            gate.fail_acquire = True
+        assert semaphore.locked()
+    await slots.release_owned()
+    assert gate.calls.count("release") == 1, "a tenant slot it no longer held was released again"
+
+
+async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end():
+    slots, semaphore, gate = await held_turn(gate=CountingGate(held=1, fail_release=1))
+    async with slots.activity():
+        async with slots.waiting():
+            assert not semaphore.locked()  # the worker slot went back
+            assert gate.held == 1  # the tenant slot could not
+        assert "try_acquire" not in gate.calls  # still held: nothing to take back
+    await slots.release_owned()
+    assert gate.held == 0
+    assert gate.calls.count("release") == 2
+
+
+async def test_a_new_activity_takes_the_slots_back_first():
+    slots, semaphore, gate = await held_turn()
+    waiting = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def waiter() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                waiting.set()
+                await finish.wait()
+
+    running = asyncio.create_task(waiter())
+    await waiting.wait()
+    assert not semaphore.locked()
+    async with slots.activity():
+        assert semaphore.locked() and gate.held == 1
+        finish.set()
+    await running
+
+
+async def test_the_turn_stops_counting_while_it_waits_for_its_tools():
+    slots, semaphore, gate = await held_turn()
+    async with slots.activity():  # the turn's own work
+        async with slots.joining():  # it waits for its tool calls
+            async with slots.activity():  # a tool call
+                async with slots.waiting():
+                    assert not semaphore.locked() and gate.held == 0
+        assert semaphore.locked() and gate.held == 1
+
+
+async def test_a_cancelled_wait_leaves_the_slots_for_the_turn_to_take_back():
+    slots, semaphore, gate = await held_turn()
+    waiting = asyncio.Event()
+
+    async def tool() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                waiting.set()
+                await asyncio.Event().wait()
+
+    async with slots.activity():
+        async with slots.joining():
+            task = asyncio.create_task(tool())
+            await waiting.wait()
+            task.cancel()  # discarded, as an interrupt or a stream retry does
+            await asyncio.gather(task, return_exceptions=True)
+            assert not semaphore.locked()  # a cancelled call takes nothing back
+        # The turn takes the slots back before it does anything else.
+        assert semaphore.locked() and gate.held == 1
+
+
+async def test_cleanup_gives_back_only_what_the_turn_still_holds():
+    slots, semaphore, gate = await held_turn()
+    waiting = asyncio.Event()
+    answer = asyncio.Event()
+
+    async def turn() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                waiting.set()
+                await answer.wait()
+
+    running = asyncio.create_task(turn())
+    await waiting.wait()
+    await slots.release_owned()  # the turn ended while it waited
+    answer.set()  # the answer arrives anyway
+    await asyncio.wait_for(running, 1.0)
+    assert gate.calls.count("try_acquire") == 0, "a slot was taken back after the turn ended"
+    assert gate.calls.count("release") == 1, "the tenant slot was given back twice"
+    await semaphore.acquire()
+    assert semaphore.locked(), "the semaphore slot was given back twice"
+
+
+async def test_a_turn_without_a_tenant_slot_never_takes_one():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    gate = CountingGate(held=0)
+    slots = TurnSlots(semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=False)
+    async with slots.activity():
+        async with slots.waiting():
+            pass
+    assert gate.calls == []
+    assert semaphore.locked()
+
+
+async def test_without_a_turn_the_helpers_do_nothing():
+    assert current_turn.get() is None
+    async with turn_activity():
+        async with turn_joining():
+            async with turn_waiting():
+                pass
