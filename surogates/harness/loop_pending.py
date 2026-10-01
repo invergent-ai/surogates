@@ -9,6 +9,9 @@ from surogates.session.events import EventType
 _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
     EventType.HARNESS_RECOVERED.value,
     EventType.HARNESS_WAKE.value,
+    # These tell viewers about a wait on the user's computer and give the harness nothing to do.
+    EventType.DEVICE_WAITING.value,
+    EventType.DEVICE_RESUMED.value,
 })
 
 

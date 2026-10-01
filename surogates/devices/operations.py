@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -30,10 +30,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import Device, DeviceOperation
 from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import BIND, binding_of, device_of
-from surogates.devices.presence import control_channel
+from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
 from surogates.runtime.turn_slots import turn_waiting
+
+if TYPE_CHECKING:
+    from surogates.devices.waits import DeviceWaitNotice
 
 logger = logging.getLogger(__name__)
 
@@ -215,10 +218,12 @@ class DeviceOperations:
         redis: Redis,
         *,
         recheck_interval_s: float = RECHECK_INTERVAL_S,
+        notice: DeviceWaitNotice | None = None,
     ) -> None:
         self._sf = session_factory
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
+        self._notice = notice
 
     # -- the worker's side -----------------------------------------------
 
@@ -243,9 +248,38 @@ class DeviceOperations:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
             async with turn_waiting():
-                return await waiter
+                return await self._wait_watching(waiter, request)
         finally:
             waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
+
+    async def _wait_watching(self, waiter: asyncio.Future, request: OperationRequest) -> dict[str, Any]:
+        """Await *waiter*, telling the session's viewers whenever its computer is away."""
+        if self._notice is None:
+            return await waiter
+        presence = DevicePresence(self._redis)
+        away = False
+        try:
+            while True:
+                online = await self._online(presence, request.device_id)
+                if online is False and not away:
+                    away = True
+                    await self._notice.away(request)
+                elif online is True and away:
+                    away = False
+                    await self._notice.back(request)
+                done, _ = await asyncio.wait({waiter}, timeout=self._recheck_interval_s)
+                if done:
+                    return waiter.result()
+        finally:
+            if away:
+                await self._notice.back(request)
+
+    async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
+        """Whether a link holds the device: None when Redis cannot tell."""
+        try:
+            return device_id in await self._within_redis_patience(presence.online([device_id]))
+        except Exception:
+            return None
 
     async def _wait_forever(self, operation_id: UUID) -> dict[str, Any]:
         """Wait for the operation's outcome as long as it takes."""

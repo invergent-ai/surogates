@@ -11,6 +11,7 @@ live worker can replay it.
 from __future__ import annotations
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -160,3 +161,16 @@ async def test_sweeper_recovers_orphaned_session(
 
     # Clean up.
     await redis_client.delete(queue)
+
+
+async def test_a_trailing_device_event_leaves_a_finished_turn_alone(session_store, session_factory):
+    agent_id = "sweeper-device-agent"
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
+    await session_store.emit_event(session.id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "done"}})
+    # A cancelled wait's resumed notice can land after the turn's clean end.
+    await session_store.emit_event(session.id, EventType.DEVICE_RESUMED, {"device_id": str(uuid4())})
+    await _backdate(session_factory, session.id, seconds=10)
+    orphans = await session_store.find_orphaned_sessions(stale_seconds=1, agent_id=agent_id)
+    assert session.id not in {o.id for o in orphans}

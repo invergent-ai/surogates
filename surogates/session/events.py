@@ -247,6 +247,10 @@ class EventType(str, Enum):
     BROWSER_CONTROL_GRANTED = "browser.control_granted"
     BROWSER_CONTROL_RETURNED = "browser.control_returned"
 
+    # A local-folder session's computer is away while its work waits on it.
+    DEVICE_WAITING = "device.waiting"
+    DEVICE_RESUMED = "device.resumed"
+
     # Agent inbox
     INBOX_INPUT_REQUIRED = "inbox.input_required"
     INBOX_ACTION_REQUIRED = "inbox.action_required"

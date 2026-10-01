@@ -39,6 +39,7 @@ from surogates.devices.operations import (
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
+from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import current_turn
@@ -2131,3 +2132,93 @@ async def test_an_announcement_during_a_delivery_is_delivered_after_it(
             return len(calls) == 2
 
         await eventually(delivered_again)
+
+
+def noticing_journal(session_factory, redis_client) -> DeviceOperations:
+    """A journal that tells sessions when their computer is away, quickly."""
+    return DeviceOperations(
+        session_factory, redis_client, recheck_interval_s=0.1,
+        notice=DeviceWaitNotice(SessionStore(session_factory, redis_client), session_factory),
+    )
+
+
+async def device_wait_events(session_factory, session_id: UUID) -> list[tuple[str, dict]]:
+    events = await SessionStore(session_factory).get_events(
+        session_id, types=[EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED],
+    )
+    return [(e.type, e.data) for e in events]  # Event.type is the str value
+
+
+def waiting_for(rig) -> tuple[str, dict]:
+    return ("device.waiting", {
+        "device_id": str(rig.device_id), "device_name": "Flavius's ThinkPad", "reason": "offline",
+    })
+
+
+def resumed_from(rig) -> tuple[str, dict]:
+    return ("device.resumed", {"device_id": str(rig.device_id)})
+
+
+async def test_a_session_waiting_for_an_absent_computer_says_so(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig  # the laptop starts disconnected
+    ops = noticing_journal(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(rig.device_id, rig.root)))
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    await eventually(says_waiting)
+    await rig.laptop.connect()
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_two_waiting_operations_of_a_session_say_so_once(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    ops = noticing_journal(session_factory, redis_client)
+    waits = [asyncio.create_task(ops.run(request_for(rig.device_id, rig.root))) for _ in range(2)]
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    await eventually(says_waiting)
+    await asyncio.sleep(0.3)  # both are past their grace now
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+    await rig.laptop.connect()
+    await asyncio.wait_for(asyncio.gather(*waits), 5.0)
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_computer_lost_after_delivery_is_waited_for_too(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    rig.laptop.reply = False  # it receives the operation, then drops off
+    await rig.laptop.connect()
+    ops = noticing_journal(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(rig.device_id, rig.root)))
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    await eventually(says_waiting, timeout=5.0)
+    rig.laptop.reply = True
+    await rig.laptop.disconnect()  # clear the dropped connection's tasks before connecting again
+    await rig.laptop.connect()
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_quick_answer_tells_no_one(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    ops = noticing_journal(session_factory, redis_client)
+    assert await asyncio.wait_for(ops.run(request_for(rig.device_id, rig.root)), 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == []

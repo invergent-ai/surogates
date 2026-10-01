@@ -2267,6 +2267,11 @@ class SessionStore:
         # like ``/loop`` produces duplicated side effects.
         trailing_async_event_types = (
             "session.title_updated",
+            # A cancelled device wait can emit device.resumed after the turn's
+            # clean llm.response.  During a live wait the event before them is
+            # tool.call, so a dead worker's session is still recovered.
+            "device.waiting",
+            "device.resumed",
         )
         # Correlated scalar subqueries: latest event for the session
         # under test, skipping trailing-async events so the predicate
