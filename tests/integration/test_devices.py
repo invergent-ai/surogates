@@ -1212,14 +1212,20 @@ async def test_recording_waits_for_a_revocation_in_flight(api, session_factory, 
             .where(DeviceOperation.device_id == device_id, DeviceOperation.completed_at.is_(None))
             .values(outcome=REVOKED_OUTCOME, completed_at=func.now())
         )
-        recording = asyncio.create_task(ops.run(request_for(device_id)))
+        request = request_for(device_id)
+        recording = asyncio.create_task(ops.run(request))
         await asyncio.sleep(0.5)
         # An insert that committed now would be missed by the update above, and
         # would run after the device was reauthorized.
         assert await operation_rows(session_factory, device_id) == []
         await db.commit()
     assert await asyncio.wait_for(recording, 3.0) == REVOKED_OUTCOME
-    assert await ops.pending(device_id, 1) == []
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeviceOperation.outcome, DeviceOperation.completed_at)
+            .where(DeviceOperation.invocation_id == request.invocation_id)
+        )).all()
+    assert [(row.outcome, row.completed_at is not None) for row in rows] == [(REVOKED_OUTCOME, True)]
 
 
 async def test_a_reply_that_races_a_reauthorization_is_stale(
