@@ -23,6 +23,7 @@ from surogates.coding_agents.messages import (
     render_login_instructions,
     render_status,
 )
+from surogates.devices.binding import device_of
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,14 @@ class CodeCommandMixin:
     async def _handle_code_command(self, session, content, lease, all_events=None) -> None:
         cmd = parse_code_command(content)
         if cmd is None:  # defensive — dispatch only calls us for /code
+            return
+
+        if device_of(session.config) is not None:
+            # Coding agents are switched off for a folder on the user's
+            # computer: answer before resolving credentials or starting a run.
+            await self._emit_code_message(
+                session, "/code is not available for sessions on a local folder", lease,
+            )
             return
 
         # The run path emits its own STARTED/PROGRESS/RESULT events.

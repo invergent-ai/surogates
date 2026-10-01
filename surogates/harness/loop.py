@@ -28,6 +28,8 @@ from uuid import UUID, uuid4
 
 from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
+from surogates.devices.binding import device_of
+from surogates.devices.sandbox import enter_device_session, leave_device_session
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
@@ -83,6 +85,8 @@ from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from openai import AsyncOpenAI
     from redis.asyncio import Redis
 
@@ -1007,6 +1011,7 @@ class AgentHarness(
         session: Session | None = None
         lease: Any | None = None
         renewal_task: asyncio.Task[None] | None = None
+        device_token: Token[frozenset[str]] | None = None
 
         try:
             # Connection health: proactively clean up dead connections
@@ -1029,6 +1034,9 @@ class AgentHarness(
             # /code and the coding tool can resolve them (the fetched row does
             # not carry them).
             session = self._overlay_repos(session)
+            # From here every sandbox request for this session, whoever
+            # makes it, goes through its device or is refused.
+            device_token = enter_device_session(session)
 
             # A browser-setup session is interactive-only: provision a fresh
             # browser + grant the user control on the first wake, and release it
@@ -1410,6 +1418,8 @@ class AgentHarness(
                     logger.debug("Failed to notify parent on crash", exc_info=True)
             raise
         finally:
+            leave_device_session(device_token)
+
             # Stop the background renewal task before touching the
             # lease.  ``None`` when the wake bailed before the lease
             # was acquired (status=paused short-circuit, lease held
@@ -1568,9 +1578,13 @@ class AgentHarness(
         # allowed to grow again.
         tool_guardrails.seed_from_messages(messages)
 
-        # Subdirectory hint tracker -- discovers context files as the agent navigates.
-        hint_tracker = SubdirectoryHintTracker(
-            initial_cwd=session.config.get("workspace_path"),
+        # Subdirectory hint tracker -- discovers context files as the agent
+        # navigates.  It reads this host's filesystem, so a folder on the
+        # user's computer gets none.
+        hint_tracker = (
+            None
+            if device_of(session.config) is not None
+            else SubdirectoryHintTracker(initial_cwd=session.config.get("workspace_path"))
         )
 
         # --- Prefilled context injection ---

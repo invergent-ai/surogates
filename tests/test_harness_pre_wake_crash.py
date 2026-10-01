@@ -28,6 +28,7 @@ from uuid import UUID, uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.devices.sandbox import is_device_owner
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import (
     AgentHarness,
@@ -215,3 +216,21 @@ async def test_paused_session_short_circuits_without_crash(monkeypatch):
     ]
     assert crash_calls == []
     store.release_lease.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wake_marks_a_local_folder_session_while_it_runs(monkeypatch):
+    session = _root_session().model_copy(update={"config": {
+        "execution": {"kind": "device", "device_id": str(uuid4())},
+        "workspace_path": "/home/flavius/notes",
+    }})
+    seen: list[bool] = []
+
+    async def _resolver(*_args, **_kwargs):
+        seen.append(is_device_owner(str(session.id)))
+        return None
+
+    monkeypatch.setattr(loop_module, "resolve_agent_def", _resolver)
+    await _harness(_stub_store(session)).wake(session.id)
+    assert seen == [True]
+    assert not is_device_owner(str(session.id))

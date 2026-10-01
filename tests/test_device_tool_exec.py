@@ -9,10 +9,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall
+from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
 
 pytestmark = pytest.mark.asyncio
 
@@ -150,3 +152,40 @@ async def test_an_oversized_result_spills_onto_the_computer():
     write = registry.get("write_file").handler
     assert write.call_args.args[0]["path"].startswith(".surogates-results/")
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
+
+
+async def test_nothing_in_a_local_folder_wake_falls_back_to_this_host():
+    # The expert loop's harness tools arrive with no session config at all.
+    token = enter_device_session(device_session())
+    try:
+        with pytest.raises(RuntimeError, match="computer"):
+            workspace_io_from({"workspace_path": "/tmp"})
+    finally:
+        leave_device_session(token)
+
+
+async def test_a_local_folder_session_never_falls_back_to_this_hosts_files():
+    with pytest.raises(RuntimeError, match="computer"):
+        workspace_io_from({
+            "workspace_path": "/",
+            "session_config": {"execution": {"kind": "device", "device_id": str(uuid4())}},
+        })
+
+
+async def test_a_cloud_session_still_gets_its_workspace_on_this_host(tmp_path):
+    wio = workspace_io_from({"workspace_path": str(tmp_path), "session_config": {}})
+    assert isinstance(wio, LocalWorkspaceIO)
+
+
+async def test_project_files_are_not_read_from_this_host_for_a_local_folder(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("HOST ONLY")
+
+    def context(config: dict) -> str:
+        session = SimpleNamespace(config=config, channel="web")
+        return PromptBuilder(tenant=MagicMock(), session=session)._context_files_section()
+
+    assert "HOST ONLY" in context({"workspace_path": str(tmp_path)})
+    assert "HOST ONLY" not in context({
+        "workspace_path": str(tmp_path),
+        "execution": {"kind": "device", "device_id": str(uuid4())},
+    })
