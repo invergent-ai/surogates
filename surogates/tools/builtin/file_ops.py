@@ -14,19 +14,20 @@ from __future__ import annotations
 import asyncio
 import difflib
 import errno
+import io
 import json
 import logging
 import multiprocessing
 import os
 import re
-import shutil
-import subprocess
+import shlex
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
 
 logger = logging.getLogger(__name__)
 
@@ -378,104 +379,6 @@ async def _parse_document_to_text(path: Path) -> str:
     except Exception as exc:  # noqa: BLE001 — parsers raise ad-hoc types
         raise DocumentParseError(path, str(exc)) from exc
 
-# ---------------------------------------------------------------------------
-# Write-path deny list — blocks writes to sensitive system/credential files
-# ---------------------------------------------------------------------------
-
-# Ripgrep binary path, resolved at import time.  search_files routes
-# through rg -- the worker and sandbox images both install it, and
-# config.py declares it as a worker requirement alongside srt/bubblewrap/
-# socat, so callers can rely on it being present.  If it's missing we
-# raise from the handler with a clear "install ripgrep" message rather
-# than silently degrading to a slow Python loop.
-_RIPGREP_PATH: str | None = shutil.which("rg")
-
-
-_HOME = str(Path.home())
-
-WRITE_DENIED_PATHS = {
-    os.path.realpath(p) for p in [
-        os.path.join(_HOME, ".ssh", "authorized_keys"),
-        os.path.join(_HOME, ".ssh", "id_rsa"),
-        os.path.join(_HOME, ".ssh", "id_ed25519"),
-        os.path.join(_HOME, ".ssh", "config"),
-        os.path.join(_HOME, ".bashrc"),
-        os.path.join(_HOME, ".zshrc"),
-        os.path.join(_HOME, ".profile"),
-        os.path.join(_HOME, ".bash_profile"),
-        os.path.join(_HOME, ".zprofile"),
-        os.path.join(_HOME, ".netrc"),
-        os.path.join(_HOME, ".pgpass"),
-        os.path.join(_HOME, ".npmrc"),
-        os.path.join(_HOME, ".pypirc"),
-        "/etc/sudoers",
-        "/etc/passwd",
-        "/etc/shadow",
-    ]
-}
-
-WRITE_DENIED_PREFIXES = [
-    os.path.realpath(p) + os.sep for p in [
-        os.path.join(_HOME, ".ssh"),
-        os.path.join(_HOME, ".aws"),
-        os.path.join(_HOME, ".gnupg"),
-        os.path.join(_HOME, ".kube"),
-        "/etc/sudoers.d",
-        "/etc/systemd",
-        os.path.join(_HOME, ".docker"),
-        os.path.join(_HOME, ".azure"),
-        os.path.join(_HOME, ".config", "gh"),
-    ]
-]
-
-
-def _get_safe_write_root() -> str | None:
-    """Return the resolved SUROGATES_WRITE_SAFE_ROOT path, or None if unset.
-
-    When set, all write_file/patch operations are constrained to this
-    directory tree.  Writes outside it are denied even if the target is
-    not on the static deny list.  Opt-in hardening for gateway/messaging
-    deployments that should only touch a workspace checkout.
-    """
-    root = os.getenv("SUROGATES_WRITE_SAFE_ROOT", "")
-    if not root:
-        return None
-    try:
-        return os.path.realpath(os.path.expanduser(root))
-    except Exception:
-        return None
-
-
-def _is_write_denied(path: str) -> bool:
-    """Return True if path is on the write deny list.
-
-    Checks the static deny list of sensitive system/credential files,
-    then the optional safe-root sandbox (SUROGATES_WRITE_SAFE_ROOT).
-    """
-    resolved = os.path.realpath(os.path.expanduser(str(path)))
-
-    # 1) Static deny list
-    if resolved in WRITE_DENIED_PATHS:
-        return True
-    for prefix in WRITE_DENIED_PREFIXES:
-        if resolved.startswith(prefix):
-            return True
-
-    # 2) Optional safe-root sandbox
-    safe_root = _get_safe_write_root()
-    if safe_root:
-        if not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
-            return True
-
-    return False
-
-
-def _resolve_user_path(path: str, workspace_path: str | None = None) -> str:
-    """Resolve a user-supplied path, enforcing workspace containment when set."""
-    if workspace_path:
-        return validate_workspace_path(workspace_path, path)
-    return str(Path(os.path.expanduser(path)).resolve())
-
 
 # ---------------------------------------------------------------------------
 # Image extensions — subset of binary that we can redirect to vision tools
@@ -489,6 +392,16 @@ def _is_image(path: str) -> bool:
     """Check if file is an image by extension."""
     ext = os.path.splitext(path)[1].lower()
     return ext in IMAGE_EXTENSIONS
+
+
+def _decode(
+    data: bytes,
+    encoding: str = "utf-8",
+    errors: str = "strict",
+    newline: str | None = None,
+) -> io.TextIOWrapper:
+    """Text view of *data*, decoded exactly as a text-mode file read would decode it."""
+    return io.TextIOWrapper(io.BytesIO(data), encoding=encoding, errors=errors, newline=newline)
 
 
 # ---------------------------------------------------------------------------
@@ -511,36 +424,35 @@ LINTERS = {
 }
 
 
-def _check_lint(filepath: str) -> dict[str, Any] | None:
+async def _check_lint(wio: WorkspaceIO, key: str) -> dict[str, Any] | None:
     """Run a syntax check on a file after editing.
 
     Returns ``{"status": "ok"}`` or ``{"status": "error", "output": ...}``,
     or ``None`` when no check ran -- unsupported extension, missing binary,
     timeout, or crash.  Non-results are ``None`` rather than a "skipped"
     dict so callers never have to filter them out of model-visible output.
+    Runs where the workspace runs commands, sandboxed like the terminal.
     """
-    ext = os.path.splitext(filepath)[1].lower()
+    ext = os.path.splitext(key)[1].lower()
     if ext not in LINTERS:
         return None
 
     linter_template = LINTERS[ext]
     # Extract the base command (first word) and check availability
     base_cmd = linter_template.split()[0]
-    if not shutil.which(base_cmd):
+    if not await wio.which(base_cmd):
         return None
 
-    resolved = str(Path(filepath).expanduser().resolve())
-    cmd = linter_template.format(file=repr(resolved))
+    cmd = linter_template.format(file=shlex.quote(key))
     try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return {"status": "ok"}
-        output = (result.stdout or "") + (result.stderr or "")
-        return {"status": "error", "output": output.strip()}
+        result = await wio.run(cmd, workdir=None, timeout=30)
     except Exception:
         return None
+    if result.timed_out:
+        return None
+    if result.returncode == 0:
+        return {"status": "ok"}
+    return {"status": "error", "output": result.output.strip()}
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +460,7 @@ def _check_lint(filepath: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def _suggest_similar_files(path: str) -> list[str]:
+async def _suggest_similar_files(wio: WorkspaceIO, path: str) -> list[str]:
     """Return up to 5 similar filenames in the same directory.
 
     Uses difflib.get_close_matches for fuzzy filename matching.
@@ -557,9 +469,8 @@ def _suggest_similar_files(path: str) -> list[str]:
     filename = os.path.basename(path)
 
     try:
-        resolved_dir = str(Path(dir_path).expanduser().resolve())
-        entries = os.listdir(resolved_dir)
-    except OSError:
+        entries = await wio.list_dir(await wio.resolve(dir_path))
+    except (OSError, WorkspaceSandboxError):
         return []
 
     matches = difflib.get_close_matches(filename, entries, n=5, cutoff=0.4)
@@ -580,10 +491,7 @@ def _suggest_similar_files(path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
-from surogates.tools.utils.workspace_sandbox import (
-    WorkspaceSandboxError,
-    validate_path as validate_workspace_path,
-)
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
 
 # ---------------------------------------------------------------------------
@@ -619,34 +527,6 @@ def _is_blocked_device(filepath: str) -> bool:
     ):
         return True
     return False
-
-
-# ---------------------------------------------------------------------------
-# Sensitive path protection — refuse writes to system-critical locations
-# without going through the terminal tool's approval system.
-# ---------------------------------------------------------------------------
-_SENSITIVE_PATH_PREFIXES = ("/etc/", "/boot/", "/usr/lib/systemd/")
-_SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
-
-
-def _check_sensitive_path(filepath: str) -> str | None:
-    """Return an error message if the path targets a sensitive system location."""
-    try:
-        resolved = os.path.realpath(os.path.expanduser(filepath))
-    except (OSError, ValueError):
-        resolved = filepath
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix):
-            return (
-                f"Refusing to write to sensitive system path: {filepath}\n"
-                "Use the terminal tool with sudo if you need to modify system files."
-            )
-    if resolved in _SENSITIVE_EXACT_PATHS:
-        return (
-            f"Refusing to write to sensitive system path: {filepath}\n"
-            "Use the terminal tool with sudo if you need to modify system files."
-        )
-    return None
 
 
 def _is_expected_write_exception(exc: Exception) -> bool:
@@ -716,17 +596,13 @@ def seed_read_timestamps(
         _cap_read_tracker_data(task_data)
 
 
-def has_read(filepath: str, task_id: str = "default") -> bool:
-    """Whether *filepath* was read by *task_id* during this session."""
-    try:
-        resolved = str(Path(filepath).expanduser().resolve())
-    except (OSError, ValueError):
-        return False
+def has_read(key: str, task_id: str = "default") -> bool:
+    """Whether the file at *key*, a resolved workspace key, was read by *task_id*."""
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if not task_data:
             return False
-        return resolved in task_data.get("read_timestamps", {})
+        return key in task_data.get("read_timestamps", {})
 
 
 def get_read_files_summary(task_id: str = "default") -> list:
@@ -831,51 +707,44 @@ def notify_other_tool_call(task_id: str = "default") -> None:
             task_data["consecutive"] = 0
 
 
-def _update_read_timestamp(filepath: str, task_id: str) -> None:
+async def _update_read_timestamp(wio: WorkspaceIO, key: str, task_id: str) -> None:
     """Record the file's current modification time after a successful write.
 
     Called after write_file and patch so that consecutive edits by the
     same task don't trigger false staleness warnings — each write
     refreshes the stored timestamp to match the file's new state.
     """
-    try:
-        resolved = str(Path(filepath).expanduser().resolve())
-        current_mtime = os.path.getmtime(resolved)
-    except (OSError, ValueError):
+    st = await wio.stat(key)
+    if st is None:
         return
-    _invalidate_dedup_for_path(resolved, task_id)
+    _invalidate_dedup_for_path(key, task_id)
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if task_data is not None:
-            task_data.setdefault("read_timestamps", {})[resolved] = current_mtime
+            task_data.setdefault("read_timestamps", {})[key] = st.mtime
             _cap_read_tracker_data(task_data)
 
 
-def _check_file_staleness(filepath: str, task_id: str) -> str | None:
+async def _check_file_staleness(wio: WorkspaceIO, key: str, task_id: str) -> str | None:
     """Check whether a file was modified since the agent last read it.
 
     Returns a warning string if the file is stale (mtime changed since
     the last read_file call for this task), or None if the file is fresh
     or was never read.  Does not block — the write still proceeds.
     """
-    try:
-        resolved = str(Path(filepath).expanduser().resolve())
-    except (OSError, ValueError):
-        return None
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if not task_data:
             return None
-        read_mtime = task_data.get("read_timestamps", {}).get(resolved)
+        read_mtime = task_data.get("read_timestamps", {}).get(key)
     if read_mtime is None:
         return None  # File was never read — nothing to compare against
-    try:
-        current_mtime = os.path.getmtime(resolved)
-    except OSError:
+    st = await wio.stat(key)
+    if st is None:
         return None  # Can't stat — file may have been deleted, let write handle it
-    if current_mtime != read_mtime:
+    if st.mtime != read_mtime:
         return (
-            f"Warning: {filepath} was modified since you last read it "
+            f"Warning: {key} was modified since you last read it "
             "(external edit or concurrent agent). The content you read may be "
             "stale. Consider re-reading the file to verify before writing."
         )
@@ -1298,7 +1167,7 @@ async def _read_file_handler(
       * everything else — treated as text by ``_handle_text``.
     """
     path = arguments.get("path", "")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     if not path:
         return _tool_error("No path provided")
@@ -1315,14 +1184,14 @@ async def _read_file_handler(
                 ),
             })
 
-        resolved = Path(_resolve_user_path(path, workspace_path))
-        ext = resolved.suffix.lower()
+        key = await wio.resolve(path)
+        ext = Path(key).suffix.lower()
 
         # ── Image file guard ─────────────────────────────────────────
         # Defensive fallback only.  Production routes images through the
         # worker pre-dispatch branch in ``tool_exec`` because the sandbox
         # has no vision LLM client.
-        if _is_image(str(resolved)):
+        if _is_image(key):
             return json.dumps({
                 "error": (
                     f"Image file detected: '{path}'. "
@@ -1332,11 +1201,11 @@ async def _read_file_handler(
 
         # ── Document branch ──────────────────────────────────────────
         if ext in _DOCUMENT_EXTENSIONS:
-            return await _handle_document(path, resolved, arguments, **kwargs)
+            return await _handle_document(wio, path, key, arguments)
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block remaining binary files by extension (no I/O).
-        if has_binary_extension(str(resolved)):
+        if has_binary_extension(key):
             return json.dumps({
                 "error": (
                     f"Cannot read binary file '{path}' ({ext}). "
@@ -1344,16 +1213,16 @@ async def _read_file_handler(
                 ),
             })
 
-        return await _handle_text(path, resolved, arguments, **kwargs)
+        return await _handle_text(wio, path, key, arguments, **kwargs)
     except Exception as exc:
         return _tool_error(str(exc))
 
 
 async def _handle_document(
+    wio: WorkspaceIO,
     path: str,
-    resolved: Path,
+    key: str,
     arguments: dict[str, Any],
-    **kwargs: Any,  # noqa: ARG001 — kwargs accepted for signature parity with _handle_text
 ) -> str:
     """Parse a PDF/docx/xlsx/pptx via liteparse and return its text.
 
@@ -1366,18 +1235,17 @@ async def _handle_document(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
-    if not resolved.exists():
+    if await wio.stat(key) is None:
         return json.dumps(
             {"error": f"File not found: {path}"},
             ensure_ascii=False,
         )
 
     try:
-        markdown = await default_cache().get_or_parse(
-            resolved, _parse_document_to_text,
-        )
+        async with wio.local_file(key) as local:
+            markdown = await default_cache().get_or_parse(local, _parse_document_to_text)
     except DocumentParseError as exc:
-        ext = resolved.suffix.lower().lstrip(".")
+        ext = Path(key).suffix.lower().lstrip(".")
         return _tool_error(
             f"Could not parse {path} as a {ext} document: {exc.reason}. "
             "You can retry with a subprocess fallback: try running "
@@ -1401,7 +1269,7 @@ async def _handle_document(
     logger.info(
         "event=document.parse path=%s ext=%s bytes_md=%d total_lines=%d "
         "lines_shown=%d truncated=%s",
-        path, resolved.suffix.lower(), len(markdown), total_lines,
+        path, Path(key).suffix.lower(), len(markdown), total_lines,
         lines_shown, truncated,
     )
 
@@ -1420,8 +1288,9 @@ async def _handle_document(
 
 
 async def _handle_text(
+    wio: WorkspaceIO,
     path: str,
-    resolved: Path,
+    key: str,
     arguments: dict[str, Any],
     **kwargs: Any,
 ) -> str:
@@ -1435,37 +1304,32 @@ async def _handle_text(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
     task_id = kwargs.get("task_id", "default")
-    resolved_str = str(resolved)
 
     # ── Dedup check ───────────────────────────────────────────────
     # If we already read this exact (path, offset, limit) and the
     # file hasn't been modified since, return a lightweight stub
     # instead of re-sending the same content.  Saves context tokens.
-    dedup_key = (resolved_str, offset, limit)
+    dedup_key = (key, offset, limit)
     task_data = _init_task_data(task_id)
     with _read_tracker_lock:
         cached_mtime = task_data.get("dedup", {}).get(dedup_key)
 
-    if cached_mtime is not None:
-        try:
-            current_mtime = os.path.getmtime(resolved_str)
-            if current_mtime == cached_mtime:
-                return json.dumps({
-                    "content": (
-                        "File unchanged since last read. The content from "
-                        "the earlier read_file result in this conversation is "
-                        "still current — refer to that instead of re-reading."
-                    ),
-                    "path": path,
-                    "dedup": True,
-                }, ensure_ascii=False)
-        except OSError:
-            pass  # stat failed — fall through to full read
+    st = await wio.stat(key)
+    if cached_mtime is not None and st is not None and st.mtime == cached_mtime:
+        return json.dumps({
+            "content": (
+                "File unchanged since last read. The content from "
+                "the earlier read_file result in this conversation is "
+                "still current — refer to that instead of re-reading."
+            ),
+            "path": path,
+            "dedup": True,
+        }, ensure_ascii=False)
 
     # ── Perform the read ──────────────────────────────────────────
-    if not os.path.exists(resolved_str):
+    if st is None:
         result_dict: dict[str, Any] = {"error": f"File not found: {path}"}
-        similar = _suggest_similar_files(path)
+        similar = await _suggest_similar_files(wio, path)
         if similar:
             result_dict["similar_files"] = similar
             result_dict["hint"] = (
@@ -1474,13 +1338,12 @@ async def _handle_text(
             )
         return json.dumps(result_dict, ensure_ascii=False)
 
-    file_size = os.path.getsize(resolved_str)
+    file_size = st.size
 
     # Try to detect encoding; fall back to utf-8
     encoding = "utf-8"
     try:
-        with open(resolved_str, "rb") as fb:
-            raw_head = fb.read(8192)
+        raw_head = await wio.read(key, max_bytes=8192)
         # Check for UTF-16/UTF-32 BOM
         if raw_head.startswith(b"\xff\xfe\x00\x00"):
             encoding = "utf-32-le"
@@ -1505,8 +1368,7 @@ async def _handle_text(
         pass  # Proceed with utf-8
 
     try:
-        with open(resolved_str, encoding=encoding, errors="replace") as fh:
-            lines = fh.readlines()
+        lines = _decode(await wio.read(key), encoding, errors="replace").readlines()
     except (OSError, UnicodeDecodeError) as exc:
         return _tool_error(f"Failed to read file: {exc}")
 
@@ -1538,6 +1400,7 @@ async def _handle_text(
         )
 
     # ── Track for consecutive-loop detection ──────────────────────
+    after = await wio.stat(key)
     read_key = ("read", path, offset, limit)
     with _read_tracker_lock:
         task_data["read_history"].add((path, offset, limit))
@@ -1552,13 +1415,10 @@ async def _handle_text(
         # 1. Dedup: skip identical re-reads of unchanged files.
         # 2. Staleness: warn on write/patch if the file changed since
         #    the agent last read it (external edit, concurrent agent, etc.).
-        try:
-            _mtime_now = os.path.getmtime(resolved_str)
-            task_data["dedup"][dedup_key] = _mtime_now
-            task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+        if after is not None:
+            task_data["dedup"][dedup_key] = after.mtime
+            task_data.setdefault("read_timestamps", {})[key] = after.mtime
             _cap_read_tracker_data(task_data)
-        except OSError:
-            pass  # Can't stat — skip tracking for this entry
 
     if count >= 4:
         # Hard block: stop returning content to break the loop
@@ -1595,30 +1455,25 @@ async def _write_file_handler(
     path = arguments.get("path", "")
     content = arguments.get("content", "")
     task_id = kwargs.get("task_id", "default")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     if not path:
         return _tool_error("No path provided")
 
     # Block writes to sensitive system/credential files
-    if _is_write_denied(path):
-        return _tool_error(
-            f"Write denied: '{path}' is a protected system/credential file."
-        )
-
-    sensitive_err = _check_sensitive_path(path)
-    if sensitive_err:
-        return _tool_error(sensitive_err)
+    refusal = await wio.check_write(path)
+    if refusal:
+        return _tool_error(refusal)
 
     try:
-        resolved = _resolve_user_path(path, workspace_path)
+        key = await wio.resolve(path)
 
         # Refuse a blind overwrite. Creating a file is free; replacing one
         # whose content was never read discards work the agent cannot
         # describe, and the recovery -- read it, then write -- costs one
         # call. Existence is checked here rather than in the harness
         # because this is the side that has the filesystem.
-        if os.path.exists(resolved) and not has_read(resolved, task_id):
+        if await wio.stat(key) is not None and not has_read(key, task_id):
             return _tool_error(
                 f"Refusing to overwrite '{path}': it already exists and has "
                 "not been read in this session. Call read_file on it first, "
@@ -1626,25 +1481,10 @@ async def _write_file_handler(
                 "it first."
             )
 
-        stale_warning = _check_file_staleness(resolved, task_id)
+        stale_warning = await _check_file_staleness(wio, key, task_id)
 
-        # Create parent directories automatically
-        parent_dir = os.path.dirname(resolved) or "."
-        os.makedirs(parent_dir, exist_ok=True)
-
-        # Atomic write: write to temp file then rename
-        tmp_path = resolved + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            os.replace(tmp_path, resolved)
-        except Exception:
-            # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        # Atomic write that creates parent directories.
+        await wio.write(key, content.encode("utf-8"))
 
         lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         result_dict: dict[str, Any] = {
@@ -1658,13 +1498,13 @@ async def _write_file_handler(
             result_dict["_warning"] = stale_warning
 
         # Auto-lint after write
-        lint_result = _check_lint(resolved)
+        lint_result = await _check_lint(wio, key)
         if lint_result:
             result_dict["lint"] = lint_result
 
         # Refresh the stored timestamp so consecutive writes by this
         # task don't trigger false staleness warnings.
-        _update_read_timestamp(resolved, task_id)
+        await _update_read_timestamp(wio, key, task_id)
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as exc:
@@ -1693,7 +1533,7 @@ async def _patch_handler(
     replace_all = arguments.get("replace_all", False)
     patch_content = arguments.get("patch")
     task_id = kwargs.get("task_id", "default")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     paths_to_check: list[str] = []
@@ -1709,24 +1549,17 @@ async def _patch_handler(
 
     for p in paths_to_check:
         # Block writes to sensitive system/credential files
-        if _is_write_denied(p):
-            return _tool_error(
-                f"Write denied: '{p}' is a protected system/credential file."
-            )
-        sensitive_err = _check_sensitive_path(p)
-        if sensitive_err:
-            return _tool_error(sensitive_err)
+        refusal = await wio.check_write(p)
+        if refusal:
+            return _tool_error(refusal)
 
     try:
-        resolved_paths = {
-            p: _resolve_user_path(p, workspace_path)
-            for p in paths_to_check
-        }
+        keys = {p: await wio.resolve(p) for p in paths_to_check}
 
         # Check staleness for all files this patch will touch.
         stale_warnings: list[str] = []
         for p in paths_to_check:
-            sw = _check_file_staleness(resolved_paths[p], task_id)
+            sw = await _check_file_staleness(wio, keys[p], task_id)
             if sw:
                 stale_warnings.append(sw)
 
@@ -1734,14 +1567,14 @@ async def _patch_handler(
             if not patch_content:
                 return _tool_error("patch content required")
             # V4A patch mode — apply multi-file patches
-            result_dict = _apply_v4a_patch(patch_content, workspace_path)
+            result_dict = await _apply_v4a_patch(wio, patch_content)
         elif mode == "replace":
             if not path:
                 return _tool_error("path required")
             if old_string is None or new_string is None:
                 return _tool_error("old_string and new_string required")
-            result_dict = _apply_replace(
-                path, old_string, new_string, replace_all, workspace_path,
+            result_dict = await _apply_replace(
+                wio, path, old_string, new_string, replace_all,
             )
         else:
             return _tool_error(f"Unknown mode: {mode}")
@@ -1756,7 +1589,7 @@ async def _patch_handler(
         # Auto-lint after successful patch
         if not result_dict.get("error"):
             for p in paths_to_check:
-                lint_result = _check_lint(resolved_paths[p])
+                lint_result = await _check_lint(wio, keys[p])
                 if lint_result:
                     result_dict.setdefault("lint", {})[p] = lint_result
 
@@ -1764,7 +1597,7 @@ async def _patch_handler(
         # consecutive edits by this task don't trigger false warnings.
         if not result_dict.get("error"):
             for p in paths_to_check:
-                _update_read_timestamp(resolved_paths[p], task_id)
+                await _update_read_timestamp(wio, keys[p], task_id)
 
         result_json = json.dumps(result_dict, ensure_ascii=False)
 
@@ -1815,12 +1648,12 @@ def _fuzzy_line_windows(
     ]
 
 
-def _apply_replace(
+async def _apply_replace(
+    wio: WorkspaceIO,
     path: str,
     old_string: str,
     new_string: str,
     replace_all: bool,
-    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
@@ -1848,17 +1681,16 @@ def _apply_replace(
             "path": path,
         }
 
-    resolved = _resolve_user_path(path, workspace_path)
+    key = await wio.resolve(path)
 
-    if not os.path.exists(resolved):
+    if await wio.stat(key) is None:
         return {"error": f"File not found: {path}"}
 
     try:
         # newline="" keeps CRLF intact: universal-newline translation here
         # plus a plain write-back silently converts every line ending in the
         # file, far outside the region being edited.
-        with open(resolved, encoding="utf-8", newline="") as fh:
-            content = fh.read()
+        content = _decode(await wio.read(key), newline="").read()
     except OSError as exc:
         return {"error": f"Failed to read file: {exc}"}
 
@@ -1880,7 +1712,7 @@ def _apply_replace(
         else:
             new_content = content.replace(old_string, new_string)
 
-        return _write_patched(resolved, path, content, new_content)
+        return await _write_patched(wio, key, path, content, new_content)
 
     # --- Scoped fuzzy match ---
     # Whitespace differences (indentation, tabs vs spaces, runs of spaces,
@@ -1914,7 +1746,7 @@ def _apply_replace(
             + replacement
             + "".join(content_lines[end:])
         )
-        return _write_patched(resolved, path, content, new_content)
+        return await _write_patched(wio, key, path, content, new_content)
 
     return {
         "error": f"Could not find the specified text in {path}",
@@ -1922,9 +1754,9 @@ def _apply_replace(
     }
 
 
-def _apply_v4a_patch(
+async def _apply_v4a_patch(
+    wio: WorkspaceIO,
     patch_content: str,
-    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a V4A-format multi-file patch.
 
@@ -1977,7 +1809,7 @@ def _apply_v4a_patch(
     if current_file and current_hunks:
         operations.append((current_file, current_op or "Update", current_hunks))
 
-    validation_errors = _validate_v4a_operations(operations, workspace_path)
+    validation_errors = await _validate_v4a_operations(wio, operations)
     if validation_errors:
         return {
             "status": "error",
@@ -1992,9 +1824,7 @@ def _apply_v4a_patch(
     errors: list[str] = []
 
     for filepath, operation, hunk_lines in operations:
-        result = _apply_v4a_file_op(
-            filepath, operation, hunk_lines, workspace_path,
-        )
+        result = await _apply_v4a_file_op(wio, filepath, operation, hunk_lines)
         results.append(result)
         if result.get("error"):
             errors.append(result["error"])
@@ -2011,40 +1841,40 @@ def _apply_v4a_patch(
     }
 
 
-def _validate_v4a_operations(
+async def _validate_v4a_operations(
+    wio: WorkspaceIO,
     operations: list[tuple[str, str, list[str]]],
-    workspace_path: str | None = None,
 ) -> list[str]:
     """Validate a parsed V4A patch without writing files."""
     errors: list[str] = []
     for filepath, operation, hunk_lines in operations:
         try:
-            resolved = _resolve_user_path(filepath, workspace_path)
+            resolved = await wio.resolve(filepath)
         except WorkspaceSandboxError as exc:
             errors.append(f"{filepath}: {exc}")
             continue
         if operation == "Update":
-            ok, error = _simulate_v4a_update(filepath, resolved, hunk_lines)
+            ok, error = await _simulate_v4a_update(wio, filepath, resolved, hunk_lines)
             if not ok and error:
                 errors.append(error)
         elif operation == "Delete":
-            if not os.path.exists(resolved):
+            if await wio.stat(resolved) is None:
                 errors.append(f"{filepath}: file not found for deletion")
     return errors
 
 
-def _simulate_v4a_update(
+async def _simulate_v4a_update(
+    wio: WorkspaceIO,
     filepath: str,
     resolved: str,
     hunk_lines: list[str],
 ) -> tuple[bool, str | None]:
     """Apply update hunks in memory and report the first missing match."""
-    if not os.path.exists(resolved):
+    if await wio.stat(resolved) is None:
         return False, f"{filepath}: file not found"
 
     try:
-        with open(resolved, encoding="utf-8") as fh:
-            original = fh.read()
+        original = _decode(await wio.read(resolved)).read()
     except OSError as exc:
         return False, f"{filepath}: failed to read: {exc}"
 
@@ -2105,21 +1935,21 @@ def _find_v4a_line(lines: list[str], target: str, start: int) -> int | None:
     return None
 
 
-def _apply_v4a_file_op(
+async def _apply_v4a_file_op(
+    wio: WorkspaceIO,
     filepath: str,
     operation: str,
     hunk_lines: list[str],
-    workspace_path: str | None = None,
 ) -> dict[str, Any]:
     """Apply a single V4A file operation (Update, Add, or Delete)."""
     try:
-        resolved = _resolve_user_path(filepath, workspace_path)
+        resolved = await wio.resolve(filepath)
     except WorkspaceSandboxError as exc:
         return {"path": filepath, "error": str(exc)}
 
     if operation == "Delete":
         try:
-            os.unlink(resolved)
+            await wio.delete(resolved)
             return {"path": filepath, "operation": "deleted", "status": "ok"}
         except OSError as exc:
             return {"path": filepath, "error": f"Failed to delete: {exc}"}
@@ -2134,10 +1964,7 @@ def _apply_v4a_file_op(
                 content_lines.append(line[1:])
         content = "\n".join(content_lines)
         try:
-            parent = os.path.dirname(resolved) or "."
-            os.makedirs(parent, exist_ok=True)
-            with open(resolved, "w", encoding="utf-8") as fh:
-                fh.write(content)
+            await wio.write(resolved, content.encode("utf-8"))
             return {
                 "path": filepath,
                 "operation": "created",
@@ -2148,12 +1975,11 @@ def _apply_v4a_file_op(
             return {"path": filepath, "error": f"Failed to create: {exc}"}
 
     # Operation == "Update"
-    if not os.path.exists(resolved):
+    if await wio.stat(resolved) is None:
         return {"path": filepath, "error": f"File not found: {filepath}"}
 
     try:
-        with open(resolved, encoding="utf-8") as fh:
-            original = fh.read()
+        original = _decode(await wio.read(resolved)).read()
     except OSError as exc:
         return {"path": filepath, "error": f"Failed to read: {exc}"}
 
@@ -2232,8 +2058,7 @@ def _apply_v4a_file_op(
 
     new_content = "\n".join(new_lines)
     try:
-        with open(resolved, "w", encoding="utf-8") as fh:
-            fh.write(new_content)
+        await wio.write(resolved, new_content.encode("utf-8"))
         return {
             "path": filepath,
             "operation": "updated",
@@ -2244,8 +2069,9 @@ def _apply_v4a_file_op(
         return {"path": filepath, "error": f"Failed to write: {exc}"}
 
 
-def _write_patched(
-    resolved_path: str,
+async def _write_patched(
+    wio: WorkspaceIO,
+    key: str,
     display_path: str,
     original: str,
     new_content: str,
@@ -2254,97 +2080,46 @@ def _write_patched(
 
     Used by ``_apply_replace`` after a successful match (exact or fuzzy).
     """
-    import difflib
-
     try:
-        # Atomic write
-        tmp_path = resolved_path + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8", newline="") as fh:
-                fh.write(new_content)
-            os.replace(tmp_path, resolved_path)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-
-        # Generate unified diff for the response
-        original_lines = original.splitlines(keepends=True)
-        new_lines = new_content.splitlines(keepends=True)
-        diff = difflib.unified_diff(
-            original_lines,
-            new_lines,
-            fromfile=f"a/{display_path}",
-            tofile=f"b/{display_path}",
-        )
-        diff_text = "".join(diff)
-
-        return {
-            "status": "ok",
-            "path": display_path,
-            "diff": diff_text if diff_text else "(no visible diff — whitespace-only change)",
-        }
+        await wio.write(key, new_content.encode("utf-8"))
     except OSError as exc:
         return {"error": f"Failed to write patched file: {exc}"}
 
-
-class _RipgrepError(RuntimeError):
-    """Raised when ripgrep exits non-{0,1} (rc=1 just means no matches)."""
-
-
-async def _run_ripgrep(args: list[str]) -> str:
-    """Run ripgrep with *args* and return stdout.
-
-    Exit codes: 0 = matches found, 1 = no matches (not an error), 2+ =
-    real failure (invalid regex, I/O error, etc.).  rc>=2 raises so the
-    caller surfaces a useful error to the agent instead of silently
-    returning an empty result set.
-    """
-    if _RIPGREP_PATH is None:
-        raise _RipgrepError(
-            "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf "
-            "install ripgrep) or rebuild the worker image"
-        )
-    proc = await asyncio.create_subprocess_exec(
-        _RIPGREP_PATH, *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    rc = proc.returncode or 0
-    if rc not in (0, 1):
-        raise _RipgrepError(
-            f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
-        )
-    return stdout.decode("utf-8", errors="replace")
+    # Generate unified diff for the response
+    diff_text = "".join(difflib.unified_diff(
+        original.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile=f"a/{display_path}",
+        tofile=f"b/{display_path}",
+    ))
+    return {
+        "status": "ok",
+        "path": display_path,
+        "diff": diff_text if diff_text else "(no visible diff — whitespace-only change)",
+    }
 
 
 async def _files_target_rg(
+    wio: WorkspaceIO,
     pattern: str,
-    expanded: str,
+    key: str,
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
-    """Find files matching glob *pattern* under *expanded* via ripgrep.
+    """Find files matching glob *pattern* under *key* via ripgrep.
 
-    ``--no-ignore`` preserves the legacy behaviour of NOT respecting
-    .gitignore; hidden files/dirs are skipped (rg default).  Results
-    are sorted by modification time (newest first) to match the legacy
-    glob-based path.
+    Results are sorted by modification time (newest first) to match the
+    legacy glob-based path.
     """
-    out = await _run_ripgrep([
-        "--no-ignore",
-        "--files",
-        "-g", pattern,
-        expanded,
-    ])
+    out = await wio.ripgrep(key, mode="files", pattern=pattern)
     files = [line for line in out.splitlines() if line]
-    files.sort(
-        key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-        reverse=True,
-    )
+    # ponytail: one stat per result; batch them when a remote workspace
+    # makes each stat a round trip.
+    mtimes: dict[str, float] = {}
+    for p in files:
+        st = await wio.stat(p)
+        mtimes[p] = st.mtime if st else 0
+    files.sort(key=lambda p: mtimes[p], reverse=True)
     total_count = len(files)
     paginated = files[offset : offset + limit]
     return {
@@ -2356,8 +2131,9 @@ async def _files_target_rg(
 
 
 async def _content_target_rg(
+    wio: WorkspaceIO,
     pattern: str,
-    expanded: str,
+    key: str,
     file_glob: str | None,
     output_mode: str,
     context: int,
@@ -2373,14 +2149,8 @@ async def _content_target_rg(
     rg's automatic binary-file detection replaces the legacy extension
     blocklist.
     """
-    base_args = ["--no-ignore"]
-    if file_glob:
-        base_args += ["-g", file_glob]
-
     if output_mode in ("files_only", "count"):
-        out = await _run_ripgrep(
-            base_args + ["-c", "-e", pattern, expanded],
-        )
+        out = await wio.ripgrep(key, mode="count", pattern=pattern, glob=file_glob)
         file_counts: list[tuple[str, int]] = []
         total_matches = 0
         for ln in out.splitlines():
@@ -2410,11 +2180,9 @@ async def _content_target_rg(
         }
 
     # output_mode == "content"
-    args = base_args + ["--json"]
-    if context > 0:
-        args += ["-C", str(context)]
-    args += ["-e", pattern, expanded]
-    out = await _run_ripgrep(args)
+    out = await wio.ripgrep(
+        key, mode="json", pattern=pattern, glob=file_glob, context=context,
+    )
     return _parse_rg_json_content(out, context, offset, limit)
 
 
@@ -2525,7 +2293,7 @@ async def _search_files_handler(
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
     task_id = kwargs.get("task_id", "default")
-    workspace_path = kwargs.get("workspace_path")
+    wio = workspace_io_from(kwargs)
 
     # Map legacy target names
     target_map = {"grep": "content", "find": "files"}
@@ -2567,15 +2335,13 @@ async def _search_files_handler(
                 "already_searched": count,
             }, ensure_ascii=False)
 
-        expanded = _resolve_user_path(path, workspace_path)
+        key = await wio.resolve(path)
 
         if target == "files":
-            result_dict = await _files_target_rg(
-                pattern, expanded, offset, limit,
-            )
+            result_dict = await _files_target_rg(wio, pattern, key, offset, limit)
         else:
             result_dict = await _content_target_rg(
-                pattern, expanded, file_glob, output_mode,
+                wio, pattern, key, file_glob, output_mode,
                 context, offset, limit,
             )
 
