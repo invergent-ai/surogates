@@ -65,6 +65,12 @@ export class FakeLinkServer {
     this.socket?.close(code, "test");
   }
 
+  // Stop reading from the current connection: a half-open link, which never
+  // answers a close frame.
+  stall(): void {
+    this.socket?.pause();
+  }
+
   async until(check: () => boolean, timeoutMs = 3_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (!check()) {

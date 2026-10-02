@@ -46,6 +46,16 @@ export interface DeviceLinkOptions {
   delay?: (attempt: number) => number;
 }
 
+// How long stop() waits for the server to answer the close before it cuts the
+// link: ws would wait 30 s on a half-open one, and the app is quitting.
+export const CLOSE_TIMEOUT_MS = 2_000;
+// Interval ticks are a millisecond or so off, and a check that lands just
+// short of the deadline would drop a silent server a whole heartbeat late.
+const TICK_SLACK_MS = 50;
+
+// What the server ended the link with: a later stop() leaves it showing.
+const ENDED: readonly LinkStatus[] = ["unauthenticated", "revoked", "superseded", "update_required"];
+
 // Closes after which the app must not reconnect.
 const FINAL: Partial<Record<number, LinkStatus>> = {
   [Close.unauthenticated]: "unauthenticated",
@@ -77,11 +87,15 @@ export class DeviceLink {
     const socket = this.socket;
     if (socket !== null && socket.readyState !== WebSocket.CLOSED) {
       await new Promise<void>((resolve) => {
-        socket.once("close", () => resolve());
+        const cut = setTimeout(() => socket.terminate(), CLOSE_TIMEOUT_MS);
+        socket.once("close", () => {
+          clearTimeout(cut);
+          resolve();
+        });
         socket.close(1000, "app stopped");
       });
     }
-    this.setStatus("stopped");
+    if (!ENDED.includes(this.status)) this.setStatus("stopped");
   }
 
   /** Send a frame on the welcomed connection; false when there is none. */
@@ -105,7 +119,8 @@ export class DeviceLink {
     });
     this.socket = socket;
     this.welcomed = false;
-    let lastFrameAt = Date.now();
+    // When the oldest ping that no frame has followed went out.
+    let pingedAt: number | null = null;
     let pinger: NodeJS.Timeout | null = null;
     let final: LinkStatus | undefined;
     const welcomeTimer = setTimeout(() => socket.terminate(), this.options.welcomeTimeoutMs ?? WELCOME_TIMEOUT_MS);
@@ -116,7 +131,7 @@ export class DeviceLink {
 
     socket.on("message", (data, isBinary) => {
       // Any frame counts as liveness, not only a pong.
-      lastFrameAt = Date.now();
+      pingedAt = null;
       if (isBinary) {
         socket.close(Close.protocol, "text frames only");
         return;
@@ -136,12 +151,14 @@ export class DeviceLink {
           this.welcomed = true;
           const heartbeatMs = frame.welcome.heartbeatS * 1000;
           pinger = setInterval(() => {
+            const now = Date.now();
             // No frame within two heartbeats of a ping: the server is gone.
-            if (Date.now() - lastFrameAt > 2 * heartbeatMs) {
+            if (pingedAt !== null && now - pingedAt >= 2 * heartbeatMs - TICK_SLACK_MS) {
               socket.terminate();
               return;
             }
             socket.send(JSON.stringify({ type: "ping" }));
+            pingedAt ??= now;
           }, heartbeatMs);
           this.setStatus("connected");
           this.options.handlers.onWelcome?.(frame.welcome);

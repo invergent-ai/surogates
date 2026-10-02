@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DeviceLink, type LinkStatus } from "../src/link/client.js";
+import { CLOSE_TIMEOUT_MS, DeviceLink, type LinkStatus } from "../src/link/client.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -21,7 +21,12 @@ interface Seen {
 
 async function connected(
   options: ConstructorParameters<typeof FakeLinkServer>[0] = {},
-  linkOptions: { token?: string; open?: string[]; welcomeTimeoutMs?: number } = {},
+  linkOptions: {
+    token?: string;
+    open?: string[];
+    welcomeTimeoutMs?: number;
+    delay?: (attempt: number) => number;
+  } = {},
 ): Promise<{ server: FakeLinkServer; link: DeviceLink; seen: Seen }> {
   const server = new FakeLinkServer(options);
   servers.push(server);
@@ -32,7 +37,7 @@ async function connected(
     token: linkOptions.token ?? "surg_dev_test",
     openIds: () => linkOptions.open ?? [],
     welcomeTimeoutMs: linkOptions.welcomeTimeoutMs,
-    delay: () => 20,
+    delay: linkOptions.delay ?? (() => 20),
     handlers: {
       onOperation: (operation) => seen.operations.push(operation),
       onCancel: (id) => seen.cancels.push(id),
@@ -79,11 +84,25 @@ describe("staying connected", () => {
     expect(server.connections).toBe(1);
   });
 
-  it("drops a server that falls silent, and reconnects", async () => {
+  it("drops a server that falls silent two heartbeats after its first unanswered ping", async () => {
+    const began = Date.now();
     const { server } = await connected({ heartbeatS: 1, pong: false });
     await server.until(() => server.connections >= 2, 5_000);
+    // The first ping goes out at 1 s, so the drop is at 3 s: after the second
+    // ping (2 s), and not a tick later (4 s).
+    expect(pings(server)).toBe(2);
+    expect(Date.now() - began).toBeLessThan(3_500);
     // 1006: the app cut the link itself, it was not a protocol close.
     expect(server.closes[0]).toBe(1006);
+  });
+
+  it("counts any frame as the server answering, not only a pong", async () => {
+    const { server } = await connected({ heartbeatS: 1, pong: false });
+    for (const ping of [1, 2, 3]) {
+      await server.until(() => pings(server) >= ping, 5_000);
+      server.send({ type: "op_ack", id: "op-0" });
+    }
+    expect(server.connections).toBe(1);
   });
 
   it("reconnects after an ordinary close", async () => {
@@ -104,13 +123,55 @@ describe("staying connected", () => {
 
 describe("stopping and starting", () => {
   it("starts again after a stop that came while it waited to reconnect", async () => {
-    const { server, link } = await connected();
+    // A wait too long to end by itself: the stop always lands inside it.
+    const { server, link } = await connected({}, { delay: () => 60_000 });
     await server.until(() => link.status === "connected");
     server.close(1011);
     await server.until(() => link.status === "offline");
     await link.stop();
     link.start();
     await server.until(() => server.connections === 2 && link.status === "connected");
+  });
+
+  it("does not wait on a server that never answers the close", async () => {
+    const { server, link } = await connected();
+    await server.until(() => link.status === "connected");
+    server.stall();
+    const began = Date.now();
+    await link.stop();
+    expect(Date.now() - began).toBeLessThan(CLOSE_TIMEOUT_MS + 1_000);
+    expect(link.status).toBe("stopped");
+  });
+});
+
+describe("backing off", () => {
+  it("does not start the backoff over at a welcome", async () => {
+    const attempts: number[] = [];
+    const { server, link } = await connected({}, { delay: (attempt) => (attempts.push(attempt), 20) });
+    await server.until(() => link.status === "connected");
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link.status === "connected");
+    server.close(1011);
+    await server.until(() => server.connections === 3);
+    expect(attempts).toEqual([0, 1]);
+  });
+
+  it("starts the backoff over when the server answers a ping", async () => {
+    const attempts: number[] = [];
+    const { server, link, seen } = await connected(
+      { heartbeatS: 1 },
+      { delay: (attempt) => (attempts.push(attempt), 20) },
+    );
+    await server.until(() => link.status === "connected");
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link.status === "connected");
+    await server.until(() => server.received.some((frame) => frame.type === "ping"), 5_000);
+    // Frames arrive in order: once this cancel is in, the pong before it was read.
+    server.send({ type: "cancel", id: "op-0" });
+    await server.until(() => seen.cancels.length === 1);
+    server.close(1011);
+    await server.until(() => server.connections === 3);
+    expect(attempts).toEqual([0, 0]);
   });
 });
 
@@ -127,6 +188,15 @@ describe("stopping for good", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(server.connections).toBe(1);
     expect(seen.statuses.at(-1)).toBe(status);
+  });
+
+  it("keeps the reason it ended when it is stopped afterwards", async () => {
+    const { server, link } = await connected();
+    await server.until(() => link.status === "connected");
+    server.close(4403);
+    await server.until(() => link.status === "revoked");
+    await link.stop();
+    expect(link.status).toBe("revoked");
   });
 
   it("stops when the server needs a newer app", async () => {
