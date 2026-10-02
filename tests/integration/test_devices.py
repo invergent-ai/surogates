@@ -22,6 +22,8 @@ from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Delete
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -3085,3 +3087,74 @@ async def test_a_chat_resumed_after_a_pause_reports_its_call_stopped(laptop_rig,
 
     assert "Stopped before the computer reported a result" in resumed["content"]
     assert not (rig.folder / "log.txt").exists()
+
+
+async def test_a_pause_waits_for_a_recording_in_flight_and_cancels_it(laptop_rig, api, session_factory, monkeypatch):
+    rig = laptop_rig  # the laptop stays away
+    recording, release = asyncio.Event(), asyncio.Event()
+    real_refuse_when_full = operations_module._refuse_when_full
+
+    async def refuse_when_full_after_a_wait(db, request, device):
+        # Inside the record's transaction, past its session check: its locks are held.
+        recording.set()
+        await release.wait()
+        await real_refuse_when_full(db, request, device)
+
+    monkeypatch.setattr(operations_module, "_refuse_when_full", refuse_when_full_after_a_wait)
+    running = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    pausing: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(recording.wait(), 5.0)
+        pausing = asyncio.create_task(api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth()))
+        await asyncio.sleep(0.5)
+        # Its status update waits for the recording's share lock.  Without the
+        # lock the pause would finish first, cancel nothing, and the operation
+        # recorded after it would run on the computer.
+        assert not pausing.done()
+        release.set()
+        paused = await asyncio.wait_for(pausing, 5.0)
+        assert paused.status_code == 200, paused.text
+        assert await asyncio.wait_for(running, 5.0) == CANCELLED_OUTCOME
+        assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+    finally:
+        release.set()
+        await stop(running)
+        if pausing is not None:
+            await asyncio.gather(pausing, return_exceptions=True)
+
+
+async def test_a_recording_waits_for_a_delete_in_flight_and_is_refused(laptop_rig, api, session_factory, monkeypatch):
+    rig = laptop_rig  # the laptop stays away
+    archiving, release = asyncio.Event(), asyncio.Event()
+    real_execute = AsyncSession.execute
+
+    async def execute(self, statement, *args, **kwargs):
+        # The statement that follows the archive's lock on the tree's sessions.
+        if isinstance(statement, Delete) and statement.table.name == "scheduled_sessions":
+            archiving.set()
+            await release.wait()
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", execute)
+    deleting = asyncio.create_task(api.app.state.session_store.archive_session_tree_and_delete_schedules(
+        rig.root, org_id=api.org_id, agent_id=AGENT_ID,
+    ))
+    running: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(archiving.wait(), 5.0)
+        running = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+        await asyncio.sleep(0.5)
+        # The archive holds the sessions, so the recording waits for it.  Without
+        # that, it would record beside the delete, and the cancellation that
+        # follows might not see it.
+        assert await operation_rows(session_factory, rig.device_id) == []
+        release.set()
+        await asyncio.wait_for(deleting, 5.0)
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await asyncio.wait_for(running, 5.0)
+        assert await operation_rows(session_factory, rig.device_id) == []
+    finally:
+        release.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+        if running is not None:
+            await stop(running)
