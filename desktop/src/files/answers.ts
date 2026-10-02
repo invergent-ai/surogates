@@ -120,7 +120,7 @@ export function io<T>(path: string, call: () => T): T {
   }
 }
 
-function fromNode(error: unknown, path: string): unknown {
+export function fromNode(error: unknown, path: string): unknown {
   if (!(error instanceof Error) || error instanceof Failure) return error;
   const { code, errno } = error as NodeJS.ErrnoException;
   if (typeof code !== "string" || typeof errno !== "number") return error;

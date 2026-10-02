@@ -3,18 +3,18 @@
 // sandbox. Each is synchronous fs work, so two changes to one path never
 // interleave; only ripgrep waits on a process.
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync,
   renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import type { Outcome } from "../link/protocol.js";
 import {
-  Failure, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength,
+  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength,
   sandboxError, TOO_LARGE, valueError,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
@@ -45,6 +45,8 @@ const EFBIG = new Failure({ type: "os", code: "EFBIG", message: TOO_LARGE });
 
 export const RG_MISSING =
   "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
+const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true }); // Python keeps a leading BOM
+const STDERR_BYTES = 1024; // the message keeps 200 code points, at most 800 bytes
 const CANCELLED = new Failure({ type: "cancelled", message: "The session stopped this search" });
 const NARROW = new Failure({
   type: "ripgrep",
@@ -233,14 +235,15 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 }
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);
-// otherwise the first PATH entry holding an executable file of that name.
+// otherwise the first PATH entry holding an executable file of that name, a
+// relative or empty entry being read from *cwd*.
 export function findOnPath(name: string, path: string | undefined, cwd: string): string | null {
   if (!name || name.includes("\0")) return null;
   if (name.includes("/")) return runnable(name.startsWith("/") ? name : join(cwd, name)) ? name : null;
   const entries = path ?? "/bin:/usr/bin";
   if (!entries) return null;
   for (const entry of entries.split(":")) {
-    const candidate = join(entry || cwd, name);
+    const candidate = join(resolve(cwd, entry), name);
     if (runnable(candidate)) return candidate;
   }
   return null;
@@ -281,16 +284,41 @@ async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, 
     argv.push("-e", pattern);
   }
   argv.push(key);
+  // A user's rg config could change the results or add --pre, which runs a program.
   const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
   return searchWith(rg, argv, clean, signal);
 }
 
+// ENOENT is no rg to run (or no interpreter for it); any other spawn error
+// (E2BIG, EACCES, EMFILE) is an os error naming rg.
+function spawnFailure(error: unknown, rg: string): unknown {
+  return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
+    ? new Failure({ type: "ripgrep", message: RG_MISSING })
+    : fromNode(error, rg);
+}
+
 function searchWith(rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(rg, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+    if (signal.aborted) {
+      reject(CANCELLED);
+      return;
+    }
+    let child: ChildProcess;
+    try {
+      child = spawn(rg, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      reject(spawnFailure(error, rg));
+      return;
+    }
+    // At once: an error event nobody listens for crashes the helper.
+    child.on("error", (error) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(spawnFailure(error, rg));
+    });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let size = 0;
+    let errSize = 0;
     let over = false;
     const kill = () => {
       try {
@@ -299,12 +327,13 @@ function searchWith(rg: string, argv: string[], env: Record<string, string | und
         // Already gone.
       }
     };
-    const onAbort = () => {
+    function onAbort() {
       kill();
       reject(CANCELLED);
-    };
+    }
     signal.addEventListener("abort", onAbort, { once: true });
-    child.stdout.on("data", (chunk: Buffer) => {
+    // A child that could not start (EMFILE) has no streams.
+    child.stdout?.on("data", (chunk: Buffer) => {
       size += chunk.length;
       // Every byte costs at least one character on the wire, so past the cap in
       // bytes the answer is already known.
@@ -315,27 +344,27 @@ function searchWith(rg: string, argv: string[], env: Record<string, string | und
         out.push(chunk);
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      if (err.length < 16) err.push(chunk);
-    });
-    child.on("error", () => {
-      signal.removeEventListener("abort", onAbort);
-      reject(new Failure({ type: "ripgrep", message: RG_MISSING }));
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (errSize < STDERR_BYTES) err.push(chunk.subarray(0, STDERR_BYTES - errSize));
+      errSize += chunk.length;
     });
     child.on("close", (code, killedBy) => {
       signal.removeEventListener("abort", onAbort);
-      if (signal.aborted) return;
+      if (signal.aborted) {
+        reject(CANCELLED);
+        return;
+      }
       if (over) {
         reject(NARROW);
         return;
       }
       const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
       if (status !== 0 && status !== 1) {
-        const stderr = [...new TextDecoder().decode(Buffer.concat(err))].slice(0, 200).join("");
+        const stderr = [...UTF8.decode(Buffer.concat(err))].slice(0, 200).join("");
         reject(new Failure({ type: "ripgrep", message: `rg exited ${status}: ${stderr}` }));
         return;
       }
-      const found = new TextDecoder().decode(Buffer.concat(out));
+      const found = UTF8.decode(Buffer.concat(out));
       if (pyJsonLength(found) > OUTPUT_CAP_CHARS) reject(NARROW);
       else resolve(found);
     });
