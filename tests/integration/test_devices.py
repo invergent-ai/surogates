@@ -2210,7 +2210,8 @@ async def test_two_waiting_operations_of_a_session_say_so_once(
     monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
     rig = laptop_rig
     ops = noticing_journal(session_factory, redis_client)
-    waits = [asyncio.create_task(ops.run(request_for(rig.device_id, rig.root))) for _ in range(2)]
+    requests = [request_for(rig.device_id, rig.root) for _ in range(2)]
+    waits = [asyncio.create_task(ops.run(request)) for request in requests]
 
     async def says_waiting() -> bool:
         return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
@@ -2218,8 +2219,32 @@ async def test_two_waiting_operations_of_a_session_say_so_once(
     await eventually(says_waiting)
     await asyncio.sleep(0.3)  # both are past their grace now
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+    # One of them is answered while the computer is still away: the other still waits.
+    [answered] = [op for op in await ops.pending(rig.device_id, 1) if op.invocation_id == requests[0].invocation_id]
+    assert await ops.complete(rig.device_id, 1, answered.id, answered.digest, {"ok": True}) == "completed"
+    assert await asyncio.wait_for(waits[0], 5.0) == {"ok": True}
+    assert not waits[1].done()
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
     await rig.laptop.connect()
-    await asyncio.wait_for(asyncio.gather(*waits), 5.0)
+    assert await asyncio.wait_for(waits[1], 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_stopped_wait_says_the_computer_is_no_longer_awaited(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig  # the laptop stays disconnected
+    ops = noticing_journal(session_factory, redis_client)
+    waiting = asyncio.create_task(ops.run(request_for(rig.device_id, rig.root)))
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    await eventually(says_waiting)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
 
 
