@@ -7,9 +7,13 @@ import type { OperationJournal } from "../journal/journal.js";
 import { MAX_FRAME_CHARS, opResult, type Operation, type Outcome } from "../link/protocol.js";
 
 // The answer to an operation whose result would not fit one frame: the server
-// would refuse that frame, and the result would be resent forever.
+// would refuse that frame, and the result would be resent forever. The operation
+// did run, so the agent is told to look before it repeats one that has effects.
 export const TOO_LARGE: Outcome = {
-  error: { type: "too_large", message: "The computer's result is too large to send" },
+  error: {
+    type: "too_large",
+    message: "The operation ran, but its result is too large to send. Check what it did before repeating it.",
+  },
 };
 
 function unsendable(why: string): Outcome {

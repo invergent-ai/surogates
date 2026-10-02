@@ -153,6 +153,12 @@ describe("a result too large for one frame", () => {
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual(TOO_LARGE);
   });
+
+  it("says the operation ran, so the agent checks before it repeats an effectful command", () => {
+    expect(TOO_LARGE).toMatchObject({
+      error: { type: "too_large", message: expect.stringMatching(/ran.*before repeating/i) },
+    });
+  });
 });
 
 describe("a failure too large for one frame", () => {
