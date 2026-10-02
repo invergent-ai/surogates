@@ -3,16 +3,19 @@
 // sandbox. Each is synchronous fs work, so two changes to one path never
 // interleave; only ripgrep waits on a process.
 
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync,
+  accessSync, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync,
   renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
+import { constants as osConstants } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { Outcome } from "../link/protocol.js";
 import {
-  Failure, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, osError, sandboxError, TOO_LARGE, valueError,
+  Failure, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength,
+  sandboxError, TOO_LARGE, valueError,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -33,10 +36,20 @@ const KINDS: Record<string, Kind> = {
   write,
   delete: remove,
   list_dir: listDir,
+  ripgrep,
+  which,
 };
 
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const EFBIG = new Failure({ type: "os", code: "EFBIG", message: TOO_LARGE });
+
+export const RG_MISSING =
+  "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
+const CANCELLED = new Failure({ type: "cancelled", message: "The session stopped this search" });
+const NARROW = new Failure({
+  type: "ripgrep",
+  message: `search output over ${OUTPUT_CAP_CHARS} characters; narrow the pattern, path or glob`,
+});
 
 // One operation's outcome. Never rejects: whatever goes wrong is an error outcome.
 export async function perform(
@@ -76,6 +89,10 @@ function whole(args: Record<string, unknown>, name: string): number {
 
 function wholeOrNull(args: Record<string, unknown>, name: string): number | null {
   return args[name] === null ? null : whole(args, name);
+}
+
+function textOrNull(args: Record<string, unknown>, name: string): string | null {
+  return args[name] === null ? null : text(args, name);
 }
 
 function stat(args: Record<string, unknown>, { folder }: Context): unknown {
@@ -213,4 +230,114 @@ function makeDirs(dir: string): void {
 function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"));
   return io(key, () => readdirSync(key)).slice(0, MAX_NAMES);
+}
+
+// shutil.which: a name with a slash is checked as it is (relative to *cwd*);
+// otherwise the first PATH entry holding an executable file of that name.
+export function findOnPath(name: string, path: string | undefined, cwd: string): string | null {
+  if (!name || name.includes("\0")) return null;
+  if (name.includes("/")) return runnable(name.startsWith("/") ? name : join(cwd, name)) ? name : null;
+  const entries = path ?? "/bin:/usr/bin";
+  if (!entries) return null;
+  for (const entry of entries.split(":")) {
+    const candidate = join(entry || cwd, name);
+    if (runnable(candidate)) return candidate;
+  }
+  return null;
+}
+
+function runnable(path: string): boolean {
+  try {
+    if (statSync(path).isDirectory()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function which(args: Record<string, unknown>, { env, folder }: Context): boolean {
+  return findOnPath(text(args, "name"), env.PATH, folder) !== null;
+}
+
+// The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-".
+async function ripgrep(args: Record<string, unknown>, { env, folder }: Context, signal: AbortSignal): Promise<string> {
+  const key = keyInFolder(folder, text(args, "key"));
+  const mode = text(args, "mode");
+  if (mode !== "files" && mode !== "count" && mode !== "json") throw valueError(`unknown search mode '${mode}'`);
+  const pattern = text(args, "pattern");
+  const glob = textOrNull(args, "glob");
+  const lines = whole(args, "context");
+  if (pattern.includes("\0") || glob?.includes("\0")) throw valueError("embedded null byte");
+  const rg = findOnPath("rg", env.PATH, folder);
+  if (!rg) throw new Failure({ type: "ripgrep", message: RG_MISSING });
+  const argv = ["--no-ignore"];
+  if (mode === "files") {
+    argv.push("--files", "-g", pattern);
+  } else {
+    if (glob) argv.push("-g", glob);
+    if (mode === "count") argv.push("-c");
+    else argv.push("--json", ...(lines > 0 ? ["-C", String(lines)] : []));
+    argv.push("-e", pattern);
+  }
+  argv.push(key);
+  const { RIPGREP_CONFIG_PATH: _config, ...clean } = env;
+  return searchWith(rg, argv, clean, signal);
+}
+
+function searchWith(rg: string, argv: string[], env: Record<string, string | undefined>, signal: AbortSignal): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(rg, argv, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    let size = 0;
+    let over = false;
+    const kill = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    };
+    const onAbort = () => {
+      kill();
+      reject(CANCELLED);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      // Every byte costs at least one character on the wire, so past the cap in
+      // bytes the answer is already known.
+      if (size > OUTPUT_CAP_CHARS) {
+        over = true;
+        kill();
+      } else {
+        out.push(chunk);
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (err.length < 16) err.push(chunk);
+    });
+    child.on("error", () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new Failure({ type: "ripgrep", message: RG_MISSING }));
+    });
+    child.on("close", (code, killedBy) => {
+      signal.removeEventListener("abort", onAbort);
+      if (signal.aborted) return;
+      if (over) {
+        reject(NARROW);
+        return;
+      }
+      const status = code ?? -(killedBy ? osConstants.signals[killedBy] : 0);
+      if (status !== 0 && status !== 1) {
+        const stderr = [...new TextDecoder().decode(Buffer.concat(err))].slice(0, 200).join("");
+        reject(new Failure({ type: "ripgrep", message: `rg exited ${status}: ${stderr}` }));
+        return;
+      }
+      const found = new TextDecoder().decode(Buffer.concat(out));
+      if (pyJsonLength(found) > OUTPUT_CAP_CHARS) reject(NARROW);
+      else resolve(found);
+    });
+  });
 }
