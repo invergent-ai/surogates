@@ -68,6 +68,17 @@ describe("realpath, as CPython's non-strict os.path.realpath", () => {
   it("reports a loop", () => {
     expect(realpath(`${base}/loop-a/x`).loop).toBe(true);
   });
+
+  it("leaves what a loop did not resolve as normpath tidies it, keeping exactly two leading slashes", () => {
+    expect(realpath(`${base}/loop-a/x`)).toEqual({ path: `${base}/loop-a/x`, loop: true });
+    expect(realpath(`${base}/loop-a//x`)).toEqual({ path: "/x", loop: true });
+    expect(realpath(`${base}/loop-a///x`)).toEqual({ path: "//x", loop: true });
+    expect(realpath(`${base}/loop-a////x`)).toEqual({ path: "/x", loop: true });
+  });
+
+  it("reuses what it learned of a link it crosses twice", () => {
+    expect(realpath(`${base}/to-real/inner/../../to-real/inner`)).toEqual({ path: `${base}/real/inner`, loop: false });
+  });
 });
 
 describe("expandUser, as CPython's os.path.expanduser", () => {
@@ -129,6 +140,13 @@ describe("resolveInFolder, as the cloud's resolve", () => {
       type: "os", code: "ELOOP",
     });
     expect(resolveInFolder(folder, home, "loop-x/../a.txt")).toBe(`${folder}/a.txt`);
+  });
+
+  it("reads repeated slashes as Python's Path does, so a loop is still a loop", () => {
+    expect(refusal(() => resolveInFolder(folder, home, "loop-x//f"))).toMatchObject({
+      type: "os", code: "ELOOP",
+    });
+    expect(resolveInFolder(folder, home, "loop-x//../a.txt")).toBe(`${folder}/a.txt`);
   });
 });
 

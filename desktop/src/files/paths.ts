@@ -74,7 +74,10 @@ function joinRealPath(path: string, rest: string, seen: Map<string, string | nul
 // realpath ends with abspath(), which tidies the part a loop left unresolved.
 export function realpath(path: string): { path: string; loop: boolean } {
   const [resolved, ok] = joinRealPath("", path, new Map());
-  return { path: ok ? resolved || "/" : posix.normalize(resolved).replace(/(.)\/+$/, "$1"), loop: !ok };
+  if (ok) return { path: resolved || "/", loop: false };
+  // normpath keeps exactly two leading slashes, which posix.normalize folds into one.
+  const lead = resolved.startsWith("//") && !resolved.startsWith("///") ? "/" : "";
+  return { path: lead + posix.normalize(resolved).replace(/(.)\/+$/, "$1"), loop: true };
 }
 
 // Path.resolve() fails on a loop only when stat of the result runs into one.
@@ -104,6 +107,8 @@ export function expandUser(path: string, home: string): string {
   return userHome.replace(/\/+$/, "") + path.slice(end) || "/";
 }
 
+// Reads only /etc/passwd, so a user known only to NSS or LDAP is not found
+// (Linux first).
 function homeOf(user: string): string | null {
   let passwd: string;
   try {
@@ -126,7 +131,7 @@ export function inside(path: string, folder: string): boolean {
 // resolve: a path as the model wrote it, as a key in the folder.
 export function resolveInFolder(folder: string, home: string, userPath: string): string {
   if (userPath.includes("\0")) throw valueError("embedded null byte");
-  const expanded = expandUser(userPath, home);
+  const expanded = expandUser(userPath, home).replace(/\/{2,}/g, "/");
   const { path, loop } = realpath(expanded.startsWith("/") ? expanded : pyJoin(folder, expanded));
   if (loop && stillLoops(path)) throw osError("ELOOP", path);
   if (!inside(path, folder)) {

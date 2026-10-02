@@ -52,6 +52,13 @@ const STRERROR: Record<string, string> = {
   ESPIPE: "Illegal seek",
   ENOMEM: "Cannot allocate memory",
   EFAULT: "Bad address",
+  EILSEQ: "Invalid or incomplete multibyte or wide character",
+  ERANGE: "Numerical result out of range",
+  ENOTCONN: "Transport endpoint is not connected",
+  EHOSTUNREACH: "No route to host",
+  ENOLCK: "No locks available",
+  EUCLEAN: "Structure needs cleaning",
+  ENOMEDIUM: "No medium found",
 };
 
 // Python's repr() of a str: the quote it picks, its escapes, and \x, \u or \U
@@ -104,6 +111,7 @@ export function sandboxError(message: string): Failure {
 }
 
 // A filesystem call about *path*: a Node error comes out as Python's OSError.
+// For synchronous calls only: a promise or a callback would escape the try.
 export function io<T>(path: string, call: () => T): T {
   try {
     return call();
