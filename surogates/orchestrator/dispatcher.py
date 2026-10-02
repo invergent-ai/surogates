@@ -19,7 +19,7 @@ import logging
 import random
 import traceback
 from typing import TYPE_CHECKING, Any, Callable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from dataclasses import dataclass
 
@@ -169,6 +169,8 @@ class DequeuedSession:
     agent_id: str
     session_id: str
     priority: float
+    # The turn's holder in the tenant gate; empty when no gate is in use.
+    gate_holder: str = ""
 
 
 # Maximum number of gate-busy candidates dequeue_next_session will
@@ -224,13 +226,15 @@ async def dequeue_next_session(
                 session_id=session_id, priority=score,
             )
 
+        holder = f"{session_id}:{uuid4().hex}"
         acquired = await gate.try_acquire(
-            org_id, agent_id, limit=gate_limit,
+            org_id, agent_id, holder=holder, limit=gate_limit,
         )
         if acquired:
             return DequeuedSession(
                 org_id=org_id, agent_id=agent_id,
                 session_id=session_id, priority=score,
+                gate_holder=holder,
             )
 
         # Gate-busy candidate: requeue with backoff (no slot
@@ -428,6 +432,7 @@ class Orchestrator:
                     # billed for a slot that produces no work.
                     await self._turn_gate.release(
                         dequeued.org_id, dequeued.agent_id,
+                        holder=dequeued.gate_holder,
                     )
                 continue
 
@@ -524,6 +529,7 @@ class Orchestrator:
             agent_id=dequeued.agent_id if dequeued is not None else "",
             # The dispatch loop took a tenant slot only for a dequeued session.
             gate_held=dequeued is not None and self._turn_gate is not None,
+            gate_holder=dequeued.gate_holder if dequeued is not None else "",
             session_id=str(session_id),
             task=task,
         )
@@ -1017,23 +1023,21 @@ class Orchestrator:
         which is the only path that ``release()``s the gate slot.  Left
         unhandled, every debugger-stop / OOM / pod-eviction leaks one slot per
         in-flight session for this (org, agent); a few cycles of that drives
-        the counter to its cap and every subsequent dequeue is rejected,
+        the tenant's count to its cap and every subsequent dequeue is rejected,
         leaving fresh sessions stuck in an endless re-enqueue loop with no
         diagnostic anywhere.
 
         The slot leaked whether or not we go on to retry the session, so both
         the recovery and the abandon path call this.
 
-        Floor-at-zero in ``TurnGate.release()`` protects against
-        double-release if this races a late-arriving finally on the original
-        owner (the owner is by definition gone at this point, but the floor
-        keeps us honest).
+        The gate frees only the slots the session's turns hold: if its turn had
+        given its slot back while it waited, nothing is freed.
         """
         if self._turn_gate is None:
             return
         try:
-            await self._turn_gate.release(
-                str(session.org_id), session.agent_id,
+            await self._turn_gate.release_session(
+                str(session.org_id), session.agent_id, str(session.id),
             )
         except Exception:
             logger.warning(

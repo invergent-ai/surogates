@@ -44,6 +44,7 @@ class TurnSlots:
         org_id: str,
         agent_id: str,
         gate_held: bool,
+        gate_holder: str = "",
         session_id: str = "",
         task: asyncio.Task[Any] | None = None,
     ) -> None:
@@ -52,6 +53,8 @@ class TurnSlots:
         self._org_id = org_id
         self._agent_id = agent_id
         self._session_id = session_id
+        # The turn's holder in the tenant gate: its slot is added and removed under it.
+        self._gate_holder = gate_holder
         # A turn that never had a tenant slot never takes one.
         self._uses_gate = gate is not None and gate_held
         self._gate_held = self._uses_gate
@@ -196,11 +199,13 @@ class TurnSlots:
         if self._gate_held:
             try:
                 async with asyncio.timeout(GATE_CALL_TIMEOUT_S):
-                    await self._gate.release(self._org_id, self._agent_id)
+                    await self._gate.release(
+                        self._org_id, self._agent_id, holder=self._gate_holder,
+                    )
             except asyncio.CancelledError:
-                # The give-back is a single DECR that has most likely landed.
-                # Count the slot as given back: giving it back again at the
-                # end of the turn would take another session's.
+                # The give-back is a single removal of the turn's holder that
+                # has most likely landed.  Count the slot as given back; if it
+                # had not, the holder stays counted until recovery releases it.
                 self._gate_held = False
                 raise
             except Exception:
@@ -221,14 +226,15 @@ class TurnSlots:
                     # This turn was admitted already: the tenant's cap governs
                     # new turns, so it takes its slot back whatever the count.
                     self._gate_held = await self._gate.try_acquire(
-                        self._org_id, self._agent_id, limit=sys.maxsize,
+                        self._org_id, self._agent_id,
+                        holder=self._gate_holder, limit=sys.maxsize,
                     )
             except asyncio.CancelledError:
-                # The take-back is a single INCR that has most likely landed.
-                # Count the slot as held, so the end of the turn gives it back:
-                # a slot given back that was never taken only floors at zero
-                # and heals when the tenant goes idle, while one taken and
-                # never given back stays counted forever.
+                # The take-back is a single addition of the turn's holder that
+                # has most likely landed.  Count the slot as held, so the end
+                # of the turn removes the holder: removing one that was never
+                # added frees nothing, while one added and never removed stays
+                # counted until recovery releases it.
                 self._gate_held = True
                 raise
             except Exception:

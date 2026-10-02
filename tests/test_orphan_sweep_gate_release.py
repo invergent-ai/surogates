@@ -1,20 +1,20 @@
 """Boot-time orphan sweeper compensates the TurnConcurrencyGate.
 
-Regression test for a stuck-counter scenario:
+Regression test for a stuck-slot scenario:
 
   * A worker dies mid-session (debugpy stop, SIGKILL, OOM, pod
     eviction) without running the dispatcher's finally branch.
-  * The gate slot for that (org, agent) is leaked -- the counter
-    sticks one above where it should be.
-  * After a few of these the counter reaches its cap.  Every new
+  * The gate slot for that (org, agent) is leaked -- the dead turn's
+    holder stays in the gate's set.
+  * After a few of these the set reaches the cap.  Every new
     dequeue then hits ``TurnConcurrencyGate.try_acquire`` over the
     cap, the session is requeued, and the orphan sweeper sees it
     stale 60s later -- producing an endless re-enqueue loop with
     zero diagnostic anywhere in the worker logs.
 
 The fix: when ``_sweep_orphans_once`` recovers a session whose
-previous owner died, it also calls ``gate.release(org_id, agent_id)``
-to compensate for the leaked acquire.
+previous owner died, it also calls ``gate.release_session`` to free the
+slots that session's turns held -- and only those.
 """
 
 from __future__ import annotations
@@ -27,25 +27,7 @@ import pytest
 
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.runtime.turn_gate import TurnConcurrencyGate
-
-
-class _FakeRedisGate:
-    """Minimal in-memory shim of the gate's Redis dependency.
-
-    ``TurnConcurrencyGate`` only exercises ``incr`` / ``decr`` so we
-    keep it to those.
-    """
-
-    def __init__(self) -> None:
-        self.values: dict[str, int] = {}
-
-    async def incr(self, key: str) -> int:
-        self.values[key] = self.values.get(key, 0) + 1
-        return self.values[key]
-
-    async def decr(self, key: str) -> int:
-        self.values[key] = self.values.get(key, 0) - 1
-        return self.values[key]
+from tests.test_turn_gate_holders import FakeRedis as _FakeRedisGate
 
 
 class _FakeQueueRedis:
@@ -91,9 +73,9 @@ def _make_orchestrator(
 async def test_sweep_releases_one_gate_slot_per_recovered_orphan(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """An orphan recovery must release one gate slot for that (org,
-    agent).  Without this, repeated worker crashes drive the counter
-    to its cap and every subsequent dequeue is silently rejected."""
+    """An orphan recovery must release the slots that orphan's turn held
+    for that (org, agent).  Without this, repeated worker crashes fill the
+    tenant's slots and every subsequent dequeue is silently rejected."""
     monkeypatch.setattr(
         "surogates.orchestrator.dispatcher.enqueue_session",
         AsyncMock(),
@@ -105,16 +87,16 @@ async def test_sweep_releases_one_gate_slot_per_recovered_orphan(
     gate_redis = _FakeRedisGate()
     gate = TurnConcurrencyGate(gate_redis, default_max=10)
 
-    # Pre-fill the counter to 3 -- representing three previously-
-    # leaked slots from worker crashes.
-    counter_key = f"surogates:turns:{org_id}:{agent_id}"
-    gate_redis.values[counter_key] = 3
-
-    # Two orphans to recover.
+    # Two orphans to recover, each holding the slot of its dead turn, and
+    # one live session holding its own.
     orphans = [
         _make_orphan(org_id=org_id, agent_id=agent_id),
         _make_orphan(org_id=org_id, agent_id=agent_id),
     ]
+    holders_key = f"surogates:turn_holders:{org_id}:{agent_id}"
+    live_holder = f"{uuid4()}:live"
+    gate_redis.sets[holders_key] = {f"{o.id}:dead" for o in orphans} | {live_holder}
+
     session_store = AsyncMock()
     session_store.find_orphaned_sessions = AsyncMock(return_value=orphans)
     session_store.emit_event = AsyncMock()
@@ -131,22 +113,15 @@ async def test_sweep_releases_one_gate_slot_per_recovered_orphan(
     )
 
     assert recovered == 2
-    # Counter dropped by exactly one per recovered orphan: 3 -> 1.
-    assert gate_redis.values[counter_key] == 1, (
-        f"expected counter to drop by 2 (one per orphan), got "
-        f"{gate_redis.values[counter_key]}"
-    )
+    assert gate_redis.sets[holders_key] == {live_holder}
 
 
 @pytest.mark.asyncio
-async def test_sweep_does_not_drive_gate_below_zero(
+async def test_the_sweeper_leaves_another_sessions_slot_alone(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """If the counter is already at 0 when the sweeper runs (e.g. a
-    double-recovery from a racy crash), the floor in
-    ``TurnGate.release()`` must keep us honest -- the counter cannot
-    go negative, because the next genuine acquire would silently
-    exceed the cap by the negative offset."""
+    """An orphan whose turn had given its slot back while it waited holds
+    nothing: recovering it must not free the slot of a live session."""
     monkeypatch.setattr(
         "surogates.orchestrator.dispatcher.enqueue_session",
         AsyncMock(),
@@ -156,13 +131,18 @@ async def test_sweep_does_not_drive_gate_below_zero(
     agent_id = "agent-X"
 
     gate_redis = _FakeRedisGate()
-    gate = TurnConcurrencyGate(gate_redis, default_max=10)
-    counter_key = f"surogates:turns:{org_id}:{agent_id}"
-    gate_redis.values[counter_key] = 0  # already at zero
+    gate = TurnConcurrencyGate(gate_redis, default_max=1)
 
-    orphans = [_make_orphan(org_id=org_id, agent_id=agent_id)]
+    orphan = _make_orphan(org_id=org_id, agent_id=agent_id)
+    # The orphan's turn took a slot and gave it back while it waited; a live
+    # session took the freed one.
+    assert await gate.try_acquire(str(org_id), agent_id, holder=f"{orphan.id}:dead")
+    assert await gate.release(str(org_id), agent_id, holder=f"{orphan.id}:dead")
+    live_holder = f"{uuid4()}:live"
+    assert await gate.try_acquire(str(org_id), agent_id, holder=live_holder)
+
     session_store = AsyncMock()
-    session_store.find_orphaned_sessions = AsyncMock(return_value=orphans)
+    session_store.find_orphaned_sessions = AsyncMock(return_value=[orphan])
     session_store.emit_event = AsyncMock()
     session_store.release_stale_lease = AsyncMock(return_value=True)
 
@@ -176,10 +156,7 @@ async def test_sweep_does_not_drive_gate_below_zero(
         stale_seconds=60, reason="orchestrator_sweeper",
     )
 
-    assert gate_redis.values[counter_key] == 0, (
-        "counter must not go negative; the floor in release() must "
-        f"have re-incremented it (got {gate_redis.values[counter_key]})"
-    )
+    assert gate_redis.sets[f"surogates:turn_holders:{org_id}:{agent_id}"] == {live_holder}
 
 
 @pytest.mark.asyncio
@@ -254,7 +231,7 @@ async def test_sweep_without_gate_still_recovers(
 async def test_gate_release_failure_does_not_abort_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """If gate.release raises (Redis blip, transient network), we must
+    """If gate.release_session raises (Redis blip, transient network), we must
     still emit harness.recovered, drop the stale lease, and re-enqueue
     -- a flaky gate must not stop the sweeper from making progress."""
     monkeypatch.setattr(
@@ -269,7 +246,7 @@ async def test_gate_release_failure_does_not_abort_recovery(
     session_store.release_stale_lease = AsyncMock(return_value=True)
 
     class _FlakyGate:
-        release = AsyncMock(side_effect=RuntimeError("redis blip"))
+        release_session = AsyncMock(side_effect=RuntimeError("redis blip"))
 
     orchestrator = _make_orchestrator(
         session_store=session_store,

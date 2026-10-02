@@ -183,7 +183,7 @@ async def test_release_failure_does_not_break_the_wait():
     store = _IdentifiedStore()
 
     class _FlakyReleaseGate(CountingGate):
-        async def release(self, org_id: str, agent_id: str) -> None:
+        async def release(self, org_id: str, agent_id: str, *, holder: str) -> bool:
             self.calls.append("release")
             raise RuntimeError("redis blip")
 

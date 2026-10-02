@@ -152,8 +152,9 @@ async def test_ceiling_still_releases_the_leaked_gate_slot(
 ):
     """The dead owner leaked its gate slot whether or not we retry.
 
-    Skipping the release here would drive the (org, agent) counter to its
-    cap and stall every unrelated session for that agent.
+    Skipping the release here would leave the dead turn's holder counted
+    against the (org, agent) cap and stall every unrelated session for that
+    agent.
     """
     monkeypatch.setattr(
         "surogates.orchestrator.dispatcher.enqueue_session", AsyncMock(),
@@ -171,7 +172,7 @@ async def test_ceiling_still_releases_the_leaked_gate_slot(
         stale_seconds=60, reason="orchestrator_sweeper",
     )
 
-    gate.release.assert_awaited_once_with(str(org_id), orphan.agent_id)
+    gate.release_session.assert_awaited_once_with(str(org_id), orphan.agent_id, str(orphan.id))
     store.release_stale_lease.assert_awaited_once_with(orphan.id)
 
 

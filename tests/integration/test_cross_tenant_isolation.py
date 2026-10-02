@@ -110,23 +110,26 @@ async def test_two_tenants_no_credential_or_storage_leak(
         assert str(org_a) not in ctx_b.storage_key_prefix
         assert str(org_b) not in ctx_a.storage_key_prefix
 
-        # 3 — gate counters are independent.  Acme exhausts its
-        # single-slot budget; Globex still has its own full budget.
+        # 3 — gate slots are independent.  Acme exhausts its single-slot
+        # budget; Globex still has its own full budget.
         gate = TurnConcurrencyGate(redis_client, default_max=1)
         assert await gate.try_acquire(
-            str(org_a), "a-acme", limit=1,
+            str(org_a), "a-acme", holder="s1:a", limit=1,
         ) is True
         assert await gate.try_acquire(
-            str(org_a), "a-acme", limit=1,
+            str(org_a), "a-acme", holder="s2:a", limit=1,
         ) is False
         assert await gate.try_acquire(
-            str(org_b), "a-globex", limit=1,
+            str(org_b), "a-globex", holder="s3:a", limit=1,
         ) is True
         # Release acme; the gate must be re-acquirable.
-        await gate.release(str(org_a), "a-acme")
+        assert await gate.release(str(org_a), "a-acme", holder="s1:a") is True
         assert await gate.try_acquire(
-            str(org_a), "a-acme", limit=1,
+            str(org_a), "a-acme", holder="s2:a", limit=1,
         ) is True
+        # Recovery frees a session's slot only in its own tenant.
+        assert await gate.release_session(str(org_b), "a-globex", "s2") == 0
+        assert await gate.release_session(str(org_a), "a-acme", "s2") == 1
     finally:
         await bundle_a.aclose()
         await bundle_b.aclose()

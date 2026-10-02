@@ -29,7 +29,11 @@ def orchestrator_with(gate: CountingGate) -> Orchestrator:
 
 
 def dequeued() -> DequeuedSession:
-    return DequeuedSession(org_id="org", agent_id="agent", session_id=str(uuid4()), priority=0.0)
+    session_id = str(uuid4())
+    return DequeuedSession(
+        org_id="org", agent_id="agent", session_id=session_id, priority=0.0,
+        gate_holder=f"{session_id}:turn",
+    )
 
 
 async def test_a_finished_turn_gives_both_slots_back(monkeypatch):
@@ -42,10 +46,12 @@ async def test_a_finished_turn_gives_both_slots_back(monkeypatch):
         seen.append(current_turn.get())
 
     monkeypatch.setattr(orchestrator, "_process", process)
-    await orchestrator._guarded_process(uuid4(), dequeued=dequeued())
+    turn = dequeued()
+    await orchestrator._guarded_process(uuid4(), dequeued=turn)
     assert seen and seen[0] is not None
     assert not orchestrator.semaphore.locked() and gate.held == 0
     assert gate.calls.count("release") == 1
+    assert gate.holders == [turn.gate_holder], "the turn gave back its slot under another holder"
     assert current_turn.get() is None
 
 
