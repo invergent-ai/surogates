@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CLOSE_TIMEOUT_MS, DeviceLink, type LinkHandlers, type LinkStatus } from "../src/link/client.js";
-import type { Operation } from "../src/link/protocol.js";
+import { MAX_FRAME_CHARS, type Operation } from "../src/link/protocol.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 const servers: FakeLinkServer[] = [];
@@ -246,6 +246,18 @@ describe("what the server sends", () => {
     server.send({ type: "cancel", id: "op-9" });
     await server.until(() => seen.cancels.length === 1);
     expect(seen.statuses.filter((status) => status === "connected")).toHaveLength(1);
+  });
+
+  it("takes a frame of the most code points the contract allows, up to 4 bytes each in UTF-8", async () => {
+    const { server, link, seen } = await connected();
+    await server.until(() => link.status === "connected");
+    // 25 characters of envelope; every code point of the id is 4 bytes, so the frame is
+    // nearly 4 x MAX_FRAME_CHARS bytes, and a limit of fewer would close it with 1009.
+    const id = "\u{1F600}".repeat(MAX_FRAME_CHARS - 25);
+    server.send({ type: "cancel", id });
+    await server.until(() => seen.cancels.length === 1);
+    expect(seen.cancels[0]).toBe(id);
+    expect(server.connections).toBe(1);
   });
 
   it("passes on operations, acknowledgements and cancels", async () => {

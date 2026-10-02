@@ -124,7 +124,9 @@ export class DeviceLink {
     this.setStatus("connecting");
     const socket = new WebSocket(this.options.url, {
       headers: { Authorization: `Bearer ${this.options.token}` },
-      maxPayload: 2 * MAX_FRAME_CHARS,
+      // Bytes, not characters: a frame of MAX_FRAME_CHARS code points is up to 4 bytes
+      // each in UTF-8, and a limit below that closes it with 1009, redelivered for ever.
+      maxPayload: 4 * MAX_FRAME_CHARS,
     });
     this.socket = socket;
     this.welcomed = false;
