@@ -34,6 +34,9 @@ export interface LinkHandlers {
   onCancel(id: string): void;
   onAck(id: string): void;
   onStatus?(status: LinkStatus): void;
+  // A handler above threw: what it keeps is broken, so the link stops (it is not
+  // restarted) after this is told.
+  onError?(error: unknown): void;
 }
 
 export interface DeviceLinkOptions {
@@ -143,46 +146,52 @@ export class DeviceLink {
         socket.close(Close.protocol, error instanceof ProtocolError ? error.message : "malformed frame");
         return;
       }
-      switch (frame.type) {
-        case "welcome": {
-          // One welcome per connection: a repeat would start a second pinger.
-          if (this.welcomed) break;
-          clearTimeout(welcomeTimer);
-          this.welcomed = true;
-          const heartbeatMs = frame.welcome.heartbeatS * 1000;
-          pinger = setInterval(() => {
-            const now = Date.now();
-            // No frame within two heartbeats of a ping: the server is gone.
-            if (pingedAt !== null && now - pingedAt >= 2 * heartbeatMs - TICK_SLACK_MS) {
-              socket.terminate();
-              return;
-            }
-            socket.send(JSON.stringify({ type: "ping" }));
-            pingedAt ??= now;
-          }, heartbeatMs);
-          this.setStatus("connected");
-          this.options.handlers.onWelcome?.(frame.welcome);
-          break;
+      // A handler that throws would reach ws as an uncaught exception.
+      try {
+        switch (frame.type) {
+          case "welcome": {
+            // One welcome per connection: a repeat would start a second pinger.
+            if (this.welcomed) break;
+            clearTimeout(welcomeTimer);
+            this.welcomed = true;
+            const heartbeatMs = frame.welcome.heartbeatS * 1000;
+            pinger = setInterval(() => {
+              const now = Date.now();
+              // No frame within two heartbeats of a ping: the server is gone.
+              if (pingedAt !== null && now - pingedAt >= 2 * heartbeatMs - TICK_SLACK_MS) {
+                socket.terminate();
+                return;
+              }
+              socket.send(JSON.stringify({ type: "ping" }));
+              pingedAt ??= now;
+            }, heartbeatMs);
+            this.setStatus("connected");
+            this.options.handlers.onWelcome?.(frame.welcome);
+            break;
+          }
+          case "pong":
+            // A link that answers a ping is healthy: start the backoff over. Not at
+            // the welcome: a link the server closes right after it would loop fast.
+            this.attempt = 0;
+            break;
+          case "unknown":
+            break;
+          case "op":
+            this.options.handlers.onOperation(frame.operation);
+            break;
+          case "op_ack":
+            this.options.handlers.onAck(frame.id);
+            break;
+          case "cancel":
+            this.options.handlers.onCancel(frame.id);
+            break;
+          case "error":
+            if (frame.code === "unsupported_protocol") final = "update_required";
+            break;
         }
-        case "pong":
-          // A link that answers a ping is healthy: start the backoff over. Not at
-          // the welcome: a link the server closes right after it would loop fast.
-          this.attempt = 0;
-          break;
-        case "unknown":
-          break;
-        case "op":
-          this.options.handlers.onOperation(frame.operation);
-          break;
-        case "op_ack":
-          this.options.handlers.onAck(frame.id);
-          break;
-        case "cancel":
-          this.options.handlers.onCancel(frame.id);
-          break;
-        case "error":
-          if (frame.code === "unsupported_protocol") final = "update_required";
-          break;
+      } catch (error) {
+        this.options.handlers.onError?.(error);
+        void this.stop();
       }
     });
 

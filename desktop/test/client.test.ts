@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { CLOSE_TIMEOUT_MS, DeviceLink, type LinkStatus } from "../src/link/client.js";
+import { CLOSE_TIMEOUT_MS, DeviceLink, type LinkHandlers, type LinkStatus } from "../src/link/client.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -17,6 +17,7 @@ interface Seen {
   operations: Operation[];
   cancels: string[];
   acks: string[];
+  errors: unknown[];
 }
 
 async function connected(
@@ -26,12 +27,13 @@ async function connected(
     open?: string[];
     welcomeTimeoutMs?: number;
     delay?: (attempt: number) => number;
+    handlers?: Partial<LinkHandlers>;
   } = {},
 ): Promise<{ server: FakeLinkServer; link: DeviceLink; seen: Seen }> {
   const server = new FakeLinkServer(options);
   servers.push(server);
   const url = await server.start();
-  const seen: Seen = { statuses: [], operations: [], cancels: [], acks: [] };
+  const seen: Seen = { statuses: [], operations: [], cancels: [], acks: [], errors: [] };
   const link = new DeviceLink({
     url,
     token: linkOptions.token ?? "surg_dev_test",
@@ -43,6 +45,8 @@ async function connected(
       onCancel: (id) => seen.cancels.push(id),
       onAck: (id) => seen.acks.push(id),
       onStatus: (status) => seen.statuses.push(status),
+      onError: (error) => seen.errors.push(error),
+      ...linkOptions.handlers,
     },
   });
   links.push(link);
@@ -243,5 +247,35 @@ describe("what the server sends", () => {
     expect(seen.operations[0]?.id).toBe("op-1");
     expect(seen.acks).toEqual(["op-0"]);
     expect(seen.cancels).toEqual(["op-2"]);
+  });
+});
+
+describe("a handler that throws", () => {
+  const failure = new Error("journal broke");
+  const throws = () => {
+    throw failure;
+  };
+  const op = {
+    type: "op", id: "op-1", session_id: "r", calling_session_id: "r", invocation_id: "1:c",
+    ordinal: 1, kind: "which", args: { name: "sh" }, digest: "d",
+  };
+
+  it.each([
+    ["onWelcome", { onWelcome: throws }, null],
+    ["onOperation", { onOperation: throws }, op],
+    ["onCancel", { onCancel: throws }, { type: "cancel", id: "op-2" }],
+    ["onAck", { onAck: throws }, { type: "op_ack", id: "op-0" }],
+  ] as const)("in %s is reported, and stops the link for good", async (_name, handlers, frame) => {
+    const { server, link, seen } = await connected({}, { handlers });
+    await server.until(() => server.hellos.length === 1);
+    if (frame !== null) {
+      await server.until(() => link.status === "connected");
+      server.send({ ...frame });
+    }
+    await server.until(() => link.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(seen.errors).toEqual([failure]);
+    expect(server.connections).toBe(1);
+    expect(link.status).toBe("stopped");
   });
 });
