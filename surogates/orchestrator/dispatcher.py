@@ -477,7 +477,9 @@ class Orchestrator:
         handed_over: dict[asyncio.Task, DequeuedSession] = {}
         while True:
             for task, (slots, dequeued) in list(self._turns.items()):
-                if task not in handed_over and slots.waiting_resumably:
+                # A turn detached already lost its lease: the worker that took
+                # the session has it, and it is not this one's to hand over.
+                if task not in handed_over and not slots.detached and slots.waiting_resumably:
                     slots.detach()
                     handed_over[task] = dequeued
             pending = {task for task in set(self._tasks) | set(handed_over) if not task.done()}

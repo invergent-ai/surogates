@@ -253,6 +253,36 @@ async def test_a_cancelled_take_back_is_given_back_at_the_end():
     assert gate.held == 0, "a tenant slot that was taken and never given back stays counted"
 
 
+async def test_a_cancelled_give_back_counts_as_given_back():
+    class BlockedGate(CountingGate):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.in_give_back = asyncio.Event()
+
+        async def release(self, org_id: str, agent_id: str) -> None:
+            self.calls.append("release")
+            self.held = max(0, self.held - 1)  # the DECR landed
+            if self.calls.count("release") == 1:
+                self.in_give_back.set()
+                await asyncio.Event().wait()  # the reply never comes
+
+    slots, semaphore, gate = await held_turn(gate=BlockedGate(held=1))
+
+    async def turn() -> None:
+        async with slots.activity():
+            async with slots.waiting():  # entering the wait starts the give-back
+                pass
+
+    task = asyncio.create_task(turn())
+    await asyncio.wait_for(gate.in_give_back.wait(), 1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await slots.release_owned()
+    # Giving back a slot twice would take another session's.
+    assert gate.calls.count("release") == 1
+
+
 async def test_a_failed_give_back_keeps_the_slot_for_the_turns_end(caplog):
     slots, semaphore, gate = await held_turn(gate=CountingGate(held=1, fail_release=1))
     async with slots.activity():

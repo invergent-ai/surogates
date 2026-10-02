@@ -181,6 +181,12 @@ class TurnSlots:
             try:
                 async with asyncio.timeout(GATE_CALL_TIMEOUT_S):
                     await self._gate.release(self._org_id, self._agent_id)
+            except asyncio.CancelledError:
+                # The give-back is a single DECR that has most likely landed.
+                # Count the slot as given back: giving it back again at the
+                # end of the turn would take another session's.
+                self._gate_held = False
+                raise
             except Exception:
                 # Still held: the end of the turn tries again.
                 logger.warning(

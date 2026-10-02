@@ -146,6 +146,28 @@ async def test_shutdown_hands_a_turn_waiting_on_a_computer_to_another_worker(mon
     assert orchestrator.semaphore.locked(), "the semaphore slot was released twice"
 
 
+async def test_shutdown_does_not_hand_over_a_turn_the_loss_of_its_lease_already_detached(monkeypatch):
+    orchestrator = orchestrator_with(CountingGate(held=1))
+    await orchestrator.semaphore.acquire()
+    waiting = asyncio.Event()
+    enqueued = _recording_enqueue(monkeypatch)
+
+    async def process(session_id, *args, **kwargs):
+        async with turn_joining():
+            async with turn_activity():
+                async with turn_waiting(resumable=True):
+                    waiting.set()
+                    await asyncio.Event().wait()
+
+    task, _turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(waiting.wait(), 5.0)
+    slots, _dequeued = orchestrator._turns[task]
+    slots.detach()  # as the loss of its lease does: the worker that took the session resumes it
+    await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
+    assert task.cancelled()
+    assert enqueued == []
+
+
 async def test_shutdown_lets_a_working_turn_finish(monkeypatch):
     orchestrator = orchestrator_with(CountingGate(held=1))
     await orchestrator.semaphore.acquire()
