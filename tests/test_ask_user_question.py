@@ -12,9 +12,11 @@ from uuid import uuid4
 
 import pytest
 
+import surogates.tools.builtin.ask_user_question as ask_module
 from surogates.session.events import EventType
 from surogates.tools.builtin.ask_user_question import (
     _ask_user_question_handler,
+    _wait_for_response,
 )
 
 
@@ -242,3 +244,154 @@ async def test_handler_exits_quickly_when_session_already_paused():
     result = json.loads(raw)
     assert result["cancelled"] is True
     assert result["reason"] == "session.paused"
+
+
+class NudgedStore(FakeSessionStore):
+    """A store whose events wake every listener, like SessionStore's Redis nudge."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.nudge = asyncio.Event()
+
+    async def emit_event(self, session_id, type_, data) -> int:
+        event_id = await super().emit_event(session_id, type_, data)
+        self.nudge.set()
+        return event_id
+
+
+class FakePubSub:
+    def __init__(self, store: NudgedStore, *, delivers: bool = True) -> None:
+        self.store = store
+        self.delivers = delivers
+        self.subscribed: list[str] = []
+        self.closed = False
+
+    async def subscribe(self, channel: str) -> None:
+        self.subscribed.append(channel)
+
+    async def get_message(self, *, ignore_subscribe_messages: bool, timeout: float):
+        if not self.delivers:
+            await asyncio.sleep(timeout)
+            return None
+        try:
+            await asyncio.wait_for(self.store.nudge.wait(), timeout)
+        except TimeoutError:
+            return None
+        self.store.nudge.clear()
+        return {"type": "message", "data": b"1:ask_user_question.response"}
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeRedis:
+    def __init__(self, pubsub: FakePubSub) -> None:
+        self._pubsub = pubsub
+
+    def pubsub(self) -> FakePubSub:
+        return self._pubsub
+
+
+async def _answer(store, session_id, tool_call_id, *, after: float) -> None:
+    await asyncio.sleep(after)
+    await store.emit_event(session_id, EventType.ASK_USER_QUESTION_RESPONSE, {
+        "tool_call_id": tool_call_id,
+        "responses": [{"question": "q", "answer": "A", "is_other": False}],
+    })
+
+
+@pytest.mark.asyncio
+async def test_a_reply_wakes_the_wait_at_once(monkeypatch):
+    monkeypatch.setattr(ask_module, "_POLL_INTERVAL_SECONDS", 30)  # polling alone would take 30 s
+    session_id, store = uuid4(), NudgedStore()
+    pubsub = FakePubSub(store)
+    outcome, _ = await asyncio.wait_for(asyncio.gather(
+        _wait_for_response(
+            session_id=session_id, tool_call_id="call_1", session_store=store,
+            lease_token=None, redis=FakeRedis(pubsub),
+        ),
+        _answer(store, session_id, "call_1", after=0.05),
+    ), 2.0)
+    assert outcome["cancelled"] is False
+    assert pubsub.subscribed == [f"surogates:session:{session_id}"]
+    assert pubsub.closed
+
+
+@pytest.mark.asyncio
+async def test_a_lost_nudge_is_caught_by_the_recheck(monkeypatch):
+    monkeypatch.setattr(ask_module, "_POLL_INTERVAL_SECONDS", 30)
+    monkeypatch.setattr(ask_module, "_RECHECK_INTERVAL_SECONDS", 0.1, raising=False)
+    session_id, store = uuid4(), NudgedStore()
+    outcome, _ = await asyncio.wait_for(asyncio.gather(
+        _wait_for_response(
+            session_id=session_id, tool_call_id="call_1", session_store=store,
+            lease_token=None, redis=FakeRedis(FakePubSub(store, delivers=False)),
+        ),
+        _answer(store, session_id, "call_1", after=0.05),
+    ), 2.0)
+    assert outcome["cancelled"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_cap_still_ends_a_nudged_wait(monkeypatch):
+    monkeypatch.setattr(ask_module, "_MAX_WAIT_SECONDS", 0.2)
+    session_id, store = uuid4(), NudgedStore()
+    outcome = await asyncio.wait_for(_wait_for_response(
+        session_id=session_id, tool_call_id="call_1", session_store=store,
+        lease_token=None, redis=FakeRedis(FakePubSub(store)),
+    ), 2.0)
+    assert outcome == {"cancelled": True, "reason": "timeout"}
+
+
+@pytest.mark.asyncio
+async def test_without_redis_the_wait_still_polls(monkeypatch):
+    monkeypatch.setattr(ask_module, "_POLL_INTERVAL_SECONDS", 0.01)
+    session_id, store = uuid4(), FakeSessionStore()
+    outcome, _ = await asyncio.wait_for(asyncio.gather(
+        _wait_for_response(
+            session_id=session_id, tool_call_id="call_1", session_store=store, lease_token=None,
+        ),
+        _answer(store, session_id, "call_1", after=0.05),
+    ), 2.0)
+    assert outcome["cancelled"] is False
+
+
+class BrokenPubSub(FakePubSub):
+    async def subscribe(self, channel: str) -> None:
+        raise ConnectionError("redis is down")
+
+
+class HangingPubSub(FakePubSub):
+    async def subscribe(self, channel: str) -> None:
+        await asyncio.sleep(60)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_subscription_falls_back_to_polling(monkeypatch):
+    monkeypatch.setattr(ask_module, "_POLL_INTERVAL_SECONDS", 0.01)
+    session_id, store = uuid4(), NudgedStore()
+    pubsub = BrokenPubSub(store)
+    outcome, _ = await asyncio.wait_for(asyncio.gather(
+        _wait_for_response(
+            session_id=session_id, tool_call_id="call_1", session_store=store,
+            lease_token=None, redis=FakeRedis(pubsub),
+        ),
+        _answer(store, session_id, "call_1", after=0.05),
+    ), 2.0)
+    assert outcome["cancelled"] is False
+    assert pubsub.closed
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_subscribe_closes_the_pubsub():
+    session_id, store = uuid4(), NudgedStore()
+    pubsub = HangingPubSub(store)
+    wait = asyncio.create_task(_wait_for_response(
+        session_id=session_id, tool_call_id="call_1", session_store=store,
+        lease_token=None, redis=FakeRedis(pubsub),
+    ))
+    await asyncio.sleep(0.05)
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert pubsub.closed

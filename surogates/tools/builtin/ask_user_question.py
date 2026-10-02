@@ -16,8 +16,9 @@ Round-trip
    ``POST /v1/sessions/{id}/ask_user_question/{tool_call_id}/respond``.
 5. The endpoint emits
    :attr:`~surogates.session.events.EventType.ASK_USER_QUESTION_RESPONSE`.
-6. This handler polls the event log for the matching response, renewing
-   the session lease to prevent expiry, and returns the answers as JSON.
+6. This handler waits for the matching response, renewing the session lease
+   to prevent expiry, and returns the answers as JSON.  It wakes on the
+   session's Redis nudge when there is one, and polls the event log when not.
 7. If the user pauses the session instead of answering, the handler exits
    with ``cancelled: true`` so the LLM sees a clean termination.
 """
@@ -25,6 +26,7 @@ Round-trip
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any
@@ -46,6 +48,9 @@ MAX_DESCRIPTION_LENGTH = 500
 
 # Polling / lease renewal --------------------------------------------------
 _POLL_INTERVAL_SECONDS = 1.0
+# How long a wait goes without a nudge before it checks again anyway: a lost
+# message only delays the answer by this much.
+_RECHECK_INTERVAL_SECONDS = 5.0
 # Keep well under :data:`surogates.harness.loop._LEASE_TTL_SECONDS` (60s).
 _LEASE_RENEW_INTERVAL_SECONDS = 30.0
 # Hard cap on how long we keep the worker parked on a single ask call.
@@ -227,11 +232,44 @@ def _validate_questions(raw: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Polling
+# Waiting
 # ---------------------------------------------------------------------------
 
 
 _TERMINAL_STATUSES = {"paused", "completed", "failed", "archived"}
+
+
+async def _subscribe(redis: Any, session_id: UUID) -> Any | None:
+    """Listen for the session's event nudges before the first check, so none is missed."""
+    if redis is None:
+        return None
+    # ponytail: one pub/sub connection per waiting question, held up to its
+    # 30-minute cap; share one subscriber per worker when they number in thousands.
+    pubsub = redis.pubsub()
+    try:
+        async with asyncio.timeout(_RECHECK_INTERVAL_SECONDS):
+            await pubsub.subscribe(f"surogates:session:{session_id}")
+    except BaseException as exc:
+        with contextlib.suppress(Exception):
+            await pubsub.aclose()
+        if not isinstance(exc, Exception):
+            raise  # cancelled: the caller's own cleanup runs
+        logger.warning("ask_user_question: no event nudges for %s; polling", session_id, exc_info=True)
+        return None
+    return pubsub
+
+
+async def _until_nudged(pubsub: Any | None, *, within: float) -> None:
+    """Return once any event of the session is announced, or *within* seconds pass."""
+    if pubsub is None:
+        await asyncio.sleep(min(_POLL_INTERVAL_SECONDS, within))
+        return
+    try:
+        async with asyncio.timeout(within + _RECHECK_INTERVAL_SECONDS):
+            await pubsub.get_message(ignore_subscribe_messages=True, timeout=within)
+    except Exception:
+        logger.debug("ask_user_question: nudge lost; polling once", exc_info=True)
+        await asyncio.sleep(min(_POLL_INTERVAL_SECONDS, within))
 
 
 async def _wait_for_response(
@@ -240,9 +278,14 @@ async def _wait_for_response(
     tool_call_id: str,
     session_store: Any,
     lease_token: Any | None,
+    redis: Any | None = None,
 ) -> dict[str, Any]:
-    """Poll for the matching ``ASK_USER_QUESTION_RESPONSE`` event or a
+    """Wait for the matching ``ASK_USER_QUESTION_RESPONSE`` event or a
     session stop.
+
+    With *redis* it wakes on the session's event nudge and rechecks at a
+    bounded interval, so a lost nudge only delays the answer.  Without
+    *redis* (or when the subscription fails) it polls the event log.
 
     Returns ``{"responses": [...], "cancelled": False}`` on success, or
     ``{"cancelled": True, "reason": <why>}`` when the user stopped the
@@ -261,59 +304,70 @@ async def _wait_for_response(
     next_renew = asyncio.get_running_loop().time() + _LEASE_RENEW_INTERVAL_SECONDS
     cursor = 0
 
-    while True:
-        now = asyncio.get_running_loop().time()
-        if now >= deadline:
-            logger.warning(
-                "ask_user_question tool %s timed out after %ds", tool_call_id,
-                _MAX_WAIT_SECONDS,
-            )
-            return {"cancelled": True, "reason": "timeout"}
-
-        # Lease renewal keeps ownership while the user composes an answer.
-        if lease_token is not None and now >= next_renew:
-            try:
-                await session_store.renew_lease(
-                    session_id, lease_token, ttl_seconds=60,
-                )
-            except Exception:
+    # Subscribe before the first check: an answer landing in between still
+    # wakes the wait.
+    pubsub = await _subscribe(redis, session_id)
+    try:
+        while True:
+            now = asyncio.get_running_loop().time()
+            if now >= deadline:
                 logger.warning(
-                    "Failed to renew lease during ask_user_question wait for %s",
+                    "ask_user_question tool %s timed out after %ds", tool_call_id,
+                    _MAX_WAIT_SECONDS,
+                )
+                return {"cancelled": True, "reason": "timeout"}
+
+            # Lease renewal keeps ownership while the user composes an answer.
+            if lease_token is not None and now >= next_renew:
+                try:
+                    await session_store.renew_lease(
+                        session_id, lease_token, ttl_seconds=60,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to renew lease during ask_user_question wait for %s",
+                        session_id, exc_info=True,
+                    )
+                next_renew = now + _LEASE_RENEW_INTERVAL_SECONDS
+
+            # 1. Look for this tool call's response.
+            events = await session_store.get_events(
+                session_id,
+                after=cursor,
+                types=[EventType.ASK_USER_QUESTION_RESPONSE],
+            )
+            for event in events:
+                cursor = max(cursor, event.id)
+                data = event.data or {}
+                if data.get("tool_call_id") == tool_call_id:
+                    responses = data.get("responses")
+                    if isinstance(responses, list):
+                        return {"responses": responses, "cancelled": False}
+                    return {"cancelled": True, "reason": "malformed_response"}
+
+            # 2. Has the session been stopped?  Status is the authoritative
+            #    current state -- the pause endpoint both emits SESSION_PAUSE
+            #    and flips the row to ``paused`` atomically, so a transient
+            #    event from a prior pause/resume cycle cannot fool us.
+            try:
+                session = await session_store.get_session(session_id)
+            except Exception:
+                logger.debug(
+                    "Session lookup failed during ask_user_question wait for %s",
                     session_id, exc_info=True,
                 )
-            next_renew = now + _LEASE_RENEW_INTERVAL_SECONDS
+                session = None
+            if session is not None and session.status in _TERMINAL_STATUSES:
+                return {"cancelled": True, "reason": f"session.{session.status}"}
 
-        # 1. Look for this tool call's response.
-        events = await session_store.get_events(
-            session_id,
-            after=cursor,
-            types=[EventType.ASK_USER_QUESTION_RESPONSE],
-        )
-        for event in events:
-            cursor = max(cursor, event.id)
-            data = event.data or {}
-            if data.get("tool_call_id") == tool_call_id:
-                responses = data.get("responses")
-                if isinstance(responses, list):
-                    return {"responses": responses, "cancelled": False}
-                return {"cancelled": True, "reason": "malformed_response"}
-
-        # 2. Has the session been stopped?  Status is the authoritative
-        #    current state -- the pause endpoint both emits SESSION_PAUSE
-        #    and flips the row to ``paused`` atomically, so a transient
-        #    event from a prior pause/resume cycle cannot fool us.
-        try:
-            session = await session_store.get_session(session_id)
-        except Exception:
-            logger.debug(
-                "Session lookup failed during ask_user_question wait for %s",
-                session_id, exc_info=True,
+            remaining = deadline - asyncio.get_running_loop().time()
+            await _until_nudged(
+                pubsub, within=max(0.0, min(_RECHECK_INTERVAL_SECONDS, remaining)),
             )
-            session = None
-        if session is not None and session.status in _TERMINAL_STATUSES:
-            return {"cancelled": True, "reason": f"session.{session.status}"}
-
-        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+    finally:
+        if pubsub is not None:
+            with contextlib.suppress(Exception):
+                await pubsub.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +387,8 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
     Optional:
 
     - ``lease_token`` -- current lease token, used to renew during the wait.
+    - ``redis`` -- the worker's Redis client; the wait wakes on the session's
+      event nudge instead of polling.
     """
     session_store = kwargs.get("session_store")
     tool_call_id = kwargs.get("tool_call_id")
@@ -372,6 +428,7 @@ async def _ask_user_question_handler(arguments: dict[str, Any], **kwargs: Any) -
             tool_call_id=str(tool_call_id),
             session_store=session_store,
             lease_token=lease_token,
+            redis=kwargs.get("redis"),
         )
 
     if outcome.get("cancelled"):
