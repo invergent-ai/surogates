@@ -544,7 +544,9 @@ export type AgentChatEventType =
   | "ask_user_question.response"
   | "iteration.summary"
   | "turn.summary"
-  | "loop.result";
+  | "loop.result"
+  | "device.waiting"
+  | "device.resumed";
 
 export interface AgentChatRuntimeEvent {
   type: AgentChatEventType;
@@ -555,6 +557,13 @@ export interface AgentChatRuntimeEvent {
 export interface AgentChatBrowserState {
   status: "provisioning" | "live" | "user-control" | "closed";
   controlOwner: string | null;
+}
+
+/** A local-folder session's computer is away while its work waits on it. */
+export interface AgentChatDeviceWaitState {
+  deviceId: string;
+  deviceName: string;
+  reason: string;
 }
 
 export interface AgentChatBrowserProfile {
@@ -615,6 +624,9 @@ export interface AgentChatState {
   /** Sources collected from successful research_memory(add) tool
    *  results.  Deduped by sourceId on insertion. */
   researchSources: AgentChatResearchSource[];
+  /** The session is waiting for a local-folder computer to come online.
+   *  Null when no local operation awaits a device. */
+  deviceWait: AgentChatDeviceWaitState | null;
 }
 
 /**

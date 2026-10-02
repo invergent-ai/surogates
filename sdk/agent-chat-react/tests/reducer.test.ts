@@ -369,6 +369,41 @@ describe("applyAgentChatEvent", () => {
     expect(destroyed.messages.at(-1)?.content).toMatch(/browser closed/i);
   });
 
+  it("tracks whether the session waits for its computer", () => {
+    const initial = createInitialAgentChatState();
+    expect(initial.deviceWait).toBeNull();
+
+    const waiting = applyAgentChatEvent(initial, {
+      type: "device.waiting",
+      eventId: 31,
+      data: { device_id: "dev-1", device_name: "Flavius's ThinkPad", reason: "offline" },
+    });
+    expect(waiting.deviceWait).toEqual({
+      deviceId: "dev-1",
+      deviceName: "Flavius's ThinkPad",
+      reason: "offline",
+    });
+    expect(waiting.messages).toEqual(initial.messages);
+
+    const resumed = applyAgentChatEvent(waiting, {
+      type: "device.resumed",
+      eventId: 32,
+      data: { device_id: "dev-1" },
+    });
+    expect(resumed.deviceWait).toBeNull();
+  });
+
+  it("forgets a wait when the session wakes again", () => {
+    const waiting = applyAgentChatEvent(createInitialAgentChatState(), {
+      type: "device.waiting",
+      eventId: 41,
+      data: { device_id: "dev-1", device_name: "Flavius's ThinkPad", reason: "offline" },
+    });
+    // The worker that saw the computer away is gone; the next one announces the wait again.
+    const woken = applyAgentChatEvent(waiting, { type: "harness.wake", eventId: 42, data: {} });
+    expect(woken.deviceWait).toBeNull();
+  });
+
   it("stores llmResponseEventId on a freshly created assistant message", () => {
     const next = applyAgentChatEvent(createInitialAgentChatState(), {
       type: "llm.response",

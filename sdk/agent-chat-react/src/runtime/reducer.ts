@@ -44,6 +44,7 @@ export function createInitialAgentChatState(
     browser: null,
     viewMode: options.viewMode ?? "simple",
     researchSources: [],
+    deviceWait: null,
   };
 }
 
@@ -191,6 +192,19 @@ export function applyAgentChatEvent(
     case "browser.destroyed":
       return applyBrowserEvent(nextState, event, null);
 
+    case "device.waiting":
+      return {
+        ...nextState,
+        deviceWait: {
+          deviceId: stringValue(event.data.device_id),
+          deviceName: stringValue(event.data.device_name),
+          reason: stringValue(event.data.reason) || "offline",
+        },
+      };
+
+    case "device.resumed":
+      return { ...nextState, deviceWait: null };
+
     case "llm.delta":
       return applyLlmDelta(nextState, event);
 
@@ -228,7 +242,9 @@ export function applyAgentChatEvent(
       // after the ``/messages`` route's RESUME + USER_MESSAGE; without
       // re-clearing ``terminal`` here every subsequent gated event
       // (deltas, thinking, tool calls) would leave ``isRunning`` false.
-      return { ...nextState, terminal: false, isRunning: true };
+      // A new wake means the worker that saw the device away is gone;
+      // forget the wait so the UI clears.
+      return { ...nextState, terminal: false, isRunning: true, deviceWait: null };
 
     case "llm.request":
       // A new LLM call closes prior text streams. On history replay,
