@@ -6,7 +6,10 @@ accept frames that large.
   app -> server   {"type": "hello", "protocols": [1], "open": [ids]}
                                                         first frame, within HELLO_TIMEOUT_S; "open"
                                                         lists the operations the app holds
-                                                        unfinished, at most MAX_OPEN_REPORTED
+                                                        unfinished, and is optional: an empty
+                                                        list is the same as none.  An app that
+                                                        holds more than MAX_OPEN_REPORTED lists
+                                                        the newest MAX_OPEN_REPORTED
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
                    "agent_id", "user_id", "name", "heartbeat_s": 15}
   app -> server   {"type": "ping"}                      every heartbeat_s
@@ -18,8 +21,10 @@ accept frames that large.
   app -> server   {"type": "op_result", "id", "digest", "outcome"}
                                                          outcome is {"ok": v} or {"error": {...}}
   server -> app   {"type": "op_ack", "id"}               the outcome is recorded durably
-  server -> app   {"type": "cancel", "id"}               the session stopped this operation: end it,
-                                                        record that, and never run it
+  server -> app   {"type": "cancel", "id"}               the server closed this operation, because its
+                                                        session stopped it or its device was
+                                                        revoked: end it, record that, and never
+                                                        run it
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -48,13 +53,18 @@ answers a repeat with the recorded outcome.  A reply for an operation this
 device was not given, or with another digest, is a protocol error (4400); a
 reply under rotated-out credentials closes with 4403.
 On connect, before any operation, the server sends a cancel for each operation
-the app reported open that was cancelled.  Later, a cancel is sent live when it
-happens; if that one was lost, the next reconcile sends it once more.  So a
-cancel may arrive more than once (live, resent, and on reconnect), and the app
-treats it as idempotent.  The server does not acknowledge a cancel.  A cancel
-may arrive before the op it names, so the app records unknown ids too.  A
-cancelled bind dismisses the folder prompt.  A result the app sends for a
-cancelled operation is acknowledged as a duplicate and changes nothing.
+the app reported open that the server closed while the app held it: cancelled
+by its session, or revoked before a reauthorization.  Later, a cancel is sent
+live when a session cancels an operation; if that one was lost, the next
+reconcile sends it once more for each operation the app was sent and has not
+answered.  So a cancel may arrive more than once (live, resent, and on
+reconnect), and the app treats it as idempotent.  The app sends nothing back
+for a cancel.  A cancel may arrive before the op it names, so the app records
+unknown ids too; it may forget them when the connection ends, because a
+closed operation is never sent on a later connection.  A cancelled bind
+dismisses the folder prompt.  After a cancel the app need not send an
+op_result: one it sends anyway, with the operation's digest, is acknowledged
+with an op_ack as a duplicate and changes nothing.
 
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no frame from the server within

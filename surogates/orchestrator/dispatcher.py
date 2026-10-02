@@ -1032,6 +1032,11 @@ class Orchestrator:
 
         The gate frees only the slots the session's turns hold: if its turn had
         given its slot back while it waited, nothing is freed.
+
+        Every holder of the session is freed, whichever turn it belongs to.  A
+        live turn caught between its dequeue and taking its lease, or in a
+        double sweep, therefore loses its holder and is undercounted for the
+        rest of that turn.
         """
         if self._turn_gate is None:
             return

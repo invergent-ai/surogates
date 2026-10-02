@@ -67,7 +67,13 @@ class TurnConcurrencyGate:
         return bool(await self._redis.srem(self._key(org_id, agent_id), holder))
 
     async def release_session(self, org_id: str, agent_id: str, session_id: str) -> int:
-        """Free every slot a session's turns hold: recovery's release for a dead owner."""
+        """Free every slot a session's turns hold: recovery's release for a dead owner.
+
+        Every holder of the session goes, whichever turn it belongs to.  A live
+        turn caught between its dequeue and taking its lease, or in a double
+        sweep, therefore loses its holder and is undercounted for the rest of
+        that turn.
+        """
         key = self._key(org_id, agent_id)
         cursor, freed = 0, 0
         while True:
