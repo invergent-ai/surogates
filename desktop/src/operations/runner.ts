@@ -5,6 +5,7 @@
 
 import type { OperationJournal } from "../journal/journal.js";
 import { MAX_FRAME_CHARS, opResult, type Operation, type Outcome } from "../link/protocol.js";
+import { report } from "../report.js";
 
 // The answer to an operation whose result would not fit one frame: the server
 // would refuse that frame, and the result would be resent forever. The operation
@@ -84,7 +85,7 @@ export class OperationRunner {
     if (!this.journal.start(operation.id)) return;
     const controller = new AbortController();
     this.running.set(operation.id, controller);
-    void this.execute(operation, controller.signal).catch((error: unknown) => this.onError?.(error));
+    void this.execute(operation, controller.signal).catch((error: unknown) => report(this.onError, error));
   }
 
   cancel(id: string): void {

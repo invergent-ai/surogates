@@ -5,6 +5,7 @@
 
 import WebSocket from "ws";
 
+import { report } from "../report.js";
 import { reconnectDelayMs } from "./backoff.js";
 import {
   Close,
@@ -109,9 +110,14 @@ export class DeviceLink {
     return true;
   }
 
+  // Status is display only: a callback that throws is reported, and the link goes on.
   private setStatus(status: LinkStatus): void {
     this.status = status;
-    this.options.handlers.onStatus?.(status);
+    try {
+      this.options.handlers.onStatus?.(status);
+    } catch (error) {
+      report(this.options.handlers.onError, error);
+    }
   }
 
   private connect(): void {
@@ -129,7 +135,16 @@ export class DeviceLink {
     const welcomeTimer = setTimeout(() => socket.terminate(), this.options.welcomeTimeoutMs ?? WELCOME_TIMEOUT_MS);
 
     socket.on("open", () => {
-      socket.send(JSON.stringify(hello(this.options.openIds())));
+      let open: string[];
+      try {
+        open = this.options.openIds();
+      } catch (error) {
+        // What it reads is broken: no hello can say what is held, so the link stops.
+        report(this.options.handlers.onError, error);
+        void this.stop();
+        return;
+      }
+      socket.send(JSON.stringify(hello(open)));
     });
 
     socket.on("message", (data, isBinary) => {
@@ -193,7 +208,7 @@ export class DeviceLink {
             break;
         }
       } catch (error) {
-        this.options.handlers.onError?.(error);
+        report(this.options.handlers.onError, error);
         void this.stop();
       }
     });

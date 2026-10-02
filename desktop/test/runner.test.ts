@@ -293,6 +293,23 @@ describe("a journal that fails", () => {
     expect(journal.openIds()).toEqual(["a"]);
   });
 
+  it("is reported even to an onError that throws, which changes nothing: the link still stops", async () => {
+    const failure = new Error("disk full");
+    const asked: unknown[] = [];
+    const { journal } = await start(new RecordingExecutor(), open(), (error) => {
+      asked.push(error);
+      throw new Error("onError broke");
+    });
+    vi.spyOn(journal, "finish").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(opFrame("a"));
+    await server.until(() => link?.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked).toEqual([failure]);
+    expect(journal.openIds()).toEqual(["a"]);
+  });
+
   it("while receiving an operation is reported, and stops the link without reconnecting", async () => {
     const failure = new Error("disk full");
     const errors: unknown[] = [];

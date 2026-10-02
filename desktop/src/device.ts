@@ -4,6 +4,7 @@
 import type { OperationJournal } from "./journal/journal.js";
 import { DeviceLink, type LinkStatus } from "./link/client.js";
 import { type Executor, OperationRunner } from "./operations/runner.js";
+import { report } from "./report.js";
 
 export interface DeviceOptions {
   url: string;
@@ -20,7 +21,7 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
   // The runner failed after the executor answered: the link stops, as when its own handler throws.
   const fail = (error: unknown): void => {
     void link.stop();
-    options.onError?.(error);
+    report(options.onError, error);
   };
   // Opening the journal already answered what a crash cut off "interrupted".
   const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame), fail);

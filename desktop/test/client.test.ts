@@ -25,6 +25,7 @@ async function connected(
   linkOptions: {
     token?: string;
     open?: string[];
+    openIds?: () => string[];
     welcomeTimeoutMs?: number;
     delay?: (attempt: number) => number;
     handlers?: Partial<LinkHandlers>;
@@ -37,7 +38,7 @@ async function connected(
   const link = new DeviceLink({
     url,
     token: linkOptions.token ?? "surg_dev_test",
-    openIds: () => linkOptions.open ?? [],
+    openIds: linkOptions.openIds ?? (() => linkOptions.open ?? []),
     welcomeTimeoutMs: linkOptions.welcomeTimeoutMs,
     delay: linkOptions.delay ?? (() => 20),
     handlers: {
@@ -299,5 +300,76 @@ describe("a handler that throws", () => {
     expect(calls).toEqual(["op-1"]);
     expect(seen.cancels).toEqual([]);
     expect(seen.errors).toEqual([failure]);
+  });
+});
+
+// What the app's own callbacks do must not take the main process down: each of
+// these would reach Node as an uncaught exception, which Vitest fails the run on.
+describe("a callback that throws", () => {
+  const failure = new Error("callback broke");
+
+  it("onStatus, on offline, is reported, and the link still reconnects", async () => {
+    const { server, link, seen } = await connected({}, {
+      handlers: {
+        onStatus: (status) => {
+          if (status === "offline") throw failure;
+        },
+      },
+    });
+    await server.until(() => link.status === "connected");
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link.status === "connected");
+    expect(seen.errors).toEqual([failure]);
+  });
+
+  it("onStatus, on stopped, is reported, and stop() still resolves", async () => {
+    const { server, link, seen } = await connected({}, {
+      handlers: {
+        onStatus: (status) => {
+          if (status === "stopped") throw failure;
+        },
+      },
+    });
+    await server.until(() => link.status === "connected");
+    await expect(link.stop()).resolves.toBeUndefined();
+    expect(seen.errors).toEqual([failure]);
+    expect(link.status).toBe("stopped");
+  });
+
+  it("openIds is reported, and stops the link for good", async () => {
+    const { server, link, seen } = await connected({}, {
+      openIds: () => {
+        throw failure;
+      },
+    });
+    await server.until(() => link.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(seen.errors).toEqual([failure]);
+    expect(server.hellos).toEqual([]);
+    expect(server.connections).toBe(1);
+  });
+
+  it("onError, from a handler that threw, is swallowed: the link still stops", async () => {
+    const asked: unknown[] = [];
+    const { server, link } = await connected({}, {
+      handlers: {
+        onOperation: () => {
+          throw failure;
+        },
+        onError: (error) => {
+          asked.push(error);
+          throw new Error("onError broke");
+        },
+      },
+    });
+    await server.until(() => link.status === "connected");
+    server.send({
+      type: "op", id: "op-1", session_id: "r", calling_session_id: "r", invocation_id: "1:c",
+      ordinal: 1, kind: "which", args: { name: "sh" }, digest: "d",
+    });
+    await server.until(() => link.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(asked).toEqual([failure]);
+    expect(server.connections).toBe(1);
   });
 });
