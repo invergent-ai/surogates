@@ -73,10 +73,13 @@ class Client:
             self._reader.cancel()
 
 
-async def client(built_client: Path, url: str, token: str, journal: Path, *, hold: bool = False) -> Client:
+async def client(
+    built_client: Path, url: str, token: str, journal: Path, *, hold: bool = False, folder: Path | None = None,
+) -> Client:
     args = ["node", str(built_client), "--url", url, "--token", token, "--journal", str(journal)]
     process = await asyncio.create_subprocess_exec(
-        *args, *(["--hold"] if hold else []), stdout=asyncio.subprocess.PIPE,
+        *args, *(["--hold"] if hold else []), *(["--folder", str(folder)] if folder else []),
+        stdout=asyncio.subprocess.PIPE,
     )
     return Client(process)
 
