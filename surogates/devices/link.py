@@ -24,7 +24,8 @@ accept frames that large.
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
 
-  4400  protocol error, including an unsupported protocol or an oversized frame
+  4400  protocol error, including an unsupported protocol, an oversized frame
+        or a malformed open list in hello
   4401  token unknown, including one replaced by reauthorization, or the address
         names another agent or none: the app stops reconnecting and suspends local work
   4403  the revocation case: revoked (also when a revoked device reconnects),
@@ -47,12 +48,13 @@ answers a repeat with the recorded outcome.  A reply for an operation this
 device was not given, or with another digest, is a protocol error (4400); a
 reply under rotated-out credentials closes with 4403.
 On connect, before any operation, the server sends a cancel for each operation
-the app reported open that was cancelled.  Later cancels arrive when they
-happen, and again at each reconcile while the app has not answered the
-operation.  A cancel may arrive before the op it names, so the app records
-unknown ids too.  A cancelled bind dismisses the folder prompt.  A result the
-app sends for a cancelled operation is acknowledged as a duplicate and changes
-nothing.
+the app reported open that was cancelled.  Later, a cancel is sent live when it
+happens; if that one was lost, the next reconcile sends it once more.  So a
+cancel may arrive more than once (live, resent, and on reconnect), and the app
+treats it as idempotent.  The server does not acknowledge a cancel.  A cancel
+may arrive before the op it names, so the app records unknown ids too.  A
+cancelled bind dismisses the folder prompt.  A result the app sends for a
+cancelled operation is acknowledged as a duplicate and changes nothing.
 
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no frame from the server within
@@ -185,6 +187,8 @@ class _Link:
     async def deliver(self) -> None:
         """Send the device its open operations not yet sent on this connection.
 
+        First sends a cancel again for each operation it was sent and has not
+        answered that was cancelled since, in case the live one was lost.
         Only the connection holding the device's presence delivers, so a
         superseded one that has not closed yet runs nothing.
         """
@@ -472,8 +476,11 @@ async def _control(
             continue
         # A session stopped an operation of this device.
         if kind == "cancel":
-            with contextlib.suppress(ValueError):
-                link.forget(UUID(value))
+            try:
+                operation_id = UUID(value)
+            except ValueError:
+                continue
+            link.forget(operation_id)
             await link.send({"type": "cancel", "id": value})
             continue
         generation = int(value) if value.isdigit() else None

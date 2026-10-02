@@ -676,18 +676,17 @@ class DeviceOperations:
         """Which of these operations of the device were cancelled."""
         if not operation_ids:
             return []
+        # Filtered in the database: an outcome can be a megabyte, and the ids
+        # may be as many as a device's hello lists.
         async with self._sf() as db:
-            rows = (await db.execute(
-                select(DeviceOperation.id, DeviceOperation.outcome).where(
+            return list((await db.execute(
+                select(DeviceOperation.id).where(
                     DeviceOperation.device_id == device_id,
                     DeviceOperation.id.in_(list(operation_ids)),
                     DeviceOperation.completed_at.is_not(None),
+                    DeviceOperation.outcome["error"]["type"].as_string() == "cancelled",
                 )
-            )).all()
-        return [
-            row.id for row in rows
-            if ((row.outcome or {}).get("error") or {}).get("type") == "cancelled"
-        ]
+            )).scalars())
 
     async def _cancel_where(self, *conditions: Any) -> int:
         async with self._sf() as db:

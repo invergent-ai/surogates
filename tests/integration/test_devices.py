@@ -2902,6 +2902,32 @@ async def test_a_computer_hears_of_a_cancellation_first_when_it_reconnects(lapto
     await stop(second)
 
 
+async def test_only_cancelled_operations_are_found_among_a_computers_own(laptop_rig):
+    rig = laptop_rig  # the laptop stays away
+    names = ["cancelled", "answered", "failed", "open"]
+    requests = {name: request_for(rig.device_id, rig.root, args={"name": name}) for name in names}
+    waiting = [asyncio.create_task(rig.ops.run(request)) for request in requests.values()]
+
+    async def all_recorded() -> bool:
+        return len(await rig.ops.pending(rig.device_id, 1)) == len(names)
+
+    await eventually(all_recorded)
+    by_name = {op.args["name"]: op for op in await rig.ops.pending(rig.device_id, 1)}
+    await rig.ops.cancel_invocation(rig.root, requests["cancelled"].invocation_id)
+    for name, outcome in (
+        ("answered", {"ok": "x" * 1000}),
+        ("failed", {"error": {"type": "os", "message": "no such file"}}),
+    ):
+        op = by_name[name]
+        assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, outcome) == "completed"
+
+    found = await rig.ops.cancelled_among(rig.device_id, [op.id for op in by_name.values()])
+
+    assert found == [by_name["cancelled"].id]
+    assert await rig.ops.cancelled_among(rig.device_id, []) == []
+    await asyncio.gather(*(stop(task) for task in waiting))
+
+
 @pytest.mark.parametrize("reported", ["not a list", ["not-a-uuid"], [str(uuid.uuid4())] * 1001])
 async def test_a_hello_with_a_malformed_open_list_is_refused(laptop_rig, link_url, reported):
     async with connect(
