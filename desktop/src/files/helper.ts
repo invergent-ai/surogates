@@ -17,18 +17,23 @@ const running = new Map<string, AbortController>();
 const say = (line: unknown) => process.stdout.write(`${JSON.stringify(line)}\n`);
 
 createInterface({ input: process.stdin }).on("line", (line) => {
-  let request: { id?: unknown; kind?: unknown; args?: unknown; cancel?: unknown };
+  let request: { id?: unknown; kind?: unknown; args?: unknown; cancel?: unknown } | null;
   try {
     request = JSON.parse(line) as typeof request;
   } catch {
     return;
   }
+  if (typeof request !== "object" || request === null) return;
   if (typeof request.cancel === "string") {
     running.get(request.cancel)?.abort();
     return;
   }
   const { id, kind, args } = request;
-  if (typeof id !== "string" || typeof kind !== "string" || typeof args !== "object" || args === null) return;
+  if (typeof id !== "string") return;
+  if (typeof kind !== "string" || typeof args !== "object" || args === null) {
+    say({ id, outcome: { error: { type: "value", message: "malformed request" } } });
+    return;
+  }
   const controller = new AbortController();
   running.set(id, controller);
   void perform(kind, args as Record<string, unknown>, context, controller.signal).then((outcome) => {

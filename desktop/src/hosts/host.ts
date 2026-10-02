@@ -5,7 +5,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdirSync, realpathSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -14,10 +14,11 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { Outcome } from "../link/protocol.js";
 import { inside } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
-import { sandboxPolicy } from "./policy.js";
+import { GLOB, sandboxPolicy } from "./policy.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
+const SYSTEM_FOLDERS = ["/proc", "/sys", "/dev", "/run"];
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 
 const send = (message: FromHost, then?: () => void) => {
@@ -33,6 +34,7 @@ process.on("message", (raw) => {
   const message = raw as ToHost;
   switch (message.type) {
     case "start":
+      if (folder) break;
       start(message).then(
         () => send({ type: "ready" }),
         (error: unknown) => send(
@@ -56,23 +58,47 @@ process.on("message", (raw) => {
 process.on("disconnect", () => void stop());
 process.on("SIGTERM", () => void stop());
 
+// A path as spelled, and as the file system resolves it when it exists.
+function spellings(path: string): string[] {
+  const plain = resolve(path);
+  try {
+    const real = realpathSync(plain);
+    return real === plain ? [plain] : [plain, real];
+  } catch {
+    return [plain];
+  }
+}
+
 async function start(message: HostStart): Promise<void> {
   const home = message.env.HOME;
   if (!home) throw new Error("the app's environment has no HOME");
+  if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
+  const tmp = resolve(message.tmp);
+  const appDirs = message.appDirs.map((dir) => resolve(dir));
   const path = realpathSync(message.folder);
+  const globbed = [path, tmp, ...appDirs].find((entry) => GLOB.test(entry));
+  if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
+  if (SYSTEM_FOLDERS.some((dir) => inside(path, dir))) {
+    throw new Error(`the folder ${path} is inside one of this computer's system folders`);
+  }
   // A sandbox whose writable folder held the home folder, the app's own data or
   // files (which run outside the sandbox) or a credential folder would hand all
-  // of it to the agent.
-  const guarded = [message.dataDir, ...message.appDirs, ...CREDENTIALS.map((name) => join(home, name))];
-  if (path === "/" || inside(home, path) || guarded.some((dir) => inside(dir, path) || inside(path, dir))) {
-    throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
-  }
+  // of it to the agent. Each is compared as spelled and as resolved: a link
+  // would otherwise walk around the check.
+  const homes = spellings(home);
+  const guarded = [message.dataDir, ...appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
+    .flatMap(spellings);
+  const refused = [...new Set([resolve(message.folder), path])].some(
+    (candidate) => candidate === "/" || homes.some((dir) => inside(dir, candidate)) ||
+      guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)),
+  );
+  if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
   const { dev, ino } = statSync(path);
   folder = { path, dev, ino };
-  mkdirSync(message.tmp, { recursive: true });
+  mkdirSync(tmp, { recursive: true });
   // srt sets the sandbox's TMPDIR from this; its default is shared by every sandbox.
-  process.env.CLAUDE_CODE_TMPDIR = message.tmp;
-  const policy = sandboxPolicy({ folder: path, tmp: message.tmp, home, appDirs: message.appDirs, bwrapPath: message.bwrapPath });
+  process.env.CLAUDE_CODE_TMPDIR = tmp;
+  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath: message.bwrapPath });
   await SandboxManager.initialize(policy);
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
   const { errors, warnings } = SandboxManager.checkDependencies();
@@ -86,17 +112,19 @@ async function start(message: HostStart): Promise<void> {
   // srt mounts placeholders over its protected names in the working directory at
   // wrap time. The helper guards those names itself, so it is wrapped from the
   // temp folder and the user's folder stays as it was.
-  process.chdir(message.tmp);
+  process.chdir(tmp);
   const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(HELPER)}`);
   const [file, ...args] = argv;
   if (!file) throw new Error("srt returned no command");
   // The app-built environment only: srt's returned env is this process's own.
   const child = spawn(file, args, {
     cwd: path,
-    env: { ...message.env, TMPDIR: message.tmp, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
+    env: { ...message.env, TMPDIR: tmp, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;
+  // A write to a helper that has died is not an error of its own: its exit is the one way out.
+  child.stdin.on("error", () => {});
   let stderr = "";
   child.stderr.on("data", (chunk: Buffer) => {
     stderr = (stderr + chunk.toString()).slice(-4000);
