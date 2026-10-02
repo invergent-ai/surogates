@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from surogates.devices.operations import CANCELLED_OUTCOME, OperationRequest
+from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationRequest
 
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
@@ -158,7 +158,7 @@ async def test_an_app_that_quit_mid_operation_reports_it_interrupted_and_the_can
 
 
 async def test_an_app_that_quit_mid_operation_is_sent_it_again_and_never_runs_it_again(
-    built_client, laptop_rig, link_url, tmp_path,
+    built_client, laptop_rig, link_url, tmp_path, monkeypatch,
 ):
     rig = laptop_rig
     journal = tmp_path / "journal.sqlite"
@@ -176,9 +176,34 @@ async def test_an_app_that_quit_mid_operation_is_sent_it_again_and_never_runs_it
     finally:
         await app.close()  # the app quits with the operation started, and nothing cancels it
 
-    # The server still has it open, so it sends it again when the app is back.
-    again = await client(built_client, link_url, rig.token, journal, hold=True)
+    # After a welcome the server looks for the app's open operations while it reads the app's
+    # first reply, and which one is first is down to timing. Hold the record of any reply
+    # until the server's look has found the operation: the repeat is always sent.
+    sent_again = asyncio.Event()
+    order: list[str] = []
+    real_pending, real_complete = DeviceOperations.pending, DeviceOperations.complete
+
+    async def pending(self, *args, **kwargs):
+        found = await real_pending(self, *args, **kwargs)
+        if any(str(op.id) == operation_id for op in found) and not sent_again.is_set():
+            order.append("found")
+            sent_again.set()
+        return found
+
+    async def complete(self, device_id, generation, id_, *args, **kwargs):
+        if str(id_) == operation_id:
+            await asyncio.wait_for(sent_again.wait(), 5.0)
+        result = await real_complete(self, device_id, generation, id_, *args, **kwargs)
+        if str(id_) == operation_id:
+            order.append("recorded")
+        return result
+
+    monkeypatch.setattr(DeviceOperations, "pending", pending)
+    monkeypatch.setattr(DeviceOperations, "complete", complete)
+
+    again = None
     try:
+        again = await client(built_client, link_url, rig.token, journal, hold=True)
         await again.until(connected)
         outcome = await asyncio.wait_for(waiting, 10.0)
         # The app answers twice from its journal: on welcome, with what its restart recovered,
@@ -187,8 +212,10 @@ async def test_an_app_that_quit_mid_operation_is_sent_it_again_and_never_runs_it
         assert not any(e["event"] == "op" for e in again.events)
     finally:
         await stop(waiting)
-        await again.close()
+        if again is not None:
+            await again.close()
 
+    assert order[:2] == ["found", "recorded"]  # the gate was hit, and held
     # The server holds what the app's journal recorded, nothing the app ran.
     state, recorded = journal_row(journal, operation_id)
     assert state == "acknowledged"
