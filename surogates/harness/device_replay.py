@@ -12,6 +12,7 @@ computer and is left to the usual "result unavailable" stub.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -20,6 +21,8 @@ from sqlalchemy import select
 from surogates.db.models import DeviceOperation
 from surogates.devices.binding import device_of
 from surogates.session.events import EventType
+
+logger = logging.getLogger(__name__)
 
 
 def unanswered_calls(events: list[Any]) -> list[tuple[int, dict[str, Any]]]:
@@ -71,6 +74,7 @@ def place(messages: list[dict[str, Any]], result: dict[str, Any]) -> None:
                 end += 1
             messages.insert(end, result)
             return
+    logger.warning("no assistant message holds call %s; its result stays only in the event log", result["tool_call_id"])
 
 
 async def _journaled(session_factory: Any, calling_session_id: Any, invocations: list[str]) -> set[str]:

@@ -1186,6 +1186,11 @@ class AgentHarness(
             # compacted or the model is asked for more work.
             if resumable(session, all_events):
                 await self._resume_unanswered_calls(session, lease, all_events, messages)
+                # A pause or stop cancelled the resumed call: stop here, before
+                # anything compacts the history around it.
+                if self._check_interrupt():
+                    await self._abort_iteration_with_pause(session, None)
+                    return
 
             # 6a. Kick off title generation in the background as soon as we
             # see the user's first message.  Runs in parallel with context
@@ -1516,8 +1521,9 @@ class AgentHarness(
             expert_transcript=None,
         )
         # A worker resuming a call has not seen the reads the first run made:
-        # each resumed call starts from what a fresh worker knows.  Only a
-        # wake with calls to resume clears it; any other keeps what was read.
+        # each resumed call starts from what a fresh worker knows.  Any wake
+        # with unanswered calls clears it, even when the journal turns up
+        # nothing to resume; any other keeps what was read.
         clear_read_tracker(sandbox_session_key(session))
 
         async def resume(call: dict[str, Any]) -> dict[str, Any]:
@@ -1532,6 +1538,9 @@ class AgentHarness(
         # A pause or stop cancels the wait, as it cancels a streamed call: the
         # journal keeps the call for the next wake, and the loop then pauses.
         self._active_executor = SimpleNamespace(discard=replay.cancel)
+        # A pause that landed before this point only set the flag.
+        if self._check_interrupt():
+            replay.cancel()
         try:
             await replay
         except asyncio.CancelledError:

@@ -5,7 +5,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
-from surogates.harness.device_replay import place, resumable, unanswered_calls
+import pytest
+
+from surogates.harness.device_replay import place, replay_unanswered, resumable, unanswered_calls
 
 
 def call(call_id: str) -> dict:
@@ -73,3 +75,26 @@ def test_a_result_goes_after_the_results_already_answering_its_message():
     ]
     place(messages, {"role": "tool", "tool_call_id": "b", "content": "resumed"})
     assert [m.get("tool_call_id") for m in messages] == [None, None, "a", "b", None]
+
+
+@pytest.mark.asyncio
+async def test_a_call_with_no_operations_in_the_journal_is_not_resumed(monkeypatch):
+    async def journaled(session_factory, calling_session_id, invocations):
+        return set()
+
+    monkeypatch.setattr("surogates.harness.device_replay._journaled", journaled)
+    events = [
+        event(1, "llm.response", message={"tool_calls": [call("a")]}),
+        event(2, "tool.call", tool_call_id="a"),
+    ]
+    ran: list[dict] = []
+
+    async def run_tool(resumed: dict) -> dict:
+        ran.append(resumed)
+        return {"role": "tool", "tool_call_id": resumed["id"], "content": "resumed"}
+
+    await replay_unanswered(
+        session=SimpleNamespace(id=uuid4()), events=events, messages=[],
+        session_factory=None, run_tool=run_tool,
+    )
+    assert ran == []

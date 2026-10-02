@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -30,13 +31,16 @@ def _events() -> list:
     ]
 
 
-async def _wake(monkeypatch, config: dict) -> tuple[list[str], list[dict]]:
+async def _wake(monkeypatch, config: dict, *, while_running=None, before_replay=None) -> tuple[list[str], list[dict]]:
+    """Wake a session; *while_running* and *before_replay* are called with the harness to inject behaviour."""
     order: list[str] = []
     compacted: list[dict] = []
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
 
     async def fake_execute_single_tool(call, **kwargs):
         order.append(f"run {call['id']} as {call['_replay_of']}")
+        if while_running is not None:
+            await while_running(harness)
         return {"role": "tool", "tool_call_id": call["id"], "content": "resumed"}
 
     monkeypatch.setattr(loop_module, "execute_single_tool", fake_execute_single_tool)
@@ -47,7 +51,14 @@ async def _wake(monkeypatch, config: dict) -> tuple[list[str], list[dict]]:
     harness = _harness(store, _permissive())
     # The helper's compressor is a spec mock: left alone it hands compaction a mock instead of the messages.
     harness._compressor.prune_stale_browser_states = lambda messages: messages
-    harness._rebuild_messages = lambda *a, **k: [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "tool_calls": CALLS}, {"role": "tool", "tool_call_id": "b", "content": "read"}]
+
+    def rebuild(*a, **k):
+        # The step just before the replay.
+        if before_replay is not None:
+            before_replay(harness)
+        return [{"role": "user", "content": "go"}, {"role": "assistant", "content": "", "tool_calls": CALLS}, {"role": "tool", "tool_call_id": "b", "content": "read"}]
+
+    harness._rebuild_messages = rebuild
 
     async def engineer(_session, _events, messages):
         order.append("compact")
@@ -61,7 +72,7 @@ async def _wake(monkeypatch, config: dict) -> tuple[list[str], list[dict]]:
         return set(invocations)
 
     monkeypatch.setattr("surogates.harness.device_replay._journaled", journaled)
-    await harness.wake(session.id)
+    await asyncio.wait_for(harness.wake(session.id), 5.0)
     return order, compacted
 
 
@@ -75,3 +86,27 @@ async def test_a_local_folder_wake_resumes_a_call_a_sibling_hid_before_it_compac
 async def test_a_cloud_wake_with_nothing_pending_does_nothing(monkeypatch):
     order, _ = await _wake(monkeypatch, {})
     assert order == []
+
+
+LOCAL = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/home/u/project"}
+
+
+async def _waits_forever(harness) -> None:
+    await asyncio.Event().wait()
+
+
+async def test_a_pause_while_a_resumed_call_waits_stops_the_wake_before_it_compacts(monkeypatch):
+    async def pause_then_wait(harness) -> None:
+        harness.interrupt("paused by user")
+        await _waits_forever(harness)
+
+    order, _ = await _wake(monkeypatch, LOCAL, while_running=pause_then_wait)
+    assert order == ["run a as 10"]
+
+
+async def test_a_pause_that_landed_before_the_replay_still_stops_it(monkeypatch):
+    order, _ = await _wake(
+        monkeypatch, LOCAL, while_running=_waits_forever,
+        before_replay=lambda harness: harness.interrupt("paused by user"),
+    )
+    assert "compact" not in order and "loop" not in order
