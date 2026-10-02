@@ -278,4 +278,26 @@ describe("a handler that throws", () => {
     expect(server.connections).toBe(1);
     expect(link.status).toBe("stopped");
   });
+
+  it("is the end of what the link hands on: frames read behind it are dropped, and it is reported once", async () => {
+    const calls: string[] = [];
+    const { server, link, seen } = await connected({}, {
+      handlers: {
+        onOperation: (operation) => {
+          calls.push(operation.id);
+          throw failure;
+        },
+      },
+    });
+    await server.until(() => link.status === "connected");
+    // One burst: the second operation is read while the link is already stopping.
+    server.send(op);
+    server.send({ ...op, id: "op-2" });
+    server.send({ type: "cancel", id: "op-3" });
+    await server.until(() => link.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(calls).toEqual(["op-1"]);
+    expect(seen.cancels).toEqual([]);
+    expect(seen.errors).toEqual([failure]);
+  });
 });

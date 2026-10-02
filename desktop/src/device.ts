@@ -24,9 +24,6 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
   };
   // Opening the journal already answered what a crash cut off "interrupted".
   const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame), fail);
-  // Set while the welcomed device is not the journal's: stop() takes a moment, and
-  // what the server sent right behind the welcome would still arrive and be applied.
-  let refused = false;
   const link: DeviceLink = new DeviceLink({
     url: options.url,
     token: options.token,
@@ -35,23 +32,16 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
     handlers: {
       onWelcome: (welcome) => {
         // One journal per device: another device's results would be refused and resent forever.
-        refused = !options.journal.claim(welcome.deviceId);
-        if (refused) {
+        if (!options.journal.claim(welcome.deviceId)) {
           void link.stop();
           return;
         }
         options.journal.prune();
         runner.connected();
       },
-      onOperation: (operation) => {
-        if (!refused) runner.operation(operation);
-      },
-      onCancel: (id) => {
-        if (!refused) runner.cancel(id);
-      },
-      onAck: (id) => {
-        if (!refused) runner.acknowledged(id);
-      },
+      onOperation: (operation) => runner.operation(operation),
+      onCancel: (id) => runner.cancel(id),
+      onAck: (id) => runner.acknowledged(id),
       onStatus: options.onStatus,
       onError: options.onError,
     },

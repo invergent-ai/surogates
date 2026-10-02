@@ -133,6 +133,9 @@ export class DeviceLink {
     });
 
     socket.on("message", (data, isBinary) => {
+      // ws keeps reading while the link closes: what it already read behind a stop
+      // (a handler that threw, a refused device) is not handed on.
+      if (this.stopped) return;
       // Any frame counts as liveness, not only a pong.
       pingedAt = null;
       if (isBinary) {
