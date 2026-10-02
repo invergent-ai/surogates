@@ -34,10 +34,10 @@ class FakeOperations:
         self.open = list(operations)
         self.delay = delay
         self.statuses: list[str] = []
-        self.cancelled: set[uuid.UUID] = set()
+        self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
 
-    async def cancelled_among(self, device_id, operation_ids):
-        return [i for i in operation_ids if i in self.cancelled]
+    async def closed_among(self, device_id, operation_ids):
+        return [i for i in operation_ids if i in self.closed]
 
     async def pending(self, device_id, generation, *, exclude=frozenset(), limit=100):
         # The query reads the journal first and the caller sees the answer
@@ -118,7 +118,7 @@ async def test_a_cancelled_operation_is_told_to_the_app_once_and_leaves_the_deli
     operations = FakeOperations(first, second)
     link, socket = make_link(operations)
     await link.deliver()
-    operations.cancelled.add(first.id)
+    operations.closed.add(first.id)
     operations.open = [second]
 
     await link.deliver()

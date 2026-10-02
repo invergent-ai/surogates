@@ -273,14 +273,21 @@ class DeviceOperations:
         A request already recorded under the same invocation and ordinal is
         joined, never repeated: its outcome comes back when the device reports
         it, or at once if it already has.
+
+        A new request from a stopped session (paused, deleted or failed) raises
+        "This session was stopped" and records nothing.  A caller that is
+        stopped while it waits, or while its request is being recorded, closes
+        its own operation unless its turn is detached, handed to another
+        worker that carries the wait on.  The call returns, or raises, only
+        after its wait's subscription is closed.
         """
-        operation_id, outcome = await self._while_database_recovers(
-            "recording", lambda: self._record(request),
-        )
-        if outcome is not None:
-            return outcome
         waiter: asyncio.Future | None = None
         try:
+            operation_id, outcome = await self._while_database_recovers(
+                "recording", lambda: self._record(request),
+            )
+            if outcome is not None:
+                return outcome
             await self._announce(control_channel(request.device_id), f"op:{operation_id}")
             # One wait, never interrupted: a deadline here could cancel a query mid-flight.
             waiter = asyncio.ensure_future(self._wait_forever(operation_id))
@@ -292,9 +299,11 @@ class DeviceOperations:
                 return await self._wait_watching(waiter, request)
         except asyncio.CancelledError:
             # Stopped, not handed to another worker: nothing will ask for it
-            # again, so it must not run when the computer comes back.
+            # again, so it must not run when the computer comes back.  Found by
+            # the request's key: a stop during the record's commit leaves no
+            # operation id to name, and the row may be committed.
             if not turn_detached():
-                await self._cancel_own(operation_id)
+                await self._cancel_own(request)
             raise
         finally:
             if waiter is not None:
@@ -672,19 +681,23 @@ class DeviceOperations:
             DeviceOperation.invocation_id == invocation_id,
         )
 
-    async def cancelled_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
-        """Which of these operations of the device were cancelled."""
+    async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
+        """Which of these operations of the device the server has closed.
+
+        For the ids the app reports open, or was sent and has not answered:
+        only the server can have closed those, by a cancellation or a
+        revocation, so the app must be told to stop them.
+        """
         if not operation_ids:
             return []
-        # Filtered in the database: an outcome can be a megabyte, and the ids
-        # may be as many as a device's hello lists.
+        # Ids only: an outcome can be a megabyte, and the ids may be as many
+        # as a device's hello lists.
         async with self._sf() as db:
             return list((await db.execute(
                 select(DeviceOperation.id).where(
                     DeviceOperation.device_id == device_id,
                     DeviceOperation.id.in_(list(operation_ids)),
                     DeviceOperation.completed_at.is_not(None),
-                    DeviceOperation.outcome["error"]["type"].as_string() == "cancelled",
                 )
             )).scalars())
 
@@ -702,15 +715,22 @@ class DeviceOperations:
             await self._announce(control_channel(device_id), f"cancel:{operation_id}")
         return len(rows)
 
-    async def _cancel_own(self, operation_id: UUID) -> None:
+    async def _cancel_own(self, request: OperationRequest) -> None:
         """Close a stopped call's operation, best effort: a failure leaves it open as before."""
         try:
             async with asyncio.timeout(_CANCEL_PATIENCE_S):
                 # Shielded: a second cancel of the stopping task must not
                 # abandon the write half-way.
-                await asyncio.shield(self._cancel_where(DeviceOperation.id == operation_id))
+                await asyncio.shield(self._cancel_where(
+                    DeviceOperation.calling_session_id == request.calling_session_id,
+                    DeviceOperation.invocation_id == request.invocation_id,
+                    DeviceOperation.ordinal == request.ordinal,
+                ))
         except Exception:
-            logger.warning("could not cancel operation %s; it stays open", operation_id, exc_info=True)
+            logger.warning(
+                "could not cancel operation %s of %s; it stays open",
+                request.ordinal, request.invocation_id, exc_info=True,
+            )
 
 
 class JournalRunner:

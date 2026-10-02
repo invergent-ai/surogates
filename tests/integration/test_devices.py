@@ -2754,6 +2754,25 @@ async def test_a_call_stopped_while_its_operation_is_announced_closes_it(laptop_
     assert not await has_pending(rig.ops, rig.device_id)
 
 
+async def test_a_call_stopped_while_its_record_commits_closes_its_operation(laptop_rig, session_factory, monkeypatch):
+    rig = laptop_rig
+    recorded = asyncio.Event()
+    real_record = DeviceOperations._record
+
+    async def record_then_linger(self, request):
+        found = await real_record(self, request)  # the row is committed
+        recorded.set()
+        await asyncio.Event().wait()  # the reply has not reached the call yet
+        return found
+
+    monkeypatch.setattr(DeviceOperations, "_record", record_then_linger)
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await asyncio.wait_for(recorded.wait(), 5.0)
+    await stop(waiting)
+    assert not await has_pending(rig.ops, rig.device_id)
+    assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+
+
 async def test_a_stopped_call_closes_its_wait_before_it_returns(laptop_rig, monkeypatch):
     rig = laptop_rig
     closed: list[UUID] = []
@@ -2902,9 +2921,40 @@ async def test_a_computer_hears_of_a_cancellation_first_when_it_reconnects(lapto
     await stop(second)
 
 
-async def test_only_cancelled_operations_are_found_among_a_computers_own(laptop_rig):
+async def test_a_computer_hears_first_that_a_revocation_closed_what_it_held(laptop_rig, api):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    first = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.laptop.disconnect()
+    assert (await api.client.delete(f"/v1/devices/{rig.device_id}", headers=api.auth())).status_code == 204
+    await stop(first)  # the wait would see the revocation at its next recheck
+    reauthorized = await api.client.post(f"/v1/devices/{rig.device_id}/reauthorize", headers=api.auth())
+    assert reauthorized.status_code == 200, reauthorized.text
+    rig.laptop.token = reauthorized.json()["token"]
+    second = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id, 2))
+
+    rig.laptop.frames.clear()
+    await rig.laptop.connect()  # its hello still lists the operation the revocation closed
+
+    async def both() -> bool:
+        return "cancel" in rig.laptop.frames and "op" in rig.laptop.frames
+
+    await eventually(both)
+    assert rig.laptop.frames.index("cancel") < rig.laptop.frames.index("op")
+    assert rig.laptop.cancelled == {rig.laptop.received[0]}
+    await stop(second)
+
+
+async def test_only_closed_operations_are_found_among_a_computers_own(laptop_rig, api):
     rig = laptop_rig  # the laptop stays away
-    names = ["cancelled", "answered", "failed", "open"]
+    names = ["cancelled", "open"]
     requests = {name: request_for(rig.device_id, rig.root, args={"name": name}) for name in names}
     waiting = [asyncio.create_task(rig.ops.run(request)) for request in requests.values()]
 
@@ -2914,17 +2964,13 @@ async def test_only_cancelled_operations_are_found_among_a_computers_own(laptop_
     await eventually(all_recorded)
     by_name = {op.args["name"]: op for op in await rig.ops.pending(rig.device_id, 1)}
     await rig.ops.cancel_invocation(rig.root, requests["cancelled"].invocation_id)
-    for name, outcome in (
-        ("answered", {"ok": "x" * 1000}),
-        ("failed", {"error": {"type": "os", "message": "no such file"}}),
-    ):
-        op = by_name[name]
-        assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, outcome) == "completed"
+    ids = [op.id for op in by_name.values()]
 
-    found = await rig.ops.cancelled_among(rig.device_id, [op.id for op in by_name.values()])
-
-    assert found == [by_name["cancelled"].id]
-    assert await rig.ops.cancelled_among(rig.device_id, []) == []
+    assert await rig.ops.closed_among(rig.device_id, ids) == [by_name["cancelled"].id]
+    assert await rig.ops.closed_among(rig.device_id, []) == []
+    # A revocation closes what is still open, and the computer must hear of those too.
+    assert (await api.client.delete(f"/v1/devices/{rig.device_id}", headers=api.auth())).status_code == 204
+    assert set(await rig.ops.closed_among(rig.device_id, ids)) == set(ids)
     await asyncio.gather(*(stop(task) for task in waiting))
 
 

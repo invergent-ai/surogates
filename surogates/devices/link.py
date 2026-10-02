@@ -188,7 +188,8 @@ class _Link:
         """Send the device its open operations not yet sent on this connection.
 
         First sends a cancel again for each operation it was sent and has not
-        answered that was cancelled since, in case the live one was lost.
+        answered that the server has closed since (cancelled or revoked), in
+        case the live one was lost.
         Only the connection holding the device's presence delivers, so a
         superseded one that has not closed yet runs nothing.
         """
@@ -198,7 +199,7 @@ class _Link:
         # each reconcile tells it again about what it was sent and has not
         # answered.  Dropping them also keeps the delivered set bounded.
         if self._delivered:
-            for operation_id in await _bounded(self._operations.cancelled_among(self._device.id, self._delivered)):
+            for operation_id in await _bounded(self._operations.closed_among(self._device.id, self._delivered)):
                 self._delivered.discard(operation_id)
                 await self.send({"type": "cancel", "id": str(operation_id)})
         for operation in await _bounded(self._operations.pending(
@@ -296,8 +297,9 @@ async def serve_device_link(
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
         })
         # Cancellations come before any new work, so the app stops what the
-        # session stopped while it was away.
-        for operation_id in await _bounded(operations.cancelled_among(device.id, reported)):
+        # server closed while it was away: a session stopped it, or a
+        # revocation did.
+        for operation_id in await _bounded(operations.closed_among(device.id, reported)):
             await link.send({"type": "cancel", "id": str(operation_id)})
         link.deliver_soon()
         await _serve(link, pubsub, device=device, holder=holder, store=store, presence=presence)
