@@ -37,12 +37,41 @@ describe("an operation's life", () => {
     journal.close();
   });
 
+  it("keeps a result of undefined as null, so a replay or a resend is a frame the server accepts", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    journal.start("a");
+    expect(journal.finish("a", { ok: undefined })).toBe(true);
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: { ok: null } }]);
+    expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: null } });
+    journal.close();
+  });
+
   it("never runs another request that comes under a known id", () => {
     const journal = new OperationJournal(path);
     journal.receive(operation("a"));
     journal.start("a");
     journal.finish("a", { ok: 1 });
     expect(journal.receive(operation("a", "another-digest"))).toEqual({ action: "ignore" });
+    journal.close();
+  });
+});
+
+describe("starting an operation", () => {
+  it("is true only for the call that moved it from received to started", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    expect(journal.start("a")).toBe(true);
+    expect(journal.start("a")).toBe(false);
+    journal.close();
+  });
+
+  it("is false for a cancelled or an unknown id", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("cancelled"));
+    journal.cancel("cancelled");
+    expect(journal.start("cancelled")).toBe(false);
+    expect(journal.start("unknown")).toBe(false);
     journal.close();
   });
 });
@@ -111,6 +140,20 @@ describe("a cancel", () => {
   });
 });
 
+describe("a second journal on the same file", () => {
+  it("fails to open while the first is open, and leaves its running operations alone", () => {
+    const first = new OperationJournal(path);
+    first.receive(operation("a"));
+    first.start("a");
+    expect(() => new OperationJournal(path)).toThrow();
+    expect(first.finish("a", { ok: 1 })).toBe(true);
+    first.close();
+    const after = new OperationJournal(path);
+    expect(after.recovered).toBe(0);
+    after.close();
+  });
+});
+
 describe("the device it belongs to", () => {
   it("is the first one that claims it", () => {
     const journal = new OperationJournal(path);
@@ -134,7 +177,19 @@ describe("what the journal reports", () => {
     journal.cancel("cancelled");
     expect(journal.openIds()).toEqual(["started", "received"]);
     for (let i = 0; i < MAX_OPEN_REPORTED + 5; i++) journal.receive(operation(`many-${i}`));
-    expect(journal.openIds()).toHaveLength(MAX_OPEN_REPORTED);
+    const open = journal.openIds();
+    expect(open).toHaveLength(MAX_OPEN_REPORTED);
+    expect(open[0]).toBe(`many-${MAX_OPEN_REPORTED + 4}`);
+    expect(open).not.toContain("received");
+    journal.close();
+  });
+
+  it("orders operations that share a timestamp newest first", () => {
+    const journal = new OperationJournal(path, () => 5);
+    journal.receive(operation("a"));
+    journal.receive(operation("b"));
+    journal.receive(operation("c"));
+    expect(journal.openIds()).toEqual(["c", "b", "a"]);
     journal.close();
   });
 
@@ -147,6 +202,19 @@ describe("what the journal reports", () => {
     journal.acknowledge("a");
     expect(journal.unsent()).toEqual([]);
     expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: 1 } });
+    journal.close();
+  });
+
+  it("keeps an acknowledged result's payload until the day is up", () => {
+    let now = 1_000;
+    const journal = new OperationJournal(path, () => now);
+    journal.receive(operation("a"));
+    journal.start("a");
+    journal.finish("a", { ok: "big" });
+    journal.acknowledge("a");
+    now += RETAIN_MS;
+    expect(journal.prune()).toBe(0);
+    expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: "big" } });
     journal.close();
   });
 

@@ -45,24 +45,33 @@ export class OperationJournal {
 
   constructor(path: string, private readonly now: () => number = Date.now) {
     this.db = new DatabaseSync(path);
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
-      PRAGMA fullfsync = ON;
-      PRAGMA checkpoint_fullfsync = ON;
-      CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS operations (
-        id TEXT PRIMARY KEY,
-        digest TEXT,
-        state TEXT NOT NULL,
-        outcome TEXT,
-        updated_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS operations_by_state ON operations (state, updated_at);
-    `);
-    // Opened once per process: what a crash cut off is interrupted before
-    // anything is reported or run.
-    this.recovered = this.recover();
+    try {
+      // One journal per file. Another journal opening it would run recovery
+      // and turn this one's running operations into "interrupted".
+      this.db.exec(`
+        PRAGMA locking_mode = EXCLUSIVE;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = FULL;
+        PRAGMA fullfsync = ON;
+        PRAGMA checkpoint_fullfsync = ON;
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS operations (
+          id TEXT PRIMARY KEY,
+          digest TEXT,
+          state TEXT NOT NULL,
+          outcome TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS operations_by_state ON operations (state, updated_at);
+      `);
+      // Opened once per process: what a crash cut off is interrupted before
+      // anything is reported or run.
+      this.recovered = this.recover();
+    } catch (error) {
+      // The file is held by another journal: fail loudly, leave no handle open.
+      this.db.close();
+      throw error;
+    }
   }
 
   /** How many operations a crash had cut off, answered "interrupted" when this journal was opened. */
@@ -106,18 +115,29 @@ export class OperationJournal {
     return row.state === "received" ? { action: "run" } : { action: "ignore" };
   }
 
-  /** Durably mark an operation started, before it acts. */
-  start(id: string): void {
-    this.db
+  /**
+   * Durably mark an operation started, before it acts. True only when this call
+   * moved it from received to started; false (do not act) when it was cancelled,
+   * unknown, or already started or finished.
+   */
+  start(id: string): boolean {
+    const result = this.db
       .prepare(`UPDATE operations SET state = 'started', updated_at = ? WHERE id = ? AND state = 'received'`)
       .run(this.now(), id);
+    return Number(result.changes) === 1;
   }
 
-  /** Durably record an outcome, before it is sent. False if it was cancelled meanwhile. */
+  /**
+   * Durably record an outcome, before it is sent. True when this call recorded
+   * it. False, with nothing recorded, when the operation was cancelled meanwhile,
+   * was already finished, is unknown, or never started.
+   */
   finish(id: string, outcome: Outcome): boolean {
+    // JSON.stringify drops an undefined ok, leaving a frame the server refuses.
+    const stored = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
     const result = this.db
       .prepare(`UPDATE operations SET state = 'finished', outcome = ?, updated_at = ? WHERE id = ? AND state = 'started'`)
-      .run(JSON.stringify(outcome), this.now(), id);
+      .run(JSON.stringify(stored), this.now(), id);
     return Number(result.changes) === 1;
   }
 
@@ -143,7 +163,7 @@ export class OperationJournal {
   /** What a hello reports as held unfinished. */
   openIds(): string[] {
     const rows = this.db
-      .prepare(`SELECT id FROM operations WHERE state IN ('received', 'started') ORDER BY updated_at DESC, id LIMIT ?`)
+      .prepare(`SELECT id FROM operations WHERE state IN ('received', 'started') ORDER BY updated_at DESC, rowid DESC LIMIT ?`)
       .all(MAX_OPEN_REPORTED) as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
