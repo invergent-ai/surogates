@@ -518,7 +518,7 @@ async def _cancelled_result_emits(config: dict) -> tuple[list[Any], Any]:
     interrupted = True
     executor.discard()
     results = await executor.get_all_results()
-    assert len(results) == 1 and "skipped" in results[0]["content"].lower()
+    assert len(results) == 1
     return [
         call for call in store.emit_event.call_args_list
         if call.args[1] == EventType.TOOL_RESULT and call.args[2].get("cancelled")
@@ -538,6 +538,19 @@ class TestCancelledResultOnALocalFolder:
     async def test_a_cloud_result_is_not_fenced(self) -> None:
         emits, _ = await _cancelled_result_emits({})
         assert [emit.kwargs for emit in emits] == [{}]
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_local_folder_call_says_it_may_have_run(self) -> None:
+        # The computer may already have run it: "skipped" would have the model repeat a push.
+        [emit], _ = await _cancelled_result_emits(DEVICE_CONFIG)
+        content = emit.args[2]["content"]
+        assert "It may have run" in content
+        assert "skipped" not in content
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_cloud_call_still_says_it_was_skipped(self) -> None:
+        [emit], _ = await _cancelled_result_emits({})
+        assert "skipped due to interrupt" in emit.args[2]["content"]
 
 
 class TestToolBlockDetection:

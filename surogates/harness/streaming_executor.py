@@ -41,6 +41,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from surogates.devices.binding import device_of
+from surogates.devices.operations import CANCELLED_OUTCOME
 from surogates.runtime.turn_slots import turn_detached
 from surogates.session.events import EventType
 from surogates.session.store import LeaseNotHeldError
@@ -463,7 +464,11 @@ class StreamingToolExecutor:
             # sibling-error abort. The reason text is shown to the LLM in
             # the synthetic tool result, and ``sibling error`` would lead
             # it to hunt for a peer failure that didn't happen.
-            if self._interrupt_check():
+            if device_of(self._session.config) is not None:
+                # The computer may already have run it: "skipped" would have
+                # the model repeat a push or a publish after a resume.
+                reason = CANCELLED_OUTCOME["error"]["message"]
+            elif self._interrupt_check():
                 reason = "skipped due to interrupt"
             else:
                 reason = "cancelled (sibling error)"
