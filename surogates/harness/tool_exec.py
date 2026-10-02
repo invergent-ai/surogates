@@ -1741,6 +1741,7 @@ async def _run_single_tool(
     )
     if replay_of is not None and device_call is not None and await device_call.diverged():
         result_content = INTERRUPTED
+        await device_call.close_open()
 
     # Sanitise the event payload — frontend SSE consumers must not see
     # real filesystem paths.  The LLM still receives the raw

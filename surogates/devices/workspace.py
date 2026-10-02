@@ -42,7 +42,9 @@ An error names the exception the worker raises again:
   {"type": "ripgrep", "message"}          RipgrepError
   {"type": "value", "message"}            ValueError, e.g. a NUL byte in a path
   any other type                          DeviceOperationError(message), including
-                                          "revoked" (local access was revoked) and
+                                          "revoked" (local access was revoked),
+                                          "cancelled" (the session stopped it before
+                                          the computer reported a result) and
                                           "too_large"
 
 Data is standard base64 (RFC 4648 section 4: the "+" and "/" alphabet, padded

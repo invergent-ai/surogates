@@ -35,12 +35,12 @@ DEVICE_SANDBOX_ID = "device"
 # The result of a resumed call that cannot be resumed safely: it asked the
 # computer for other operations than its first run, or it is a harness tool,
 # whose effects off the computer are not in the journal.  What happened cannot
-# be told from the journal, and an operation still waiting for the computer
-# may happen when it reconnects.
+# be told from the journal.  What its first run left open is cancelled, so
+# nothing happens later.
 INTERRUPTED = json.dumps({"error": (
     "interrupted: this call was resumed after its worker stopped, and could not be "
-    "resumed safely. Some of its effects may have happened, and one still waiting for "
-    "the computer may happen when it reconnects. Check the folder before repeating it."
+    "resumed safely. Some of its effects may have happened. Check the folder before "
+    "repeating it."
 )})
 
 
@@ -77,6 +77,11 @@ class DeviceCall:
     async def diverged(self) -> bool:
         """Whether this call, resumed, took another path than its first run."""
         return self._runner is not None and await self._runner.diverged()
+
+    async def close_open(self) -> None:
+        """Cancel what this call's first run left open on the computer."""
+        if self._runner is not None:
+            await self._runner.close_open()
 
     async def dispatch(self, name: str, args: dict[str, Any]) -> str:
         """Run a sandbox tool's handler on the computer."""
