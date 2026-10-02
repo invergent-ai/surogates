@@ -7,6 +7,9 @@ export const WELCOME_TIMEOUT_MS = 10_000;
 // The largest frame either side sends: one operation's 1 MiB of file data,
 // base64-encoded, plus its envelope.
 export const MAX_FRAME_CHARS = 2 * 1024 * 1024;
+// The longest heartbeat a welcome may ask for (the shortest is 1 s): a value
+// outside that makes the timers never fire or fire every millisecond.
+export const MAX_HEARTBEAT_S = 300;
 
 export const Close = {
   protocol: 4400,
@@ -78,8 +81,11 @@ export function parseServerFrame(raw: string): ServerFrame {
   switch (frame.type) {
     case "welcome": {
       const heartbeat = frame.heartbeat_s;
-      if (typeof heartbeat !== "number" || !(heartbeat > 0)) {
-        throw new ProtocolError("welcome frame needs a positive heartbeat_s");
+      if (
+        typeof heartbeat !== "number" || !Number.isFinite(heartbeat)
+        || heartbeat < 1 || heartbeat > MAX_HEARTBEAT_S
+      ) {
+        throw new ProtocolError(`welcome frame needs a heartbeat_s from 1 to ${MAX_HEARTBEAT_S}`);
       }
       return {
         type: "welcome",
@@ -141,5 +147,7 @@ export function opResult(
   operation: { id: string; digest: string },
   outcome: Outcome,
 ): Record<string, unknown> {
-  return { type: "op_result", id: operation.id, digest: operation.digest, outcome };
+  // JSON.stringify drops an undefined ok, a frame the server refuses: send null.
+  const sent = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
+  return { type: "op_result", id: operation.id, digest: operation.digest, outcome: sent };
 }

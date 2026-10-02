@@ -3,6 +3,11 @@ import { describe, expect, it } from "vitest";
 import { reconnectDelayMs } from "../src/link/backoff.js";
 import { hello, opResult, parseServerFrame, ProtocolError } from "../src/link/protocol.js";
 
+const welcome = {
+  type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a", user_id: "u",
+  name: "Laptop", heartbeat_s: 15,
+};
+
 const op = {
   type: "op",
   id: "7d0c3d2e-0000-4000-8000-000000000001",
@@ -17,10 +22,7 @@ const op = {
 
 describe("server frames", () => {
   it("reads a welcome", () => {
-    const frame = parseServerFrame(JSON.stringify({
-      type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a", user_id: "u",
-      name: "Laptop", heartbeat_s: 15,
-    }));
+    const frame = parseServerFrame(JSON.stringify(welcome));
     expect(frame).toEqual({
       type: "welcome",
       welcome: { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "Laptop", heartbeatS: 15 },
@@ -53,13 +55,30 @@ describe("server frames", () => {
   it.each([
     ["not JSON", "{"],
     ["not an object", "[1]"],
+    ["null", "null"],
+    ["a number", "42"],
+    ["a string", JSON.stringify("text")],
     ["a frame without a type", JSON.stringify({ id: "x" })],
     ["an operation without args", JSON.stringify({ ...op, args: undefined })],
     ["an operation with a fractional ordinal", JSON.stringify({ ...op, ordinal: 1.5 })],
-    ["a welcome without a heartbeat", JSON.stringify({ type: "welcome", protocol: 1 })],
+    ["a welcome without a heartbeat", JSON.stringify({ ...welcome, heartbeat_s: undefined })],
     ["a cancel without an id", JSON.stringify({ type: "cancel" })],
   ])("refuses %s", (_name, text) => {
     expect(() => parseServerFrame(text)).toThrow(ProtocolError);
+  });
+});
+
+describe("a welcome's heartbeat", () => {
+  // JSON.stringify cannot write 1e999, so the value goes in as raw text.
+  const withHeartbeat = (raw: string) =>
+    JSON.stringify({ ...welcome, heartbeat_s: "HB" }).replace('"HB"', raw);
+
+  it.each(["1e999", "0", "-1", "0.5", "301", '"15"'])("refuses %s", (raw) => {
+    expect(() => parseServerFrame(withHeartbeat(raw))).toThrow(ProtocolError);
+  });
+
+  it.each(["1", "15", "300"])("accepts %s", (raw) => {
+    expect(parseServerFrame(withHeartbeat(raw)).type).toBe("welcome");
   });
 });
 
@@ -70,6 +89,15 @@ describe("app frames", () => {
 
   it("answers an operation by id and digest", () => {
     expect(opResult({ id: "x", digest: "d" }, { ok: null })).toEqual({
+      type: "op_result", id: "x", digest: "d", outcome: { ok: null },
+    });
+  });
+});
+
+describe("an operation's result", () => {
+  it("sends null for an ok that is undefined, which JSON would drop", () => {
+    const frame = opResult({ id: "x", digest: "d" }, { ok: undefined });
+    expect(JSON.parse(JSON.stringify(frame))).toEqual({
       type: "op_result", id: "x", digest: "d", outcome: { ok: null },
     });
   });
