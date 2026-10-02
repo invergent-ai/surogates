@@ -20,7 +20,8 @@ export type ToHost =
 
 export type FromHost =
   | { type: "ready" }
-  | { type: "failed"; message: string }
+  // folder: the bound folder is not there, or is not a folder; the app answers folder_unavailable.
+  | { type: "failed"; message: string; folder?: true }
   | { type: "result"; id: string; outcome: Outcome };
 
 export const FOLDER_UNAVAILABLE: Outcome = {

@@ -134,7 +134,12 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     const executor = toolHosts();
     renameSync(folders[ROOT_B] ?? "", `${folders[ROOT_B]}-moved`);
     expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toEqual(FOLDER_UNAVAILABLE);
-    expect(spawned).toHaveLength(0);
+    // The app stats nothing itself: the host it starts is the one that finds the folder gone, and goes.
+    expect(spawned).toHaveLength(1);
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toEqual(FOLDER_UNAVAILABLE);
+    expect(spawned).toHaveLength(2);
+    // Each of them goes on its own; none is left to exit during the next test.
+    await until(() => exits === 2);
   });
 
   it("starts no host once stopped", async () => {
@@ -232,6 +237,26 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(fakes[0]?.killed).toBe(1);
     expect(await executor.run(resolve(), signal())).toMatchObject(unavailable);
     expect(fakes).toHaveLength(2);
+  });
+
+  it("answers folder_unavailable when its host says the folder is not there, and starts another for the next", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
+      if (message.type === "start") host.say({ type: "failed", message: "not a folder", folder: true });
+      onStop(host, message);
+    }) });
+    expect(await executor.run(resolve(), signal())).toEqual(FOLDER_UNAVAILABLE);
+    expect(await executor.run(resolve(), signal())).toEqual(FOLDER_UNAVAILABLE);
+    expect(fakes).toHaveLength(2);
+  });
+
+  it("answers unavailable, with its reason, when its host fails for any other cause", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
+      if (message.type === "start") host.say({ type: "failed", message: "no sandbox" });
+      onStop(host, message);
+    }) });
+    expect(await executor.run(resolve(), signal())).toEqual({
+      error: { type: "unavailable", message: "This computer could not open the folder's sandbox: no sandbox" },
+    });
   });
 
   it("keeps a host that started, once its start timeout has passed", async () => {

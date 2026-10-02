@@ -3,7 +3,6 @@
 // the app's own record of the binding, never from the request.
 
 import { fork } from "node:child_process";
-import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,14 +31,6 @@ export const NOT_BOUND: Outcome = { error: { type: "binding", message: "This fol
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
-
-function isFolder(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
 
 export interface Binding {
   folder: string;
@@ -127,7 +118,7 @@ export class ToolHosts implements Executor {
     if (operation.kind === "bind") return NOT_BOUND;
     if (this.stopping) return unavailable("the app is quitting");
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
-    if (!binding || !isFolder(binding.folder)) return FOLDER_UNAVAILABLE;
+    if (!binding) return FOLDER_UNAVAILABLE;
     return this.hostFor(operation.sessionId, binding).run(operation, signal);
   }
 
@@ -254,7 +245,7 @@ class Host {
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one.
       this.onGone();
-      this.settleStart(unavailable(message.message));
+      this.settleStart(message.folder ? FOLDER_UNAVAILABLE : unavailable(message.message));
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);

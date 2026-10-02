@@ -4,7 +4,7 @@
 // operations to it. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,11 @@ process.on("message", (raw) => {
       start(message).then(
         () => send({ type: "ready" }),
         (error: unknown) => send(
-          { type: "failed", message: error instanceof Error ? error.message : String(error) },
+          {
+            type: "failed",
+            message: error instanceof Error ? error.message : String(error),
+            ...(error instanceof FolderUnavailable ? { folder: true as const } : {}),
+          },
           () => process.exit(1),
         ),
       );
@@ -65,13 +69,25 @@ function spellings(path: string): string[] {
   return real === plain ? [plain] : [plain, real];
 }
 
+// The bound folder is gone, or is not a folder. The app has no folder to check
+// before it starts a host (a stat on a stuck mount would freeze it), so the host says.
+class FolderUnavailable extends Error {}
+
 async function start(message: HostStart): Promise<void> {
   const home = message.env.HOME;
   if (!home) throw new Error("the app's environment has no HOME");
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
   const tmp = resolve(message.tmp);
   const appDirs = message.appDirs.map((dir) => resolve(dir));
-  const path = realpathSync(message.folder);
+  let path: string;
+  let stats: Stats;
+  try {
+    path = realpathSync(message.folder);
+    stats = statSync(path);
+  } catch {
+    throw new FolderUnavailable(`the folder ${message.folder} is not there`);
+  }
+  if (!stats.isDirectory()) throw new FolderUnavailable(`the folder ${message.folder} is not a folder`);
   const globbed = [path, tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
   if (isReserved(path)) {
@@ -89,8 +105,7 @@ async function start(message: HostStart): Promise<void> {
       guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)),
   );
   if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
-  const { dev, ino } = statSync(path);
-  folder = { path, dev, ino };
+  folder = { path, dev: stats.dev, ino: stats.ino };
   mkdirSync(tmp, { recursive: true });
   // srt sets the sandbox's TMPDIR from this; its default is shared by every sandbox.
   process.env.CLAUDE_CODE_TMPDIR = tmp;

@@ -156,6 +156,18 @@ describe("a tool host", { timeout: 30_000 }, () => {
     const harness = host({ bwrapPath: "/nonexistent/bwrap" });
     const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
     expect(failed.type === "failed" && failed.message).toMatch(/bwrap/);
+    expect(failed).not.toHaveProperty("folder");
+    expect(await harness.exited).toBe(1);
+  });
+
+  it.each([
+    ["a regular file", (b: string) => join(b, "folder", "a.txt")],
+    ["a path that is not there", (b: string) => join(b, "gone")],
+    ["a path under a regular file", (b: string) => join(b, "folder", "a.txt", "sub")],
+  ])("answers a folder that is %s as unavailable, and goes", async (_name, chosen) => {
+    const harness = host({ folder: chosen(base) });
+    const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
+    expect(failed).toMatchObject({ type: "failed", folder: true });
     expect(await harness.exited).toBe(1);
   });
 
