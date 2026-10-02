@@ -1,3 +1,5 @@
 web/node_modules/
 web/dist/
 .venv/
+desktop/node_modules/
+desktop/dist/
