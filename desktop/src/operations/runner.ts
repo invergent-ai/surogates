@@ -23,6 +23,9 @@ export class OperationRunner {
     private readonly journal: OperationJournal,
     private readonly executor: Executor,
     private readonly send: (frame: Record<string, unknown>) => boolean,
+    // What failed after the executor answered (the journal, the link): the
+    // operation stays "started", so the next launch answers it "interrupted".
+    private readonly onError?: (error: unknown) => void,
   ) {}
 
   /** The link is back: send every outcome the server has not acknowledged. */
@@ -41,7 +44,7 @@ export class OperationRunner {
     if (!this.journal.start(operation.id)) return;
     const controller = new AbortController();
     this.running.set(operation.id, controller);
-    void this.execute(operation, controller.signal);
+    void this.execute(operation, controller.signal).catch((error: unknown) => this.onError?.(error));
   }
 
   cancel(id: string): void {
@@ -61,13 +64,14 @@ export class OperationRunner {
     let outcome: Outcome;
     try {
       outcome = await this.executor.run(operation, signal);
+      // String length counts UTF-16 units, never fewer than the server counts. An
+      // outcome that is not JSON (a BigInt, a cycle) fails here, and is answered below.
+      if (JSON.stringify(opResult(operation, outcome)).length > MAX_FRAME_CHARS) outcome = TOO_LARGE;
     } catch (error) {
       outcome = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
     } finally {
       this.running.delete(operation.id);
     }
-    // String length counts UTF-16 units, never fewer than the server counts.
-    if (JSON.stringify(opResult(operation, outcome)).length > MAX_FRAME_CHARS) outcome = TOO_LARGE;
     // A cancelled operation's late outcome is dropped: the server gave up on it.
     if (this.journal.finish(operation.id, outcome)) this.send(opResult(operation, outcome));
   }

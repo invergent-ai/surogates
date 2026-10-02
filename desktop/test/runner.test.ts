@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 
 import { connectDevice } from "../src/device.js";
@@ -17,18 +17,28 @@ import { FakeLinkServer } from "./fake-server.js";
 let dir: string;
 let server: FakeLinkServer;
 let link: DeviceLink | null;
+let journals: OperationJournal[];
 
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "runner-"));
   server = new FakeLinkServer();
   link = null;
+  journals = [];
 });
 
 afterEach(async () => {
   await link?.stop();
   await server.stop();
+  for (const journal of journals) journal.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+// Every journal a test opens is closed after it, so the file can go.
+function open(path = join(dir, "journal.sqlite")): OperationJournal {
+  const journal = new OperationJournal(path);
+  journals.push(journal);
+  return journal;
+}
 
 function opFrame(id: string, kind = "which"): Record<string, unknown> {
   return {
@@ -61,13 +71,13 @@ class RecordingExecutor implements Executor {
   }
 }
 
-async function start(executor: Executor, journal = new OperationJournal(join(dir, "journal.sqlite"))) {
+async function start(executor: Executor, journal = open(), onError?: (error: unknown) => void) {
   const url = await server.start();
-  const device = connectDevice({ url, token: "surg_dev_test", journal, executor, delay: () => 20 });
+  const device = connectDevice({ url, token: "surg_dev_test", journal, executor, onError, delay: () => 20 });
   link = device.link;
   device.link.start();
   await server.until(() => device.link.status === "connected");
-  return device;
+  return { ...device, journal };
 }
 
 const results = (id: string) => server.received.filter((f) => f.type === "op_result" && f.id === id);
@@ -158,7 +168,7 @@ describe("the link coming and going", () => {
     before.close();
 
     const executor = new RecordingExecutor();
-    await start(executor, new OperationJournal(path));
+    await start(executor, open(path));
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual(INTERRUPTED);
     expect(server.hellos[0]?.open).toEqual([]);
@@ -169,8 +179,7 @@ describe("the link coming and going", () => {
 
   it("stops resending a result once the server acknowledged it", async () => {
     const executor = new RecordingExecutor();
-    const journal = new OperationJournal(join(dir, "journal.sqlite"));
-    await start(executor, journal);
+    const { journal } = await start(executor);
     server.send(opFrame("a"));
     await server.until(() => results("a").length === 1);
     server.send({ type: "op_ack", id: "a" });
@@ -182,19 +191,88 @@ describe("the link coming and going", () => {
   });
 });
 
+describe("an outcome that is not an answer", () => {
+  it.each([
+    ["a BigInt", () => ({ ok: 1n })],
+    ["a cycle", () => { const loop: Record<string, unknown> = {}; loop.self = loop; return { ok: loop }; }],
+    ["a toJSON that throws", () => ({ ok: { toJSON: () => { throw new Error("no json"); } } })],
+  ])("holding %s is answered as an error, and the next operation still runs", async (_name, outcome) => {
+    const executor: Executor = {
+      run: (operation) => Promise.resolve(operation.id === "a" ? (outcome() as Outcome) : { ok: "fine" }),
+    };
+    await start(executor);
+    server.send(opFrame("a"));
+    server.send(opFrame("b"));
+    await server.until(() => results("a").length === 1 && results("b").length === 1);
+    expect(results("a")[0]?.outcome).toMatchObject({ error: { type: "other" } });
+    expect(results("b")[0]?.outcome).toEqual({ ok: "fine" });
+  });
+
+  it.each([
+    ["throws", () => { throw new Error("boom"); }],
+    ["rejects", () => Promise.reject(new Error("boom"))],
+  ])("from an executor that %s is answered as an error", async (_name, run) => {
+    await start({ run } as Executor);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ error: { type: "other", message: "boom" } });
+  });
+});
+
+describe("a journal that fails", () => {
+  it("while recording an outcome is reported, stops the link, and leaves the operation open", async () => {
+    const failure = new Error("disk full");
+    const errors: unknown[] = [];
+    const { journal } = await start(new RecordingExecutor(), open(), (error) => errors.push(error));
+    vi.spyOn(journal, "finish").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(opFrame("a"));
+    await server.until(() => link?.status === "stopped");
+    expect(errors).toEqual([failure]);
+    expect(journal.openIds()).toEqual(["a"]);
+  });
+
+  it("while receiving an operation is reported, and stops the link without reconnecting", async () => {
+    const failure = new Error("disk full");
+    const errors: unknown[] = [];
+    const { journal } = await start(new RecordingExecutor(), open(), (error) => errors.push(error));
+    vi.spyOn(journal, "receive").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(opFrame("a"));
+    await server.until(() => link?.status === "stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(errors).toEqual([failure]);
+    expect(server.connections).toBe(1);
+  });
+});
+
 describe("a journal that belongs to another device", () => {
-  it("stops the link and runs nothing, even an operation sent right behind the welcome", async () => {
-    const journal = new OperationJournal(join(dir, "journal.sqlite"));
+  it("stops the link and touches nothing, even what is sent right behind the welcome", async () => {
+    const journal = open();
     expect(journal.claim("another-device")).toBe(true);
+    // An outcome that device has not had acknowledged.
+    journal.receive({
+      id: "f", sessionId: "r", callingSessionId: "r", invocationId: "1:c", ordinal: 1,
+      kind: "run", args: {}, digest: "digest-f",
+    });
+    journal.start("f");
+    journal.finish("f", { ok: 1 });
+
     const raw = new WebSocketServer({ host: "127.0.0.1", port: 0 });
     await once(raw, "listening");
+    let connections = 0;
     raw.on("connection", (socket) => {
+      connections += 1;
       socket.once("message", () => {
         socket.send(JSON.stringify({
           type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a",
           user_id: "u", name: "Laptop", heartbeat_s: 15,
         }));
         socket.send(JSON.stringify(opFrame("a")));
+        socket.send(JSON.stringify({ type: "cancel", id: "c" }));
+        socket.send(JSON.stringify({ type: "op_ack", id: "f" }));
       });
     });
     try {
@@ -204,8 +282,16 @@ describe("a journal that belongs to another device", () => {
       link = device.link;
       device.link.start();
       await server.until(() => device.link.status === "stopped");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(connections).toBe(1);
       expect(executor.ran).toEqual([]);
       expect(journal.openIds()).toEqual([]);
+      // The cancel and the acknowledgement were not applied either.
+      expect(journal.unsent().map((result) => result.id)).toEqual(["f"]);
+      expect(journal.receive({
+        id: "c", sessionId: "r", callingSessionId: "r", invocationId: "1:c", ordinal: 1,
+        kind: "run", args: {}, digest: "digest-c",
+      })).toEqual({ action: "run" });
     } finally {
       for (const client of raw.clients) client.terminate();
       await new Promise<void>((resolve) => raw.close(() => resolve()));

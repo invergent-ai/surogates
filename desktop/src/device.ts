@@ -11,14 +11,21 @@ export interface DeviceOptions {
   journal: OperationJournal;
   executor: Executor;
   onStatus?: (status: LinkStatus) => void;
+  // Something the app cannot recover from (a journal that fails): the link has stopped.
+  onError?: (error: unknown) => void;
   delay?: (attempt: number) => number;
 }
 
 export function connectDevice(options: DeviceOptions): { link: DeviceLink; runner: OperationRunner } {
+  // The runner failed after the executor answered: the link stops, as when its own handler throws.
+  const fail = (error: unknown): void => {
+    void link.stop();
+    options.onError?.(error);
+  };
   // Opening the journal already answered what a crash cut off "interrupted".
-  const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame));
+  const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame), fail);
   // Set while the welcomed device is not the journal's: stop() takes a moment, and
-  // an operation sent right behind the welcome would still arrive and run.
+  // what the server sent right behind the welcome would still arrive and be applied.
   let refused = false;
   const link: DeviceLink = new DeviceLink({
     url: options.url,
@@ -39,9 +46,14 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onOperation: (operation) => {
         if (!refused) runner.operation(operation);
       },
-      onCancel: (id) => runner.cancel(id),
-      onAck: (id) => runner.acknowledged(id),
+      onCancel: (id) => {
+        if (!refused) runner.cancel(id);
+      },
+      onAck: (id) => {
+        if (!refused) runner.acknowledged(id);
+      },
       onStatus: options.onStatus,
+      onError: options.onError,
     },
   });
   return { link, runner };
