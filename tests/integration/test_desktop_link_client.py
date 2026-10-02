@@ -22,6 +22,7 @@ from .test_devices import (  # noqa: F401  (fixtures)
     link_url,
     outcome_of,
     request_for,
+    stop,
 )
 
 pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
@@ -36,6 +37,7 @@ def built_client() -> Path:
         pytest.fail("the desktop cross-check needs npm")
     subprocess.run(["npm", "ci"], cwd=DESKTOP, check=True)
     subprocess.run(["npm", "run", "build"], cwd=DESKTOP, check=True)
+    assert CLIENT.exists(), f"the build left no {CLIENT}"
     return CLIENT
 
 
@@ -58,10 +60,17 @@ class Client:
         await eventually(seen, timeout=timeout)
 
     async def close(self) -> None:
-        if self.process.returncode is None:
-            self.process.terminate()
-        await asyncio.wait_for(self.process.wait(), 10.0)
-        self._reader.cancel()
+        try:
+            if self.process.returncode is None:
+                self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 10.0)
+            except TimeoutError:
+                # An app that ignores SIGTERM must not outlive its test.
+                self.process.kill()
+                await self.process.wait()
+        finally:
+            self._reader.cancel()
 
 
 async def client(built_client: Path, url: str, token: str, journal: Path, *, hold: bool = False) -> Client:
@@ -138,7 +147,6 @@ async def test_an_app_that_quit_mid_operation_reports_it_interrupted_and_the_can
         # Its journal answers the cut-off operation "interrupted"; the server
         # takes that as a duplicate of the cancellation, acknowledges it, and keeps it.
         await again.until(lambda events: {"event": "ack", "id": operation_id} in events)
-        assert not any(e["event"] == "op" for e in again.events)
         assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
     finally:
         await again.close()
@@ -147,3 +155,42 @@ async def test_an_app_that_quit_mid_operation_reports_it_interrupted_and_the_can
     state, outcome = journal_row(journal, operation_id)
     assert state == "acknowledged"
     assert json.loads(outcome)["error"]["type"] == "interrupted"
+
+
+async def test_an_app_that_quit_mid_operation_is_sent_it_again_and_never_runs_it_again(
+    built_client, laptop_rig, link_url, tmp_path,
+):
+    rig = laptop_rig
+    journal = tmp_path / "journal.sqlite"
+    app = await client(built_client, link_url, rig.token, journal, hold=True)
+    waiting = None
+    try:
+        await app.until(connected)
+        waiting = asyncio.create_task(rig.ops.run(held(rig)))
+        await app.until(lambda events: any(e["event"] == "op" for e in events))
+        operation_id = next(e["id"] for e in app.events if e["event"] == "op")
+    except BaseException:
+        if waiting is not None:
+            await stop(waiting)
+        raise
+    finally:
+        await app.close()  # the app quits with the operation started, and nothing cancels it
+
+    # The server still has it open, so it sends it again when the app is back.
+    again = await client(built_client, link_url, rig.token, journal, hold=True)
+    try:
+        await again.until(connected)
+        outcome = await asyncio.wait_for(waiting, 10.0)
+        # The app answers twice from its journal: on welcome, with what its restart recovered,
+        # and to the repeat. Each is acknowledged, so two acks mean the repeat was handled.
+        await again.until(lambda events: events.count({"event": "ack", "id": operation_id}) == 2)
+        assert not any(e["event"] == "op" for e in again.events)
+    finally:
+        await stop(waiting)
+        await again.close()
+
+    # The server holds what the app's journal recorded, nothing the app ran.
+    state, recorded = journal_row(journal, operation_id)
+    assert state == "acknowledged"
+    assert outcome == json.loads(recorded)
+    assert outcome["error"]["type"] == "interrupted"

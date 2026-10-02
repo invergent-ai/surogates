@@ -1,8 +1,9 @@
 // A device for the server's cross-check: it connects like the app, answers
 // `which`, and holds anything else until cancelled when --hold is given. One
 // JSON line per event on stdout; a link that stops itself says why as an "error" event.
-// The journal's file stays locked while this runs, so an acknowledgement is said
-// aloud as an "ack" event: the cross-check reads the file only after it quits.
+// The journal's file stays locked while this runs, so each op_ack the server sends is
+// said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
+// the file only after it quits.
 
 import { parseArgs } from "node:util";
 
