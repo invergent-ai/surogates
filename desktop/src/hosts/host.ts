@@ -14,11 +14,10 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import type { Outcome } from "../link/protocol.js";
 import { inside } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
-import { GLOB, sandboxPolicy } from "./policy.js";
+import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
-const SYSTEM_FOLDERS = ["/proc", "/sys", "/dev", "/run"];
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 
 const send = (message: FromHost, then?: () => void) => {
@@ -78,7 +77,7 @@ async function start(message: HostStart): Promise<void> {
   const path = realpathSync(message.folder);
   const globbed = [path, tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
-  if (SYSTEM_FOLDERS.some((dir) => inside(path, dir))) {
+  if (isReserved(path)) {
     throw new Error(`the folder ${path} is inside one of this computer's system folders`);
   }
   // A sandbox whose writable folder held the home folder, the app's own data or

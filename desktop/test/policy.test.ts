@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { sandboxPolicy } from "../src/hosts/policy.js";
+import { isReserved, sandboxPolicy } from "../src/hosts/policy.js";
 
 let base = "";
 afterEach(() => rmSync(base, { recursive: true, force: true }));
@@ -25,4 +25,21 @@ describe("the sandbox policy", () => {
     expect(read(plain)).toContain(join(plain, ".nvm"));
     expect(read(odd)).not.toContain(join(odd, ".nvm"));
   });
+});
+
+describe("the folders no sandbox may be given", () => {
+  it.each(["/proc", "/proc/self", "/sys/kernel", "/dev", "/dev/shm", "/run", "/run/user/1000", "/run/media-x"])(
+    "refuses %s",
+    (path) => expect(isReserved(path)).toBe(true),
+  );
+
+  it.each(["/run/media/flavius/USB", "/run/media/flavius/USB/work", "/home/flavius/work", "/tmp/work", "/tmp/claudex", "/runner"])(
+    "accepts %s, so a removable drive can be bound",
+    (path) => expect(isReserved(path)).toBe(false),
+  );
+
+  it.each(["/tmp/claude", "/tmp/claude/work", "/private/tmp/claude", "/private/tmp/claude/work"])(
+    "refuses %s, which srt makes read-only",
+    (path) => expect(isReserved(path)).toBe(true),
+  );
 });
