@@ -927,6 +927,29 @@ async def test_a_changed_request_under_the_same_ordinal_is_a_conflict(api, sessi
     await stop(waiting)
 
 
+async def test_an_operation_from_a_worker_that_lost_the_session_is_refused(api, session_factory, redis_client):
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    store = SessionStore(session_factory)
+    stale = await store.try_acquire_lease(root, "worker-a", ttl_seconds=60)
+    await store.release_lease(root, stale.lease_token)
+    current = await store.try_acquire_lease(root, "worker-b", ttl_seconds=60)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id, root)
+
+    with pytest.raises(DeviceOperationError, match="Another worker runs this session now"):
+        await asyncio.wait_for(
+            ops.run(OperationRequest(**{**_fields(request), "lease_token": str(stale.lease_token)})), 5.0,
+        )
+    assert await operation_rows(session_factory, device_id) == []
+
+    waiting = asyncio.create_task(
+        ops.run(OperationRequest(**{**_fields(request), "lease_token": str(current.lease_token)})),
+    )
+    await eventually(lambda: has_pending(ops, device_id))
+    await stop(waiting)
+
+
 async def test_an_operation_needs_an_invocation_id():
     with pytest.raises(ValueError):
         OperationRequest(**{**_fields(request_for(uuid.uuid4(), uuid.uuid4())), "invocation_id": ""})
@@ -1599,6 +1622,7 @@ async def laptop_rig(api, link_url, session_factory, redis_client, tmp_path):
         folder=folder,
         ops=DeviceOperations(session_factory, redis_client),
         laptop=laptop,
+        lease=await SessionStore(session_factory).try_acquire_lease(root, "test-worker", ttl_seconds=600),
     )
     yield rig
     await laptop.disconnect()
@@ -1697,12 +1721,14 @@ def builtin_tools() -> ToolRegistry:
     return registry
 
 
-async def tool_call(rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory) -> dict:
+async def tool_call(
+    rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory, lease=None,
+) -> dict:
     """One tool call of the rig's bound session, as the harness makes it."""
     return await asyncio.wait_for(execute_single_tool(
         {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}},
         session=await store.get_session(rig.root),
-        lease=SimpleNamespace(lease_token=uuid.uuid4()),
+        lease=lease or rig.lease,
         store=store,
         tools=tools,
         tenant=MagicMock(asset_root="/tmp/test"),

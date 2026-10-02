@@ -21,7 +21,7 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -112,6 +112,20 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+
+
+async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
+    """Refuse an operation from a worker that no longer holds its session's lease.
+
+    The lease row stays locked FOR SHARE until the operation commits, so a
+    worker taking the session over waits for it, then finds it in the journal.
+    """
+    current = (await db.execute(
+        text("SELECT lease_token FROM session_leases WHERE session_id = :id FOR SHARE"),
+        {"id": request.calling_session_id},
+    )).scalar_one_or_none()
+    if current is None or str(current) != request.lease_token:
+        raise DeviceOperationError("Another worker runs this session now")
 
 
 async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device: Any) -> None:
@@ -394,6 +408,8 @@ class DeviceOperations:
             if device is None:
                 raise DeviceOperationError("This computer was removed")
             await _check_session(db, request, device)
+            if request.lease_token is not None:
+                await _check_lease(db, request)
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
             # count together and the limit is soft by their number; the count also includes
             # abandoned open operations, which cancellation (later work) will close.

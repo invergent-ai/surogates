@@ -587,6 +587,26 @@ async def test_advance_cursor_requires_lease(session_store, session_factory):
         )
 
 
+async def test_an_event_under_a_lease_no_longer_held_is_not_committed(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
+    stale = await session_store.try_acquire_lease(session.id, "worker-1", ttl_seconds=30)
+    await session_store.release_lease(session.id, stale.lease_token)
+    current = await session_store.try_acquire_lease(session.id, "worker-2", ttl_seconds=30)
+
+    with pytest.raises(LeaseNotHeldError):
+        await session_store.emit_event(
+            session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1"}, lease_token=stale.lease_token,
+        )
+    assert await session_store.get_events(session.id, types=[EventType.TOOL_RESULT]) == []
+
+    await session_store.emit_event(
+        session.id, EventType.TOOL_RESULT, {"tool_call_id": "c1"}, lease_token=current.lease_token,
+    )
+    assert len(await session_store.get_events(session.id, types=[EventType.TOOL_RESULT])) == 1
+
+
 # ---------------------------------------------------------------------------
 # Orphan recovery
 # ---------------------------------------------------------------------------
