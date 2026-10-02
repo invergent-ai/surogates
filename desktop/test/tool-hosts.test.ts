@@ -234,6 +234,15 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(fakes).toHaveLength(2);
   });
 
+  it("keeps a host that started, once its start timeout has passed", async () => {
+    const executor = toolHosts({ startTimeoutMs: 100, spawnHost: fakeSpawn(answering) });
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_A), signal())).toMatchObject({ ok: expect.any(String) });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakes[0]?.killed).toBe(0);
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_A), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(1);
+  });
+
   it("gives a host START_TIMEOUT_MS to start by default", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
