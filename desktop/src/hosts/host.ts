@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import type { Outcome } from "../link/protocol.js";
-import { inside } from "../files/paths.js";
+import { inside, realpath } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
 
@@ -57,15 +57,12 @@ process.on("message", (raw) => {
 process.on("disconnect", () => void stop());
 process.on("SIGTERM", () => void stop());
 
-// A path as spelled, and as the file system resolves it when it exists.
+// A path as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
+// read, the part that exists is still resolved: a guard that is not there yet is still where its links lead.
 function spellings(path: string): string[] {
   const plain = resolve(path);
-  try {
-    const real = realpathSync(plain);
-    return real === plain ? [plain] : [plain, real];
-  } catch {
-    return [plain];
-  }
+  const { path: real } = realpath(plain);
+  return real === plain ? [plain] : [plain, real];
 }
 
 async function start(message: HostStart): Promise<void> {

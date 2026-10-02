@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, fork } from "node:child_process";
 import {
-  mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -200,6 +200,37 @@ describe("a tool host", { timeout: 30_000 }, () => {
     symlinkSync(join(base, "home-real"), join(base, "home-link"));
     const env = { ...start.env, HOME: join(base, "home-link") };
     expect(await refusal(host({ folder: join(base, "home-real"), env }))).toMatch(REFUSED);
+  });
+
+  // A guard that is not there yet is still where its links lead: a later `gh auth login` would write there.
+  it.each(["dotfiles/config", "dotfiles"])(
+    "refuses %s, which a credential folder that does not exist yet is a link into",
+    async (chosen) => {
+      const home = join(base, "home");
+      mkdirSync(join(home, "dotfiles", "config"), { recursive: true });
+      symlinkSync(join(home, "dotfiles", "config"), join(home, ".config"));
+      expect(await refusal(host({ folder: join(home, chosen), env: { ...start.env, HOME: home } }))).toMatch(REFUSED);
+    },
+  );
+
+  it("refuses the folder that holds a data folder, when the data folder is not there yet and its parent is a link", async () => {
+    mkdirSync(join(base, "realB"));
+    symlinkSync(join(base, "realB"), join(base, "linkB"));
+    expect(await refusal(host({ folder: join(base, "realB"), dataDir: join(base, "linkB", "appdata") }))).toMatch(REFUSED);
+  });
+
+  it("refuses a folder that holds the place a credential folder is linked to, when that place cannot be read", async () => {
+    const home = join(base, "home");
+    const locked = join(base, "x", "locked");
+    mkdirSync(join(locked, "ssh"), { recursive: true });
+    mkdirSync(home);
+    symlinkSync(join(locked, "ssh"), join(home, ".ssh"));
+    chmodSync(locked, 0o000);
+    try {
+      expect(await refusal(host({ folder: join(base, "x"), env: { ...start.env, HOME: home } }))).toMatch(REFUSED);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   });
 
   const globbed: [string, (base: string, start: HostStart) => Partial<HostStart>][] = [
