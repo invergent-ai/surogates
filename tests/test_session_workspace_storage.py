@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from io import BytesIO
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,6 +15,7 @@ from surogates.api.routes import sessions as sessions_route
 from surogates.artifacts.models import ArtifactKind
 from surogates.artifacts.store import ArtifactStore
 from surogates.config import Settings
+from surogates.devices.operations import DeviceOperations
 from surogates.tenant.context import TenantContext
 
 pytestmark = pytest.mark.asyncio
@@ -221,6 +223,7 @@ def _request(
             state=SimpleNamespace(
                 settings=settings,
                 session_store=store,
+                session_factory=None,
                 storage=storage,
                 redis=redis,
                 browser_pool=browser_pool,
@@ -278,7 +281,8 @@ async def test_create_session_drops_client_supplied_sandbox_root():
     )
 
 
-async def test_delete_session_deletes_session_prefix_not_agent_bucket():
+async def test_delete_session_deletes_session_prefix_not_agent_bucket(monkeypatch):
+    monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
     org_id = uuid4()
     session_id = uuid4()
     store = _Store(org_id)
@@ -316,7 +320,8 @@ async def test_delete_session_deletes_session_prefix_not_agent_bucket():
     ]
 
 
-async def test_delete_session_destroys_browser_sandbox():
+async def test_delete_session_destroys_browser_sandbox(monkeypatch):
+    monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
     org_id = uuid4()
     session_id = uuid4()
     store = _Store(org_id)

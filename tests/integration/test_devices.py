@@ -22,6 +22,8 @@ from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Delete
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -31,6 +33,7 @@ from surogates.devices import link as link_module
 from surogates.devices import operations as operations_module
 from surogates.devices.binding import BIND, Binding, binding_of, device_of
 from surogates.devices.operations import (
+    CANCELLED_OUTCOME,
     DeviceOperations,
     JournalRunner,
     OperationConflict,
@@ -1407,9 +1410,8 @@ async def test_revoking_cancels_work_nobody_is_waiting_for(api, session_factory,
     device_id = UUID(issued["id"])
     ops = DeviceOperations(session_factory, redis_client)
     request = request_for(device_id, root)
-    waiting = asyncio.create_task(ops.run(request))
-    await eventually(lambda: has_pending(ops, device_id))
-    await stop(waiting)  # the worker is gone before the device is revoked
+    # The worker is gone before the device is revoked.
+    await detached_run(SimpleNamespace(ops=ops, device_id=device_id), lambda: ops.run(request))
     await api.client.delete(f"/v1/devices/{issued['id']}", headers=api.auth())
     await api.client.post(f"/v1/devices/{issued['id']}/reauthorize", headers=api.auth())
     assert await ops.pending(device_id, 2) == []
@@ -2113,9 +2115,7 @@ async def test_a_session_whose_worker_stopped_while_the_computer_was_away_is_res
     args = {"command": "echo once >> log.txt"}
     assistant = {"role": "assistant", "content": "", "tool_calls": [model_call("call_1", "terminal", args)]}
     await store.emit_event(rig.root, EventType.LLM_RESPONSE, {"message": assistant})
-    first = asyncio.create_task(tool_call(rig, store, tools, "call_1", "terminal", args, **io))
-    await eventually(lambda: has_pending(rig.ops, rig.device_id))
-    await stop(first)  # the worker stops while the operation is open
+    await detached_run(rig, lambda: tool_call(rig, store, tools, "call_1", "terminal", args, **io))
     await take_over(store, rig)
     messages = [{"role": "user", "content": "log it"}, assistant]
 
@@ -2663,6 +2663,330 @@ async def test_a_detached_wait_leaves_the_session_waiting(laptop_rig, session_fa
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
 
 
+async def outcome_of(session_factory, root: UUID) -> dict | None:
+    async with session_factory() as db:
+        return (await db.execute(
+            select(DeviceOperation.outcome)
+            .where(DeviceOperation.root_session_id == root, DeviceOperation.kind != BIND)
+            .order_by(DeviceOperation.created_at.desc())
+            .limit(1)
+        )).scalar_one()
+
+
+async def detached_run(rig, call) -> None:
+    """Run *call* in a turn that is then handed over, so what it left open stays open."""
+    turn: list[TurnSlots] = []
+
+    async def worker() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity():
+            await call()
+
+    first = asyncio.create_task(worker())
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    turn[0].detach()
+    await asyncio.gather(first, return_exceptions=True)
+
+
+async def test_cancelling_a_session_ends_its_wait_and_tells_its_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig  # the laptop stays away
+    control = await DevicePresence(redis_client).subscribe(rig.device_id)
+    try:
+        waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+        announced = await next_control(control)
+        assert announced.startswith("op:")
+        assert await rig.ops.cancel([rig.root]) == 1
+        assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+        assert await next_control(control) == f"cancel:{announced.removeprefix('op:')}"
+    finally:
+        await control.aclose()
+    assert not await has_pending(rig.ops, rig.device_id)
+    assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+
+
+async def test_a_finished_operation_keeps_its_outcome_when_its_session_is_cancelled(laptop_rig, session_factory):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    done = await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 10.0)
+    assert await rig.ops.cancel([rig.root]) == 0
+    assert await outcome_of(session_factory, rig.root) == done
+
+
+async def test_a_binding_is_cancelled_only_when_asked(api, session_factory, redis_client):
+    issued = await register(api, "Laptop")
+    device_id = UUID(issued["id"])
+    root = await device_session(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    await ops.bind(session_id=root, device_id=device_id, folder=FOLDER, nonce=NONCE)  # never answered
+    assert await ops.cancel([root]) == 0
+    assert (await binding(api, root)).state == "pending"
+    assert await ops.cancel([root], bindings=True) == 1
+    assert (await binding(api, root)).state == "failed"
+
+
+async def test_a_stopped_call_closes_its_operation(laptop_rig, session_factory):
+    rig = laptop_rig  # the laptop stays away
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    await stop(waiting)
+    assert not await has_pending(rig.ops, rig.device_id)
+    assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+
+
+async def test_a_call_stopped_while_its_operation_is_announced_closes_it(laptop_rig, session_factory, monkeypatch):
+    rig = laptop_rig
+    announcing = asyncio.Event()
+    real_announce = DeviceOperations._announce
+
+    async def slow_announce(self, channel, message):
+        if message.startswith("op:"):
+            announcing.set()
+            await asyncio.sleep(1.0)
+        await real_announce(self, channel, message)
+
+    monkeypatch.setattr(DeviceOperations, "_announce", slow_announce)
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await asyncio.wait_for(announcing.wait(), 5.0)
+    await stop(waiting)
+    assert not await has_pending(rig.ops, rig.device_id)
+
+
+async def test_a_call_stopped_while_its_record_commits_closes_its_operation(laptop_rig, session_factory, monkeypatch):
+    rig = laptop_rig
+    recorded = asyncio.Event()
+    real_record = DeviceOperations._record
+
+    async def record_then_linger(self, request):
+        found = await real_record(self, request)  # the row is committed
+        recorded.set()
+        await asyncio.Event().wait()  # the reply has not reached the call yet
+        return found
+
+    monkeypatch.setattr(DeviceOperations, "_record", record_then_linger)
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await asyncio.wait_for(recorded.wait(), 5.0)
+    await stop(waiting)
+    assert not await has_pending(rig.ops, rig.device_id)
+    assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+
+
+async def test_a_stopped_call_closes_its_wait_before_it_returns(laptop_rig, monkeypatch):
+    rig = laptop_rig
+    closed: list[UUID] = []
+
+    async def slow_to_close(self, operation_id):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)  # as closing the subscription does
+            closed.append(operation_id)
+
+    monkeypatch.setattr(DeviceOperations, "_wait_forever", slow_to_close)
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    await stop(waiting)
+    assert len(closed) == 1
+
+
+async def test_a_stopped_session_records_nothing_new(laptop_rig, session_factory):
+    rig = laptop_rig
+    await SessionStore(session_factory).update_session_status(rig.root, "paused")
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 5.0)
+    assert await operation_rows(session_factory, rig.device_id) == []
+
+
+async def test_a_call_resumed_as_a_pause_lands_still_learns_what_the_computer_did(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    await tool_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+    await store.update_session_status(rig.root, "paused")  # the pause lands after the new worker's wake began
+
+    resumed = await resume_call(rig, store, tools, "call_1", "terminal", args, **io)
+
+    assert json.loads(resumed["content"])["exit_code"] == 0
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+
+
+async def test_a_call_reported_interrupted_closes_what_its_first_run_left_open(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig  # the laptop stays away
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+
+    async def handler(arguments: dict, **kwargs) -> str:
+        wio = kwargs["workspace_io"]
+        await wio.read(await wio.resolve("notes.md"))  # waits for the computer
+        return json.dumps({"ok": True})
+
+    tools.register(
+        "harness_probe",
+        ToolSchema(name="harness_probe", description="probe", parameters={"type": "object", "properties": {}}),
+        handler=handler,
+    )
+    monkeypatch.setitem(TOOL_LOCATIONS, "harness_probe", ToolLocation.HARNESS)
+    await detached_run(rig, lambda: tool_call(rig, store, tools, "call_1", "harness_probe", {}, **io))
+    assert await has_pending(rig.ops, rig.device_id)  # its first run left the read open
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "harness_probe", {}, **io)
+
+    assert resumed["content"] == INTERRUPTED
+    assert not await has_pending(rig.ops, rig.device_id)
+    assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+
+
+async def test_a_cancellation_reaches_a_connected_computer(laptop_rig):
+    rig = laptop_rig
+    rig.laptop.hold = True  # it receives the operation and keeps working on it
+    await rig.laptop.connect()
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.ops.cancel([rig.root])
+    assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+
+    async def told() -> bool:
+        return rig.laptop.cancelled == set(rig.laptop.received)
+
+    await eventually(told)
+    assert rig.laptop.ran == []
+
+
+async def test_a_lost_cancellation_reaches_the_computer_at_the_next_reconcile(laptop_rig, monkeypatch):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    real_announce = DeviceOperations._announce
+
+    async def lose_cancels(self, channel, message):
+        if not message.startswith("cancel:"):
+            await real_announce(self, channel, message)
+
+    monkeypatch.setattr(DeviceOperations, "_announce", lose_cancels)
+    await rig.ops.cancel([rig.root])
+    await asyncio.wait_for(waiting, 5.0)
+
+    async def told() -> bool:
+        return rig.laptop.cancelled == set(rig.laptop.received)
+
+    await eventually(told, timeout=5.0)  # the laptop pings every 0.2 s; a reconcile follows within 1 s
+
+
+async def test_a_computer_hears_of_a_cancellation_first_when_it_reconnects(laptop_rig):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    first = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.laptop.disconnect()
+    await rig.ops.cancel([rig.root])
+    await asyncio.wait_for(first, 5.0)
+    second = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+
+    rig.laptop.frames.clear()
+    await rig.laptop.connect()
+
+    async def both() -> bool:
+        return "cancel" in rig.laptop.frames and "op" in rig.laptop.frames
+
+    await eventually(both)
+    assert rig.laptop.frames.index("cancel") < rig.laptop.frames.index("op")
+    assert rig.laptop.cancelled == {rig.laptop.received[0]}
+    await stop(second)
+
+
+async def test_a_computer_hears_first_that_a_revocation_closed_what_it_held(laptop_rig, api):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    first = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.laptop.disconnect()
+    assert (await api.client.delete(f"/v1/devices/{rig.device_id}", headers=api.auth())).status_code == 204
+    await stop(first)  # the wait would see the revocation at its next recheck
+    reauthorized = await api.client.post(f"/v1/devices/{rig.device_id}/reauthorize", headers=api.auth())
+    assert reauthorized.status_code == 200, reauthorized.text
+    rig.laptop.token = reauthorized.json()["token"]
+    second = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id, 2))
+
+    rig.laptop.frames.clear()
+    await rig.laptop.connect()  # its hello still lists the operation the revocation closed
+
+    async def both() -> bool:
+        return "cancel" in rig.laptop.frames and "op" in rig.laptop.frames
+
+    await eventually(both)
+    assert rig.laptop.frames.index("cancel") < rig.laptop.frames.index("op")
+    assert rig.laptop.cancelled == {rig.laptop.received[0]}
+    await stop(second)
+
+
+async def test_only_closed_operations_are_found_among_a_computers_own(laptop_rig, api):
+    rig = laptop_rig  # the laptop stays away
+    names = ["cancelled", "open"]
+    requests = {name: request_for(rig.device_id, rig.root, args={"name": name}) for name in names}
+    waiting = [asyncio.create_task(rig.ops.run(request)) for request in requests.values()]
+
+    async def all_recorded() -> bool:
+        return len(await rig.ops.pending(rig.device_id, 1)) == len(names)
+
+    await eventually(all_recorded)
+    by_name = {op.args["name"]: op for op in await rig.ops.pending(rig.device_id, 1)}
+    await rig.ops.cancel_invocation(rig.root, requests["cancelled"].invocation_id)
+    ids = [op.id for op in by_name.values()]
+
+    assert await rig.ops.closed_among(rig.device_id, ids) == [by_name["cancelled"].id]
+    assert await rig.ops.closed_among(rig.device_id, []) == []
+    # A revocation closes what is still open, and the computer must hear of those too.
+    assert (await api.client.delete(f"/v1/devices/{rig.device_id}", headers=api.auth())).status_code == 204
+    assert set(await rig.ops.closed_among(rig.device_id, ids)) == set(ids)
+    await asyncio.gather(*(stop(task) for task in waiting))
+
+
+@pytest.mark.parametrize("reported", ["not a list", ["not-a-uuid"], [str(uuid.uuid4())] * 1001])
+async def test_a_hello_with_a_malformed_open_list_is_refused(laptop_rig, link_url, reported):
+    async with connect(
+        link_url, additional_headers={"Authorization": f"Bearer {laptop_rig.token}"},
+    ) as ws:
+        await ws.send(json.dumps({"type": "hello", "protocols": [1], "open": reported}))
+        with pytest.raises(ConnectionClosed) as closed:
+            await ws.recv()
+        assert closed.value.rcvd.code == 4400
+
+
 async def test_a_computer_lost_after_delivery_is_waited_for_too(
     laptop_rig, session_factory, redis_client, monkeypatch,
 ):
@@ -2717,3 +3041,120 @@ async def test_a_failed_name_lookup_does_not_fail_the_wait_notice(laptop_rig, se
         })]
     finally:
         await notice.back(request)  # leave the process-wide count as it was
+
+
+async def test_pausing_a_local_chat_cancels_what_waits_on_its_computer(laptop_rig, api):
+    rig = laptop_rig  # the laptop stays away
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})), 5.0)
+
+
+async def test_a_paused_chat_reads_paused_when_its_pause_event_is_written(laptop_rig, api, monkeypatch):
+    rig = laptop_rig
+    store = api.app.state.session_store
+    seen: list[str] = []
+    emit = store.emit_event
+
+    async def emit_reading_the_status(session_id, event_type, data, **kwargs):
+        if event_type == EventType.SESSION_PAUSE:
+            seen.append((await store.get_session(session_id)).status)
+        return await emit(session_id, event_type, data, **kwargs)
+
+    monkeypatch.setattr(store, "emit_event", emit_reading_the_status)
+    paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    assert seen == ["paused"]
+
+
+async def test_a_chat_resumed_after_a_pause_reports_its_call_stopped(laptop_rig, api, session_factory, redis_client):
+    rig = laptop_rig  # the laptop stays away
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    await detached_run(rig, lambda: tool_call(rig, store, tools, "call_1", "terminal", args, **io))
+    await take_over(store, rig)
+    assert (await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())).status_code == 200
+    assert (await api.client.post(f"/v1/sessions/{rig.root}/resume", headers=api.auth())).status_code == 200
+
+    resumed = await resume_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await rig.laptop.connect()
+    await asyncio.sleep(0.5)
+
+    assert "Stopped before the computer reported a result" in resumed["content"]
+    assert not (rig.folder / "log.txt").exists()
+
+
+async def test_a_pause_waits_for_a_recording_in_flight_and_cancels_it(laptop_rig, api, session_factory, monkeypatch):
+    rig = laptop_rig  # the laptop stays away
+    recording, release = asyncio.Event(), asyncio.Event()
+    real_refuse_when_full = operations_module._refuse_when_full
+
+    async def refuse_when_full_after_a_wait(db, request, device):
+        # Inside the record's transaction, past its session check: its locks are held.
+        recording.set()
+        await release.wait()
+        await real_refuse_when_full(db, request, device)
+
+    monkeypatch.setattr(operations_module, "_refuse_when_full", refuse_when_full_after_a_wait)
+    running = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    pausing: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(recording.wait(), 5.0)
+        pausing = asyncio.create_task(api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth()))
+        await asyncio.sleep(0.5)
+        # Its status update waits for the recording's share lock.  Without the
+        # lock the pause would finish first, cancel nothing, and the operation
+        # recorded after it would run on the computer.
+        assert not pausing.done()
+        release.set()
+        paused = await asyncio.wait_for(pausing, 5.0)
+        assert paused.status_code == 200, paused.text
+        assert await asyncio.wait_for(running, 5.0) == CANCELLED_OUTCOME
+        assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
+    finally:
+        release.set()
+        await stop(running)
+        if pausing is not None:
+            await asyncio.gather(pausing, return_exceptions=True)
+
+
+async def test_a_recording_waits_for_a_delete_in_flight_and_is_refused(laptop_rig, api, session_factory, monkeypatch):
+    rig = laptop_rig  # the laptop stays away
+    archiving, release = asyncio.Event(), asyncio.Event()
+    real_execute = AsyncSession.execute
+
+    async def execute(self, statement, *args, **kwargs):
+        # The statement that follows the archive's lock on the tree's sessions.
+        if isinstance(statement, Delete) and statement.table.name == "scheduled_sessions":
+            archiving.set()
+            await release.wait()
+        return await real_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", execute)
+    deleting = asyncio.create_task(api.app.state.session_store.archive_session_tree_and_delete_schedules(
+        rig.root, org_id=api.org_id, agent_id=AGENT_ID,
+    ))
+    running: asyncio.Task | None = None
+    try:
+        await asyncio.wait_for(archiving.wait(), 5.0)
+        running = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+        await asyncio.sleep(0.5)
+        # The archive holds the sessions, so the recording waits for it.  Without
+        # that, it would record beside the delete, and the cancellation that
+        # follows might not see it.
+        assert await operation_rows(session_factory, rig.device_id) == []
+        release.set()
+        await asyncio.wait_for(deleting, 5.0)
+        with pytest.raises(DeviceOperationError, match="This session was stopped"):
+            await asyncio.wait_for(running, 5.0)
+        assert await operation_rows(session_factory, rig.device_id) == []
+    finally:
+        release.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+        if running is not None:
+            await stop(running)

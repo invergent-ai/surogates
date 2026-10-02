@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -28,7 +29,11 @@ def orchestrator_with(gate: CountingGate) -> Orchestrator:
 
 
 def dequeued() -> DequeuedSession:
-    return DequeuedSession(org_id="org", agent_id="agent", session_id=str(uuid4()), priority=0.0)
+    session_id = str(uuid4())
+    return DequeuedSession(
+        org_id="org", agent_id="agent", session_id=session_id, priority=0.0,
+        gate_holder=f"{session_id}:turn",
+    )
 
 
 async def test_a_finished_turn_gives_both_slots_back(monkeypatch):
@@ -41,10 +46,12 @@ async def test_a_finished_turn_gives_both_slots_back(monkeypatch):
         seen.append(current_turn.get())
 
     monkeypatch.setattr(orchestrator, "_process", process)
-    await orchestrator._guarded_process(uuid4(), dequeued=dequeued())
+    turn = dequeued()
+    await orchestrator._guarded_process(uuid4(), dequeued=turn)
     assert seen and seen[0] is not None
     assert not orchestrator.semaphore.locked() and gate.held == 0
     assert gate.calls.count("release") == 1
+    assert gate.holders == [turn.gate_holder], "the turn gave back its slot under another holder"
     assert current_turn.get() is None
 
 
@@ -198,3 +205,27 @@ async def test_shutdown_lets_a_turn_waiting_on_a_person_finish(monkeypatch):
     await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
     assert task.done() and not task.cancelled()
     assert enqueued == []
+
+
+@pytest.mark.parametrize("harness_running", [True, False])
+async def test_an_interrupt_signal_reaches_the_turns_slots_only_when_a_harness_took_it(monkeypatch, harness_running):
+    orchestrator = orchestrator_with(CountingGate(held=1))
+    await orchestrator.semaphore.acquire()
+    started = asyncio.Event()
+    interrupted: list[bool] = []
+
+    async def process(session_id, *args, **kwargs):
+        slots = current_turn.get()
+        slots.interrupt = lambda: interrupted.append(True)
+        started.set()
+        await asyncio.sleep(0.2)
+
+    task, turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(started.wait(), 5.0)
+    if harness_running:
+        # The interrupt reaches the turn only through its harness.
+        orchestrator._active_harnesses[UUID(turn.session_id)] = SimpleNamespace(interrupt=lambda message: None)
+    await orchestrator._handle_interrupt_signal(UUID(turn.session_id), "paused by user")
+    await asyncio.gather(task, return_exceptions=True)
+    # An interrupt no harness took ends nothing: the turn goes on, and keeps waiting for its slot.
+    assert interrupted == ([True] if harness_running else [])

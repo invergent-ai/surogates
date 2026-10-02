@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import text
 
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
+from surogates.devices.operations import DeviceOperations
 from surogates.orchestrator.dispatcher import Orchestrator
 from surogates.session.events import EventType
 
@@ -174,3 +175,31 @@ async def test_a_trailing_device_event_leaves_a_finished_turn_alone(session_stor
     await _backdate(session_factory, session.id, seconds=10)
     orphans = await session_store.find_orphaned_sessions(stale_seconds=1, agent_id=agent_id)
     assert session.id not in {o.id for o in orphans}
+
+
+async def test_an_abandoned_session_cancels_what_it_left_on_its_computer(
+    session_store, session_factory, redis_client, monkeypatch,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="sweeper-test-agent")
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="sweeper-test-agent", parent_id=session.id,
+    )
+    cancelled: list[set] = []
+
+    async def record(self, calling_session_ids, *, bindings=False):
+        cancelled.append(set(calling_session_ids))
+        return 0
+
+    monkeypatch.setattr(DeviceOperations, "cancel", record)
+    orchestrator = Orchestrator(
+        redis_client=redis_client,
+        session_store=session_store,
+        harness_factory=lambda _sid: None,
+        agent_id="sweeper-test-agent",
+        queue_key="surogates:work_queue:sweeper-test-agent",
+        session_factory=session_factory,
+    )
+    await orchestrator._abandon_unrecoverable_session(session, attempts=3, reason="no progress")
+    assert cancelled == [{session.id}]

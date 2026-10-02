@@ -559,6 +559,11 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
 
             session_ids = [row["id"] for row in rows]
+            # In id order, as the device journal locks a session's rows, so a
+            # delete and an operation being recorded cannot deadlock.
+            await db.execute(
+                select(SessionRow.id).where(SessionRow.id.in_(session_ids)).order_by(SessionRow.id).with_for_update()
+            )
             await db.execute(
                 delete(ScheduledSessionRow).where(
                     ScheduledSessionRow.org_id == org_id,
@@ -651,6 +656,24 @@ class SessionStore:
             row["status"] = "archived"
             archived.append(Session.model_validate(row))
         return archived
+
+    async def session_tree_ids(self, session_id: UUID) -> list[UUID]:
+        """The session and every session under it by ``parent_id``, at any depth."""
+        async with self._sf() as db:
+            rows = await db.execute(
+                text(
+                    """
+                    WITH RECURSIVE tree(id) AS (
+                        SELECT id FROM sessions WHERE id = :id
+                        UNION
+                        SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+                    )
+                    SELECT id FROM tree
+                    """
+                ),
+                {"id": session_id},
+            )
+        return [row[0] for row in rows]
 
     async def update_session_title_if_empty(
         self,

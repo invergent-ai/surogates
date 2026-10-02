@@ -1537,7 +1537,8 @@ class AgentHarness(
             session_factory=self._session_factory, run_tool=resume,
         ))
         # A pause or stop cancels the wait, as it cancels a streamed call: the
-        # journal keeps the call for the next wake, and the loop then pauses.
+        # pause's cancellation completes the call in the journal, and the next
+        # wake reports it stopped.
         self._active_executor = SimpleNamespace(discard=replay.cancel)
         # A pause that landed before this point only set the flag.
         if self._check_interrupt():

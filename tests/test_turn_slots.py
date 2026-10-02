@@ -20,6 +20,9 @@ from surogates.runtime.turn_slots import (
 
 pytestmark = pytest.mark.asyncio
 
+# The turn's holder in the tenant gate.
+TURN_HOLDER = "sess-1:turn-a"
+
 
 class CountingGate:
     """A tenant gate with a cap that records its calls in order, and can fail on demand."""
@@ -33,16 +36,21 @@ class CountingGate:
         self.order = order if order is not None else []
         self.fail_release = fail_release
         self.fail_acquire = False
+        # The holder each call named, in order.
+        self.holders: list[str] = []
 
-    async def release(self, org_id: str, agent_id: str) -> None:
+    async def release(self, org_id: str, agent_id: str, *, holder: str) -> bool:
         self.calls.append("release")
+        self.holders.append(holder)
         if self.fail_release > 0:
             self.fail_release -= 1
             raise RuntimeError("redis blip")
         self.held = max(0, self.held - 1)
+        return True
 
-    async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+    async def try_acquire(self, org_id: str, agent_id: str, *, holder: str, limit: int | None = None) -> bool:
         self.calls.append("try_acquire")
+        self.holders.append(holder)
         self.order.append("gate")
         if self.fail_acquire:
             raise RuntimeError("redis down")
@@ -60,7 +68,8 @@ async def held_turn(
     await semaphore.acquire()
     gate = gate if gate is not None else CountingGate(held=1)
     slots = TurnSlots(
-        semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True, session_id=session_id,
+        semaphore=semaphore, gate=gate, org_id="org", agent_id="agent", gate_held=True,
+        gate_holder=TURN_HOLDER, session_id=session_id,
     )
     return slots, semaphore, gate
 
@@ -82,6 +91,16 @@ async def test_a_lone_wait_gives_both_slots_back():
             assert gate.held == 0
         assert semaphore.locked()
         assert gate.held == 1
+
+
+async def test_the_turn_gives_back_and_takes_back_under_its_own_holder():
+    slots, semaphore, gate = await held_turn()
+    async with slots.activity():
+        async with slots.waiting():
+            pass
+    await slots.release_owned()
+    assert gate.calls == ["release", "try_acquire", "release"]
+    assert gate.holders == [TURN_HOLDER] * 3
 
 
 async def test_a_wait_keeps_the_slots_while_a_sibling_still_runs():
@@ -209,9 +228,9 @@ async def test_a_take_back_that_times_out_is_given_back_at_the_end(monkeypatch):
     monkeypatch.setattr(turn_slots_module, "GATE_CALL_TIMEOUT_S", 0.05)
 
     class LateReplyGate(CountingGate):
-        async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+        async def try_acquire(self, org_id: str, agent_id: str, *, holder: str, limit: int | None = None) -> bool:
             self.calls.append("try_acquire")
-            self.held += 1  # the INCR landed
+            self.held += 1  # the holder was added
             await asyncio.sleep(0.2)  # the reply comes after the timeout
             return True
 
@@ -230,9 +249,9 @@ async def test_a_cancelled_take_back_is_given_back_at_the_end():
             super().__init__(**kwargs)
             self.in_take_back = asyncio.Event()
 
-        async def try_acquire(self, org_id: str, agent_id: str, *, limit: int | None = None) -> bool:
+        async def try_acquire(self, org_id: str, agent_id: str, *, holder: str, limit: int | None = None) -> bool:
             self.calls.append("try_acquire")
-            self.held += 1  # the INCR landed
+            self.held += 1  # the holder was added
             self.in_take_back.set()
             await asyncio.Event().wait()  # the reply never comes
             return True
@@ -259,12 +278,13 @@ async def test_a_cancelled_give_back_counts_as_given_back():
             super().__init__(**kwargs)
             self.in_give_back = asyncio.Event()
 
-        async def release(self, org_id: str, agent_id: str) -> None:
+        async def release(self, org_id: str, agent_id: str, *, holder: str) -> bool:
             self.calls.append("release")
-            self.held = max(0, self.held - 1)  # the DECR landed
+            self.held = max(0, self.held - 1)  # the holder was removed
             if self.calls.count("release") == 1:
                 self.in_give_back.set()
                 await asyncio.Event().wait()  # the reply never comes
+            return True
 
     slots, semaphore, gate = await held_turn(gate=BlockedGate(held=1))
 
@@ -466,3 +486,75 @@ async def test_detaching_a_turn_cancels_it_and_it_takes_no_slot_again():
     assert gate.held == 0 and gate.calls.count("release") == 1
     await semaphore.acquire()
     assert semaphore.locked(), "the semaphore slot was given back twice"
+
+
+async def _a_tool_call_blocked_taking_its_slot_back(slots: TurnSlots, semaphore: asyncio.Semaphore) -> asyncio.Task:
+    """A tool call waits, the turn gives its slot back, another turn takes it, and the call's wait ends."""
+    answered = asyncio.Event()
+
+    async def tool_call() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                await answered.wait()
+
+    call = asyncio.create_task(tool_call())
+    await asyncio.sleep(0.05)
+    assert not semaphore.locked(), "all of the turn waits, so its slot went back"
+    await semaphore.acquire()  # another turn takes it
+    answered.set()
+    await asyncio.sleep(0.05)
+    assert not call.done(), "the worker is full, so the take-back waits"
+    return call
+
+
+def _unstick(call: asyncio.Task, semaphore: asyncio.Semaphore) -> None:
+    """A take-back still blocked means the test failed: release it so the test ends instead of hanging."""
+    if not call.done():
+        call.cancel()
+        semaphore.release()
+
+
+async def test_an_interrupted_turn_stops_waiting_for_a_slot_it_was_taking_back():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()  # the dispatch loop's, for this turn
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    async with slots.activity(), slots.joining():
+        call = await _a_tool_call_blocked_taking_its_slot_back(slots, semaphore)
+        try:
+            slots.interrupt()
+            await asyncio.wait_for(call, 1.0)
+        finally:
+            _unstick(call, semaphore)
+    await slots.release_owned()
+    assert semaphore.locked(), "a slot the turn never took back was released"
+    semaphore.release()  # the other turn ends
+    await asyncio.sleep(0)
+    assert not semaphore.locked(), "a stopped take-back swallowed the next free slot"
+
+
+async def test_ending_a_turn_does_not_wait_behind_a_blocked_take_back():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    async with slots.activity(), slots.joining():
+        call = await _a_tool_call_blocked_taking_its_slot_back(slots, semaphore)
+        try:
+            await asyncio.wait_for(slots.release_owned(), 1.0)
+            await asyncio.wait_for(call, 1.0)
+        finally:
+            _unstick(call, semaphore)
+    assert semaphore.locked(), "a slot the turn never took back was released"
+
+
+async def test_a_take_back_stopped_as_its_slot_arrives_keeps_no_slot():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    slots._semaphore_held = False  # it gave the slot back while it waited
+    taking = asyncio.create_task(slots._acquire_semaphore())
+    await asyncio.sleep(0.05)
+    semaphore.release()     # the slot comes:
+    await asyncio.sleep(0)  # the inner acquire takes it ...
+    taking.cancel()         # ... just before the take-back is stopped
+    await asyncio.gather(taking, return_exceptions=True)
+    assert not semaphore.locked(), "the slot that came as the take-back was stopped was lost"

@@ -1052,3 +1052,16 @@ async def test_inbox_item_requires_exactly_one_principal(
                 {"org": org_id, "sid": session.id, "ev": event_id},
             )
             await db.commit()
+
+
+async def test_a_session_tree_holds_the_session_and_everything_under_it(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    root = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
+    child = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent", parent_id=root.id)
+    grandchild = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", parent_id=child.id,
+    )
+    other = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
+    assert set(await session_store.session_tree_ids(root.id)) == {root.id, child.id, grandchild.id}
+    assert await session_store.session_tree_ids(other.id) == [other.id]

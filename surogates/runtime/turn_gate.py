@@ -6,21 +6,15 @@ max-concurrent-turns budget have their session requeued so a noisy
 tenant cannot drain the worker pool.
 
 Distinct from :class:`PerTenantRateLimiter` which
-is a request-rate limit (per-minute window).  The gate is a live
-counter — exactly tracks how many sessions are currently being
-processed for the tenant — and decrements when the dispatcher
-retires the session.
+is a request-rate limit (per-minute window).  The gate counts the turns
+currently holding the tenant's slots, and a turn gives its slot back when
+the dispatcher retires it, or while it waits on something outside the worker.
 
-Keys: ``surogates:turns:<org_id>:<agent_id>``.  INCR on acquire,
-DECR on release; the counter is bounded at zero on release to
-survive a stuck-release scenario (e.g. crash recovery double-
-releasing).
-
-If the worker pool crashes mid-session and never DECRs, the counter
-sticks high until a manual reset. lifecycle adds an admin
-``reset_turn_counters`` CLI; today an admin can ``DEL`` the key.
-A heartbeat / TTL-based variant is intentionally deferred because
-the simple counter is enough for the canary deploy.
+Keys are ``surogates:turn_holders:<org_id>:<agent_id>``, a set of turn
+holders, ``<session_id>:<turn>``.  Taking a slot adds the holder, and
+releasing removes it, so a release by a holder that holds nothing frees
+nothing.  A holder whose worker died stays counted until recovery releases
+its session's holders.
 """
 
 from __future__ import annotations
@@ -38,7 +32,7 @@ class TurnGateBusy(RuntimeError):
 
 
 class TurnConcurrencyGate:
-    """Live per-(org_id, agent_id) counter capped at ``limit``."""
+    """The turns holding a tenant's turn slots, capped at ``limit``."""
 
     def __init__(self, redis: Any, *, default_max: int = 10) -> None:
         self._redis = redis
@@ -49,34 +43,45 @@ class TurnConcurrencyGate:
         org_id: str,
         agent_id: str,
         *,
+        holder: str,
         limit: int | None = None,
     ) -> bool:
-        """Increment the tenant counter; return True if under the cap.
+        """Count *holder* as holding a slot; True if the tenant is under its cap.
 
-        If the increment lands over the cap, immediately DECR so the
-        counter reflects only acquired slots.  ``limit=0`` (kill-
-        switch) and negative limits reject without touching Redis."""
+        A holder already counted keeps its one slot.  ``limit=0`` (kill-switch)
+        and negative limits reject without touching Redis.
+        """
         cap = limit if limit is not None else self._default
         if cap <= 0:
             return False
         key = self._key(org_id, agent_id)
-        count = await self._redis.incr(key)
-        if count > cap:
-            await self._redis.decr(key)
+        async with self._redis.pipeline(transaction=True) as pipe:
+            added, count = await pipe.sadd(key, holder).scard(key).execute()
+        if added and count > cap:
+            await self._redis.srem(key, holder)
             return False
         return True
 
-    async def release(self, org_id: str, agent_id: str) -> None:
-        """Decrement the tenant counter, floor at zero.
+    async def release(self, org_id: str, agent_id: str, *, holder: str) -> bool:
+        """Free *holder*'s slot; False if it held none, so nothing else is freed."""
+        return bool(await self._redis.srem(self._key(org_id, agent_id), holder))
 
-        Floor protects against stuck-release scenarios — a crash-
-        recovery handler that double-releases must not drive the
-        counter negative, or a future acquire would silently exceed
-        the cap by however many spurious releases happened."""
+    async def release_session(self, org_id: str, agent_id: str, session_id: str) -> int:
+        """Free every slot a session's turns hold: recovery's release for a dead owner.
+
+        Every holder of the session goes, whichever turn it belongs to.  A live
+        turn caught between its dequeue and taking its lease, or in a double
+        sweep, therefore loses its holder and is undercounted for the rest of
+        that turn.
+        """
         key = self._key(org_id, agent_id)
-        new = await self._redis.decr(key)
-        if new < 0:
-            await self._redis.incr(key)
+        cursor, freed = 0, 0
+        while True:
+            cursor, members = await self._redis.sscan(key, cursor, match=f"{session_id}:*", count=100)
+            if members:
+                freed += await self._redis.srem(key, *members)
+            if not cursor:
+                return freed
 
     @asynccontextmanager
     async def acquire(
@@ -84,23 +89,21 @@ class TurnConcurrencyGate:
         org_id: str,
         agent_id: str,
         *,
+        holder: str,
         limit: int | None = None,
     ) -> AsyncIterator[None]:
         """Async context manager: acquires on entry, releases on exit.
 
-        Releases even if the body raises so a panicking handler does
-        not permanently consume a slot.  Raises :class:`TurnGateBusy`
-        on the entry path if the tenant is over the cap so the
-        dispatcher can pick its requeue strategy."""
-        ok = await self.try_acquire(org_id, agent_id, limit=limit)
-        if not ok:
+        Raises :class:`TurnGateBusy` on entry if the tenant is at its cap.
+        """
+        if not await self.try_acquire(org_id, agent_id, holder=holder, limit=limit):
             raise TurnGateBusy(
                 f"agent {agent_id} (org {org_id}) at max-concurrent-turns",
             )
         try:
             yield
         finally:
-            await self.release(org_id, agent_id)
+            await self.release(org_id, agent_id, holder=holder)
 
     def _key(self, org_id: str, agent_id: str) -> str:
-        return f"surogates:turns:{org_id}:{agent_id}"
+        return f"surogates:turn_holders:{org_id}:{agent_id}"

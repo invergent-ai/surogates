@@ -1680,10 +1680,22 @@ async def pause_session(
             detail=f"Cannot pause session in '{session.status}' state.",
         )
 
-    # Only emit event + update status if not already paused.
+    # Only emit event + update status if not already paused.  The status
+    # first: an operation recorded after it is refused, so the cancellation
+    # below cannot miss one, and a wait that wakes on the event reads paused.
     if session.status != "paused":
-        await store.emit_event(session_id, EventType.SESSION_PAUSE, {})
         await store.update_session_status(session_id, "paused")
+        await store.emit_event(session_id, EventType.SESSION_PAUSE, {})
+
+    # Durably, for the session and the sessions under it: a computer that is
+    # away hears of it when it comes back.  A failure must not keep the
+    # interrupt below from reaching the turn.
+    try:
+        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(
+            await store.session_tree_ids(session_id),
+        )
+    except Exception:
+        logger.warning("could not cancel the device operations of paused session %s", session_id, exc_info=True)
 
     # Always publish the interrupt signal — the harness may still be
     # running even if the DB status is already "paused" (race condition
@@ -1920,6 +1932,15 @@ async def delete_session(
         org_id=session.org_id,
         agent_id=session.agent_id,
     )
+
+    # A deleted chat's computer stops what it was doing, its folder's set-up
+    # included; the journal refuses anything more for its tree.
+    try:
+        await DeviceOperations(request.app.state.session_factory, request.app.state.redis).cancel(
+            [archived.id for archived in archived_sessions], bindings=True,
+        )
+    except Exception:
+        logger.warning("could not cancel the device operations of deleted session %s", session_id, exc_info=True)
 
     for archived_session in archived_sessions:
         await _destroy_deleted_session_browser(request, archived_session.id)

@@ -54,6 +54,22 @@ WAIT_GRACE_S = 2.0
 # ponytail: a constant; make it a worker setting when a deployment needs another value.
 PARKED_SESSIONS_PER_DEVICE = 20
 
+# The outcome of an operation its session stopped before the computer reported
+# a result.  The computer may have run it anyway: its late reply is dropped.
+CANCELLED_OUTCOME: dict[str, Any] = {
+    "error": {
+        "type": "cancelled",
+        "message": "Stopped before the computer reported a result. It may have run in part or in full: check before repeating it.",
+    },
+}
+
+# A calling session in one of these records nothing new.  A cancellation of it
+# then cannot miss an operation recorded beside it.
+_STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
+
+# The longest a stopped call waits to close its own operation.
+_CANCEL_PATIENCE_S = 5.0
+
 
 def operation_channel(operation_id: UUID) -> str:
     """Where the API announces that an operation's outcome was recorded."""
@@ -76,15 +92,24 @@ class OperationConflict(RuntimeError):
     """The same invocation and ordinal were recorded with a different request."""
 
 
-async def _check_session(db: AsyncSession, request: OperationRequest, device: Any) -> None:
+async def _check_session(db: AsyncSession, request: OperationRequest, device: Any) -> bool:
     """Refuse a request for a session that is not this device's, or not bound to it yet.
 
     The root session must name the device and belong to the device's user and
     agent; the calling session must be the root, or a session created under it.
+
+    Returns whether the session is stopped: paused, deleted or failed, or under
+    a deleted root.  The rows stay locked FOR SHARE until the operation commits,
+    so a pause or a delete waits for the operation it must cancel.
     """
     rows = (await db.execute(
-        select(SessionRow.id, SessionRow.org_id, SessionRow.agent_id, SessionRow.user_id, SessionRow.config)
+        select(
+            SessionRow.id, SessionRow.org_id, SessionRow.agent_id, SessionRow.user_id,
+            SessionRow.config, SessionRow.status,
+        )
         .where(SessionRow.id.in_([request.root_session_id, request.calling_session_id]))
+        .order_by(SessionRow.id)
+        .with_for_update(read=True)
     )).all()
     sessions = {row.id: row for row in rows}
     root = sessions.get(request.root_session_id)
@@ -112,6 +137,7 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+    return calling.status in _STOPPED_STATUSES or root.status == "archived"
 
 
 async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
@@ -247,24 +273,43 @@ class DeviceOperations:
         A request already recorded under the same invocation and ordinal is
         joined, never repeated: its outcome comes back when the device reports
         it, or at once if it already has.
+
+        A new request from a stopped session (paused, deleted or failed) raises
+        "This session was stopped" and records nothing.  A caller that is
+        stopped while it waits, or while its request is being recorded, closes
+        its own operation unless its turn is detached, handed to another
+        worker that carries the wait on.  The call returns, or raises, only
+        after its wait's subscription is closed.
         """
-        operation_id, outcome = await self._while_database_recovers(
-            "recording", lambda: self._record(request),
-        )
-        if outcome is not None:
-            return outcome
-        await self._announce(control_channel(request.device_id), f"op:{operation_id}")
-        # One wait, never interrupted: a deadline here could cancel a query mid-flight.
-        waiter = asyncio.ensure_future(self._wait_forever(operation_id))
+        waiter: asyncio.Future | None = None
         try:
+            operation_id, outcome = await self._while_database_recovers(
+                "recording", lambda: self._record(request),
+            )
+            if outcome is not None:
+                return outcome
+            await self._announce(control_channel(request.device_id), f"op:{operation_id}")
+            # One wait, never interrupted: a deadline here could cancel a query mid-flight.
+            waiter = asyncio.ensure_future(self._wait_forever(operation_id))
             done, _ = await asyncio.wait({waiter}, timeout=WAIT_GRACE_S)
             if done:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
             async with turn_waiting(resumable=True):
                 return await self._wait_watching(waiter, request)
+        except asyncio.CancelledError:
+            # Stopped, not handed to another worker: nothing will ask for it
+            # again, so it must not run when the computer comes back.  Found by
+            # the request's key: a stop during the record's commit leaves no
+            # operation id to name, and the row may be committed.
+            if not turn_detached():
+                await self._cancel_own(request)
+            raise
         finally:
-            waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
+            if waiter is not None:
+                waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
+                # Its subscription is closed before this call returns.
+                await asyncio.gather(waiter, return_exceptions=True)
 
     async def _wait_watching(self, waiter: asyncio.Future, request: OperationRequest) -> dict[str, Any]:
         """Await *waiter*, telling the session's viewers whenever its computer is away."""
@@ -407,12 +452,31 @@ class DeviceOperations:
             )).one_or_none()
             if device is None:
                 raise DeviceOperationError("This computer was removed")
-            await _check_session(db, request, device)
             if request.lease_token is not None:
+                # The lease before the session rows: emit_event takes them in that order.
                 await _check_lease(db, request)
+            if await _check_session(db, request, device):
+                # A stopped session records nothing new.  One it already
+                # recorded keeps its outcome, so a call resumed as a pause
+                # lands still learns what the computer did; an open one is
+                # completed by that pause's cancellation.
+                existing = (await db.execute(
+                    select(DeviceOperation.id, DeviceOperation.digest, DeviceOperation.outcome).where(
+                        DeviceOperation.calling_session_id == request.calling_session_id,
+                        DeviceOperation.invocation_id == request.invocation_id,
+                        DeviceOperation.ordinal == request.ordinal,
+                    )
+                )).one_or_none()
+                if existing is None:
+                    raise DeviceOperationError("This session was stopped")
+                if existing.digest != digest:
+                    raise OperationConflict(
+                        f"Operation {request.ordinal} of {request.invocation_id} was recorded "
+                        "with a different request"
+                    )
+                return existing.id, existing.outcome
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
-            # count together and the limit is soft by their number; the count also includes
-            # abandoned open operations, which cancellation (later work) will close.
+            # count together and the limit is soft by their number.
             if request.kind != BIND and device.revoked_at is None:
                 await _refuse_when_full(db, request, device)
             refused = (
@@ -596,6 +660,78 @@ class DeviceOperations:
         await self._announce(operation_channel(operation_id), "completed")
         return "completed" if completed is not None else "duplicate"
 
+    async def cancel(self, calling_session_ids: Collection[UUID], *, bindings: bool = False) -> int:
+        """Cancel the open operations of these sessions, and tell their computers.
+
+        What a computer already reported keeps its outcome.  A binding is
+        cancelled only with *bindings*: deleting a chat ends its folder's
+        set-up, pausing it does not.  Returns how many were cancelled.
+        """
+        if not calling_session_ids:
+            return 0
+        conditions = [DeviceOperation.calling_session_id.in_(list(calling_session_ids))]
+        if not bindings:
+            conditions.append(DeviceOperation.kind != BIND)
+        return await self._cancel_where(*conditions)
+
+    async def cancel_invocation(self, calling_session_id: UUID, invocation_id: str) -> int:
+        """Cancel the open operations of one tool call."""
+        return await self._cancel_where(
+            DeviceOperation.calling_session_id == calling_session_id,
+            DeviceOperation.invocation_id == invocation_id,
+        )
+
+    async def closed_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
+        """Which of these operations of the device the server has closed.
+
+        For the ids the app reports open, or was sent and has not answered:
+        only the server can have closed those, by a cancellation or a
+        revocation, so the app must be told to stop them.
+        """
+        if not operation_ids:
+            return []
+        # Ids only: an outcome can be a megabyte, and the ids may be as many
+        # as a device's hello lists.
+        async with self._sf() as db:
+            return list((await db.execute(
+                select(DeviceOperation.id).where(
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.id.in_(list(operation_ids)),
+                    DeviceOperation.completed_at.is_not(None),
+                )
+            )).scalars())
+
+    async def _cancel_where(self, *conditions: Any) -> int:
+        async with self._sf() as db:
+            rows = (await db.execute(
+                update(DeviceOperation)
+                .where(DeviceOperation.completed_at.is_(None), *conditions)
+                .values(outcome=CANCELLED_OUTCOME, completed_at=func.now())
+                .returning(DeviceOperation.id, DeviceOperation.device_id)
+            )).all()
+            await db.commit()
+        for operation_id, device_id in rows:
+            await self._announce(operation_channel(operation_id), "completed")
+            await self._announce(control_channel(device_id), f"cancel:{operation_id}")
+        return len(rows)
+
+    async def _cancel_own(self, request: OperationRequest) -> None:
+        """Close a stopped call's operation, best effort: a failure leaves it open as before."""
+        try:
+            async with asyncio.timeout(_CANCEL_PATIENCE_S):
+                # Shielded: a second cancel of the stopping task must not
+                # abandon the write half-way.
+                await asyncio.shield(self._cancel_where(
+                    DeviceOperation.calling_session_id == request.calling_session_id,
+                    DeviceOperation.invocation_id == request.invocation_id,
+                    DeviceOperation.ordinal == request.ordinal,
+                ))
+        except Exception:
+            logger.warning(
+                "could not cancel operation %s of %s; it stays open",
+                request.ordinal, request.invocation_id, exc_info=True,
+            )
+
 
 class JournalRunner:
     """The operations of one tool call, numbered in the order its handler asks for them."""
@@ -646,3 +782,7 @@ class JournalRunner:
         return self._ordinal < await self._operations.recorded(
             self._calling_session_id, self._invocation_id,
         )
+
+    async def close_open(self) -> int:
+        """Cancel what this call's first run left open: a call reported interrupted must not act later."""
+        return await self._operations.cancel_invocation(self._calling_session_id, self._invocation_id)
