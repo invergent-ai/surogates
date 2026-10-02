@@ -145,6 +145,8 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
 // Temp file and atomic rename, keeping the replaced file's mode, as the cloud does.
 function write(args: Record<string, unknown>, { folder }: Context): null {
   const key = keyInFolder(folder, text(args, "key"));
+  // Only the in-folder protected names are re-checked: the cloud's system and credential lists cannot be reached here.
+  // A key is proven to be inside the folder, and a folder that holds such a path is refused at host start.
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
   const encoded = text(args, "data");
   // The check comes first: the pattern overflows the regex engine's stack on megabytes of text.
