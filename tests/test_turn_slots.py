@@ -527,6 +527,9 @@ async def test_an_interrupted_turn_stops_waiting_for_a_slot_it_was_taking_back()
             _unstick(call, semaphore)
     await slots.release_owned()
     assert semaphore.locked(), "a slot the turn never took back was released"
+    semaphore.release()  # the other turn ends
+    await asyncio.sleep(0)
+    assert not semaphore.locked(), "a stopped take-back swallowed the next free slot"
 
 
 async def test_ending_a_turn_does_not_wait_behind_a_blocked_take_back():

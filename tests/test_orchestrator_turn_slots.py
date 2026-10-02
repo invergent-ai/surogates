@@ -207,7 +207,8 @@ async def test_shutdown_lets_a_turn_waiting_on_a_person_finish(monkeypatch):
     assert enqueued == []
 
 
-async def test_an_interrupt_signal_reaches_the_turns_slots(monkeypatch):
+@pytest.mark.parametrize("harness_running", [True, False])
+async def test_an_interrupt_signal_reaches_the_turns_slots_only_when_a_harness_took_it(monkeypatch, harness_running):
     orchestrator = orchestrator_with(CountingGate(held=1))
     await orchestrator.semaphore.acquire()
     started = asyncio.Event()
@@ -221,8 +222,10 @@ async def test_an_interrupt_signal_reaches_the_turns_slots(monkeypatch):
 
     task, turn = await _start_turn(orchestrator, monkeypatch, process)
     await asyncio.wait_for(started.wait(), 5.0)
-    # The interrupt reaches the turn only through its harness.
-    orchestrator._active_harnesses[UUID(turn.session_id)] = SimpleNamespace(interrupt=lambda message: None)
+    if harness_running:
+        # The interrupt reaches the turn only through its harness.
+        orchestrator._active_harnesses[UUID(turn.session_id)] = SimpleNamespace(interrupt=lambda message: None)
     await orchestrator._handle_interrupt_signal(UUID(turn.session_id), "paused by user")
     await asyncio.gather(task, return_exceptions=True)
-    assert interrupted == [True]
+    # An interrupt no harness took ends nothing: the turn goes on, and keeps waiting for its slot.
+    assert interrupted == ([True] if harness_running else [])
