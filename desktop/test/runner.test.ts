@@ -73,7 +73,9 @@ class RecordingExecutor implements Executor {
 
 async function start(executor: Executor, journal = open(), onError?: (error: unknown) => void) {
   const url = await server.start();
-  const device = connectDevice({ url, token: "surg_dev_test", journal, executor, onError, delay: () => 20 });
+  const device = connectDevice({
+    url, token: "surg_dev_test", journal, executor, onError: onError ?? (() => {}), delay: () => 20,
+  });
   link = device.link;
   device.link.start();
   await server.until(() => device.link.status === "connected");
@@ -355,11 +357,18 @@ describe("a journal that belongs to another device", () => {
     try {
       const executor = new RecordingExecutor();
       const url = `ws://127.0.0.1:${(raw.address() as AddressInfo).port}`;
-      const device = connectDevice({ url, token: "surg_dev_test", journal, executor, delay: () => 20 });
+      const errors: unknown[] = [];
+      const device = connectDevice({
+        url, token: "surg_dev_test", journal, executor, delay: () => 20, onError: (error) => errors.push(error),
+      });
       link = device.link;
       device.link.start();
       await server.until(() => device.link.status === "stopped");
       await new Promise((resolve) => setTimeout(resolve, 100));
+      // Said before it stopped, and why: the journal is another device's.
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(Error);
+      expect((errors[0] as Error).message).toMatch(/another device/);
       expect(connections).toBe(1);
       expect(executor.ran).toEqual([]);
       expect(journal.openIds()).toEqual([]);

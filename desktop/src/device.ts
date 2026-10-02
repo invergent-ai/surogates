@@ -12,16 +12,17 @@ export interface DeviceOptions {
   journal: OperationJournal;
   executor: Executor;
   onStatus?: (status: LinkStatus) => void;
-  // Something the app cannot recover from (a journal that fails): the link has stopped.
-  onError?: (error: unknown) => void;
+  // Something the app cannot recover from (a journal that fails, a journal that is
+  // another device's): said first, then the link stops. Required, so a stop is never silent.
+  onError: (error: unknown) => void;
   delay?: (attempt: number) => number;
 }
 
 export function connectDevice(options: DeviceOptions): { link: DeviceLink; runner: OperationRunner } {
-  // The runner failed after the executor answered: the link stops, as when its own handler throws.
+  // The device cannot go on: say why, then stop the link, as when its own handler throws.
   const fail = (error: unknown): void => {
-    void link.stop();
     report(options.onError, error);
+    void link.stop();
   };
   // Opening the journal already answered what a crash cut off "interrupted".
   const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame), fail);
@@ -34,7 +35,9 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onWelcome: (welcome) => {
         // One journal per device: another device's results would be refused and resent forever.
         if (!options.journal.claim(welcome.deviceId)) {
-          void link.stop();
+          fail(new Error(
+            `This journal belongs to another device, not ${welcome.deviceId}: its results would be refused, so the link stopped`,
+          ));
           return;
         }
         options.journal.prune();
