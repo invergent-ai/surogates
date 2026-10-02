@@ -20,6 +20,8 @@ export class FakeLinkServer {
   // The close code of each connection, in order.
   readonly closes: number[] = [];
   connections = 0;
+  // Frames sent right behind each welcome, in one burst with it.
+  behindWelcome: Record<string, unknown>[] = [];
   private server: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
 
@@ -47,6 +49,7 @@ export class FakeLinkServer {
               type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a",
               user_id: "u", name: "Laptop", heartbeat_s: this.options.heartbeatS ?? 15,
             }));
+            for (const behind of this.behindWelcome) socket.send(JSON.stringify(behind));
           }
         } else if (frame.type === "ping" && this.options.pong !== false) {
           socket.send(JSON.stringify({ type: "pong" }));

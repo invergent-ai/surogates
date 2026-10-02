@@ -189,6 +189,21 @@ describe("the link coming and going", () => {
     expect(server.hellos.at(-1)?.open).toEqual(["b"]);
   });
 
+  it("sends what it held before the result of an operation delivered right behind the welcome", async () => {
+    const journal = open();
+    journal.receive({
+      id: "a", sessionId: "r", callingSessionId: "r", invocationId: "1:c", ordinal: 1,
+      kind: "which", args: {}, digest: "digest-a",
+    });
+    journal.start("a");
+    journal.finish("a", { ok: "earlier" });
+    // One burst: the welcome, then the operation, which this executor answers at once.
+    server.behindWelcome = [opFrame("b")];
+    await start(new RecordingExecutor(), journal);
+    await server.until(() => results("a").length > 0 && results("b").length > 0);
+    expect(server.received.filter((f) => f.type === "op_result").map((f) => f.id)).toEqual(["a", "b"]);
+  });
+
   it("answers an operation cut off by a crash as interrupted, and holds nothing open", async () => {
     const path = join(dir, "journal.sqlite");
     const before = new OperationJournal(path);
