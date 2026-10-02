@@ -43,6 +43,17 @@ class Harness {
     this.child.send(message);
   }
 
+  // srt removes its sockets and folders in /tmp when a host stops, never when it is
+  // killed: ask it to stop, and kill the group only when it does not (or to clear
+  // what is left of it, such as socat).
+  async stop(timeoutMs = 3_000): Promise<void> {
+    if (this.child.connected) this.send({ type: "stop" });
+    const timer = setTimeout(() => this.killGroup(), timeoutMs);
+    await this.exited;
+    clearTimeout(timer);
+    this.killGroup();
+  }
+
   async until<T>(find: (messages: FromHost[]) => T | undefined, timeoutMs = 20_000): Promise<T> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -100,10 +111,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  for (const harness of harnesses) {
-    harness.killGroup();
-    await harness.exited;
-  }
+  for (const harness of harnesses) await harness.stop();
   rmSync(base, { recursive: true, force: true });
 });
 

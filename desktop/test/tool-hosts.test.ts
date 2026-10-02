@@ -74,6 +74,9 @@ beforeEach(() => {
 
 afterEach(async () => {
   await hosts?.stop();
+  // A host that failed to start, or timed out, is no longer in hosts and is on its way out. srt
+  // cleans up /tmp only when a host exits by itself, so each is given the time before any is killed.
+  await until(() => exits >= spawned.length, 3_000).catch(() => {});
   for (const host of spawned) host.kill();
   rmSync(base, { recursive: true, force: true });
 });
