@@ -32,12 +32,15 @@ UNAVAILABLE_TOOLS = frozenset({"run_coding_agent", "idea_tree", "dispatch_experi
 
 DEVICE_SANDBOX_ID = "device"
 
-# The result of a resumed call that asked the computer for other operations
-# than its first run: what happened there cannot be told from the journal.
+# The result of a resumed call that cannot be resumed safely: it asked the
+# computer for other operations than its first run, or it is a harness tool,
+# whose effects off the computer are not in the journal.  What happened cannot
+# be told from the journal, and an operation still waiting for the computer
+# may happen when it reconnects.
 INTERRUPTED = json.dumps({"error": (
-    "interrupted: this call was resumed after its worker stopped, and the resumed run "
-    "did not match what had already been sent to the computer. Some of its effects may "
-    "have happened. Check the folder before repeating it."
+    "interrupted: this call was resumed after its worker stopped, and could not be "
+    "resumed safely. Some of its effects may have happened, and one still waiting for "
+    "the computer may happen when it reconnects. Check the folder before repeating it."
 )})
 
 
