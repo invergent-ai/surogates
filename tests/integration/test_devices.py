@@ -1857,6 +1857,34 @@ async def test_a_replayed_operation_gets_its_outcome_on_a_full_computer(
     await stop(parked)
 
 
+async def test_a_call_already_under_way_finishes_on_a_full_computer(
+    api, session_factory, redis_client, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "PARKED_SESSIONS_PER_DEVICE", 1, raising=False)
+    issued, first = await bound_device(api)
+    device_id = UUID(issued["id"])
+    second = await another_bound_root(api, device_id)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id, first)  # the first step of a multi-step tool call
+    done = asyncio.create_task(ops.run(request))
+    await eventually(lambda: has_pending(ops, device_id))
+    assert await complete_pending(ops, device_id, LocalWorkspaceIO(str(tmp_path))) == 1
+    assert await asyncio.wait_for(done, 2.0) == {"ok": True}
+    parked = asyncio.create_task(ops.run(request_for(device_id, second)))  # the computer is now full
+    await eventually(lambda: has_pending(ops, device_id))
+    # Between its steps the first session has nothing open, but its call may still finish.
+    next_step = asyncio.create_task(ops.run(OperationRequest(**{**_fields(request), "ordinal": 2})))
+
+    async def recorded() -> bool:
+        if next_step.done():
+            next_step.result()  # a refusal surfaces here
+        return len(await ops.pending(device_id, 1)) == 2
+
+    await eventually(recorded)
+    for task in (parked, next_step):
+        await stop(task)
+
+
 async def test_a_tool_call_waits_for_the_computer_to_come_back(laptop_rig, session_factory, redis_client):
     rig = laptop_rig  # the laptop starts disconnected
     store = SessionStore(session_factory)

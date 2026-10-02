@@ -118,15 +118,15 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
     """Refuse a new operation from a session not yet waiting on a computer that has its fill.
 
     A session already waiting may keep asking.  A binding waits for its user,
-    not for the computer, so it never counts.  An operation already recorded
-    is a replay: it gets its recorded outcome, never a refusal.
+    not for the computer, so it never counts.  A replay gets its recorded
+    outcome, and a tool call already under way may finish its remaining steps:
+    neither is ever refused.
     """
     already = (await db.execute(
         select(DeviceOperation.id).where(
             DeviceOperation.calling_session_id == request.calling_session_id,
             DeviceOperation.invocation_id == request.invocation_id,
-            DeviceOperation.ordinal == request.ordinal,
-        )
+        ).limit(1)
     )).scalar_one_or_none()
     if already is not None:
         return
