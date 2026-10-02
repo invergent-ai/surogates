@@ -38,7 +38,7 @@ async def _wake(monkeypatch, config: dict, *, while_running=None, before_replay=
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
 
     async def fake_execute_single_tool(call, **kwargs):
-        order.append(f"run {call['id']} as {call['_replay_of']}")
+        order.append(f"run {call['id']} as {kwargs['replay_of']}")
         if while_running is not None:
             await while_running(harness)
         return {"role": "tool", "tool_call_id": call["id"], "content": "resumed"}

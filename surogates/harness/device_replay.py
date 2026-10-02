@@ -96,7 +96,7 @@ async def replay_unanswered(
     events: list[Any],
     messages: list[dict[str, Any]],
     session_factory: Any,
-    run_tool: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    run_tool: Callable[[dict[str, Any], int], Awaitable[dict[str, Any]]],
 ) -> None:
     """Resume each unanswered call with operations in the journal, adding its result to *messages*."""
     calls = {f"{event_id}:{call['id']}": (event_id, call) for event_id, call in unanswered_calls(events)}
@@ -105,4 +105,4 @@ async def replay_unanswered(
     journaled = await _journaled(session_factory, session.id, list(calls))
     for invocation, (event_id, call) in calls.items():
         if invocation in journaled:
-            place(messages, await run_tool({**call, "_replay_of": event_id}))
+            place(messages, await run_tool(call, event_id))

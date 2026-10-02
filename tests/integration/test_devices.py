@@ -1849,7 +1849,6 @@ async def resume_call(
         {
             "id": call_id,
             "function": {"name": name, "arguments": json.dumps(args)},
-            "_replay_of": await call_event_of(store, rig.root, call_id),
         },
         session=await store.get_session(rig.root),
         lease=rig.lease,
@@ -1859,6 +1858,7 @@ async def resume_call(
         redis=redis_client,
         session_factory=session_factory,
         governance_gate=governance_gate,
+        replay_of=await call_event_of(store, rig.root, call_id),
     ), 15.0)
 
 
@@ -1882,6 +1882,35 @@ async def test_a_resumed_call_gets_what_the_computer_already_did_without_running
     assert json.loads(resumed["content"])["exit_code"] == json.loads(first["content"])["exit_code"] == 0
     assert len(await store.get_events(rig.root, types=[EventType.TOOL_CALL])) == 1
     assert len(await store.get_events(rig.root, types=[EventType.TOOL_RESULT])) == 1
+
+
+async def test_a_call_dict_cannot_mark_itself_resumed(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    # A model provider can put any field on a tool call it sends.
+    call = {
+        "id": "call_1",
+        "function": {"name": "terminal", "arguments": json.dumps({"command": "echo once >> log.txt"})},
+        "_replay_of": 1,
+    }
+
+    refused = await asyncio.wait_for(execute_single_tool(
+        call,
+        session=await store.get_session(rig.root),
+        lease=rig.lease,
+        store=store,
+        tools=tools,
+        tenant=MagicMock(asset_root="/tmp/test"),
+        redis=redis_client,
+        session_factory=session_factory,
+        governance_gate=GovernanceGate(require_approval={"terminal"}),
+    ), 15.0)
+
+    assert json.loads(refused["content"])["error"] == "policy_blocked_overridable"
+    assert not (rig.folder / "log.txt").exists()
+    assert len(await store.get_events(rig.root, types=[EventType.POLICY_DENIED])) == 1
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_CALL])) == 1
 
 
 async def test_a_resumed_call_is_not_asked_for_an_approval_its_first_run_spent(
@@ -1979,9 +2008,9 @@ async def resume_session(rig, store, tools, messages: list[dict], *, redis_clien
     """Resume the session's unanswered calls as a new worker's wake does."""
     session = await store.get_session(rig.root)
 
-    async def run_tool(call: dict) -> dict:
+    async def run_tool(call: dict, event_id: int) -> dict:
         return await asyncio.wait_for(execute_single_tool(
-            call, session=session, lease=rig.lease, store=store, tools=tools,
+            call, replay_of=event_id, session=session, lease=rig.lease, store=store, tools=tools,
             tenant=MagicMock(asset_root="/tmp/test"), redis=redis_client, session_factory=session_factory,
         ), 15.0)
 

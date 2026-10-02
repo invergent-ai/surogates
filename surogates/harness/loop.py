@@ -1526,10 +1526,10 @@ class AgentHarness(
         # nothing to resume; any other keeps what was read.
         clear_read_tracker(sandbox_session_key(session))
 
-        async def resume(call: dict[str, Any]) -> dict[str, Any]:
+        async def resume(call: dict[str, Any], event_id: int) -> dict[str, Any]:
             # The turn's own task steps out, so a resumed call that waits gives the slots back.
             async with turn_joining():
-                return await execute_single_tool(call, **tool_kwargs)
+                return await execute_single_tool(call, replay_of=event_id, **tool_kwargs)
 
         replay = asyncio.ensure_future(replay_unanswered(
             session=session, events=events, messages=messages,

@@ -89,7 +89,7 @@ async def test_a_call_with_no_operations_in_the_journal_is_not_resumed(monkeypat
     ]
     ran: list[dict] = []
 
-    async def run_tool(resumed: dict) -> dict:
+    async def run_tool(resumed: dict, event_id: int) -> dict:
         ran.append(resumed)
         return {"role": "tool", "tool_call_id": resumed["id"], "content": "resumed"}
 

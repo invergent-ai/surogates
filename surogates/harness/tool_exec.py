@@ -1138,11 +1138,15 @@ async def execute_tool_calls_concurrent(
     return [r for r in results if r is not None]
 
 
-async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
+async def execute_single_tool(tc: dict[str, Any], *, replay_of: int | None = None, **kwargs: Any) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
     *interrupt_check* is this session's stop flag; it is handed to the tool
     handler so long-running tools can poll it without a process-wide signal.
+
+    *replay_of* is the ``tool.call`` event of a call a worker resumes after
+    the one that began it stopped.  It is the caller's to give: a field of
+    the call itself comes from the model provider and is never believed.
 
     When *log_policy_allowed* is True, every governance check that passes
     also emits a ``policy.allowed`` event.  Off by default because each
@@ -1153,7 +1157,7 @@ async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
     worker slots unless every activity of the turn is waiting.
     """
     async with turn_activity():
-        return await _run_single_tool(tc, **kwargs)
+        return await _run_single_tool(tc, replay_of=replay_of, **kwargs)
 
 
 async def _run_single_tool(
@@ -1190,6 +1194,7 @@ async def _run_single_tool(
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
+    replay_of: int | None = None,
 ) -> dict:
     from surogates.trace import get_trace, new_span
 
@@ -1222,6 +1227,8 @@ async def _run_single_tool(
     # A session on the user's computer reaches its folder only through the
     # device: the folder is never a path on this host.
     on_device = device_of(session.config) is not None
+    # Only a call on the user's computer can be resumed from its journal.
+    replay_of = replay_of if on_device else None
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
@@ -1237,7 +1244,6 @@ async def _run_single_tool(
 
     # A call resumed after its worker stopped keeps its tool.call event, so
     # its operations are found in the journal under the same invocation.
-    replay_of: int | None = tc.get("_replay_of")
     if replay_of is None:
         _call_event_id = await store.emit_event(
             session.id,
