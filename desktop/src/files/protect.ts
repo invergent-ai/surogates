@@ -2,7 +2,8 @@
 // files, with their messages (surogates/tools/workspace_io/local.py), and the
 // names in the folder where a change runs code outside the sandbox: srt's own
 // write denies (sandbox-utils.js), which its mounts only cover for files that
-// existed when a sandbox started, so the file API checks them on every write.
+// existed when a sandbox started, so the file API checks them on every write,
+// and the rest of what git reads its config and hooks from (see protectedInFolder).
 
 import { join } from "node:path";
 
@@ -27,6 +28,11 @@ const PROTECTED_NAMES = new Set([
 const PROTECTED_PAIRS: ReadonlyArray<readonly [string, string]> = [
   [".claude", "commands"], [".claude", "agents"], [".git", "hooks"], [".git", "config"],
 ];
+// Inside a .git folder, at any depth (a submodule's git folder lies in its
+// parent's .git/modules): the config files git reads, in the folder or through
+// commondir, and the hooks. A config can name a program that git runs on its
+// next status; so can a hook.
+const GIT_CONFIGS = new Set(["config", "config.worktree", "commondir"]);
 
 const real = (path: string) => realpath(path).path;
 
@@ -48,14 +54,24 @@ export function checkWrite(folder: string, home: string, path: string): string |
 
 // Whether a key in the folder names, or lies under, one of srt's protected names.
 // A file named .git (a worktree's pointer) would send git to a config and hooks
-// of the agent's choosing, so .git itself is protected too; what lies in a .git
-// folder, other than its config and hooks, is not.
+// of the agent's choosing, so .git itself is protected too. In a .git folder,
+// at any depth, so are the config files (config, config.worktree, commondir),
+// anything under a hooks folder and anything under worktrees, where each
+// linked worktree keeps a config of its own and a commondir that redirects git.
+// The rest of a .git folder (HEAD, info, objects, refs, ...) is not.
 export function protectedInFolder(folder: string, key: string): boolean {
   if (key === folder || !inside(key, folder)) return false;
   const parts = key.slice(folder.length + 1).toLowerCase().split("/");
   return parts.at(-1) === ".git" || parts.some(
-    (part, i) => PROTECTED_NAMES.has(part) || PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second),
+    (part, i) => PROTECTED_NAMES.has(part) || PROTECTED_PAIRS.some(([first, second]) => part === first && parts[i + 1] === second) ||
+      (part === ".git" && runsCode(parts.slice(i + 1))),
   );
+}
+
+// What lies after a .git component.
+function runsCode(rest: string[]): boolean {
+  const last = rest.at(-1);
+  return (last !== undefined && GIT_CONFIGS.has(last)) || rest.includes("hooks") || rest[0] === "worktrees";
 }
 
 export function inFolderRefusal(path: string): string {

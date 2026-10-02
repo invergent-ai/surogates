@@ -139,6 +139,40 @@ describe("checkWrite, in the folder", () => {
   });
 });
 
+// What else in a .git folder sends git to a config or hooks of the agent's choosing.
+const GIT_RUNS_CODE = [
+  ".git/commondir", ".git/config.worktree", ".git/config",
+  ".git/modules/sub/config", ".git/modules/sub/hooks/pre-commit", ".git/modules/sub/hooks",
+  ".git/worktrees/w/config.worktree", ".git/worktrees/w/commondir", ".git/worktrees/w/anything", ".git/worktrees",
+  ".git/modules/a/modules/b/config",
+];
+const GIT_RUNS_CODE_ANYWHERE = [
+  ...GIT_RUNS_CODE,
+  ...GIT_RUNS_CODE.map((path) => `sub/deeper/${path}`),
+  ...GIT_RUNS_CODE.map((path) => path.replace(/[a-z]+/g, (word) => word.charAt(0).toUpperCase() + word.slice(1))),
+  ...GIT_RUNS_CODE.map((path) => `Sub/${path.toUpperCase()}`),
+];
+const GIT_STAYS_OPEN = [
+  ".git/HEAD", ".git/info/exclude", ".git/objects/ab/cdef", ".git/refs/heads/main", ".git/index", ".git/modules/sub/HEAD",
+  ".git/modules/sub/objects/ab", ".git/modules/sub/info/exclude", "sub/.git/HEAD",
+  "commondir", "config", "config.worktree", "hooks/x", "worktrees/w/config", "sub/commondir", "gitconfig/x",
+];
+
+describe("the rest of a .git folder that runs code", () => {
+  it.each(GIT_RUNS_CODE_ANYWHERE)("checkWrite refuses %s", (path) => {
+    expect(checkWrite(folder, home, path)).toBe(inFolderRefusal(path));
+  });
+
+  it.each(GIT_RUNS_CODE_ANYWHERE)("protectedInFolder protects %s", (path) => {
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(true);
+  });
+
+  it.each(GIT_STAYS_OPEN)("leaves %s open to writes", (path) => {
+    expect(checkWrite(folder, home, path)).toBeNull();
+    expect(protectedInFolder(folder, `${folder}/${path}`)).toBe(false);
+  });
+});
+
 describe("protectedInFolder", () => {
   it("judges a key in the folder, never the folder itself", () => {
     expect(protectedInFolder(folder, `${folder}/.git/config`)).toBe(true);
