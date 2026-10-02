@@ -67,11 +67,8 @@ def fill(value, folder: Path):
 
 
 def comparable(kind: str, args: dict, outcome: dict) -> dict:
-    """What must match: listings and searches in any order, rg's timings and wording aside."""
+    """What must match: listings and searches in any order, rg's timings aside."""
     if "error" in outcome:
-        error = outcome["error"]
-        if error.get("type") == "ripgrep" and error["message"].startswith("rg exited"):
-            return {"error": {"type": "ripgrep", "message": error["message"].split(":")[0]}}
         return outcome
     if kind == "list_dir":
         return {"ok": sorted(outcome["ok"])}
@@ -218,6 +215,11 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         assert refusal["ok"].startswith("Write denied: '.git/config' is protected in this folder")
         assert (await on_app(laptop_rig, "write", {"key": f"{folder}/.git/config", "data": b64(b"x")}))["error"]["type"] == "sandbox"
         assert (folder / ".git" / "config").read_text() == "[core]\n"
+        # A file named .git points git at another folder's config and hooks.
+        listed = sorted(os.listdir(folder / "sub"))
+        assert (await on_app(laptop_rig, "write", {"key": f"{folder}/sub/.git", "data": b64(b"gitdir: x\n")}))["error"]["type"] == "sandbox"
+        assert not (folder / "sub" / ".git").exists()
+        assert sorted(os.listdir(folder / "sub")) == listed
         for key in (str(outside), f"{folder}/link-in"):
             assert await on_app(laptop_rig, "read", {"key": key, "max_bytes": None}) == {
                 "error": {"type": "sandbox", "message": f"Not a path in this folder: '{key}'"},
