@@ -40,8 +40,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from surogates.devices.binding import device_of
 from surogates.runtime.turn_slots import turn_detached
 from surogates.session.events import EventType
+from surogates.session.store import LeaseNotHeldError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -514,6 +516,10 @@ class StreamingToolExecutor:
         the call was permanently orphaned.
         """
         result = tool.result
+        # On the user's computer only the worker that holds the session
+        # commits a result: one that has not noticed it lost the lease must
+        # not answer a call the worker now resuming it answers for real.
+        fence = {"lease_token": self._lease.lease_token} if device_of(self._session.config) is not None else {}
         try:
             await self._store.emit_event(
                 self._session.id,
@@ -527,7 +533,10 @@ class StreamingToolExecutor:
                     ) if tool.started_at else 0,
                     "cancelled": True,
                 },
+                **fence,
             )
+        except LeaseNotHeldError:
+            pass  # another worker has the session; the call is its to answer
         except Exception:
             logger.warning(
                 "Failed to emit cancelled tool.result for session %s",

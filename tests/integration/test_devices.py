@@ -52,7 +52,8 @@ from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin import file_ops
-from surogates.tools.registry import ToolRegistry
+from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
@@ -1998,6 +1999,41 @@ async def test_a_resumed_call_that_stops_short_is_reported_interrupted(laptop_ri
     # The write did happen: "refusing to overwrite" would tell the model it did not.
     assert resumed["content"] == INTERRUPTED
     assert (rig.folder / "notes.md").read_text() == "new\n"
+
+
+async def test_a_resumed_harness_tool_is_reported_interrupted_without_running_again(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    ran: list[dict] = []
+
+    async def handler(arguments: dict, **kwargs) -> str:
+        # Whatever else it does off the computer is done again by running it again.
+        ran.append(arguments)
+        wio = kwargs["workspace_io"]
+        await wio.write(await wio.resolve("made.md"), b"made")
+        return json.dumps({"ok": True})
+
+    tools.register(
+        "harness_probe",
+        ToolSchema(name="harness_probe", description="probe", parameters={"type": "object", "properties": {}}),
+        handler=handler,
+    )
+    monkeypatch.setitem(TOOL_LOCATIONS, "harness_probe", ToolLocation.HARNESS)
+    first = await tool_call(rig, store, tools, "call_1", "harness_probe", {}, **io)
+    assert json.loads(first["content"]) == {"ok": True}
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "harness_probe", {}, **io)
+
+    assert resumed["content"] == INTERRUPTED
+    assert len(ran) == 1
+    [result] = await store.get_events(rig.root, types=[EventType.TOOL_RESULT])
+    assert result.data["content"] == INTERRUPTED
 
 
 async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(

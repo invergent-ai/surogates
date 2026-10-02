@@ -1581,6 +1581,11 @@ async def _run_single_tool(
             pass  # result_content already set by the image branch.
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)
+        elif replay_of is not None and location != ToolLocation.SANDBOX:
+            # The journal holds only what reached the computer.  A harness
+            # tool also acts off it (it creates an artifact, it pays for a
+            # model call), and running it again would do that again.
+            result_content = INTERRUPTED
         elif device_call is not None and location == ToolLocation.SANDBOX:
             result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:

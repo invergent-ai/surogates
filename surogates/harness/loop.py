@@ -1511,7 +1511,8 @@ class AgentHarness(
         """Resume the calls a stopped worker left unanswered; a pause or stop cancels the wait.
 
         A resumed call skips its saga step and runs without the hint tracker
-        (a local folder has none) or the turn transcript.
+        (a local folder has none) or the turn transcript.  Only a sandbox
+        tool is run again; a harness tool is reported interrupted.
         """
         from surogates.sandbox.pool import sandbox_session_key
 
