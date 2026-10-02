@@ -28,12 +28,16 @@ def open_operation(ordinal: int) -> OpenOperation:
 
 
 class FakeOperations:
-    """The journal's two calls the link makes, over a list of open operations."""
+    """The journal's calls the link makes, over a list of open operations."""
 
     def __init__(self, *operations: OpenOperation, delay: float = 0.0) -> None:
         self.open = list(operations)
         self.delay = delay
         self.statuses: list[str] = []
+        self.cancelled: set[uuid.UUID] = set()
+
+    async def cancelled_among(self, device_id, operation_ids):
+        return [i for i in operation_ids if i in self.cancelled]
 
     async def pending(self, device_id, generation, *, exclude=frozenset(), limit=100):
         # The query reads the journal first and the caller sees the answer
@@ -107,3 +111,18 @@ async def test_an_answered_operation_leaves_the_delivered_set(repeat):
     assert [f for f in socket.sent if f["type"] == "op_ack"] == [
         {"type": "op_ack", "id": str(first.id)}
     ] * (2 if repeat else 1)
+
+
+async def test_a_cancelled_operation_is_told_to_the_app_once_and_leaves_the_delivered_set():
+    first, second = open_operation(1), open_operation(2)
+    operations = FakeOperations(first, second)
+    link, socket = make_link(operations)
+    await link.deliver()
+    operations.cancelled.add(first.id)
+    operations.open = [second]
+
+    await link.deliver()
+    await link.deliver()
+
+    assert [f for f in socket.sent if f["type"] == "cancel"] == [{"type": "cancel", "id": str(first.id)}]
+    assert link._delivered == {second.id}

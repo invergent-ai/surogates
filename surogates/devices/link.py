@@ -3,7 +3,10 @@
 Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS (2 MiB); the app must
 accept frames that large.
 
-  app -> server   {"type": "hello", "protocols": [1]}   first frame, within HELLO_TIMEOUT_S
+  app -> server   {"type": "hello", "protocols": [1], "open": [ids]}
+                                                        first frame, within HELLO_TIMEOUT_S; "open"
+                                                        lists the operations the app holds
+                                                        unfinished, at most MAX_OPEN_REPORTED
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
                    "agent_id", "user_id", "name", "heartbeat_s": 15}
   app -> server   {"type": "ping"}                      every heartbeat_s
@@ -15,6 +18,8 @@ accept frames that large.
   app -> server   {"type": "op_result", "id", "digest", "outcome"}
                                                          outcome is {"ok": v} or {"error": {...}}
   server -> app   {"type": "op_ack", "id"}               the outcome is recorded durably
+  server -> app   {"type": "cancel", "id"}               the session stopped this operation: end it,
+                                                        record that, and never run it
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -41,6 +46,13 @@ The app keeps a journal by operation id: it runs each operation once and
 answers a repeat with the recorded outcome.  A reply for an operation this
 device was not given, or with another digest, is a protocol error (4400); a
 reply under rotated-out credentials closes with 4403.
+On connect, before any operation, the server sends a cancel for each operation
+the app reported open that was cancelled.  Later cancels arrive when they
+happen, and again at each reconcile while the app has not answered the
+operation.  A cancel may arrive before the op it names, so the app records
+unknown ids too.  A cancelled bind dismisses the folder prompt.  A result the
+app sends for a cancelled operation is acknowledged as a duplicate and changes
+nothing.
 
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no frame from the server within
@@ -80,6 +92,8 @@ _T = TypeVar("_T")
 
 PROTOCOL_VERSION = 1
 HELLO_TIMEOUT_S = 10.0
+# The most operations a hello may report as unfinished.
+MAX_OPEN_REPORTED = 1000
 # The longest one Redis or database call may take before the link closes with
 # 1011: a stalled dependency must not leave the socket open with no pong.
 DEPENDENCY_TIMEOUT_S = 5.0
@@ -176,6 +190,13 @@ class _Link:
         """
         if not await _bounded(self._presence.holds(self._device.id, self._holder)):
             return
+        # A cancel announced while the app was connected may have been lost:
+        # each reconcile tells it again about what it was sent and has not
+        # answered.  Dropping them also keeps the delivered set bounded.
+        if self._delivered:
+            for operation_id in await _bounded(self._operations.cancelled_among(self._device.id, self._delivered)):
+                self._delivered.discard(operation_id)
+                await self.send({"type": "cancel", "id": str(operation_id)})
         for operation in await _bounded(self._operations.pending(
             self._device.id, self._device.credential_generation, exclude=self._delivered,
         )):
@@ -185,6 +206,10 @@ class _Link:
                 continue
             self._delivered.add(operation.id)
             await self.send(operation.frame())
+
+    def forget(self, operation_id: UUID) -> None:
+        """Stop tracking an operation as sent and unanswered."""
+        self._delivered.discard(operation_id)
 
     async def record(self, frame: dict[str, Any]) -> None:
         """Record an ``op_result`` durably, then acknowledge it."""
@@ -244,7 +269,7 @@ async def serve_device_link(
     pubsub: PubSub | None = None
     claimed = False
     try:
-        await _hello(websocket)
+        reported = await _hello(websocket)
         # Listen before claiming, so every message sent after the claim is seen.
         pubsub = await _bounded(presence.subscribe(device.id))
         # Set before the claim: release is compare-and-delete, so it is safe
@@ -266,6 +291,10 @@ async def serve_device_link(
             "name": device.name,
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
         })
+        # Cancellations come before any new work, so the app stops what the
+        # session stopped while it was away.
+        for operation_id in await _bounded(operations.cancelled_among(device.id, reported)):
+            await link.send({"type": "cancel", "id": str(operation_id)})
         link.deliver_soon()
         await _serve(link, pubsub, device=device, holder=holder, store=store, presence=presence)
     except _Close as close:
@@ -318,7 +347,8 @@ async def _receive_frame(websocket: WebSocket) -> dict[str, Any]:
     return frame
 
 
-async def _hello(websocket: WebSocket) -> None:
+async def _hello(websocket: WebSocket) -> list[UUID]:
+    """Read the app's hello; returns the operations it reports unfinished."""
     try:
         frame = await asyncio.wait_for(_receive_frame(websocket), HELLO_TIMEOUT_S)
     except TimeoutError:
@@ -331,6 +361,13 @@ async def _hello(websocket: WebSocket) -> None:
             "type": "error", "code": "unsupported_protocol", "supported": [PROTOCOL_VERSION],
         })
         raise _Close(CLOSE_PROTOCOL, "unsupported protocol")
+    reported = frame.get("open", [])
+    if not isinstance(reported, list) or len(reported) > MAX_OPEN_REPORTED:
+        raise _Close(CLOSE_PROTOCOL, "malformed open list")
+    try:
+        return [UUID(str(value)) for value in reported]
+    except ValueError:
+        raise _Close(CLOSE_PROTOCOL, "malformed open list") from None
 
 
 def _check_current(current: DeviceRecord | None, device: DeviceRecord) -> None:
@@ -432,6 +469,12 @@ async def _control(
         # A worker announced an operation.
         if kind == "op":
             link.deliver_soon()
+            continue
+        # A session stopped an operation of this device.
+        if kind == "cancel":
+            with contextlib.suppress(ValueError):
+                link.forget(UUID(value))
+            await link.send({"type": "cancel", "id": value})
             continue
         generation = int(value) if value.isdigit() else None
         # A revocation of an older generation predates this connection's token.

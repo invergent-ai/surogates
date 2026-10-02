@@ -672,6 +672,23 @@ class DeviceOperations:
             DeviceOperation.invocation_id == invocation_id,
         )
 
+    async def cancelled_among(self, device_id: UUID, operation_ids: Collection[UUID]) -> list[UUID]:
+        """Which of these operations of the device were cancelled."""
+        if not operation_ids:
+            return []
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(DeviceOperation.id, DeviceOperation.outcome).where(
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.id.in_(list(operation_ids)),
+                    DeviceOperation.completed_at.is_not(None),
+                )
+            )).all()
+        return [
+            row.id for row in rows
+            if ((row.outcome or {}).get("error") or {}).get("type") == "cancelled"
+        ]
+
     async def _cancel_where(self, *conditions: Any) -> int:
         async with self._sf() as db:
             rows = (await db.execute(

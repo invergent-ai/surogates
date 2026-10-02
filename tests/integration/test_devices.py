@@ -2828,6 +2828,91 @@ async def test_a_call_reported_interrupted_closes_what_its_first_run_left_open(
     assert await outcome_of(session_factory, rig.root) == CANCELLED_OUTCOME
 
 
+async def test_a_cancellation_reaches_a_connected_computer(laptop_rig):
+    rig = laptop_rig
+    rig.laptop.hold = True  # it receives the operation and keeps working on it
+    await rig.laptop.connect()
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.ops.cancel([rig.root])
+    assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+
+    async def told() -> bool:
+        return rig.laptop.cancelled == set(rig.laptop.received)
+
+    await eventually(told)
+    assert rig.laptop.ran == []
+
+
+async def test_a_lost_cancellation_reaches_the_computer_at_the_next_reconcile(laptop_rig, monkeypatch):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    real_announce = DeviceOperations._announce
+
+    async def lose_cancels(self, channel, message):
+        if not message.startswith("cancel:"):
+            await real_announce(self, channel, message)
+
+    monkeypatch.setattr(DeviceOperations, "_announce", lose_cancels)
+    await rig.ops.cancel([rig.root])
+    await asyncio.wait_for(waiting, 5.0)
+
+    async def told() -> bool:
+        return rig.laptop.cancelled == set(rig.laptop.received)
+
+    await eventually(told, timeout=5.0)  # the laptop pings every 0.2 s; a reconcile follows within 1 s
+
+
+async def test_a_computer_hears_of_a_cancellation_first_when_it_reconnects(laptop_rig):
+    rig = laptop_rig
+    rig.laptop.hold = True
+    await rig.laptop.connect()
+    first = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+
+    async def received() -> bool:
+        return len(rig.laptop.received) == 1
+
+    await eventually(received)
+    await rig.laptop.disconnect()
+    await rig.ops.cancel([rig.root])
+    await asyncio.wait_for(first, 5.0)
+    second = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+
+    rig.laptop.frames.clear()
+    await rig.laptop.connect()
+
+    async def both() -> bool:
+        return "cancel" in rig.laptop.frames and "op" in rig.laptop.frames
+
+    await eventually(both)
+    assert rig.laptop.frames.index("cancel") < rig.laptop.frames.index("op")
+    assert rig.laptop.cancelled == {rig.laptop.received[0]}
+    await stop(second)
+
+
+@pytest.mark.parametrize("reported", ["not a list", ["not-a-uuid"], [str(uuid.uuid4())] * 1001])
+async def test_a_hello_with_a_malformed_open_list_is_refused(laptop_rig, link_url, reported):
+    async with connect(
+        link_url, additional_headers={"Authorization": f"Bearer {laptop_rig.token}"},
+    ) as ws:
+        await ws.send(json.dumps({"type": "hello", "protocols": [1], "open": reported}))
+        with pytest.raises(ConnectionClosed) as closed:
+            await ws.recv()
+        assert closed.value.rcvd.code == 4400
+
+
 async def test_a_computer_lost_after_delivery_is_waited_for_too(
     laptop_rig, session_factory, redis_client, monkeypatch,
 ):

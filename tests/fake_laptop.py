@@ -171,7 +171,9 @@ class FakeLaptop:
     """Surogate Desktop's side of the device link, in a test.
 
     Keeps each operation's outcome by id, like the app's journal, so an
-    operation delivered again is answered without being run again.
+    operation delivered again is answered without being run again.  It reports
+    the operations it holds unfinished in its hello, and never runs one it was
+    told to cancel.
     """
 
     def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
@@ -188,6 +190,11 @@ class FakeLaptop:
         self.bindings: dict[str, str] = {}
         self.acked: set[str] = set()
         self.reply = True
+        # Received operations are neither run nor answered: a long command.
+        self.hold = False
+        self.cancelled: set[str] = set()
+        # The type of every frame received after welcome, in order.
+        self.frames: list[str] = []
         self.connected = False
         self._ws: ClientConnection | None = None
         self._tasks: list[asyncio.Task] = []
@@ -200,7 +207,8 @@ class FakeLaptop:
             additional_headers={"Authorization": f"Bearer {self.token}"},
             max_size=4 * 1024 * 1024,
         )
-        await self._ws.send(json.dumps({"type": "hello", "protocols": [1]}))
+        unfinished = [i for i in self.received if i not in self.outcomes and i not in self.cancelled]
+        await self._ws.send(json.dumps({"type": "hello", "protocols": [1], "open": unfinished}))
         welcome = json.loads(await self._ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True
@@ -227,10 +235,13 @@ class FakeLaptop:
         try:
             async for raw in self._ws:
                 frame = json.loads(raw)
+                self.frames.append(frame["type"])
                 if frame["type"] == "op":
                     await self._handle(frame)
                 elif frame["type"] == "op_ack":
                     self.acked.add(frame["id"])
+                elif frame["type"] == "cancel":
+                    self.cancelled.add(frame["id"])
         except ConnectionClosed:
             pass
         finally:
@@ -248,6 +259,9 @@ class FakeLaptop:
     async def _handle(self, frame: dict[str, Any]) -> None:
         operation_id = frame["id"]
         self.received.append(operation_id)
+        if operation_id in self.cancelled or (self.hold and operation_id not in self.outcomes):
+            # A cancelled operation is never run; a held one is still running.
+            return
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
             self.outcomes[operation_id] = (
