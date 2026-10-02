@@ -58,7 +58,8 @@ by its session, or revoked before a reauthorization.  Later, a cancel is sent
 live when a session cancels an operation; if that one was lost, the next
 reconcile sends it once more for each operation the app was sent and has not
 answered.  So a cancel may arrive more than once (live, resent, and on
-reconnect), and the app treats it as idempotent.  The app sends nothing back
+reconnect), and the app treats it as idempotent; a cancel for an operation
+the app already answered changes nothing there.  The app sends nothing back
 for a cancel.  A cancel may arrive before the op it names, so the app records
 unknown ids too; it may forget them when the connection ends, because a
 closed operation is never sent on a later connection.  A cancelled bind
