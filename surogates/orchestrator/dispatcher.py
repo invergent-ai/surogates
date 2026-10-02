@@ -1065,6 +1065,14 @@ class Orchestrator:
             },
         )
         await self.session_store.update_session_status(session.id, "failed")
+        # Nothing will resume it: what it left waiting on a computer must not run later.
+        if self._session_factory is not None:
+            from surogates.devices.operations import DeviceOperations
+
+            try:
+                await DeviceOperations(self._session_factory, self.redis).cancel([session.id])
+            except Exception:
+                logger.warning("could not cancel the operations of abandoned session %s", session.id, exc_info=True)
 
     async def _sweep_orphans_on_boot(self) -> None:
         """One-shot aggressive sweep right after worker start.

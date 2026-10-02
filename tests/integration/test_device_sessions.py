@@ -326,3 +326,10 @@ async def test_the_orphan_sweep_leaves_a_waiting_local_chat_alone(api):
     found = {str(s.id) for s in orphans}
     assert local_id not in found
     assert cloud.json()["id"] in found
+
+
+async def test_deleting_a_chat_whose_folder_is_still_being_set_up_cancels_its_binding(api):
+    device = await register(api)
+    session_id = await local_chat(api, device["id"])  # its binding is never answered
+    await api.client.delete(f"/v1/sessions/{session_id}", headers=api.auth())
+    assert await has_failed(api, session_id)

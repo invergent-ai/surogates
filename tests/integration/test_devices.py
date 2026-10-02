@@ -2993,3 +2993,49 @@ async def test_a_failed_name_lookup_does_not_fail_the_wait_notice(laptop_rig, se
         })]
     finally:
         await notice.back(request)  # leave the process-wide count as it was
+
+
+async def test_pausing_a_local_chat_cancels_what_waits_on_its_computer(laptop_rig, api):
+    rig = laptop_rig  # the laptop stays away
+    waiting = asyncio.create_task(rig.ops.run(request_for(rig.device_id, rig.root)))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+    with pytest.raises(DeviceOperationError, match="This session was stopped"):
+        await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root, args={"name": "bash"})), 5.0)
+
+
+async def test_a_paused_chat_reads_paused_when_its_pause_event_is_written(laptop_rig, api, monkeypatch):
+    rig = laptop_rig
+    store = api.app.state.session_store
+    seen: list[str] = []
+    emit = store.emit_event
+
+    async def emit_reading_the_status(session_id, event_type, data, **kwargs):
+        if event_type == EventType.SESSION_PAUSE:
+            seen.append((await store.get_session(session_id)).status)
+        return await emit(session_id, event_type, data, **kwargs)
+
+    monkeypatch.setattr(store, "emit_event", emit_reading_the_status)
+    paused = await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    assert seen == ["paused"]
+
+
+async def test_a_chat_resumed_after_a_pause_reports_its_call_stopped(laptop_rig, api, session_factory, redis_client):
+    rig = laptop_rig  # the laptop stays away
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    await detached_run(rig, lambda: tool_call(rig, store, tools, "call_1", "terminal", args, **io))
+    await take_over(store, rig)
+    assert (await api.client.post(f"/v1/sessions/{rig.root}/pause", headers=api.auth())).status_code == 200
+    assert (await api.client.post(f"/v1/sessions/{rig.root}/resume", headers=api.auth())).status_code == 200
+
+    resumed = await resume_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await rig.laptop.connect()
+    await asyncio.sleep(0.5)
+
+    assert "Stopped before the computer reported a result" in resumed["content"]
+    assert not (rig.folder / "log.txt").exists()
