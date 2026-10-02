@@ -154,6 +154,7 @@ class StreamingToolExecutor:
         bundle: Any | None = None,
         platform_client: Any | None = None,
         expert_transcript: Any | None = None,
+        start_early: bool = True,
     ) -> None:
         self._session = session
         self._lease = lease
@@ -186,6 +187,7 @@ class StreamingToolExecutor:
         self._bundle = bundle
         self._platform_client = platform_client
         self._expert_transcript = expert_transcript
+        self._start_early = start_early
 
         self._tracked: list[TrackedTool] = []
         self._sibling_aborted: bool = False
@@ -210,7 +212,9 @@ class StreamingToolExecutor:
 
         Called synchronously from the streaming callback.  Must be called
         from within a running event loop (which is guaranteed when called
-        from an async streaming context).
+        from an async streaming context).  An executor that does not start
+        early only queues it: ``get_all_results`` starts it once the response
+        is saved.
         """
         if self._discarded:
             return
@@ -232,7 +236,7 @@ class StreamingToolExecutor:
         )
         self._tracked.append(tracked)
 
-        if self._can_execute(tracked):
+        if self._start_early and self._can_execute(tracked):
             self._start_execution(tracked)
 
     async def get_all_results(self) -> list[dict[str, Any]]:

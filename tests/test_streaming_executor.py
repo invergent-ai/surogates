@@ -90,6 +90,7 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
         saga=overrides.get("saga"),
         tool_guardrails=overrides.get("tool_guardrails"),
         platform_client=overrides.get("platform_client"),
+        start_early=overrides.get("start_early", True),
     )
 
 
@@ -908,3 +909,24 @@ class TestDetachedTurn:
         results = [c for c in store.emit_event.call_args_list if c.args[1] == EventType.TOOL_RESULT]
         assert results == []
         assert dispatched == ["write_file"]
+
+
+class TestNoEarlyStart:
+    """A local-folder session's calls start only once the response is saved."""
+
+    @pytest.mark.asyncio
+    async def test_an_executor_that_starts_nothing_early_waits_for_the_response(self) -> None:
+        dispatched: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            return '{"ok": true}'
+
+        tools = _make_registry("read_file")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools, start_early=False)
+        executor.add_tool(_make_tool_call("read_file", {"path": "a"}, call_id="tc_1"))
+        await asyncio.sleep(0.05)
+        assert dispatched == []
+        await executor.get_all_results()
+        assert dispatched == ["read_file"]
