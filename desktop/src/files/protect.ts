@@ -68,10 +68,14 @@ export function protectedInFolder(folder: string, key: string): boolean {
   );
 }
 
-// What lies after a .git component.
+// What lies after a .git component. A paused rebase or cherry-pick keeps a todo
+// whose exec lines git runs on --continue.
+const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
+
 function runsCode(rest: string[]): boolean {
   const last = rest.at(-1);
-  return (last !== undefined && GIT_CONFIGS.has(last)) || rest.includes("hooks") || rest[0] === "worktrees";
+  const first = rest[0];
+  return (last !== undefined && GIT_CONFIGS.has(last)) || rest.includes("hooks") || (first !== undefined && GIT_STATE.has(first));
 }
 
 export function inFolderRefusal(path: string): string {

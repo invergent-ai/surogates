@@ -145,6 +145,8 @@ const GIT_RUNS_CODE = [
   ".git/modules/sub/config", ".git/modules/sub/hooks/pre-commit", ".git/modules/sub/hooks",
   ".git/worktrees/w/config.worktree", ".git/worktrees/w/commondir", ".git/worktrees/w/anything", ".git/worktrees",
   ".git/modules/a/modules/b/config",
+  // A paused rebase or cherry-pick runs the exec lines of its todo on --continue.
+  ".git/rebase-merge/git-rebase-todo", ".git/rebase-apply/next", ".git/sequencer/todo",
 ];
 const GIT_RUNS_CODE_ANYWHERE = [
   ...GIT_RUNS_CODE,
