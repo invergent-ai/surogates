@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
-from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, refusal
+from surogates.devices.sandbox import INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.tool_guardrails import (
@@ -1235,11 +1235,17 @@ async def _run_single_tool(
     if checkpoint_hash:
         tool_call_data["checkpoint_hash"] = checkpoint_hash
 
-    _call_event_id = await store.emit_event(
-        session.id,
-        EventType.TOOL_CALL,
-        tool_call_data,
-    )
+    # A call resumed after its worker stopped keeps its tool.call event, so
+    # its operations are found in the journal under the same invocation.
+    replay_of: int | None = tc.get("_replay_of")
+    if replay_of is None:
+        _call_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_CALL,
+            tool_call_data,
+        )
+    else:
+        _call_event_id = replay_of
 
     if parse_error is not None:
         result_content = json.dumps(
@@ -1291,6 +1297,11 @@ async def _run_single_tool(
         # The computer checks containment; this host cannot resolve its paths.
         workspace_path=None if on_device else workspace_path,
     )
+    if replay_of is not None:
+        # A resumed call passed this check before its operations reached the
+        # journal.  Checking again would ask for the approval its first run
+        # spent, and approving it again would run the call a second time.
+        decision = replace(decision, allowed=True, reason="resumed")
     if not decision.allowed and decision.overridable:
         # A human may already have approved this exact call.  The grant
         # query lives HERE, not in ``gate.check``: the gate is a frozen,
@@ -1386,7 +1397,7 @@ async def _run_single_tool(
             "content": result_content,
         }
 
-    if log_policy_allowed:
+    if log_policy_allowed and replay_of is None:
         await store.emit_event(
             session.id,
             EventType.POLICY_ALLOWED,
@@ -1410,7 +1421,7 @@ async def _run_single_tool(
     # the model would keep calling the same forbidden tool on the next
     # turn).
     allow_list = session.config.get("tool_allow_list") if session.config else None
-    if allow_list and tool_name not in allow_list:
+    if replay_of is None and allow_list and tool_name not in allow_list:
         reason = (
             f"Tool '{tool_name}' is not in this session's allow-list. "
             f"Allowed: {sorted(allow_list)}"
@@ -1448,7 +1459,7 @@ async def _run_single_tool(
     # --- Saga step tracking ---
     saga_step = None
     _active_saga_id: str | None = None
-    if saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
+    if replay_of is None and saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
         from surogates.governance.events import saga_step_event as _sse
         from surogates.governance.saga.state_machine import StepState as _StepState
 
@@ -1717,6 +1728,8 @@ async def _run_single_tool(
         tool_use_id=tool_call_id,
         writer=spill_writer,
     )
+    if replay_of is not None and device_call is not None and await device_call.diverged():
+        result_content = INTERRUPTED
 
     # Sanitise the event payload — frontend SSE consumers must not see
     # real filesystem paths.  The LLM still receives the raw

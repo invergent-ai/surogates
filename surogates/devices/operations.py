@@ -533,6 +533,16 @@ class DeviceOperations:
             for row in rows
         ]
 
+    async def recorded(self, calling_session_id: UUID, invocation_id: str) -> int:
+        """How many operations of one invocation are in the journal."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(func.count()).select_from(DeviceOperation).where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.invocation_id == invocation_id,
+                )
+            )).scalar_one()
+
     async def complete(
         self,
         device_id: UUID,
@@ -607,16 +617,32 @@ class JournalRunner:
         self._invocation_id = invocation_id
         self._lease_token = lease_token
         self._ordinal = 0
+        self._conflicted = False
 
     async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self._conflicted:
+            # A resumed call that took another path asks the computer for nothing more.
+            raise OperationConflict(f"{self._invocation_id} took another path than its first run")
         self._ordinal += 1
-        return await self._operations.run(OperationRequest(
-            device_id=self._device_id,
-            root_session_id=self._root_session_id,
-            calling_session_id=self._calling_session_id,
-            invocation_id=self._invocation_id,
-            ordinal=self._ordinal,
-            kind=kind,
-            args=args,
-            lease_token=self._lease_token,
-        ))
+        try:
+            return await self._operations.run(OperationRequest(
+                device_id=self._device_id,
+                root_session_id=self._root_session_id,
+                calling_session_id=self._calling_session_id,
+                invocation_id=self._invocation_id,
+                ordinal=self._ordinal,
+                kind=kind,
+                args=args,
+                lease_token=self._lease_token,
+            ))
+        except OperationConflict:
+            self._conflicted = True
+            raise
+
+    async def diverged(self) -> bool:
+        """Whether this call, resumed, asked for other operations than the run it resumes."""
+        if self._conflicted:
+            return True
+        return self._ordinal < await self._operations.recorded(
+            self._calling_session_id, self._invocation_id,
+        )

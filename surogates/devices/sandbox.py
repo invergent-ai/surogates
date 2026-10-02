@@ -32,6 +32,14 @@ UNAVAILABLE_TOOLS = frozenset({"run_coding_agent", "idea_tree", "dispatch_experi
 
 DEVICE_SANDBOX_ID = "device"
 
+# The result of a resumed call that asked the computer for other operations
+# than its first run: what happened there cannot be told from the journal.
+INTERRUPTED = json.dumps({"error": (
+    "interrupted: this call was resumed after its worker stopped, and the resumed run "
+    "did not match what had already been sent to the computer. Some of its effects may "
+    "have happened. Check the folder before repeating it."
+)})
+
 
 def refusal(name: str) -> str:
     """The tool error for a feature switched off for sessions on a local folder."""
@@ -50,14 +58,22 @@ class DeviceCall:
     the computer through the same call.
     """
 
-    def __init__(self, *, tools: ToolRegistry, workspace_io: DeviceWorkspaceIO, task_id: str) -> None:
+    def __init__(
+        self, *, tools: ToolRegistry, workspace_io: DeviceWorkspaceIO, task_id: str,
+        runner: JournalRunner | None = None,
+    ) -> None:
         self._tools = tools
         self._workspace_io = workspace_io
         self._task_id = task_id
+        self._runner = runner
 
     @property
     def workspace_io(self) -> DeviceWorkspaceIO:
         return self._workspace_io
+
+    async def diverged(self) -> bool:
+        """Whether this call, resumed, took another path than its first run."""
+        return self._runner is not None and await self._runner.diverged()
 
     async def dispatch(self, name: str, args: dict[str, Any]) -> str:
         """Run a sandbox tool's handler on the computer."""
@@ -121,6 +137,7 @@ def device_call_for(
         tools=tools,
         workspace_io=DeviceWorkspaceIO(runner, root=session.config["workspace_path"]),
         task_id=root,
+        runner=runner,
     )
 
 
