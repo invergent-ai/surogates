@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CLOSE_TIMEOUT_MS, DeviceLink, type LinkHandlers, type LinkStatus } from "../src/link/client.js";
 import type { Operation } from "../src/link/protocol.js";
@@ -99,6 +99,19 @@ describe("staying connected", () => {
     expect(Date.now() - began).toBeLessThan(3_500);
     // 1006: the app cut the link itself, it was not a protocol close.
     expect(server.closes[0]).toBe(1006);
+  });
+
+  it("still drops a silent server when the wall clock jumps back an hour", async () => {
+    const { server } = await connected({ heartbeatS: 1, pong: false });
+    await server.until(() => pings(server) >= 1, 5_000);
+    const wall = Date.now;
+    // `wall` keeps the real clock that the spy replaces.
+    vi.spyOn(Date, "now").mockImplementation(() => wall() - 3_600_000);
+    try {
+      await server.until(() => server.connections >= 2, 5_000);
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("counts any frame as the server answering, not only a pong", async () => {

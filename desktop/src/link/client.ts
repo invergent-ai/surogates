@@ -128,7 +128,8 @@ export class DeviceLink {
     });
     this.socket = socket;
     this.welcomed = false;
-    // When the oldest ping that no frame has followed went out.
+    // When the oldest ping that no frame has followed went out, on the monotonic
+    // clock: a wall clock set back would hold a silent server up.
     let pingedAt: number | null = null;
     let pinger: NodeJS.Timeout | null = null;
     let final: LinkStatus | undefined;
@@ -174,7 +175,7 @@ export class DeviceLink {
             this.welcomed = true;
             const heartbeatMs = frame.welcome.heartbeatS * 1000;
             pinger = setInterval(() => {
-              const now = Date.now();
+              const now = performance.now();
               // No frame within two heartbeats of a ping: the server is gone.
               if (pingedAt !== null && now - pingedAt >= 2 * heartbeatMs - TICK_SLACK_MS) {
                 socket.terminate();
