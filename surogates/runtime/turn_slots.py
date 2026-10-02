@@ -66,6 +66,9 @@ class TurnSlots:
         # The task the turn runs in: detaching cancels it.
         self._task = task
         self.detached = False
+        # Set when the turn is interrupted or ended: a take-back waiting for
+        # a semaphore slot stops waiting.
+        self._stop_waiting = asyncio.Event()
 
     @contextlib.asynccontextmanager
     async def activity(self) -> AsyncIterator[None]:
@@ -133,9 +136,14 @@ class TurnSlots:
                         await self._take_back()
 
     async def release_owned(self) -> None:
-        """End the turn: give back what it still holds, and never take anything again."""
+        """End the turn: give back what it still holds, and never take anything again.
+
+        It does not wait behind a take-back blocked on a full worker: that one
+        stops waiting.
+        """
+        self._ended = True
+        self._stop_waiting.set()
         async with self._lock:
-            self._ended = True
             await self._give_back()
         if self._gate_held:
             # Nothing gives it back later, and the gate has no TTL.
@@ -168,6 +176,14 @@ class TurnSlots:
         self._ended = True
         if self._task is not None and self._task is not asyncio.current_task():
             self._task.cancel()
+
+    def interrupt(self) -> None:
+        """Let a take-back blocked on a full worker go on without its slot.
+
+        An interrupted turn only has to reach its interrupt check and stop; it
+        does that without a semaphore slot rather than wait for one.
+        """
+        self._stop_waiting.set()
 
     async def _give_back_if_all_waiting(self) -> None:
         if self.all_waiting:
@@ -225,8 +241,26 @@ class TurnSlots:
                     self._org_id, self._agent_id, exc_info=True,
                 )
         if not self._semaphore_held:
-            await self._semaphore.acquire()
-            self._semaphore_held = True
+            self._semaphore_held = await self._acquire_semaphore()
+
+    async def _acquire_semaphore(self) -> bool:
+        """Take a semaphore slot; False if the turn was interrupted or ended first."""
+        if self._stop_waiting.is_set():
+            return False
+        acquire = asyncio.ensure_future(self._semaphore.acquire())
+        stop = asyncio.ensure_future(self._stop_waiting.wait())
+        try:
+            await asyncio.wait({acquire, stop}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            if acquire.done() and not acquire.cancelled():
+                # The slot came as this take-back was stopped: give it back.
+                self._semaphore.release()
+            raise
+        finally:
+            stop.cancel()
+            # A no-op once done; a waiting acquire gives back what it was handed.
+            acquire.cancel()
+        return acquire.done() and not acquire.cancelled()
 
 
 current_turn: ContextVar[TurnSlots | None] = ContextVar("surogates_turn_slots", default=None)

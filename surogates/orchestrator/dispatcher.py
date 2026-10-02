@@ -907,6 +907,13 @@ class Orchestrator:
 
     async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
         delivered = self.interrupt_session(session_id, reason)
+        # A turn waiting to take its slot back on a full worker would not see
+        # the interrupt until a slot freed.  Only a delivered interrupt ends
+        # the turn, so only then may it go on without its slot.
+        if delivered:
+            for slots, dequeued in list(self._turns.values()):
+                if dequeued.session_id == str(session_id):
+                    slots.interrupt()
         if reason == "session deleted" and self._browser_pool is not None:
             try:
                 await self._browser_pool.destroy_for_session(str(session_id))

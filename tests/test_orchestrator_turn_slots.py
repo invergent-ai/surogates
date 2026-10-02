@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -198,3 +199,24 @@ async def test_shutdown_lets_a_turn_waiting_on_a_person_finish(monkeypatch):
     await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
     assert task.done() and not task.cancelled()
     assert enqueued == []
+
+
+async def test_an_interrupt_signal_reaches_the_turns_slots(monkeypatch):
+    orchestrator = orchestrator_with(CountingGate(held=1))
+    await orchestrator.semaphore.acquire()
+    started = asyncio.Event()
+    interrupted: list[bool] = []
+
+    async def process(session_id, *args, **kwargs):
+        slots = current_turn.get()
+        slots.interrupt = lambda: interrupted.append(True)
+        started.set()
+        await asyncio.sleep(0.2)
+
+    task, turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(started.wait(), 5.0)
+    # The interrupt reaches the turn only through its harness.
+    orchestrator._active_harnesses[UUID(turn.session_id)] = SimpleNamespace(interrupt=lambda message: None)
+    await orchestrator._handle_interrupt_signal(UUID(turn.session_id), "paused by user")
+    await asyncio.gather(task, return_exceptions=True)
+    assert interrupted == [True]

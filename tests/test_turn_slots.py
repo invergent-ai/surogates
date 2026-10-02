@@ -466,3 +466,72 @@ async def test_detaching_a_turn_cancels_it_and_it_takes_no_slot_again():
     assert gate.held == 0 and gate.calls.count("release") == 1
     await semaphore.acquire()
     assert semaphore.locked(), "the semaphore slot was given back twice"
+
+
+async def _a_tool_call_blocked_taking_its_slot_back(slots: TurnSlots, semaphore: asyncio.Semaphore) -> asyncio.Task:
+    """A tool call waits, the turn gives its slot back, another turn takes it, and the call's wait ends."""
+    answered = asyncio.Event()
+
+    async def tool_call() -> None:
+        async with slots.activity():
+            async with slots.waiting():
+                await answered.wait()
+
+    call = asyncio.create_task(tool_call())
+    await asyncio.sleep(0.05)
+    assert not semaphore.locked(), "all of the turn waits, so its slot went back"
+    await semaphore.acquire()  # another turn takes it
+    answered.set()
+    await asyncio.sleep(0.05)
+    assert not call.done(), "the worker is full, so the take-back waits"
+    return call
+
+
+def _unstick(call: asyncio.Task, semaphore: asyncio.Semaphore) -> None:
+    """A take-back still blocked means the test failed: release it so the test ends instead of hanging."""
+    if not call.done():
+        call.cancel()
+        semaphore.release()
+
+
+async def test_an_interrupted_turn_stops_waiting_for_a_slot_it_was_taking_back():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()  # the dispatch loop's, for this turn
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    async with slots.activity(), slots.joining():
+        call = await _a_tool_call_blocked_taking_its_slot_back(slots, semaphore)
+        try:
+            slots.interrupt()
+            await asyncio.wait_for(call, 1.0)
+        finally:
+            _unstick(call, semaphore)
+    await slots.release_owned()
+    assert semaphore.locked(), "a slot the turn never took back was released"
+
+
+async def test_ending_a_turn_does_not_wait_behind_a_blocked_take_back():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    async with slots.activity(), slots.joining():
+        call = await _a_tool_call_blocked_taking_its_slot_back(slots, semaphore)
+        try:
+            await asyncio.wait_for(slots.release_owned(), 1.0)
+            await asyncio.wait_for(call, 1.0)
+        finally:
+            _unstick(call, semaphore)
+    assert semaphore.locked(), "a slot the turn never took back was released"
+
+
+async def test_a_take_back_stopped_as_its_slot_arrives_keeps_no_slot():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    slots = TurnSlots(semaphore=semaphore, gate=None, org_id="", agent_id="", gate_held=False)
+    slots._semaphore_held = False  # it gave the slot back while it waited
+    taking = asyncio.create_task(slots._acquire_semaphore())
+    await asyncio.sleep(0.05)
+    semaphore.release()     # the slot comes:
+    await asyncio.sleep(0)  # the inner acquire takes it ...
+    taking.cancel()         # ... just before the take-back is stopped
+    await asyncio.gather(taking, return_exceptions=True)
+    assert not semaphore.locked(), "the slot that came as the take-back was stopped was lost"
