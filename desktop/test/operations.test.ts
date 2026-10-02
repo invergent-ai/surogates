@@ -58,6 +58,11 @@ describe("stat", () => {
     ["@-1.000000001", -1.000000001],
     ["@-1.5", -1.5],
     ["@0.000000001", 1e-9],
+    // These three tell the formula apart from its near misses: dropping the
+    // borrow for a negative time, dividing by 1e9, or dividing the whole count.
+    ["@-1.758663714", -1.7586637139999999],
+    ["@-0.128129134", -0.12812913399999992],
+    ["@1700000000.987654321", 1700000000.9876542],
   ])("answers the mtime of %s to the last bit, as CPython's st_mtime", async (time, expected) => {
     execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
     const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
