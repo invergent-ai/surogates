@@ -1728,17 +1728,28 @@ async def _run_single_tool(
     # as a real path, double-substitution of ``__WORKSPACE__/__WORKSPACE__``).
     sanitized_content = _sanitize_paths(result_content, workspace_path)
 
-    # Emit TOOL_RESULT event.
-    result_event_id = await store.emit_event(
-        session.id,
-        EventType.TOOL_RESULT,
-        {
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": sanitized_content,
-            "elapsed_ms": elapsed_ms,
-        },
-    )
+    # Emit TOOL_RESULT event.  On the user's computer only the worker that
+    # holds the session commits it: one that lost the lease must not answer
+    # for the worker now resuming the call from the journal.
+    from surogates.runtime.turn_slots import detach_turn
+    from surogates.session.store import LeaseNotHeldError
+
+    fence = {"lease_token": lease.lease_token} if on_device else {}
+    try:
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": sanitized_content,
+                "elapsed_ms": elapsed_ms,
+            },
+            **fence,
+        )
+    except LeaseNotHeldError:
+        detach_turn()
+        raise asyncio.CancelledError("another worker runs this session now") from None
 
     # Advance the cursor through the result event.
     try:

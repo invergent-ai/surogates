@@ -42,7 +42,7 @@ from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.harness.tool_exec import execute_single_tool
-from surogates.runtime.turn_slots import current_turn
+from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
@@ -1770,6 +1770,55 @@ async def test_a_tool_call_is_journaled_under_its_own_event(laptop_rig, session_
     assert invocations == {f"{call_event}:call_1"}
 
 
+async def take_over(store: SessionStore, rig):
+    """Another worker takes the session: the rig's lease is released and a new one taken."""
+    await store.release_lease(rig.root, rig.lease.lease_token)
+    rig.lease = await store.try_acquire_lease(rig.root, "worker-b", ttl_seconds=600)
+    return rig.lease
+
+
+async def test_a_worker_that_lost_the_session_commits_no_result(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    stale = rig.lease
+    await take_over(store, rig)
+    with pytest.raises(asyncio.CancelledError):
+        await tool_call(
+            rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "a"},
+            redis_client=redis_client, session_factory=session_factory, lease=stale,
+        )
+    assert await store.get_events(rig.root, types=[EventType.TOOL_RESULT]) == []
+    assert not (rig.folder / "a.md").exists()
+
+
+async def test_a_dispatched_turn_that_lost_the_session_stops(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    stale = rig.lease
+    await take_over(store, rig)
+    turn: list[TurnSlots] = []
+
+    async def run_turn() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity():
+            await tool_call(
+                rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "a"},
+                redis_client=redis_client, session_factory=session_factory, lease=stale,
+            )
+
+    task = asyncio.create_task(run_turn())
+    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15.0)
+    assert task.cancelled() and turn[0].detached
+    assert await store.get_events(rig.root, types=[EventType.TOOL_RESULT]) == []
+
+
 async def test_the_process_tool_asks_the_computer(laptop_rig, session_factory, redis_client):
     rig = laptop_rig
     await rig.laptop.connect()
@@ -2272,6 +2321,35 @@ async def test_a_stopped_wait_says_the_computer_is_no_longer_awaited(
     with pytest.raises(asyncio.CancelledError):
         await waiting
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_detached_wait_leaves_the_session_waiting(laptop_rig, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig  # the laptop stays disconnected
+    ops = noticing_journal(session_factory, redis_client)
+    turn: list[TurnSlots] = []
+
+    async def run_turn() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity():
+            await ops.run(request_for(rig.device_id, rig.root))
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    task = asyncio.create_task(run_turn())
+    await eventually(says_waiting)
+    turn[0].detach()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    # Another worker carries the wait on: the operation stays open and the session still waits.
+    assert await has_pending(rig.ops, rig.device_id)
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
 
 
 async def test_a_computer_lost_after_delivery_is_waited_for_too(

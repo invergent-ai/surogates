@@ -33,7 +33,7 @@ from surogates.devices.binding import BIND, binding_of, device_of
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
-from surogates.runtime.turn_slots import turn_waiting
+from surogates.runtime.turn_slots import turn_detached, turn_waiting
 
 if TYPE_CHECKING:
     from surogates.devices.waits import DeviceWaitNotice
@@ -286,7 +286,7 @@ class DeviceOperations:
                     return waiter.result()
         finally:
             if away:
-                await self._notice.back(request)
+                await self._notice.back(request, announce=not turn_detached())
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""

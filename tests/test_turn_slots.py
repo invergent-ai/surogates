@@ -405,3 +405,34 @@ async def test_without_a_turn_the_helpers_do_nothing():
         async with turn_joining():
             async with turn_waiting():
                 pass
+
+
+async def test_detaching_a_turn_cancels_it_and_it_takes_no_slot_again():
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()
+    gate = CountingGate(held=1)
+    turn: list[TurnSlots] = []
+    waiting = asyncio.Event()
+
+    async def run_turn() -> None:
+        slots = TurnSlots(
+            semaphore=semaphore, gate=gate, org_id="org", agent_id="agent",
+            gate_held=True, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        try:
+            async with slots.activity(), slots.joining(), slots.activity(), slots.waiting():
+                waiting.set()
+                await asyncio.Event().wait()
+        finally:
+            await slots.release_owned()
+
+    task = asyncio.create_task(run_turn())
+    await asyncio.wait_for(waiting.wait(), 5.0)
+    assert turn[0].all_waiting
+    turn[0].detach()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled() and turn[0].detached
+    assert gate.held == 0 and gate.calls.count("release") == 1
+    await semaphore.acquire()
+    assert semaphore.locked(), "the semaphore slot was given back twice"

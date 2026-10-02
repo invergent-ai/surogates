@@ -81,7 +81,7 @@ from surogates.harness.tool_schemas import (
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
-from surogates.runtime.turn_slots import turn_joining
+from surogates.runtime.turn_slots import detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 
@@ -848,9 +848,9 @@ class AgentHarness(
 
         If renewal fails because the lease no longer belongs to us
         (:class:`LeaseNotHeldError`), another worker has taken over the
-        session.  Request an interrupt so the main loop exits cleanly
-        instead of racing against the new worker and writing duplicate
-        events.  Transient DB errors are retried on the next tick.
+        session.  Detach the turn so it stops instead of racing against
+        the new worker and writing duplicate events.  Transient DB errors
+        are retried on the next tick.
         """
         while True:
             try:
@@ -862,11 +862,14 @@ class AgentHarness(
                 raise
             except LeaseNotHeldError:
                 logger.warning(
-                    "Session %s: lease stolen by another worker, "
-                    "interrupting current loop",
+                    "Session %s: lease taken by another worker, stopping the turn",
                     session_id,
                 )
-                self.interrupt("lease lost — another worker took over")
+                # Stopped where it stands: the new owner resumes what it left
+                # unfinished, so nothing is compensated or answered here.
+                # Outside a dispatched turn there is no task to stop.
+                if not detach_turn():
+                    self.interrupt("lease lost — another worker took over")
                 return
             except Exception:
                 logger.debug(

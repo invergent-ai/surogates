@@ -13,6 +13,8 @@ import pytest
 from surogates.harness.streaming_executor import (
     StreamingToolExecutor,
 )
+from surogates.runtime.turn_slots import current_turn
+from tests.test_turn_slots import held_turn
 
 
 def _make_tool_call(name: str, args: dict | None = None, call_id: str | None = None) -> dict:
@@ -869,3 +871,40 @@ class TestStreamingExecutorGuardrails:
 
         assert tools.dispatch.calls == 5
         assert all("guardrail" not in (r.get("content") or "") for r in results)
+
+
+class TestDetachedTurn:
+    """A detached turn's calls are the next worker's to resume."""
+
+    @pytest.mark.asyncio
+    async def test_a_detached_turn_answers_no_call_and_starts_no_more(self) -> None:
+        from surogates.session.events import EventType
+
+        started = asyncio.Event()
+        dispatched: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            started.set()
+            await asyncio.Event().wait()
+
+        store = _make_store()
+        # write_file runs alone and aborts no sibling, so tc_2 waits in the queue.
+        tools = _make_registry("write_file")
+        tools.dispatch = mock_dispatch
+        slots, _semaphore, _gate = await held_turn()
+        token = current_turn.set(slots)
+        try:
+            executor = _make_executor(store=store, tools=tools)
+            executor.add_tool(_make_tool_call("write_file", {"path": "a"}, call_id="tc_1"))
+            executor.add_tool(_make_tool_call("write_file", {"path": "b"}, call_id="tc_2"))
+            await asyncio.wait_for(started.wait(), 5.0)
+            slots.detach()
+            # As cancelling the turn's gather over its tool tasks does.
+            executor._tracked[0].task.cancel()
+            await asyncio.sleep(0.05)
+        finally:
+            current_turn.reset(token)
+        results = [c for c in store.emit_event.call_args_list if c.args[1] == EventType.TOOL_RESULT]
+        assert results == []
+        assert dispatched == ["write_file"]

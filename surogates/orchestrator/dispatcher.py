@@ -480,6 +480,7 @@ class Orchestrator:
             # The dispatch loop took a tenant slot only for a dequeued session.
             gate_held=dequeued is not None and self._turn_gate is not None,
             session_id=str(session_id),
+            task=asyncio.current_task(),
         )
         token = current_turn.set(slots)
         try:

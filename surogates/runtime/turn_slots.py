@@ -45,6 +45,7 @@ class TurnSlots:
         agent_id: str,
         gate_held: bool,
         session_id: str = "",
+        task: asyncio.Task[Any] | None = None,
     ) -> None:
         self._semaphore = semaphore
         self._gate = gate
@@ -61,6 +62,9 @@ class TurnSlots:
         # Serialises giving back and taking back; the counters change outside
         # it, so a cancellation cannot leave them wrong.
         self._lock = asyncio.Lock()
+        # The task the turn runs in: detaching cancels it.
+        self._task = task
+        self.detached = False
 
     @contextlib.asynccontextmanager
     async def activity(self) -> AsyncIterator[None]:
@@ -133,8 +137,28 @@ class TurnSlots:
                 self._org_id, self._agent_id, self._session_id,
             )
 
+    @property
+    def all_waiting(self) -> bool:
+        """Whether every activity still counted is waiting on something outside the worker."""
+        return self._active > 0 and self._waiting >= self._active
+
+    def detach(self) -> None:
+        """Stop the turn so another worker resumes it.
+
+        Its task is cancelled and what it waits on is left as it is: an open
+        operation stays in the journal.  It never takes a slot again; what it
+        still holds is given back when the dispatcher ends it.  Called from
+        the turn's own task, it cancels nothing: the caller unwinds itself.
+        """
+        if self.detached:
+            return
+        self.detached = True
+        self._ended = True
+        if self._task is not None and self._task is not asyncio.current_task():
+            self._task.cancel()
+
     async def _give_back_if_all_waiting(self) -> None:
-        if self._active > 0 and self._waiting >= self._active:
+        if self.all_waiting:
             await self._give_back()
 
     async def _give_back(self) -> None:
@@ -206,3 +230,18 @@ def turn_joining() -> contextlib.AbstractAsyncContextManager[None]:
     """The current turn's joining(), or nothing outside a dispatched turn."""
     slots = current_turn.get()
     return slots.joining() if slots is not None else contextlib.nullcontext()
+
+
+def detach_turn() -> bool:
+    """Detach the current turn; False outside a dispatched turn."""
+    slots = current_turn.get()
+    if slots is None:
+        return False
+    slots.detach()
+    return True
+
+
+def turn_detached() -> bool:
+    """Whether the current turn was detached: what it leaves unfinished is another worker's to resume."""
+    slots = current_turn.get()
+    return slots is not None and slots.detached

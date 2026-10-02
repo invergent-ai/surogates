@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from surogates.runtime.turn_slots import turn_detached
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -342,7 +343,7 @@ class StreamingToolExecutor:
         """
         if self._sibling_aborted or self._discarded:
             return False
-        if self._interrupt_check():
+        if self._interrupt_check() or turn_detached():
             return False
 
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]
@@ -462,7 +463,10 @@ class StreamingToolExecutor:
                 reason = "cancelled (sibling error)"
             tool.result = make_skipped_tool_result(tool.tool_call, reason=reason)
             tool.errored = True
-            await self._emit_cancelled_result_event(tool)
+            # A detached turn's calls are the next worker's to resume: a
+            # cancelled result committed now would answer them.
+            if not turn_detached():
+                await self._emit_cancelled_result_event(tool)
         except Exception as exc:
             logger.exception(
                 "Streaming executor: tool %s failed",
