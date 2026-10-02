@@ -2000,6 +2000,30 @@ async def test_a_resumed_call_that_stops_short_is_reported_interrupted(laptop_ri
     assert (rig.folder / "notes.md").read_text() == "new\n"
 
 
+async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    (rig.folder / "notes.md").write_text("one\ntwo\nthree\n")
+    patch = {"path": "notes.md", "old_string": "two", "new_string": "2"}
+    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "notes.md"}, **io)
+    first = await tool_call(rig, store, tools, "call_2", "patch", patch, **io)
+    await forget_result(store, session_factory, rig.root, "call_2")
+    # A new worker has not seen the read; the patch asks the computer for the same operations all the same.
+    file_ops._read_tracker.clear()
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_2", "patch", patch, **io)
+
+    assert resumed["content"] != INTERRUPTED
+    assert resumed["content"] == first["content"]
+    assert json.loads(resumed["content"]).get("error") is None
+    assert (rig.folder / "notes.md").read_text() == "one\n2\nthree\n"
+
+
 def model_call(call_id: str, name: str, args: dict) -> dict:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
 
