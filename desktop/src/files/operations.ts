@@ -96,11 +96,10 @@ function stat(args: Record<string, unknown>, { folder }: Context): unknown {
 }
 
 // An open file that is a regular file; refused otherwise, before any byte moves.
-function regular(fd: number, key: string): { mode: number; nlink: number } {
+function regular(fd: number, key: string): void {
   const st = fstatSync(fd);
   if (st.isDirectory()) throw osError("EISDIR", key);
   if (!st.isFile()) throw osError("EINVAL", key, "Not a regular file");
-  return { mode: st.mode & 0o7777, nlink: st.nlink };
 }
 
 function read(args: Record<string, unknown>, { folder }: Context): string {
@@ -120,7 +119,7 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
     if (size > MAX_PAYLOAD_BYTES) throw EFBIG;
     return buffer.subarray(0, size).toString("base64");
   } finally {
-    closeSync(fd);
+    io(key, () => closeSync(fd));
   }
 }
 
@@ -129,6 +128,8 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   const key = keyInFolder(folder, text(args, "key"));
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
   const encoded = text(args, "data");
+  // The check comes first: the pattern overflows the regex engine's stack on megabytes of text.
+  if (encoded.length > Math.ceil(MAX_PAYLOAD_BYTES / 3) * 4) throw EFBIG;
   if (!BASE64.test(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_PAYLOAD_BYTES) throw EFBIG;
@@ -150,14 +151,20 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
     mode = existing.mode & 0o7777;
   }
   const temporary = join(parent, `.surogate-${randomUUID()}.tmp`);
-  const fd = io(temporary, () =>
+  const fd = io(key, () =>
     openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o666));
   try {
     try {
       for (let written = 0; written < data.length;) written += io(key, () => writeSync(fd, data, written));
-      if (mode !== null) fchmodSync(fd, mode);
+      if (mode !== null) {
+        try {
+          fchmodSync(fd, mode);
+        } catch {
+          // The cloud writes on without the mode.
+        }
+      }
     } finally {
-      closeSync(fd);
+      io(key, () => closeSync(fd));
     }
     io(key, () => renameSync(temporary, key));
   } catch (error) {

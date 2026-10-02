@@ -53,6 +53,17 @@ describe("stat", () => {
     expect(await run("stat", { key: `${folder}/sub` })).toMatchObject({ ok: { is_dir: true } });
   });
 
+  it.each([
+    ["@1700000000.123456789", 1700000000.1234567],
+    ["@-1.000000001", -1.000000001],
+    ["@-1.5", -1.5],
+    ["@0.000000001", 1e-9],
+  ])("answers the mtime of %s to the last bit, as CPython's st_mtime", async (time, expected) => {
+    execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
+    const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
+    expect(answer.ok.mtime).toBe(expected);
+  });
+
   it("answers null for anything it cannot stat", async () => {
     for (const key of [`${folder}/missing`, `${folder}/a\0`, `${base}/outside/o.txt`, `${folder}/link-in`]) {
       expect(await run("stat", { key })).toEqual({ ok: null });
@@ -74,6 +85,12 @@ describe("read", () => {
     });
     const head = await run("read", { key: `${folder}/big.bin`, max_bytes: 8192 });
     expect(Buffer.from((head as { ok: string }).ok, "base64").length).toBe(8192);
+  });
+
+  it("answers a file of exactly 1 MiB", async () => {
+    writeFileSync(join(folder, "exact.bin"), Buffer.alloc(MAX_PAYLOAD_BYTES, 121));
+    const answer = await run("read", { key: `${folder}/exact.bin`, max_bytes: null });
+    expect(Buffer.from((answer as { ok: string }).ok, "base64").equals(Buffer.alloc(MAX_PAYLOAD_BYTES, 121))).toBe(true);
   });
 
   it("answers OS errors in Python's words", async () => {
@@ -176,6 +193,29 @@ describe("write", () => {
     expect(readFileSync(join(base, "outside", "o.txt"), "utf8")).toBe("outside\n");
   });
 
+  it("writes exactly 1 MiB", async () => {
+    const exact = Buffer.alloc(MAX_PAYLOAD_BYTES, 122);
+    expect(await run("write", { key: `${folder}/exact.bin`, data: b64(exact) })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "exact.bin")).equals(exact)).toBe(true);
+  });
+
+  it("names the key, not the temporary file, when it cannot create one", async () => {
+    chmodSync(folder, 0o555);
+    try {
+      expect(await run("write", { key: `${folder}/new.txt`, data: b64("x") })).toEqual({
+        error: { type: "os", code: "EACCES", message: `Permission denied: '${folder}/new.txt'` },
+      });
+    } finally {
+      chmodSync(folder, 0o755);
+    }
+  });
+
+  it("answers data far over 1 MiB as too large, without running the base64 check on it", async () => {
+    expect(await run("write", { key: `${folder}/x.txt`, data: "A".repeat(6_000_000) })).toEqual({
+      error: { type: "os", code: "EFBIG", message: TOO_LARGE },
+    });
+  });
+
   it("refuses data that is not standard padded base64, or over 1 MiB", async () => {
     for (const data of ["@@", "YQ", "YQ=\n", "Y-8_"]) {
       expect(await run("write", { key: `${folder}/x.txt`, data })).toMatchObject({ error: { type: "value" } });
@@ -245,6 +285,14 @@ describe("any kind", () => {
     expect(await run("run", { command: "true" })).toEqual({
       error: { type: "unsupported", message: "This computer cannot do 'run' yet" },
     });
+  });
+
+  it("answers the names every object has as kinds this computer does not do", async () => {
+    for (const kind of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+      expect(await run(kind, {})).toEqual({
+        error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` },
+      });
+    }
   });
 
   it("refuses arguments of the wrong type", async () => {
