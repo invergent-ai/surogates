@@ -12,6 +12,42 @@ export const TOO_LARGE: Outcome = {
   error: { type: "too_large", message: "The computer's result is too large to send" },
 };
 
+function unsendable(why: string): Outcome {
+  return { error: { type: "other", message: `The operation ran, but its result could not be sent: ${why}` } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// What goes in the journal and on the wire: an outcome the server records, and
+// nothing it would refuse. A refused result closes the link with 4400, and the
+// journal would send it again at every welcome, forever. So the outcome is
+// round-tripped through JSON (what JSON drops or cannot hold is found here, not
+// by the server), then needs exactly one of ok and error, an error that names
+// its type and message, and a frame that fits (surogates/devices/link.py).
+function sendable(operation: Operation, outcome: unknown): Outcome {
+  let value: unknown;
+  try {
+    // opResult sends an undefined ok as null, which JSON would drop.
+    const kept = isRecord(outcome) ? opResult(operation, outcome as Outcome).outcome : outcome;
+    value = JSON.parse(JSON.stringify(kept)) as unknown;
+  } catch (error) {
+    return unsendable(error instanceof Error ? error.message : String(error));
+  }
+  if (!isRecord(value) || ["ok", "error"].filter((key) => key in value).length !== 1) {
+    return unsendable("it holds neither an ok nor an error, or both");
+  }
+  if ("error" in value) {
+    const error = value.error;
+    if (!isRecord(error) || typeof error.type !== "string" || typeof error.message !== "string") {
+      return unsendable("its error has no type and message");
+    }
+  }
+  // String length counts UTF-16 units, never fewer than the server counts.
+  return JSON.stringify(opResult(operation, value as Outcome)).length > MAX_FRAME_CHARS ? TOO_LARGE : (value as Outcome);
+}
+
 export interface Executor {
   run(operation: Operation, signal: AbortSignal): Promise<Outcome>;
 }
@@ -63,12 +99,10 @@ export class OperationRunner {
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {
     let outcome: Outcome;
     try {
-      outcome = await this.executor.run(operation, signal);
-      // String length counts UTF-16 units, never fewer than the server counts. An
-      // outcome that is not JSON (a BigInt, a cycle) fails here, and is answered below.
-      if (JSON.stringify(opResult(operation, outcome)).length > MAX_FRAME_CHARS) outcome = TOO_LARGE;
+      outcome = sendable(operation, await this.executor.run(operation, signal));
     } catch (error) {
-      outcome = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
+      const message = error instanceof Error ? error.message : String(error);
+      outcome = sendable(operation, { error: { type: "other", message } });
     } finally {
       this.running.delete(operation.id);
     }

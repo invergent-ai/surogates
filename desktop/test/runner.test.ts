@@ -82,6 +82,19 @@ async function start(executor: Executor, journal = open(), onError?: (error: unk
 
 const results = (id: string) => server.received.filter((f) => f.type === "op_result" && f.id === id);
 
+// What the server's record() takes of an op_result (surogates/devices/link.py): a frame
+// of at most MAX_FRAME_CHARS whose outcome is a dict with exactly one of ok and error,
+// and an error that is a dict. Anything else closes 4400, and the row is resent forever.
+function accepted(frame: Record<string, unknown> | undefined): boolean {
+  const outcome = frame?.outcome;
+  if (typeof outcome !== "object" || outcome === null || Array.isArray(outcome)) return false;
+  const record = outcome as Record<string, unknown>;
+  const error = record.error;
+  return JSON.stringify(frame).length <= MAX_FRAME_CHARS
+    && ["ok", "error"].filter((key) => key in record).length === 1
+    && (!("error" in record) || (typeof error === "object" && error !== null && !Array.isArray(error)));
+}
+
 describe("running an operation", () => {
   it("runs it once and answers; a repeat gets the same answer without running again", async () => {
     const executor = new RecordingExecutor();
@@ -139,6 +152,17 @@ describe("a result too large for one frame", () => {
     server.send(opFrame("a"));
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual(TOO_LARGE);
+  });
+});
+
+describe("a failure too large for one frame", () => {
+  it("from an executor that rejects is answered too_large, not journaled as an oversized frame", async () => {
+    const { journal } = await start({ run: () => Promise.reject(new Error("x".repeat(MAX_FRAME_CHARS))) });
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual(TOO_LARGE);
+    expect(accepted(results("a")[0])).toBe(true);
+    expect(journal.unsent().map((row) => row.outcome)).toEqual([TOO_LARGE]);
   });
 });
 
@@ -206,6 +230,36 @@ describe("an outcome that is not an answer", () => {
     await server.until(() => results("a").length === 1 && results("b").length === 1);
     expect(results("a")[0]?.outcome).toMatchObject({ error: { type: "other" } });
     expect(results("b")[0]?.outcome).toEqual({ ok: "fine" });
+  });
+
+  it.each([
+    ["an error that is text", () => ({ error: "x" })],
+    ["an error with no message", () => ({ error: { type: "os" } })],
+    ["a function", () => ({ ok: () => 1 })],
+    ["a symbol", () => ({ ok: Symbol("s") })],
+    ["both an ok and an error", () => ({ ok: 1, error: { type: "os", message: "x" } })],
+    ["neither an ok nor an error", () => ({})],
+    ["nothing", () => undefined],
+    ["a list", () => [{ ok: 1 }]],
+  ])("holding %s is answered with a frame the server accepts, journaled as sent", async (_name, outcome) => {
+    const { journal } = await start({ run: () => Promise.resolve(outcome() as Outcome) });
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    const frame = results("a")[0];
+    expect(accepted(frame)).toBe(true);
+    expect(frame?.outcome).toMatchObject({ error: { type: "other" } });
+    expect(journal.unsent().map((row) => row.outcome)).toEqual([frame?.outcome]);
+  });
+
+  it.each([
+    ["an ok of null", { ok: null }, { ok: null }],
+    ["an ok of undefined", { ok: undefined }, { ok: null }],
+    ["an error with details", { error: { type: "os", code: "ENOENT", message: "gone" } }, undefined],
+  ])("holding %s is sent as it is", async (_name, outcome, sent) => {
+    await start({ run: () => Promise.resolve(outcome as Outcome) });
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual(sent ?? outcome);
   });
 
   it.each([
