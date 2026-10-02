@@ -21,7 +21,7 @@ from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -33,7 +33,7 @@ from surogates.devices.binding import BIND, binding_of, device_of
 from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
-from surogates.runtime.turn_slots import turn_waiting
+from surogates.runtime.turn_slots import turn_detached, turn_waiting
 
 if TYPE_CHECKING:
     from surogates.devices.waits import DeviceWaitNotice
@@ -112,6 +112,20 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+
+
+async def _check_lease(db: AsyncSession, request: OperationRequest) -> None:
+    """Refuse an operation from a worker that no longer holds its session's lease.
+
+    The lease row stays locked FOR SHARE until the operation commits, so a
+    worker taking the session over waits for it, then finds it in the journal.
+    """
+    current = (await db.execute(
+        text("SELECT lease_token FROM session_leases WHERE session_id = :id FOR SHARE"),
+        {"id": request.calling_session_id},
+    )).scalar_one_or_none()
+    if current is None or str(current) != request.lease_token:
+        raise DeviceOperationError("Another worker runs this session now")
 
 
 async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device: Any) -> None:
@@ -247,7 +261,7 @@ class DeviceOperations:
             if done:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
-            async with turn_waiting():
+            async with turn_waiting(resumable=True):
                 return await self._wait_watching(waiter, request)
         finally:
             waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
@@ -272,7 +286,7 @@ class DeviceOperations:
                     return waiter.result()
         finally:
             if away:
-                await self._notice.back(request)
+                await self._notice.back(request, announce=not turn_detached())
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""
@@ -394,6 +408,8 @@ class DeviceOperations:
             if device is None:
                 raise DeviceOperationError("This computer was removed")
             await _check_session(db, request, device)
+            if request.lease_token is not None:
+                await _check_lease(db, request)
             # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
             # count together and the limit is soft by their number; the count also includes
             # abandoned open operations, which cancellation (later work) will close.
@@ -517,6 +533,16 @@ class DeviceOperations:
             for row in rows
         ]
 
+    async def recorded(self, calling_session_id: UUID, invocation_id: str) -> int:
+        """How many operations of one invocation are in the journal."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(func.count()).select_from(DeviceOperation).where(
+                    DeviceOperation.calling_session_id == calling_session_id,
+                    DeviceOperation.invocation_id == invocation_id,
+                )
+            )).scalar_one()
+
     async def complete(
         self,
         device_id: UUID,
@@ -591,16 +617,32 @@ class JournalRunner:
         self._invocation_id = invocation_id
         self._lease_token = lease_token
         self._ordinal = 0
+        self._conflicted = False
 
     async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self._conflicted:
+            # A resumed call that took another path asks the computer for nothing more.
+            raise OperationConflict(f"{self._invocation_id} took another path than its first run")
         self._ordinal += 1
-        return await self._operations.run(OperationRequest(
-            device_id=self._device_id,
-            root_session_id=self._root_session_id,
-            calling_session_id=self._calling_session_id,
-            invocation_id=self._invocation_id,
-            ordinal=self._ordinal,
-            kind=kind,
-            args=args,
-            lease_token=self._lease_token,
-        ))
+        try:
+            return await self._operations.run(OperationRequest(
+                device_id=self._device_id,
+                root_session_id=self._root_session_id,
+                calling_session_id=self._calling_session_id,
+                invocation_id=self._invocation_id,
+                ordinal=self._ordinal,
+                kind=kind,
+                args=args,
+                lease_token=self._lease_token,
+            ))
+        except OperationConflict:
+            self._conflicted = True
+            raise
+
+    async def diverged(self) -> bool:
+        """Whether this call, resumed, asked for other operations than the run it resumes."""
+        if self._conflicted:
+            return True
+        return self._ordinal < await self._operations.recorded(
+            self._calling_session_id, self._invocation_id,
+        )

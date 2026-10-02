@@ -13,6 +13,8 @@ import pytest
 from surogates.harness.streaming_executor import (
     StreamingToolExecutor,
 )
+from surogates.runtime.turn_slots import current_turn
+from tests.test_turn_slots import held_turn
 
 
 def _make_tool_call(name: str, args: dict | None = None, call_id: str | None = None) -> dict:
@@ -88,6 +90,7 @@ def _make_executor(**overrides: Any) -> StreamingToolExecutor:
         saga=overrides.get("saga"),
         tool_guardrails=overrides.get("tool_guardrails"),
         platform_client=overrides.get("platform_client"),
+        start_early=overrides.get("start_early", True),
     )
 
 
@@ -475,6 +478,66 @@ class TestInterruptHandling:
         assert "skipped due to interrupt" in content, (
             f"expected interrupt reason, got: {results[0]['content']!r}"
         )
+
+
+DEVICE_CONFIG = {"execution": {"kind": "device", "device_id": str(uuid4())}, "workspace_path": "/w"}
+
+
+async def _cancelled_result_emits(config: dict) -> tuple[list[Any], Any]:
+    """Interrupt a streamed call mid-flight; the emits of its cancelled result, and the lease it ran under.
+
+    The store refuses, as the real one does, a result fenced by a lease another worker has taken.
+    """
+    from surogates.session.events import EventType
+    from surogates.session.store import LeaseNotHeldError
+
+    started = asyncio.Event()
+    interrupted = False
+
+    async def mock_dispatch(name, args, **kwargs):
+        started.set()
+        await asyncio.sleep(10)  # Will be cancelled.
+
+    async def emit_event(session_id, event_type, data, **kwargs):
+        if event_type == EventType.TOOL_RESULT and "lease_token" in kwargs:
+            raise LeaseNotHeldError("another worker holds the session")
+        return 1
+
+    store = _make_store()
+    store.emit_event = AsyncMock(side_effect=emit_event)
+    tools = _make_registry("read_file")
+    tools.dispatch = mock_dispatch
+    lease = _make_lease()
+    session = _make_session(config=config)
+    session.parent_id = None
+    executor = _make_executor(
+        store=store, tools=tools, lease=lease, session=session, interrupt_check=lambda: interrupted,
+    )
+    executor.add_tool(_make_tool_call("read_file", call_id="tc_1"))
+    await asyncio.wait_for(started.wait(), 5.0)
+    interrupted = True
+    executor.discard()
+    results = await executor.get_all_results()
+    assert len(results) == 1 and "skipped" in results[0]["content"].lower()
+    return [
+        call for call in store.emit_event.call_args_list
+        if call.args[1] == EventType.TOOL_RESULT and call.args[2].get("cancelled")
+    ], lease
+
+
+class TestCancelledResultOnALocalFolder:
+    """A stale worker's cancelled result must not answer a call the new worker resumes."""
+
+    @pytest.mark.asyncio
+    async def test_a_local_folder_result_is_fenced_by_the_lease_and_dropped_when_it_is_lost(self, caplog) -> None:
+        emits, lease = await _cancelled_result_emits(DEVICE_CONFIG)
+        assert [emit.kwargs for emit in emits] == [{"lease_token": lease.lease_token}]
+        assert "Failed to emit" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_cloud_result_is_not_fenced(self) -> None:
+        emits, _ = await _cancelled_result_emits({})
+        assert [emit.kwargs for emit in emits] == [{}]
 
 
 class TestToolBlockDetection:
@@ -869,3 +932,61 @@ class TestStreamingExecutorGuardrails:
 
         assert tools.dispatch.calls == 5
         assert all("guardrail" not in (r.get("content") or "") for r in results)
+
+
+class TestDetachedTurn:
+    """A detached turn's calls are the next worker's to resume."""
+
+    @pytest.mark.asyncio
+    async def test_a_detached_turn_answers_no_call_and_starts_no_more(self) -> None:
+        from surogates.session.events import EventType
+
+        started = asyncio.Event()
+        dispatched: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            started.set()
+            await asyncio.Event().wait()
+
+        store = _make_store()
+        # write_file runs alone and aborts no sibling, so tc_2 waits in the queue.
+        tools = _make_registry("write_file")
+        tools.dispatch = mock_dispatch
+        slots, _semaphore, _gate = await held_turn()
+        token = current_turn.set(slots)
+        try:
+            executor = _make_executor(store=store, tools=tools)
+            executor.add_tool(_make_tool_call("write_file", {"path": "a"}, call_id="tc_1"))
+            executor.add_tool(_make_tool_call("write_file", {"path": "b"}, call_id="tc_2"))
+            await asyncio.wait_for(started.wait(), 5.0)
+            slots.detach()
+            # As cancelling the turn's gather over its tool tasks does.
+            executor._tracked[0].task.cancel()
+            await asyncio.sleep(0.05)
+        finally:
+            current_turn.reset(token)
+        results = [c for c in store.emit_event.call_args_list if c.args[1] == EventType.TOOL_RESULT]
+        assert results == []
+        assert dispatched == ["write_file"]
+
+
+class TestNoEarlyStart:
+    """A local-folder session's calls start only once the response is saved."""
+
+    @pytest.mark.asyncio
+    async def test_an_executor_that_starts_nothing_early_waits_for_the_response(self) -> None:
+        dispatched: list[str] = []
+
+        async def mock_dispatch(name, args, **kwargs):
+            dispatched.append(name)
+            return '{"ok": true}'
+
+        tools = _make_registry("read_file")
+        tools.dispatch = mock_dispatch
+        executor = _make_executor(tools=tools, start_early=False)
+        executor.add_tool(_make_tool_call("read_file", {"path": "a"}, call_id="tc_1"))
+        await asyncio.sleep(0.05)
+        assert dispatched == []
+        await executor.get_all_results()
+        assert dispatched == ["read_file"]

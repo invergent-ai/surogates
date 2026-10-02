@@ -16,13 +16,13 @@ Registers the ``terminal`` tool with the tool registry.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import time
 import traceback
-import uuid
 from typing import Any, Optional
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -140,7 +140,10 @@ async def _spill_full_output(output: str, wio: WorkspaceIO) -> str | None:
     """
     if not wio.root:
         return None
-    path = f"{WORKSPACE_STORAGE_DIR}/terminal-output-{uuid.uuid4().hex}.log"
+    # Named after the output, not at random: a call resumed after its worker
+    # stopped asks the computer for the same write, under the same name.
+    digest = hashlib.sha256(output.encode("utf-8", errors="replace")).hexdigest()[:32]
+    path = f"{WORKSPACE_STORAGE_DIR}/terminal-output-{digest}.log"
     try:
         await wio.write(
             await wio.resolve(path), output.encode("utf-8", errors="replace"),

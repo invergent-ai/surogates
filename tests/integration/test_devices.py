@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -38,18 +38,22 @@ from surogates.devices.operations import (
     operation_channel,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
+from surogates.devices.sandbox import INTERRUPTED
 from surogates.devices.store import REVOKED_OUTCOME, DeviceStore
 from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
+from surogates.governance.policy import GovernanceGate
+from surogates.harness.device_replay import replay_unanswered
 from surogates.harness.tool_exec import execute_single_tool
-from surogates.runtime.turn_slots import current_turn
+from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
 from surogates.tenant.credentials import CredentialVault
 from surogates.tools.builtin import file_ops
-from surogates.tools.registry import ToolRegistry
+from surogates.tools.registry import ToolRegistry, ToolSchema
+from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 from surogates.tools.runtime import ToolRuntime
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import LocalWorkspaceIO
@@ -927,6 +931,29 @@ async def test_a_changed_request_under_the_same_ordinal_is_a_conflict(api, sessi
     await stop(waiting)
 
 
+async def test_an_operation_from_a_worker_that_lost_the_session_is_refused(api, session_factory, redis_client):
+    issued, root = await bound_device(api)
+    device_id = UUID(issued["id"])
+    store = SessionStore(session_factory)
+    stale = await store.try_acquire_lease(root, "worker-a", ttl_seconds=60)
+    await store.release_lease(root, stale.lease_token)
+    current = await store.try_acquire_lease(root, "worker-b", ttl_seconds=60)
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(device_id, root)
+
+    with pytest.raises(DeviceOperationError, match="Another worker runs this session now"):
+        await asyncio.wait_for(
+            ops.run(OperationRequest(**{**_fields(request), "lease_token": str(stale.lease_token)})), 5.0,
+        )
+    assert await operation_rows(session_factory, device_id) == []
+
+    waiting = asyncio.create_task(
+        ops.run(OperationRequest(**{**_fields(request), "lease_token": str(current.lease_token)})),
+    )
+    await eventually(lambda: has_pending(ops, device_id))
+    await stop(waiting)
+
+
 async def test_an_operation_needs_an_invocation_id():
     with pytest.raises(ValueError):
         OperationRequest(**{**_fields(request_for(uuid.uuid4(), uuid.uuid4())), "invocation_id": ""})
@@ -1599,6 +1626,7 @@ async def laptop_rig(api, link_url, session_factory, redis_client, tmp_path):
         folder=folder,
         ops=DeviceOperations(session_factory, redis_client),
         laptop=laptop,
+        lease=await SessionStore(session_factory).try_acquire_lease(root, "test-worker", ttl_seconds=600),
     )
     yield rig
     await laptop.disconnect()
@@ -1697,12 +1725,14 @@ def builtin_tools() -> ToolRegistry:
     return registry
 
 
-async def tool_call(rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory) -> dict:
+async def tool_call(
+    rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory, lease=None,
+) -> dict:
     """One tool call of the rig's bound session, as the harness makes it."""
     return await asyncio.wait_for(execute_single_tool(
         {"id": call_id, "function": {"name": name, "arguments": json.dumps(args)}},
         session=await store.get_session(rig.root),
-        lease=SimpleNamespace(lease_token=uuid.uuid4()),
+        lease=lease or rig.lease,
         store=store,
         tools=tools,
         tenant=MagicMock(asset_root="/tmp/test"),
@@ -1742,6 +1772,362 @@ async def test_a_tool_call_is_journaled_under_its_own_event(laptop_rig, session_
             .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.kind != BIND)
         )).scalars())
     assert invocations == {f"{call_event}:call_1"}
+
+
+async def take_over(store: SessionStore, rig):
+    """Another worker takes the session: the rig's lease is released and a new one taken."""
+    await store.release_lease(rig.root, rig.lease.lease_token)
+    rig.lease = await store.try_acquire_lease(rig.root, "worker-b", ttl_seconds=600)
+    return rig.lease
+
+
+async def test_a_worker_that_lost_the_session_commits_no_result(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    stale = rig.lease
+    await take_over(store, rig)
+    with pytest.raises(asyncio.CancelledError):
+        await tool_call(
+            rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "a"},
+            redis_client=redis_client, session_factory=session_factory, lease=stale,
+        )
+    assert await store.get_events(rig.root, types=[EventType.TOOL_RESULT]) == []
+    assert not (rig.folder / "a.md").exists()
+
+
+async def test_a_dispatched_turn_that_lost_the_session_stops(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    stale = rig.lease
+    await take_over(store, rig)
+    turn: list[TurnSlots] = []
+
+    async def run_turn() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity():
+            await tool_call(
+                rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "a"},
+                redis_client=redis_client, session_factory=session_factory, lease=stale,
+            )
+
+    task = asyncio.create_task(run_turn())
+    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 15.0)
+    assert task.cancelled() and turn[0].detached
+    assert await store.get_events(rig.root, types=[EventType.TOOL_RESULT]) == []
+
+
+async def call_event_of(store: SessionStore, session_id: UUID, call_id: str) -> int:
+    [event] = [
+        e for e in await store.get_events(session_id, types=[EventType.TOOL_CALL])
+        if e.data.get("tool_call_id") == call_id
+    ]
+    return event.id
+
+
+async def forget_result(store: SessionStore, session_factory, session_id: UUID, call_id: str) -> None:
+    """The worker stopped before committing the call's result: the journal has it, the event log does not."""
+    ids = [
+        e.id for e in await store.get_events(session_id, types=[EventType.TOOL_RESULT])
+        if e.data.get("tool_call_id") == call_id
+    ]
+    async with session_factory() as db:
+        await db.execute(delete(Event).where(Event.id.in_(ids)))
+        await db.commit()
+
+
+async def resume_call(
+    rig, store, tools, call_id: str, name: str, args: dict, *, redis_client, session_factory, governance_gate=None,
+) -> dict:
+    """The call run again by a worker resuming it: under its first tool.call event."""
+    return await asyncio.wait_for(execute_single_tool(
+        {
+            "id": call_id,
+            "function": {"name": name, "arguments": json.dumps(args)},
+        },
+        session=await store.get_session(rig.root),
+        lease=rig.lease,
+        store=store,
+        tools=tools,
+        tenant=MagicMock(asset_root="/tmp/test"),
+        redis=redis_client,
+        session_factory=session_factory,
+        governance_gate=governance_gate,
+        replay_of=await call_event_of(store, rig.root, call_id),
+    ), 15.0)
+
+
+async def test_a_resumed_call_gets_what_the_computer_already_did_without_running_it_again(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    first = await tool_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    ran = len(rig.laptop.ran)
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "terminal", args, **io)
+
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+    assert len(rig.laptop.ran) == ran
+    assert json.loads(resumed["content"])["exit_code"] == json.loads(first["content"])["exit_code"] == 0
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_CALL])) == 1
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_RESULT])) == 1
+
+
+async def test_a_call_dict_cannot_mark_itself_resumed(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    # A model provider can put any field on a tool call it sends.
+    call = {
+        "id": "call_1",
+        "function": {"name": "terminal", "arguments": json.dumps({"command": "echo once >> log.txt"})},
+        "_replay_of": 1,
+    }
+
+    refused = await asyncio.wait_for(execute_single_tool(
+        call,
+        session=await store.get_session(rig.root),
+        lease=rig.lease,
+        store=store,
+        tools=tools,
+        tenant=MagicMock(asset_root="/tmp/test"),
+        redis=redis_client,
+        session_factory=session_factory,
+        governance_gate=GovernanceGate(require_approval={"terminal"}),
+    ), 15.0)
+
+    assert json.loads(refused["content"])["error"] == "policy_blocked_overridable"
+    assert not (rig.folder / "log.txt").exists()
+    assert len(await store.get_events(rig.root, types=[EventType.POLICY_DENIED])) == 1
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_CALL])) == 1
+
+
+async def test_a_resumed_call_is_not_asked_for_an_approval_its_first_run_spent(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    # The call ran once, approved, before its worker stopped.
+    await tool_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(
+        rig, store, tools, "call_1", "terminal", args,
+        governance_gate=GovernanceGate(require_approval={"terminal"}), **io,
+    )
+
+    assert json.loads(resumed["content"])["exit_code"] == 0
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+    assert await store.get_events(rig.root, types=[EventType.INBOX_GOVERNANCE_GATE, EventType.POLICY_DENIED]) == []
+
+
+async def test_a_resumed_call_that_asks_for_something_else_is_reported_interrupted(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    await tool_call(rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "first"}, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "write_file", {"path": "a.md", "content": "second"}, **io)
+
+    assert resumed["content"] == INTERRUPTED
+    assert (rig.folder / "a.md").read_text() == "first"
+    [result] = await store.get_events(rig.root, types=[EventType.TOOL_RESULT])
+    assert result.data["content"] == INTERRUPTED
+
+
+async def test_a_resumed_call_that_took_another_path_asks_the_computer_for_nothing_more(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+
+    def runner() -> JournalRunner:
+        return JournalRunner(
+            rig.ops, device_id=rig.device_id, root_session_id=rig.root, calling_session_id=rig.root,
+            invocation_id="call-event:call_1", lease_token=str(rig.lease.lease_token),
+        )
+
+    def command(text: str) -> dict:
+        return {"command": f"echo {text} >> log.txt", "workdir": None, "timeout": 10}
+
+    await asyncio.wait_for(runner().run("run", command("first")), 10.0)
+    resumed = runner()
+    with pytest.raises(OperationConflict):
+        await resumed.run("run", command("changed"))
+    with pytest.raises(OperationConflict):
+        await resumed.run("run", command("after"))
+    assert await resumed.diverged()
+    assert (rig.folder / "log.txt").read_text() == "first\n"
+
+
+async def test_a_resumed_call_that_stops_short_is_reported_interrupted(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    (rig.folder / "notes.md").write_text("old\n")
+    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "notes.md"}, **io)
+    await tool_call(rig, store, tools, "call_2", "write_file", {"path": "notes.md", "content": "new\n"}, **io)
+    await forget_result(store, session_factory, rig.root, "call_2")
+    # A new worker has not seen the read, so its write_file refuses to overwrite.
+    file_ops._read_tracker.clear()
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_2", "write_file", {"path": "notes.md", "content": "new\n"}, **io)
+
+    # The write did happen: "refusing to overwrite" would tell the model it did not.
+    assert resumed["content"] == INTERRUPTED
+    assert (rig.folder / "notes.md").read_text() == "new\n"
+
+
+async def test_a_resumed_harness_tool_is_reported_interrupted_without_running_again(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    ran: list[dict] = []
+
+    async def handler(arguments: dict, **kwargs) -> str:
+        # Whatever else it does off the computer is done again by running it again.
+        ran.append(arguments)
+        wio = kwargs["workspace_io"]
+        await wio.write(await wio.resolve("made.md"), b"made")
+        return json.dumps({"ok": True})
+
+    tools.register(
+        "harness_probe",
+        ToolSchema(name="harness_probe", description="probe", parameters={"type": "object", "properties": {}}),
+        handler=handler,
+    )
+    monkeypatch.setitem(TOOL_LOCATIONS, "harness_probe", ToolLocation.HARNESS)
+    first = await tool_call(rig, store, tools, "call_1", "harness_probe", {}, **io)
+    assert json.loads(first["content"]) == {"ok": True}
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "harness_probe", {}, **io)
+
+    assert resumed["content"] == INTERRUPTED
+    assert len(ran) == 1
+    [result] = await store.get_events(rig.root, types=[EventType.TOOL_RESULT])
+    assert result.data["content"] == INTERRUPTED
+
+
+async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    (rig.folder / "notes.md").write_text("one\ntwo\nthree\n")
+    patch = {"path": "notes.md", "old_string": "two", "new_string": "2"}
+    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "notes.md"}, **io)
+    first = await tool_call(rig, store, tools, "call_2", "patch", patch, **io)
+    await forget_result(store, session_factory, rig.root, "call_2")
+    # A new worker has not seen the read; the patch asks the computer for the same operations all the same.
+    file_ops._read_tracker.clear()
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_2", "patch", patch, **io)
+
+    assert resumed["content"] != INTERRUPTED
+    assert resumed["content"] == first["content"]
+    assert json.loads(resumed["content"]).get("error") is None
+    assert (rig.folder / "notes.md").read_text() == "one\n2\nthree\n"
+
+
+def model_call(call_id: str, name: str, args: dict) -> dict:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+async def resume_session(rig, store, tools, messages: list[dict], *, redis_client, session_factory) -> None:
+    """Resume the session's unanswered calls as a new worker's wake does."""
+    session = await store.get_session(rig.root)
+
+    async def run_tool(call: dict, event_id: int) -> dict:
+        return await asyncio.wait_for(execute_single_tool(
+            call, replay_of=event_id, session=session, lease=rig.lease, store=store, tools=tools,
+            tenant=MagicMock(asset_root="/tmp/test"), redis=redis_client, session_factory=session_factory,
+        ), 15.0)
+
+    await replay_unanswered(
+        session=session, events=await store.get_events(rig.root), messages=messages,
+        session_factory=session_factory, run_tool=run_tool,
+    )
+
+
+async def test_a_session_whose_worker_stopped_after_the_computer_answered_is_resumed_without_running_it_again(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    assistant = {"role": "assistant", "content": "", "tool_calls": [model_call("call_1", "terminal", args)]}
+    await store.emit_event(rig.root, EventType.LLM_RESPONSE, {"message": assistant})
+    await tool_call(rig, store, tools, "call_1", "terminal", args, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    ran = len(rig.laptop.ran)
+    await take_over(store, rig)
+    messages = [{"role": "user", "content": "log it"}, assistant]
+
+    await resume_session(rig, store, tools, messages, **io)
+
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+    assert len(rig.laptop.ran) == ran
+    assert messages[2]["role"] == "tool" and messages[2]["tool_call_id"] == "call_1"
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_RESULT])) == 1
+
+
+async def test_a_session_whose_worker_stopped_while_the_computer_was_away_is_resumed_when_it_returns(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"command": "echo once >> log.txt"}
+    assistant = {"role": "assistant", "content": "", "tool_calls": [model_call("call_1", "terminal", args)]}
+    await store.emit_event(rig.root, EventType.LLM_RESPONSE, {"message": assistant})
+    first = asyncio.create_task(tool_call(rig, store, tools, "call_1", "terminal", args, **io))
+    await eventually(lambda: has_pending(rig.ops, rig.device_id))
+    await stop(first)  # the worker stops while the operation is open
+    await take_over(store, rig)
+    messages = [{"role": "user", "content": "log it"}, assistant]
+
+    resumed = asyncio.create_task(resume_session(rig, store, tools, messages, **io))
+    await asyncio.sleep(0.3)
+    assert not resumed.done()
+    await rig.laptop.connect()
+    await asyncio.wait_for(resumed, 15.0)
+
+    assert (rig.folder / "log.txt").read_text() == "once\n"
+    assert messages[2]["tool_call_id"] == "call_1"
+    assert len(await store.get_events(rig.root, types=[EventType.TOOL_RESULT])) == 1
 
 
 async def test_the_process_tool_asks_the_computer(laptop_rig, session_factory, redis_client):
@@ -2246,6 +2632,35 @@ async def test_a_stopped_wait_says_the_computer_is_no_longer_awaited(
     with pytest.raises(asyncio.CancelledError):
         await waiting
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_detached_wait_leaves_the_session_waiting(laptop_rig, session_factory, redis_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig  # the laptop stays disconnected
+    ops = noticing_journal(session_factory, redis_client)
+    turn: list[TurnSlots] = []
+
+    async def run_turn() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity():
+            await ops.run(request_for(rig.device_id, rig.root))
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
+
+    task = asyncio.create_task(run_turn())
+    await eventually(says_waiting)
+    turn[0].detach()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    # Another worker carries the wait on: the operation stays open and the session still waits.
+    assert await has_pending(rig.ops, rig.device_id)
+    assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig)]
 
 
 async def test_a_computer_lost_after_delivery_is_waited_for_too(

@@ -42,14 +42,19 @@ class DeviceWaitNotice:
                 "reason": "offline",
             })
 
-    async def back(self, request: OperationRequest) -> None:
-        """One of the session's operations no longer waits on an absent computer."""
+    async def back(self, request: OperationRequest, *, announce: bool = True) -> None:
+        """One of the session's operations no longer waits on an absent computer.
+
+        A detached turn's wait goes on with another worker: it is not
+        announced, so the session keeps saying it waits.
+        """
         _away[request.calling_session_id] -= 1
         if _away[request.calling_session_id] <= 0:
             del _away[request.calling_session_id]
-            await self._emit(request.calling_session_id, EventType.DEVICE_RESUMED, {
-                "device_id": str(request.device_id),
-            })
+            if announce:
+                await self._emit(request.calling_session_id, EventType.DEVICE_RESUMED, {
+                    "device_id": str(request.device_id),
+                })
 
     async def _name(self, device_id: UUID) -> str:
         # The name is a nicety: a database that cannot give it must not fail the wait.

@@ -732,6 +732,10 @@ async def _check_file_staleness(wio: WorkspaceIO, key: str, task_id: str) -> str
     the last read_file call for this task), or None if the file is fresh
     or was never read.  Does not block — the write still proceeds.
     """
+    # Asked of the filesystem first, whatever this worker remembers: a call a
+    # new worker resumes must ask the computer for the same operations in the
+    # same order as the first run did.
+    st = await wio.stat(key)
     with _read_tracker_lock:
         task_data = _read_tracker.get(task_id)
         if not task_data:
@@ -739,7 +743,6 @@ async def _check_file_staleness(wio: WorkspaceIO, key: str, task_id: str) -> str
         read_mtime = task_data.get("read_timestamps", {}).get(key)
     if read_mtime is None:
         return None  # File was never read — nothing to compare against
-    st = await wio.stat(key)
     if st is None:
         return None  # Can't stat — file may have been deleted, let write handle it
     if st.mtime != read_mtime:

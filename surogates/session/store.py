@@ -1027,10 +1027,17 @@ class SessionStore:
         session_id: UUID,
         event_type: EventType,
         data: dict,
+        *,
+        lease_token: UUID | None = None,
     ) -> int:
         """Append an event and atomically update session counters.
 
         Returns the newly assigned event id (``BIGSERIAL``).
+
+        With *lease_token*, the event is committed only while that token is
+        the session's lease: a worker that lost the session must not answer
+        for the worker now running it.  It raises :class:`LeaseNotHeldError`
+        and commits nothing otherwise.
 
         Trace context is read automatically from the :mod:`surogates.trace`
         contextvar.  If no trace is active the ``trace_id`` / ``span_id``
@@ -1081,6 +1088,18 @@ class SessionStore:
         )
 
         async with self._sf() as db:
+            if lease_token is not None:
+                held = (await db.execute(
+                    text(
+                        "SELECT 1 FROM session_leases "
+                        "WHERE session_id = :id AND lease_token = :token FOR SHARE"
+                    ),
+                    {"id": session_id, "token": lease_token},
+                )).first()
+                if held is None:
+                    raise LeaseNotHeldError(
+                        f"Session {session_id}: lease {lease_token} is no longer held"
+                    )
             db.add(row)
             await db.flush()  # assigns row.id via BIGSERIAL
             event_id: int = row.id

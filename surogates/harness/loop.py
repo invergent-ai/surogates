@@ -23,6 +23,7 @@ import logging
 import os
 import traceback
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
@@ -36,6 +37,7 @@ from surogates.harness.agent_resolver import (
 )
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.cost_tracker import SessionCostTracker
+from surogates.harness.device_replay import replay_unanswered, resumable
 from surogates.harness.error_classify import classify_harness_error
 from surogates.harness.llm_call import apply_developer_role, call_llm_with_retry
 from surogates.harness.message_utils import (
@@ -72,7 +74,7 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
-from surogates.harness.tool_exec import execute_tool_calls
+from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.harness.tool_schemas import (
@@ -81,9 +83,10 @@ from surogates.harness.tool_schemas import (
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
-from surogates.runtime.turn_slots import turn_joining
+from surogates.runtime.turn_slots import detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
+from surogates.tools.builtin.file_ops import clear_read_tracker
 
 if TYPE_CHECKING:
     from contextvars import Token
@@ -848,9 +851,9 @@ class AgentHarness(
 
         If renewal fails because the lease no longer belongs to us
         (:class:`LeaseNotHeldError`), another worker has taken over the
-        session.  Request an interrupt so the main loop exits cleanly
-        instead of racing against the new worker and writing duplicate
-        events.  Transient DB errors are retried on the next tick.
+        session.  Detach the turn so it stops instead of racing against
+        the new worker and writing duplicate events.  Transient DB errors
+        are retried on the next tick.
         """
         while True:
             try:
@@ -862,11 +865,14 @@ class AgentHarness(
                 raise
             except LeaseNotHeldError:
                 logger.warning(
-                    "Session %s: lease stolen by another worker, "
-                    "interrupting current loop",
+                    "Session %s: lease taken by another worker, stopping the turn",
                     session_id,
                 )
-                self.interrupt("lease lost — another worker took over")
+                # Stopped where it stands: the new owner resumes what it left
+                # unfinished, so nothing is compensated or answered here.
+                # Outside a dispatched turn there is no task to stop.
+                if not detach_turn():
+                    self.interrupt("lease lost — another worker took over")
                 return
             except Exception:
                 logger.debug(
@@ -1147,7 +1153,7 @@ class AgentHarness(
 
             # 4. Check for pending events (events after the cursor).
             pending = _actionable_pending_events(all_events, cursor)
-            if not pending:
+            if not pending and not resumable(session, all_events):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -1174,6 +1180,17 @@ class AgentHarness(
                 all_events,
                 workspace_path=(session.config or {}).get("workspace_path"),
             )
+
+            # 6'. A worker that stopped mid-call may have left results the
+            # computer already produced: commit them before the history is
+            # compacted or the model is asked for more work.
+            if resumable(session, all_events):
+                await self._resume_unanswered_calls(session, lease, all_events, messages)
+                # A pause or stop cancelled the resumed call: stop here, before
+                # anything compacts the history around it.
+                if self._check_interrupt():
+                    await self._abort_iteration_with_pause(session, None)
+                    return
 
             # 6a. Kick off title generation in the background as soon as we
             # see the user's first message.  Runs in parallel with context
@@ -1439,6 +1456,99 @@ class AgentHarness(
                     logger.warning(
                         "Failed to release lease for session %s", session_id,
                     )
+
+    def _tool_call_kwargs(
+        self,
+        *,
+        session: Session,
+        lease: SessionLease,
+        saga: Any,
+        hint_tracker: Any,
+        model_id: str | None,
+        expert_transcript: Callable[[], str] | None,
+    ) -> dict[str, Any]:
+        """What every tool call this harness makes runs with."""
+        return {
+            "session": session,
+            "lease": lease,
+            "store": self._store,
+            "tools": self._tools,
+            "tenant": self._tenant,
+            "interrupt_check": self._check_interrupt,
+            "redis": self._redis,
+            "budget": self._budget,
+            "memory_manager": self._memory_manager,
+            "hint_tracker": hint_tracker,
+            "sandbox_pool": self._sandbox_pool,
+            "credential_vault": self._credential_vault,
+            "browser_pool": self._browser_pool,
+            "browser_control": self._browser_control,
+            "storage": self._storage,
+            "api_client": self._api_client,
+            "session_factory": self._session_factory,
+            "llm_client": self._llm,
+            "model": model_id,
+            "vision_llm_client": self._vision_client,
+            "vision_model": self._vision_model,
+            "summary_llm_client": self._summary_client,
+            "summary_model": self._summary_model,
+            "media_gen": self._media_gen,
+            "saga": saga,
+            "log_policy_allowed": self._log_policy_allowed,
+            "governance_gate": self._governance_gate,
+            "bundle": self._bundle,
+            "platform_client": self._platform_client,
+            "expert_transcript": expert_transcript,
+        }
+
+    async def _resume_unanswered_calls(
+        self,
+        session: Session,
+        lease: SessionLease,
+        events: list[Any],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Resume the calls a stopped worker left unanswered; a pause or stop cancels the wait.
+
+        A resumed call skips its saga step and runs without the hint tracker
+        (a local folder has none) or the turn transcript.  Only a sandbox
+        tool is run again; a harness tool is reported interrupted.
+        """
+        from surogates.sandbox.pool import sandbox_session_key
+
+        tool_kwargs = self._tool_call_kwargs(
+            session=session, lease=lease, saga=None, hint_tracker=None,
+            model_id=self._current_model or session.model or self._default_model,
+            expert_transcript=None,
+        )
+        # A worker resuming a call has not seen the reads the first run made:
+        # each resumed call starts from what a fresh worker knows.  Any wake
+        # with unanswered calls clears it, even when the journal turns up
+        # nothing to resume; any other keeps what was read.
+        clear_read_tracker(sandbox_session_key(session))
+
+        async def resume(call: dict[str, Any], event_id: int) -> dict[str, Any]:
+            # The turn's own task steps out, so a resumed call that waits gives the slots back.
+            async with turn_joining():
+                return await execute_single_tool(call, replay_of=event_id, **tool_kwargs)
+
+        replay = asyncio.ensure_future(replay_unanswered(
+            session=session, events=events, messages=messages,
+            session_factory=self._session_factory, run_tool=resume,
+        ))
+        # A pause or stop cancels the wait, as it cancels a streamed call: the
+        # journal keeps the call for the next wake, and the loop then pauses.
+        self._active_executor = SimpleNamespace(discard=replay.cancel)
+        # A pause that landed before this point only set the flag.
+        if self._check_interrupt():
+            replay.cancel()
+        try:
+            await replay
+        except asyncio.CancelledError:
+            if not self._check_interrupt() or asyncio.current_task().cancelling():
+                raise
+        finally:
+            self._active_executor = None
 
     # ------------------------------------------------------------------
     # Core LLM loop
@@ -1917,6 +2027,9 @@ class AgentHarness(
                     bundle=self._bundle,
                     platform_client=self._platform_client,
                     expert_transcript=expert_transcript,
+                    # On the user's computer a call may start only once the
+                    # response is saved: a stopped worker's replay reads it.
+                    start_early=device_of(session.config) is None,
                 )
 
             def _reset_streaming_executor() -> Callable[[dict[str, Any]], None]:
@@ -2769,36 +2882,10 @@ class AgentHarness(
                 async with turn_joining():
                     tool_results = await execute_tool_calls(
                         tool_calls_raw,
-                        session=session,
-                        lease=lease,
-                        store=self._store,
-                        tools=self._tools,
-                        tenant=self._tenant,
-                        interrupt_check=self._check_interrupt,
-                        redis=self._redis,
-                        budget=self._budget,
-                        memory_manager=self._memory_manager,
-                        hint_tracker=hint_tracker,
-                        sandbox_pool=self._sandbox_pool,
-                        credential_vault=self._credential_vault,
-                        browser_pool=self._browser_pool,
-                        browser_control=self._browser_control,
-                        storage=self._storage,
-                        api_client=self._api_client,
-                        session_factory=self._session_factory,
-                        llm_client=self._llm,
-                        model=model_id,
-                        vision_llm_client=self._vision_client,
-                        vision_model=self._vision_model,
-                        summary_llm_client=self._summary_client,
-                        summary_model=self._summary_model,
-                        media_gen=self._media_gen,
-                        saga=saga,
-                        log_policy_allowed=self._log_policy_allowed,
-                        governance_gate=self._governance_gate,
-                        bundle=self._bundle,
-                        platform_client=self._platform_client,
-                        expert_transcript=expert_transcript,
+                        **self._tool_call_kwargs(
+                            session=session, lease=lease, saga=saga, hint_tracker=hint_tracker,
+                            model_id=model_id, expert_transcript=expert_transcript,
+                        ),
                     )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(

@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from surogates.devices.binding import device_of
-from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, refusal
+from surogates.devices.sandbox import INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
 from surogates.harness.tool_guardrails import (
@@ -1138,11 +1138,15 @@ async def execute_tool_calls_concurrent(
     return [r for r in results if r is not None]
 
 
-async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
+async def execute_single_tool(tc: dict[str, Any], *, replay_of: int | None = None, **kwargs: Any) -> dict:
     """Execute a single tool call: emit events, dispatch, return result message.
 
     *interrupt_check* is this session's stop flag; it is handed to the tool
     handler so long-running tools can poll it without a process-wide signal.
+
+    *replay_of* is the ``tool.call`` event of a call a worker resumes after
+    the one that began it stopped.  It is the caller's to give: a field of
+    the call itself comes from the model provider and is never believed.
 
     When *log_policy_allowed* is True, every governance check that passes
     also emits a ``policy.allowed`` event.  Off by default because each
@@ -1153,7 +1157,7 @@ async def execute_single_tool(tc: dict[str, Any], **kwargs: Any) -> dict:
     worker slots unless every activity of the turn is waiting.
     """
     async with turn_activity():
-        return await _run_single_tool(tc, **kwargs)
+        return await _run_single_tool(tc, replay_of=replay_of, **kwargs)
 
 
 async def _run_single_tool(
@@ -1190,6 +1194,7 @@ async def _run_single_tool(
     platform_client: Any | None = None,
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
+    replay_of: int | None = None,
 ) -> dict:
     from surogates.trace import get_trace, new_span
 
@@ -1222,6 +1227,8 @@ async def _run_single_tool(
     # A session on the user's computer reaches its folder only through the
     # device: the folder is never a path on this host.
     on_device = device_of(session.config) is not None
+    # Only a call on the user's computer can be resumed from its journal.
+    replay_of = replay_of if on_device else None
     sanitized_args = _sanitize_paths(tool_args, workspace_path)
 
     # Emit TOOL_CALL event.
@@ -1235,11 +1242,16 @@ async def _run_single_tool(
     if checkpoint_hash:
         tool_call_data["checkpoint_hash"] = checkpoint_hash
 
-    _call_event_id = await store.emit_event(
-        session.id,
-        EventType.TOOL_CALL,
-        tool_call_data,
-    )
+    # A call resumed after its worker stopped keeps its tool.call event, so
+    # its operations are found in the journal under the same invocation.
+    if replay_of is None:
+        _call_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_CALL,
+            tool_call_data,
+        )
+    else:
+        _call_event_id = replay_of
 
     if parse_error is not None:
         result_content = json.dumps(
@@ -1291,6 +1303,11 @@ async def _run_single_tool(
         # The computer checks containment; this host cannot resolve its paths.
         workspace_path=None if on_device else workspace_path,
     )
+    if replay_of is not None:
+        # A resumed call passed this check before its operations reached the
+        # journal.  Checking again would ask for the approval its first run
+        # spent, and approving it again would run the call a second time.
+        decision = replace(decision, allowed=True, reason="resumed")
     if not decision.allowed and decision.overridable:
         # A human may already have approved this exact call.  The grant
         # query lives HERE, not in ``gate.check``: the gate is a frozen,
@@ -1386,7 +1403,7 @@ async def _run_single_tool(
             "content": result_content,
         }
 
-    if log_policy_allowed:
+    if log_policy_allowed and replay_of is None:
         await store.emit_event(
             session.id,
             EventType.POLICY_ALLOWED,
@@ -1410,7 +1427,7 @@ async def _run_single_tool(
     # the model would keep calling the same forbidden tool on the next
     # turn).
     allow_list = session.config.get("tool_allow_list") if session.config else None
-    if allow_list and tool_name not in allow_list:
+    if replay_of is None and allow_list and tool_name not in allow_list:
         reason = (
             f"Tool '{tool_name}' is not in this session's allow-list. "
             f"Allowed: {sorted(allow_list)}"
@@ -1448,7 +1465,7 @@ async def _run_single_tool(
     # --- Saga step tracking ---
     saga_step = None
     _active_saga_id: str | None = None
-    if saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
+    if replay_of is None and saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
         from surogates.governance.events import saga_step_event as _sse
         from surogates.governance.saga.state_machine import StepState as _StepState
 
@@ -1564,6 +1581,11 @@ async def _run_single_tool(
             pass  # result_content already set by the image branch.
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:
             result_content = refusal(tool_name)
+        elif replay_of is not None and location != ToolLocation.SANDBOX:
+            # The journal holds only what reached the computer.  A harness
+            # tool also acts off it (it creates an artifact, it pays for a
+            # model call), and running it again would do that again.
+            result_content = INTERRUPTED
         elif device_call is not None and location == ToolLocation.SANDBOX:
             result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
@@ -1717,6 +1739,8 @@ async def _run_single_tool(
         tool_use_id=tool_call_id,
         writer=spill_writer,
     )
+    if replay_of is not None and device_call is not None and await device_call.diverged():
+        result_content = INTERRUPTED
 
     # Sanitise the event payload — frontend SSE consumers must not see
     # real filesystem paths.  The LLM still receives the raw
@@ -1728,17 +1752,28 @@ async def _run_single_tool(
     # as a real path, double-substitution of ``__WORKSPACE__/__WORKSPACE__``).
     sanitized_content = _sanitize_paths(result_content, workspace_path)
 
-    # Emit TOOL_RESULT event.
-    result_event_id = await store.emit_event(
-        session.id,
-        EventType.TOOL_RESULT,
-        {
-            "tool_call_id": tool_call_id,
-            "name": tool_name,
-            "content": sanitized_content,
-            "elapsed_ms": elapsed_ms,
-        },
-    )
+    # Emit TOOL_RESULT event.  On the user's computer only the worker that
+    # holds the session commits it: one that lost the lease must not answer
+    # for the worker now resuming the call from the journal.
+    from surogates.runtime.turn_slots import detach_turn
+    from surogates.session.store import LeaseNotHeldError
+
+    fence = {"lease_token": lease.lease_token} if on_device else {}
+    try:
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": sanitized_content,
+                "elapsed_ms": elapsed_ms,
+            },
+            **fence,
+        )
+    except LeaseNotHeldError:
+        detach_turn()
+        raise asyncio.CancelledError("another worker runs this session now") from None
 
     # Advance the cursor through the result event.
     try:
