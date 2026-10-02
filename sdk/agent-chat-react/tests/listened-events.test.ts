@@ -14,4 +14,9 @@ describe("AGENT_CHAT_LISTENED_EVENTS", () => {
   it("includes loop.result so scheduled results reach the reducer", () => {
     expect(AGENT_CHAT_LISTENED_EVENTS).toContain("loop.result");
   });
+
+  it("includes the device wait events so a local folder's wait is shown", () => {
+    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("device.waiting");
+    expect(AGENT_CHAT_LISTENED_EVENTS).toContain("device.resumed");
+  });
 });

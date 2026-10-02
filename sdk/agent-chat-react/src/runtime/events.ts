@@ -47,6 +47,8 @@ export const AGENT_CHAT_LISTENED_EVENTS = [
   "iteration.summary",
   "turn.summary",
   "loop.result",
+  "device.waiting",
+  "device.resumed",
 ] as const satisfies readonly AgentChatEventType[];
 
 /** Membership set for the listened events above.  The reconciliation poll

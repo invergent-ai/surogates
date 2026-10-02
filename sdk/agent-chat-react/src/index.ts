@@ -110,6 +110,7 @@ export type {
   AgentChatArtifactPayload,
   AgentChatBrowserProfile,
   AgentChatChartArtifactSpec,
+  AgentChatDeviceWaitState,
   CodingAgentConnection,
   AgentChatAskUserQuestionArgs,
   AgentChatAskUserQuestionAnswer,

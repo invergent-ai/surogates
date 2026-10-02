@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -30,10 +30,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import Device, DeviceOperation
 from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import BIND, binding_of, device_of
-from surogates.devices.presence import control_channel
+from surogates.devices.presence import DevicePresence, control_channel
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import DeviceOperationError, is_well_formed
 from surogates.runtime.turn_slots import turn_waiting
+
+if TYPE_CHECKING:
+    from surogates.devices.waits import DeviceWaitNotice
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,12 @@ RECHECK_INTERVAL_S = 5.0
 # How long a device operation may take before its turn gives its worker slots
 # back: an operation the computer answers at once must not churn them.
 WAIT_GRACE_S = 2.0
+
+# How many sessions may wait on one computer at once.  Past it a new session's
+# local operation fails at once, telling the user, rather than park another
+# coroutine on the worker.
+# ponytail: a constant; make it a worker setting when a deployment needs another value.
+PARKED_SESSIONS_PER_DEVICE = 20
 
 
 def operation_channel(operation_id: UUID) -> str:
@@ -103,6 +112,44 @@ async def _check_session(db: AsyncSession, request: OperationRequest, device: An
         raise ValueError("Only a root session is bound to a folder")
     if not is_binding and (await binding_of(db, request.root_session_id)).state != "bound":
         raise DeviceOperationError("This session's folder is not set up on this computer yet")
+
+
+async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device: Any) -> None:
+    """Refuse a new operation from a session not yet waiting on a computer that has its fill.
+
+    A session already waiting may keep asking.  A binding waits for its user,
+    not for the computer, so it never counts.  A replay gets its recorded
+    outcome, and a tool call already under way may finish its remaining steps:
+    neither is ever refused.
+    """
+    already = (await db.execute(
+        select(DeviceOperation.id).where(
+            DeviceOperation.calling_session_id == request.calling_session_id,
+            DeviceOperation.invocation_id == request.invocation_id,
+        ).limit(1)
+    )).scalar_one_or_none()
+    if already is not None:
+        return
+    open_for_device = (
+        DeviceOperation.device_id == request.device_id,
+        DeviceOperation.completed_at.is_(None),
+        DeviceOperation.kind != BIND,
+    )
+    others = (await db.execute(
+        select(func.count(func.distinct(DeviceOperation.calling_session_id))).where(
+            *open_for_device,
+            DeviceOperation.calling_session_id != request.calling_session_id,
+        )
+    )).scalar_one()
+    if others < PARKED_SESSIONS_PER_DEVICE:
+        return
+    mine = (await db.execute(
+        select(DeviceOperation.id)
+        .where(*open_for_device, DeviceOperation.calling_session_id == request.calling_session_id)
+        .limit(1)
+    )).scalar_one_or_none()
+    if mine is None:
+        raise DeviceOperationError(f"Too many sessions are waiting for {device.name}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,10 +218,12 @@ class DeviceOperations:
         redis: Redis,
         *,
         recheck_interval_s: float = RECHECK_INTERVAL_S,
+        notice: DeviceWaitNotice | None = None,
     ) -> None:
         self._sf = session_factory
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
+        self._notice = notice
 
     # -- the worker's side -----------------------------------------------
 
@@ -199,9 +248,38 @@ class DeviceOperations:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
             async with turn_waiting():
-                return await waiter
+                return await self._wait_watching(waiter, request)
         finally:
             waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled
+
+    async def _wait_watching(self, waiter: asyncio.Future, request: OperationRequest) -> dict[str, Any]:
+        """Await *waiter*, telling the session's viewers whenever its computer is away."""
+        if self._notice is None:
+            return await waiter
+        presence = DevicePresence(self._redis)
+        away = False
+        try:
+            while True:
+                online = await self._online(presence, request.device_id)
+                if online is False and not away:
+                    away = True
+                    await self._notice.away(request)
+                elif online is True and away:
+                    away = False
+                    await self._notice.back(request)
+                done, _ = await asyncio.wait({waiter}, timeout=self._recheck_interval_s)
+                if done:
+                    return waiter.result()
+        finally:
+            if away:
+                await self._notice.back(request)
+
+    async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
+        """Whether a link holds the device: None when Redis cannot tell."""
+        try:
+            return device_id in await self._within_redis_patience(presence.online([device_id]))
+        except Exception:
+            return None
 
     async def _wait_forever(self, operation_id: UUID) -> dict[str, Any]:
         """Wait for the operation's outcome as long as it takes."""
@@ -309,13 +387,18 @@ class DeviceOperations:
             # update sees the new operation.  Without it the insert could commit
             # just after that update and run once the device is reauthorized.
             device = (await db.execute(
-                select(Device.revoked_at, Device.org_id, Device.agent_id, Device.user_id)
+                select(Device.name, Device.revoked_at, Device.org_id, Device.agent_id, Device.user_id)
                 .where(Device.id == request.device_id)
                 .with_for_update(read=True)
             )).one_or_none()
             if device is None:
                 raise DeviceOperationError("This computer was removed")
             await _check_session(db, request, device)
+            # ponytail: the device row is locked FOR SHARE, so concurrent recorders can pass the
+            # count together and the limit is soft by their number; the count also includes
+            # abandoned open operations, which cancellation (later work) will close.
+            if request.kind != BIND and device.revoked_at is None:
+                await _refuse_when_full(db, request, device)
             refused = (
                 {"outcome": REVOKED_OUTCOME, "completed_at": func.now()}
                 if device.revoked_at is not None

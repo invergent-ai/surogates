@@ -99,9 +99,17 @@ def device_call_for(
     redis: Any,
 ) -> DeviceCall:
     """The DeviceCall for one tool call of *session*, journaled under *invocation_id*."""
+    # Imported here: both reach surogates.session, whose store imports the
+    # harness, which imports this module.
+    from surogates.devices.waits import DeviceWaitNotice
+    from surogates.session.store import SessionStore
+
     root = sandbox_session_key(session)
     runner = JournalRunner(
-        DeviceOperations(session_factory, redis),
+        DeviceOperations(
+            session_factory, redis,
+            notice=DeviceWaitNotice(SessionStore(session_factory, redis), session_factory),
+        ),
         # From the session the server stamped, never from tool input.
         device_id=device_of(session.config),
         root_session_id=UUID(root),
