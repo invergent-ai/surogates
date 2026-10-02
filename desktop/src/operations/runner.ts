@@ -54,6 +54,12 @@ function sendable(operation: Operation, outcome: unknown): Outcome {
 }
 
 export interface Executor {
+  /**
+   * Do the operation and answer it. A throw or a rejection is answered as an error.
+   * An abort listener on `signal` must not throw: Node's EventTarget rethrows a
+   * listener's exception on the next tick as an uncaught exception, which no
+   * try/catch here or in the caller can contain.
+   */
   run(operation: Operation, signal: AbortSignal): Promise<Outcome>;
 }
 
@@ -64,8 +70,9 @@ export class OperationRunner {
     private readonly journal: OperationJournal,
     private readonly executor: Executor,
     private readonly send: (frame: Record<string, unknown>) => boolean,
-    // What failed after the executor answered (the journal, the link): the
-    // operation stays "started", so the next launch answers it "interrupted".
+    // What failed after the executor answered. A send that throws leaves the row
+    // finished, and it is sent again at the next welcome; a finish that throws
+    // leaves it "started", so the next launch answers it "interrupted".
     private readonly onError?: (error: unknown) => void,
   ) {}
 
