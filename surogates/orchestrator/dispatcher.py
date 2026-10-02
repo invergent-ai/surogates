@@ -74,6 +74,9 @@ _MAX_RETRIES: int = 3
 # Base delay (seconds) for exponential back-off on retry.
 _BASE_RETRY_DELAY: float = 1.0
 
+# How often shutdown looks for turns waiting on a computer, to hand them to another worker.
+_SHUTDOWN_RECHECK_SECONDS = 1.0
+
 # ── Crash-loop circuit breaker ────────────────────────────────────────
 # The in-process retry counter resets on every re-enqueue, so a session
 # whose conversation deterministically crashes the LLM call (e.g. a
@@ -287,6 +290,8 @@ class Orchestrator:
         self._turn_gate = turn_gate
         self._running = True
         self._tasks: set[asyncio.Task] = set()
+        # Each running turn's slots and queue entry, by its task.
+        self._turns: dict[asyncio.Task, tuple[TurnSlots, DequeuedSession]] = {}
         # Active harnesses by session ID — for delivering interrupt signals.
         self._active_harnesses: dict[UUID, Any] = {}
         # Sessions that received an extra enqueue while their wake was
@@ -452,14 +457,51 @@ class Orchestrator:
                 "Orchestrator shutting down; waiting for %d in-flight tasks",
                 len(self._tasks),
             )
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await self._drain_turns()
 
         logger.info("Orchestrator stopped")
 
     async def shutdown(self) -> None:
-        """Graceful shutdown -- stop accepting work, wait for in-flight tasks."""
+        """Graceful shutdown -- stop accepting work; ``run`` then drains in-flight turns."""
         logger.info("Orchestrator shutdown requested")
         self._running = False
+
+    async def _drain_turns(self) -> None:
+        """Wait for in-flight turns, handing each one that waits on a computer to another worker.
+
+        A turn waiting on the user's computer may wait for days.  Detached, it
+        leaves its operation open in the journal and releases its lease; once
+        its task has ended, its session goes back on the queue, and the worker
+        that picks it up resumes the call from the journal.
+        """
+        handed_over: dict[asyncio.Task, DequeuedSession] = {}
+        while True:
+            for task, (slots, dequeued) in list(self._turns.items()):
+                if task not in handed_over and slots.waiting_resumably:
+                    slots.detach()
+                    handed_over[task] = dequeued
+            pending = {task for task in set(self._tasks) | set(handed_over) if not task.done()}
+            if pending:
+                await asyncio.wait(pending, timeout=_SHUTDOWN_RECHECK_SECONDS)
+            for task in [task for task in handed_over if task.done()]:
+                await self._resume_elsewhere(handed_over.pop(task))
+            if not pending:
+                return
+
+    async def _resume_elsewhere(self, dequeued: DequeuedSession) -> None:
+        try:
+            await enqueue_session(
+                self.redis,
+                org_id=dequeued.org_id,
+                agent_id=dequeued.agent_id,
+                session_id=UUID(dequeued.session_id),
+            )
+        except Exception:
+            # The orphan sweep finds it once its lease has expired.
+            logger.warning(
+                "Could not hand session %s to another worker", dequeued.session_id,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Internal dispatch
@@ -472,6 +514,7 @@ class Orchestrator:
         dequeued: DequeuedSession | None = None,
     ) -> None:
         """Run one turn holding the slots it was given, and release whatever it still holds."""
+        task = asyncio.current_task()
         slots = TurnSlots(
             semaphore=self.semaphore,
             gate=self._turn_gate,
@@ -480,8 +523,10 @@ class Orchestrator:
             # The dispatch loop took a tenant slot only for a dequeued session.
             gate_held=dequeued is not None and self._turn_gate is not None,
             session_id=str(session_id),
-            task=asyncio.current_task(),
+            task=task,
         )
+        if dequeued is not None and task is not None:
+            self._turns[task] = (slots, dequeued)
         token = current_turn.set(slots)
         try:
             # The turn's own work is an activity; the loop steps out of it
@@ -490,6 +535,7 @@ class Orchestrator:
                 await self._process(session_id)
         finally:
             current_turn.reset(token)
+            self._turns.pop(task, None)
             # The turn may have given its slots back while it waited, and ended
             # before taking them again: release only what it holds.
             await slots.release_owned()

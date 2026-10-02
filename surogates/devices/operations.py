@@ -261,7 +261,7 @@ class DeviceOperations:
             if done:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
-            async with turn_waiting():
+            async with turn_waiting(resumable=True):
                 return await self._wait_watching(waiter, request)
         finally:
             waiter.cancel()  # a no-op once it finished; stops it if this caller is cancelled

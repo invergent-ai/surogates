@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -99,3 +99,80 @@ async def test_a_tenant_slot_that_cannot_be_given_back_is_logged_with_its_sessio
     await orchestrator._guarded_process(session_id, dequeued=dequeued())
     leaks = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(leaks) == 1 and str(session_id) in leaks[0].getMessage()
+
+
+async def _start_turn(orchestrator, monkeypatch, process) -> tuple[asyncio.Task, DequeuedSession]:
+    """A turn started as the dispatch loop starts one."""
+    monkeypatch.setattr(orchestrator, "_process", process)
+    turn = dequeued()
+    task = asyncio.create_task(orchestrator._guarded_process(UUID(turn.session_id), dequeued=turn))
+    orchestrator._tasks.add(task)
+    task.add_done_callback(orchestrator._task_done)
+    return task, turn
+
+
+def _recording_enqueue(monkeypatch) -> list[UUID]:
+    enqueued: list[UUID] = []
+
+    async def enqueue(redis, *, org_id, agent_id, session_id):
+        enqueued.append(session_id)
+
+    monkeypatch.setattr("surogates.orchestrator.dispatcher.enqueue_session", enqueue)
+    return enqueued
+
+
+async def test_shutdown_hands_a_turn_waiting_on_a_computer_to_another_worker(monkeypatch):
+    gate = CountingGate(held=1)
+    orchestrator = orchestrator_with(gate)
+    await orchestrator.semaphore.acquire()
+    waiting = asyncio.Event()
+    enqueued = _recording_enqueue(monkeypatch)
+
+    async def process(session_id, *args, **kwargs):
+        # The loop, waiting for a tool call that waits on the user's computer.
+        async with turn_joining():
+            async with turn_activity():
+                async with turn_waiting(resumable=True):
+                    waiting.set()
+                    await asyncio.Event().wait()
+
+    task, turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(waiting.wait(), 5.0)
+    await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
+    assert task.cancelled()
+    assert enqueued == [UUID(turn.session_id)]
+    assert gate.calls.count("release") == 1
+    await orchestrator.semaphore.acquire()
+    assert orchestrator.semaphore.locked(), "the semaphore slot was released twice"
+
+
+async def test_shutdown_lets_a_working_turn_finish(monkeypatch):
+    orchestrator = orchestrator_with(CountingGate(held=1))
+    await orchestrator.semaphore.acquire()
+    enqueued = _recording_enqueue(monkeypatch)
+
+    async def process(session_id, *args, **kwargs):
+        await asyncio.sleep(0.2)
+
+    task, _turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
+    assert task.done() and not task.cancelled()
+    assert enqueued == []
+
+
+async def test_shutdown_lets_a_turn_waiting_on_a_person_finish(monkeypatch):
+    orchestrator = orchestrator_with(CountingGate(held=1))
+    await orchestrator.semaphore.acquire()
+    enqueued = _recording_enqueue(monkeypatch)
+
+    async def process(session_id, *args, **kwargs):
+        # The loop, waiting for an ask_user_question that is answered soon.
+        async with turn_joining():
+            async with turn_activity():
+                async with turn_waiting():
+                    await asyncio.sleep(1.5)
+
+    task, _turn = await _start_turn(orchestrator, monkeypatch, process)
+    await asyncio.wait_for(orchestrator._drain_turns(), 5.0)
+    assert task.done() and not task.cancelled()
+    assert enqueued == []

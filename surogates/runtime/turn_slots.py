@@ -58,6 +58,7 @@ class TurnSlots:
         self._semaphore_held = True
         self._active = 0
         self._waiting = 0
+        self._resumable = 0
         self._ended = False
         # Serialises giving back and taking back; the counters change outside
         # it, so a cancellation cannot leave them wrong.
@@ -98,17 +99,21 @@ class TurnSlots:
                     await self._take_back()
 
     @contextlib.asynccontextmanager
-    async def waiting(self) -> AsyncIterator[None]:
+    async def waiting(self, *, resumable: bool = False) -> AsyncIterator[None]:
         """Wait on something outside the worker; once all of the turn waits, the slots go back.
 
-        A cancelled wait takes nothing back: whoever carries on (the loop, when
-        it stops joining) takes the slots back before it works.
+        A resumable wait is one another worker can take over from the
+        journal: an operation on the user's computer.  A cancelled wait takes
+        nothing back: whoever carries on (the loop, when it stops joining)
+        takes the slots back before it works.
         """
         if _in_wait.get():
             yield
             return
         token = _in_wait.set(True)
         self._waiting += 1
+        if resumable:
+            self._resumable += 1
         cancelled = False
         try:
             async with self._lock:
@@ -119,6 +124,8 @@ class TurnSlots:
             raise
         finally:
             self._waiting -= 1
+            if resumable:
+                self._resumable -= 1
             _in_wait.reset(token)
             if not cancelled:
                 async with self._lock:
@@ -141,6 +148,11 @@ class TurnSlots:
     def all_waiting(self) -> bool:
         """Whether every activity still counted is waiting on something outside the worker."""
         return self._active > 0 and self._waiting >= self._active
+
+    @property
+    def waiting_resumably(self) -> bool:
+        """Whether every activity still counted waits on work another worker can resume from the journal."""
+        return self._active > 0 and self._resumable >= self._active
 
     def detach(self) -> None:
         """Stop the turn so another worker resumes it.
@@ -220,10 +232,10 @@ def turn_activity() -> contextlib.AbstractAsyncContextManager[None]:
     return slots.activity() if slots is not None else contextlib.nullcontext()
 
 
-def turn_waiting() -> contextlib.AbstractAsyncContextManager[None]:
+def turn_waiting(*, resumable: bool = False) -> contextlib.AbstractAsyncContextManager[None]:
     """The current turn's waiting(), or nothing outside a dispatched turn."""
     slots = current_turn.get()
-    return slots.waiting() if slots is not None else contextlib.nullcontext()
+    return slots.waiting(resumable=resumable) if slots is not None else contextlib.nullcontext()
 
 
 def turn_joining() -> contextlib.AbstractAsyncContextManager[None]:
