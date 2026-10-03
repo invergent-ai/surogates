@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +13,10 @@ import {
 
 // The built module, for a holder in another process (npm test builds first).
 const MODULE = new URL("../dist/hosts/folder-record.js", import.meta.url).href;
+
+// Lock names are global per user on the machine: a device of our own process id
+// keeps them apart from a suite running at the same time.
+const D = process.pid;
 
 let dir: string;
 let folder: string;
@@ -28,32 +33,40 @@ afterEach(() => {
 
 describe("the folder lock", () => {
   it("lets one holder have a folder at a time, and refuses the next once its wait is over", async () => {
-    const held = await lockFolder(1, 2);
+    const held = await lockFolder(D, 2);
     const started = Date.now();
-    await expect(lockFolder(1, 2, 300)).rejects.toBeInstanceOf(FolderBusy);
+    await expect(lockFolder(D, 2, 300)).rejects.toBeInstanceOf(FolderBusy);
     expect(Date.now() - started).toBeGreaterThanOrEqual(300);
     // Another folder is another lock.
-    (await lockFolder(1, 3)).close();
+    (await lockFolder(D, 3)).close();
     held.close();
-    (await lockFolder(1, 2, 0)).close();
+    (await lockFolder(D, 2, 0)).close();
   });
 
   it("waits for a holder that lets go while it waits", async () => {
-    const held = await lockFolder(4, 5);
+    const held = await lockFolder(D, 5);
     setTimeout(() => held.close(), 200);
-    (await lockFolder(4, 5, 2_000)).close();
+    (await lockFolder(D, 5, 2_000)).close();
   });
 
   it("is free as soon as its holder is killed", async () => {
     const holder = spawn(process.execPath, [
       "--input-type=module", "-e",
-      `const { lockFolder } = await import(${JSON.stringify(MODULE)}); await lockFolder(7, 8); console.log("held"); setInterval(() => {}, 1000);`,
+      `const { lockFolder } = await import(${JSON.stringify(MODULE)}); await lockFolder(${D}, 8); console.log("held"); setInterval(() => {}, 1000);`,
     ], { stdio: ["ignore", "pipe", "inherit"] });
     await once(holder.stdout, "data");
-    await expect(lockFolder(7, 8, 0)).rejects.toBeInstanceOf(FolderBusy);
+    await expect(lockFolder(D, 8, 0)).rejects.toBeInstanceOf(FolderBusy);
     holder.kill("SIGKILL");
     await once(holder, "exit");
-    (await lockFolder(7, 8, 0)).close();
+    (await lockFolder(D, 8, 0)).close();
+  });
+
+  it("drops a connection to its name at once, and stays held", async () => {
+    const held = await lockFolder(D, 9);
+    const client = connect(`\0surogate-folder-${process.getuid?.() ?? 0}-${D}-9`);
+    await once(client, "close");
+    await expect(lockFolder(D, 9, 0)).rejects.toBeInstanceOf(FolderBusy);
+    held.close();
   });
 });
 
@@ -108,5 +121,21 @@ describe("srt's placeholders", () => {
     removePlaceholders(folder, []);
     expect(existsSync(join(outside, "hooks"))).toBe(true);
     expect(existsSync(join(outside, "config"))).toBe(true);
+  });
+
+  it("keeps an empty read-only file that has another link", () => {
+    writeFileSync(join(folder, ".bashrc"), "", { mode: 0o444 });
+    linkSync(join(folder, ".bashrc"), join(folder, "notes"));
+    removePlaceholders(folder, []);
+    expect(existsSync(join(folder, ".bashrc"))).toBe(true);
+  });
+
+  it("keeps a link over a placeholder name, and what it points to", () => {
+    const target = join(dir, "target");
+    writeFileSync(target, "", { mode: 0o444 });
+    symlinkSync(target, join(folder, ".zshrc"));
+    removePlaceholders(folder, []);
+    expect(lstatSync(join(folder, ".zshrc")).isSymbolicLink()).toBe(true);
+    expect(existsSync(target)).toBe(true);
   });
 });

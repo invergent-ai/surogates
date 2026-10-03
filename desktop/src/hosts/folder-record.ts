@@ -41,10 +41,12 @@ export async function lockFolder(dev: number, ino: number, waitMs = LOCK_WAIT_MS
   const name = `\0surogate-folder-${process.getuid?.() ?? 0}-${dev}-${ino}`;
   const deadline = Date.now() + waitMs;
   for (;;) {
-    const server = createServer();
+    // Anything in the host's network namespace can connect to the name: drop it at once.
+    const server = createServer((socket) => socket.destroy());
     try {
       await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
+        // on, not once: a later error lands on the settled promise, not on the host.
+        server.on("error", reject);
         server.listen(name, resolve);
       });
       // It holds the name; it does not keep the host running.
