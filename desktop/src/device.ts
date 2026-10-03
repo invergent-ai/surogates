@@ -6,7 +6,8 @@ import { DeviceLink, type LinkStatus } from "./link/client.js";
 import { ACCESS_ENDED, type Executor, OperationRunner } from "./operations/runner.js";
 import { report } from "./report.js";
 
-// The link ends for good with these: nothing local goes on for an agent that cannot hear it.
+// The computer's access to the agent ended: nothing local goes on for an agent that
+// cannot hear it. update_required keeps access, and its results go out after the update.
 const SUSPENDING: readonly LinkStatus[] = ["revoked", "unauthenticated", "superseded"];
 
 export interface DeviceOptions {

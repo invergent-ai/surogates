@@ -414,7 +414,15 @@ describe("suspending local work", () => {
 
   it("records what runs with the outcome it is given, and settles once each is recorded", async () => {
     const executor = new RecordingExecutor(true);
-    const { runner, journal } = await start(executor);
+    // Answers a tick after the abort, so the rows are recorded only if suspend waits for them.
+    const late: Executor = {
+      run: async (operation, signal) => {
+        const outcome = await executor.run(operation, signal);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return outcome;
+      },
+    };
+    const { runner, journal } = await start(late);
     server.send(opFrame("a"));
     server.send(opFrame("b"));
     await server.until(() => executor.ran.length === 2);
@@ -426,13 +434,14 @@ describe("suspending local work", () => {
 
   it("leaves an operation that has finished as it was", async () => {
     const executor = new RecordingExecutor(true);
-    const { runner } = await start(executor);
+    const { runner, journal } = await start(executor);
     server.send(opFrame("a"));
     await server.until(() => executor.ran.length === 1);
     executor.finish("a");
     await server.until(() => results("a").length === 1);
     await runner.suspend(APP_CLOSED);
-    expect(results("a")[0]?.outcome).toEqual({ ok: "ran a" });
+    // The fake server never acknowledges, so the row is still unsent, as it was recorded.
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: { ok: "ran a" } }]);
     expect(executor.aborted).toEqual([]);
   });
 });
