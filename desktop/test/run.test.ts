@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -41,6 +41,23 @@ async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
+
+// The folder srt keeps its sockets in for this test's folder.
+const srtTmp = () => {
+  const { dev, ino } = statSync(folder);
+  return join(start.dataDir, "srt", `${dev}-${ino}`);
+};
+const sockets = () => readdirSync(srtTmp()).filter((name) => name.endsWith(".sock"));
+// The processes whose command line names srt's folder: its socat bridges.
+const bridges = () => spawnSync("pgrep", ["-f", `${srtTmp()}/`], { encoding: "utf8" }).stdout.split("\n").filter(Boolean).map(Number);
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "run-")));
@@ -402,4 +419,37 @@ describe("run", { timeout: 30_000 }, () => {
     expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/) });
     expect(await second.exited).toBe(1);
   }, 30_000);
+
+  it("keeps srt's sockets in the app's data, and a new host ends the bridges a killed one left", async () => {
+    const first = await host();
+    const before = sockets();
+    expect(before.length).toBeGreaterThan(0);
+    const left = bridges();
+    expect(left.length).toBeGreaterThan(0);
+    // Killed alone, as when the app dies with it: its sandbox goes with it
+    // (die-with-parent), its socat bridges, outside the sandbox, go on.
+    process.kill(first.child.pid ?? 0, "SIGKILL");
+    await first.exited;
+    expect(left.some(alive)).toBe(true);
+    await host();
+    await until(() => left.filter(alive).length === 0);
+    expect(sockets().filter((name) => before.includes(name))).toEqual([]);
+  });
+
+  it("leaves no socket behind when its helper dies", async () => {
+    const harness = await host();
+    expect(sockets().length).toBeGreaterThan(0);
+    execFileSync("pkill", ["-KILL", "-P", String(harness.child.pid)]);
+    expect(await harness.exited).toBe(1);
+    expect(sockets()).toEqual([]);
+  });
+
+  it("says so when the app's data folder's path is too long for srt's sockets", async () => {
+    const harness = new Harness();
+    harnesses.push(harness);
+    harness.send({ ...start, dataDir: join(base, "d".repeat(90)), tmp: join(base, "d".repeat(90), "tmp", "root") });
+    const said = await harness.until((messages) => messages.find((message) => message.type === "failed" || message.type === "ready"));
+    expect(said).toEqual({ type: "failed", message: expect.stringContaining("too long for the sandbox's sockets") });
+    expect(await harness.exited).toBe(1);
+  });
 });

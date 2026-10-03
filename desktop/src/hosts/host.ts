@@ -5,7 +5,7 @@
 // is the parent of every command's bwrap. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, type Stats, statSync } from "node:fs";
 import type { Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -56,7 +56,7 @@ process.on("message", (raw) => {
             message: error instanceof Error ? error.message : String(error),
             ...(error instanceof FolderUnavailable ? { folder: true as const } : {}),
           },
-          () => process.exit(1),
+          () => void stop(1),
         ),
       );
       break;
@@ -83,6 +83,19 @@ function spellings(path: string): string[] {
   const plain = resolve(path);
   const { path: real } = realpath(plain);
   return real === plain ? [plain] : [plain, real];
+}
+
+// What a host killed together with the app left of srt: its bridges (socat, whose
+// command line names their socket), then its files.
+function sweep(dir: string): void {
+  for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      if (readFileSync(`/proc/${pid}/cmdline`, "latin1").includes(`${dir}/`)) process.kill(Number(pid), "SIGKILL");
+    } catch {
+      // Gone, or not ours to read.
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // The bound folder is gone, or is not a folder. The app has no folder to check
@@ -125,7 +138,20 @@ async function start(message: HostStart): Promise<void> {
   // One host per folder. Then, if the host before this one was killed, what srt
   // left over the names that were absent when it started.
   const key = `${stats.dev}-${stats.ino}`;
+  // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
+  // through os.tmpdir(), read at each call: here, in a folder only this folder's
+  // host uses, so whatever a killed host left there is provably its own.
+  const srtTmp = join(message.dataDir, "srt", key);
+  // A unix socket's path holds at most 107 bytes; srt's longest name here is claude-socks-<16 hex>.sock.
+  if (Buffer.byteLength(join(srtTmp, `claude-socks-${"0".repeat(16)}.sock`)) > 107) {
+    throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
+  }
   lock = await lockFolder(stats.dev, stats.ino);
+  // Before anything in the folder is touched: a host killed with the app may have
+  // left its commands' sandboxes and bridges running, and each names this folder.
+  sweep(srtTmp);
+  mkdirSync(srtTmp, { recursive: true, mode: 0o700 });
+  process.env.TMPDIR = srtTmp;
   const record = join(message.dataDir, "folders", `${key}.json`);
   const last = readRecord(record);
   const killed = last?.state === "running" ? last : null;
@@ -166,7 +192,7 @@ async function start(message: HostStart): Promise<void> {
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
   const { errors, warnings } = SandboxManager.checkDependencies();
   if (errors.length || warnings.length) throw new Error([...errors, ...warnings].join("; "));
-  // srt's proxy bridges listen in this process's /tmp, which the policy hides.
+  // srt's proxy bridges listen in its temp folder, which the policy hides.
   const sockets = [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()]
     .filter((socket): socket is string => Boolean(socket));
   SandboxManager.updateConfig({
@@ -221,9 +247,9 @@ async function start(message: HostStart): Promise<void> {
     child.once("exit", () => {
       clearTimeout(timer);
       if (!up) reject(new Error(`the file helper exited: ${stderr}`));
-      // A helper that dies takes its host with it: the app answers whatever was
-      // running as interrupted and starts a new host for the next operation.
-      else if (!stopping) process.exit(1);
+      // A helper that dies takes its host with it, srt cleaned up: the app answers
+      // whatever was running as interrupted and starts a new host for the next operation.
+      else if (!stopping) void stop(1);
     });
   });
   // The helper's sandbox lasts as long as the host. Left in srt's count, it
