@@ -364,13 +364,18 @@ describe("run", { timeout: 30_000 }, () => {
 
   it.skipIf(process.getuid?.() === 0)("keeps the record of a host that stopped without seeing the whole folder", async () => {
     const first = await host();
-    expect((await run(
-      first,
-      "git -c init.defaultBranch=main init -q sub && printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit && chmod +x sub/.git/hooks/pre-commit && chmod 0 sub",
-    )).ok?.returncode).toBe(0);
-    await first.stop();
-    // The user does what the refusal asked, and a new host starts.
-    chmodSync(join(folder, "sub"), 0o755);
+    try {
+      expect((await run(
+        first,
+        "git -c init.defaultBranch=main init -q sub && printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit && chmod +x sub/.git/hooks/pre-commit && chmod 0 sub",
+      )).ok?.returncode).toBe(0);
+      await first.stop();
+      // Stopped, not killed by the harness: the record stays because of the look.
+      expect(await first.exited).toBe(0);
+    } finally {
+      // The user does what the refusal asked, and a new host starts. Also lets afterEach remove the folder.
+      chmodSync(join(folder, "sub"), 0o755);
+    }
     const second = await host();
     expect((await run(second, "test -x sub/.git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");
   });
@@ -378,6 +383,7 @@ describe("run", { timeout: 30_000 }, () => {
   it("does not touch the folder after a host that stopped cleanly", async () => {
     const first = await host();
     await first.stop();
+    expect(await first.exited).toBe(0);
     // Made after, by the user: empty and read-only, like srt's, but no host was killed.
     writeFileSync(join(folder, ".bash_profile"), "", { mode: 0o444 });
     await host();

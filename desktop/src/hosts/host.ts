@@ -283,7 +283,10 @@ async function stop(code = 0): Promise<void> {
 // host stopped cleanly, if it did, so the next one has nothing to clear.
 async function leave(code: number, clean: boolean): Promise<void> {
   await SandboxManager.reset().catch(() => {});
-  if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null });
-  lock?.close();
-  process.exit(code);
+  try {
+    if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null });
+  } finally {
+    lock?.close();
+    process.exit(code);
+  }
 }
