@@ -12,7 +12,21 @@ import { join } from "node:path";
 export const APP_NAMES = ["HOME", "LANG", "PATH", "USER", "LOGNAME", "TERM"] as const;
 const CACHES = { XDG_CACHE_HOME: "cache", npm_config_cache: "npm", PIP_CACHE_DIR: "pip", UV_CACHE_DIR: "uv" };
 const LOGIN_TIMEOUT_MS = 10_000;
+// After the shell exits: time for output still in the pipe, which a job it left running keeps open.
+const EXIT_GRACE_MS = 200;
+// The marker is near the end of whatever an rc file prints; the rest is not kept.
+const OUTPUT_KEPT = 1024 * 1024;
 const FALLBACK_PATH = "/usr/bin:/bin";
+
+// The user's name from the environment, else the system's; "user" when the
+// system has no entry for this uid, which throws.
+function currentUser(): string {
+  try {
+    return process.env.USER || process.env.LOGNAME || userInfo().username;
+  } catch {
+    return "user";
+  }
+}
 
 // Only absolute entries, each once: an empty or relative one would resolve in
 // the folder, where the agent can write.
@@ -24,7 +38,7 @@ export function absolutePath(path: string): string {
 // Run from the home folder, never a project's; null when it cannot be read.
 export function loginPath(shell: string, home: string, timeoutMs = LOGIN_TIMEOUT_MS): Promise<string | null> {
   return new Promise((resolve) => {
-    const user = userInfo().username;
+    const user = currentUser();
     let output = "";
     let child: ReturnType<typeof spawn>;
     try {
@@ -39,8 +53,12 @@ export function loginPath(shell: string, home: string, timeoutMs = LOGIN_TIMEOUT
       resolve(null);
       return;
     }
+    let settled = false;
+    const timers: NodeJS.Timeout[] = [];
     const done = (path: string | null) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      timers.forEach(clearTimeout);
       try {
         if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
       } catch {
@@ -50,12 +68,16 @@ export function loginPath(shell: string, home: string, timeoutMs = LOGIN_TIMEOUT
       resolve(path);
     };
     // A job the rc files leave in the background can hold stdout open for ever:
-    // answer once the PATH is out, or at the timeout.
-    const timer = setTimeout(() => done(null), timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
+    // answer once the PATH is out, shortly after the shell exits, or at the timeout.
+    timers.push(setTimeout(() => done(null), timeoutMs));
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      output = (output + chunk).slice(-OUTPUT_KEPT);
       const found = /__P__(.*?)__P__/s.exec(output);
       if (found) done(found[1] ?? null);
+    });
+    child.on("exit", () => {
+      if (!settled) timers.push(setTimeout(() => done(null), EXIT_GRACE_MS));
     });
     child.on("error", () => done(null));
     child.on("close", () => done(null));
@@ -66,9 +88,8 @@ export function loginPath(shell: string, home: string, timeoutMs = LOGIN_TIMEOUT
 export async function appEnvironment(options: { shell?: string; home?: string } = {}): Promise<Record<string, string>> {
   const home = options.home ?? homedir();
   const shell = options.shell ?? process.env.SHELL ?? "/bin/bash";
-  const user = userInfo().username;
-  const found = await loginPath(shell, home);
-  const path = absolutePath(found ?? process.env.PATH ?? "") || FALLBACK_PATH;
+  const user = currentUser();
+  const path = absolutePath((await loginPath(shell, home)) ?? "") || absolutePath(process.env.PATH ?? "") || FALLBACK_PATH;
   return { HOME: home, LANG: process.env.LANG || "C.UTF-8", PATH: path, USER: user, LOGNAME: user, TERM: "dumb" };
 }
 
