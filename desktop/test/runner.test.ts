@@ -11,7 +11,7 @@ import { connectDevice } from "../src/device.js";
 import { INTERRUPTED, OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { MAX_FRAME_CHARS, type Operation, type Outcome } from "../src/link/protocol.js";
-import { type Executor, TOO_LARGE } from "../src/operations/runner.js";
+import { ACCESS_ENDED, APP_CLOSED, type Executor, TOO_LARGE } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 let dir: string;
@@ -397,5 +397,42 @@ describe("a journal that belongs to another device", () => {
       for (const client of raw.clients) client.terminate();
       await new Promise<void>((resolve) => raw.close(() => resolve()));
     }
+  });
+});
+
+describe("suspending local work", () => {
+  it.each([4403, 4401, 4409])("stops what runs when the link ends with %i, and records it interrupted", async (code) => {
+    const executor = new RecordingExecutor(true);
+    const { journal } = await start(executor);
+    server.send(opFrame("a"));
+    await server.until(() => executor.ran.length === 1);
+    server.close(code);
+    await server.until(() => executor.aborted.length === 1);
+    await server.until(() => journal.unsent().length === 1);
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: ACCESS_ENDED }]);
+  });
+
+  it("records what runs with the outcome it is given, and settles once each is recorded", async () => {
+    const executor = new RecordingExecutor(true);
+    const { runner, journal } = await start(executor);
+    server.send(opFrame("a"));
+    server.send(opFrame("b"));
+    await server.until(() => executor.ran.length === 2);
+    await link?.stop();
+    await runner.suspend(APP_CLOSED);
+    expect(executor.aborted.sort()).toEqual(["a", "b"]);
+    expect(journal.unsent().map((row) => [row.id, row.outcome]).sort()).toEqual([["a", APP_CLOSED], ["b", APP_CLOSED]]);
+  });
+
+  it("leaves an operation that has finished as it was", async () => {
+    const executor = new RecordingExecutor(true);
+    const { runner } = await start(executor);
+    server.send(opFrame("a"));
+    await server.until(() => executor.ran.length === 1);
+    executor.finish("a");
+    await server.until(() => results("a").length === 1);
+    await runner.suspend(APP_CLOSED);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "ran a" });
+    expect(executor.aborted).toEqual([]);
   });
 });

@@ -17,6 +17,23 @@ export const TOO_LARGE: Outcome = {
   },
 };
 
+// What a running operation is recorded as when the app stops it: it may have
+// done part of its work, so the agent is told to look before it repeats it.
+export const APP_CLOSED: Outcome = {
+  error: { type: "interrupted", message: "interrupted: the app was closed while this ran. Check what it did before repeating it." },
+};
+export const ACCESS_ENDED: Outcome = {
+  error: {
+    type: "interrupted",
+    message: "interrupted: this computer's access to the agent ended while this ran. Check what it did before repeating it.",
+  },
+};
+
+// The abort reason suspend() gives: the outcome to record, whatever the executor answers.
+class Suspension {
+  constructor(readonly outcome: Outcome) {}
+}
+
 function unsendable(why: string): Outcome {
   return { error: { type: "other", message: `The operation ran, but its result could not be sent: ${why}` } };
 }
@@ -65,6 +82,7 @@ export interface Executor {
 
 export class OperationRunner {
   private readonly running = new Map<string, AbortController>();
+  private readonly inflight = new Set<Promise<void>>();
 
   constructor(
     private readonly journal: OperationJournal,
@@ -92,12 +110,21 @@ export class OperationRunner {
     if (!this.journal.start(operation.id)) return;
     const controller = new AbortController();
     this.running.set(operation.id, controller);
-    void this.execute(operation, controller.signal).catch((error: unknown) => report(this.onError, error));
+    const done: Promise<void> = this.execute(operation, controller.signal)
+      .catch((error: unknown) => report(this.onError, error))
+      .finally(() => this.inflight.delete(done));
+    this.inflight.add(done);
   }
 
   cancel(id: string): void {
     this.journal.cancel(id);
     this.running.get(id)?.abort();
+  }
+
+  /** Stop every running operation and record it as *outcome*; settles once each is recorded. */
+  suspend(outcome: Outcome): Promise<void> {
+    for (const controller of this.running.values()) controller.abort(new Suspension(outcome));
+    return Promise.all(this.inflight).then(() => {});
   }
 
   acknowledged(id: string): void {
@@ -118,6 +145,8 @@ export class OperationRunner {
     } finally {
       this.running.delete(operation.id);
     }
+    // Stopped by suspend: what it did is unknown, whatever the executor said.
+    if (signal.reason instanceof Suspension) outcome = signal.reason.outcome;
     // A cancelled operation's late outcome is dropped: the server gave up on it.
     if (this.journal.finish(operation.id, outcome)) this.send(opResult(operation, outcome));
   }

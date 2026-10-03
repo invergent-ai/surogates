@@ -3,8 +3,11 @@
 
 import type { OperationJournal } from "./journal/journal.js";
 import { DeviceLink, type LinkStatus } from "./link/client.js";
-import { type Executor, OperationRunner } from "./operations/runner.js";
+import { ACCESS_ENDED, type Executor, OperationRunner } from "./operations/runner.js";
 import { report } from "./report.js";
+
+// The link ends for good with these: nothing local goes on for an agent that cannot hear it.
+const SUSPENDING: readonly LinkStatus[] = ["revoked", "unauthenticated", "superseded"];
 
 export interface DeviceOptions {
   url: string;
@@ -46,7 +49,10 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onOperation: (operation) => runner.operation(operation),
       onCancel: (id) => runner.cancel(id),
       onAck: (id) => runner.acknowledged(id),
-      onStatus: options.onStatus,
+      onStatus: (status) => {
+        if (SUSPENDING.includes(status)) void runner.suspend(ACCESS_ENDED);
+        options.onStatus?.(status);
+      },
       onError: options.onError,
     },
   });
