@@ -156,7 +156,8 @@ async function start(message: HostStart): Promise<void> {
   const [file, flag, line] = argv;
   if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // The app-built environment only: srt's returned env is this process's own.
-  const child = spawn(file, [flag, hideSrtTmp(line)], {
+  // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
+  const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
     env: { ...env, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["pipe", "pipe", "pipe"],

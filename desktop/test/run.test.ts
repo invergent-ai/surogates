@@ -245,6 +245,17 @@ describe("run", { timeout: 30_000 }, () => {
     expect(existsSync(proof)).toBe(false);
   });
 
+  it("never reads the user's shell startup files outside the sandbox", async () => {
+    // srt's outer bash runs out here. With a socket for stdin, as the helper's is, bash
+    // takes itself for a remote shell and reads ~/.bashrc; its output would also spoil
+    // the helper's handshake.
+    const marker = join(base, "bashrc-ran");
+    writeFileSync(join(home, ".bashrc"), `echo Welcome to my shell\ntouch '${marker}'\n`);
+    const harness = await host();
+    expect((await run(harness, "true")).ok?.returncode).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("stops its commands when it stops", async () => {
     const harness = await host();
     harness.send({ type: "op", id: id(), kind: "run", args: { command: "sleep 616", workdir: null, timeout: 60 } });

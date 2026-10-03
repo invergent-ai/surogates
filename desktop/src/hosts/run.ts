@@ -122,7 +122,8 @@ async function run(args: Record<string, unknown>, context: CommandContext, signa
     let timedOut = false;
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(shell, [flag, hidden], { cwd, env: context.env, stdio: ["ignore", "pipe", "pipe"] });
+      // --norc --noprofile: never the user's startup files out here, whatever stdin is.
+      child = spawn(shell, ["--norc", "--noprofile", flag, hidden], { cwd, env: context.env, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       // A spawn that throws (an argument it refuses) never started bwrap: release it all the same.
       release(context);
