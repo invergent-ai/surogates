@@ -80,6 +80,14 @@ describe("hideSrtTmp", () => {
     expect(() => hideSrtTmp("/usr/bin/bwrap --ro-bind /dev/null '/f/q --dev /dev --unshare-pid /x' -- bash")).toThrow(/cannot hide/);
   });
 
+  it("reads srt's quote inside a quoted word, as in a folder named with an apostrophe", () => {
+    // srt writes an apostrophe in a quoted word as '"'"': the anchor after it is still inside the word.
+    const named = `/usr/bin/bwrap --ro-bind /dev/null '/f/it'"'"'s x --dev /dev --unshare-pid /.vscode' --dev /dev --unshare-pid -- bash`;
+    expect(hideSrtTmp(named)).toBe(
+      `/usr/bin/bwrap --ro-bind /dev/null '/f/it'"'"'s x --dev /dev --unshare-pid /.vscode' --tmpfs /tmp/claude --dev /dev --unshare-pid -- bash`,
+    );
+  });
+
   it("refuses a line it does not recognise, so no sandbox starts with /tmp/claude showing", () => {
     expect(() => hideSrtTmp("/usr/bin/bwrap --ro-bind / / -- bash")).toThrow(/cannot hide \/tmp\/claude/);
   });
