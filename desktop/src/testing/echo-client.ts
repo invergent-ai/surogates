@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { connectDevice } from "../device.js";
+import { appEnvironment } from "../hosts/environment.js";
 import { ToolHosts } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -44,7 +45,7 @@ const hosts = folder
   ? new ToolHosts({
     bindingOf: () => ({ folder }),
     dataDir: join(dirname(values.journal), "data"),
-    env: { HOME: process.env.HOME ?? "", LANG: process.env.LANG ?? "C.UTF-8", PATH: process.env.PATH ?? "/usr/bin:/bin" },
+    env: await appEnvironment(),
   })
   : null;
 

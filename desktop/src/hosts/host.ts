@@ -1,24 +1,29 @@
 // A tool host: one process per root session, holding that folder's sandbox. srt
 // keeps its configuration in module globals, so each folder gets its own process
 // (spec, Section 1). It starts the file helper inside the sandbox and relays
-// operations to it. A Node child process with an IPC channel.
+// file operations to it, and it runs commands itself: it owns the folder's srt and
+// is the parent of every command's bwrap. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
+import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
+import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
-import { GLOB, isReserved, sandboxPolicy } from "./policy.js";
+import { GLOB, hideSrtTmp, isReserved, sandboxPolicy } from "./policy.js";
+import { type CommandContext, runCommand } from "./run.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
+const STOP_COMMANDS_MS = 2_000;
 
 const send = (message: FromHost, then?: () => void) => {
   process.send?.(message, undefined, undefined, then);
@@ -28,6 +33,8 @@ const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 let helper: ChildProcess | null = null;
 let folder: { path: string; dev: number; ino: number } | null = null;
 let stopping = false;
+let context: CommandContext | null = null;
+const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
 process.on("message", (raw) => {
   const message = raw as ToHost;
@@ -48,9 +55,11 @@ process.on("message", (raw) => {
       break;
     case "op":
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
+      else if (message.kind === "run") command(message.id, message.args);
       else helper?.stdin?.write(`${JSON.stringify({ id: message.id, kind: message.kind, args: message.args })}\n`);
       break;
     case "cancel":
+      commands.get(message.id)?.controller.abort();
       helper?.stdin?.write(`${JSON.stringify({ cancel: message.id })}\n`);
       break;
     case "stop":
@@ -107,9 +116,25 @@ async function start(message: HostStart): Promise<void> {
   if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
   folder = { path, dev: stats.dev, ino: stats.ino };
   mkdirSync(tmp, { recursive: true });
+  makeCaches(tmp);
+  const env = commandEnvironment(message.env, tmp);
   // srt sets the sandbox's TMPDIR from this; its default is shared by every sandbox.
   process.env.CLAUDE_CODE_TMPDIR = tmp;
-  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath: message.bwrapPath });
+  // srt and the shell it wraps a command in run outside the sandbox, with the
+  // folder as their working folder, and srt itself looks up which, rg and the
+  // shell through this process's PATH. Only absolute entries outside the folder
+  // and the temp folder are kept, and srt's own tools go by absolute path: no
+  // program a command wrote can run out here.
+  const hostPath = absolutePath(process.env.PATH ?? "").split(":")
+    .filter((entry) => entry && ![path, tmp].some((dir) => inside(realpath(entry).path, dir)))
+    .join(":") || "/usr/bin:/bin";
+  process.env.PATH = hostPath;
+  // A user's rg config could hide nested paths from srt's scan, as it could from the helper's searches.
+  delete process.env.RIPGREP_CONFIG_PATH;
+  const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
+  const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
+  const rgPath = findOnPath("rg", hostPath, "/") ?? undefined;
+  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath, socatPath, rgPath });
   await SandboxManager.initialize(policy);
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
   const { errors, warnings } = SandboxManager.checkDependencies();
@@ -125,12 +150,16 @@ async function start(message: HostStart): Promise<void> {
   // temp folder and the user's folder stays as it was.
   process.chdir(tmp);
   const { argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(HELPER)}`);
-  const [file, ...args] = argv;
-  if (!file) throw new Error("srt returned no command");
+  // Every later wrap is a command's, and gets srt's protected names in the
+  // folder itself. Once, here: a wrap awaits, so a chdir per wrap would race.
+  process.chdir(path);
+  const [file, flag, line] = argv;
+  if (!file || flag === undefined || line === undefined) throw new Error("srt returned no command");
   // The app-built environment only: srt's returned env is this process's own.
-  const child = spawn(file, args, {
+  // --norc --noprofile: with a socket for stdin, as this pipe is, bash reads ~/.bashrc out here.
+  const child = spawn(file, ["--norc", "--noprofile", flag, hideSrtTmp(line)], {
     cwd: path,
-    env: { ...message.env, TMPDIR: tmp, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
+    env: { ...env, SUROGATE_FOLDER: path, ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   helper = child;
@@ -170,6 +199,10 @@ async function start(message: HostStart): Promise<void> {
       else if (!stopping) process.exit(1);
     });
   });
+  // The helper's sandbox lasts as long as the host. Left in srt's count, it
+  // would keep srt from ever removing a command's placeholders.
+  SandboxManager.cleanupAfterCommand();
+  context = { folder: path, home, env, claudeWasAbsent: !existsSync(join(path, ".claude")) };
 }
 
 function sameFolder(): boolean {
@@ -182,9 +215,27 @@ function sameFolder(): boolean {
   }
 }
 
+// A command runs here, not in the helper: the host owns the folder's srt and
+// must be the parent of its bwrap.
+function command(id: string, args: Record<string, unknown>): void {
+  if (!context || stopping || commands.has(id)) return;
+  const controller = new AbortController();
+  const done = runCommand(args, context, controller.signal, id).then((outcome) => {
+    commands.delete(id);
+    send({ type: "result", id, outcome });
+  });
+  commands.set(id, { controller, done });
+}
+
 async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
+  const running = [...commands.values()];
+  for (const { controller } of running) controller.abort();
+  await Promise.race([
+    Promise.all(running.map(({ done }) => done)),
+    new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
+  ]);
   helper?.kill("SIGKILL");
   await SandboxManager.reset();
   process.exit(0);

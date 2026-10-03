@@ -5,5 +5,6 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     environment: "node",
     testTimeout: 10_000,
+    globalSetup: ["test/srt-tmp.ts"],
   },
 });
