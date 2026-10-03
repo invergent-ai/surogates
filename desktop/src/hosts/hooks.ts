@@ -112,7 +112,9 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
 export async function chmodInside(
   path: string, folders: readonly string[], change: (mode: number) => number, directory = false,
 ): Promise<boolean> {
-  const flags = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW | (directory ? constants.O_DIRECTORY : 0);
+  // O_NOCTTY: the host leads a session with no terminal, and a path swapped for one must not become its own.
+  const flags = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW | constants.O_NOCTTY
+    | (directory ? constants.O_DIRECTORY : 0);
   const handle = await open(path, flags).catch(() => null);
   if (!handle) return false;
   try {
@@ -120,7 +122,8 @@ export async function chmodInside(
     // A file hard-linked elsewhere is the same file at its other paths, which may be outside.
     if (directory ? !stats.isDirectory() : !stats.isFile() || stats.nlink !== 1) return false;
     const real = await readlink(`/proc/self/fd/${handle.fd}`);
-    if (!folders.some((dir) => inside(real, dir))) return false;
+    // Unlinked since the open: its one link left may be outside. A file really named so is refused too.
+    if (real.endsWith(" (deleted)") || !folders.some((dir) => inside(real, dir))) return false;
     await handle.chmod(change(stats.mode));
     return true;
   } catch {

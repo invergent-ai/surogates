@@ -1,17 +1,20 @@
 // What the hook guard does when chmod fails, and when two looks overlap. The
-// calls are real unless a test switches chmod to fail or holds a readdir.
+// calls are real unless a test switches chmod to fail, acts right after an
+// open, or holds a readdir.
 
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Mode } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { HookGuard, neutralize, scanHooks } from "../src/hosts/hooks.js";
+import { chmodInside, HookGuard, neutralize, scanHooks } from "../src/hosts/hooks.js";
 
 const calls = vi.hoisted(() => ({
   failing: (_path: string): boolean => false,
+  // Runs right after a real open of *path*, as a running command could.
+  opened: (_path: string): void => {},
   // The readdir of *path* after *skip* others of it waits for *release*, and
   // says when it started waiting.
   held: null as { path: string; skip: number; reached: () => void; release: Promise<void> } | null,
@@ -24,6 +27,7 @@ vi.mock("node:fs/promises", async (original) => {
     // The guard changes a mode through a handle on the file, never by path.
     open: async (...args: Parameters<typeof fs.open>) => {
       const handle = await fs.open(...args);
+      calls.opened(String(args[0]));
       const chmod = handle.chmod.bind(handle);
       handle.chmod = async (mode: Mode) => {
         if (calls.failing(String(args[0]))) {
@@ -62,11 +66,13 @@ const asRoot = process.getuid?.() === 0;
 beforeEach(() => {
   folder = realpathSync(mkdtempSync(join(tmpdir(), "hooks-chmod-")));
   calls.failing = () => false;
+  calls.opened = () => {};
   calls.held = null;
 });
 
 afterEach(() => {
   calls.failing = () => false;
+  calls.opened = () => {};
   rmSync(folder, { recursive: true, force: true });
 });
 
@@ -126,6 +132,26 @@ describe("a hook chmod cannot change", () => {
       });
     } finally {
       chmodSync(locked, 0o755);
+    }
+  });
+});
+
+describe("a mode change on a file hard-linked outside the folder", () => {
+  it("is refused when its name in the folder goes between the open and the check", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "hooks-chmod-outside-")));
+    try {
+      const target = join(outside, "run.sh");
+      writeFileSync(target, "#!/bin/sh\n", { mode: 0o755 });
+      const inner = join(folder, "run.sh");
+      linkSync(target, inner);
+      // Unlinked, the open file has one link left, outside, and /proc names it "<inner> (deleted)".
+      calls.opened = (path) => {
+        if (path === inner) unlinkSync(inner);
+      };
+      expect(await chmodInside(inner, [folder], (mode) => mode & 0o7666)).toBe(false);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
