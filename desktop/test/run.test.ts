@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -323,4 +323,77 @@ describe("run", { timeout: 30_000 }, () => {
     expect(answer.ok?.returncode).toBe(-1);
     expect(answer.ok?.output).not.toBe("");
   });
+
+  it("removes what srt left when the host before it was killed, and nothing of the user's", async () => {
+    // The user's own: empty, and empty and read-only like srt's, and a folder with something in it.
+    writeFileSync(join(folder, ".profile"), "");
+    writeFileSync(join(folder, ".zshrc"), "", { mode: 0o444 });
+    mkdirSync(join(folder, ".vscode"));
+    writeFileSync(join(folder, ".vscode", "settings.json"), "{}");
+    mkdirSync(join(folder, ".git"));
+    const before = readdirSync(folder).sort();
+    const first = await host();
+    first.send({ type: "op", id: id(), kind: "run", args: { command: "sleep 621", workdir: null, timeout: 900 } });
+    await until(() => existsSync(join(folder, ".bashrc")));
+    first.killGroup();
+    await first.exited;
+    expect(readdirSync(folder).sort()).not.toEqual(before);
+    await host();
+    expect(readdirSync(folder).sort()).toEqual(before);
+    expect(readdirSync(join(folder, ".git"))).toEqual([]);
+  });
+
+  it("makes the hooks a killed host's command left non-executable before the next host runs a command, and keeps the user's own", async () => {
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(folder, ".git", "hooks", "pre-push"), "#!/bin/sh\n", { mode: 0o755 });
+    const first = await host();
+    first.send({
+      type: "op", id: id(), kind: "run", args: {
+        command: "git -c init.defaultBranch=main init -q sub && printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit && chmod +x sub/.git/hooks/pre-commit && sleep 623",
+        workdir: null, timeout: 900,
+      },
+    });
+    await until(() => running("^sleep 623$") === 1);
+    first.killGroup();
+    await first.exited;
+    const second = await host();
+    // Seen from inside the first command: it was made non-executable before that command ran.
+    expect((await run(second, "test -x sub/.git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");
+    expect(statSync(join(folder, ".git", "hooks", "pre-push")).mode & 0o111).not.toBe(0);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("keeps the record of a host that stopped without seeing the whole folder", async () => {
+    const first = await host();
+    expect((await run(
+      first,
+      "git -c init.defaultBranch=main init -q sub && printf '#!/bin/sh\\n' > sub/.git/hooks/pre-commit && chmod +x sub/.git/hooks/pre-commit && chmod 0 sub",
+    )).ok?.returncode).toBe(0);
+    await first.stop();
+    // The user does what the refusal asked, and a new host starts.
+    chmodSync(join(folder, "sub"), 0o755);
+    const second = await host();
+    expect((await run(second, "test -x sub/.git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");
+  });
+
+  it("does not touch the folder after a host that stopped cleanly", async () => {
+    const first = await host();
+    await first.stop();
+    // Made after, by the user: empty and read-only, like srt's, but no host was killed.
+    writeFileSync(join(folder, ".bash_profile"), "", { mode: 0o444 });
+    await host();
+    expect(existsSync(join(folder, ".bash_profile"))).toBe(true);
+  });
+
+  it("answers a second host for the same folder, however it is spelled, that another chat has it", async () => {
+    await host();
+    symlinkSync(folder, join(base, "link"));
+    const second = new Harness();
+    harnesses.push(second);
+    second.send({ ...start, folder: join(base, "link"), tmp: join(base, "data", "tmp", "other") });
+    const said = await second.until(
+      (messages) => messages.find((message) => message.type === "failed" || message.type === "ready"), 20_000,
+    );
+    expect(said).toEqual({ type: "failed", message: expect.stringMatching(/another chat on this computer is working in this folder/) });
+    expect(await second.exited).toBe(1);
+  }, 30_000);
 });

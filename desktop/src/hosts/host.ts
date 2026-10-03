@@ -6,6 +6,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
+import type { Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
 import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
+import { lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, sandboxPolicy } from "./policy.js";
@@ -36,6 +38,9 @@ let folder: { path: string; dev: number; ino: number } | null = null;
 let stopping = false;
 let context: CommandContext | null = null;
 let guard: HookGuard | null = null;
+// Held for the host's life: the kernel lets go of it when the host goes.
+let lock: Server | null = null;
+let recordPath: string | null = null;
 const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
 process.on("message", (raw) => {
@@ -117,9 +122,26 @@ async function start(message: HostStart): Promise<void> {
   );
   if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
   folder = { path, dev: stats.dev, ino: stats.ino };
-  // Its first look finds the user's own hooks, while srt starts. Commands can write
-  // the folder and the session's temp folder: a hook linked into either is theirs.
-  guard = new HookGuard(path, { writable: [path, ...spellings(tmp)] });
+  // One host per folder. Then, if the host before this one was killed, what srt
+  // left over the names that were absent when it started.
+  const key = `${stats.dev}-${stats.ino}`;
+  lock = await lockFolder(stats.dev, stats.ino);
+  const record = join(message.dataDir, "folders", `${key}.json`);
+  const last = readRecord(record);
+  const killed = last?.state === "running" ? last : null;
+  if (killed) removePlaceholders(path, killed.present);
+  const present = presentIn(path);
+  const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
+  const running = (hooks: ReadonlyMap<string, string> | null) =>
+    writeRecord(record, { state: "running", present, hooks: hooks ? Object.fromEntries(hooks) : null });
+  // On disk before srt puts anything in the folder, with a killed host's baseline
+  // kept: commands wait for the guard, which records its own once it knows it.
+  running(inherited);
+  recordPath = record;
+  // Its first look finds the user's own hooks, while srt starts. After a killed
+  // host, that host's are the user's, and the look catches what its commands left.
+  // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)] });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -240,7 +262,7 @@ function command(id: string, args: Record<string, unknown>): void {
   commands.set(id, { controller, done });
 }
 
-async function stop(): Promise<void> {
+async function stop(code = 0): Promise<void> {
   if (stopping) return;
   stopping = true;
   const running = [...commands.values()];
@@ -250,6 +272,18 @@ async function stop(): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
-  await SandboxManager.reset();
-  process.exit(0);
+  // What a stopped command left, before the record can say the host stopped
+  // cleanly. A look that could not see the whole folder, or a host killed
+  // during it, leaves "running" and the baseline for the next host.
+  const clean = (await guard?.settle()) ?? true;
+  await leave(code, clean);
+}
+
+// The way out: srt removes its sockets and placeholders, then the record says the
+// host stopped cleanly, if it did, so the next one has nothing to clear.
+async function leave(code: number, clean: boolean): Promise<void> {
+  await SandboxManager.reset().catch(() => {});
+  if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null });
+  lock?.close();
+  process.exit(code);
 }
