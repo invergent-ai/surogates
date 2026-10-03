@@ -29,6 +29,8 @@ class Harness {
     });
     this.exited = new Promise((resolve) => this.child.on("exit", (code) => resolve(code)));
     this.child.on("message", (message) => this.messages.push(message as FromHost));
+    // A send to a host that has just exited fails (EPIPE): its exit is what the tests wait on.
+    this.child.on("error", () => {});
   }
 
   killGroup(): void {
