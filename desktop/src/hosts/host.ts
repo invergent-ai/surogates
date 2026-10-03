@@ -36,6 +36,9 @@ const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 let helper: ChildProcess | null = null;
 let folder: { path: string; dev: number; ino: number } | null = null;
 let stopping = false;
+// Stopped because something failed: the commands it stops go unanswered, and the
+// app answers them as interrupted, with the warning to check what they did.
+let failing = false;
 let context: CommandContext | null = null;
 let guard: HookGuard | null = null;
 // Held for the host's life: the kernel lets go of it when the host goes.
@@ -90,6 +93,8 @@ function spellings(path: string): string[] {
 function sweep(dir: string): void {
   for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
     try {
+      // The user's own only: reading a command line waits on that process's memory, which one stuck in the kernel holds.
+      if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) continue;
       if (readFileSync(`/proc/${pid}/cmdline`, "latin1").includes(`${dir}/`)) process.kill(Number(pid), "SIGKILL");
     } catch {
       // Gone, or not ours to read.
@@ -147,8 +152,8 @@ async function start(message: HostStart): Promise<void> {
     throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
   }
   lock = await lockFolder(stats.dev, stats.ino);
-  // Before anything in the folder is touched: a host killed with the app may have
-  // left its commands' sandboxes and bridges running, and each names this folder.
+  // Before anything in the folder is touched: the bridges (socat) a host killed with
+  // the app left running, and anything else whose command line names srt's folder.
   sweep(srtTmp);
   mkdirSync(srtTmp, { recursive: true, mode: 0o700 });
   process.env.TMPDIR = srtTmp;
@@ -247,8 +252,9 @@ async function start(message: HostStart): Promise<void> {
     child.once("exit", () => {
       clearTimeout(timer);
       if (!up) reject(new Error(`the file helper exited: ${stderr}`));
-      // A helper that dies takes its host with it, srt cleaned up: the app answers
-      // whatever was running as interrupted and starts a new host for the next operation.
+      // A helper that dies takes its host with it, srt cleaned up and its commands
+      // stopped unanswered: the app answers them as interrupted and starts a new host
+      // for the next operation.
       else if (!stopping) void stop(1);
     });
   });
@@ -283,7 +289,7 @@ function command(id: string, args: Record<string, unknown>): void {
       ? CANCELLED
       : await hooks.after(await runCommand(args, ready, controller.signal, id)));
     commands.delete(id);
-    send({ type: "result", id, outcome });
+    if (!failing) send({ type: "result", id, outcome });
   })();
   commands.set(id, { controller, done });
 }
@@ -291,6 +297,7 @@ function command(id: string, args: Record<string, unknown>): void {
 async function stop(code = 0): Promise<void> {
   if (stopping) return;
   stopping = true;
+  failing = code !== 0;
   const running = [...commands.values()];
   for (const { controller } of running) controller.abort();
   await Promise.race([

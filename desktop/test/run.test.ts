@@ -444,6 +444,20 @@ describe("run", { timeout: 30_000 }, () => {
     expect(sockets()).toEqual([]);
   });
 
+  it("leaves a command its helper's death stopped unanswered, for the app to answer as interrupted", async () => {
+    const harness = await host();
+    const opId = id();
+    harness.send({ type: "op", id: opId, kind: "run", args: { command: "sleep 627", workdir: null, timeout: 60 } });
+    await until(() => running("^sleep 627$") === 1);
+    // The helper alone: the command, another of the host's children, runs on until the host stops it.
+    execFileSync("pkill", ["-KILL", "-P", String(harness.child.pid), "-f", "files/helper.js"]);
+    expect(await harness.exited).toBe(1);
+    // Every message the host sent has been read once its channel is closed.
+    await until(() => !harness.child.connected);
+    expect(harness.messages.filter((message) => message.type === "result" && message.id === opId)).toEqual([]);
+    await until(() => running("^sleep 627$") === 0);
+  });
+
   it("says so when the app's data folder's path is too long for srt's sockets", async () => {
     const harness = new Harness();
     harnesses.push(harness);
