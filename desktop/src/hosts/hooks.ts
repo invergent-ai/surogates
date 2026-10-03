@@ -84,14 +84,15 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
       if (owner === uid || writable) scan.unreadable.push(dir);
       return;
     }
-    // A git folder holds HEAD. Its objects/ is the object store, unless it holds
-    // a HEAD of its own: then it is the git folder of a submodule named objects.
+    // A git folder holds HEAD. Its objects/ is the object store only when it holds
+    // no HEAD of its own: else it may be the git folder of a submodule named objects.
     const gitFolder = inGit && entries.some((entry) => entry.name === "HEAD");
     await Promise.all(entries.map(async (entry) => {
       const path = join(dir, entry.name);
       const name = entry.name.toLowerCase();
       if (entry.isDirectory()) {
-        const store = gitFolder && name === "objects" && await lstat(join(path, "HEAD")).then(() => false, () => true);
+        const store = gitFolder && name === "objects"
+          && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
         if (name === "node_modules" || store) return;
         await walk(path, inGit || name === ".git");
       } else if ((entry.isFile() || entry.isSymbolicLink()) && isGitHook(folder, path)) {
@@ -141,7 +142,7 @@ export class HookGuard {
   private recorded = false;
   private blocked: string | null = null;
   private looks = 0;
-  private readonly first: Promise<string[]>;
+  private readonly first: Promise<unknown>;
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
   private readonly timeoutMs: number;
@@ -156,7 +157,8 @@ export class HookGuard {
     this.first = this.check();
   }
 
-  // Why the next command may not run, or null: the last look did not see the whole folder.
+  // Why the next command may not run, or null: the last look did not see the
+  // whole folder, or left a hook it could not stop.
   async refusal(): Promise<Outcome | null> {
     await this.first;
     if (this.blocked) await this.check();
@@ -166,27 +168,29 @@ export class HookGuard {
   // After a command, whatever its outcome: its hooks are made non-executable, and its output says so.
   async after(outcome: Outcome): Promise<Outcome> {
     await this.first;
-    const changed = await this.check();
+    const { changed } = await this.check();
     if (changed.length === 0 || !("ok" in outcome)) return outcome;
     const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
     return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${HOOKS_NOTICE}${listed(this.folder, changed)}` } };
   }
 
   // The last look, when the host stops: what a stopped command left. False when
-  // it could not see the whole folder, so the record must not say the host stopped cleanly.
+  // it could not see the whole folder or left a hook it could not stop, so the
+  // record must not say the host stopped cleanly.
   async settle(): Promise<boolean> {
     await this.first;
-    await this.check();
-    return !this.blocked;
+    const { blocked } = await this.check();
+    return !blocked && !this.blocked;
   }
 
   // One look, numbered. Only the newest says whether commands may run: an older
-  // one may have seen the folder before the newest did.
-  private async check(): Promise<string[]> {
+  // one may have seen the folder before the newest did. Its own verdict goes back
+  // to the caller either way.
+  private async check(): Promise<{ changed: string[]; blocked: string | null }> {
     const mine = ++this.looks;
-    const { changed, blocked } = await this.look();
-    if (mine === this.looks) this.blocked = blocked;
-    return changed;
+    const verdict = await this.look();
+    if (mine === this.looks) this.blocked = verdict.blocked;
+    return verdict;
   }
 
   // The first look that sees the whole folder sets the baseline, which is
@@ -218,11 +222,9 @@ export class HookGuard {
       }
     }
     const { changed, stuck } = await neutralize(this.folder, scan, this.baseline, this.writable);
-    return {
-      changed,
-      blocked: stuck.length > 0
-        ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
-        : unseen,
-    };
+    const unstopped = stuck.length > 0
+      ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
+      : null;
+    return { changed, blocked: [unstopped, unseen].filter(Boolean).join(" ") || null };
   }
 }

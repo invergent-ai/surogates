@@ -12,8 +12,9 @@ import { HookGuard, neutralize, scanHooks } from "../src/hosts/hooks.js";
 
 const calls = vi.hoisted(() => ({
   failing: (_path: string): boolean => false,
-  // A readdir of *path* waits for *release*, and says when it started waiting.
-  held: null as { path: string; reached: () => void; release: Promise<void> } | null,
+  // The readdir of *path* after *skip* others of it waits for *release*, and
+  // says when it started waiting.
+  held: null as { path: string; skip: number; reached: () => void; release: Promise<void> } | null,
 }));
 
 vi.mock("node:fs/promises", async (original) => {
@@ -28,7 +29,7 @@ vi.mock("node:fs/promises", async (original) => {
     },
     readdir: async (...args: Parameters<typeof fs.readdir>) => {
       const held = calls.held;
-      if (held && String(args[0]) === held.path) {
+      if (held && String(args[0]) === held.path && held.skip-- === 0) {
         calls.held = null;
         held.reached();
         await held.release;
@@ -100,6 +101,27 @@ describe("a hook chmod cannot change", () => {
     expect(await guard.refusal()).toBeNull();
     expect(executable(added)).toBe(false);
   });
+
+  it.skipIf(asRoot)("stops commands giving both reasons while a folder cannot be read too", async () => {
+    const guard = new HookGuard(folder);
+    expect(await guard.refusal()).toBeNull();
+    hook(".git/hooks/pre-commit");
+    const locked = join(folder, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0);
+    calls.failing = () => true;
+    try {
+      await guard.after(ran(""));
+      expect(await guard.refusal()).toEqual({
+        error: {
+          type: "sandbox",
+          message: "Blocked: the computer could not stop these git hooks from running outside the sandbox: .git/hooks/pre-commit. Remove them or make them non-executable to run commands here. Blocked: the computer cannot read locked in this folder, so it cannot check there for git hooks, which would run outside the sandbox. Make it readable to run commands here.",
+        },
+      });
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
 });
 
 describe("overlapping looks", () => {
@@ -110,7 +132,7 @@ describe("overlapping looks", () => {
     mkdirSync(slow);
     let release = () => {};
     const reached = new Promise<void>((resolve) => {
-      calls.held = { path: slow, reached: resolve, release: new Promise((done) => { release = done; }) };
+      calls.held = { path: slow, skip: 0, reached: resolve, release: new Promise((done) => { release = done; }) };
     });
     // An older look listed the folder before it held anything unreadable...
     const older = guard.after(ran(""));
@@ -126,6 +148,30 @@ describe("overlapping looks", () => {
       expect(await guard.refusal()).toEqual({
         error: { type: "sandbox", message: expect.stringContaining("locked") },
       });
+    } finally {
+      release();
+      chmodSync(locked, 0o755);
+    }
+  });
+
+  it.skipIf(asRoot)("let settle judge the stop by its own look, though a newer one started", async () => {
+    const guard = new HookGuard(folder);
+    expect(await guard.refusal()).toBeNull();
+    const locked = join(folder, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0);
+    let release = () => {};
+    const reached = new Promise<void>((resolve) => {
+      // Settle's look lists the folder first; the newer look's listing waits.
+      calls.held = { path: folder, skip: 1, reached: resolve, release: new Promise((done) => { release = done; }) };
+    });
+    try {
+      const settled = guard.settle();
+      const newer = guard.after(ran(""));
+      await reached;
+      expect(await settled).toBe(false);
+      release();
+      await newer;
     } finally {
       release();
       chmodSync(locked, 0o755);

@@ -73,6 +73,21 @@ describe("the walk", () => {
     expect([...(await scanHooks(folder)).hooks.keys()]).toEqual([inner]);
   });
 
+  it.skipIf(asRoot)("walks a git folder's objects folder it cannot search, as it may be a submodule's git folder", async () => {
+    const objects = join(folder, ".git", "modules", "objects");
+    mkdirSync(objects, { recursive: true });
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(folder, ".git", "modules", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(objects, "HEAD"), "ref: refs/heads/main\n");
+    hook(".git/modules/objects/hooks/pre-commit");
+    chmodSync(objects, 0o600);
+    try {
+      expect((await scanHooks(folder)).unreadable).toEqual([join(objects, "hooks")]);
+    } finally {
+      chmodSync(objects, 0o755);
+    }
+  });
+
   it.skipIf(asRoot)("lists a folder it cannot read when the user owns it or can write it, and skips one it can do neither with", async () => {
     const locked = join(folder, "locked");
     mkdirSync(locked);
