@@ -159,6 +159,22 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     await executor.stop();
     expect(exits).toBe(2);
   });
+
+  it("lets one chat at a time work in a folder, and the next once the first is idle", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const executor = toolHosts({ idleMs: 500 });
+    const busy = new AbortController();
+    const first = executor.run(op("run", { command: "sleep 31.5", workdir: null, timeout: 60 }), busy.signal);
+    await until(() => Number(spawnSync("pgrep", ["-fc", "^sleep 31.5$"], { encoding: "utf8" }).stdout.trim() || 0) >= 1, 20_000);
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({
+      error: { type: "unavailable", message: expect.stringMatching(/another chat on this computer/) },
+    });
+    busy.abort();
+    expect(await first).toEqual(CANCELLED);
+    // Half a second with nothing to do, and the first chat's host lets the folder go.
+    await until(() => exits >= 2, 10_000);
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+  }, 40_000);
 });
 
 // A host that does what the test tells it to, so the paths a real host takes only
@@ -440,5 +456,37 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "cancel")).toBe(0);
     fakes[0]?.say({ type: "result", id: "again", outcome: { ok: 2 } });
     expect(await second).toEqual({ ok: 2 });
+  });
+
+  it("stops a host that has had nothing to do for a while, and starts another for the next operation", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    await until(() => sent(0, "stop") === 1, 1_000);
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes.length).toBe(2);
+  });
+
+  it("does not stop a host while an operation runs", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(readyOnly) });
+    void executor.run(resolve(), signal());
+    await new Promise((done) => setTimeout(done, 200));
+    expect(sent(0, "stop")).toBe(0);
+  });
+
+  it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
+    const slowStop = (host: FakeHost, message: ToHost) => {
+      if (message.type === "start") host.say({ type: "ready" });
+      if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+      if (message.type === "stop") setTimeout(() => host.exit(), 300);
+    };
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(slowStop) });
+    await executor.run(resolve(), signal());
+    await until(() => sent(0, "stop") === 1, 1_000);
+    let exited = false;
+    fakes[0]?.onExit(() => {
+      exited = true;
+    });
+    await executor.stop();
+    expect(exited).toBe(true);
   });
 });
