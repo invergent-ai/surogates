@@ -157,6 +157,30 @@ SAME_FAILURES = [
 ]
 
 
+# Commands answered alike by the app and the cloud. None depends on the shell
+# (sh or bash) or on HOME.
+SAME_RUN = [
+    ("run", {"command": "echo out; echo err >&2; exit 3", "workdir": None, "timeout": 10}),
+    ("run", {"command": "printf 'a\\000b'", "workdir": None, "timeout": 10}),
+    ("run", {"command": "printf '\\377A'", "workdir": None, "timeout": 10}),
+    ("run", {"command": "printf START; head -c 600000 /dev/zero | tr '\\000' x; printf END", "workdir": None, "timeout": 30}),
+    ("run", {"command": "yes 中 | head -n 600000 | tr -d '\\n'", "workdir": None, "timeout": 30}),
+    ("run", {"command": "sleep 5", "workdir": None, "timeout": 1}),
+    ("run", {"command": "cat a.txt", "workdir": None, "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": None, "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "sub", "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "~", "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "/etc", "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "nope", "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "a.txt", "timeout": 10}),
+    # A symlink in the folder that points outside: refused on both sides.
+    ("run", {"command": "pwd", "workdir": "link-out", "timeout": 10}),
+    ("run", {"command": "a\0b", "workdir": None, "timeout": 10}),
+    ("run", {"command": "pwd", "workdir": "a\0b", "timeout": 10}),
+    ("run", {"command": "exit 0", "workdir": None, "timeout": 10}),
+]
+
+
 async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path):
     folder = prepare(tmp_path)
     prepared = sorted(os.listdir(folder))
@@ -164,7 +188,7 @@ async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_
     app = await client(built_client, link_url, laptop_rig.token, tmp_path / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
-        for kind, template in SAME + SAME_FAILURES:
+        for kind, template in SAME + SAME_FAILURES + SAME_RUN:
             args = fill(template, folder)
             got = await on_app(laptop_rig, kind, args)
             want = await perform(cloud, kind, args)
@@ -229,7 +253,19 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         assert await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": big}) == {
             "error": {"type": "os", "code": "EFBIG", "message": TOO_LARGE},
         }
-        assert (await on_app(laptop_rig, "run", {"command": "true", "workdir": None, "timeout": 5}))["error"]["type"] == "unsupported"
+        assert (await on_app(laptop_rig, "start", {"command": "true", "workdir": None}))["error"]["type"] == "unsupported"
+        home = os.environ["HOME"]
+        # The command's HOME is the app's, not the folder (the toolchains find themselves through it).
+        assert (await on_app(laptop_rig, "run", {"command": "echo $HOME", "workdir": None, "timeout": 10}))["ok"]["output"] == f"{home}\n"
+        # A shell reports a signal as 128 + N.
+        assert (await on_app(laptop_rig, "run", {"command": "kill -9 $$", "workdir": None, "timeout": 10}))["ok"]["returncode"] == 137
+        # A process left in the background ends with its command, so the answer does not wait for it.
+        started = asyncio.get_running_loop().time()
+        answer = await on_app(laptop_rig, "run", {"command": "sleep 30 & echo started", "workdir": None, "timeout": 20})
+        assert answer["ok"]["output"] == "started\n" and asyncio.get_running_loop().time() - started < 10
+        # A host off the package list is refused by the sandbox's proxy.
+        refused = await on_app(laptop_rig, "run", {"command": "curl -sS -o /dev/null https://example.com 2>&1", "workdir": None, "timeout": 20})
+        assert "403" in refused["ok"]["output"]
     finally:
         await app.close()
 
