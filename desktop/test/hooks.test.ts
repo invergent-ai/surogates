@@ -1,10 +1,10 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { HOOKS_NOTICE, HookGuard, isGitHook, neutralize, scanHooks } from "../src/hosts/hooks.js";
+import { HOOKS_NOTICE, HookGuard, MAX_LISTED, isGitHook, neutralize, scanHooks } from "../src/hosts/hooks.js";
 
 let folder: string;
 let other: string;
@@ -64,6 +64,15 @@ describe("the walk", () => {
     expect([...(await scanHooks(folder)).hooks.keys()]).toEqual([inner]);
   });
 
+  it("walks a submodule named objects even when a command wrote a HEAD into the folder above it", async () => {
+    mkdirSync(join(folder, ".git", "modules", "objects"), { recursive: true });
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(folder, ".git", "modules", "HEAD"), "ref: refs/heads/main\n");
+    writeFileSync(join(folder, ".git", "modules", "objects", "HEAD"), "ref: refs/heads/main\n");
+    const inner = hook(".git/modules/objects/hooks/pre-commit");
+    expect([...(await scanHooks(folder)).hooks.keys()]).toEqual([inner]);
+  });
+
   it.skipIf(asRoot)("lists a folder it cannot read when the user owns it or can write it, and skips one it can do neither with", async () => {
     const locked = join(folder, "locked");
     mkdirSync(locked);
@@ -81,6 +90,23 @@ describe("the walk", () => {
       chmodSync(dropBox, 0o755);
     }
   });
+
+  it.skipIf(asRoot)("lists a folder below a hooks folder it cannot read only while a hook could still run a file in it", async () => {
+    const hooks = join(folder, ".git", "hooks");
+    // A hook can run a file in a folder it can search but not list.
+    const searchable = join(hooks, "pre-commit.d");
+    const closed = join(hooks, "post-checkout.d");
+    mkdirSync(searchable, { recursive: true });
+    mkdirSync(closed);
+    chmodSync(searchable, 0o311);
+    chmodSync(closed, 0);
+    try {
+      expect((await scanHooks(folder)).unreadable).toEqual([searchable]);
+    } finally {
+      chmodSync(searchable, 0o755);
+      chmodSync(closed, 0o755);
+    }
+  });
 });
 
 describe("neutralizing", () => {
@@ -92,7 +118,7 @@ describe("neutralizing", () => {
     const target = hook("tools/run.sh");
     const linked = join(folder, ".git/hooks/post-checkout");
     symlinkSync(target, linked);
-    const changed = await neutralize(folder, await scanHooks(folder), baseline);
+    const { changed } = await neutralize(folder, await scanHooks(folder), baseline);
     expect(changed.sort()).toEqual([linked, added].sort());
     expect(executable(added)).toBe(false);
     expect(executable(target)).toBe(false);
@@ -105,7 +131,7 @@ describe("neutralizing", () => {
     const target = hook("run.sh", 0o755, other);
     mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
     symlinkSync(target, join(folder, ".git", "hooks", "pre-commit"));
-    expect(await neutralize(folder, await scanHooks(folder), baseline, [folder, other])).toHaveLength(1);
+    expect((await neutralize(folder, await scanHooks(folder), baseline, [folder, other])).changed).toHaveLength(1);
     expect(executable(target)).toBe(false);
   });
 
@@ -115,10 +141,27 @@ describe("neutralizing", () => {
     mkdirSync(hooks, { recursive: true });
     symlinkSync("/bin/sh", join(hooks, "post-checkout"));
     try {
-      expect(await neutralize(folder, await scanHooks(folder), baseline)).toEqual([join(hooks, "post-checkout")]);
+      expect((await neutralize(folder, await scanHooks(folder), baseline)).changed).toEqual([join(hooks, "post-checkout")]);
       // Git can reach no hook in a folder it cannot search.
       expect(statSync(hooks).mode & 0o111).toBe(0);
       expect(executable("/bin/sh")).toBe(true);
+    } finally {
+      chmodSync(hooks, 0o755);
+    }
+  });
+
+  it("closes the hooks folder of a hook hard-linked to a file elsewhere, and leaves the file", async () => {
+    const baseline = (await scanHooks(folder)).hooks;
+    const target = hook("run.sh", 0o755, other);
+    const hooks = join(folder, ".git", "hooks");
+    mkdirSync(hooks, { recursive: true });
+    linkSync(target, join(hooks, "pre-commit"));
+    try {
+      const { changed } = await neutralize(folder, await scanHooks(folder), baseline, [folder, other]);
+      // A chmod would change the file at its other paths too.
+      expect(executable(target)).toBe(true);
+      expect(statSync(hooks).mode & 0o111).toBe(0);
+      expect(changed).toEqual([join(hooks, "pre-commit")]);
     } finally {
       chmodSync(hooks, 0o755);
     }
@@ -128,7 +171,7 @@ describe("neutralizing", () => {
     const own = hook(".git/hooks/pre-push", 0o644);
     const baseline = (await scanHooks(folder)).hooks;
     chmodSync(own, 0o755);
-    expect(await neutralize(folder, await scanHooks(folder), baseline)).toEqual([own]);
+    expect((await neutralize(folder, await scanHooks(folder), baseline)).changed).toEqual([own]);
     expect(executable(own)).toBe(false);
   });
 
@@ -139,7 +182,7 @@ describe("neutralizing", () => {
     symlinkSync("../../scripts/pre-commit", linked);
     const baseline = (await scanHooks(folder)).hooks;
     writeFileSync(script, "#!/bin/sh\necho changed\n");
-    expect(await neutralize(folder, await scanHooks(folder), baseline)).toEqual([linked]);
+    expect((await neutralize(folder, await scanHooks(folder), baseline)).changed).toEqual([linked]);
     expect(executable(script)).toBe(false);
   });
 });
@@ -175,6 +218,37 @@ describe("the guard", () => {
       expect(await guard.refusal()).toBeNull();
     } finally {
       chmodSync(locked, 0o755);
+    }
+  });
+
+  it("goes on past a folder below a hooks folder it closed, as git runs nothing from there", async () => {
+    const hooks = join(folder, ".git", "hooks");
+    mkdirSync(join(hooks, "pre-commit.d"), { recursive: true });
+    const guard = new HookGuard(folder);
+    await guard.refusal();
+    symlinkSync("/bin/sh", join(hooks, "post-checkout"));
+    try {
+      await guard.after(ran(""));
+      expect(statSync(hooks).mode & 0o111).toBe(0);
+      expect(await guard.settle()).toBe(true);
+      expect(await guard.refusal()).toBeNull();
+    } finally {
+      chmodSync(hooks, 0o755);
+    }
+  });
+
+  it.skipIf(asRoot)("names at most a few of the folders it cannot read", async () => {
+    const locked = Array.from({ length: MAX_LISTED + 1 }, (_, i) => join(folder, `locked${String(i).padStart(2, "0")}`));
+    for (const dir of locked) {
+      mkdirSync(dir);
+      chmodSync(dir, 0);
+    }
+    try {
+      expect(await new HookGuard(folder).refusal()).toEqual({
+        error: { type: "sandbox", message: expect.stringContaining(`${basename(locked[MAX_LISTED - 1] ?? "")} and 1 more in this folder`) },
+      });
+    } finally {
+      for (const dir of locked) chmodSync(dir, 0o755);
     }
   });
 
