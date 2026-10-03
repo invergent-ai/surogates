@@ -5,7 +5,7 @@
 // makes each hook that is not the user's own, unchanged, non-executable: git skips
 // those. Nothing is deleted.
 
-import { access, chmod, constants, lstat, readdir, realpath, stat } from "node:fs/promises";
+import { access, constants, lstat, open, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 
 import { inside } from "../files/paths.js";
@@ -105,6 +105,31 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
   return scan;
 }
 
+// Changes one file's mode through a handle on it, never by its path again: a
+// command still running could swap a folder on the path for a link out of the
+// folder between a look and a chmod. Done only when the opened file is a folder
+// (*directory*) or a file no other path shares, and really lies inside *folders*.
+export async function chmodInside(
+  path: string, folders: readonly string[], change: (mode: number) => number, directory = false,
+): Promise<boolean> {
+  const flags = constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW | (directory ? constants.O_DIRECTORY : 0);
+  const handle = await open(path, flags).catch(() => null);
+  if (!handle) return false;
+  try {
+    const stats = await handle.stat();
+    // A file hard-linked elsewhere is the same file at its other paths, which may be outside.
+    if (directory ? !stats.isDirectory() : !stats.isFile() || stats.nlink !== 1) return false;
+    const real = await readlink(`/proc/self/fd/${handle.fd}`);
+    if (!folders.some((dir) => inside(real, dir))) return false;
+    await handle.chmod(change(stats.mode));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 // Makes every hook that is not in *baseline* unchanged unable to run: the keys
 // it changed, and the keys it could not stop.
 export async function neutralize(
@@ -118,19 +143,14 @@ export async function neutralize(
     const target = await realpath(key).catch(() => null);
     const stats = target ? await stat(target).catch(() => null) : null;
     if (!target || !stats?.isFile() || (stats.mode & 0o111) === 0) continue;
-    // A file hard-linked elsewhere is the same file at its other paths, which
-    // may be outside the folder: a chmod would change it there too.
-    if (stats.nlink === 1 && writable.some((dir) => inside(target, dir))
-      && await chmod(target, stats.mode & 0o7666).then(() => true, () => false)) {
+    if (await chmodInside(target, writable, (mode) => mode & 0o7666)) {
       changed.push(key);
       continue;
     }
     // A program no command wrote, which git would still run with arguments from
     // the repository, or a file that could not be changed: git reaches no hook in
     // a hooks folder it cannot search.
-    const hooks = dirname(key);
-    const folderStats = await stat(hooks).catch(() => null);
-    const closed = folderStats !== null && await chmod(hooks, folderStats.mode & 0o7666).then(() => true, () => false);
+    const closed = await chmodInside(dirname(key), [folder], (mode) => mode & 0o7666, true);
     (closed ? changed : stuck).push(key);
   }
   return { changed, stuck };

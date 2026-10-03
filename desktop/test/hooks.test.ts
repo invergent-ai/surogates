@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { HOOKS_NOTICE, HookGuard, MAX_LISTED, isGitHook, neutralize, scanHooks } from "../src/hosts/hooks.js";
+import { HOOKS_NOTICE, HookGuard, MAX_LISTED, chmodInside, isGitHook, neutralize, scanHooks } from "../src/hosts/hooks.js";
 
 let folder: string;
 let other: string;
@@ -199,6 +199,28 @@ describe("neutralizing", () => {
     writeFileSync(script, "#!/bin/sh\necho changed\n");
     expect((await neutralize(folder, await scanHooks(folder), baseline)).changed).toEqual([linked]);
     expect(executable(script)).toBe(false);
+  });
+});
+
+describe("a mode change", () => {
+  const closed = (mode: number) => mode & 0o7666;
+
+  it("is made where the opened file really is, so a link on its path cannot lead it out of the folder", async () => {
+    const outside = hook("run.sh", 0o755, other);
+    symlinkSync(other, join(folder, "d"));
+    expect(await chmodInside(join(folder, "d", "run.sh"), [folder], closed)).toBe(false);
+    // A link as the last part is never followed, though it leads inside.
+    const inner = hook("real.sh");
+    symlinkSync(inner, join(folder, "link.sh"));
+    expect(await chmodInside(join(folder, "link.sh"), [folder], closed)).toBe(false);
+    expect(statSync(outside).mode & 0o777).toBe(0o755);
+    expect(executable(inner)).toBe(true);
+  });
+
+  it("is made on a file inside the folder", async () => {
+    const inner = hook("run.sh");
+    expect(await chmodInside(inner, [folder], closed)).toBe(true);
+    expect(statSync(inner).mode & 0o777).toBe(0o644);
   });
 });
 

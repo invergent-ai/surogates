@@ -248,7 +248,8 @@ describe("run", { timeout: 30_000 }, () => {
       "git -c init.defaultBranch=main init -q && printf '#!/bin/sh\\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo made",
     );
     // git may warn first that it cannot read the hidden home folder's config.
-    expect(answer.ok?.output.endsWith(`made\n\n${HOOKS_NOTICE}.git/hooks/pre-commit`)).toBe(true);
+    const notice = HOOKS_NOTICE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(answer.ok?.output).toMatch(new RegExp(`made\\n\\n${notice}\\.git/hooks/pre-commit$`));
     expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
     // git's samples never run, and stay as git made them.
     expect(statSync(join(folder, ".git", "hooks", "pre-commit.sample")).mode & 0o111).not.toBe(0);

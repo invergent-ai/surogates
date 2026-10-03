@@ -2,7 +2,7 @@
 // calls are real unless a test switches chmod to fail or holds a readdir.
 
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import type { Mode, PathLike } from "node:fs";
+import type { Mode } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -21,11 +21,17 @@ vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
   return {
     ...fs,
-    chmod: async (path: PathLike, mode: Mode) => {
-      if (calls.failing(String(path))) {
-        throw Object.assign(new Error("EPERM: operation not permitted, chmod"), { code: "EPERM", syscall: "chmod" });
-      }
-      return fs.chmod(path, mode);
+    // The guard changes a mode through a handle on the file, never by path.
+    open: async (...args: Parameters<typeof fs.open>) => {
+      const handle = await fs.open(...args);
+      const chmod = handle.chmod.bind(handle);
+      handle.chmod = async (mode: Mode) => {
+        if (calls.failing(String(args[0]))) {
+          throw Object.assign(new Error("EPERM: operation not permitted, fchmod"), { code: "EPERM", syscall: "fchmod" });
+        }
+        return chmod(mode);
+      };
+      return handle;
     },
     readdir: async (...args: Parameters<typeof fs.readdir>) => {
       const held = calls.held;
