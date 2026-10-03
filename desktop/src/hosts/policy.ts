@@ -85,6 +85,8 @@ export function sandboxPolicy({ folder, tmp, home, appDirs, bwrapPath, socatPath
     // folder's .ignore, .rgignore or .gitignore: the agent writes those, and one
     // naming a nested repo would leave its .git/config writable.
     ripgrep: { command: rgPath ?? "rg", args: ["--no-ignore"] },
+    // srt's scan for nested protected names, as deep as srt allows (its default is 3).
+    mandatoryDenySearchDepth: 10,
     network: { allowedDomains: PACKAGE_HOSTS, deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],

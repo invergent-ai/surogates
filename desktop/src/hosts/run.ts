@@ -27,7 +27,7 @@ export interface CommandContext {
 // The workdirs the cloud reads as the folder itself (local.py _HOME_ALIASES).
 const HOME_ALIASES = new Set(["$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"]);
 const MAX_TIMER_MS = 2 ** 31 - 1;
-const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
+export const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
 
 const ran = (output: string, returncode: number, timed_out = false): Outcome => ({ ok: { output, returncode, timed_out } });
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));

@@ -17,8 +17,9 @@ import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
 import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
+import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, sandboxPolicy } from "./policy.js";
-import { type CommandContext, runCommand } from "./run.js";
+import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
@@ -34,6 +35,7 @@ let helper: ChildProcess | null = null;
 let folder: { path: string; dev: number; ino: number } | null = null;
 let stopping = false;
 let context: CommandContext | null = null;
+let guard: HookGuard | null = null;
 const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
 process.on("message", (raw) => {
@@ -115,6 +117,9 @@ async function start(message: HostStart): Promise<void> {
   );
   if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
   folder = { path, dev: stats.dev, ino: stats.ino };
+  // Its first look finds the user's own hooks, while srt starts. Commands can write
+  // the folder and the session's temp folder: a hook linked into either is theirs.
+  guard = new HookGuard(path, { writable: [path, ...spellings(tmp)] });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -216,14 +221,22 @@ function sameFolder(): boolean {
 }
 
 // A command runs here, not in the helper: the host owns the folder's srt and
-// must be the parent of its bwrap.
+// must be the parent of its bwrap. The folder is looked through before it, when
+// the last look could not see all of it, and after it, for the hooks it left.
 function command(id: string, args: Record<string, unknown>): void {
-  if (!context || stopping || commands.has(id)) return;
+  if (!context || !guard || stopping || commands.has(id)) return;
+  const ready = context;
+  const hooks = guard;
   const controller = new AbortController();
-  const done = runCommand(args, context, controller.signal, id).then((outcome) => {
+  const done = (async () => {
+    const refused = await hooks.refusal();
+    // Stopped or cancelled while the folder was looked through: it never starts.
+    const outcome = refused ?? (stopping || controller.signal.aborted
+      ? CANCELLED
+      : await hooks.after(await runCommand(args, ready, controller.signal, id)));
     commands.delete(id);
     send({ type: "result", id, outcome });
-  });
+  })();
   commands.set(id, { controller, done });
 }
 

@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
+import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { Harness, PACKAGE } from "./host-harness.js";
 
@@ -230,6 +231,56 @@ describe("run", { timeout: 30_000 }, () => {
     expect((await run(harness, "printf 'sub\\n' > .ignore")).ok?.returncode).toBe(0);
     expect((await run(harness, "echo y >> sub/.git/config")).ok?.output).toMatch(/Read-only file system/);
     expect(readFileSync(join(folder, "sub", ".git", "config"), "utf8")).toBe("[core]\n");
+  });
+
+  it("keeps a nested repo's config protected deeper than srt's default three levels", async () => {
+    mkdirSync(join(folder, "a", "b", "c", "d", ".git"), { recursive: true });
+    writeFileSync(join(folder, "a", "b", "c", "d", ".git", "config"), "[core]\n");
+    const harness = await host();
+    expect((await run(harness, "echo y >> a/b/c/d/.git/config")).ok?.output).toMatch(/Read-only file system/);
+    expect(readFileSync(join(folder, "a", "b", "c", "d", ".git", "config"), "utf8")).toBe("[core]\n");
+  });
+
+  it("makes the hooks a command adds non-executable, and says so", async () => {
+    const harness = await host();
+    const answer = await run(
+      harness,
+      "git -c init.defaultBranch=main init -q && printf '#!/bin/sh\\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo made",
+    );
+    // git may warn first that it cannot read the hidden home folder's config.
+    expect(answer.ok?.output.endsWith(`made\n\n${HOOKS_NOTICE}.git/hooks/pre-commit`)).toBe(true);
+    expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
+    // git's samples never run, and stay as git made them.
+    expect(statSync(join(folder, ".git", "hooks", "pre-commit.sample")).mode & 0o111).not.toBe(0);
+  });
+
+  it("makes the target of a hook linked into the session's temp folder non-executable", async () => {
+    const harness = await host();
+    const answer = await run(
+      harness,
+      "printf '#!/bin/sh\\n' > \"$TMPDIR/h\" && chmod +x \"$TMPDIR/h\" && mkdir -p .git/hooks && ln -s \"$TMPDIR/h\" .git/hooks/pre-commit",
+    );
+    expect(answer.ok?.output).toBe(`${HOOKS_NOTICE}.git/hooks/pre-commit`);
+    expect((await run(harness, "test -x \"$TMPDIR/h\" || echo not")).ok?.output).toBe("not\n");
+  });
+
+  it("leaves the user's own hooks as they are", async () => {
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(folder, ".git", "hooks", "pre-commit"), "#!/bin/sh\n", { mode: 0o755 });
+    const harness = await host();
+    expect((await run(harness, "true")).ok?.output).toBe("");
+    expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).not.toBe(0);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("refuses commands while a folder in it cannot be read", async () => {
+    mkdirSync(join(folder, "locked"));
+    chmodSync(join(folder, "locked"), 0);
+    try {
+      const harness = await host();
+      expect(await run(harness, "echo hi")).toEqual({ error: { type: "sandbox", message: expect.stringContaining("locked") } });
+    } finally {
+      chmodSync(join(folder, "locked"), 0o755);
+    }
   });
 
   it("never runs a program from the folder outside the sandbox", async () => {
