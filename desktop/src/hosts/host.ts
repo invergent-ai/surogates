@@ -21,7 +21,7 @@ import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholder
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
-import { FINISHED_TTL_SECONDS, Processes } from "./processes.js";
+import { Processes } from "./processes.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner } from "./session-runner.js";
 
@@ -179,9 +179,9 @@ async function start(message: HostStart): Promise<void> {
   if (killed) removePlaceholders(path, killed.present);
   const present = presentIn(path);
   const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
-  // The processes the last host started ended with it; they are answered for until the cloud would forget them.
-  const now = Date.now() / 1000;
-  const ended = (last?.processes ?? []).filter((handle) => now - handle.started_at <= FINISHED_TTL_SECONDS);
+  // The processes the last host started: those still running ended with it, and those that ended by
+  // themselves keep their real exit code. The registry answers for them until the cloud would forget them.
+  const ended = last?.processes ?? [];
   // On disk before srt puts anything in the folder, with a killed host's baseline
   // kept: commands wait for the guard, which records its own once it knows it.
   saved = { state: "running", present, hooks: killed?.hooks ?? null, processes: ended };

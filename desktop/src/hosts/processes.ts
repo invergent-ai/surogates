@@ -128,6 +128,7 @@ export class Processes {
   private readonly running = new Map<string, Tracked>();
   private readonly finished = new Map<string, Tracked>();
   private readonly now: () => number;
+  private saving = false;
 
   constructor(private readonly options: ProcessesOptions) {
     this.now = options.now ?? (() => Date.now() / 1000);
@@ -361,13 +362,20 @@ export class Processes {
     this.changed();
   }
 
-  // A host that idles out keeps how a process ended for the next one, as the cloud keeps it for 30 minutes;
-  // one its sandbox took with it, as when the host stops, ended when the app quit.
+  // One save for every change in the same tick: a runner that dies ends all its
+  // processes at once. A start awaits its child after this, so its save lands first.
   private changed(): void {
     this.options.live?.(this.running.size);
-    this.options.save?.(this.handles());
+    if (this.saving || !this.options.save) return;
+    this.saving = true;
+    queueMicrotask(() => {
+      this.saving = false;
+      this.options.save?.(this.handles());
+    });
   }
 
+  // A host that idles out keeps how a process ended for the next one, as the cloud keeps it for 30 minutes;
+  // one its sandbox took with it, as when the host stops, ended when the app quit.
   private handles(): ProcessHandle[] {
     return [...this.running.values(), ...this.finished.values()].map((record) => (record.exited && record.note !== RUNNER_GONE
       ? { ...record.handle, ended: { exit_code: record.exitCode, output: lastPoints(record.buffer, 2000), note: record.note } }

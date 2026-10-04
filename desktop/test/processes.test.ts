@@ -388,6 +388,18 @@ describe("processes from before the app quit", { timeout: 20_000 }, () => {
     // The first save is the start's; the process's end saves again.
     expect(saves[0]).toEqual([id, old.id]);
   });
+
+  it("are written once when many processes end together, as when their runner dies", async () => {
+    const { runner: driven, spawned } = fake();
+    const saves: ProcessHandle[][] = [];
+    processes({ runner: driven, save: (handles) => saves.push(handles) });
+    for (let i = 0; i < 20; i += 1) await start("x");
+    expect(saves).toHaveLength(20);
+    for (const child of spawned) child.end({ lost: true });
+    await Promise.resolve();
+    expect(saves).toHaveLength(21);
+    expect(saves[20]?.every((handle) => handle.ended === undefined)).toBe(true);
+  });
 });
 
 describe("a background process with a terminal", { timeout: 20_000 }, () => {

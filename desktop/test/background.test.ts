@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { readRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { APP_QUIT, RUNNER_GONE } from "../src/hosts/processes.js";
@@ -204,6 +205,27 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     expect((await ask(second, "list_processes", { task_id: "t" })).ok).toEqual([
       expect.objectContaining({ session_id, status: "exited", exit_code: null, note: APP_QUIT }),
     ]);
+  });
+
+  it("keeps a killed host's hook baseline in its record through a start, for the next host", async () => {
+    mkdirSync(join(folder, ".git", "hooks"));
+    writeFileSync(join(folder, ".git", "hooks", "pre-push"), "#!/bin/sh\n", { mode: 0o755 });
+    const { dev, ino } = statSync(folder);
+    const record = join(start.dataDir, "folders", `${dev}-${ino}.json`);
+    const first = await host();
+    await until(() => readRecord(record)?.hooks != null);
+    const session_id = (await begin(first, "sleep 681")).ok.session_id as string;
+    // Planted once the baseline is known: not the user's.
+    writeFileSync(join(folder, ".git", "hooks", "pre-commit"), "#!/bin/sh\n", { mode: 0o755 });
+    first.killGroup();
+    await first.exited;
+    await until(() => running("^sleep 681$") === 0);
+    const left = readRecord(record);
+    expect(left?.hooks).not.toBeNull();
+    expect(left?.processes.map((handle) => handle.id)).toEqual([session_id]);
+    const second = await host();
+    expect((await run(second, "test -x .git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");
+    expect(statSync(join(folder, ".git", "hooks", "pre-push")).mode & 0o111).not.toBe(0);
   });
 
   it("answers how a process that ended before its host idled out ended, to the next host", async () => {
