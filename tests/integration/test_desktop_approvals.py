@@ -45,27 +45,36 @@ async def test_what_its_user_denies_reaches_each_tool_as_not_done(built_client, 
             wio = device_io(ops, UUID(device["id"]), UUID(session_id), folder)
             return json.loads(await asyncio.wait_for(handler(args, workspace_io=wio, task_id=session_id), 60.0))
 
-        # A denied command is blocked and never ran; an allowed one runs.
-        assert await call(terminal._terminal_handler, {"command": f"touch {WORD}.txt"}) == {
-            "output": "", "exit_code": -1, "error": "The user denied this command on this computer", "status": "blocked",
-        }
-        assert not (folder / f"{WORD}.txt").exists()
+        # A denied command is blocked and never ran, in the foreground or the background; an allowed one runs.
+        blocked = {"output": "", "exit_code": -1, "error": "The user denied this command on this computer", "status": "blocked"}
+        assert await call(terminal._terminal_handler, {"command": f"touch {WORD}.txt"}) == blocked
+        assert await call(terminal._terminal_handler, {"command": f"echo {WORD}", "background": True}) == blocked
         assert (await call(terminal._terminal_handler, {"command": "echo allowed"}))["output"] == "allowed"
 
         # A denied write is a PermissionError, which write_file reports as expected.
         assert await call(file_ops._write_file_handler, {"path": f"{WORD}.txt", "content": "x"}) == {
             "error": "[Errno 13] The user denied this change on this computer",
         }
+        assert not (folder / f"{WORD}.txt").exists()
 
-        # In a patch, the denied file fails alone; the next is asked about on its own, and applied.
-        patch = f"*** Begin Patch\n*** Add File: {WORD}.md\n+no\n*** Add File: kept.md\n+yes\n*** End Patch"
+        # In a patch, each denied file fails alone; the next is asked about on its own, and applied.
+        # The blank line keeps the Delete: the V4A parser drops one with no body.
+        (folder / f"{WORD}-old.md").write_text("old")
+        patch = (
+            f"*** Begin Patch\n*** Add File: {WORD}.md\n+no\n*** Delete File: {WORD}-old.md\n\n"
+            "*** Add File: kept.md\n+yes\n*** End Patch"
+        )
         patched = await call(file_ops._patch_handler, {"mode": "patch", "patch": patch})
         assert patched["status"] == "partial"
         assert patched["files"][0] == {
             "path": f"{WORD}.md", "error": "Failed to create: [Errno 13] The user denied this change on this computer",
         }
-        assert patched["files"][1]["status"] == "ok"
+        assert patched["files"][1] == {
+            "path": f"{WORD}-old.md", "error": "Failed to delete: [Errno 13] The user denied this change on this computer",
+        }
+        assert patched["files"][2]["status"] == "ok"
         assert not (folder / f"{WORD}.md").exists()
+        assert (folder / f"{WORD}-old.md").read_text() == "old"
         assert (folder / "kept.md").read_text() == "yes"
 
         # Denied input to a process is a write that failed, as the process tool shapes one.
@@ -83,9 +92,11 @@ async def test_what_its_user_denies_reaches_each_tool_as_not_done(built_client, 
         ]
         assert asked == [
             ("command", f"touch {WORD}.txt"),
+            ("command", f"echo {WORD}"),
             ("command", "echo allowed"),
             ("change", str(folder / f"{WORD}.txt")),
             ("change", str(folder / f"{WORD}.md")),
+            ("change", str(folder / f"{WORD}-old.md")),
             ("change", str(folder / "kept.md")),
             ("command", "cat"),
             ("input", f"{WORD}\n"),
