@@ -411,3 +411,22 @@ describe("the walk's protected keys", () => {
     expect([...(await scanHooks(folder)).protectedKeys]).toEqual([join(folder, "d0", ".git")]);
   });
 });
+
+describe("a look whose protected keys could not be told", () => {
+  it("blocks commands, still stops new hooks, and clears on the next look that tells them", async () => {
+    let failing = true;
+    const guard = new HookGuard(folder, {
+      seen: () => {
+        if (failing) throw new Error("full");
+      },
+    });
+    expect(await guard.refusal()).toEqual({
+      error: { type: "sandbox", message: "Blocked: the computer could not check this folder's protected paths, so commands cannot run here: full" },
+    });
+    const added = hook(".git/hooks/pre-commit");
+    await guard.after(ran(""));
+    expect(executable(added)).toBe(false);
+    failing = false;
+    expect(await guard.refusal()).toBeNull();
+  });
+});

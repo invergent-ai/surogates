@@ -248,13 +248,18 @@ export class HookGuard {
     const startedAt = performance.now();
     const scan = await Promise.race([scanHooks(this.folder), late]);
     clearTimeout(timer);
-    if (scan) this.seen(scan.protectedKeys, startedAt);
+    let untold: string | null = null;
+    try {
+      if (scan) this.seen(scan.protectedKeys, startedAt);
+    } catch (error) {
+      untold = `Blocked: the computer could not check this folder's protected paths, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`;
+    }
     const unseen = !scan
       ? `Blocked: the computer could not look through this folder for git hooks within ${this.timeoutMs / 1000} seconds, so commands cannot run here.`
       : scan.unreadable.length > 0
         ? `Blocked: the computer cannot read ${listed(this.folder, scan.unreadable)} in this folder, so it cannot check there for git hooks, which would run outside the sandbox. Make it readable to run commands here.`
         : null;
-    if (!scan || (unseen && !this.baseline)) return { changed: [], blocked: unseen };
+    if (!scan || (unseen && !this.baseline)) return { changed: [], blocked: [unseen, untold].filter(Boolean).join(" ") || null };
     this.baseline ??= scan.hooks;
     if (!this.recorded) {
       try {
@@ -271,6 +276,6 @@ export class HookGuard {
     const unstopped = stuck.length > 0
       ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
       : null;
-    return { changed, blocked: [unstopped, unseen].filter(Boolean).join(" ") || null };
+    return { changed, blocked: [unstopped, unseen, untold].filter(Boolean).join(" ") || null };
   }
 }
