@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,10 +7,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel,
 } from "../src/binding/approvals.js";
+import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
+import { connectDevice } from "../src/device.js";
+import { ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
+import type { DeviceLink } from "../src/link/client.js";
 import type { Operation } from "../src/link/protocol.js";
+import { APP_CLOSED, type Executor, type OperationRunner } from "../src/operations/runner.js";
+import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "44444444-4444-4444-8444-444444444444";
 const OTHER = "55555555-5555-4555-8555-555555555555";
@@ -272,5 +278,122 @@ describe("a chat's mode", () => {
     gone.abort();
     expect(await approvals.requestFreeMode(ROOT, gone.signal)).toBe(false);
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+  });
+});
+
+describe("approvals over the link", () => {
+  let server: FakeLinkServer;
+  let url: string;
+  let devices: Array<{ link: DeviceLink; runner: OperationRunner }>;
+  let ran: Operation[];
+
+  // The tool hosts, as far as the binder sees them.
+  const hosts: Executor = {
+    run: (operation) => {
+      ran.push(operation);
+      return Promise.resolve({ ok: `ran ${operation.kind}` });
+    },
+  };
+  // No folder is prepared here: every chat is bound already.
+  const noFolders: FolderPrompts = { confirmFolder: () => Promise.resolve(null), pickFolder: () => Promise.resolve(null) };
+
+  // The device as the app wires it: the binder, asking the approvals, in front of the tool hosts.
+  async function connect(prompts: User, tools: Executor = hosts): Promise<{ link: DeviceLink; runner: OperationRunner }> {
+    const approvals = new Approvals({ bindings: journal.bindings, prompts, agent: "Research assistant" });
+    const binder = new Binder({
+      bindings: journal.bindings, prompts: noFolders, guards: { home: base, dataDir: join(base, "data"), appDirs: [] },
+      agent: "Research assistant", hosts: tools, approvals,
+    });
+    const device = connectDevice({ url, token: "surg_dev_test", journal, executor: binder, onError: () => {}, delay: () => 20 });
+    devices.push(device);
+    device.link.start();
+    await server.until(() => device.link.status === "connected");
+    return device;
+  }
+
+  const frame = (operation: Operation): Record<string, unknown> => ({
+    type: "op", id: operation.id, session_id: operation.sessionId, calling_session_id: operation.callingSessionId,
+    invocation_id: operation.invocationId, ordinal: operation.ordinal, kind: operation.kind, args: operation.args,
+    digest: operation.digest,
+  });
+  const results = (id: string) => server.received.filter((f) => f.type === "op_result" && f.id === id);
+
+  beforeEach(async () => {
+    server = new FakeLinkServer();
+    url = await server.start();
+    devices = [];
+    ran = [];
+  });
+
+  afterEach(async () => {
+    for (const { link } of devices) await link.stop();
+    await server.stop();
+  });
+
+  it("asks again at the next launch when the app quit with a prompt open, and the command never ran", async () => {
+    bind(ROOT, "ask");
+    const before = await connect(user);
+    const run = op("run", RUN);
+    server.send(frame(run));
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    // The quit order: the link, then the work that runs, then the journal.
+    await before.link.stop();
+    await before.runner.suspend(APP_CLOSED);
+    expect(user.dismissed).toBe(1);
+    journal.close();
+    journal = new OperationJournal(join(base, "journal.sqlite"));
+    expect(journal.openIds()).toEqual([run.id]);
+    const again = new User();
+    await connect(again);
+    expect(server.hellos.at(-1)?.open).toEqual([run.id]);
+    server.send(frame(run));
+    await vi.waitFor(() => expect(again.open).toHaveLength(1));
+    expect(ran).toEqual([]);
+    again.answer("allow");
+    await server.until(() => results(run.id).length === 1);
+    expect(results(run.id)[0]?.outcome).toEqual({ ok: "ran run" });
+    expect(ran.map((operation) => operation.id)).toEqual([run.id]);
+  });
+
+  it("dismisses an open prompt when the chat is stopped, records nothing for it, and asks the next", async () => {
+    bind(ROOT, "ask");
+    await connect(user);
+    const [stopped, after] = [op("run", RUN), op("run", RUN)];
+    server.send(frame(stopped));
+    server.send(frame(after));
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    server.send({ type: "cancel", id: stopped.id });
+    await vi.waitFor(() => expect([user.dismissed, user.asked.length]).toEqual([1, 2]));
+    user.answer("deny");
+    await server.until(() => results(after.id).length === 1);
+    expect(results(after.id)[0]?.outcome).toEqual(COMMAND_DENIED);
+    expect([results(stopped.id), ran, journal.openIds()]).toEqual([[], [], []]);
+  });
+
+  it("gives a command its whole timeout once it is allowed, however long its prompt was open", { timeout: 30_000 }, async () => {
+    const folder = join(base, "notes");
+    const home = join(base, "home");
+    mkdirSync(folder);
+    mkdirSync(home);
+    const { dev, ino } = statSync(folder);
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder, dev, ino, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const tools = new ToolHosts({
+      bindingOf: (root) => journal.bindings.get(root),
+      dataDir: join(base, "data"),
+      env: { HOME: home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
+    });
+    try {
+      await connect(user, tools);
+      const run = op("run", { command: "sleep 0.45; echo done", workdir: null, timeout: 1 });
+      server.send(frame(run));
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      // Longer than the command's whole timeout.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      user.answer("allow");
+      await server.until(() => results(run.id).length === 1, 20_000);
+      expect(results(run.id)[0]?.outcome).toEqual({ ok: { output: "done\n", returncode: 0, timed_out: false } });
+    } finally {
+      await tools.stop();
+    }
   });
 });

@@ -2,8 +2,9 @@
 // user confirms one in the desktop's own sheet; the page creates the chat with
 // the confirmation's nonce; the server sends that chat's bind operation, which is
 // answered as it arrives, against the confirmation; bindSession tells the page
-// once the server has recorded the answer. Every other operation goes to the
-// tool hosts, which find their folder in the bindings.
+// once the server has recorded the answer. Every other operation is put to the
+// approvals first (approvals.ts), then goes to the tool hosts, which find their
+// folder in the bindings.
 
 import { randomBytes } from "node:crypto";
 
@@ -12,6 +13,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
+import type { Approvals } from "./approvals.js";
 import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -59,6 +61,7 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
+  approvals: Approvals; // asks the user about every other operation first, in a chat that asks every time
   preparedMs?: number;
   onError?: (error: unknown) => void; // a binding that could not be recorded, and why
 }
@@ -137,10 +140,11 @@ export class Binder implements Executor {
   // The binding is made when its operation arrives, before the journal marks it
   // started: an app that stops between recording it and answering finds it here
   // when the server sends the operation again. It touches no file: the host checks
-  // the folder against the binding's identity before any work. It waits on nothing,
-  // so it settles at once, an aborted one too: suspend waits for it.
-  async admit(operation: Operation): Promise<Outcome | null> {
-    if (operation.kind !== "bind") return null;
+  // the folder against the binding's identity before any work. A bind waits on
+  // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
+  // other operation is the approvals', which settle once the signal aborts.
+  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    if (operation.kind !== "bind") return this.options.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;

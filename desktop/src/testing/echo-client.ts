@@ -15,6 +15,7 @@ import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
+import { Approvals } from "../binding/approvals.js";
 import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
@@ -77,6 +78,12 @@ const binder = confirm && hosts
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
+    // The cross-check's chats work freely, so nothing asks; a prompt would be denied.
+    approvals: new Approvals({
+      bindings: journal.bindings,
+      prompts: { approve: () => Promise.resolve("deny"), confirmFreeMode: () => Promise.resolve(false) },
+      agent: "the cross-check",
+    }),
     onError: sayError,
   })
   : null;
