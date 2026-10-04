@@ -33,12 +33,14 @@ const { values } = parseArgs({
     confirm: { type: "string" },
   },
 });
-if (!values.url || !values.token || !values.journal) {
+// --folder binds every root by itself, so it cannot stand beside a confirmed folder.
+if (!values.url || !values.token || !values.journal || (values.folder && values.confirm)) {
   process.stderr.write("usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH]\n");
   process.exit(2);
 }
 
 const say = (event: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(event)}\n`);
+const sayError = (error: unknown) => say({ event: "error", message: String(error) });
 
 class SpokenJournal extends OperationJournal {
   override acknowledge(id: string): void {
@@ -60,6 +62,7 @@ const hosts = values.folder || values.confirm
   ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env })
   : null;
 const confirm = values.confirm;
+let refusal: string | null = null;
 const binder = confirm && hosts
   ? new Binder({
     bindings: journal.bindings,
@@ -67,18 +70,20 @@ const binder = confirm && hosts
       pickFolder: () => Promise.resolve(confirm),
       confirmFolder: (sheet) => {
         say({ event: "sheet", ...sheet });
-        return Promise.resolve(sheet.refusal === null ? { mode: sheet.mode } : null);
+        refusal = sheet.refusal;
+        return Promise.resolve(refusal === null ? { mode: sheet.mode } : null);
       },
     },
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
+    onError: sayError,
   })
   : null;
 if (binder) {
   const prepared = await binder.prepareFolder("pick", "cross-check", new AbortController().signal);
   if (!prepared) {
-    say({ event: "error", message: "the folder was refused" });
+    say({ event: "error", message: `the folder was refused: ${refusal ?? "the sheet was not accepted"}` });
     process.exit(2);
   }
   say({ event: "prepared", folder: prepared.folder, nonce: prepared.nonce });
@@ -89,7 +94,7 @@ const { link } = connectDevice({
   token: values.token,
   journal,
   onStatus: (status) => say({ event: "status", status }),
-  onError: (error) => say({ event: "error", message: String(error) }),
+  onError: sayError,
   executor: binder ?? hosts ?? {
     run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
       say({ event: "op", id: operation.id, kind: operation.kind });
