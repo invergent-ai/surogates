@@ -430,3 +430,22 @@ describe("a look whose protected keys could not be told", () => {
     expect(await guard.refusal()).toBeNull();
   });
 });
+
+describe("a look that could neither record nor tell its protected keys", () => {
+  it("says both", async () => {
+    const guard = new HookGuard(folder, {
+      known: () => {
+        throw new Error("disk");
+      },
+      seen: () => {
+        throw new Error("full");
+      },
+    });
+    expect(await guard.refusal()).toEqual({
+      error: {
+        type: "sandbox",
+        message: "Blocked: the computer could not record this folder's state, so commands cannot run here: disk Blocked: the computer could not check this folder's protected paths, so commands cannot run here: full",
+      },
+    });
+  });
+});

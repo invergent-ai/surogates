@@ -268,7 +268,10 @@ export class HookGuard {
       } catch (error) {
         return {
           changed: [],
-          blocked: `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
+          blocked: [
+            `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
+            untold,
+          ].filter(Boolean).join(" "),
         };
       }
     }

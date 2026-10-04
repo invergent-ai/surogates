@@ -145,6 +145,9 @@ const GIT_RUNS_CODE = [
   ".git/modules/sub/config", ".git/modules/sub/hooks/pre-commit", ".git/modules/sub/hooks",
   ".git/worktrees/w/config.worktree", ".git/worktrees/w/commondir", ".git/worktrees/w/anything", ".git/worktrees",
   ".git/modules/a/modules/b/config", ".git/hooks/pre-commit", ".git/modules/a/hooks/x", ".git/worktrees/w/config",
+  // A submodule's name can hold slashes, and its git folder has worktrees and paused state of its own.
+  ".git/modules/libs/foo/config", ".git/modules/libs/foo/hooks/pre-commit", ".git/modules/sub/worktrees/w/config",
+  ".git/modules/sub/worktrees/w/commondir", ".git/modules/sub/rebase-merge/git-rebase-todo",
   // A paused rebase or cherry-pick runs the exec lines of its todo on --continue.
   ".git/rebase-merge/git-rebase-todo", ".git/rebase-apply/next", ".git/sequencer/todo",
 ];
