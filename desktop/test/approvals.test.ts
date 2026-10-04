@@ -406,6 +406,21 @@ describe("a command's connection to a destination off the package hosts", () => 
     expect(user.asked).toEqual([]);
   });
 
+  it("denies when the chat's binding cannot be read, saying why, and asks nothing", async () => {
+    bind(ROOT, "free");
+    user.auto = "allow";
+    const errors: unknown[] = [];
+    const reading = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant", onError: (error) => errors.push(error),
+    });
+    vi.spyOn(journal.bindings, "get").mockImplementation(() => {
+      throw new Error("locked");
+    });
+    expect(await reading.askNetwork(ROOT, SITE, never())).toBe("deny");
+    expect(errors.map(String)).toEqual(["Error: locked"]);
+    expect(user.asked).toEqual([]);
+  });
+
   it("waits its turn in the chat's line, and is dismissed when its host stops", async () => {
     bind(ROOT, "ask");
     const command = approvals.admit(op("run", RUN), never());

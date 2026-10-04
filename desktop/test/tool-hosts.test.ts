@@ -464,7 +464,10 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
 
   it("puts a host's network asks to the approvals for its root, and tells the host each answer, failing closed", async () => {
     const asked: Array<[string, NetworkAsk]> = [];
-    const choices: Array<NetworkAnswer | Error> = ["allow", "allow_session", "deny", new Error("no display"), "maybe" as NetworkAnswer];
+    // The last throws at once, without a promise.
+    const choices: Array<NetworkAnswer | Error | "throw"> = [
+      "allow", "allow_session", "deny", new Error("no display"), "maybe" as NetworkAnswer, "throw",
+    ];
     const executor = toolHosts({
       spawnHost: fakeSpawn(answering),
       network: {
@@ -472,6 +475,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
         askNetwork: (root, request) => {
           asked.push([root, request]);
           const choice = choices.shift();
+          if (choice === "throw") throw new Error("boom");
           return choice instanceof Error ? Promise.reject(choice) : Promise.resolve(choice ?? "deny");
         },
       },
@@ -479,8 +483,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await executor.run(resolve(), signal());
     // A background process lives: its connections may ask.
     fakes[0]?.say({ type: "processes", live: 1 });
-    for (let id = 1; id <= 5; id += 1) fakes[0]?.say({ type: "ask", id, host: "example.com", port: 443, privateNetwork: id === 5 });
-    await until(() => sent(0, "answer") === 5);
+    for (let id = 1; id <= 6; id += 1) fakes[0]?.say({ type: "ask", id, host: "example.com", port: 443, privateNetwork: id === 5 });
+    await until(() => sent(0, "answer") === 6);
     const answers = fakes[0]?.sent.filter((message) => message.type === "answer") ?? [];
     expect(answers.sort((a, b) => a.id - b.id)).toEqual([
       { type: "answer", id: 1, allow: true, remember: false },
@@ -488,9 +492,10 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       { type: "answer", id: 3, allow: false, remember: false },
       { type: "answer", id: 4, allow: false, remember: false },
       { type: "answer", id: 5, allow: false, remember: false },
+      { type: "answer", id: 6, allow: false, remember: false },
     ]);
     expect(asked.map(([root, request]) => [root, request.privateNetwork])).toEqual([
-      [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, true],
+      [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, false], [ROOT_A, true], [ROOT_A, false],
     ]);
     expect(asked[0]?.[1]).toEqual({ host: "example.com", port: 443, privateNetwork: false });
   });

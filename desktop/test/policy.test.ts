@@ -123,6 +123,8 @@ describe("where a destination leads", () => {
 
   it("is unknown for a name that cannot be looked up, gives no address, or takes too long", async () => {
     expect(await where("nowhere.invalid")).toBeNull();
+    // A lookup that fails: the resolver rejects.
+    expect(await where("nowhere.example")).toBeNull();
     // RFC 6761: decided without a lookup, so a resolver that answers for it changes nothing.
     expect(await reach("surogate-test.invalid", { local, resolve: () => Promise.resolve(["93.184.215.14"]) })).toBeNull();
     expect(await where("odd.example")).toBeNull();
