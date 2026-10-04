@@ -2,11 +2,12 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { SpawnRequest } from "../src/hosts/messages.js";
+import type { FromRunner, SpawnRequest, ToRunner } from "../src/hosts/messages.js";
 import type { CommandEnd } from "../src/hosts/run.js";
 import { type RunnerChild, SessionRunner } from "../src/hosts/session-runner.js";
 
@@ -18,8 +19,8 @@ let raw: ChildProcess[];
 let next = 0;
 
 // The runner as the host starts it, without srt: the protocol is the same.
-function bare(): ChildProcess {
-  const child = spawn(process.execPath, [RUNNER], {
+function bare(args: string[] = [RUNNER]): ChildProcess {
+  const child = spawn(process.execPath, args, {
     cwd: base,
     env: { PATH: "/usr/bin:/bin", HOME: base, LANG: "C.UTF-8", ELECTRON_RUN_AS_NODE: "1" },
     stdio: ["pipe", "pipe", "pipe"],
@@ -34,6 +35,23 @@ async function runner(onLost?: () => void): Promise<SessionRunner> {
   await started.ready;
   return started;
 }
+
+// A runner whose lines the host cannot trust: after each started come lines that are not messages.
+const GARBLED = `
+const { spawn } = require("node:child_process");
+const { createInterface } = require("node:readline");
+const runner = spawn(process.execPath, [process.argv[1]], { stdio: ["inherit", "pipe", "inherit"] });
+createInterface({ input: runner.stdout }).on("line", (line) => {
+  process.stdout.write(line + "\\n");
+  const message = JSON.parse(line);
+  if (message.type === "started") {
+    for (const bad of [null, 42, { type: "bogus", id: message.id }, { type: "exit", id: 7, code: 1, signal: null }]) {
+      process.stdout.write(JSON.stringify(bad) + "\\n");
+    }
+  }
+});
+runner.on("exit", () => process.exit(0));
+`;
 
 // Ids of their own: a bare runner's sweep reads every process's marker, other test files' too.
 const request = (command: string, background = false, extra: Partial<SpawnRequest> = {}): SpawnRequest => ({
@@ -172,6 +190,47 @@ describe("the session runner", { timeout: 20_000 }, () => {
     await started.stop();
     expect(lost).toBe(0);
     await until(() => running("^sleep 649$") === 0);
+  });
+
+  it("ignores runner lines that are not its messages, and still ends the command as it ended", async () => {
+    const started = new SessionRunner(bare(["-e", GARBLED, RUNNER]));
+    runners.push(started);
+    await started.ready;
+    expect(await collect(started.spawn(request("sleep 0.2; echo done", true)))).toEqual({
+      out: "done\n", err: "", end: { code: 0, signal: null },
+    });
+  });
+
+  it("refuses a second command with an id it already runs, and keeps the first", async () => {
+    const started = await runner();
+    const first = started.spawn(request("sleep 650", true, { id: "sr-dup" }));
+    const ended = collect(first);
+    await first.started;
+    expect((await collect(started.spawn(request("true", false, { id: "sr-dup" })))).end).toEqual({
+      failed: "a process with this id is already running",
+    });
+    first.kill();
+    expect((await ended).end).toEqual({ code: null, signal: "SIGKILL" });
+  });
+
+  it("answers a second spawn of an id it already runs, and keeps the first", async () => {
+    const child = bare();
+    if (!child.stdout) throw new Error("no stdout");
+    const lines: FromRunner[] = [];
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      if (line !== '{"ready":true}') lines.push(JSON.parse(line) as FromRunner);
+    });
+    const send = (message: ToRunner) => child.stdin?.write(`${JSON.stringify(message)}\n`);
+    const first = request("sleep 651", true);
+    send({ type: "spawn", ...first });
+    await until(() => lines.some((message) => message.type === "started"));
+    send({ type: "spawn", ...first, command: "true" });
+    await until(() => lines.length >= 2);
+    expect(lines[1]).toEqual({ type: "error", id: first.id, message: "a process with this id is already running" });
+    send({ type: "signal", id: first.id, signal: "SIGKILL" });
+    await until(() => lines.length >= 3);
+    expect(lines[2]).toEqual({ type: "exit", id: first.id, code: null, signal: "SIGKILL" });
+    child.stdin?.end();
   });
 
   it("leaves a flood in the command's pipe while the host does not read", async () => {

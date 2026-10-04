@@ -55,8 +55,10 @@ export class RunnerChild implements CommandChild {
       this.settleStarted(message.pid);
     } else if (message.type === "data") {
       this.output(Buffer.from(message.data, "base64"), message.err === true);
-    } else {
-      this.finish(message.type === "exit" ? { code: message.code, signal: message.signal } : { failed: message.message });
+    } else if (message.type === "exit") {
+      this.finish({ code: message.code, signal: message.signal });
+    } else if (message.type === "error") {
+      this.finish({ failed: message.message });
     }
     return this.ended !== null;
   }
@@ -111,6 +113,8 @@ export class SessionRunner {
         } catch {
           return;
         }
+        // The runner's sandbox runs the agent's commands: a line that is not a message is ignored.
+        if (typeof message?.id !== "string") return;
         const target = this.children.get(message.id);
         if (target?.receive(message)) this.children.delete(message.id);
       });
@@ -137,6 +141,11 @@ export class SessionRunner {
     const target = new RunnerChild(request.id, (message) => this.send(message));
     if (this.left) {
       target.finish({ lost: true });
+      return target;
+    }
+    // The runner refuses it too, and its answer would end the first.
+    if (this.children.has(request.id)) {
+      target.finish({ failed: "a process with this id is already running" });
       return target;
     }
     this.children.set(request.id, target);

@@ -89,7 +89,10 @@ function finish(id: string): void {
 
 function start(request: SpawnRequest): void {
   const { id } = request;
-  if (children.has(id)) return;
+  if (children.has(id)) {
+    say({ type: "error", id, message: "a process with this id is already running" });
+    return;
+  }
   const env = { ...base, ...request.env, [MARKER]: id };
   const [file, args] = argv(request);
   let proc: ChildProcess;
