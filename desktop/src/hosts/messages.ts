@@ -16,6 +16,8 @@ export type ToHost =
   | HostStart
   | { type: "op"; id: string; kind: string; args: Record<string, unknown> }
   | { type: "cancel"; id: string }
+  // A filesystem grant changed: the session runner, if one is up, is wrapped again.
+  | { type: "restart"; reason: "grant" }
   | { type: "stop" };
 
 export type FromHost =

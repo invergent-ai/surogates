@@ -22,7 +22,7 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
-import { appeared, extraDenies, protectedKeys } from "./restarts.js";
+import { appeared, extraDenies, GRANT_CHANGED, protectedKeys } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
 
@@ -32,6 +32,8 @@ const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".c
 const STOP_COMMANDS_MS = 2_000;
 // While background processes or the runner live, the hook guard looks this often: one may write a hook between commands.
 const WATCH_MS = 5_000;
+// A protected key that comes and goes restarts the runner at most once in this long; a restart asked for sooner waits.
+const RESTART_WINDOW_MS = 10_000;
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 // A channel the app has closed is not an error: with no callback, Node would raise
@@ -66,6 +68,10 @@ type Baseline = { keys: ReadonlySet<string>; since: number };
 let baseline: Baseline | null = null;
 // While the runner restarts, run and start wait for the new one.
 let restarting: Promise<void> | null = null;
+let lastRestart = -Infinity;
+let deferred: NodeJS.Timeout | null = null;
+// The latest reason asked for while a restart is deferred: the one the agent is told.
+let deferredReason = "";
 // Runs in flight in the runner: a look between commands does not restart it under them.
 let runnerRuns = 0;
 
@@ -95,6 +101,9 @@ process.on("message", (raw) => {
     case "cancel":
       commands.get(message.id)?.controller.abort();
       helper?.stdin?.write(`${JSON.stringify({ cancel: message.id })}\n`);
+      break;
+    case "restart":
+      restart(GRANT_CHANGED);
       break;
     case "stop":
       void stop();
@@ -385,12 +394,13 @@ async function openRunner(ready: CommandContext, onLost: () => void): Promise<{ 
 // What a look found, against the live runner's baseline: a protected key that was
 // not there when the runner was wrapped is writable inside it, so it restarts.
 // A look that started before the baseline's walk may have seen the old runner's folder.
+// While a restart waits for its window, a key seen again adds nothing: that restart takes a new baseline.
 // A look between commands leaves runs in flight to finish, and the look after the last
 // one restarts: until then background processes can write the new path, as a command
 // in a sandbox of its own can.
 function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): void {
   const known = baseline;
-  if (!liveRunner || !folder || !known || startedAt < known.since || (between && runnerRuns > 0)) return;
+  if (!liveRunner || deferred || !folder || !known || startedAt < known.since || (between && runnerRuns > 0)) return;
   const added = [...keys].filter((key) => !known.keys.has(key)).sort();
   if (added[0]) restart(appeared(relative(folder.path, added[0])));
 }
@@ -399,8 +409,26 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
 // folder and covers its hooks and config. Its live processes end, released from srt's
 // count once, with its bwrap; work that comes meanwhile waits for the new one.
 function restart(reason: string): void {
-  if (stopping || restarting || !liveRunner) return;
+  if (stopping || !(liveRunner || restarting)) return;
+  if (deferred) {
+    deferredReason = reason;
+    return;
+  }
+  const wait = lastRestart + RESTART_WINDOW_MS - performance.now();
+  // Deferred, not dropped. One asked for during a restart comes after it: that wrap may predate the reason.
+  if (restarting || wait > 0) {
+    deferredReason = reason;
+    // Still deferred while it waits for a restart under way: a grant then only updates the reason.
+    deferred = setTimeout(() => void (restarting ?? Promise.resolve()).then(() => {
+      deferred = null;
+      // A key's restart leaves runs in flight to finish, as a timed look's does: the last one's own look decides.
+      if (deferredReason === GRANT_CHANGED || runnerRuns === 0) restart(deferredReason);
+    }), Math.max(wait, 0));
+    return;
+  }
   const old = liveRunner;
+  if (!old) return;
+  lastRestart = performance.now();
   const registry = processes;
   runner = null;
   liveRunner = null;
@@ -498,6 +526,7 @@ async function stop(code = 0): Promise<void> {
   stopping = true;
   failing = code !== 0;
   if (watching) clearTimeout(watching);
+  if (deferred) clearTimeout(deferred);
   const running = [...commands.values()];
   for (const { controller } of running) controller.abort();
   await Promise.race([

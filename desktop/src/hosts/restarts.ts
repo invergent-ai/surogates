@@ -15,6 +15,8 @@ import { GLOB } from "./policy.js";
 // here. A parent folder of about 130 checkouts already needs 256.
 export const MAX_EXTRA_DENIES = 1024;
 
+export const GRANT_CHANGED = "a folder grant changed";
+
 export const appeared = (key: string) => `a protected file appeared in the folder (${key})`;
 
 // srt 0.0.77's own write denies (linux-sandbox-utils.js) that hold whatever happens:

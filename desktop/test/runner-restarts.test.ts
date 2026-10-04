@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { HostStart } from "../src/hosts/messages.js";
 import { RESTARTED, restartNotice } from "../src/hosts/processes.js";
-import { appeared, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
-import { CANCELLED } from "../src/hosts/run.js";
+import { appeared, GRANT_CHANGED, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
+import { CANCELLED, SANDBOX_STOPPED } from "../src/hosts/run.js";
 import { Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
@@ -182,5 +182,102 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     expect(await begin(harness, "sleep 625")).toEqual({
       error: { type: "sandbox", message: expect.stringContaining(`this folder has ${MAX_EXTRA_DENIES + 1} protected paths`) },
     });
+  });
+});
+
+describe("a restart the app asks for", { timeout: 40_000 }, () => {
+  it("restarts the runner on a grant, and tells the next command", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 637")).ok.session_id as string;
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, session_id)).status === "exited");
+    expect(await poll(harness, session_id)).toMatchObject({ exit_code: null, note: RESTARTED });
+    expect((await run(harness, "echo hi")).ok?.output).toBe(`hi\n\n${restartNotice(GRANT_CHANGED)}`);
+  });
+
+  it("answers a command it interrupts, a wait on a process it ends, and the work after", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 605")).ok.session_id as string;
+    const waiting = ask(harness, "wait", { session_id, timeout: 60 });
+    const running = run(harness, ": > begun; sleep 5; echo late");
+    // In the old runner before the restart starts.
+    await until(() => existsSync(join(folder, "begun")));
+    harness.send({ type: "restart", reason: "grant" });
+    expect(await running).toEqual(SANDBOX_STOPPED);
+    expect((await waiting).ok).toEqual({ status: "exited", exit_code: null, output: "", note: RESTARTED });
+    expect((await run(harness, "echo next")).ok?.output).toBe(`next\n\n${restartNotice(GRANT_CHANGED)}`);
+  });
+
+  it("stops cleanly while it restarts, and leaves the folder as it was", async () => {
+    const harness = await host();
+    await begin(harness, "sleep 628");
+    harness.send({ type: "restart", reason: "grant" });
+    await harness.stop();
+    expect(await harness.exited).toBe(0);
+    expect(readdirSync(folder)).toEqual([]);
+  });
+
+  it("does nothing with no runner", async () => {
+    const harness = await host();
+    harness.send({ type: "restart", reason: "grant" });
+    expect((await run(harness, "echo hi")).ok?.output).toBe("hi\n");
+    expect((await begin(harness, "true")).ok?.session_id).toEqual(expect.any(String));
+  });
+});
+
+describe("restarts that come quickly", { timeout: 60_000 }, () => {
+  it("come at most once in 10 seconds: a key that comes and goes sooner restarts when the window ends", async () => {
+    const harness = await host();
+    const first = (await begin(harness, "sleep 638")).ok.session_id as string;
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, first)).status === "exited");
+    const restarted = Date.now();
+    // A start waits for the new runner, whose baseline is then taken.
+    const second = (await begin(harness, "sleep 639")).ok.session_id as string;
+    // Made outside the app, as the user's own tools would, and gone before the window ends.
+    mkdirSync(join(folder, "sub", ".idea"), { recursive: true });
+    writeFileSync(join(folder, "sub", ".idea", "x"), "");
+    await new Promise((resolve) => setTimeout(resolve, 7_000));
+    rmSync(join(folder, "sub"), { recursive: true });
+    expect((await poll(harness, second)).status).toBe("running");
+    await until(async () => (await poll(harness, second)).status === "exited");
+    expect(Date.now() - restarted).toBeGreaterThanOrEqual(9_000);
+    expect(await poll(harness, second)).toMatchObject({ exit_code: null, note: RESTARTED });
+    expect((await run(harness, "true")).ok?.output).toBe(restartNotice(appeared("sub/.idea")));
+  });
+
+  it("tells the latest reason asked for while a restart waits for the window", async () => {
+    const harness = await host();
+    const first = (await begin(harness, "sleep 601")).ok.session_id as string;
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, first)).status === "exited");
+    const second = (await begin(harness, "sleep 602")).ok.session_id as string;
+    // A key the next look sees, whose restart waits for the window; then a grant.
+    mkdirSync(join(folder, "sub", ".idea"), { recursive: true });
+    writeFileSync(join(folder, "sub", ".idea", "x"), "");
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, second)).status === "exited");
+    // The polls above took the first restart's notice.
+    expect((await run(harness, "true")).ok?.output).toBe(restartNotice(GRANT_CHANGED));
+  });
+
+  it("lets a run in flight finish when the window ends on a key's restart, and restarts after it", async () => {
+    const harness = await host();
+    const first = (await begin(harness, "sleep 603")).ok.session_id as string;
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, first)).status === "exited");
+    const second = (await begin(harness, "sleep 604")).ok.session_id as string;
+    // This poll takes the grant's notice.
+    expect((await poll(harness, second)).status).toBe("running");
+    // A key the next timed look sees with no run in flight: its restart waits for the window.
+    mkdirSync(join(folder, "sub", ".idea"), { recursive: true });
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    // The window ends while this sleeps.
+    expect(await run(harness, "sleep 6 && echo done")).toMatchObject({ ok: { output: "done\n", returncode: 0 } });
+    // Its own look restarts the runner.
+    await until(async () => (await poll(harness, second)).status === "exited");
+    expect(await poll(harness, second)).toMatchObject({ exit_code: null, note: RESTARTED });
+    expect((await run(harness, "true")).ok?.output).toBe(restartNotice(appeared("sub/.idea")));
   });
 });
