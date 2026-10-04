@@ -546,9 +546,12 @@ class LocalWorkspaceIO:
         stdout, stderr = await proc.communicate()
         rc = proc.returncode or 0
         if rc not in (0, 1):
-            raise RipgrepError(
-                f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
-            )
+            message = f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
+            # rg exits 2 on any file it could not read (one deleted mid-walk,
+            # permission denied) yet still prints what it found elsewhere.
+            if not stdout:
+                raise RipgrepError(message)
+            logger.warning("Returning partial ripgrep results under %s: %s", key, message)
         return stdout.decode("utf-8", errors="replace")
 
     def _workdir(self, requested: str | None) -> str:
