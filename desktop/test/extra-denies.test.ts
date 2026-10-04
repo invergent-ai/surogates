@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -75,16 +75,20 @@ afterEach(async () => {
 describe("extra denies", () => {
   it("are the outermost protected path of each key srt's own rules miss, at any depth, never a .git folder", async () => {
     const deep = chain("d", 10);
-    // srt's own: its names at the top, the top repository's config and hooks, nested
-    // files with its names or a repository's config at most 10 deep.
+    // srt's own, from the folder's top alone: its names there in its spelling, and the
+    // top repository's config and hooks.
     file(".git/config");
     file(".git/hooks/pre-commit");
     file(".vscode/settings.json");
     file(".bashrc");
-    file("sub/.zshrc");
-    file(`${chain("s", 8)}/.git/config`);
-    // Not srt's: git's other config and state, a .git file, a nested hooks folder,
-    // its names inside a .git folder, and anything deeper than its scan.
+    // Not srt's: its nested scan, which it drops when rg fails; git's other config
+    // and state, a .git file, a nested hooks folder, its names inside a .git folder,
+    // and its names in another case.
+    const zshrc = file("sub/.zshrc");
+    const bashrc = file("sub/.bashrc");
+    const subConfig = file("sub/.git/config");
+    const shallow = file(`${chain("s", 8)}/.git/config`);
+    const eleven = file(`${deep}/.bashrc`);
     const worktree = file(".git/config.worktree");
     file(".git/rebase-merge/done");
     file(".git/worktrees/w/commondir");
@@ -92,6 +96,8 @@ describe("extra denies", () => {
     const gitfile = file("wt/.git");
     file("sub/.git/hooks/pre-commit");
     const inGit = file("sub/.git/.gitconfig");
+    const upper = file("up/.GIT/config");
+    file(".VSCODE/x");
     file(`${deep}/.git/config`);
     file(`${deep}/.vscode/a`);
     expect(extraDenies(folder, await protectedKeys(folder))).toEqual([
@@ -99,12 +105,27 @@ describe("extra denies", () => {
       join(folder, ".git", "modules", "m", "config"),
       join(folder, ".git", "rebase-merge"),
       join(folder, ".git", "worktrees"),
+      join(folder, ".VSCODE"),
+      eleven,
       join(folder, deep, ".git", "config"),
       join(folder, deep, ".vscode"),
+      shallow,
+      bashrc,
       inGit,
+      subConfig,
       join(folder, "sub", ".git", "hooks"),
+      zshrc,
+      upper,
       gitfile,
     ].sort());
+  });
+
+  it("refuse a protected path whose name srt would read as a glob, naming it", () => {
+    const key = join(folder, "app", "[id]", ".git");
+    expect(refusal(() => extraDenies(folder, [key]))).toEqual({
+      type: "sandbox",
+      message: "Blocked: this computer cannot protect app/[id]/.git in the sandbox, because its name holds *, ?, [ or ], so background processes cannot start here.",
+    });
   });
 
   it(`refuse a folder with more than ${MAX_EXTRA_DENIES} of them, naming how many`, () => {
@@ -152,6 +173,34 @@ describe("a session runner's wrap", { timeout: 30_000 }, () => {
     expect((await run(harness, tryWrite(".git/config.worktree"))).ok?.output).toBe("denied\n");
     expect((await run(harness, tryWrite(`${deep}/.git/config`))).ok?.output).toBe("denied\n");
     expect((await run(harness, tryWrite(`${deep}/.git/hooks/pre-commit`))).ok?.output).toBe("denied\n");
+  });
+
+  it.skipIf(asRoot)("protects a nested repository's config when srt's own scan fails on a folder it cannot read", async () => {
+    spawnSync("git", ["-c", "init.defaultBranch=main", "init", "-q", folder]);
+    spawnSync("git", ["-c", "init.defaultBranch=main", "init", "-q", join(folder, "sub")]);
+    const config = join(folder, "sub", ".git", "config");
+    const before = readFileSync(config, "utf8");
+    // In the object store, which the walk skips and srt's rg does not.
+    const locked = join(folder, ".git", "objects", "zz");
+    mkdirSync(locked);
+    chmodSync(locked, 0);
+    try {
+      const harness = await host();
+      expect((await begin(harness, "sleep 630")).ok?.session_id).toBeDefined();
+      expect((await run(harness, tryWrite("sub/.git/config"))).ok?.output).toBe("denied\n");
+      expect(readFileSync(config, "utf8")).toBe(before);
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+
+  it("refuses to start with a protected path srt would read as a glob, and commands still run", async () => {
+    file("app/[id]/.git");
+    const harness = await host();
+    expect(await begin(harness, "true")).toEqual({
+      error: { type: "sandbox", message: expect.stringContaining("cannot protect app/[id]/.git in the sandbox") },
+    });
+    expect((await run(harness, "echo hi")).ok?.output).toBe("hi\n");
   });
 
   it(`refuses to start past ${MAX_EXTRA_DENIES} protected paths srt misses, and commands still run`, async () => {

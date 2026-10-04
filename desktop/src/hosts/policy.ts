@@ -13,7 +13,7 @@ const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/pro
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
 // How deep srt's scan for nested protected names looks, from the folder: its maximum (its default is 3).
-export const SCAN_DEPTH = 10;
+const SCAN_DEPTH = 10;
 const TOOLCHAINS = [".nvm", ".pyenv", ".rustup", ".cargo/bin", ".local/bin", ".local/lib", "go", ".bun", ".deno", ".sdkman"];
 
 // srt binds its own temp folder read-write into every sandbox, a channel shared with all the others.

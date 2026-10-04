@@ -4,23 +4,24 @@
 // writable inside it until the host wraps a new one (spec, Section 1).
 
 import { lstatSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import { sandboxError } from "../files/answers.js";
 import { protectedInFolder } from "../files/protect.js";
 import { SCAN_TIMEOUT_MS, listed, scanHooks } from "./hooks.js";
-import { SCAN_DEPTH } from "./policy.js";
+import { GLOB } from "./policy.js";
 
 // bwrap takes 9 000 arguments, about 3 000 mounts, and srt's own rules and scan use some of them.
 export const MAX_EXTRA_DENIES = 256;
 
-// srt 0.0.77's own write denies (linux-sandbox-utils.js): these names at the folder's
-// top, whatever they are, and .git's hooks and config there when .git is a folder.
-// Its scan adds nested files with one of SRT_FILES' names, or a repository's
-// config, SCAN_DEPTH deep at most and outside any .git, .vscode or .idea.
-const SRT_FILES = new Set([".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ripgreprc", ".mcp.json"]);
-const SRT_TOP = new Set([...SRT_FILES, ".vscode", ".idea", ".claude/commands", ".claude/agents"]);
-const SRT_DIRS = new Set([".git", ".vscode", ".idea"]);
+// srt 0.0.77's own write denies (linux-sandbox-utils.js) that hold whatever happens:
+// these names at the folder's top, and .git's hooks and config there when .git is a
+// folder. Its nested scan is not credited: srt drops it silently when rg fails, as
+// it does on any folder it cannot read.
+const SRT_TOP = new Set([
+  ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile", ".ripgreprc", ".mcp.json",
+  ".vscode", ".idea", ".claude/commands", ".claude/agents",
+]);
 
 // The folder's protected keys, from one walk. A walk that takes too long, or that
 // could not read a folder, fails closed: a key hidden there would get no deny.
@@ -43,15 +44,25 @@ export async function protectedKeys(folder: string, timeoutMs = SCAN_TIMEOUT_MS)
 // The paths a runner's wrap denies writes to beyond srt's own: for every protected
 // key, the outermost protected path it lies in, unless srt already denies it.
 export function extraDenies(folder: string, keys: Iterable<string>): string[] {
+  let gitFolder: boolean | undefined;
+  const topGit = () => (gitFolder ??= lstatSync(join(folder, ".git"), { throwIfNoEntry: false })?.isDirectory() === true);
   const denies = new Set<string>();
   for (const key of keys) {
-    const parts = outermost(folder, key.slice(folder.length + 1).split("/"));
-    if (!srtDenies(folder, parts)) denies.add(join(folder, ...parts));
+    const path = outermost(folder, key.slice(folder.length + 1).split("/")).join("/");
+    // Spelled as srt spells them: it matches these in this case only.
+    const srts = SRT_TOP.has(path) || ((path === ".git/hooks" || path === ".git/config") && topGit());
+    if (!srts) denies.add(join(folder, path));
   }
   if (denies.size > MAX_EXTRA_DENIES) {
     throw sandboxError(`Blocked: this folder has ${denies.size} protected paths the sandbox does not cover by itself, and the computer can protect at most ${MAX_EXTRA_DENIES}, so background processes cannot start here.`);
   }
-  return [...denies].sort();
+  const sorted = [...denies].sort();
+  // srt drops a denyWrite path that holds a glob character, without a word.
+  const globbed = sorted.find((path) => GLOB.test(path));
+  if (globbed) {
+    throw sandboxError(`Blocked: this computer cannot protect ${relative(folder, globbed)} in the sandbox, because its name holds *, ?, [ or ], so background processes cannot start here.`);
+  }
+  return sorted;
 }
 
 // .git/hooks for a hook, .vscode for a file in it. Never a .git folder, which would
@@ -62,24 +73,4 @@ function outermost(folder: string, parts: readonly string[]): string[] {
     if (protectedInFolder(folder, join(folder, ...parts.slice(0, i)))) return parts.slice(0, i);
   }
   return [...parts];
-}
-
-// Whether srt denies writes to this path itself. Spelled as srt spells it: it
-// matches .git/config and the top's names in this case only.
-function srtDenies(folder: string, parts: readonly string[]): boolean {
-  const path = parts.join("/");
-  if (SRT_TOP.has(path)) return true;
-  if (path === ".git/hooks" || path === ".git/config") return isKind(join(folder, ".git"), "directory");
-  // Its scan finds files only, and leaves out a match inside one of its folders but the last.
-  if (parts.length > SCAN_DEPTH || !isKind(join(folder, path), "file")) return false;
-  const lower = parts.map((part) => part.toLowerCase());
-  const name = lower.at(-1) ?? "";
-  const above = lower.slice(0, -1);
-  if (SRT_FILES.has(name)) return !above.some((part) => SRT_DIRS.has(part));
-  return parts.at(-1) === "config" && parts.at(-2) === ".git" && !above.slice(0, -1).some((part) => SRT_DIRS.has(part));
-}
-
-function isKind(path: string, kind: "file" | "directory"): boolean {
-  const stats = lstatSync(path, { throwIfNoEntry: false });
-  return kind === "file" ? stats?.isFile() === true : stats?.isDirectory() === true;
 }
