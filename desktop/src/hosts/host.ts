@@ -5,7 +5,8 @@
 // is the parent of every command's bwrap. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, type Stats, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, type Stats, statSync } from "node:fs";
+import type { Server } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -16,24 +17,36 @@ import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
 import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
+import { lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
+import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, sandboxPolicy } from "./policy.js";
-import { type CommandContext, runCommand } from "./run.js";
+import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 const STOP_COMMANDS_MS = 2_000;
 
-const send = (message: FromHost, then?: () => void) => {
-  process.send?.(message, undefined, undefined, then);
+// A channel the app has closed is not an error: with no callback, Node would raise
+// one on process and end the host before its final look. Every exit goes through stop.
+const send = (message: FromHost, then: () => void = () => {}) => {
+  if (process.connected) process.send?.(message, undefined, undefined, then);
+  else then();
 };
 const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 let helper: ChildProcess | null = null;
 let folder: { path: string; dev: number; ino: number } | null = null;
 let stopping = false;
+// Stopped because something failed: the commands it stops go unanswered, and the
+// app answers them as interrupted, with the warning to check what they did.
+let failing = false;
 let context: CommandContext | null = null;
+let guard: HookGuard | null = null;
+// Held for the host's life: the kernel lets go of it when the host goes.
+let lock: Server | null = null;
+let recordPath: string | null = null;
 const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
 
 process.on("message", (raw) => {
@@ -49,7 +62,7 @@ process.on("message", (raw) => {
             message: error instanceof Error ? error.message : String(error),
             ...(error instanceof FolderUnavailable ? { folder: true as const } : {}),
           },
-          () => process.exit(1),
+          () => void stop(1),
         ),
       );
       break;
@@ -76,6 +89,21 @@ function spellings(path: string): string[] {
   const plain = resolve(path);
   const { path: real } = realpath(plain);
   return real === plain ? [plain] : [plain, real];
+}
+
+// What a host killed together with the app left of srt: its bridges (socat, whose
+// command line names their socket), then its files.
+function sweep(dir: string): void {
+  for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+    try {
+      // The user's own only: reading a command line waits on that process's memory, which one stuck in the kernel holds.
+      if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) continue;
+      if (readFileSync(`/proc/${pid}/cmdline`, "latin1").includes(`${dir}/`)) process.kill(Number(pid), "SIGKILL");
+    } catch {
+      // Gone, or not ours to read.
+    }
+  }
+  rmSync(dir, { recursive: true, force: true });
 }
 
 // The bound folder is gone, or is not a folder. The app has no folder to check
@@ -115,6 +143,39 @@ async function start(message: HostStart): Promise<void> {
   );
   if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
   folder = { path, dev: stats.dev, ino: stats.ino };
+  // One host per folder. Then, if the host before this one was killed, what srt
+  // left over the names that were absent when it started.
+  const key = `${stats.dev}-${stats.ino}`;
+  // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
+  // through os.tmpdir(), read at each call: here, in a folder only this folder's
+  // host uses, so whatever a killed host left there is provably its own.
+  const srtTmp = join(message.dataDir, "srt", key);
+  // A unix socket's path holds at most 107 bytes; srt's longest name here is claude-socks-<16 hex>.sock.
+  if (Buffer.byteLength(join(srtTmp, `claude-socks-${"0".repeat(16)}.sock`)) > 107) {
+    throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
+  }
+  lock = await lockFolder(stats.dev, stats.ino);
+  // Before anything in the folder is touched: the bridges (socat) a host killed with
+  // the app left running, and anything else whose command line names srt's folder.
+  sweep(srtTmp);
+  mkdirSync(srtTmp, { recursive: true, mode: 0o700 });
+  process.env.TMPDIR = srtTmp;
+  const record = join(message.dataDir, "folders", `${key}.json`);
+  const last = readRecord(record);
+  const killed = last?.state === "running" ? last : null;
+  if (killed) removePlaceholders(path, killed.present);
+  const present = presentIn(path);
+  const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
+  const running = (hooks: ReadonlyMap<string, string> | null) =>
+    writeRecord(record, { state: "running", present, hooks: hooks ? Object.fromEntries(hooks) : null });
+  // On disk before srt puts anything in the folder, with a killed host's baseline
+  // kept: commands wait for the guard, which records its own once it knows it.
+  running(inherited);
+  recordPath = record;
+  // Its first look finds the user's own hooks, while srt starts. After a killed
+  // host, that host's are the user's, and the look catches what its commands left.
+  // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)] });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -139,7 +200,7 @@ async function start(message: HostStart): Promise<void> {
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
   const { errors, warnings } = SandboxManager.checkDependencies();
   if (errors.length || warnings.length) throw new Error([...errors, ...warnings].join("; "));
-  // srt's proxy bridges listen in this process's /tmp, which the policy hides.
+  // srt's proxy bridges listen in its temp folder, which the policy hides.
   const sockets = [SandboxManager.getLinuxHttpSocketPath(), SandboxManager.getLinuxSocksSocketPath()]
     .filter((socket): socket is string => Boolean(socket));
   SandboxManager.updateConfig({
@@ -194,9 +255,10 @@ async function start(message: HostStart): Promise<void> {
     child.once("exit", () => {
       clearTimeout(timer);
       if (!up) reject(new Error(`the file helper exited: ${stderr}`));
-      // A helper that dies takes its host with it: the app answers whatever was
-      // running as interrupted and starts a new host for the next operation.
-      else if (!stopping) process.exit(1);
+      // A helper that dies takes its host with it, srt cleaned up and its commands
+      // stopped unanswered: the app answers them as interrupted and starts a new host
+      // for the next operation.
+      else if (!stopping) void stop(1);
     });
   });
   // The helper's sandbox lasts as long as the host. Left in srt's count, it
@@ -216,20 +278,29 @@ function sameFolder(): boolean {
 }
 
 // A command runs here, not in the helper: the host owns the folder's srt and
-// must be the parent of its bwrap.
+// must be the parent of its bwrap. The folder is looked through before it, when
+// the last look could not see all of it, and after it, for the hooks it left.
 function command(id: string, args: Record<string, unknown>): void {
-  if (!context || stopping || commands.has(id)) return;
+  if (!context || !guard || stopping || commands.has(id)) return;
+  const ready = context;
+  const hooks = guard;
   const controller = new AbortController();
-  const done = runCommand(args, context, controller.signal, id).then((outcome) => {
+  const done = (async () => {
+    const refused = await hooks.refusal();
+    // Stopped or cancelled while the folder was looked through: it never starts.
+    const outcome = refused ?? (stopping || controller.signal.aborted
+      ? CANCELLED
+      : await hooks.after(await runCommand(args, ready, controller.signal, id)));
     commands.delete(id);
-    send({ type: "result", id, outcome });
-  });
+    if (!failing) send({ type: "result", id, outcome });
+  })();
   commands.set(id, { controller, done });
 }
 
-async function stop(): Promise<void> {
+async function stop(code = 0): Promise<void> {
   if (stopping) return;
   stopping = true;
+  failing = code !== 0;
   const running = [...commands.values()];
   for (const { controller } of running) controller.abort();
   await Promise.race([
@@ -237,6 +308,21 @@ async function stop(): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
-  await SandboxManager.reset();
-  process.exit(0);
+  // What a stopped command left, before the record can say the host stopped
+  // cleanly. A look that could not see the whole folder, or a host killed
+  // during it, leaves "running" and the baseline for the next host.
+  const clean = (await guard?.settle()) ?? true;
+  await leave(code, clean);
+}
+
+// The way out: srt removes its sockets and placeholders, then the record says the
+// host stopped cleanly, if it did, so the next one has nothing to clear.
+async function leave(code: number, clean: boolean): Promise<void> {
+  await SandboxManager.reset().catch(() => {});
+  try {
+    if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null });
+  } finally {
+    lock?.close();
+    process.exit(code);
+  }
 }

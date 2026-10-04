@@ -15,6 +15,8 @@ const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 const HOST = join(PACKAGE, "dist", "hosts", "host.js");
 const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
+// How long a host with nothing to do keeps its folder: another chat may want it.
+export const IDLE_MS = 120_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const CANCELLED: Outcome = {
@@ -106,10 +108,13 @@ export interface ToolHostsOptions {
   bwrapPath?: string;
   spawnHost?: () => HostProcess;
   startTimeoutMs?: number;
+  idleMs?: number;
 }
 
 export class ToolHosts implements Executor {
   private readonly hosts = new Map<string, Host>();
+  // Every host until it exits: one stopping because it had nothing to do is no longer in hosts.
+  private readonly live = new Set<Host>();
   private stopping: Promise<void> | undefined;
 
   constructor(private readonly options: ToolHostsOptions) {}
@@ -128,7 +133,7 @@ export class ToolHosts implements Executor {
   }
 
   private async stopHosts(): Promise<void> {
-    const hosts = [...this.hosts.values()];
+    const hosts = [...this.live];
     this.hosts.clear();
     await Promise.all(hosts.map((host) => host.stop()));
   }
@@ -146,10 +151,15 @@ export class ToolHosts implements Executor {
       appDirs: this.options.appDirs ?? [dirname(process.execPath), PACKAGE],
       ...(bwrapPath ? { bwrapPath } : {}),
     };
-    const host = new Host((this.options.spawnHost ?? forkHost)(), start, this.options.startTimeoutMs ?? START_TIMEOUT_MS, () => {
-      if (this.hosts.get(root) === host) this.hosts.delete(root);
-    });
+    const host = new Host(
+      (this.options.spawnHost ?? forkHost)(), start, this.options.startTimeoutMs ?? START_TIMEOUT_MS,
+      this.options.idleMs ?? IDLE_MS, () => {
+        if (this.hosts.get(root) === host) this.hosts.delete(root);
+      },
+    );
     this.hosts.set(root, host);
+    this.live.add(host);
+    void host.exited.then(() => this.live.delete(host));
     return host;
   }
 }
@@ -157,15 +167,18 @@ export class ToolHosts implements Executor {
 class Host {
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private readonly started: Promise<Outcome | null>;
-  private readonly exited: Promise<void>;
+  readonly exited: Promise<void>;
   private readonly startTimer: NodeJS.Timeout;
   private settleStart: (failure: Outcome | null) => void = () => {};
   private gone = false;
+  private running = 0;
+  private idleTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly process: HostProcess,
     start: HostStart,
     startTimeoutMs: number,
+    private readonly idleMs: number,
     private readonly onGone: () => void,
   ) {
     this.started = new Promise((resolve) => {
@@ -193,6 +206,23 @@ class Host {
   }
 
   async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    this.running += 1;
+    clearTimeout(this.idleTimer);
+    try {
+      return await this.answer(operation, signal);
+    } finally {
+      this.running -= 1;
+      // Out of the list first: the next operation for this root starts a new host.
+      if (this.running === 0 && !this.gone) {
+        this.idleTimer = setTimeout(() => {
+          this.onGone();
+          void this.stop();
+        }, this.idleMs).unref();
+      }
+    }
+  }
+
+  private async answer(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     // A cancel while the host is still starting is answered at once.
     let onAbort = () => {};
     const aborted = new Promise<Outcome>((resolve) => {
@@ -224,6 +254,7 @@ class Host {
   }
 
   async stop(): Promise<void> {
+    clearTimeout(this.idleTimer);
     this.send({ type: "stop" });
     const timer = setTimeout(() => this.process.kill(), STOP_TIMEOUT_MS);
     await this.exited;
@@ -254,6 +285,7 @@ class Host {
   }
 
   private leave(): void {
+    clearTimeout(this.idleTimer);
     this.gone = true;
     this.onGone();
     this.settleStart(unavailable("its tool host stopped while it was starting"));

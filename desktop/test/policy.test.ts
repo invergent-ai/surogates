@@ -25,6 +25,10 @@ describe("the sandbox policy", () => {
     expect(read(plain)).toContain(join(plain, ".nvm"));
     expect(read(odd)).not.toContain(join(odd, ".nvm"));
   });
+
+  it("scans for nested protected names as deep as srt allows", () => {
+    expect(sandboxPolicy({ folder: "/f", tmp: "/t", home: "/h", appDirs: [] }).mandatoryDenySearchDepth).toBe(10);
+  });
 });
 
 describe("the folders no sandbox may be given", () => {
