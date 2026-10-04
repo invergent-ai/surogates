@@ -11,8 +11,9 @@ import { protectedInFolder } from "../files/protect.js";
 import { SCAN_TIMEOUT_MS, listed, scanHooks } from "./hooks.js";
 import { GLOB } from "./policy.js";
 
-// bwrap takes 9 000 arguments, about 3 000 mounts, and srt's own rules and scan use some of them.
-export const MAX_EXTRA_DENIES = 256;
+// bwrap takes 9 000 arguments, and 2 905 literals fit beside srt's own rules and scan
+// here. A parent folder of about 130 checkouts already needs 256.
+export const MAX_EXTRA_DENIES = 1024;
 
 // srt 0.0.77's own write denies (linux-sandbox-utils.js) that hold whatever happens:
 // these names at the folder's top, and .git's hooks and config there when .git is a
