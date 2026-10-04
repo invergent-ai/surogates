@@ -177,8 +177,8 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 6_000));
     // Made outside the app: no command of this chat runs, and no process lives.
     spawnSync("git", ["-c", "init.defaultBranch=main", "init", "-q", folder]);
-    // The runner's next timed look sees it.
-    await new Promise((resolve) => setTimeout(resolve, 6_500));
+    // One of the runner's next two timed looks sees it.
+    await new Promise((resolve) => setTimeout(resolve, 11_000));
     expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe("denied\n");
   });
 

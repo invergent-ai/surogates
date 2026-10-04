@@ -238,12 +238,12 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     const record = join(start.dataDir, "folders", `${dev}-${ino}.json`);
     const first = await host();
     await until(() => readRecord(record)?.hooks != null);
-    const session_id = (await begin(first, "sleep 681")).ok.session_id as string;
+    const session_id = (await begin(first, "sleep 691")).ok.session_id as string;
     // Planted once the baseline is known: not the user's.
     writeFileSync(join(folder, ".git", "hooks", "pre-commit"), "#!/bin/sh\n", { mode: 0o755 });
     first.killGroup();
     await first.exited;
-    await until(() => running("^sleep 681$") === 0);
+    await until(() => running("^sleep 691$") === 0);
     const left = readRecord(record);
     expect(left?.hooks).toEqual(expect.objectContaining({ [join(folder, ".git", "hooks", "pre-push")]: expect.any(String) }));
     expect(left?.processes.map((handle) => handle.id)).toEqual([session_id]);
