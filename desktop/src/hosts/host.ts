@@ -20,7 +20,7 @@ import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
-import { GLOB, hideSrtTmp, isReserved, sandboxPolicy } from "./policy.js";
+import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
@@ -34,7 +34,6 @@ const send = (message: FromHost, then: () => void = () => {}) => {
   if (process.connected) process.send?.(message, undefined, undefined, then);
   else then();
 };
-const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 let helper: ChildProcess | null = null;
 let folder: { path: string; dev: number; ino: number } | null = null;

@@ -10,7 +10,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
+import { findOnPath } from "../files/operations.js";
 import type { FromRunner, SpawnRequest, ToRunner } from "./messages.js";
+import { quote } from "./policy.js";
 
 // Every process a command starts inherits it, setsid or not: how the runner finds them all.
 export const MARKER = "SUROGATE_PROCESS";
@@ -44,8 +46,13 @@ process.stdout.on("drain", () => {
   paused.clear();
 });
 
-// A background process's stderr goes to its stdout, in the order it was written.
-function argv(request: SpawnRequest): [string, string[]] {
+// The cloud's shapes: a terminal of 30 by 120 through script, which answers the
+// command's own exit code (-e); without script, pipes. A background process's
+// stderr goes to its stdout, in the order it was written.
+function argv(request: SpawnRequest, env: NodeJS.ProcessEnv): [string, string[]] {
+  if (request.pty && findOnPath("script", env.PATH, request.cwd)) {
+    return ["script", ["-qfec", `stty rows 30 cols 120 2>/dev/null; exec bash -c ${quote(request.command)}`, "/dev/null"]];
+  }
   if (request.stdin) return ["bash", ["-c", 'exec 2>&1; exec bash -c "$1"', "bash", request.command]];
   return ["bash", ["-c", request.command]];
 }
@@ -94,7 +101,7 @@ function start(request: SpawnRequest): void {
     return;
   }
   const env = { ...base, ...request.env, [MARKER]: id };
-  const [file, args] = argv(request);
+  const [file, args] = argv(request, env);
   let proc: ChildProcess;
   try {
     // Its own process group, so one signal reaches what it started too.

@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -363,5 +363,33 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect(await ask("start", { command: "x", workdir: null, task_id: "t", pty: false })).toEqual({
       error: { type: "other", message: "spawn E2BIG" },
     });
+  });
+});
+
+describe("a background process with a terminal", { timeout: 20_000 }, () => {
+  it("gets a terminal of the cloud's size, and answers its exit code", async () => {
+    processes();
+    const id = await start("tty; stty size; exit 7", { pty: true });
+    const answer = (await ask("wait", { session_id: id, timeout: 10 })).ok;
+    expect(answer.exit_code).toBe(7);
+    expect(answer.output).toMatch(/^\/dev\/pts\/\d+\r\n30 120\r\n$/);
+  });
+
+  it("answers a prompt written to its stdin", async () => {
+    processes();
+    const id = await start("read -p 'name? ' x; echo got:$x", { pty: true });
+    await until(async () => (await ask("poll", { session_id: id })).ok.output_preview === "name? ");
+    expect(await ask("write_stdin", { session_id: id, data: "alice\n" })).toEqual({ ok: { status: "ok", bytes_written: 6 } });
+    // The terminal echoes what it is given, as the cloud's does.
+    expect((await ask("wait", { session_id: id, timeout: 10 })).ok.output).toBe("name? alice\r\ngot:alice\r\n");
+  });
+
+  it("falls back to pipes where the sandbox has no script", async () => {
+    const bin = join(base, "bin");
+    mkdirSync(bin);
+    for (const name of ["bash", "tty"]) symlinkSync(`/usr/bin/${name}`, join(bin, name));
+    processes({ runner: () => runner(bin) });
+    const id = await start("tty", { pty: true });
+    expect((await ask("wait", { session_id: id, timeout: 10 })).ok).toEqual({ status: "exited", exit_code: 1, output: "not a tty\n" });
   });
 });
