@@ -1,13 +1,23 @@
 // Which folders a chat may work on (spec, Section 4): checked when the user
 // confirms one, and again by its tool host before anything runs there.
 
-import { realpathSync, type Stats, statSync } from "node:fs";
+import { readFileSync, realpathSync, type Stats, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { inside, realpath } from "../files/paths.js";
 import { GLOB, isReserved } from "../hosts/policy.js";
 
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
+
+// This boot, read once; "" when it cannot be read. A folder's st_dev belongs to its mount and
+// can change at a reboot (btrfs subvolumes, ZFS, NFS and SMB, FUSE, several NVMe drives).
+export const BOOT_ID = (() => {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch {
+    return "";
+  }
+})();
 
 // What a chat's folder must keep clear of: the home folder, the app's own data
 // and files (which run outside the sandbox), and the credential folders.

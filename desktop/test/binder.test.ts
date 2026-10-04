@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, type Prepared,
 } from "../src/binding/binder.js";
+import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
 import { NOT_BOUND } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
@@ -137,7 +138,7 @@ describe("preparing a new chat's folder", () => {
   });
 
   it("shows the last folder bound without a dialog, and opens the dialog there once that folder has gone", async () => {
-    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, mode: "free", boundAt: 1 });
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
     const user = new User([], [{ mode: "free" }]);
     expect((await binder(user).prepareFolder("last", WINDOW, never()))?.folder).toBe(notes);
     expect(user.dialogs).toEqual([]);
@@ -187,7 +188,7 @@ describe("a chat's bind operation", () => {
     expect(await chooser.admit(bindOp(ROOT, ready))).toEqual({ ok: null });
     const { dev, ino } = statSync(notes);
     expect(journal.bindings.get(ROOT)).toEqual({
-      root: ROOT, nonce: ready.nonce, folder: notes, dev, ino, mode: "ask", boundAt: expect.any(Number),
+      root: ROOT, nonce: ready.nonce, folder: notes, dev, ino, boot: BOOT_ID, mode: "ask", boundAt: expect.any(Number),
     });
   });
 
@@ -235,7 +236,7 @@ describe("a chat's bind operation", () => {
 
   it("is answered from the binding when it comes again after a restart, and refused once the chat is bound otherwise", async () => {
     const nonce = "n".repeat(32);
-    journal.bindings.add({ root: ROOT, nonce, folder: notes, dev: 1, ino: 1, mode: "free", boundAt: 1 });
+    journal.bindings.add({ root: ROOT, nonce, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
     // A restarted app has no confirmations; the binding is in the journal.
     const restarted = binder(new User());
     expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce }))).toEqual({ ok: null });

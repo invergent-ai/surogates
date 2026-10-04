@@ -1,10 +1,22 @@
 import { type ChildProcess, fork } from "node:child_process";
+import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import type { FromHost, ToHost } from "../src/hosts/messages.js";
+import { BOOT_ID } from "../src/binding/folder.js";
+import type { FromHost, HostStart, ToHost } from "../src/hosts/messages.js";
 
 export const HOST = fileURLToPath(new URL("../dist/hosts/host.js", import.meta.url));
 export const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
+
+// The identity a binding holds for *folder* as it is now; any, for a path that is no folder to stat.
+export function bound(folder: string): HostStart["expect"] {
+  try {
+    const { dev, ino } = statSync(folder);
+    return { dev, ino, boot: BOOT_ID };
+  } catch {
+    return { dev: 0, ino: 0, boot: BOOT_ID };
+  }
+}
 
 export class Harness {
   readonly messages: FromHost[] = [];

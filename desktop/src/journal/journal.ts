@@ -71,6 +71,7 @@ export class OperationJournal {
           folder TEXT NOT NULL,
           dev INTEGER NOT NULL,
           ino INTEGER NOT NULL,
+          boot TEXT NOT NULL,
           mode TEXT NOT NULL,
           bound_at INTEGER NOT NULL
         );

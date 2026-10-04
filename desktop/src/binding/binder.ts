@@ -11,7 +11,7 @@ import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
-import { checkFolder, type FolderGuards } from "./folder.js";
+import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
 // How long a confirmed folder waits for its chat's bind operation.
@@ -143,7 +143,7 @@ export class Binder implements Executor {
       return NOT_BOUND;
     }
     const { dev, ino, mode } = preparation;
-    this.options.bindings.add({ root, nonce, folder, dev, ino, mode, boundAt: Date.now() });
+    this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now() });
     preparation.root = root;
     this.answered.set(operation.id, preparation);
     return BOUND;

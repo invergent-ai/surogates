@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 import { Binder } from "../binding/binder.js";
+import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import { APP_DIRS, ToolHosts } from "../hosts/tool-hosts.js";
@@ -51,10 +52,10 @@ const journal = new SpokenJournal(values.journal);
 const dataDir = join(dirname(values.journal), "data");
 const env: Record<string, string> = values.folder || values.confirm ? await appEnvironment() : {};
 // With --folder, every session works on that folder, as if each had been bound to it there.
-let everyRoot: { folder: string; dev: number; ino: number } | undefined;
+let everyRoot: { folder: string; dev: number; ino: number; boot: string } | undefined;
 if (values.folder) {
   const { dev, ino } = statSync(values.folder);
-  everyRoot = { folder: values.folder, dev, ino };
+  everyRoot = { folder: values.folder, dev, ino, boot: BOOT_ID };
 }
 const hosts = values.folder || values.confirm
   ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env })

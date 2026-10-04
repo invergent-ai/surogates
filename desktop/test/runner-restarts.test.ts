@@ -11,7 +11,7 @@ import type { HostStart } from "../src/hosts/messages.js";
 import { RESTARTED, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
 import { appeared, GRANT_CHANGED, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/hosts/run.js";
-import { Harness, PACKAGE } from "./host-harness.js";
+import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
 
@@ -29,6 +29,7 @@ async function host(): Promise<Harness> {
   const start: HostStart = {
     type: "start",
     folder,
+    expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: join(base, "home"), LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

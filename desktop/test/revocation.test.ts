@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, expect, it } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
 import { forkHost, ToolHosts } from "../src/hosts/tool-hosts.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -39,7 +40,7 @@ beforeEach(() => {
   exits = 0;
   journal = new OperationJournal(join(base, "journal.sqlite"));
   hosts = new ToolHosts({
-    bindingOf: () => ({ folder: join(base, "folder"), dev, ino }),
+    bindingOf: () => ({ folder: join(base, "folder"), dev, ino, boot: BOOT_ID }),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     spawnHost: () => {

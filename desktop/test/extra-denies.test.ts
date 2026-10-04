@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Failure } from "../src/files/answers.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { MAX_EXTRA_DENIES, extraDenies, protectedKeys } from "../src/hosts/restarts.js";
-import { Harness, PACKAGE } from "./host-harness.js";
+import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
 
@@ -44,6 +44,7 @@ async function host(): Promise<Harness> {
   const start: HostStart = {
     type: "start",
     folder,
+    expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: join(base, "home"), LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

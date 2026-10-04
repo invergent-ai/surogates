@@ -268,7 +268,7 @@ describe("an operation answered before it started", () => {
 
 describe("the bindings", () => {
   const binding = (root: string, boundAt: number): Binding => ({
-    root, nonce: `nonce-${root}`, folder: `/home/me/${root}`, dev: 2049, ino: 7_340_033, mode: "free", boundAt,
+    root, nonce: `nonce-${root}`, folder: `/home/me/${root}`, dev: 2049, ino: 7_340_033, boot: "boot-1", mode: "free", boundAt,
   });
 
   it("keep each root's folder across a restart, and give the latest", () => {

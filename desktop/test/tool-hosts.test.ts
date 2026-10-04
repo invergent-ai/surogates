@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type ToHost } from "../src/hosts/messages.js";
 import {
@@ -29,7 +30,7 @@ async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
 let base: string;
 let folders: Record<string, string>;
 // Each folder's identity as it was made: the one its binding holds.
-let identities: Map<string, { dev: number; ino: number }>;
+let identities: Map<string, { dev: number; ino: number; boot: string }>;
 let spawned: HostProcess[];
 let exits: number;
 let hosts: ToolHosts | null;
@@ -69,7 +70,7 @@ beforeEach(() => {
   for (const folder of Object.values(folders)) {
     mkdirSync(folder);
     const { dev, ino } = statSync(folder);
-    identities.set(folder, { dev, ino });
+    identities.set(folder, { dev, ino, boot: BOOT_ID });
   }
   // An rg that never answers, for operations that are still running; its sleep
   // has a length only it uses, so the test can see it run and stop.
@@ -465,7 +466,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     const executor = toolHosts({
       bindingOf: () => {
         looked += 1;
-        return { folder: folders[ROOT_A] ?? "", dev: 0, ino: 0 };
+        return { folder: folders[ROOT_A] ?? "", dev: 0, ino: 0, boot: "" };
       },
       spawnHost: fakeSpawn(answering),
     });

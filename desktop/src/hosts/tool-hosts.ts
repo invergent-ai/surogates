@@ -38,7 +38,7 @@ const unavailable = (why: string): Outcome => ({
 });
 
 // What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
-type BoundFolder = Pick<Binding, "folder" | "dev" | "ino">;
+type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
 
 export interface HostProcess {
   send(message: ToHost): void;
@@ -153,7 +153,7 @@ export class ToolHosts implements Executor {
     const start: HostStart = {
       type: "start",
       folder: binding.folder,
-      expect: { dev: binding.dev, ino: binding.ino },
+      expect: { dev: binding.dev, ino: binding.ino, boot: binding.boot },
       tmp: join(dataDir, "tmp", root),
       dataDir,
       env,

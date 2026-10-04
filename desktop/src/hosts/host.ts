@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
-import { checkFolder, spellings } from "../binding/folder.js";
+import { BOOT_ID, checkFolder, spellings } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
@@ -146,7 +146,11 @@ async function start(message: HostStart): Promise<void> {
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
   const { path, dev, ino } = checked;
-  if (message.expect && (message.expect.dev !== dev || message.expect.ino !== ino)) {
+  // A reboot can renumber the folder's mount: after one, only the inode is compared.
+  // A boot id that could not be read counts as this boot.
+  const { expect } = message;
+  const rebooted = expect.boot !== "" && BOOT_ID !== "" && expect.boot !== BOOT_ID;
+  if (expect.ino !== ino || (!rebooted && expect.dev !== dev)) {
     throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
   folder = { path, dev, ino };

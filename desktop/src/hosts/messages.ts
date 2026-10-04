@@ -5,8 +5,8 @@ import type { Outcome } from "../link/protocol.js";
 export interface HostStart {
   type: "start";
   folder: string; // the bound folder; the host resolves it
-  // The folder's identity when the chat was bound: a folder replaced since is not the chat's.
-  expect?: { dev: number; ino: number };
+  // The folder's identity when the chat was bound, and that boot's id: a folder replaced since is not the chat's.
+  expect: { dev: number; ino: number; boot: string };
   tmp: string; // the root session's temp folder
   dataDir: string; // the app's own data, never inside the folder
   env: Record<string, string>; // the app-built environment: HOME, LANG, PATH
