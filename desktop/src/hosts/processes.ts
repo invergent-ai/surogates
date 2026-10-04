@@ -188,13 +188,10 @@ export class Processes {
 
   // Before the host stops the runner to restart it: every live process will end
   // with RESTARTED, and once one has, the next answer that can carry it gets the notice.
-  // How many were live.
-  restart(reason: string): number {
-    // One still starting is flagged too, because the runner may yet spawn it; it is
-    // counted, and raises the notice, only once it has a pid.
-    const running = [...this.running.values()];
-    for (const record of running) record.restarted = reason;
-    return running.filter((record) => record.pid !== null).length;
+  restart(reason: string): void {
+    // One still starting is flagged too, because the runner may yet spawn it; it
+    // raises the notice only once it has a pid.
+    for (const record of this.running.values()) record.restarted = reason;
   }
 
   // The notice, once, for a run's output.
@@ -385,6 +382,8 @@ export class Processes {
     if (child) {
       void child.started.then((pid) => {
         record.pid = pid;
+        // Its start and its end in one chunk from the runner: the end came first.
+        if (pid !== null && record.exited) this.noticed(record);
       });
       child.onOutput((chunk) => this.push(record, record.decoder.decode(chunk, { stream: true })));
       child.onEnd((end) => this.end(record, end));
@@ -420,15 +419,18 @@ export class Processes {
     else if (record.killed) record.exitCode = -15;
     else if ("lost" in end) record.note = RUNNER_GONE;
     else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
-    // A restart's notice is due once one of its processes has ended. One that never
-    // started has its start's answer instead.
-    if (record.restarted !== null && record.pid !== null) {
-      this.notice = { text: restartNotice(record.restarted), ids: new Set([...(this.notice?.ids ?? []), record.handle.id]) };
-    }
+    if (record.pid !== null) this.noticed(record);
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
     for (const waiter of record.waiters) waiter();
     this.changed();
+  }
+
+  // A restart's notice is due once one of its processes has ended. One that never
+  // started has its start's answer instead.
+  private noticed(record: Tracked): void {
+    if (record.restarted === null) return;
+    this.notice = { text: restartNotice(record.restarted), ids: new Set([...(this.notice?.ids ?? []), record.handle.id]) };
   }
 
   // One save for every change in the same tick: a runner that dies ends all its

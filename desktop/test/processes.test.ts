@@ -407,7 +407,7 @@ describe("a runner restart", () => {
     processes({ runner: driven, save: (handles) => saves.push(handles) });
     const first = await start("x");
     const second = await start("y");
-    expect(registry.restart("a folder grant changed")).toBe(2);
+    registry.restart("a folder grant changed");
     spawned[0]?.end({ lost: true });
     spawned[1]?.end({ code: null, signal: "SIGKILL" });
     for (const id of [first, second]) {
@@ -478,13 +478,26 @@ describe("a runner restart", () => {
     processes({ runner: driven });
     const starting = start("x");
     await until(() => spawned.length === 1);
-    // Not counted: it may yet fail to start.
-    expect(registry.restart("a folder grant changed")).toBe(0);
+    registry.restart("a folder grant changed");
     release();
     const id = await starting;
     expect(id).toBeDefined();
     spawned[0]?.end({ lost: true });
     expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
+    expect(registry.takeNotice()).toBe(notice);
+  });
+
+  it("raises the notice for a process that ended before the registry knew its pid", async () => {
+    let release = () => {};
+    const { runner: driven, spawned } = fake({ held: new Promise((resolve) => { release = resolve; }) });
+    processes({ runner: driven });
+    const starting = start("x");
+    await until(() => spawned.length === 1);
+    registry.restart("a folder grant changed");
+    // Its start and its end in one chunk from the runner: the end comes before the pid is read.
+    release();
+    spawned[0]?.end({ lost: true });
+    expect(await starting).toBeDefined();
     expect(registry.takeNotice()).toBe(notice);
   });
 
@@ -527,7 +540,7 @@ describe("a runner restart", () => {
     processes({ runner: driven });
     const id = await start("x");
     spawned[0]?.end({ code: 0, signal: null });
-    expect(registry.restart("a folder grant changed")).toBe(0);
+    registry.restart("a folder grant changed");
     expect((await ask("poll", { session_id: id })).ok).not.toHaveProperty("note");
     expect(registry.takeNotice()).toBeNull();
   });
