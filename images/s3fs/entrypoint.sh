@@ -122,28 +122,40 @@ fi
 
 echo "Mounting s3://${S3_BUCKET_PATH} at ${MOUNT_POINT} (endpoint: ${S3_ENDPOINT}, region: ${S3_REGION}, cache: ${GEESEFS_CACHE_DIR:-off})"
 
-# In legacy mode we exec geesefs so it owns PID 1 and Kubernetes signals
-# reach it directly. In fleet mode we need to write the .s3fs-mounted
-# sentinel into the mount point *after* the mount lands, which is only
-# possible if we keep our shell alive long enough to write the file —
-# so we run geesefs in the background, write the sentinel, and trap
-# SIGTERM/SIGINT to forward them to it.
+# geesefs answers SIGTERM with a plain `fusermount -u`, which fails with
+# EBUSY while the sandbox container still has files open under the mount.
+# geesefs then keeps serving until SIGKILL and the dead FUSE mount stays on
+# the node (Bidirectional propagation), where kubelet retries its cleanup
+# forever and every later pod start on that node slows down. So geesefs runs
+# in the background and this shell lazily unmounts (`-z` never fails busy)
+# on SIGTERM/SIGINT and on any exit, including a geesefs crash.
+EXTRA_ARGS=()
 if [ "${FLEET_MODE:-0}" = "1" ]; then
-    geesefs \
-        --endpoint "${S3_ENDPOINT}" \
-        --region "${S3_REGION}" \
-        -o allow_other \
-        --uid 1000 \
-        --gid 1000 \
-        --file-mode 0644 \
-        --dir-mode 0755 \
-        --read-ahead-large 20 \
-        --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
-        "${GEESEFS_CACHE_ARGS[@]}" \
-        -f \
-        "${BUCKET_SPEC}" "${MOUNT_POINT}" &
-    GEESEFS_PID=$!
+    EXTRA_ARGS=(--read-ahead-large 20)
+fi
 
+geesefs \
+    --endpoint "${S3_ENDPOINT}" \
+    --region "${S3_REGION}" \
+    -o allow_other \
+    --uid 1000 \
+    --gid 1000 \
+    --file-mode 0644 \
+    --dir-mode 0755 \
+    "${EXTRA_ARGS[@]}" \
+    --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
+    "${GEESEFS_CACHE_ARGS[@]}" \
+    -f \
+    "${BUCKET_SPEC}" "${MOUNT_POINT}" &
+GEESEFS_PID=$!
+
+unmount() { fusermount -uz "${MOUNT_POINT}" 2>/dev/null || true; }
+trap unmount EXIT
+trap 'unmount; kill -TERM "${GEESEFS_PID}" 2>/dev/null || true; wait "${GEESEFS_PID}" || true; exit 0' TERM INT
+
+# Fleet mode writes the .s3fs-mounted sentinel into the mount point once
+# the mount lands.
+if [ "${FLEET_MODE:-0}" = "1" ]; then
     # mountpoint(1) needs util-linux; the base image already includes it.
     # Poll for up to 30 s — beyond that geesefs has clearly failed and the
     # manager's pod_ready_timeout will tear the pod down.
@@ -160,24 +172,6 @@ if [ "${FLEET_MODE:-0}" = "1" ]; then
         fi
         sleep 0.2
     done
-
-    # Forward signals so K8s teardown / sidecar /release shuts geesefs
-    # down cleanly and unmounts the fuse layer.
-    trap 'kill -TERM "${GEESEFS_PID}" 2>/dev/null || true; wait "${GEESEFS_PID}" || true; exit 0' TERM INT
-    wait "${GEESEFS_PID}"
-    exit $?
 fi
 
-# Legacy mode: exec geesefs directly.
-exec geesefs \
-    --endpoint "${S3_ENDPOINT}" \
-    --region "${S3_REGION}" \
-    -o allow_other \
-    --uid 1000 \
-    --gid 1000 \
-    --file-mode 0644 \
-    --dir-mode 0755 \
-    --memory-limit "${GEESEFS_MEMORY_LIMIT_MB}" \
-    "${GEESEFS_CACHE_ARGS[@]}" \
-    -f \
-    "${BUCKET_SPEC}" "${MOUNT_POINT}"
+wait "${GEESEFS_PID}"
