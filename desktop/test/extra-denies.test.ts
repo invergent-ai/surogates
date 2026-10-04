@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -191,6 +191,20 @@ describe("a session runner's wrap", { timeout: 30_000 }, () => {
       expect(readFileSync(config, "utf8")).toBe(before);
     } finally {
       chmodSync(locked, 0o755);
+    }
+  });
+
+  it("blocks commands and refuses to start in a folder holding a name that is not valid UTF-8", async () => {
+    // The walk reads the name back with U+FFFD, and no path it can build reaches it.
+    const named = Buffer.concat([Buffer.from(`${folder}/`), Buffer.from([0xff])]);
+    mkdirSync(named);
+    try {
+      const harness = await host();
+      const blocked = { error: { type: "sandbox", message: expect.stringContaining("cannot read \uFFFD in this folder") } };
+      expect(await run(harness, "echo hi")).toEqual(blocked);
+      expect(await begin(harness, "true")).toEqual(blocked);
+    } finally {
+      rmdirSync(named);
     }
   });
 

@@ -96,6 +96,11 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
     const gitFolder = inGit && entries.some((entry) => entry.name === "HEAD");
     await Promise.all(entries.map(async (entry) => {
       const path = join(dir, entry.name);
+      // A name that is not valid UTF-8 reads back with U+FFFD, and no path reaches it.
+      if (entry.name.includes("\uFFFD")) {
+        scan.unreadable.push(path);
+        return;
+      }
       const name = entry.name.toLowerCase();
       if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) scan.protectedKeys.add(path);
       if (entry.isDirectory()) {
@@ -212,8 +217,8 @@ export class HookGuard {
     return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${HOOKS_NOTICE}${listed(this.folder, told)}` } };
   }
 
-  // A look between commands, while background processes run: one may write a
-  // hook at any time. What it stops is told with the next command's output.
+  // A look between commands, while background processes or an idle runner live: one
+  // may write a hook at any time. What it stops is told with the next command's output.
   async watch(): Promise<void> {
     await this.first;
     for (const key of (await this.check(true)).changed) this.unreported.add(key);
