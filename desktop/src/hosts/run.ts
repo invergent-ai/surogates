@@ -221,7 +221,7 @@ function supervise(child: CommandChild, timeout: number, signal: AbortSignal, do
 }
 
 // _workdir: an alias is the folder, anything else must resolve inside it.
-function workdir({ folder, home }: CommandContext, requested: string | null): string {
+export function workdir({ folder, home }: CommandContext, requested: string | null): string {
   const path = requested && HOME_ALIASES.has(requested) ? folder : requested;
   try {
     return resolveInFolder(folder, home, path ?? "");
@@ -233,15 +233,20 @@ function workdir({ folder, home }: CommandContext, requested: string | null): st
   }
 }
 
+// Why a command cannot run in *cwd*: an errno name, or null.
+export function unenterable(cwd: string): string | null {
+  try {
+    if (!statSync(cwd).isDirectory()) return "ENOTDIR";
+    accessSync(cwd, constants.X_OK);
+    return null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? "EIO";
+  }
+}
+
 // What the cloud's subprocess call says when the folder cannot be entered: str(OSError).
 function cannotEnter(cwd: string): string | null {
-  let code: string | null = null;
-  try {
-    if (!statSync(cwd).isDirectory()) code = "ENOTDIR";
-    else accessSync(cwd, constants.X_OK);
-  } catch (error) {
-    code = (error as NodeJS.ErrnoException).code ?? "EIO";
-  }
+  const code = unenterable(cwd);
   if (!code) return null;
   const errno = osConstants.errno[code as keyof typeof osConstants.errno];
   return `${errno === undefined ? "" : `[Errno ${errno}] `}${osError(code, cwd).refusal.message}`;

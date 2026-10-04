@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
-import { capText, commandOutput, Window } from "../src/hosts/output.js";
+import { capStrings, capText, commandOutput, firstPoints, lastPoints, splitLines, stripAnsi, Window } from "../src/hosts/output.js";
 
 const repeat = (bytes: number[] | string, times: number) =>
   Buffer.concat(Array.from({ length: times }, () => (typeof bytes === "string" ? Buffer.from(bytes) : Buffer.from(bytes))));
@@ -84,5 +84,51 @@ describe("command output", () => {
   it("never splits a character in two", () => {
     // With the u flag a pair is one code point, so only a lone surrogate matches.
     expect(/[\uD800-\uDFFF]/u.test(capText("😀".repeat(300_000)))).toBe(false);
+  });
+});
+
+describe("the text of a process outcome", () => {
+  it("strips terminal escapes as the cloud's strip_ansi does", () => {
+    // Each answer is surogates/tools/utils/ansi_strip.py's on master.
+    const cases: [string, string][] = [
+      ["\x1b[31mred\x1b[0m", "red"],
+      ["\x1b]0;title\x07x", "x"],
+      ["\x1b]8;;http://a\x1b\\link\x1b]8;;\x1b\\", "link"],
+      ["\x1b]never", "never"],
+      ["\x1bPq#0\x1b\\done", "done"],
+      ["\x9b1mbold", "bold"],
+      ["a\x85b", "ab"],
+      ["\x1b(Bx", "x"],
+      ["\x1b", "\x1b"],
+      ["\x1b ", "\x1b "],
+      ["\x1b[12", "12"],
+      ["é😀", "é😀"],
+    ];
+    for (const [text, stripped] of cases) expect(stripAnsi(text)).toBe(stripped);
+  });
+
+  it("strips escapes that never end in one pass", () => {
+    const begun = Date.now();
+    expect(stripAnsi("\x1b]".repeat(100_000))).toBe("");
+    expect(Date.now() - begun).toBeLessThan(1_000);
+  });
+
+  it("splits lines as Python's splitlines does", () => {
+    expect(splitLines("a\r\nb\rc\x0bd\x0ce\x1cf\x1dg\x1eh\x85i\u2028j\u2029k\n")).toEqual(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"]);
+    expect(splitLines("")).toEqual([]);
+    expect(splitLines("\n")).toEqual([""]);
+    expect(splitLines("a\n\nb")).toEqual(["a", "", "b"]);
+  });
+
+  it("slices in code points, as Python does", () => {
+    expect(lastPoints("a😀b😀", 2)).toBe("b😀");
+    expect(lastPoints("ab", 5)).toBe("ab");
+    expect(firstPoints("😀😀x", 2)).toBe("😀😀");
+  });
+
+  it("caps every string at any depth, and makes it well-formed", () => {
+    const capped = capStrings({ a: ["\ud800x", 1, null], b: { c: "x".repeat(300_000) } }) as { a: unknown[]; b: { c: string } };
+    expect(capped.a).toEqual(["\ufffdx", 1, null]);
+    expect(capped.b.c).toBe(capText("x".repeat(300_000)));
   });
 });
