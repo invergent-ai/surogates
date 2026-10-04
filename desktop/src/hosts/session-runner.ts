@@ -16,6 +16,8 @@ export const RUNNER = fileURLToPath(new URL("./runner.js", import.meta.url));
 
 const READY_TIMEOUT_MS = 15_000;
 const STOP_MS = 2_000;
+// The runner's own lines are at most about 90 KB.
+const MAX_LINE_BYTES = 4 * 1024 * 1024;
 
 // One command in the runner, as the host sees it.
 export class RunnerChild implements CommandChild {
@@ -123,6 +125,16 @@ export class SessionRunner {
         if (typeof message?.id !== "string") return;
         const target = this.children.get(message.id);
         if (target?.receive(message)) this.children.delete(message.id);
+      });
+      // A runner whose line never ends is broken: it is killed, and goes as one that died.
+      // Only a command that took the runner over writes such a line: where Yama's ptrace_scope lets it.
+      let unended = 0;
+      child.stdout.on("data", (chunk: Buffer) => {
+        const newline = chunk.lastIndexOf(0x0a);
+        unended = newline < 0 ? unended + chunk.length : chunk.length - newline - 1;
+        if (unended <= MAX_LINE_BYTES) return;
+        child.kill("SIGKILL");
+        child.stdout?.destroy();
       });
     }
     this.gone = new Promise((resolve) => {

@@ -54,6 +54,20 @@ createInterface({ input: runner.stdout }).on("line", (line) => {
 runner.on("exit", () => process.exit(0));
 `;
 
+// A runner that, once ready, writes 8 MiB with no newline and then hangs.
+const ENDLESS = `
+process.stdout.write('{"ready":true}\\n');
+let left = 128;
+const more = () => {
+  while (left > 0) {
+    left -= 1;
+    if (!process.stdout.write("x".repeat(65536))) return void process.stdout.once("drain", more);
+  }
+};
+more();
+setInterval(() => {}, 1000);
+`;
+
 // Ids of their own: a bare runner's sweep reads every process's marker, other test files' too.
 const request = (command: string, background = false, extra: Partial<SpawnRequest> = {}): SpawnRequest => ({
   id: `sr-${next++}`, command, cwd: base, env: {}, pty: false, stdin: background, ...extra,
@@ -200,6 +214,17 @@ describe("the session runner", { timeout: 20_000 }, () => {
     expect(await collect(started.spawn(request("sleep 0.2; echo done", true)))).toEqual({
       out: "done\n", err: "", end: { code: 0, signal: null },
     });
+  });
+
+  it("kills a runner whose line never ends, and ends what ran in it as lost", async () => {
+    let lost = 0;
+    const started = new SessionRunner(bare(["-e", ENDLESS]), () => {
+      lost += 1;
+    });
+    runners.push(started);
+    await started.ready;
+    await Promise.race([started.gone, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+    expect(lost).toBe(1);
   });
 
   it("refuses a second command with an id it already runs, and keeps the first", async () => {
