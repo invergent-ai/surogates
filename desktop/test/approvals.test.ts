@@ -192,7 +192,8 @@ describe("a chat that asks every time", () => {
     bind(ROOT, "ask");
     bind(OTHER, "ask");
     const first = approvals.admit(op("run", RUN), never());
-    const second = approvals.admit(op("write", { key: `${FOLDER}/a.txt`, data: "" }), never());
+    // A sub-agent's is in its chat's line.
+    const second = approvals.admit(op("write", { key: `${FOLDER}/a.txt`, data: "" }, ROOT, CHILD), never());
     const elsewhere = approvals.admit(op("run", { ...RUN, command: "ls" }, OTHER), never());
     await vi.waitFor(() => expect(user.open).toHaveLength(2));
     expect(user.open.map(({ request }) => [request.chat.root, request.kind])).toEqual([[ROOT, "command"], [OTHER, "command"]]);
@@ -216,6 +217,33 @@ describe("a chat that asks every time", () => {
     expect(await approvals.admit(op("delete", { key: `${FOLDER}/a.txt` }), never())).toBeNull();
     expect(user.asked).toHaveLength(1);
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+  });
+
+  it("lets the whole chat work freely when its user stops asking at a sub-agent's prompt", async () => {
+    bind(ROOT, "ask");
+    user.auto = "stop_asking";
+    expect(await approvals.admit(op("run", RUN, ROOT, CHILD), never())).toBeNull();
+    expect(journal.bindings.get(ROOT)?.mode).toBe("free");
+    expect(await approvals.admit(op("run", RUN), never())).toBeNull();
+    expect(user.asked).toHaveLength(1);
+  });
+
+  it("keeps an operation that comes late waiting behind the one still in line", async () => {
+    bind(ROOT, "ask");
+    const first = approvals.admit(op("run", RUN), never());
+    const second = approvals.admit(op("run", RUN), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    user.answer("allow");
+    expect(await first).toBeNull();
+    await vi.waitFor(() => expect(user.asked).toHaveLength(2));
+    const late = approvals.admit(op("write", { key: `${FOLDER}/a.txt`, data: "" }), never());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(user.open.map(({ request }) => request.kind)).toEqual(["command"]);
+    user.answer("allow");
+    expect(await second).toBeNull();
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.kind)).toEqual(["change"]));
+    user.answer("deny");
+    expect(await late).toEqual(CHANGE_DENIED);
   });
 
   it("dismisses an open prompt when its operation is stopped, and lets one waiting its turn leave the line", async () => {
@@ -322,15 +350,17 @@ describe("a chat's mode", () => {
 
   it("works freely only once its user confirms it in the desktop's own window", async () => {
     bind(ROOT, "ask");
-    const confirming = new User(null, [false, true]);
+    // Only true confirms: not a window that answers something else.
+    const confirming = new User(null, [false, "yes" as unknown as boolean, true]);
     const asking = new Approvals({ bindings: journal.bindings, prompts: confirming, agent: "Research assistant" });
+    expect(await asking.requestFreeMode(ROOT, never())).toBe(false);
     expect(await asking.requestFreeMode(ROOT, never())).toBe(false);
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
     expect(await asking.requestFreeMode(ROOT, never())).toBe(true);
     expect(journal.bindings.get(ROOT)?.mode).toBe("free");
     // Already working freely: nothing to confirm.
     expect(await asking.requestFreeMode(ROOT, never())).toBe(true);
-    expect(confirming.confirmations).toEqual([chat(), chat()]);
+    expect(confirming.confirmations).toEqual([chat(), chat(), chat()]);
     await expect(asking.requestFreeMode(OTHER, never())).rejects.toThrow("This chat has no folder on this computer");
   });
 
