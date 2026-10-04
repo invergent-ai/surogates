@@ -21,6 +21,14 @@ _PRE_WAKE_HUB_TIMEOUT_SECONDS: float = 30.0
 # ``_LEASE_TTL_SECONDS`` so a single missed tick still leaves the lease alive.
 _LEASE_RENEWAL_INTERVAL_SECONDS: float = 20.0
 
+# Session statuses the pause/delete endpoints write before signalling the
+# interrupt, mapped to the reason they signal.  A renewal that reads one
+# stops the turn even if the signal was lost.
+_STOPPED_STATUS_REASONS: dict[str, str] = {
+    "paused": "paused by user",
+    "archived": "session deleted",
+}
+
 # Upper bound on how long ``wake()`` will wait for fire-and-forget background
 # tasks (e.g. title generation) before releasing the session lease.  The drain
 # is best-effort: anything still pending after this is cancelled so the worker

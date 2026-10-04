@@ -83,7 +83,7 @@ from surogates.harness.tool_schemas import (
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
-from surogates.runtime.turn_slots import detach_turn, turn_joining
+from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
 from surogates.tools.builtin.file_ops import clear_read_tracker
@@ -140,6 +140,7 @@ from surogates.harness.loop_constants import (
     _MAX_LENGTH_CONTINUATIONS,
     _MAX_PARTIAL_TOOL_CALL_RETRIES,
     _PRE_WAKE_HUB_TIMEOUT_SECONDS,
+    _STOPPED_STATUS_REASONS,
 )
 from surogates.harness.loop_deep_research import (
     DEEP_RESEARCH_NO_DELEGATE_NUDGE,
@@ -858,9 +859,22 @@ class AgentHarness(
         while True:
             try:
                 await asyncio.sleep(_LEASE_RENEWAL_INTERVAL_SECONDS)
-                await self._store.renew_lease(
+                status = await self._store.renew_lease(
                     session_id, lease_token, ttl_seconds=_LEASE_TTL_SECONDS,
                 )
+                # The pause/delete endpoints signal over Redis pub/sub, which
+                # drops messages while Redis is unreachable.  Their status
+                # write is durable: stop the turn the way the signal would.
+                reason = _STOPPED_STATUS_REASONS.get(status)
+                if reason is not None and not self._check_interrupt():
+                    logger.warning(
+                        "Session %s is %s but no interrupt arrived; stopping the turn",
+                        session_id, status,
+                    )
+                    self.interrupt(reason)
+                    slots = current_turn.get()
+                    if slots is not None:
+                        slots.interrupt()
             except asyncio.CancelledError:
                 raise
             except LeaseNotHeldError:
@@ -1054,8 +1068,8 @@ class AgentHarness(
             # the message's own enqueue is what triggered this wake.
             # Paused stays a hard stop: pause is an explicit user
             # action, and send_message on a paused session resumes
-            # through the API path.
-            if session.status in ("paused", "completed", "failed"):
+            # through the API path.  Archived (deleted) is as final.
+            if session.status in ("paused", "completed", "failed", "archived"):
                 if session.status in (
                     "completed", "failed",
                 ) and await self._has_stranded_user_message(session_id):
