@@ -510,15 +510,18 @@ function command(id: string, args: Record<string, unknown>): void {
 }
 
 // A run that comes during a restart waits for the new runner, then asks the guard: a
-// block raised meanwhile stops it. Stopped or cancelled while it waited, or while the
-// folder was looked through: it never starts.
+// block raised meanwhile stops it. A restart the guard's own look starts is waited for
+// too: the run would otherwise get a sandbox of its own, without the runner's denies.
+// Stopped or cancelled while it waited, or while the folder was looked through: it never starts.
 async function commandOutcome(
   args: Record<string, unknown>, ready: CommandContext, hooks: HookGuard, signal: AbortSignal, id: string,
 ): Promise<Outcome> {
-  await restarted(signal);
-  if (stopping || signal.aborted) return CANCELLED;
-  const refused = await hooks.refusal();
-  if (refused) return refused;
+  do {
+    await restarted(signal);
+    if (stopping || signal.aborted) return CANCELLED;
+    const refused = await hooks.refusal();
+    if (refused) return refused;
+  } while (restarting);
   if (stopping || signal.aborted) return CANCELLED;
   const inRunner = liveRunner;
   if (inRunner) runnerRuns += 1;

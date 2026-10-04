@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +19,8 @@ let base: string;
 let folder: string;
 let harnesses: Harness[];
 let next = 0;
+// chmod does not stop root from reading.
+const asRoot = process.getuid?.() === 0;
 const id = () => `rr-${next++}`;
 
 async function host(): Promise<Harness> {
@@ -204,6 +206,29 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 11_000));
     expect((await poll(harness, session_id)).status).toBe("running");
     expect((await run(harness, tryWrite(".idea/x"))).ok?.output).toBe("denied\n");
+  });
+
+  it.skipIf(asRoot)("runs a command whose guard look starts a restart in the new runner, not in a sandbox of its own", async () => {
+    const harness = await host();
+    await begin(harness, "sleep 609");
+    // Moved in whole, where no look can read it yet.
+    const stage = join(base, "stage");
+    mkdirSync(join(stage, ".git"), { recursive: true });
+    writeFileSync(join(stage, ".git", "config.worktree"), "");
+    chmodSync(stage, 0o300);
+    const sub = join(folder, "sub");
+    renameSync(stage, sub);
+    try {
+      // This command's own look cannot read sub, and blocks the next command.
+      expect((await run(harness, "true")).ok?.output).toBe("");
+      chmodSync(sub, 0o700);
+      // The guard's look before this command sees the new config and restarts the runner. A sandbox
+      // of its own would let it write there: srt's own rules do not cover git's other config.
+      expect((await run(harness, tryWrite("sub/.git/config.worktree"))).ok?.output)
+        .toBe(`denied\n\n${restartNotice(appeared("sub/.git/config.worktree"))}`);
+    } finally {
+      chmodSync(sub, 0o700);
+    }
   });
 
   it("gives commands sandboxes of their own when the new runner is refused, and refuses starts", async () => {
