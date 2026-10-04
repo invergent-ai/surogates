@@ -4,16 +4,20 @@
 // So the user is told before the folder is bound. The file helper refuses
 // writes through such files itself: this is about commands.
 
-import { lstat, opendir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 
-// ponytail: walked in the main process through fs/promises, a batch per turn of the
-// event loop; move it to a worker if the final sort of very many links ever stalls the window.
+// ponytail: walked in the main process through fs/promises, two requests at a time. A child
+// process killed at the deadline is the robust upgrade: worker threads share the same libuv pool.
 export const LINK_SCAN_MS = 5_000;
 export const LINK_SCAN_ENTRIES = 200_000;
 const EXAMPLES = 3;
-// Entries read, and files looked at, per request: a large folder never holds the process up.
-const BATCH = 256;
+// Requests in flight at once. One that hangs on a dead mount keeps its thread of libuv's 4,
+// which every fs/promises call and dns.lookup in the process share.
+const IN_FLIGHT = 2;
+
+// A walk is under way, or still held by a request that never returned: the next does not start.
+let walking = false;
 
 export interface LinkSummary {
   // How many files in the folder share their data with a link outside it.
@@ -37,6 +41,7 @@ export interface LinkScanOptions {
 // lie outside the walk, so two links that are both in the folder are not "linked from
 // elsewhere". Null: none found in a whole look.
 export async function scanLinks(folder: string, options: LinkScanOptions = {}): Promise<LinkSummary | null> {
+  if (walking) return { count: 0, examples: [], complete: false };
   const deadlineMs = options.deadlineMs ?? LINK_SCAN_MS;
   const deadline = performance.now() + deadlineMs;
   const maxEntries = options.maxEntries ?? LINK_SCAN_ENTRIES;
@@ -61,54 +66,48 @@ export async function scanLinks(folder: string, options: LinkScanOptions = {}): 
     for (let next = folders.pop(); next !== undefined; next = folders.pop()) {
       if (late()) return;
       const { dir, inGit } = next;
-      const subfolders: string[] = [];
-      const regular: string[] = [];
-      let head = false;
+      let names: string[];
       try {
-        for await (const entry of await opendir(dir, { bufferSize: BATCH })) {
-          if (stopped) return;
-          entries += 1;
-          if (entries > maxEntries) return stop();
-          // A name that is not valid UTF-8 reads back with U+FFFD, and no path reaches it:
-          // the look misses it, and may meet a valid name it reads as in its place.
-          if (entry.name.includes("\uFFFD")) {
-            complete = false;
-            continue;
-          }
-          if (entry.name === "HEAD") head = true;
-          if (entry.isDirectory()) subfolders.push(entry.name);
-          else if (entry.isFile()) regular.push(join(dir, entry.name));
-        }
+        // Names only, each type from its own lstat: Node looks up an entry the listing
+        // gives no type for (XFS without ftype, some FUSE, NFSv3) on the main thread.
+        names = await readdir(dir);
       } catch {
         complete = false;
         continue;
       }
+      entries += names.length;
+      if (entries > maxEntries) return stop();
       // A git folder holds HEAD. Its objects/ is the object store only when it holds
       // no HEAD of its own: else it may be the git folder of a submodule named objects.
-      for (const name of subfolders) {
-        const path = join(dir, name);
-        const store = inGit && head && name === "objects"
-          && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
-        if (name.toLowerCase() !== "node_modules" && !store) folders.push({ dir: path, inGit: inGit || name === ".git" });
-      }
-      for (let start = 0; start < regular.length; start += BATCH) {
-        if (late()) return;
-        const batch = regular.slice(start, start + BATCH);
-        // Bigints: an inode number past 2^53 as a number could merge two files.
-        const stats = await Promise.allSettled(batch.map((path) => lstat(path, { bigint: true })));
-        stats.forEach((result, i) => {
-          // A file that went away as the walk passed: the look missed it.
-          if (result.status !== "fulfilled") {
+      const gitFolder = inGit && names.includes("HEAD");
+      let at = 0;
+      const look = async () => {
+        for (let name = names[at++]; name !== undefined && !late(); name = names[at++]) {
+          // A name that is not valid UTF-8 reads back with U+FFFD, and no path reaches it:
+          // the look misses it, and may meet a valid name it reads as in its place.
+          if (name.includes("\uFFFD")) {
             complete = false;
-            return;
+            continue;
           }
-          if (!result.value.isFile() || result.value.nlink < 2n) return;
-          const key = `${result.value.dev}:${result.value.ino}`;
-          const file = files.get(key) ?? { nlink: result.value.nlink, paths: [] };
-          file.paths.push(batch[i] as string);
-          files.set(key, file);
-        });
-      }
+          const path = join(dir, name);
+          // Bigints: an inode number past 2^53 as a number could merge two files.
+          const stats = await lstat(path, { bigint: true }).catch(() => null);
+          // A file that went away as the walk passed: the look missed it.
+          if (!stats) {
+            complete = false;
+          } else if (stats.isDirectory()) {
+            const store = gitFolder && name === "objects"
+              && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+            if (name.toLowerCase() !== "node_modules" && !store) folders.push({ dir: path, inGit: inGit || name === ".git" });
+          } else if (stats.isFile() && stats.nlink >= 2n) {
+            const key = `${stats.dev}:${stats.ino}`;
+            const file = files.get(key) ?? { nlink: stats.nlink, paths: [] };
+            file.paths.push(path);
+            files.set(key, file);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: IN_FLIGHT }, look));
     }
   };
 
@@ -120,8 +119,12 @@ export async function scanLinks(folder: string, options: LinkScanOptions = {}): 
       resolve();
     }, deadlineMs);
   });
+  walking = true;
+  const walked = walk().catch(stop).finally(() => {
+    walking = false;
+  });
   try {
-    await Promise.race([walk(), timeout]);
+    await Promise.race([walked, timeout]);
   } finally {
     clearTimeout(timer);
   }

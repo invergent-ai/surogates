@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import {
-  chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync,
+import syncFs, {
+  chmodSync, type Dirent, linkSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,27 +11,62 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { scanLinks } from "../src/binding/links.js";
 
-// The calls are real unless a test holds one lstat or hands out large inode numbers.
+// The calls are real unless a test holds one lstat, hands out large inode numbers, or lists folders without types.
 const calls = vi.hoisted(() => ({
   // An lstat of this path waits for release(), as one on a hung mount never returns.
   hung: "",
   release: () => {},
   // Inode numbers past 2^53 a large filesystem hands out, by path.
   inodes: new Map<string, bigint>(),
+  // Folder listings give no entry's type, as on XFS without ftype, some FUSE filesystems and NFSv3.
+  untyped: false,
+  // The paths lstat was asked for.
+  looked: [] as string[],
+  // Requests in flight, and the most there were at once.
+  inFlight: 0,
+  most: 0,
 }));
 
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
+  const counted = async <T>(call: () => Promise<T>): Promise<T> => {
+    calls.inFlight += 1;
+    calls.most = Math.max(calls.most, calls.inFlight);
+    try {
+      return await call();
+    } finally {
+      calls.inFlight -= 1;
+    }
+  };
+  // An entry as Node hands one out when the listing has no type, before it looks it up on the main thread.
+  const untyped = (name: string) => ({ name, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => false });
   return {
     ...fs,
-    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+    lstat: (...args: Parameters<typeof fs.lstat>) => counted(async () => {
       const path = String(args[0]);
-      if (path === calls.hung) await new Promise<void>((resolve) => { calls.release = resolve; });
+      calls.looked.push(path);
+      if (path === calls.hung) {
+        await new Promise<void>((_resolve, reject) => {
+          calls.release = () => reject(new Error("released"));
+        });
+      }
       const stats = await fs.lstat(...args);
       const ino = calls.inodes.get(path);
       // As Node reads it: whole as a bigint, rounded to the nearest double as a number.
       if (ino !== undefined) Object.assign(stats, { ino: typeof stats.ino === "bigint" ? ino : Number(ino) });
       return stats;
+    }),
+    readdir: (...args: Parameters<typeof fs.readdir>) => counted(async () => {
+      const listed = await fs.readdir(...args);
+      const typed = typeof args[1] === "object" && args[1] !== null && "withFileTypes" in args[1] && args[1].withFileTypes;
+      return calls.untyped && typed ? (listed as unknown as Dirent[]).map((entry) => untyped(entry.name)) : listed;
+    }),
+    opendir: async (...args: Parameters<typeof fs.opendir>) => {
+      const dir = await fs.opendir(...args);
+      if (!calls.untyped) return dir;
+      return (async function* () {
+        for await (const entry of dir) yield untyped(entry.name);
+      })();
     },
   };
 });
@@ -47,10 +83,15 @@ beforeEach(() => {
   mkdirSync(outside);
 });
 
-afterEach(() => {
-  calls.release();
+afterEach(async () => {
   calls.hung = "";
+  calls.release();
   calls.inodes.clear();
+  calls.untyped = false;
+  calls.looked = [];
+  calls.most = 0;
+  // A walk the release let go of ends: the next test's scan is not refused as one at a time.
+  await new Promise(setImmediate);
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -153,6 +194,8 @@ describe("the files in a folder linked from elsewhere", () => {
     const delay = monitorEventLoopDelay({ resolution: 10 });
     delay.enable();
     expect(await scanLinks(folder)).toBeNull();
+    // The monitor records a stall when its next timer runs, after it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
     delay.disable();
     expect(delay.max / 1e6).toBeLessThan(100);
   });
@@ -164,6 +207,47 @@ describe("the files in a folder linked from elsewhere", () => {
     const started = performance.now();
     expect(await scanLinks(folder, { deadlineMs: 200 })).toEqual({ count: 1, examples: ["a.txt"], complete: false });
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it("answer at once, as incomplete, while an earlier walk is still held by a look that never returns", async () => {
+    linkedIn("a.txt");
+    linkedIn("sub/slow.txt");
+    calls.hung = join(folder, "sub", "slow.txt");
+    expect((await scanLinks(folder, { deadlineMs: 200 }))?.complete).toBe(false);
+    const started = performance.now();
+    expect(await scanLinks(folder)).toEqual({ count: 0, examples: [], complete: false });
+    expect(performance.now() - started).toBeLessThan(50);
+    calls.hung = "";
+    calls.release();
+    // Once that walk has let go, the next is a whole one.
+    await vi.waitFor(async () => {
+      expect(await scanLinks(folder)).toEqual({ count: 2, examples: ["a.txt", "sub/slow.txt"], complete: true });
+    });
+  });
+
+  it("keep at most two requests in flight, so a hung mount cannot hold all of libuv's threads", async () => {
+    for (const sub of ["a", "b", "c"]) {
+      mkdirSync(join(folder, sub));
+      for (let i = 0; i < 20; i += 1) writeFileSync(join(folder, sub, `f${i}`), "");
+    }
+    linkedIn("b/x.txt");
+    expect(await scanLinks(folder)).toEqual({ count: 1, examples: ["b/x.txt"], complete: true });
+    expect(calls.most).toBeGreaterThan(0);
+    expect(calls.most).toBeLessThanOrEqual(2);
+  });
+
+  // Node looks an entry of unknown type up with lstatSync, on the main thread, where a hung mount freezes the app.
+  it("learn each entry's type from an lstat of its own, when the folder listing gives none", async () => {
+    linkedIn("sub/a.txt");
+    calls.untyped = true;
+    const looked = vi.spyOn(syncFs, "lstatSync");
+    try {
+      expect(await scanLinks(folder)).toEqual({ count: 1, examples: ["sub/a.txt"], complete: true });
+      expect(looked).not.toHaveBeenCalled();
+    } finally {
+      looked.mockRestore();
+    }
+    expect(calls.looked).toEqual(expect.arrayContaining([join(folder, "sub"), join(folder, "sub", "a.txt")]));
   });
 
   it("say when the look stopped early, at its cap or its deadline", async () => {
