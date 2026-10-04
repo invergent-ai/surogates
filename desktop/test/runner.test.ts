@@ -327,6 +327,36 @@ describe("a journal that fails", () => {
     expect(journal.openIds()).toEqual(["a"]);
   });
 
+  it("while marking an operation started is reported, stops the link, and leaves it received", async () => {
+    const failure = new Error("disk full");
+    const errors: unknown[] = [];
+    const executor = new RecordingExecutor();
+    const { journal } = await start(executor, open(), (error) => errors.push(error));
+    vi.spyOn(journal, "start").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(opFrame("a"));
+    await server.until(() => link?.status === "stopped");
+    expect(errors).toEqual([failure]);
+    expect(journal.openIds()).toEqual(["a"]);
+    expect(executor.ran).toEqual([]);
+  });
+
+  it("while recording an answer given before the start is reported, stops the link, and leaves it received", async () => {
+    const failure = new Error("disk full");
+    const errors: unknown[] = [];
+    const gate = new Gate(() => ({ ok: "answered" }));
+    const { journal } = await start(gate, open(), (error) => errors.push(error));
+    vi.spyOn(journal, "answer").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(opFrame("a"));
+    await server.until(() => link?.status === "stopped");
+    expect(errors).toEqual([failure]);
+    expect(journal.openIds()).toEqual(["a"]);
+    expect([gate.ran, results("a")]).toEqual([[], []]);
+  });
+
   it("while receiving an operation is reported, and stops the link without reconnecting", async () => {
     const failure = new Error("disk full");
     const errors: unknown[] = [];
@@ -467,7 +497,7 @@ describe("suspending local work", () => {
 });
 
 // Answers each operation before it starts as the test says, or holds it until released.
-// A held one that is aborted answers late, as a prompt that cannot be dismissed would.
+// A held one settles once it is aborted, with an answer the runner must drop.
 class Gate implements Executor {
   readonly asked: string[] = [];
   readonly ran: string[] = [];
@@ -592,6 +622,23 @@ describe("an operation the executor admits before it starts", () => {
     server.send(opFrame("a"));
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual({ error: { type: "other", message: "boom" } });
+  });
+
+  it.each([
+    ["too large for one frame", { ok: "x".repeat(MAX_FRAME_CHARS) }, "too_large", "its answer is too large to send"],
+    ["neither an ok nor an error", {}, "other", "it holds neither an ok nor an error, or both"],
+  ])("is answered as one that did not run when its answer is %s", async (_name, answer, type, why) => {
+    const gate = new Gate(() => answer as Outcome);
+    const { journal } = await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    const frame = results("a")[0];
+    expect(accepted(frame)).toBe(true);
+    expect(frame?.outcome).toEqual({
+      error: { type, message: `The computer could not answer this operation: ${why}. It did not run.` },
+    });
+    expect(journal.unsent().map((row) => row.outcome)).toEqual([frame?.outcome]);
+    expect(gate.ran).toEqual([]);
   });
 });
 

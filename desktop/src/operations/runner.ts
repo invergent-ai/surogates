@@ -34,8 +34,19 @@ class Suspension {
   constructor(readonly outcome: Outcome) {}
 }
 
-function unsendable(why: string): Outcome {
-  return { error: { type: "other", message: `The operation ran, but its result could not be sent: ${why}` } };
+// An answer given before the operation started that could not be sent: nothing ran.
+const ANSWER_TOO_LARGE: Outcome = {
+  error: {
+    type: "too_large",
+    message: "The computer could not answer this operation: its answer is too large to send. It did not run.",
+  },
+};
+
+function unsendable(why: string, ran: boolean): Outcome {
+  const message = ran
+    ? `The operation ran, but its result could not be sent: ${why}`
+    : `The computer could not answer this operation: ${why}. It did not run.`;
+  return { error: { type: "other", message } };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,27 +58,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // journal would send it again at every welcome, forever. So the outcome is
 // round-tripped through JSON (what JSON drops or cannot hold is found here, not
 // by the server), then needs exactly one of ok and error, an error that names
-// its type and message, and a frame that fits (surogates/devices/link.py).
-function sendable(operation: Operation, outcome: unknown): Outcome {
+// its type and message, and a frame that fits (surogates/devices/link.py). *ran*
+// says whether the operation ran, so the agent knows whether to check what it did.
+function sendable(operation: Operation, outcome: unknown, ran: boolean): Outcome {
   let value: unknown;
   try {
     // opResult sends an undefined ok as null, which JSON would drop.
     const kept = isRecord(outcome) ? opResult(operation, outcome as Outcome).outcome : outcome;
     value = JSON.parse(JSON.stringify(kept)) as unknown;
   } catch (error) {
-    return unsendable(error instanceof Error ? error.message : String(error));
+    return unsendable(error instanceof Error ? error.message : String(error), ran);
   }
   if (!isRecord(value) || ["ok", "error"].filter((key) => key in value).length !== 1) {
-    return unsendable("it holds neither an ok nor an error, or both");
+    return unsendable("it holds neither an ok nor an error, or both", ran);
   }
   if ("error" in value) {
     const error = value.error;
     if (!isRecord(error) || typeof error.type !== "string" || typeof error.message !== "string") {
-      return unsendable("its error has no type and message");
+      return unsendable("its error has no type and message", ran);
     }
   }
   // String length counts UTF-16 units, never fewer than the server counts.
-  return JSON.stringify(opResult(operation, value as Outcome)).length > MAX_FRAME_CHARS ? TOO_LARGE : (value as Outcome);
+  if (JSON.stringify(opResult(operation, value as Outcome)).length <= MAX_FRAME_CHARS) return value as Outcome;
+  return ran ? TOO_LARGE : ANSWER_TOO_LARGE;
 }
 
 export interface Executor {
@@ -84,7 +97,8 @@ export interface Executor {
    * operation is still "received", and the server sends it again. It may therefore be
    * asked more than once for one operation. A throw or a rejection is answered as an
    * error. After an abort (a cancel, a suspend) its answer is dropped: the operation
-   * neither runs nor is answered here.
+   * neither runs nor is answered here. Settle once `signal` aborts: suspend waits for
+   * it, as it does for `run`.
    */
   admit?(operation: Operation, signal: AbortSignal): Promise<Outcome | null>;
   /** The server recorded this operation's outcome (op_ack). */
@@ -105,9 +119,11 @@ export class OperationRunner {
     private readonly journal: OperationJournal,
     private readonly executor: Executor,
     private readonly send: (frame: Record<string, unknown>) => boolean,
-    // What failed after the executor answered. A send that throws leaves the row
-    // finished, and it is sent again at the next welcome; a finish that throws
-    // leaves it "started", so the next launch answers it "interrupted".
+    // What failed outside the executor. A start or an answer that throws comes
+    // before anything ran and leaves the row "received", to be asked again. A send
+    // that throws leaves the row finished, and it is sent again at the next welcome;
+    // a finish that throws leaves it "started", so the next launch answers it
+    // "interrupted".
     private readonly onError?: (error: unknown) => void,
   ) {}
 
@@ -139,7 +155,11 @@ export class OperationRunner {
     this.running.get(id)?.abort();
   }
 
-  /** Stop every running operation and record it as *outcome*; settles once each is recorded. */
+  /**
+   * Stop every running operation and record it as *outcome*; settles once each is
+   * recorded. One still in admit is dropped: it stays "received", and is asked again
+   * at the next launch.
+   */
   suspend(outcome: Outcome): Promise<void> {
     for (const controller of this.running.values()) controller.abort(new Suspension(outcome));
     return Promise.all(this.inflight).then(() => {});
@@ -166,7 +186,7 @@ export class OperationRunner {
     }
     if (signal.aborted) return;
     if (answer) {
-      const outcome = sendable(operation, answer);
+      const outcome = sendable(operation, answer, false);
       if (this.journal.answer(operation.id, outcome)) this.send(opResult(operation, outcome));
       return;
     }
@@ -178,10 +198,10 @@ export class OperationRunner {
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {
     let outcome: Outcome;
     try {
-      outcome = sendable(operation, await this.executor.run(operation, signal));
+      outcome = sendable(operation, await this.executor.run(operation, signal), true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      outcome = sendable(operation, { error: { type: "other", message } });
+      outcome = sendable(operation, { error: { type: "other", message } }, true);
     } finally {
       this.running.delete(operation.id);
     }
