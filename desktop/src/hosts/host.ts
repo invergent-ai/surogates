@@ -361,6 +361,9 @@ function launch(): Promise<SessionRunner> {
     if (liveRunner === up) {
       liveRunner = null;
       baseline = null;
+      // The next runner's wrap covers whatever a restart waited for.
+      if (deferred) clearTimeout(deferred);
+      deferred = null;
     }
   }).then(
     ({ started, keys }) => {
@@ -438,11 +441,14 @@ function restart(reason: string): void {
   if (restarting || wait > 0) {
     deferredReason = reason;
     // Still deferred while it waits for a restart under way: a grant then only updates the reason.
-    deferred = setTimeout(() => void (restarting ?? Promise.resolve()).then(() => {
+    const timer = setTimeout(() => void (restarting ?? Promise.resolve()).then(() => {
+      // Dropped meanwhile, with the runner it was for.
+      if (deferred !== timer) return;
       deferred = null;
-      // A key's restart leaves runs in flight to finish, as a timed look's does: the last one's own look decides.
+      // A key's restart leaves runs in flight to finish, as a timed look's does: the first to end decides with its own look.
       if (deferredReason === GRANT_CHANGED || runnerRuns === 0) restart(deferredReason);
     }), Math.max(wait, 0));
+    deferred = timer;
     return;
   }
   const old = liveRunner;
@@ -549,6 +555,7 @@ async function stop(code = 0): Promise<void> {
   failing = code !== 0;
   if (watching) clearTimeout(watching);
   if (deferred) clearTimeout(deferred);
+  deferred = null;
   const running = [...commands.values()];
   for (const { controller } of running) controller.abort();
   await Promise.race([

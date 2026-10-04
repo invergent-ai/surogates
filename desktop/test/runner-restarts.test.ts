@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { HostStart } from "../src/hosts/messages.js";
-import { RESTARTED, restartNotice } from "../src/hosts/processes.js";
+import { RESTARTED, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
 import { appeared, GRANT_CHANGED, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/hosts/run.js";
 import { Harness, PACKAGE } from "./host-harness.js";
@@ -341,5 +341,25 @@ describe("restarts that come quickly", { timeout: 60_000 }, () => {
     await until(async () => (await poll(harness, second)).status === "exited");
     expect(await poll(harness, second)).toMatchObject({ exit_code: null, note: RESTARTED });
     expect((await run(harness, "true")).ok?.output).toBe(restartNotice(appeared("sub/.idea")));
+  });
+
+  it("drops a restart waiting for the window when its runner is lost: the next runner's wrap covers the reason", async () => {
+    const harness = await host();
+    const first = (await begin(harness, "sleep 618")).ok.session_id as string;
+    harness.send({ type: "restart", reason: "grant" });
+    await until(async () => (await poll(harness, first)).status === "exited");
+    const restarted = Date.now();
+    const second = (await begin(harness, "sleep 620")).ok.session_id as string;
+    // A key the next timed look sees: its restart waits for the window.
+    mkdirSync(join(folder, "sub", ".idea"), { recursive: true });
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    // A command kills its runner, the parent of its shell.
+    await run(harness, "kill -9 $PPID");
+    await until(async () => (await poll(harness, second)).status === "exited");
+    expect(await poll(harness, second)).toMatchObject({ exit_code: null, note: RUNNER_GONE });
+    const third = (await begin(harness, "sleep 622")).ok.session_id as string;
+    // Past the window's end.
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, restarted + 12_000 - Date.now())));
+    expect((await poll(harness, third)).status).toBe("running");
   });
 });
