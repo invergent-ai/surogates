@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -138,6 +138,23 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     expect(readdirSync(folder).sort()).toEqual(before);
     const second = (await begin(harness, "sleep 673")).ok.session_id as string;
     expect((await ask(harness, "poll", { session_id: second })).ok.status).toBe("running");
+  });
+
+  it.skipIf(process.getuid?.() === 0)("refuses a write to a process's stdin while the hook guard cannot read the folder", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 689")).ok.session_id as string;
+    const locked = join(folder, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      // The look after a command finds what it cannot read.
+      await run(harness, "true");
+      expect(await ask(harness, "write_stdin", { session_id, data: "x" })).toEqual({
+        error: { type: "sandbox", message: expect.stringContaining("Blocked: the computer cannot read locked") },
+      });
+    } finally {
+      chmodSync(locked, 0o700);
+    }
   });
 
   it("tells the app how many background processes are alive", async () => {

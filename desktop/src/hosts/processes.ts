@@ -188,8 +188,7 @@ export class Processes {
     if (command.includes("\0")) throw valueError("embedded null byte");
     const code = unenterable(cwd);
     if (code) throw osError(code, cwd);
-    const refused = await this.options.refusal?.();
-    if (refused && "error" in refused) throw new Failure(refused.error);
+    await this.refuse();
     this.prune();
     if (this.running.size >= MAX_PROCESSES) throw sandboxError(TOO_MANY);
     let runner: Spawner;
@@ -290,11 +289,19 @@ export class Processes {
     return { status: "killed", session_id: record.handle.id };
   }
 
-  private write(record: Tracked, data: string): unknown {
+  // Input to a shell runs commands: the hook guard's refusal holds here too.
+  private async write(record: Tracked, data: string): Promise<unknown> {
+    await this.refuse();
     if (record.exited) return { status: "already_exited", error: "Process has already finished" };
     record.child?.write(Buffer.from(data, "utf8"));
     // Python's len(): code points.
     return { status: "ok", bytes_written: Array.from(data).length };
+  }
+
+  // What the hook guard refuses, thrown as its answer.
+  private async refuse(): Promise<void> {
+    const refused = await this.options.refusal?.();
+    if (refused && "error" in refused) throw new Failure(refused.error);
   }
 
   private list(taskId: unknown): unknown {
