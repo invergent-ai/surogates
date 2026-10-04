@@ -499,6 +499,15 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
+  it("does not stop a host whose processes count comes after its last operation's answer", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
+    await executor.run(op("start", { command: "sleep 1" }), signal());
+    // The idle stop is already armed when the count comes.
+    fakes[0]?.say({ type: "processes", live: 1 });
+    await new Promise((done) => setTimeout(done, 250));
+    expect(sent(0, "stop")).toBe(0);
+  });
+
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
       if (message.type === "start") host.say({ type: "ready" });

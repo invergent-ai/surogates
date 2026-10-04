@@ -158,4 +158,21 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     await until(() => existsSync(hook) && (statSync(hook).mode & 0o111) === 0, 15_000);
     expect((await run(harness, "true")).ok?.output).toBe(`${HOOKS_NOTICE}sub/.git/hooks/pre-commit`);
   });
+
+  it("watches a process started while the last timed look runs", { timeout: 90_000 }, async () => {
+    const harness = await host();
+    // 100 000 hooks that cannot run, none the user's: each look over them takes seconds.
+    await begin(harness, "mkdir -p many/.git/hooks && cd many/.git/hooks && seq 1 100000 | xargs touch");
+    const firstLook = Date.now() + 5_000;
+    await until(async () => (await ask(harness, "list_processes", { task_id: "t" })).ok[0]?.status === "exited", 15_000);
+    // The look the first start armed runs now, with nothing alive.
+    await new Promise((done) => setTimeout(done, firstLook + 500 - Date.now()));
+    await begin(
+      harness,
+      "sleep 9; printf '#!/bin/sh\\n' > many/.git/h && chmod +x many/.git/h && mv many/.git/h many/.git/hooks/pre-commit; sleep 677",
+    );
+    const hook = join(folder, "many", ".git", "hooks", "pre-commit");
+    await until(() => existsSync(hook), 20_000);
+    await until(() => (statSync(hook).mode & 0o111) === 0, 30_000);
+  });
 });

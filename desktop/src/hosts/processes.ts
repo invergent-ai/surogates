@@ -48,7 +48,7 @@ export interface ProcessesOptions {
   runner(): Promise<Spawner>;
   // Why a command may not run now, or null (the hook guard).
   refusal?(): Promise<Outcome | null>;
-  // Told how many processes are alive, each time that changes.
+  // Told how many processes are alive, after each change.
   live?(count: number): void;
   now?(): number; // seconds
 }

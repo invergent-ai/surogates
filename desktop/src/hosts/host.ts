@@ -289,7 +289,8 @@ async function start(message: HostStart): Promise<void> {
 }
 
 // A look every WATCH_MS while any background process is alive, and one more after
-// the last one ends: it may have written a hook on its way out.
+// the last one ends: it may have written a hook on its way out. Decided again after
+// the look: a process started during it found a look already set and armed none.
 function watchHooks(): void {
   if (watching || !guard || stopping) return;
   const hooks = guard;
@@ -297,7 +298,7 @@ function watchHooks(): void {
     const alive = (processes?.live ?? 0) > 0;
     await hooks.watch();
     watching = null;
-    if (alive) watchHooks();
+    if (alive || (processes?.live ?? 0) > 0) watchHooks();
   })(), WATCH_MS);
 }
 
