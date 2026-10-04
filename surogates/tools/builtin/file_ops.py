@@ -12,6 +12,7 @@ Office formats.  See ``_convert_to_text_sync``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import difflib
 import errno
 import io
@@ -39,12 +40,25 @@ logger = logging.getLogger(__name__)
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # Wall-clock cap for liteparse conversions.  Text-layer PDFs parse in
-# under a second; the budget is sized for OCR-heavy scanned documents
-# (~1s/page with Tesseract).  Tunable via env so PROD can shorten it
-# without a release when health probes are tight.
+# well under a second; the budget is sized for the capped OCR pass on
+# scanned documents (see ``_OCR_MAX_PAGES``).  Tunable via env so PROD
+# can shorten it without a release when health probes are tight.
 _DOCUMENT_PARSE_TIMEOUT_S: float = float(
     os.environ.get("SUROGATES_DOCUMENT_PARSE_TIMEOUT_S", "60.0")
 )
+
+# liteparse OCRs every page by default, which turns a text-layer PDF
+# that extracts in milliseconds into seconds per page (a 21-page paper:
+# 0.15s without OCR, 18s with it on 4 CPUs).  PDFs are parsed without
+# OCR; only one whose text layer averages under
+# ``_OCR_MIN_CHARS_PER_PAGE`` non-whitespace characters per page — a
+# scan, where at most a scanner watermark or page number is real text
+# — is parsed again with OCR, over its first ``_OCR_MAX_PAGES`` pages.
+# Tesseract runs ~1.3s per scanned page on 4 CPUs, so the cap keeps
+# one OCR pass near a third of the timeout and leaves room for the
+# parallel reads agents issue.
+_OCR_MIN_CHARS_PER_PAGE: int = 50
+_OCR_MAX_PAGES: int = 15
 
 # Subprocess pool used for ``_convert_to_text_sync``.  liteparse links
 # against mupdf via Python bindings that release the GIL during most
@@ -142,11 +156,31 @@ def _convert_pdf_or_legacy_sync(path: Path) -> str:
     XML formats (.docx/.xlsx/.pptx) deliberately do NOT come here —
     they go through their format-specific Python libraries to avoid
     a lossy round-trip through PDF.
+
+    OCR runs only for a PDF without a usable text layer, and only over
+    its first ``_OCR_MAX_PAGES`` pages; a note at the top of the text
+    says so when that leaves pages out.
     """
     LiteParse = _load_liteparse()
-    parser = LiteParse(quiet=True)
-    result = parser.parse(str(path))
-    return result.text or ""
+    result = LiteParse(quiet=True, ocr_enabled=False).parse(str(path))
+    text = result.text or ""
+    pages = len(result.pages)
+    # ponytail: document-wide average, so a mostly-text PDF with a few
+    # scanned pages keeps those blank; OCR just the empty pages via
+    # ``target_pages`` if that shows up.
+    if (
+        path.suffix.lower() != ".pdf"
+        or len("".join(text.split())) >= _OCR_MIN_CHARS_PER_PAGE * max(pages, 1)
+    ):
+        return text
+    ocr = LiteParse(quiet=True, ocr_enabled=True, max_pages=_OCR_MAX_PAGES)
+    text = ocr.parse(str(path)).text or ""
+    if pages > _OCR_MAX_PAGES:
+        text = (
+            f"[Scanned PDF: text was recognised by OCR from the first "
+            f"{_OCR_MAX_PAGES} of {pages} pages only.]\n\n" + text
+        )
+    return text
 
 
 def _render_docx_sync(path: Path) -> str:
@@ -309,7 +343,7 @@ _MODERN_OFFICE_RENDERERS: dict[str, Any] = {
 
 
 def _convert_to_text_sync(path: Path) -> str:
-    """Sync entry point for the subprocess pool / ``asyncio.to_thread``.
+    """Sync entry point for the subprocess pool / parse thread.
 
     Dispatches by extension:
 
@@ -340,9 +374,9 @@ async def _parse_document_to_text(path: Path) -> str:
 
     Bounded by ``_DOCUMENT_PARSE_TIMEOUT_S`` wall-clock; any exception,
     including timeout, is normalised to :class:`DocumentParseError`.
-    Note: we cancel the future on timeout but the subprocess worker
-    may still complete the parse in the background — that's fine, the
-    result is just discarded.
+    Note: neither a started pool job nor the parse thread can be
+    stopped, so on timeout the parse may still complete in the
+    background — that's fine, the result is just discarded.
     """
     if _use_subprocess_parse():
         loop = asyncio.get_running_loop()
@@ -354,10 +388,27 @@ async def _parse_document_to_text(path: Path) -> str:
     else:
         # Thread-based fallback: the sandbox executor's daemon child
         # (where GIL contention can't reach the serving loop — it is a
-        # separate process), tests, or an explicit opt-out.
-        awaitable = asyncio.create_task(
-            asyncio.to_thread(_convert_to_text_sync, path),
-        )
+        # separate process), tests, or an explicit opt-out.  A daemon
+        # thread rather than ``asyncio.to_thread``: the child runs the
+        # tool under ``asyncio.run``, which joins the default executor
+        # on exit, so a parse still running past the timeout would hold
+        # the timeout error back until it finished.  ``execute_in_child``
+        # SIGKILLs the child once the result is sent, which stops the
+        # abandoned parse.
+        done: concurrent.futures.Future[str] = concurrent.futures.Future()
+
+        def _run() -> None:
+            if not done.set_running_or_notify_cancel():
+                return
+            try:
+                done.set_result(_convert_to_text_sync(path))
+            except Exception as exc:  # noqa: BLE001 — re-raised by the awaiter
+                done.set_exception(exc)
+
+        threading.Thread(target=_run, name="document-parse", daemon=True).start()
+        # ``wrap_future`` delivers the outcome via ``call_soon_threadsafe``
+        # and drops it once the wrapper is cancelled or the loop closed.
+        awaitable = asyncio.wrap_future(done)
         on_timeout_cancel = awaitable
 
     try:
@@ -365,10 +416,10 @@ async def _parse_document_to_text(path: Path) -> str:
             awaitable, timeout=_DOCUMENT_PARSE_TIMEOUT_S,
         )
     except asyncio.TimeoutError as exc:
-        # Explicitly cancel so the executor slot / thread is released.
+        # Explicitly cancel so a queued pool job never starts.
         # ProcessPoolExecutor.cancel() succeeds only if the job hasn't
-        # started yet — a started job will finish on its own and its
-        # result is dropped.
+        # started yet — a started job (or the parse thread) will finish
+        # on its own and its result is dropped.
         on_timeout_cancel.cancel()
         raise DocumentParseError(
             path,
