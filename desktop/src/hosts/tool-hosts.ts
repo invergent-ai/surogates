@@ -1,6 +1,7 @@
 // Runs each operation on its root session's folder: one tool host per root,
 // started on that root's first operation (spec, Section 1). The folder comes from
-// the app's own record of the binding, never from the request.
+// the app's own record of the binding, never from the request. A host's commands
+// reach only the package hosts and what the chat's user allows: the approvals decide.
 
 import { fork } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -10,7 +11,9 @@ import type { FolderGuards } from "../binding/folder.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
-import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
+import {
+  FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
+} from "./messages.js";
 
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -103,8 +106,17 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
   };
 }
 
+// Who decides what a root's commands may reach past the package hosts: the approvals.
+export interface NetworkApprovals {
+  // The hosts the chat's user allowed for the chat: each new tool host for the root starts with these.
+  granted(root: string): readonly string[];
+  // A destination one of the root's commands asked for. Settles once *signal* aborts (its host went).
+  askNetwork(root: string, asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer>;
+}
+
 export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
+  network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
   env: Record<string, string>;
   appDirs?: string[];
@@ -158,7 +170,7 @@ export class ToolHosts implements Executor {
   private hostFor(root: string, binding: BoundFolder): Host {
     const known = this.hosts.get(root);
     if (known) return known;
-    const { dataDir, env, bwrapPath } = this.options;
+    const { dataDir, env, bwrapPath, network } = this.options;
     const start: HostStart = {
       type: "start",
       folder: binding.folder,
@@ -167,13 +179,17 @@ export class ToolHosts implements Executor {
       dataDir,
       env,
       appDirs: this.options.appDirs ?? APP_DIRS,
+      domains: [...(network?.granted(root) ?? [])],
       ...(bwrapPath ? { bwrapPath } : {}),
     };
+    const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
+      network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
     const host = new Host(
       (this.options.spawnHost ?? forkHost)(), start, this.options.startTimeoutMs ?? START_TIMEOUT_MS,
       this.options.idleMs ?? IDLE_MS, () => {
         if (this.hosts.get(root) === host) this.hosts.delete(root);
       },
+      ask,
     );
     this.hosts.set(root, host);
     this.live.add(host);
@@ -192,6 +208,8 @@ class Host {
   private running = 0;
   private live = 0;
   private idleTimer: NodeJS.Timeout | undefined;
+  // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
+  private prompts = new AbortController();
 
   constructor(
     private readonly process: HostProcess,
@@ -199,6 +217,7 @@ class Host {
     startTimeoutMs: number,
     private readonly idleMs: number,
     private readonly onGone: () => void,
+    private readonly ask: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
   ) {
     this.started = new Promise((resolve) => {
       this.settleStart = (failure) => {
@@ -240,6 +259,10 @@ class Host {
   private idle(): void {
     clearTimeout(this.idleTimer);
     if (this.running > 0 || this.live > 0 || this.gone) return;
+    // No command or process of the root is left, so no connection waits on its prompts.
+    // ponytail: a process count that comes after its start's answer can dismiss that process's first prompt.
+    this.prompts.abort();
+    this.prompts = new AbortController();
     this.idleTimer = setTimeout(() => {
       this.onGone();
       void this.stop();
@@ -304,6 +327,8 @@ class Host {
     } else if (message.type === "processes") {
       this.live = message.live;
       this.idle();
+    } else if (message.type === "ask") {
+      this.asked(message.id, { host: message.host, port: message.port, privateNetwork: message.privateNetwork });
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);
@@ -311,8 +336,21 @@ class Host {
     }
   }
 
+  // A destination one of its commands asked for: its host waits for this answer for
+  // every connection to it. Fails closed: a choice that fails denies.
+  private asked(id: number, asked: NetworkAsk): void {
+    const answer = (choice: NetworkAnswer) => {
+      const allow = choice === "allow" || choice === "allow_session";
+      this.send({ type: "answer", id, allow, remember: choice === "allow_session" });
+    };
+    Promise.resolve()
+      .then(() => this.ask(asked, this.prompts.signal))
+      .then(answer, () => answer("deny"));
+  }
+
   private leave(): void {
     clearTimeout(this.idleTimer);
+    this.prompts.abort();
     this.gone = true;
     this.onGone();
     this.settleStart(unavailable("its tool host stopped while it was starting"));

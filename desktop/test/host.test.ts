@@ -44,6 +44,7 @@ beforeEach(() => {
     type: "start",
     folder,
     expect: bound(folder),
+    domains: [],
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

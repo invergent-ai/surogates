@@ -1,6 +1,7 @@
 // The sandbox for one folder (spec, Section 4): nothing readable but the system,
 // the app, the folder, its temp folder and the user's toolchains; nothing
-// writable but the folder and the temp folder; the network only to the package hosts.
+// writable but the folder and the temp folder; the network only to the package
+// hosts and to what the chat's user allowed for the chat.
 
 import { lookup } from "node:dns/promises";
 import { existsSync } from "node:fs";
@@ -25,9 +26,8 @@ const SRT_TMP = ["/tmp/claude", "/private/tmp/claude"];
 
 // The package hosts commands may reach without asking: the cloud's list
 // (surogates/tools/workspace_io/local.py) without its coding-agent endpoints.
-// srt's proxy refuses every other host with a 403 until approvals exist. srt reads
-// the list globally, so it is the whole host's, the file helper's included (it
-// makes no network calls).
+// srt asks the host about every other destination. srt reads the list globally,
+// so it is the whole host's, the file helper's included (it makes no network calls).
 export const PACKAGE_HOSTS = [
   "github.com", "*.github.com", "*.githubusercontent.com", "pypi.org", "*.pypi.org", "files.pythonhosted.org",
   "npmjs.org", "*.npmjs.org", "registry.npmjs.org",
@@ -171,9 +171,12 @@ export interface PolicyInput {
   bwrapPath?: string;
   socatPath?: string;
   rgPath?: string;
+  domains?: readonly string[]; // the hosts the chat's user allowed, past the package hosts
 }
 
-export function sandboxPolicy({ folder, tmp, home, appDirs, bwrapPath, socatPath, rgPath }: PolicyInput): SandboxRuntimeConfig {
+export function sandboxPolicy(
+  { folder, tmp, home, appDirs, bwrapPath, socatPath, rgPath, domains = [] }: PolicyInput,
+): SandboxRuntimeConfig {
   return {
     ...(bwrapPath ? { bwrapPath } : {}),
     ...(socatPath ? { socatPath } : {}),
@@ -182,7 +185,7 @@ export function sandboxPolicy({ folder, tmp, home, appDirs, bwrapPath, socatPath
     // naming a nested repo would leave its .git/config writable.
     ripgrep: { command: rgPath ?? "rg", args: ["--no-ignore"] },
     mandatoryDenySearchDepth: SCAN_DEPTH,
-    network: { allowedDomains: PACKAGE_HOSTS, deniedDomains: [] },
+    network: { allowedDomains: [...PACKAGE_HOSTS, ...domains], deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],
       allowRead: [

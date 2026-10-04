@@ -53,6 +53,7 @@ beforeEach(() => {
     type: "start",
     folder,
     expect: bound(folder),
+    domains: [],
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: join(base, "home"), LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

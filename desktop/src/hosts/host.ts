@@ -2,16 +2,18 @@
 // keeps its configuration in module globals, so each folder gets its own process
 // (spec, Section 1). It starts the file helper inside the sandbox and relays
 // file operations to it, and it runs commands itself: it owns the folder's srt and
-// is the parent of every command's bwrap. A Node child process with an IPC channel.
+// is the parent of every command's bwrap. srt asks it about every destination off
+// the allowed list: it refuses this computer's own, and asks the app about the
+// rest. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import type { Server } from "node:net";
+import { isIP, type Server } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { type NetworkHostPattern, SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import { BOOT_ID, checkFolder, spellings } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
@@ -19,9 +21,9 @@ import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
 import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
-import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
+import { type Destination, FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
-import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
+import { destination, GLOB, hideSrtTmp, quote, reach, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
 import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
@@ -38,9 +40,9 @@ const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "
 
 // A channel the app has closed is not an error: with no callback, Node would raise
 // one on process and end the host before its final look. Every exit goes through stop.
-const send = (message: FromHost, then: () => void = () => {}) => {
+const send = (message: FromHost, then: (error: Error | null) => void = () => {}) => {
   if (process.connected) process.send?.(message, undefined, undefined, then);
-  else then();
+  else then(new Error("the app's channel is closed"));
 };
 
 let helper: ChildProcess | null = null;
@@ -77,6 +79,16 @@ let deferred: NodeJS.Timeout | null = null;
 let deferredReason = "";
 // Runs in flight in the runner: a look between commands does not restart it under them.
 let runnerRuns = 0;
+// Network asks the app has not answered, by id, and the decision open for each
+// destination ("host:port"): a connection to a destination already being decided waits for it.
+const asks = new Map<number, { host: string; key: string; answer: (allow: boolean) => void }>();
+const asking = new Map<string, Promise<boolean>>();
+let lastAsk = 0;
+// Destinations refused since a command last answered, as this computer's own, as not
+// allowed, or as not looked up: the agent is told once.
+const own = new Set<string>();
+const refused = new Set<string>();
+const unknown = new Set<string>();
 
 process.on("message", (raw) => {
   const message = raw as ToHost;
@@ -107,6 +119,9 @@ process.on("message", (raw) => {
       break;
     case "restart":
       restart(GRANT_CHANGED);
+      break;
+    case "answer":
+      answered(message.id, message.allow, message.remember);
       break;
     case "stop":
       void stop();
@@ -209,8 +224,15 @@ async function start(message: HostStart): Promise<void> {
   const bwrapPath = message.bwrapPath ?? findOnPath("bwrap", hostPath, "/") ?? undefined;
   const socatPath = findOnPath("socat", hostPath, "/") ?? undefined;
   const rgPath = findOnPath("rg", hostPath, "/") ?? undefined;
-  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath, socatPath, rgPath });
-  await SandboxManager.initialize(policy);
+  // An address granted on one network can be this computer's own on another, and srt
+  // never judges a listed literal again: such a grant is left out while it is.
+  const domains: string[] = [];
+  for (const domain of message.domains) {
+    if (isIP(domain.replace(/^\[(.*)\]$/, "$1")) && (await reach(domain).catch(() => "own")) === "own") continue;
+    domains.push(domain);
+  }
+  const policy = sandboxPolicy({ folder: path, tmp, home, appDirs, bwrapPath, socatPath, rgPath, domains });
+  await SandboxManager.initialize(policy, askApp);
   // A warning names a protection that is missing, such as seccomp's unix-socket filter: fail closed.
   const { errors, warnings } = SandboxManager.checkDependencies();
   if (errors.length || warnings.length) throw new Error([...errors, ...warnings].join("; "));
@@ -300,6 +322,62 @@ async function start(message: HostStart): Promise<void> {
   });
   // The registry's 30-minute filter is the one: what it dropped leaves the record too.
   save({ processes: processes.handles() });
+}
+
+// srt's ask callback, for a connection to a destination off the allowed list. Every
+// connection to a destination already being decided waits for that decision, so one
+// npm install asks once. Fails closed: a destination srt would not dial, a host
+// that is stopping, or no app to ask refuses the connection.
+function askApp({ host, port }: NetworkHostPattern): Promise<boolean> {
+  const found = destination(host, port);
+  if (!found || stopping) return Promise.resolve(false);
+  const key = `${found.host}:${found.port}`;
+  const open = asking.get(key);
+  if (open) return open;
+  const decided = decide(found, key);
+  asking.set(key, decided);
+  void decided.then(() => {
+    if (asking.get(key) === decided) asking.delete(key);
+  });
+  return decided;
+}
+
+// This computer's own services are refused before anyone is asked, and so is a name
+// that cannot be looked up; the app asks its user about the rest, saying when it is
+// on a private network.
+async function decide(found: Destination, key: string): Promise<boolean> {
+  // A lookup or an interface read that throws refuses, as a name that cannot be looked up does.
+  const where = await reach(found.host).catch(() => null);
+  if (where === "own") own.add(key);
+  if (where === null) unknown.add(key);
+  if ((where !== "public" && where !== "private") || stopping) return false;
+  lastAsk += 1;
+  const id = lastAsk;
+  const answer = new Promise<boolean>((resolve) => asks.set(id, { host: found.host, key, answer: resolve }));
+  send({ type: "ask", id, ...found, privateNetwork: where === "private" }, (error) => {
+    if (error) answered(id, false, false);
+  });
+  return answer;
+}
+
+// The app's answer to a network ask, for every connection waiting on it. Remembered,
+// the host goes through from now on, on every port: srt reads its list at each
+// connection, the session runner's included. An answer for no open ask changes nothing.
+function answered(id: number, allow: boolean, remember: boolean): void {
+  const ask = asks.get(id);
+  if (!ask) return;
+  asks.delete(id);
+  const config = SandboxManager.getConfig();
+  if (allow && remember && config) {
+    const { allowedDomains } = config.network;
+    try {
+      SandboxManager.updateConfig({ ...config, network: { ...config.network, allowedDomains: [...allowedDomains, ask.host] } });
+    } catch {
+      // Let through this once all the same: the user allowed it.
+    }
+  }
+  if (!allow) refused.add(ask.key);
+  ask.answer(allow);
 }
 
 // A look every WATCH_MS while any background process or the runner is alive, and one
@@ -456,10 +534,19 @@ async function restarted(signal: AbortSignal): Promise<void> {
   while (restarting && !signal.aborted) await Promise.race([restarting, cancelled]);
 }
 
-// A restart's notice, after any hooks notice, in the next run that answers ok.
+// The destinations refused since the last notice, then a restart's notice, after any
+// hooks notice, in the next run that answers ok. srt does not say which command
+// asked, so a command that ends first may carry another's.
 function withNotice(outcome: Outcome): Outcome {
   if (!("ok" in outcome)) return outcome;
-  const notice = processes?.takeNotice();
+  const local = own.size > 0 ? `This computer does not let a chat reach its own network services (${[...own].join(", ")})` : null;
+  // Neutral: a denial can also be a prompt that failed or was dismissed, or no one to ask.
+  const denied = refused.size > 0 ? `This computer did not allow network access to ${[...refused].join(", ")}.` : null;
+  const lost = unknown.size > 0 ? `This computer could not look up ${[...unknown].join(", ")}.` : null;
+  own.clear();
+  refused.clear();
+  unknown.clear();
+  const notice = [local, denied, lost, processes?.takeNotice()].filter(Boolean).join("\n");
   if (!notice) return outcome;
   const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
   return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${notice}` } };

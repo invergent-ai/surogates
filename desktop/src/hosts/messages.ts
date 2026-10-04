@@ -27,6 +27,8 @@ export interface HostStart {
   dataDir: string; // the app's own data, never inside the folder
   env: Record<string, string>; // the app-built environment: HOME, LANG, PATH
   appDirs: string[]; // read-only folders the sandbox needs: the runtime and the app's files
+  // The hosts the chat's user allowed for the chat past the package hosts, on every port: srt's allowedDomains entries.
+  domains: string[];
   bwrapPath?: string;
 }
 
@@ -36,6 +38,8 @@ export type ToHost =
   | { type: "cancel"; id: string }
   // A filesystem grant changed: the session runner, if one is up, is wrapped again.
   | { type: "restart"; reason: "grant" }
+  // The app's answer to a network ask. With remember, its host goes through from now on, on every port, without asking.
+  | { type: "answer"; id: number; allow: boolean; remember: boolean }
   | { type: "stop" };
 
 export type FromHost =
@@ -44,7 +48,10 @@ export type FromHost =
   | { type: "failed"; message: string; folder?: true }
   | { type: "result"; id: string; outcome: Outcome }
   // How many background processes are alive: a host with any is never idle.
-  | { type: "processes"; live: number };
+  | { type: "processes"; live: number }
+  // A command asked for a destination off the list, and its connection waits for the app's answer.
+  // One at a time per destination: the connections asking meanwhile wait for the same answer.
+  | { type: "ask"; id: number; host: string; port: number; privateNetwork: boolean };
 
 export const FOLDER_UNAVAILABLE: Outcome = {
   error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },
