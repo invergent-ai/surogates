@@ -21,6 +21,9 @@ export const MAX_WAIT_SECONDS = 180;
 export const KILL_GRACE_MS = 2_000;
 export const APP_QUIT = "The process ended when the app quit";
 export const RUNNER_GONE = "The process ended because the computer's sandbox stopped";
+export const RESTARTED = "The process was stopped because the computer restarted its sandbox; start it again if you still need it";
+export const restartNotice = (reason: string) =>
+  `The computer restarted its sandbox because ${reason}, and stopped your background processes; start them again if you still need them.`;
 export const TOO_MANY = `This computer is already running ${MAX_PROCESSES} background processes for this chat; stop one before starting another.`;
 
 // What the folder's record keeps of a process, to answer for it after the app quit.
@@ -79,12 +82,16 @@ interface Tracked {
   note: string | null;
   // Stopped by kill: the cloud's -15, however it ended.
   killed: boolean;
+  // Why its runner was restarted while it lived: it ends with RESTARTED, however it goes.
+  restarted: string | null;
   failed: string | null;
   // Called once at its end.
   waiters: Set<() => void>;
 }
 
 const notFound = (id: string) => ({ status: "not_found", error: `No process with ID ${id}` });
+// The answers that carry a restart's notice as a note of their own.
+const NOTED = new Set(["poll", "read_output", "wait", "kill", "write_stdin"]);
 
 // Resolves at the record's end, after *ms* or at *signal*, whichever comes first,
 // and leaves no timer, listener or waiter behind.
@@ -130,6 +137,8 @@ export class Processes {
   private readonly finished = new Map<string, Tracked>();
   private readonly now: () => number;
   private saving = false;
+  // A restart's notice, until an answer carries it, and the processes that restart ended.
+  private notice: { text: string; ids: Set<string> } | null = null;
 
   constructor(private readonly options: ProcessesOptions) {
     this.now = options.now ?? (() => Date.now() / 1000);
@@ -153,7 +162,7 @@ export class Processes {
   async answer(kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     try {
       const value = await this.dispatch(kind, args, signal);
-      return value === CANCELLED ? CANCELLED : { ok: capStrings(value) };
+      return value === CANCELLED ? CANCELLED : { ok: capStrings(this.told(kind, value)) };
     } catch (error) {
       const refusal = error instanceof Failure
         ? error.refusal
@@ -174,6 +183,39 @@ export class Processes {
     if (kind === "kill") return this.kill(record);
     if (kind === "write_stdin") return this.write(record, string(args, "data"));
     throw new Failure({ type: "unsupported", message: `This computer cannot do '${kind}' yet` });
+  }
+
+  // Before the host stops the runner to restart it: every live process will end
+  // with RESTARTED, and once one has, the next answer that can carry it gets the notice.
+  // How many were live.
+  restart(reason: string): number {
+    // One still starting has no pid yet: its start answers how it ended.
+    const live = [...this.running.values()].filter((record) => record.pid !== null);
+    for (const record of live) record.restarted = reason;
+    return live.length;
+  }
+
+  // The notice, once, for a run's output.
+  takeNotice(): string | null {
+    const text = this.notice?.text ?? null;
+    this.notice = null;
+    return text;
+  }
+
+  // The notice on the first answer that can carry it: a note of its own, or, in a
+  // list, on each process the restart ended. A start has nowhere to put it.
+  private told(kind: string, value: unknown): unknown {
+    const notice = this.notice;
+    if (!notice) return value;
+    if (kind === "list_processes" && Array.isArray(value)) {
+      const entries = value as Array<Record<string, unknown>>;
+      const marked = entries.map((entry) => (notice.ids.has(entry.session_id as string) ? { ...entry, note: notice.text } : entry));
+      if (marked.some((entry, i) => entry !== entries[i])) this.notice = null;
+      return marked;
+    }
+    if (!NOTED.has(kind) || typeof value !== "object" || value === null || "note" in value) return value;
+    this.notice = null;
+    return { ...value, note: notice.text };
   }
 
   private async start(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
@@ -329,7 +371,8 @@ export class Processes {
   private record(handle: ProcessHandle, child: Spawned | null, pty = false): Tracked {
     const record: Tracked = {
       handle, pid: null, child, buffer: "", kept: 0, decoder: new TextDecoder("utf-8", { ignoreBOM: true }),
-      newlines: !pty, held: false, exited: false, exitCode: null, note: null, killed: false, failed: null, waiters: new Set(),
+      newlines: !pty, held: false, exited: false, exitCode: null, note: null, killed: false, restarted: null, failed: null,
+      waiters: new Set(),
     };
     if (child) {
       void child.started.then((pid) => {
@@ -365,9 +408,14 @@ export class Processes {
     this.push(record, record.decoder.decode(), true);
     record.exited = true;
     record.child = null;
-    if (record.killed) record.exitCode = -15;
+    if (record.restarted !== null) record.note = RESTARTED;
+    else if (record.killed) record.exitCode = -15;
     else if ("lost" in end) record.note = RUNNER_GONE;
     else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
+    // A restart's notice is due once one of its processes has ended.
+    if (record.restarted !== null) {
+      this.notice = { text: restartNotice(record.restarted), ids: new Set([...(this.notice?.ids ?? []), record.handle.id]) };
+    }
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
     for (const waiter of record.waiters) waiter();
