@@ -233,6 +233,16 @@ describe("the guard", () => {
     expect(await guard.after(ran("again"))).toEqual(ran("again"));
   });
 
+  it("tells the hooks a look between commands stopped with the next command's output", async () => {
+    const guard = new HookGuard(folder);
+    await guard.refusal();
+    const added = hook(".git/hooks/pre-commit");
+    await guard.watch();
+    expect(executable(added)).toBe(false);
+    expect(await guard.after(ran("next"))).toEqual(ran(`next\n${HOOKS_NOTICE}.git/hooks/pre-commit`));
+    expect(await guard.after(ran("again"))).toEqual(ran("again"));
+  });
+
   it("makes hooks non-executable after a command that did not answer ok, with nothing to add", async () => {
     const guard = new HookGuard(folder);
     await guard.refusal();

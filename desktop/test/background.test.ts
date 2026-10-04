@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { RUNNER_GONE } from "../src/hosts/processes.js";
 import { Harness, PACKAGE } from "./host-harness.js";
@@ -136,5 +137,25 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     expect(readdirSync(folder).sort()).toEqual(before);
     const second = (await begin(harness, "sleep 673")).ok.session_id as string;
     expect((await ask(harness, "poll", { session_id: second })).ok.status).toBe("running");
+  });
+
+  it("tells the app how many background processes are alive", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 675")).ok.session_id as string;
+    await ask(harness, "kill", { session_id });
+    const counts = harness.messages.filter((message) => message.type === "processes").map((message) => message.type === "processes" && message.live);
+    expect(counts).toEqual([1, 0]);
+  });
+
+  it("stops a hook a background process writes between commands, and says so with the next one", async () => {
+    const harness = await host();
+    // Made executable before it is put in place, so only a look can have changed it.
+    await begin(
+      harness,
+      "sleep 0.5; git -c init.defaultBranch=main init -q sub && printf '#!/bin/sh\\n' > sub/.git/h && chmod +x sub/.git/h && mv sub/.git/h sub/.git/hooks/pre-commit; sleep 676",
+    );
+    const hook = join(folder, "sub", ".git", "hooks", "pre-commit");
+    await until(() => existsSync(hook) && (statSync(hook).mode & 0o111) === 0, 15_000);
+    expect((await run(harness, "true")).ok?.output).toBe(`${HOOKS_NOTICE}sub/.git/hooks/pre-commit`);
   });
 });

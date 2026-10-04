@@ -484,6 +484,21 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "stop")).toBe(0);
   });
 
+  it("does not stop a host while its background processes run, and stops it once they end", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn((host, message) => {
+      readyOnly(host, message);
+      if (message.type === "op") {
+        host.say({ type: "processes", live: 1 });
+        host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+      }
+    }) });
+    await executor.run(op("start", { command: "sleep 1" }), signal());
+    await new Promise((done) => setTimeout(done, 250));
+    expect(sent(0, "stop")).toBe(0);
+    fakes[0]?.say({ type: "processes", live: 0 });
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
       if (message.type === "start") host.say({ type: "ready" });

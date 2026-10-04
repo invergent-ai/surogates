@@ -29,6 +29,8 @@ const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 const STOP_COMMANDS_MS = 2_000;
+// While background processes run, the hook guard looks this often: one may write a hook between commands.
+const WATCH_MS = 5_000;
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 // A channel the app has closed is not an error: with no callback, Node would raise
@@ -55,6 +57,7 @@ let processes: Processes | null = null;
 // until it stops or dies. Until it is up, commands get a sandbox of their own.
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
+let watching: NodeJS.Timeout | null = null;
 
 process.on("message", (raw) => {
   const message = raw as ToHost;
@@ -274,7 +277,28 @@ async function start(message: HostStart): Promise<void> {
   SandboxManager.cleanupAfterCommand();
   context = { folder: path, home, env, claudeWasAbsent: !existsSync(join(path, ".claude")) };
   const hooks = guard;
-  processes = new Processes({ context, runner: sessionRunner, refusal: () => hooks.refusal() });
+  processes = new Processes({
+    context,
+    runner: sessionRunner,
+    refusal: () => hooks.refusal(),
+    live: (count) => {
+      send({ type: "processes", live: count });
+      watchHooks();
+    },
+  });
+}
+
+// A look every WATCH_MS while any background process is alive, and one more after
+// the last one ends: it may have written a hook on its way out.
+function watchHooks(): void {
+  if (watching || !guard || stopping) return;
+  const hooks = guard;
+  watching = setTimeout(() => void (async () => {
+    const alive = (processes?.live ?? 0) > 0;
+    await hooks.watch();
+    watching = null;
+    if (alive) watchHooks();
+  })(), WATCH_MS);
 }
 
 // Started at the root's first background process, once. A runner that dies
@@ -350,6 +374,7 @@ async function stop(code = 0): Promise<void> {
   if (stopping) return;
   stopping = true;
   failing = code !== 0;
+  if (watching) clearTimeout(watching);
   const running = [...commands.values()];
   for (const { controller } of running) controller.abort();
   await Promise.race([

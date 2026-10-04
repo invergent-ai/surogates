@@ -22,7 +22,9 @@ export type FromHost =
   | { type: "ready" }
   // folder: the bound folder is not there, or is not a folder; the app answers folder_unavailable.
   | { type: "failed"; message: string; folder?: true }
-  | { type: "result"; id: string; outcome: Outcome };
+  | { type: "result"; id: string; outcome: Outcome }
+  // How many background processes are alive: a host with any is never idle.
+  | { type: "processes"; live: number };
 
 export const FOLDER_UNAVAILABLE: Outcome = {
   error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },

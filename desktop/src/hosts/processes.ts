@@ -48,6 +48,8 @@ export interface ProcessesOptions {
   runner(): Promise<Spawner>;
   // Why a command may not run now, or null (the hook guard).
   refusal?(): Promise<Outcome | null>;
+  // Told how many processes are alive, each time that changes.
+  live?(count: number): void;
   now?(): number; // seconds
 }
 
@@ -124,6 +126,11 @@ export class Processes {
     this.now = options.now ?? (() => Date.now() / 1000);
   }
 
+  // How many are alive.
+  get live(): number {
+    return this.running.size;
+  }
+
   // One operation's outcome. Never rejects.
   async answer(kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     try {
@@ -184,10 +191,12 @@ export class Processes {
     const child = runner.spawn({ id: handle.id, command, cwd, env: { PYTHONUNBUFFERED: "1" }, pty, stdin: true });
     const record = this.record(handle, child, pty);
     this.running.set(handle.id, record);
+    this.changed();
     const pid = await child.started;
     if (pid === null) {
       this.running.delete(handle.id);
       this.finished.delete(handle.id);
+      this.changed();
       throw new Failure({ type: "other", message: record.failed ?? RUNNER_GONE });
     }
     return { session_id: handle.id, pid };
@@ -333,6 +342,11 @@ export class Processes {
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
     for (const waiter of record.waiters) waiter();
+    this.changed();
+  }
+
+  private changed(): void {
+    this.options.live?.(this.running.size);
   }
 
   // _prune_if_needed: finished records older than the TTL, from their start; then,
