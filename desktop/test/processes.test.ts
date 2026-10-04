@@ -59,7 +59,7 @@ function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
           : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)),
         onOutput: (listener) => { outputs.push(listener); },
         onEnd: (listener) => { ends.push(listener); },
-        kill() {}, signal() {}, write() {},
+        kill() {}, signal() {}, write: async () => null,
       };
     },
   };
@@ -234,6 +234,19 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect(page).toMatchObject({ status: "running", total_lines: expect.any(Number) });
     expect(page.total_lines).toBeLessThanOrEqual(100_000);
     expect(await ask("kill", { session_id: id })).toEqual({ ok: { status: "killed", session_id: id } });
+  });
+
+  it("refuses a write to a process that is not reading its input", async () => {
+    processes();
+    const id = await start("sleep 690");
+    const chunk = "x".repeat(512 * 1024);
+    let answer: Awaited<ReturnType<typeof ask>> = {};
+    // Each write that is taken waits in the runner, up to 1 MiB.
+    for (let write = 0; write < 8 && answer.ok?.status !== "error"; write += 1) {
+      answer = await ask("write_stdin", { session_id: id, data: chunk });
+    }
+    expect(answer).toEqual({ ok: { status: "error", error: "The process is not reading its input" } });
+    expect((await ask("poll", { session_id: id })).ok.status).toBe("running");
   });
 
   it("decodes a character split across two writes", async () => {

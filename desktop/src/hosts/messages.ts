@@ -38,13 +38,15 @@ export type ToRunner =
   | { type: "spawn"; id: string; command: string; cwd: string; env: Record<string, string>; pty: boolean; stdin: boolean }
   // To the command's process group and to everything that carries its marker.
   | { type: "signal"; id: string; signal: NodeJS.Signals }
-  | { type: "stdin"; id: string; data: string }; // base64
+  | { type: "stdin"; id: string; data: string }; // base64; answered written, or error with stdin
 
 export type FromRunner =
   | { type: "started"; id: string; pid: number }
   | { type: "data"; id: string; data: string; err?: true } // base64; err: from its stderr
+  // A stdin message was taken.
+  | { type: "written"; id: string }
   | { type: "exit"; id: string; code: number | null; signal: NodeJS.Signals | null }
-  // It could not be started.
-  | { type: "error"; id: string; message: string };
+  // It could not be started; with stdin, a stdin message was refused and it goes on.
+  | { type: "error"; id: string; message: string; stdin?: true };
 
 export type SpawnRequest = Omit<Extract<ToRunner, { type: "spawn" }>, "type">;

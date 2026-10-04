@@ -38,7 +38,8 @@ export interface ProcessHandle {
 export interface Spawned extends CommandChild {
   readonly started: Promise<number | null>;
   signal(signal: NodeJS.Signals): void;
-  write(data: Buffer): void;
+  // Why the runner refused it, or null.
+  write(data: Buffer): Promise<string | null>;
 }
 
 export interface Spawner {
@@ -293,7 +294,9 @@ export class Processes {
   private async write(record: Tracked, data: string): Promise<unknown> {
     await this.refuse();
     if (record.exited) return { status: "already_exited", error: "Process has already finished" };
-    record.child?.write(Buffer.from(data, "utf8"));
+    const refused = await record.child?.write(Buffer.from(data, "utf8"));
+    // The cloud's answer to a write that fails.
+    if (refused) return { status: "error", error: refused };
     // Python's len(): code points.
     return { status: "ok", bytes_written: Array.from(data).length };
   }

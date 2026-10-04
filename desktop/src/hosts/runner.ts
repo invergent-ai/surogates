@@ -18,6 +18,8 @@ import { quote } from "./policy.js";
 export const MARKER = "SUROGATE_PROCESS";
 // A process can fork while a sweep goes by: a SIGKILL sweeps again until it finds none.
 const SWEEPS = 10;
+// What waits for a process that does not read its input stays in the runner's memory: this much, at most.
+const MAX_STDIN_BYTES = 1024 * 1024;
 
 interface Child {
   proc: ChildProcess;
@@ -159,7 +161,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.type === "signal") {
     signal(message.id, message.signal);
   } else if (message.type === "stdin") {
-    children.get(message.id)?.proc.stdin?.write(Buffer.from(message.data, "base64"));
+    // Each is answered, in order: the host waits to know whether it was taken.
+    const stdin = children.get(message.id)?.proc.stdin;
+    if (stdin && stdin.writableLength > MAX_STDIN_BYTES) {
+      say({ type: "error", id: message.id, message: "The process is not reading its input", stdin: true });
+      return;
+    }
+    stdin?.write(Buffer.from(message.data, "base64"));
+    say({ type: "written", id: message.id });
   }
 });
 // The host is done with this sandbox. Everything in the runner's pid namespace

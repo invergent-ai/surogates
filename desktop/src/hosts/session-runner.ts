@@ -28,6 +28,8 @@ export class RunnerChild implements CommandChild {
   private output: (chunk: Buffer, err: boolean) => void = () => {};
   private end: ((end: CommandEnd) => void) | null = null;
   private ended: CommandEnd | null = null;
+  // Writes the runner has not answered yet, in the order they were sent.
+  private readonly writes: Array<(refused: string | null) => void> = [];
 
   constructor(readonly id: string, private readonly send: (message: ToRunner) => void) {
     this.started = new Promise((resolve) => {
@@ -52,8 +54,13 @@ export class RunnerChild implements CommandChild {
     this.signal("SIGKILL");
   }
 
-  write(data: Buffer): void {
-    if (!this.ended) this.send({ type: "stdin", id: this.id, data: data.toString("base64") });
+  // Why the runner refused it, or null.
+  write(data: Buffer): Promise<string | null> {
+    if (this.ended) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      this.writes.push(resolve);
+      this.send({ type: "stdin", id: this.id, data: data.toString("base64") });
+    });
   }
 
   // True once it has ended.
@@ -65,6 +72,10 @@ export class RunnerChild implements CommandChild {
       this.output(Buffer.from(message.data, "base64"), message.err === true);
     } else if (message.type === "exit") {
       this.finish({ code: message.code, signal: message.signal });
+    } else if (message.type === "written") {
+      this.writes.shift()?.(null);
+    } else if (message.type === "error" && message.stdin) {
+      this.writes.shift()?.(message.message);
     } else if (message.type === "error") {
       this.finish({ failed: message.message });
     }
@@ -75,6 +86,7 @@ export class RunnerChild implements CommandChild {
     if (this.ended) return;
     this.ended = end;
     this.settleStarted(this.pid);
+    for (const written of this.writes.splice(0)) written(null);
     this.end?.(end);
   }
 }
