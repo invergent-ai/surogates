@@ -49,7 +49,9 @@ export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session";
 
 // The desktop shell's own windows; fakes in tests. Each settles once its signal aborts.
 export interface ApprovalPrompts {
-  // One operation, focus on Deny. Any answer but "allow" or "stop_asking" denies it.
+  // One operation or network destination, focus on Deny. Each settles once its signal aborts.
+  // An operation allows on "allow" or "stop_asking"; a network prompt allows on "allow" or
+  // "allow_session", and "allow_session" keeps the host for the chat, on every port. Any other answer denies.
   approve(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalAnswer>;
   // The desktop's own confirmation before a chat works freely. Only true lets it.
   confirmFreeMode(chat: ChatLabel, signal: AbortSignal): Promise<boolean>;

@@ -61,9 +61,13 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
-  approvalPrompts: ApprovalPrompts; // the user is asked about every other operation first, in a chat that asks every time
+  // The user is asked about every other operation first in a chat that asks every time,
+  // and about a network destination off the package hosts in either mode.
+  approvalPrompts: ApprovalPrompts;
   preparedMs?: number;
-  onError?: (error: unknown) => void; // a binding, or a "Stop asking", that could not be recorded, and why
+  // A binding, a "Stop asking" or a host allowed for the session that could not be recorded,
+  // or a network prompt that failed, and why.
+  onError?: (error: unknown) => void;
 }
 
 interface Preparation {

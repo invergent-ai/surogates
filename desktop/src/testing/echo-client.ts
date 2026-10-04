@@ -8,9 +8,10 @@
 // and runs the chat's other operations through the real tool hosts. With --ask
 // WORD as well, those chats ask every time: each approval is said ("approval"),
 // and denied when what it asks about names WORD, allowed otherwise. A command's
-// connection to a host off the package list asks in either mode; without --ask it
-// is denied. One JSON line
-// per event on stdout; a link that stops itself says why as an "error" event.
+// connection to a host off the package list, other than this computer's own or one
+// that cannot be looked up, asks in either mode and is said as an "approval" event;
+// without --ask it is denied. One JSON line per event on stdout; a link that stops
+// itself says why as an "error" event.
 // The journal's file stays locked while this runs, so each op_ack the server sends is
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
 // the file only after it quits.

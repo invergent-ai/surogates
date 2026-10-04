@@ -9,7 +9,8 @@ export interface Destination {
 }
 
 // What the app is asked about: a destination, and whether it is on a private network
-// (RFC 1918, link-local, unique-local), which the prompt shows. This computer's own is never asked about.
+// (RFC 1918, shared address space, link-local, unique-local), which the prompt shows.
+// This computer's own is never asked about.
 export interface NetworkAsk extends Destination {
   privateNetwork: boolean;
 }
