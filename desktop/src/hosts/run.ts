@@ -1,9 +1,11 @@
 // The run kind: one command in the folder's sandbox, answered as the cloud's
-// LocalWorkspaceIO.run and the reference laptop answer it. The host wraps and
-// spawns it, so the host is the direct parent of srt's bwrap and the command
-// dies with it; killing that bwrap ends everything the command started.
+// LocalWorkspaceIO.run and the reference laptop answer it. Until the root has a
+// session runner, the host wraps and spawns each command, so the host is the
+// direct parent of srt's bwrap and the command dies with it; killing that bwrap
+// ends everything the command started. Once it has one, the command runs in the
+// runner (session-runner.ts), with the same answers.
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { accessSync, constants, mkdirSync, rmdirSync, statSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { join } from "node:path";
@@ -15,6 +17,7 @@ import { resolveInFolder } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 import { commandOutput, Window } from "./output.js";
 import { hideSrtTmp } from "./policy.js";
+import type { SessionRunner } from "./session-runner.js";
 
 export interface CommandContext {
   folder: string;
@@ -28,6 +31,9 @@ export interface CommandContext {
 const HOME_ALIASES = new Set(["$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"]);
 const MAX_TIMER_MS = 2 ** 31 - 1;
 export const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
+export const SANDBOX_STOPPED: Outcome = {
+  error: { type: "interrupted", message: "interrupted: the computer's sandbox stopped while this ran. Check what it did before repeating it." },
+};
 
 // How a command ended: it exited, it never started, or the sandbox it ran in went first.
 export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null } | { failed: string } | { lost: true };
@@ -76,11 +82,12 @@ function release(context: CommandContext, wrapped = true): void {
 }
 
 // Never rejects: whatever goes wrong is an outcome.
+// *runner*: the root's session runner, once it is up; else the command gets a sandbox of its own.
 export async function runCommand(
-  args: Record<string, unknown>, context: CommandContext, signal: AbortSignal, id: string,
+  args: Record<string, unknown>, context: CommandContext, signal: AbortSignal, id: string, runner: SessionRunner | null = null,
 ): Promise<Outcome> {
   try {
-    const outcome = await run(args, context, signal, id);
+    const outcome = await run(args, context, signal, id, runner);
     if (JSON.stringify(outcome).length > MAX_MESSAGE_CHARS) {
       return { error: { type: "too_large", message: "The result of run is too large" } };
     }
@@ -94,7 +101,9 @@ export async function runCommand(
   }
 }
 
-async function run(args: Record<string, unknown>, context: CommandContext, signal: AbortSignal, id: string): Promise<Outcome> {
+async function run(
+  args: Record<string, unknown>, context: CommandContext, signal: AbortSignal, id: string, runner: SessionRunner | null,
+): Promise<Outcome> {
   const { command, workdir: requested, timeout } = args;
   if (typeof command !== "string") throw valueError("'command' must be a string");
   if (requested !== null && typeof requested !== "string") throw valueError("'workdir' must be a string or null");
@@ -105,6 +114,10 @@ async function run(args: Record<string, unknown>, context: CommandContext, signa
   const cwd = workdir(context, requested);
   const unusable = cannotEnter(cwd);
   if (unusable) return ran(unusable, -1);
+  if (runner) {
+    if (signal.aborted) return CANCELLED;
+    return supervise(runner.spawn({ id, command, cwd, env: {}, pty: false, stdin: false }), timeout, signal);
+  }
   let argv: string[];
   acquire(context);
   try {
@@ -128,55 +141,81 @@ async function run(args: Record<string, unknown>, context: CommandContext, signa
     release(context);
     return ran(describe(error), -1);
   }
-  return new Promise<Outcome>((resolve) => {
-    const out = new Window();
-    const err = new Window();
-    let settled = false;
-    let timedOut = false;
-    let child: ReturnType<typeof spawn>;
-    try {
-      // --norc --noprofile: never the user's startup files out here, whatever stdin is.
-      child = spawn(shell, ["--norc", "--noprofile", flag, hidden], { cwd, env: context.env, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (error) {
-      // A spawn that throws (an argument it refuses) never started bwrap: release it all the same.
-      release(context);
-      resolve(ran(describe(error), -1));
-      return;
-    }
-    const kill = () => {
+  let child: ChildProcess;
+  try {
+    // --norc --noprofile: never the user's startup files out here, whatever stdin is.
+    child = spawn(shell, ["--norc", "--noprofile", flag, hidden], { cwd, env: context.env, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    // A spawn that throws (an argument it refuses) never started bwrap: release it all the same.
+    release(context);
+    return ran(describe(error), -1);
+  }
+  return supervise(own(child), timeout, signal, () => release(context));
+}
+
+// A command in a sandbox of its own: bwrap is this host's child, and killing it
+// ends everything in the sandbox, which then has nothing more to say.
+function own(child: ChildProcess): CommandChild {
+  let killed = false;
+  let ended: CommandEnd | null = null;
+  let listener: ((end: CommandEnd) => void) | null = null;
+  const end = (value: CommandEnd) => {
+    if (ended) return;
+    ended = value;
+    listener?.(value);
+  };
+  child.on("error", (error) => end({ failed: describe(error) }));
+  child.on("exit", (code, signal) => {
+    if (killed) end({ code, signal });
+  });
+  child.on("close", (code, signal) => end({ code, signal }));
+  return {
+    onOutput: (output) => {
+      child.stdout?.on("data", (chunk: Buffer) => output(chunk, false));
+      child.stderr?.on("data", (chunk: Buffer) => output(chunk, true));
+    },
+    onEnd: (next) => {
+      listener = next;
+      if (ended) next(ended);
+    },
+    kill: () => {
+      killed = true;
       try {
         child.kill("SIGKILL");
       } catch {
         // Already gone.
       }
-    };
-    const onAbort = () => kill();
+    },
+  };
+}
+
+// One command's answer, wherever it runs: its output and exit code, or its
+// timeout or cancel, once. *done* runs as it ends.
+function supervise(child: CommandChild, timeout: number, signal: AbortSignal, done: () => void = () => {}): Promise<Outcome> {
+  return new Promise<Outcome>((resolve) => {
+    const out = new Window();
+    const err = new Window();
+    let timedOut = false;
+    const onAbort = () => child.kill();
     const timer = setTimeout(() => {
       timedOut = true;
-      kill();
+      child.kill();
     }, Math.min(timeout * 1000, MAX_TIMER_MS));
-    const finish = (outcome: Outcome) => {
-      if (settled) return;
-      settled = true;
+    signal.addEventListener("abort", onAbort, { once: true });
+    child.onOutput((chunk, isErr) => (isErr ? err : out).push(chunk));
+    child.onEnd((end) => {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
-      release(context);
-      resolve(outcome);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    child.stdout?.on("data", (chunk: Buffer) => out.push(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => err.push(chunk));
-    child.on("error", (error) => finish(ran(describe(error), -1)));
-    // A killed sandbox has nothing more to say: answer when bwrap exits.
-    child.on("exit", () => {
-      if (timedOut) finish(ran(`Command timed out after ${timeout} seconds`, 124, true));
-      else if (signal.aborted) finish(CANCELLED);
-    });
-    child.on("close", (code, killedBy) => {
-      out.end();
-      err.end();
-      const returncode = code ?? 128 + (killedBy ? osConstants.signals[killedBy] : 0);
-      finish(ran(commandOutput(out, err), returncode));
+      done();
+      if ("failed" in end) resolve(ran(end.failed, -1));
+      else if ("lost" in end) resolve(SANDBOX_STOPPED);
+      else if (timedOut) resolve(ran(`Command timed out after ${timeout} seconds`, 124, true));
+      else if (signal.aborted) resolve(CANCELLED);
+      else {
+        out.end();
+        err.end();
+        resolve(ran(commandOutput(out, err), end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0)));
+      }
     });
   });
 }

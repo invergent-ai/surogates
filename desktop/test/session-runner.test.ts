@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { FromRunner, SpawnRequest, ToRunner } from "../src/hosts/messages.js";
-import type { CommandEnd } from "../src/hosts/run.js";
+import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
+import { CANCELLED, type CommandContext, type CommandEnd, runCommand, SANDBOX_STOPPED } from "../src/hosts/run.js";
 import { type RunnerChild, SessionRunner } from "../src/hosts/session-runner.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/hosts/runner.js", import.meta.url));
@@ -247,5 +248,50 @@ describe("the session runner", { timeout: 20_000 }, () => {
     expect(running("^head -c 300000000 /dev/zero$")).toBe(1);
     child.stdin?.end();
     await until(() => running("^head -c 300000000 /dev/zero$") === 0);
+  });
+});
+
+describe("run, in a session runner", { timeout: 20_000 }, () => {
+  const context = (): CommandContext => ({ folder: base, home: base, env: {}, claudeWasAbsent: false });
+  const run = (started: SessionRunner, command: string, timeout = 10, signal = new AbortController().signal) =>
+    runCommand({ command, workdir: null, timeout }, context(), signal, `sr-run-${next++}`, started);
+
+  it("answers as a command in a sandbox of its own does", async () => {
+    const started = await runner();
+    // It ran in the runner: the runner marks what it starts.
+    expect(await run(started, "echo $SUROGATE_PROCESS")).toMatchObject({ ok: { output: expect.stringMatching(/^sr-run-\d+\n$/) } });
+    expect(await run(started, "echo out; echo err >&2; exit 3")).toEqual({ ok: { output: "out\n\nerr\n", returncode: 3, timed_out: false } });
+    expect(await run(started, "kill -9 $$")).toEqual({ ok: { output: "", returncode: 137, timed_out: false } });
+    expect(await run(started, "a\0b")).toEqual({ ok: { output: "embedded null byte", returncode: -1, timed_out: false } });
+    const long = await run(started, "printf START; head -c 600000 /dev/zero | tr '\\000' x; printf END", 30);
+    const output = (long as { ok: { output: string } }).ok.output;
+    expect(output.startsWith("START") && output.endsWith("END")).toBe(true);
+    expect(pyJsonLength(output)).toBeLessThan(OUTPUT_CAP_CHARS + 200);
+  });
+
+  it("stops a command at its timeout, and everything it started", async () => {
+    const started = await runner();
+    expect(await run(started, "sleep 651 & setsid sleep 652 & (sleep 653 &); sleep 654", 1)).toEqual({
+      ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true },
+    });
+    await until(() => running("^sleep 65[1-4]$") === 0);
+  });
+
+  it("stops a command the session cancels", async () => {
+    const started = await runner();
+    const controller = new AbortController();
+    const answer = run(started, "setsid sleep 655 & sleep 656", 60, controller.signal);
+    await until(() => running("^sleep 65[56]$") === 2);
+    controller.abort();
+    expect(await answer).toEqual(CANCELLED);
+    await until(() => running("^sleep 65[56]$") === 0);
+  });
+
+  it("answers a command whose runner dies as interrupted", async () => {
+    const started = await runner();
+    const answer = run(started, "sleep 657");
+    await until(() => running("^sleep 657$") === 1);
+    raw[0]?.kill("SIGKILL");
+    expect(await answer).toEqual(SANDBOX_STOPPED);
   });
 });
