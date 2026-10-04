@@ -471,14 +471,20 @@ class SessionStore:
             await db.commit()
 
     async def update_session_status(self, session_id: UUID, status: str) -> None:
-        """Set a session's status and touch ``updated_at``."""
+        """Set a session's status and touch ``updated_at``.
+
+        ``archived`` is final: a write that lands after the user deleted the
+        session (a worker failing the turn it was still running) is a no-op.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 update(SessionRow)
-                .where(SessionRow.id == session_id)
+                .where(SessionRow.id == session_id, SessionRow.status != "archived")
                 .values(status=status, updated_at=func.now())
             )
-            if result.rowcount == 0:
+            if result.rowcount == 0 and await db.scalar(
+                select(SessionRow.id).where(SessionRow.id == session_id)
+            ) is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
