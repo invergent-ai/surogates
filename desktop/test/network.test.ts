@@ -45,6 +45,7 @@ const PASSED = /^(000|502)\n$/;
 // The HTTP status a command gets, alone. --noproxy '' sends a destination in srt's NO_PROXY (loopback, the private ranges) to srt's proxy.
 const code = (url: string, flags = "") => `curl -sS --max-time 2 --noproxy '' ${flags} -o /dev/null -w '%{http_code}\\n' ${url} 2>/dev/null`;
 const refusal = (destination: string) => `This computer did not allow network access to ${destination}.`;
+const waiting = (destination: string) => `Still waiting for this computer's user to allow network access to ${destination}.`;
 
 beforeEach(async () => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "network-")));
@@ -147,7 +148,28 @@ describe("a command's connection to a destination off the package hosts", { time
     const harness = await host();
     const answer = run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 2);
     await harness.until((messages) => messages.find((message) => message.type === "ask"));
-    expect((await answer).ok).toEqual({ output: "Command timed out after 2 seconds", returncode: 124, timed_out: true });
+    expect((await answer).ok).toEqual({
+      output: `Command timed out after 2 seconds\n${waiting(`${AWAY}:9`)}`, returncode: 124, timed_out: true,
+    });
+  });
+
+  it("tells a command that ends while its connection waits for the app, once, and the next that it was refused", async () => {
+    const harness = await host();
+    const waited = await run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 2);
+    expect(waited.ok?.output).toBe(`Command timed out after 2 seconds\n${waiting(`${AWAY}:9`)}`);
+    // Still waiting, and already told.
+    expect((await run(harness, "echo next")).ok?.output).toBe("next\n");
+    // The prompt is dismissed, which denies.
+    await harness.answer(false);
+    expect((await run(harness, "echo after")).ok?.output).toBe(`after\n\n${refusal(`${AWAY}:9`)}`);
+  });
+
+  it("names at most 20 destinations of a kind in a notice, then how many more", async () => {
+    const harness = await host();
+    const answer = run(harness, `for port in $(seq 25); do ${code(`http://${AWAY}:$port/`)}; done`);
+    for (let i = 0; i < 25; i += 1) await harness.answer(false);
+    const named = Array.from({ length: 20 }, (_, i) => `${AWAY}:${i + 1}`).join(", ");
+    expect((await answer).ok?.output).toBe(`${"403\n".repeat(25)}\nThis computer did not allow network access to ${named} and 5 more.`);
   });
 
   it("refuses this computer's own services without asking, however a command spells them, and tells the agent once", async () => {

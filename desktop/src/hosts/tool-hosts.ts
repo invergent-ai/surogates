@@ -260,7 +260,7 @@ class Host {
     clearTimeout(this.idleTimer);
     if (this.running > 0 || this.live > 0 || this.gone) return;
     // No command or process of the root is left, so no connection waits on its prompts.
-    // ponytail: a process count that comes after its start's answer can dismiss that process's first prompt.
+    // ponytail: a process the session runner does not count (left behind by a start command) is refused without asking; srt does not say which command asked.
     this.prompts.abort();
     this.prompts = new AbortController();
     this.idleTimer = setTimeout(() => {
@@ -337,12 +337,14 @@ class Host {
   }
 
   // A destination one of its commands asked for: its host waits for this answer for
-  // every connection to it. Fails closed: a choice that fails denies.
+  // every connection to it. Fails closed: a choice that fails denies, and so does an ask
+  // that comes once nothing of the root runs (a lookup that outlasted its command), with no prompt.
   private asked(id: number, asked: NetworkAsk): void {
     const answer = (choice: NetworkAnswer) => {
       const allow = choice === "allow" || choice === "allow_session";
       this.send({ type: "answer", id, allow, remember: choice === "allow_session" });
     };
+    if (this.running === 0 && this.live === 0) return answer("deny");
     Promise.resolve()
       .then(() => this.ask(asked, this.prompts.signal))
       .then(answer, () => answer("deny"));

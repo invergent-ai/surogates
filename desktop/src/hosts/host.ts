@@ -36,6 +36,8 @@ const STOP_COMMANDS_MS = 2_000;
 const WATCH_MS = 5_000;
 // A protected key that comes and goes restarts the runner at most once in this long; a restart asked for sooner waits.
 const RESTART_WINDOW_MS = 10_000;
+// How many destinations of a kind a notice names.
+const NOTICE_NAMES = 20;
 const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 // A channel the app has closed is not an error: with no callback, Node would raise
@@ -81,7 +83,8 @@ let deferredReason = "";
 let runnerRuns = 0;
 // Network asks the app has not answered, by id, and the decision open for each
 // destination ("host:port"): a connection to a destination already being decided waits for it.
-const asks = new Map<number, { host: string; key: string; answer: (allow: boolean) => void }>();
+// told: a command's output has said that it waits.
+const asks = new Map<number, { host: string; key: string; answer: (allow: boolean) => void; told: boolean }>();
 const asking = new Map<string, Promise<boolean>>();
 let lastAsk = 0;
 // Destinations refused since a command last answered, as this computer's own, as not
@@ -353,7 +356,7 @@ async function decide(found: Destination, key: string): Promise<boolean> {
   if ((where !== "public" && where !== "private") || stopping) return false;
   lastAsk += 1;
   const id = lastAsk;
-  const answer = new Promise<boolean>((resolve) => asks.set(id, { host: found.host, key, answer: resolve }));
+  const answer = new Promise<boolean>((resolve) => asks.set(id, { host: found.host, key, answer: resolve, told: false }));
   send({ type: "ask", id, ...found, privateNetwork: where === "private" }, (error) => {
     if (error) answered(id, false, false);
   });
@@ -534,22 +537,35 @@ async function restarted(signal: AbortSignal): Promise<void> {
   while (restarting && !signal.aborted) await Promise.race([restarting, cancelled]);
 }
 
-// The destinations refused since the last notice, then a restart's notice, after any
-// hooks notice, in the next run that answers ok. srt does not say which command
-// asked, so a command that ends first may carry another's.
+// The destinations refused since the last notice and those still waiting for the app,
+// then a restart's notice, after any hooks notice, in the next run that answers ok.
+// srt does not say which command asked, so a command that ends first may carry another's.
 function withNotice(outcome: Outcome): Outcome {
   if (!("ok" in outcome)) return outcome;
-  const local = own.size > 0 ? `This computer does not let a chat reach its own network services (${[...own].join(", ")})` : null;
+  const local = line(own, (names) => `This computer does not let a chat reach its own network services (${names})`);
   // Neutral: a denial can also be a prompt that failed or was dismissed, or no one to ask.
-  const denied = refused.size > 0 ? `This computer did not allow network access to ${[...refused].join(", ")}.` : null;
-  const lost = unknown.size > 0 ? `This computer could not look up ${[...unknown].join(", ")}.` : null;
+  const denied = line(refused, (names) => `This computer did not allow network access to ${names}.`);
+  // Each open ask once: the agent learns that it waits, then, once answered, that it was refused.
+  const untold = [...asks.values()].filter((ask) => !ask.told);
+  for (const ask of untold) ask.told = true;
+  const waits = line(untold.map((ask) => ask.key), (names) => `Still waiting for this computer's user to allow network access to ${names}.`);
+  const lost = line(unknown, (names) => `This computer could not look up ${names}.`);
   own.clear();
   refused.clear();
   unknown.clear();
-  const notice = [local, denied, lost, processes?.takeNotice()].filter(Boolean).join("\n");
+  const notice = [local, denied, waits, lost, processes?.takeNotice()].filter(Boolean).join("\n");
   if (!notice) return outcome;
   const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
   return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${notice}` } };
+}
+
+// A notice's line about *keys*, naming the first NOTICE_NAMES of them and then how many
+// more, so a sweep of ports cannot flood the agent's output; none for no keys.
+function line(keys: Iterable<string>, say: (names: string) => string): string | null {
+  const all = [...keys];
+  if (all.length === 0) return null;
+  const more = all.length > NOTICE_NAMES ? ` and ${all.length - NOTICE_NAMES} more` : "";
+  return say(`${all.slice(0, NOTICE_NAMES).join(", ")}${more}`);
 }
 
 function save(change: Partial<FolderRecord>): void {

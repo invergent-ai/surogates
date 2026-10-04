@@ -477,6 +477,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       },
     });
     await executor.run(resolve(), signal());
+    // A background process lives: its connections may ask.
+    fakes[0]?.say({ type: "processes", live: 1 });
     for (let id = 1; id <= 5; id += 1) fakes[0]?.say({ type: "ask", id, host: "example.com", port: 443, privateNetwork: id === 5 });
     await until(() => sent(0, "answer") === 5);
     const answers = fakes[0]?.sent.filter((message) => message.type === "answer") ?? [];
@@ -496,10 +498,31 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   it("refuses every destination off the package hosts when it has no approvals to ask", async () => {
     const executor = toolHosts({ spawnHost: fakeSpawn(answering) });
     await executor.run(resolve(), signal());
+    fakes[0]?.say({ type: "processes", live: 1 });
     fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
     await until(() => sent(0, "answer") === 1);
     expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
     expect(fakes[0]?.sent[0]).toMatchObject({ type: "start", domains: [] });
+  });
+
+  it("denies an ask that comes once nothing of its root runs, without a prompt", async () => {
+    const asked: NetworkAsk[] = [];
+    const executor = toolHosts({
+      spawnHost: fakeSpawn(answering),
+      network: {
+        granted: () => [],
+        askNetwork: (_root, request) => {
+          asked.push(request);
+          return Promise.resolve("allow");
+        },
+      },
+    });
+    await executor.run(resolve(), signal());
+    // Late: its lookup outlasted the command that asked, which has answered.
+    fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
+    await until(() => sent(0, "answer") === 1);
+    expect(fakes[0]?.sent.at(-1)).toEqual({ type: "answer", id: 1, allow: false, remember: false });
+    expect(asked).toEqual([]);
   });
 
   it("starts each host with what its root's user allowed for the chat", async () => {
@@ -517,7 +540,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   it("dismisses a host's open network prompt when the host goes", async () => {
     let prompt: AbortSignal | undefined;
     const executor = toolHosts({
-      spawnHost: fakeSpawn(answering),
+      spawnHost: fakeSpawn(readyOnly),
       network: {
         granted: () => [],
         askNetwork: (_root, _request, dismissed) => {
@@ -526,13 +549,16 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
         },
       },
     });
-    await executor.run(resolve(), signal());
+    // The command that asks is still running when its host goes.
+    const running = executor.run(resolve(), signal());
+    await until(() => sent(0, "op") === 1);
     fakes[0]?.say({ type: "ask", id: 1, host: "example.com", port: 443, privateNetwork: false });
     await until(() => prompt !== undefined);
     expect(prompt?.aborted).toBe(false);
     // The computer's access ended: every host stops.
     await executor.end();
     expect(prompt?.aborted).toBe(true);
+    expect(await running).toEqual(HOST_STOPPED);
   });
 
   it("dismisses a host's open network prompts once nothing of its root runs", async () => {
