@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -230,6 +231,23 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     } finally {
       chmodSync(sub, 0o700);
     }
+  });
+
+  // A new runner would be wrapped over the replacement, and leave srt's placeholders in it.
+  it.each([
+    ["at its next timed look", "sleep 692", (_harness: Harness) => {}],
+    ["when the app asks for a restart", "sleep 693", (harness: Harness) => harness.send({ type: "restart", reason: "grant" })],
+  ])("stops when its folder is replaced while the runner lives, %s, and leaves the new folder as it was", async (_when, command, after) => {
+    const harness = await host();
+    await begin(harness, command);
+    renameSync(folder, `${folder}-old`);
+    mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(folder, ".git", "hooks", "pre-commit"), "#!/bin/sh\n", { mode: 0o755 });
+    after(harness);
+    expect(await harness.exited).toBe(1);
+    expect(readdirSync(folder, { recursive: true }).sort()).toEqual([".git", ".git/hooks", ".git/hooks/pre-commit"]);
+    expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o777).toBe(0o755);
+    await until(() => spawnSync("pgrep", ["-fc", `^${command}$`], { encoding: "utf8" }).stdout.trim() === "0");
   });
 
   it("gives commands sandboxes of their own when the new runner is refused, and refuses starts", async () => {

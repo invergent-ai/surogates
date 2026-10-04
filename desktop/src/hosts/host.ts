@@ -312,6 +312,8 @@ function watchHooks(): void {
   const hooks = guard;
   const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null;
   watching = setTimeout(() => void (async () => {
+    // A folder replaced since the start is not this chat's: no look or runner goes over it.
+    if (!sameFolder()) return void stop(1);
     const was = alive();
     await hooks.watch();
     watching = null;
@@ -410,6 +412,8 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
 // count once, with its bwrap; work that comes meanwhile waits for the new one.
 function restart(reason: string): void {
   if (stopping || !(liveRunner || restarting)) return;
+  // A new runner would be wrapped over the replacement, and leave srt's placeholders in it.
+  if (!sameFolder()) return void stop(1);
   if (deferred) {
     deferredReason = reason;
     return;
@@ -548,8 +552,9 @@ async function stop(code = 0): Promise<void> {
   await stopRunner(runner, liveRunner, STOP_COMMANDS_MS);
   // What a stopped command left, before the record can say the host stopped
   // cleanly. A look that could not see the whole folder, or a host killed
-  // during it, leaves "running" and the baseline for the next host.
-  const clean = (await guard?.settle()) ?? true;
+  // during it, leaves "running" and the baseline for the next host. So does a folder
+  // moved or replaced: the look would change the hooks of a folder that is not this chat's.
+  const clean = sameFolder() && ((await guard?.settle()) ?? true);
   await leave(code, clean);
 }
 
