@@ -156,7 +156,7 @@ class TestStageFromBundle:
         })
         session_id = uuid4()
 
-        await stager.stage_from_bundle(session_id, "proc", bundle)
+        await stager.stage_from_bundle(session_id, "proc", bundle, "skills/proc/")
 
         keys = await backend.list_keys(STORAGE_BUCKET, prefix=f"{session_id}/.skills/")
         assert session_workspace_key(session_id, ".skills/proc/references/notes.md") in keys

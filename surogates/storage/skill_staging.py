@@ -283,11 +283,13 @@ class SkillStager:
         session_id: UUID | str,
         skill_name: str,
         bundle: Any,
+        prefix: str,
     ) -> str:
         """Copy a bundle-backed skill's directory tree into the workspace.
 
-        Used for shared-runtime agents whose per-tenant bundle carries
-        ``skills/{name}/...``.  Walks the bundle prefix, reads each
+        Used for shared-runtime agents: *prefix* is the skill's directory
+        in *bundle* (``skills/{name}/`` in a per-agent bundle, ``{name}/``
+        in the shared system bundle).  Walks the prefix, reads each
         file via the bundle's read-through L2 cache, and writes it to
         ``sessions/{session_id}/.skills/{skill_name}/<relpath>``.  A
         ``.staged`` marker is written last to signal completion, so
@@ -299,12 +301,11 @@ class SkillStager:
         if await self.is_staged(session_id, skill_name):
             return self.workspace_path_for(session_id, skill_name)
 
-        prefix = f"skills/{skill_name}/"
         paths = await bundle.list(prefix)
         # ``SKILL.md`` and the root ``SKILL.graph.json`` live in the bundle
         # but don't need to land in the session workspace — the LLM has the
         # body inline already and never reads the graph.  Any other path
-        # under ``skills/<name>/`` is supporting content.  The graph-file
+        # under the prefix is supporting content.  The graph-file
         # exclusion is anchored at the root (exact match on
         # ``{prefix}{GRAPH_FILE}``) rather than ``endswith``, so a
         # same-named file inside a subdirectory (e.g.

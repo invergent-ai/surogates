@@ -124,6 +124,10 @@ class SkillDef:
     # ``source`` cannot be used to tell the two apart — consumers that
     # want "framework built-in vs tenant-authored" must read this flag.
     builtin: bool = False
+    # Bundle directory SKILL.md was read from (``xlsx/`` in the system
+    # bundle, ``skills/xlsx/`` in a per-agent bundle); ``None`` when the
+    # skill did not come from a bundle.
+    bundle_prefix: str | None = None
     has_graph: bool = False  # SKILL.graph.json beside SKILL.md: a procedure skill compiled from a graph
     type: str = "skill"  # "skill" (prompt-based) or "expert" (model-backed)
     category: str | None = None  # subdirectory grouping
@@ -543,7 +547,8 @@ class ResourceLoader:
                     continue
                 seen_names.add(name)
                 skill_def = _build_skill_def(parsed, source)
-                skill_def.has_graph = f"{root_prefix}{inner}/SKILL.graph.json" in present
+                skill_def.bundle_prefix = f"{root_prefix}{inner}/"
+                skill_def.has_graph = f"{skill_def.bundle_prefix}SKILL.graph.json" in present
                 skills.append(skill_def)
             except Exception:
                 logger.exception(
