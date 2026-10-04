@@ -87,7 +87,8 @@ const binder = confirm && hosts
       approve: (request) => {
         say({ event: "approval", ...request });
         const named = request.kind === "command" ? request.command : request.kind === "change" ? request.path : request.data;
-        return Promise.resolve(ask !== undefined && named.includes(ask) ? "deny" : "allow");
+        // Without --ask no chat asks: a prompt then is a fault, and fails loudly.
+        return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
       },
       confirmFreeMode: () => Promise.resolve(false),
     },

@@ -54,7 +54,8 @@ async def test_the_app_binds_the_chat_its_user_confirmed_and_works_in_its_folder
         prepared = next(e for e in app.events if e["event"] in ("prepared", "error"))
         assert prepared["event"] == "prepared", prepared
         assert prepared["folder"] == str(folder)
-        # The sheet its user accepted names the one file prepare() hard-links from outside the folder.
+        # The sheet its user accepted works freely, and names the one file prepare() hard-links from outside the folder.
+        assert said(app, "sheet")["mode"] == "free"
         assert said(app, "sheet")["links"] == {"count": 1, "examples": ["hard.txt"], "complete": True}
         await app.until(connected, timeout=30.0)
 
@@ -79,10 +80,15 @@ async def test_the_app_binds_the_chat_its_user_confirmed_and_works_in_its_folder
         await app.close()
 
 
-async def test_the_echo_client_refuses_a_folder_for_every_chat_beside_a_confirmed_one(built_client, tmp_path):
+@pytest.mark.parametrize("flags", [
+    pytest.param(["--folder", "{tmp}", "--confirm", "{tmp}"], id="a folder for every chat beside a confirmed one"),
+    pytest.param(["--ask", "word"], id="asking with no confirmed folder"),
+    pytest.param(["--folder", "{tmp}", "--ask", "word"], id="asking with a folder for every chat"),
+])
+async def test_the_echo_client_refuses_flags_that_cannot_stand_together(built_client, tmp_path, flags):
     process = await asyncio.create_subprocess_exec(
         "node", str(built_client), "--url", "ws://127.0.0.1:1", "--token", "t", "--journal", str(tmp_path / "j.sqlite"),
-        "--folder", str(tmp_path), "--confirm", str(tmp_path),
+        *(flag.format(tmp=tmp_path) for flag in flags),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     out, err = await asyncio.wait_for(process.communicate(), 30.0)

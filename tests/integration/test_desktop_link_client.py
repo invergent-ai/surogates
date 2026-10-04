@@ -80,7 +80,7 @@ async def client(
     args = ["node", str(built_client), "--url", url, "--token", token, "--journal", str(journal)]
     process = await asyncio.create_subprocess_exec(
         *args, *(["--hold"] if hold else []), *(["--folder", str(folder)] if folder else []),
-        *(["--confirm", str(confirm)] if confirm else []), *(["--ask", ask] if ask else []),
+        *(["--confirm", str(confirm)] if confirm else []), *(["--ask", ask] if ask is not None else []),
         stdout=asyncio.subprocess.PIPE,
     )
     return Client(process)
