@@ -7,7 +7,9 @@
 // ("prepared"); then it answers a chat's bind operation against that confirmation,
 // and runs the chat's other operations through the real tool hosts. With --ask
 // WORD as well, those chats ask every time: each approval is said ("approval"),
-// and denied when what it asks about names WORD, allowed otherwise. One JSON line
+// and denied when what it asks about names WORD, allowed otherwise. A command's
+// connection to a host off the package list asks in either mode; without --ask it
+// is denied. One JSON line
 // per event on stdout; a link that stops itself says why as an "error" event.
 // The journal's file stays locked while this runs, so each op_ack the server sends is
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
@@ -21,7 +23,7 @@ import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
-import { ToolHosts } from "../hosts/tool-hosts.js";
+import { type NetworkApprovals, ToolHosts } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
@@ -64,8 +66,15 @@ if (values.folder) {
   const { dev, ino } = statSync(values.folder);
   everyRoot = { folder: values.folder, dev, ino, boot: BOOT_ID };
 }
+// The binder's approvals decide the network as they decide operations; a host asks
+// them only once the binder exists. With --folder there is no binder, and every
+// destination off the package list is refused.
+const network: NetworkApprovals = {
+  granted: (root) => binder?.approvals.granted(root) ?? [],
+  askNetwork: (root, asked, signal) => binder?.approvals.askNetwork(root, asked, signal) ?? Promise.resolve("deny"),
+};
 const hosts = values.folder || values.confirm
-  ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env })
+  ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env, network })
   : null;
 const { confirm, ask } = values;
 let refusal: string | null = null;
@@ -90,7 +99,7 @@ const binder = confirm && hosts
           : request.kind === "change" ? request.path
           : request.kind === "input" ? request.data
           : request.host;
-        // Without --ask no chat asks: a prompt then is a fault, and fails loudly.
+        // Without --ask only a network prompt comes, and is denied; any other is a fault, and fails loudly.
         return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
       },
       confirmFreeMode: () => Promise.resolve(false),
