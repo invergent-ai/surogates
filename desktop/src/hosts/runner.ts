@@ -50,8 +50,10 @@ process.stdout.on("drain", () => {
 // command's own exit code (-e); without script, pipes. A background process's
 // stderr goes to its stdout, in the order it was written.
 function argv(request: SpawnRequest, env: NodeJS.ProcessEnv): [string, string[]] {
-  if (request.pty && findOnPath("script", env.PATH, request.cwd)) {
-    return ["script", ["-qfec", `stty rows 30 cols 120 2>/dev/null; exec bash -c ${quote(request.command)}`, "/dev/null"]];
+  // The script found is the one that runs: not a later lookup of the bare name.
+  const script = request.pty ? findOnPath("script", env.PATH, request.cwd) : null;
+  if (script) {
+    return [script, ["-qfec", `stty rows 30 cols 120 2>/dev/null; exec bash -c ${quote(request.command)}`, "/dev/null"]];
   }
   if (request.stdin) return ["bash", ["-c", 'exec 2>&1; exec bash -c "$1"', "bash", request.command]];
   return ["bash", ["-c", request.command]];
