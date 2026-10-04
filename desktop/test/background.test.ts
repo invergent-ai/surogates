@@ -5,10 +5,10 @@ import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { readRecord } from "../src/hosts/folder-record.js";
+import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { APP_QUIT, RUNNER_GONE } from "../src/hosts/processes.js";
+import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE } from "../src/hosts/processes.js";
 import { Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
@@ -226,6 +226,20 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     const second = await host();
     expect((await run(second, "test -x .git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");
     expect(statSync(join(folder, ".git", "hooks", "pre-push")).mode & 0o111).not.toBe(0);
+  });
+
+  it("drops a handle older than the cloud keeps one from the folder's record", async () => {
+    const { dev, ino } = statSync(folder);
+    const record = join(start.dataDir, "folders", `${dev}-${ino}.json`);
+    const old = {
+      id: "proc_000000000001", command: "echo old", cwd: folder, task_id: "t", started_at: Date.now() / 1000 - FINISHED_TTL_SECONDS - 60,
+      ended: { exit_code: 0, output: "old\n", note: null },
+    };
+    writeRecord(record, { state: "stopped", present: [], hooks: null, processes: [old] });
+    const harness = await host();
+    await harness.stop();
+    expect(await harness.exited).toBe(0);
+    expect(readRecord(record)?.processes).toEqual([]);
   });
 
   it("answers how a process that ended before its host idled out ended, to the next host", async () => {

@@ -376,7 +376,7 @@ export class Processes {
 
   // A host that idles out keeps how a process ended for the next one, as the cloud keeps it for 30 minutes;
   // one its sandbox took with it, as when the host stops, ended when the app quit.
-  private handles(): ProcessHandle[] {
+  handles(): ProcessHandle[] {
     return [...this.running.values(), ...this.finished.values()].map((record) => (record.exited && record.note !== RUNNER_GONE
       ? { ...record.handle, ended: { exit_code: record.exitCode, output: lastPoints(record.buffer, 2000), note: record.note } }
       : record.handle));

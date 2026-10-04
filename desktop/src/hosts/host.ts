@@ -300,6 +300,8 @@ async function start(message: HostStart): Promise<void> {
       watchHooks();
     },
   });
+  // The registry's 30-minute filter is the one: what it dropped leaves the record too.
+  save({ processes: processes.handles() });
 }
 
 // A look every WATCH_MS while any background process is alive, and one more after
