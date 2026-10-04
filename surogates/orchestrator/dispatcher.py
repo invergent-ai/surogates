@@ -13,6 +13,7 @@ The :class:`Orchestrator` is the long-running event loop that:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -76,6 +77,11 @@ _BASE_RETRY_DELAY: float = 1.0
 
 # How often shutdown looks for turns waiting on a computer, to hand them to another worker.
 _SHUTDOWN_RECHECK_SECONDS = 1.0
+
+# Backoff (seconds) between interrupt-listener resubscribes after a Redis
+# error; doubles up to the max and resets once a subscribe succeeds.
+_INTERRUPT_RECONNECT_INITIAL_DELAY: float = 1.0
+_INTERRUPT_RECONNECT_MAX_DELAY: float = 30.0
 
 # ── Crash-loop circuit breaker ────────────────────────────────────────
 # The in-process retry counter resets on every re-enqueue, so a session
@@ -873,43 +879,65 @@ class Orchestrator:
         """Subscribe to Redis pub/sub for session interrupt signals.
 
         The API server publishes to ``{INTERRUPT_CHANNEL_PREFIX}:{session_id}``
-        when a session is paused.  This listener delivers the signal to
-        the running harness on this worker.
+        when a session is paused, stopped or deleted.  This listener delivers
+        the signal to the running harness on this worker.
+
+        Runs for the life of the worker: a Redis error drops the connection,
+        so the listener resubscribes with a bounded backoff instead of dying
+        and leaving every running session deaf to pause/stop/delete.
         """
-        pubsub = self.redis.pubsub()
-        await pubsub.psubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
-        logger.info("Interrupt listener subscribed to %s:*", INTERRUPT_CHANNEL_PREFIX)
+        pattern = f"{INTERRUPT_CHANNEL_PREFIX}:*"
+        delay = _INTERRUPT_RECONNECT_INITIAL_DELAY
+        while True:
+            pubsub = self.redis.pubsub()
+            try:
+                await pubsub.psubscribe(pattern)
+                logger.info("Interrupt listener subscribed to %s", pattern)
+                delay = _INTERRUPT_RECONNECT_INITIAL_DELAY
+                async for message in pubsub.listen():
+                    await self._dispatch_interrupt_message(message)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.error(
+                    "Interrupt listener lost its Redis subscription; "
+                    "resubscribing in %.0fs",
+                    delay,
+                    exc_info=True,
+                )
+            finally:
+                # Best effort: on a dead connection both calls raise.
+                with contextlib.suppress(Exception):
+                    await pubsub.punsubscribe(pattern)
+                with contextlib.suppress(Exception):
+                    await pubsub.aclose()
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _INTERRUPT_RECONNECT_MAX_DELAY)
 
+    async def _dispatch_interrupt_message(self, message: dict) -> None:
+        # The worker Redis uses decode_responses=False, so
+        # message fields (type, channel, data) are bytes.
+        msg_type = message["type"]
+        if isinstance(msg_type, bytes):
+            msg_type = msg_type.decode()
+        if msg_type != "pmessage":
+            return
         try:
-            async for message in pubsub.listen():
-                # The worker Redis uses decode_responses=False, so
-                # message fields (type, channel, data) are bytes.
-                msg_type = message["type"]
-                if isinstance(msg_type, bytes):
-                    msg_type = msg_type.decode()
-                if msg_type != "pmessage":
-                    continue
-                try:
-                    channel = message["channel"]
-                    if isinstance(channel, bytes):
-                        channel = channel.decode()
-                    # Channel format: surogates:interrupt:<session_id>
-                    session_id_str = channel.rsplit(":", 1)[-1]
-                    session_id = UUID(session_id_str)
+            channel = message["channel"]
+            if isinstance(channel, bytes):
+                channel = channel.decode()
+            # Channel format: surogates:interrupt:<session_id>
+            session_id_str = channel.rsplit(":", 1)[-1]
+            session_id = UUID(session_id_str)
 
-                    reason = _parse_interrupt_reason(message.get("data"))
-                    await self._handle_interrupt_signal(session_id, reason)
-                except Exception:
-                    logger.warning(
-                        "Failed to process interrupt message: %s",
-                        message,
-                        exc_info=True,
-                    )
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await pubsub.punsubscribe(f"{INTERRUPT_CHANNEL_PREFIX}:*")
-            await pubsub.aclose()
+            reason = _parse_interrupt_reason(message.get("data"))
+            await self._handle_interrupt_signal(session_id, reason)
+        except Exception:
+            logger.warning(
+                "Failed to process interrupt message: %s",
+                message,
+                exc_info=True,
+            )
 
     async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
         delivered = self.interrupt_session(session_id, reason)
