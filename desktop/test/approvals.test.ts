@@ -336,6 +336,113 @@ describe("a chat that asks every time", () => {
   });
 });
 
+describe("a command's connection to a destination off the package hosts", () => {
+  const SITE = { host: "example.com", port: 443, privateNetwork: false };
+
+  it.each([["works freely", "free"], ["asks every time", "ask"]] as const)(
+    "asks in a chat that %s, naming the chat and the destination, and lets it through once allowed",
+    async (_name, mode) => {
+      bind(ROOT, mode);
+      const asked = approvals.askNetwork(ROOT, SITE, never());
+      await vi.waitFor(() => expect(user.open).toHaveLength(1));
+      expect(user.asked).toEqual([{ kind: "network", chat: chat(), host: "example.com", port: 443, privateNetwork: false }]);
+      user.answer("allow");
+      expect(await asked).toBe("allow");
+      // Allowed once: nothing is kept.
+      expect(approvals.granted(ROOT)).toEqual([]);
+    },
+  );
+
+  it("says when the destination is on a private network", async () => {
+    bind(ROOT, "free");
+    user.auto = "deny";
+    expect(await approvals.askNetwork(ROOT, { host: "192.168.1.20", port: 8080, privateNetwork: true }, never())).toBe("deny");
+    expect(user.asked).toEqual([{ kind: "network", chat: chat(), host: "192.168.1.20", port: 8080, privateNetwork: true }]);
+  });
+
+  it("keeps the host allowed for the session with the chat's binding, on every port, for that chat only", async () => {
+    bind(ROOT, "free");
+    bind(OTHER, "free");
+    user.auto = "allow_session";
+    expect(await approvals.askNetwork(ROOT, SITE, never())).toBe("allow_session");
+    expect(await approvals.askNetwork(ROOT, { host: "[::1]", port: 3000, privateNetwork: false }, never())).toBe("allow_session");
+    expect(approvals.granted(ROOT)).toEqual(["example.com", "[::1]"]);
+    expect(approvals.granted(OTHER)).toEqual([]);
+  });
+
+  it("lets through unasked another port of a host allowed for the session while it waited its turn", async () => {
+    bind(ROOT, "free");
+    const first = approvals.askNetwork(ROOT, SITE, never());
+    const second = approvals.askNetwork(ROOT, { ...SITE, port: 80 }, never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    user.answer("allow_session");
+    expect([await first, await second]).toEqual(["allow_session", "allow"]);
+    expect(user.asked).toHaveLength(1);
+  });
+
+  it("denies on Deny, on an answer a network prompt does not offer, and when the prompt fails, saying why", async () => {
+    bind(ROOT, "ask");
+    for (const answer of ["deny", "stop_asking", "maybe"] as ApprovalAnswer[]) {
+      user.auto = answer;
+      expect(await approvals.askNetwork(ROOT, SITE, never())).toBe("deny");
+    }
+    // Stop asking is not a network answer: the chat still asks every time.
+    expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+    const errors: unknown[] = [];
+    const failing = new Approvals({
+      bindings: journal.bindings,
+      prompts: { approve: () => Promise.reject(new Error("no display")), confirmFreeMode: () => Promise.resolve(false) },
+      agent: "Research assistant",
+      onError: (error) => errors.push(error),
+    });
+    expect(await failing.askNetwork(ROOT, SITE, never())).toBe("deny");
+    expect(errors.map(String)).toEqual(["Error: no display"]);
+    expect(approvals.granted(ROOT)).toEqual([]);
+  });
+
+  it("denies a chat this computer did not bind, and asks nothing", async () => {
+    user.auto = "allow";
+    expect(await approvals.askNetwork(OTHER, SITE, never())).toBe("deny");
+    expect(user.asked).toEqual([]);
+  });
+
+  it("waits its turn in the chat's line, and is dismissed when its host stops", async () => {
+    bind(ROOT, "ask");
+    const command = approvals.admit(op("run", RUN), never());
+    const host = new AbortController();
+    const asked = approvals.askNetwork(ROOT, SITE, host.signal);
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    expect(user.open[0]?.request.kind).toBe("command");
+    user.answer("allow");
+    expect(await command).toBeNull();
+    await vi.waitFor(() => expect(user.open.map(({ request }) => request.kind)).toEqual(["network"]));
+    host.abort();
+    // What a dismissed prompt settles with is not its user's answer.
+    expect(await asked).toBe("deny");
+    expect([user.dismissed, approvals.granted(ROOT)]).toEqual([1, []]);
+  });
+
+  it("lets these connections through when the session's grant cannot be recorded, saying why", async () => {
+    bind(ROOT, "free");
+    const errors: unknown[] = [];
+    const recording = new Approvals({
+      bindings: journal.bindings, prompts: new User("allow_session"), agent: "Research assistant", onError: (error) => errors.push(error),
+    });
+    vi.spyOn(journal.bindings, "allowDomain").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    expect(await recording.askNetwork(ROOT, SITE, never())).toBe("allow");
+    expect(errors.map(String)).toEqual(["Error: disk full"]);
+    expect(approvals.granted(ROOT)).toEqual([]);
+  });
+
+  it("denies an operation whose prompt answers Allow for this session: that answer is a network prompt's", async () => {
+    bind(ROOT, "ask");
+    user.auto = "allow_session";
+    expect(await approvals.admit(op("run", RUN), never())).toEqual(COMMAND_DENIED);
+  });
+});
+
 describe("a chat's mode", () => {
   it("may be switched to Ask every time by the page, never to Work freely", async () => {
     bind(ROOT, "free");

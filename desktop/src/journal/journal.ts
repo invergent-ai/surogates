@@ -75,6 +75,11 @@ export class OperationJournal {
           mode TEXT NOT NULL,
           bound_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS domains (
+          root TEXT NOT NULL,
+          domain TEXT NOT NULL,
+          PRIMARY KEY (root, domain)
+        );
       `);
       this.bindings = new Bindings(this.db);
       // Opened once per process: what a crash cut off is interrupted before

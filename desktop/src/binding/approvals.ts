@@ -6,11 +6,13 @@
 // sends the operation again, nothing ran, and the command's timeout starts only
 // once it is allowed. Only the desktop makes a chat less safe: the page may switch
 // a chat to Ask every time, and Work freely needs the desktop's own confirmation,
-// or "Stop asking" on one of its prompts.
+// or "Stop asking" on one of its prompts. In either mode, a command's connection to
+// a destination off the package hosts asks too, while the command runs; "Allow for
+// this session" lets that host through, on every port, for the rest of the chat.
 
 import { posix } from "node:path";
 
-import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
+import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import { report } from "../report.js";
@@ -26,6 +28,7 @@ export const UNASKED: ReadonlySet<string> = new Set([
 const RESULTS = ".surogates-results";
 
 // The chat a prompt is for, and the session asking: a sub-agent of the chat when it is not the root.
+// A network prompt names the root: srt does not say which session's command asked.
 export interface ChatLabel {
   agent: string;
   root: string;
@@ -36,10 +39,13 @@ export interface ChatLabel {
 export type ApprovalRequest =
   | { kind: "command"; chat: ChatLabel; command: string; workdir: string | null; background: boolean }
   | { kind: "change"; chat: ChatLabel; action: "write" | "delete"; path: string; bytes: number | null }
-  | { kind: "input"; chat: ChatLabel; process: string; data: string };
+  | { kind: "input"; chat: ChatLabel; process: string; data: string }
+  | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean };
 
-// Allow it this once; deny it; or allow it and stop asking in this chat, which then works freely.
-export type ApprovalAnswer = "allow" | "deny" | "stop_asking";
+// Allow it this once; deny it; allow it and stop asking in this chat, which then works
+// freely (not offered for a network prompt); or, for a network prompt only, allow its
+// host, on every port, for the rest of the chat. Any answer a prompt does not offer denies.
+export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session";
 
 // The desktop shell's own windows; fakes in tests. Each settles once its signal aborts.
 export interface ApprovalPrompts {
@@ -53,7 +59,7 @@ export interface ApprovalsOptions {
   bindings: Bindings;
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
-  onError?: (error: unknown) => void; // a "Stop asking" that could not be recorded, and why
+  onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
 }
 
 const DENIED = {
@@ -66,7 +72,7 @@ const couldNotAsk = (error: unknown) =>
   `This computer could not ask its user about this: ${error instanceof Error ? error.message : String(error)}`;
 
 // What each kind's prompt is about: a change, an input, or (any other kind) a command.
-const shapeOf = (kind: string): ApprovalRequest["kind"] =>
+const shapeOf = (kind: string): keyof typeof DENIED =>
   kind === "write" || kind === "delete" ? "change" : kind === "write_stdin" ? "input" : "command";
 
 // An operation that did not happen, in the shape its tool reads that way
@@ -105,7 +111,7 @@ function settled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undef
 }
 
 export class Approvals {
-  // Each chat's last operation in line: one prompt per chat at a time, in the order its operations came.
+  // Each chat's last prompt in line: one prompt per chat at a time, in the order asked.
   private readonly lines = new Map<string, Promise<void>>();
 
   constructor(private readonly options: ApprovalsOptions) {}
@@ -120,19 +126,8 @@ export class Approvals {
     const checked = this.asking(operation);
     if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
-    const before = this.lines.get(root) ?? Promise.resolve();
-    const { promise: turn, resolve: done } = Promise.withResolvers<void>();
-    const mine = before.then(() => turn);
-    this.lines.set(root, mine);
-    // The chat's entry goes once the last in line has had its turn, not when it leaves
-    // early: the one before it may still have its prompt open.
-    void mine.then(() => {
-      if (this.lines.get(root) === mine) this.lines.delete(root);
-    });
-    try {
-      await settled(before, signal);
-      // Stopped: the runner drops what this answers, and it never lets it run.
-      if (signal.aborted) return denied(operation.kind);
+    // Stopped: the runner drops what this answers, and it never lets it run.
+    return this.inLine(root, signal, denied(operation.kind), async () => {
       // A "Stop asking" while it waited its turn lets it through unasked.
       const again = this.asking(operation);
       if ("answer" in again) return again.answer;
@@ -155,6 +150,69 @@ export class Approvals {
         }
       }
       return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
+    });
+  }
+
+  /** The hosts the chat's user allowed for the chat past the package hosts: each new tool host for it starts with these. */
+  granted(root: string): string[] {
+    return this.options.bindings.domains(root);
+  }
+
+  /**
+   * A connection a command of the chat makes to a destination off the package
+   * hosts, in either mode, asked in the chat's line. Settles once *signal* aborts
+   * (its host stopped), denying. Fails closed: a chat this computer did not bind, a
+   * journal that cannot be read, a prompt that fails, and any answer it does not
+   * offer deny it. "Allow for this session" keeps the host, on every port, with the binding.
+   */
+  async askNetwork(root: string, asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> {
+    let binding: Binding | undefined;
+    try {
+      binding = this.options.bindings.get(root);
+    } catch (error) {
+      report(this.options.onError, error);
+      return "deny";
+    }
+    if (!binding) return "deny";
+    const chat = { agent: this.options.agent, root, calling: root, folder: binding.folder };
+    return this.inLine(root, signal, "deny", async () => {
+      // Allowed for the session while this one waited its turn: srt lets it through already.
+      if (this.granted(root).includes(asked.host)) return "allow";
+      let answer: ApprovalAnswer | undefined;
+      try {
+        answer = await settled(this.options.prompts.approve({ kind: "network", chat, ...asked }, signal), signal);
+      } catch (error) {
+        report(this.options.onError, error);
+        return "deny";
+      }
+      if (signal.aborted || (answer !== "allow" && answer !== "allow_session")) return "deny";
+      if (answer === "allow") return "allow";
+      try {
+        this.options.bindings.allowDomain(root, asked.host);
+        return "allow_session";
+      } catch (error) {
+        // The user let these connections through either way.
+        report(this.options.onError, error);
+        return "allow";
+      }
+    });
+  }
+
+  // One prompt per chat at a time, in the order asked: *ask* runs at this one's turn,
+  // or *aborted* is the answer once *signal* aborts first.
+  private async inLine<T>(root: string, signal: AbortSignal, aborted: T, ask: () => Promise<T>): Promise<T> {
+    const before = this.lines.get(root) ?? Promise.resolve();
+    const { promise: turn, resolve: done } = Promise.withResolvers<void>();
+    const mine = before.then(() => turn);
+    this.lines.set(root, mine);
+    // The chat's entry goes once the last in line has had its turn, not when it leaves
+    // early: the one before it may still have its prompt open.
+    void mine.then(() => {
+      if (this.lines.get(root) === mine) this.lines.delete(root);
+    });
+    try {
+      await settled(before, signal);
+      return signal.aborted ? aborted : await ask();
     } finally {
       done();
     }

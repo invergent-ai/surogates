@@ -2,6 +2,22 @@
 
 import type { Outcome } from "../link/protocol.js";
 
+// A destination a command asked srt's proxy for: its host as srt compares it, and its port (policy.ts destination).
+export interface Destination {
+  host: string;
+  port: number;
+}
+
+// What the app is asked about: a destination, and whether it is on a private network
+// (RFC 1918, link-local, unique-local), which the prompt shows. This computer's own is never asked about.
+export interface NetworkAsk extends Destination {
+  privateNetwork: boolean;
+}
+
+// What the app decides about a destination: let through the connections asking now,
+// let its host through on every port for the rest of the chat as well, or refuse them.
+export type NetworkAnswer = "allow" | "allow_session" | "deny";
+
 export interface HostStart {
   type: "start";
   folder: string; // the bound folder; the host resolves it

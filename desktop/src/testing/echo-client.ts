@@ -86,7 +86,10 @@ const binder = confirm && hosts
     approvalPrompts: {
       approve: (request) => {
         say({ event: "approval", ...request });
-        const named = request.kind === "command" ? request.command : request.kind === "change" ? request.path : request.data;
+        const named = request.kind === "command" ? request.command
+          : request.kind === "change" ? request.path
+          : request.kind === "input" ? request.data
+          : request.host;
         // Without --ask no chat asks: a prompt then is a fault, and fails loudly.
         return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
       },
