@@ -31,7 +31,7 @@ describe("a chat's folder", () => {
     writeFileSync(join(base, "a.txt"), "");
     // How a dialog would hand over a name that is not valid UTF-8: decoded, with U+FFFD.
     mkdirSync(Buffer.from([...Buffer.from(`${base}/bad-`), 0xff]));
-    for (const folder of [join(base, "gone"), join(base, "a.txt"), join(base, "bad-�")]) {
+    for (const folder of [join(base, "gone"), join(base, "a.txt"), join(base, "bad-\uFFFD")]) {
       expect(checkFolder(folder, guards)).toMatchObject({ ok: false, missing: true });
     }
   });
