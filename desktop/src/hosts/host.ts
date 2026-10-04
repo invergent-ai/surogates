@@ -22,6 +22,7 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
+import { extraDenies, protectedKeys } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
 
@@ -326,7 +327,7 @@ function sessionRunner(): Promise<SessionRunner> {
   if (runner) return runner;
   // Each clears only itself: a runner that went may answer after the next one started.
   let up: SessionRunner | null = null;
-  const starting: Promise<SessionRunner> = startRunner(context, () => {
+  const starting: Promise<SessionRunner> = openRunner(context, () => {
     if (runner === starting) runner = null;
     if (liveRunner === up) liveRunner = null;
   }).then(
@@ -342,6 +343,13 @@ function sessionRunner(): Promise<SessionRunner> {
   );
   runner = starting;
   return starting;
+}
+
+// srt's own denies miss protected paths: the runner's wrap denies writes to every
+// one the host's walk finds that they do not cover (restarts.ts).
+async function openRunner(ready: CommandContext, onLost: () => void): Promise<SessionRunner> {
+  const denyWrite = extraDenies(ready.folder, await protectedKeys(ready.folder));
+  return startRunner(ready, onLost, { denyWrite, allowWrite: [] });
 }
 
 function save(change: Partial<FolderRecord>): void {

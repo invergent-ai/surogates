@@ -196,6 +196,8 @@ export class Processes {
     try {
       runner = await this.options.runner();
     } catch (error) {
+      // The sandbox's own refusal, such as too many protected paths, is the agent's to read.
+      if (error instanceof Failure) throw error;
       const why = error instanceof Error ? error.message : String(error);
       throw new Failure({ type: "unavailable", message: `This computer could not start the sandbox for background processes: ${why}` });
     }

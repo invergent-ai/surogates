@@ -12,6 +12,8 @@ import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 const SYSTEM = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/sys", "/dev", "/run/systemd/resolve"];
 // srt reads these in a policy path as a glob: allowRead widens, allowWrite drops the path.
 export const GLOB = /[*?[\]]/;
+// How deep srt's scan for nested protected names looks, from the folder: its maximum (its default is 3).
+export const SCAN_DEPTH = 10;
 const TOOLCHAINS = [".nvm", ".pyenv", ".rustup", ".cargo/bin", ".local/bin", ".local/lib", "go", ".bun", ".deno", ".sdkman"];
 
 // srt binds its own temp folder read-write into every sandbox, a channel shared with all the others.
@@ -88,8 +90,7 @@ export function sandboxPolicy({ folder, tmp, home, appDirs, bwrapPath, socatPath
     // folder's .ignore, .rgignore or .gitignore: the agent writes those, and one
     // naming a nested repo would leave its .git/config writable.
     ripgrep: { command: rgPath ?? "rg", args: ["--no-ignore"] },
-    // srt's scan for nested protected names, as deep as srt allows (its default is 3).
-    mandatoryDenySearchDepth: 10,
+    mandatoryDenySearchDepth: SCAN_DEPTH,
     network: { allowedDomains: PACKAGE_HOSTS, deniedDomains: [] },
     filesystem: {
       denyRead: ["/"],

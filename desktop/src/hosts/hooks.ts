@@ -48,7 +48,7 @@ export function isGitHook(folder: string, key: string): boolean {
 }
 
 // Folder-relative names, sorted, at most MAX_LISTED of them.
-function listed(folder: string, paths: readonly string[]): string {
+export function listed(folder: string, paths: readonly string[]): string {
   const names = paths.map((path) => relative(folder, path)).sort();
   return names.length > MAX_LISTED
     ? `${names.slice(0, MAX_LISTED).join(", ")} and ${names.length - MAX_LISTED} more`

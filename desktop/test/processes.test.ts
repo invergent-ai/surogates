@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
+import { OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
 import {
   APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY,
@@ -320,6 +320,13 @@ describe("background processes", { timeout: 20_000 }, () => {
     processes({ runner: async () => { throw new Error("no sandbox"); } });
     expect(await ask("start", { command: "true", workdir: null, task_id: "t", pty: false })).toEqual({
       error: { type: "unavailable", message: "This computer could not start the sandbox for background processes: no sandbox" },
+    });
+  });
+
+  it("answers the sandbox's own refusal to start a runner as it is", async () => {
+    processes({ runner: async () => { throw sandboxError("Blocked: too many protected paths"); } });
+    expect(await ask("start", { command: "true", workdir: null, task_id: "t", pty: false })).toEqual({
+      error: { type: "sandbox", message: "Blocked: too many protected paths" },
     });
   });
 
