@@ -1,11 +1,11 @@
-import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, type Prepared,
+  ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
 } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
@@ -178,6 +178,41 @@ describe("preparing a new chat's folder", () => {
     gone.abort();
     expect(await binder(new User([notes], [{ mode: "free" }])).prepareFolder("pick", WINDOW, gone.signal)).toBeNull();
   });
+
+  it("opens no dialog and no sheet for a page that has already gone", async () => {
+    const gone = new AbortController();
+    gone.abort();
+    const user = new User([notes], [{ mode: "free" }]);
+    expect(await binder(user).prepareFolder("pick", WINDOW, gone.signal)).toBeNull();
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    expect(await binder(user).prepareFolder("last", WINDOW, gone.signal)).toBeNull();
+    expect([user.dialogs, user.sheets]).toEqual([[], []]);
+  });
+
+  it("opens no sheet for a page that went away while the folder was scanned", async () => {
+    const gone = new AbortController();
+    const user = new User([], [{ mode: "free" }]);
+    user.pickFolder = (startIn) => {
+      user.dialogs.push(startIn);
+      // After the dialog answers, while its folder is scanned.
+      setImmediate(() => gone.abort());
+      return Promise.resolve(notes);
+    };
+    expect(await binder(user).prepareFolder("pick", WINDOW, gone.signal)).toBeNull();
+    expect(user.sheets).toEqual([]);
+  });
+
+  it("is nothing when the page goes away while the sheet is open, even if the sheet is then accepted", async () => {
+    const gone = new AbortController();
+    const user = new User([notes]);
+    user.confirmFolder = (sheet) => {
+      user.sheets.push(sheet);
+      gone.abort();
+      return Promise.resolve({ mode: "free" });
+    };
+    expect(await binder(user).prepareFolder("pick", WINDOW, gone.signal)).toBeNull();
+    expect(user.sheets).toHaveLength(1);
+  });
 });
 
 describe("a chat's bind operation", () => {
@@ -225,13 +260,46 @@ describe("a chat's bind operation", () => {
     expect(journal.bindings.get(ROOT)).toBeUndefined();
   });
 
-  it("is refused once its confirmation has expired", async () => {
+  it("is refused once its confirmation has expired, and the page is told so once", async () => {
     const user = new User();
     const chooser = binder(user, { preparedMs: 20 });
     const ready = await confirmed(user, chooser);
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(await chooser.admit(bindOp(ROOT, ready))).toEqual(NOT_BOUND);
+    await expect(chooser.bindSession(ROOT, ready.token, WINDOW))
+      .rejects.toThrow("This folder's confirmation expired before its chat was created");
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toThrow("This folder was not confirmed in this window");
+  });
+
+  it.each([
+    ["removed", () => rmSync(notes, { recursive: true })],
+    ["replaced", () => {
+      renameSync(notes, join(base, "moved"));
+      mkdirSync(notes);
+    }],
+  ])("reads no file: a folder %s since it was confirmed is bound, with the identity confirmed", async (_name, change) => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    const { dev, ino } = statSync(notes);
+    change();
+    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual({ ok: null });
+    expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, dev, ino });
+  });
+
+  it("is refused when the binding cannot be recorded, and the page and onError hear why at once", async () => {
+    const user = new User();
+    const failures: unknown[] = [];
+    const chooser = binder(user, { onError: (error) => failures.push(error) });
+    const ready = await confirmed(user, chooser);
+    const full = new Error("database or disk is full");
+    vi.spyOn(journal.bindings, "add").mockImplementation(() => {
+      throw full;
+    });
+    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual(NOT_RECORDED);
+    await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toBe(full);
+    expect(failures).toEqual([full]);
+    expect(journal.bindings.get(ROOT)).toBeUndefined();
   });
 
   it("is answered from the binding when it comes again after a restart, and refused once the chat is bound otherwise", async () => {
@@ -245,7 +313,7 @@ describe("a chat's bind operation", () => {
   });
 
   it("never answers with a message that ends in a full stop", () => {
-    for (const outcome of [NOT_BOUND, ALREADY_BOUND]) {
+    for (const outcome of [NOT_BOUND, ALREADY_BOUND, NOT_RECORDED]) {
       expect("error" in outcome && outcome.error.message.endsWith(".")).toBe(false);
     }
   });
@@ -308,6 +376,18 @@ describe("waiting for a chat's binding", () => {
     await expect(chooser.bindSession(ROOT, ready.token, "window-2")).rejects.toThrow("not confirmed in this window");
     await expect(chooser.bindSession(ROOT, "unknown", WINDOW)).rejects.toThrow("not confirmed in this window");
     await expect(chooser.bindSession(OTHER, ready.token, WINDOW)).rejects.toThrow("This folder was confirmed for another chat");
+  });
+
+  it("is refused once this computer's access ended before the server recorded the bind", async () => {
+    const user = new User();
+    const chooser = binder(user);
+    const ready = await confirmed(user, chooser);
+    await chooser.admit(bindOp(ROOT, ready));
+    const waiting = chooser.bindSession(ROOT, ready.token, WINDOW);
+    await chooser.end();
+    await expect(waiting).rejects.toThrow("This computer's access to the agent ended before its chat's folder was recorded");
+    await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toThrow(/access to the agent ended/);
+    expect(hosts.ended).toBe(1);
   });
 
   it("is refused once the confirmation expired before its chat's bind came", async () => {

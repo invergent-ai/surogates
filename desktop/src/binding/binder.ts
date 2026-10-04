@@ -11,6 +11,7 @@ import { NOT_BOUND } from "../hosts/tool-hosts.js";
 import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
+import { report } from "../report.js";
 import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -20,6 +21,10 @@ export const PREPARED_MS = 5 * 60_000;
 // The server appends ". Start a new chat." to a binding refusal's message: none ends in ".".
 export const ALREADY_BOUND: Outcome = {
   error: { type: "binding", message: "This chat already works on another folder of this computer" },
+};
+// The binding could not be written to the journal (a full disk, say).
+export const NOT_RECORDED: Outcome = {
+  error: { type: "binding", message: "This computer could not record the folder for this chat" },
 };
 const BOUND: Outcome = { ok: null };
 
@@ -55,6 +60,7 @@ export interface BinderOptions {
   agent: string;
   hosts: Executor; // runs everything but the binding
   preparedMs?: number;
+  onError?: (error: unknown) => void; // a binding that could not be recorded, and why
 }
 
 interface Preparation {
@@ -88,15 +94,18 @@ export class Binder implements Executor {
   async prepareFolder(choice: "last" | "pick", window: string, signal: AbortSignal): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
     const last = this.options.bindings.last()?.folder;
+    // A page that has gone gets no prompt: the signal is looked at before each one.
     let folder = choice === "last" && last !== undefined && checkFolder(last, guards).ok ? last : null;
-    folder ??= await prompts.pickFolder(last ?? guards.home, signal);
+    folder ??= signal.aborted ? null : await prompts.pickFolder(last ?? guards.home, signal);
     while (folder !== null && !signal.aborted) {
       const checked = checkFolder(folder, guards);
+      const links = checked.ok ? await scanLinks(checked.path) : null;
+      if (signal.aborted) return null;
       const sheet: FolderSheet = {
         agent: this.options.agent,
         folder: checked.ok ? checked.path : folder,
         mode: "free",
-        links: checked.ok ? await scanLinks(checked.path) : null,
+        links,
         refusal: checked.ok ? null : checked.message,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
@@ -116,7 +125,11 @@ export class Binder implements Executor {
   async bindSession(sessionId: string, preparedToken: string, window: string): Promise<Binding> {
     const preparation = this.byToken.get(preparedToken);
     if (!preparation || preparation.window !== window) throw new Error("This folder was not confirmed in this window");
-    const binding = await preparation.settled;
+    // One that failed before it bound a chat is told once, then forgotten.
+    const binding = await preparation.settled.catch((error: unknown) => {
+      if (preparation.root === undefined) this.byToken.delete(preparedToken);
+      throw error;
+    });
     if (binding.root !== sessionId) throw new Error("This folder was confirmed for another chat");
     return binding;
   }
@@ -143,7 +156,13 @@ export class Binder implements Executor {
       return NOT_BOUND;
     }
     const { dev, ino, mode } = preparation;
-    this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now() });
+    try {
+      this.options.bindings.add({ root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now() });
+    } catch (error) {
+      report(this.options.onError, error);
+      preparation.reject(error instanceof Error ? error : new Error(String(error)));
+      return NOT_RECORDED;
+    }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
     return BOUND;
@@ -164,6 +183,11 @@ export class Binder implements Executor {
   }
 
   async end(): Promise<void> {
+    // No op_ack comes once access has ended, so a page waiting for one is told now.
+    for (const preparation of this.answered.values()) {
+      preparation.reject(new Error("This computer's access to the agent ended before its chat's folder was recorded"));
+    }
+    this.answered.clear();
     await this.options.hosts.end?.();
   }
 
@@ -178,13 +202,12 @@ export class Binder implements Executor {
     };
     this.byNonce.set(nonce, preparation);
     this.byToken.set(secret, preparation);
-    // ponytail: a used preparation stays for the app's life, so a repeated bindSession is
-    // answered; one per chat bound in this run.
+    // ponytail: a preparation stays for the app's life, so a repeated bindSession is
+    // answered, until bindSession hears it failed before binding a chat; one per folder
+    // confirmed in this run.
     setTimeout(() => {
       this.byNonce.delete(nonce);
-      if (preparation.root !== undefined) return;
-      this.byToken.delete(secret);
-      reject(new Error("This folder's confirmation expired before its chat was created"));
+      if (preparation.root === undefined) reject(new Error("This folder's confirmation expired before its chat was created"));
     }, this.options.preparedMs ?? PREPARED_MS).unref();
     return { folder: checked.path, mode, nonce, token: secret };
   }
