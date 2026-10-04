@@ -11,6 +11,7 @@
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
+import { report } from "../report.js";
 
 // What Ask every time asks about: whatever runs something or changes the folder.
 // Every other kind reads, or makes things safer (kill).
@@ -47,6 +48,7 @@ export interface ApprovalsOptions {
   bindings: Bindings;
   prompts: ApprovalPrompts;
   agent: string; // the agent's name, for the prompts
+  onError?: (error: unknown) => void; // a "Stop asking" that could not be recorded, and why
 }
 
 const DENIED = {
@@ -54,6 +56,9 @@ const DENIED = {
   change: "The user denied this change on this computer",
   input: "The user denied this input on this computer",
 } as const;
+
+const couldNotAsk = (error: unknown) =>
+  `This computer could not ask its user about this: ${error instanceof Error ? error.message : String(error)}`;
 
 // What each kind's prompt is about: a change, an input, or (any other kind) a command.
 const shapeOf = (kind: string): ApprovalRequest["kind"] =>
@@ -106,10 +111,9 @@ export class Approvals {
    * leaves the line, and its open prompt is dismissed.
    */
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
-    // Fail closed: the tool hosts read the binding again only when it runs, so a bind
-    // arriving meanwhile must not let it run unasked.
-    if (ASKED.has(operation.kind) && !this.options.bindings.get(operation.sessionId)) return FOLDER_UNAVAILABLE;
-    if (!this.asking(operation)) return null;
+    if (!ASKED.has(operation.kind)) return null;
+    const checked = this.asking(operation);
+    if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
     const before = this.lines.get(root) ?? Promise.resolve();
     const { promise: turn, resolve: done } = Promise.withResolvers<void>();
@@ -125,20 +129,26 @@ export class Approvals {
       // Stopped: the runner drops what this answers, and it never lets it run.
       if (signal.aborted) return denied(operation.kind);
       // A "Stop asking" while it waited its turn lets it through unasked.
-      const binding = this.asking(operation);
-      if (!binding) return null;
-      const request = requestFor(operation, binding, this.options.agent);
+      const again = this.asking(operation);
+      if ("answer" in again) return again.answer;
+      const request = requestFor(operation, again.binding, this.options.agent);
       let answer: ApprovalAnswer | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
         answer = await settled(this.options.prompts.approve(request, signal), signal);
       } catch (error) {
-        const why = error instanceof Error ? error.message : String(error);
-        return denied(operation.kind, `This computer could not ask its user about this: ${why}`);
+        return denied(operation.kind, couldNotAsk(error));
       }
       // A dismissed prompt's answer is not its user's.
       if (signal.aborted) return denied(operation.kind);
-      if (answer === "stop_asking") this.options.bindings.setMode(root, "free");
+      if (answer === "stop_asking") {
+        // The user let this one run either way.
+        try {
+          this.options.bindings.setMode(root, "free");
+        } catch (error) {
+          report(this.options.onError, error);
+        }
+      }
       return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
     } finally {
       done();
@@ -163,18 +173,26 @@ export class Approvals {
     return true;
   }
 
-  // The chat's binding, when this operation must be asked about now.
-  private asking(operation: Operation): Binding | undefined {
-    if (!ASKED.has(operation.kind)) return undefined;
-    const binding = this.options.bindings.get(operation.sessionId);
-    if (binding?.mode !== "ask") return undefined;
+  // The chat's binding, when this operation must be asked about now; otherwise its
+  // answer, null letting it run. A journal that cannot be read denies it.
+  private asking(operation: Operation): { binding: Binding } | { answer: Outcome | null } {
+    let binding: Binding | undefined;
+    try {
+      binding = this.options.bindings.get(operation.sessionId);
+    } catch (error) {
+      return { answer: denied(operation.kind, couldNotAsk(error)) };
+    }
+    // Fail closed: the tool hosts read the binding again only when it runs, so a bind
+    // arriving meanwhile must not let it run unasked.
+    if (!binding) return { answer: FOLDER_UNAVAILABLE };
+    if (binding.mode !== "ask") return { answer: null };
     // The file helper takes only its own resolved paths as keys, so a link or a ".."
     // cannot carry a write that skips its prompt here out of this folder.
     const key = operation.args.key;
     if (operation.kind === "write" && typeof key === "string" && key.startsWith(`${binding.folder}/${RESULTS}/`)) {
-      return undefined;
+      return { answer: null };
     }
-    return binding;
+    return { binding };
   }
 
   private bound(sessionId: string): Binding {

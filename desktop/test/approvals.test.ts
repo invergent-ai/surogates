@@ -262,6 +262,33 @@ describe("a chat that asks every time", () => {
     expect(await asking.admit(op("write_stdin", { session_id: "p", data: "y" }), never())).toEqual(INPUT_DENIED);
   });
 
+  it("lets the operation through when Stop asking cannot be recorded, saying why, and denies when the journal cannot be read", async () => {
+    bind(ROOT, "ask");
+    const failures: unknown[] = [];
+    const asking = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant", onError: (error) => failures.push(error),
+    });
+    const full = new Error("database or disk is full");
+    vi.spyOn(journal.bindings, "setMode").mockImplementation(() => {
+      throw full;
+    });
+    user.auto = "stop_asking";
+    expect(await asking.admit(op("run", RUN), never())).toBeNull();
+    expect(failures).toEqual([full]);
+    vi.spyOn(journal.bindings, "get").mockImplementation(() => {
+      throw new Error("disk I/O error");
+    });
+    const why = "This computer could not ask its user about this: disk I/O error";
+    expect(await asking.admit(op("run", RUN), never())).toEqual({ error: { type: "sandbox", message: why } });
+    expect(await asking.admit(op("delete", { key: `${FOLDER}/a.txt` }), never())).toEqual({
+      error: { type: "os", code: "EACCES", message: why },
+    });
+    expect(await asking.admit(op("write_stdin", { session_id: "p", data: "y" }), never())).toEqual({
+      ok: { status: "error", error: why },
+    });
+    expect(user.asked).toHaveLength(1);
+  });
+
   it("answers what would ask, for a chat this computer did not bind, as its host would, and asks nothing", async () => {
     user.auto = "deny";
     expect(await approvals.admit(op("run", RUN, OTHER), never())).toEqual(FOLDER_UNAVAILABLE);

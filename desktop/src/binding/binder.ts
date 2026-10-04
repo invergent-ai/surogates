@@ -63,7 +63,7 @@ export interface BinderOptions {
   hosts: Executor; // runs everything but the binding
   approvalPrompts: ApprovalPrompts; // the user is asked about every other operation first, in a chat that asks every time
   preparedMs?: number;
-  onError?: (error: unknown) => void; // a binding that could not be recorded, and why
+  onError?: (error: unknown) => void; // a binding, or a "Stop asking", that could not be recorded, and why
 }
 
 interface Preparation {
@@ -89,7 +89,9 @@ export class Binder implements Executor {
   readonly approvals: Approvals;
 
   constructor(private readonly options: BinderOptions) {
-    this.approvals = new Approvals({ bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent });
+    this.approvals = new Approvals({
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, onError: options.onError,
+    });
   }
 
   /**
