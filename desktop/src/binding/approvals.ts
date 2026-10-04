@@ -8,14 +8,19 @@
 // a chat to Ask every time, and Work freely needs the desktop's own confirmation,
 // or "Stop asking" on one of its prompts.
 
+import { posix } from "node:path";
+
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import { report } from "../report.js";
 
-// What Ask every time asks about: whatever runs something or changes the folder.
-// Every other kind reads, or makes things safer (kill).
-export const ASKED: ReadonlySet<string> = new Set(["run", "start", "write", "delete", "write_stdin"]);
+// What Ask every time never asks about: these only read, or make things safer (kill).
+// Every other kind asks (run, start, write, delete, write_stdin), and so does a new one.
+export const UNASKED: ReadonlySet<string> = new Set([
+  "resolve", "check_write", "stat", "read", "list_dir", "ripgrep", "which", "poll", "read_output", "wait", "kill",
+  "list_processes",
+]);
 
 // The harness's own files: the terminal spills long output here.
 const RESULTS = ".surogates-results";
@@ -111,7 +116,7 @@ export class Approvals {
    * leaves the line, and its open prompt is dismissed.
    */
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
-    if (!ASKED.has(operation.kind)) return null;
+    if (UNASKED.has(operation.kind)) return null;
     const checked = this.asking(operation);
     if ("answer" in checked) return checked.answer;
     const root = operation.sessionId;
@@ -185,11 +190,14 @@ export class Approvals {
     // Fail closed: the tool hosts read the binding again only when it runs, so a bind
     // arriving meanwhile must not let it run unasked.
     if (!binding) return { answer: FOLDER_UNAVAILABLE };
-    if (binding.mode !== "ask") return { answer: null };
+    // A mode it does not know asks.
+    if (binding.mode === "free") return { answer: null };
     // The file helper takes only its own resolved paths as keys, so a link or a ".."
-    // cannot carry a write that skips its prompt here out of this folder.
+    // cannot carry a write that skips its prompt here out of this folder; a key that
+    // is not already normal asks all the same.
     const key = operation.args.key;
-    if (operation.kind === "write" && typeof key === "string" && key.startsWith(`${binding.folder}/${RESULTS}/`)) {
+    const spill = typeof key === "string" && posix.normalize(key) === key && key.startsWith(`${binding.folder}/${RESULTS}/`);
+    if (operation.kind === "write" && spill) {
       return { answer: null };
     }
     return { binding };

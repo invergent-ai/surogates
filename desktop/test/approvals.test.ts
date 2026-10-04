@@ -146,7 +146,7 @@ describe("a chat that asks every time", () => {
     user.auto = "deny";
     for (const kind of [
       "resolve", "check_write", "stat", "read", "list_dir", "ripgrep", "which", "poll", "read_output", "wait", "kill",
-      "list_processes", "bind",
+      "list_processes",
     ]) {
       expect(await approvals.admit(op(kind, { key: `${FOLDER}/a.txt` }), never())).toBeNull();
     }
@@ -164,10 +164,21 @@ describe("a chat that asks every time", () => {
       op("write", { key: `${FOLDER}/sub/.surogates-results/x.log`, data: "" }),
       op("write", { key: `${FOLDER}/.surogates-results-old/x.log`, data: "" }),
       op("write", { key: [spill], data: "" }),
+      op("write", { key: `${FOLDER}/.surogates-results/../a.txt`, data: "" }),
+      op("write", { key: `${FOLDER}/.surogates-results/./x.log`, data: "" }),
     ]) {
       expect(await approvals.admit(operation, never())).toEqual(CHANGE_DENIED);
     }
-    expect(user.asked).toHaveLength(4);
+    expect(user.asked).toHaveLength(6);
+  });
+
+  it("asks about a kind it does not know, and in a chat whose mode it does not know", async () => {
+    bind(ROOT, "ask");
+    bind(OTHER, "maybe" as Mode);
+    user.auto = "deny";
+    expect(await approvals.admit(op("click", { selector: "#buy" }), never())).toEqual(COMMAND_DENIED);
+    expect(await approvals.admit(op("run", RUN, OTHER), never())).toEqual(COMMAND_DENIED);
+    expect(user.asked.map(({ chat: { root } }) => root)).toEqual([ROOT, OTHER]);
   });
 
   it("asks about a sub-agent's operation as the chat's own, and says it is a sub-agent's", async () => {
