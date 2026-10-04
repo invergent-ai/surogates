@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -167,6 +169,32 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     // The runner's next timed look sees it.
     await new Promise((resolve) => setTimeout(resolve, 6_500));
     expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe("denied\n");
+  });
+
+  it("restarts when a protected file is replaced from outside, as git writes its config, and the new runner denies it", async () => {
+    spawnSync("git", ["-c", "init.defaultBranch=main", "init", "-q", folder]);
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 607")).ok.session_id as string;
+    expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe("denied\n");
+    // A new file renamed over the old one, as git and editors save: the runner's mount held the old one.
+    const config = join(folder, ".git", "config");
+    writeFileSync(join(base, "config.new"), readFileSync(config));
+    renameSync(join(base, "config.new"), config);
+    await until(async () => (await poll(harness, session_id)).status === "exited");
+    expect(await poll(harness, session_id)).toMatchObject({ exit_code: null, note: RESTARTED });
+    expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe(`denied\n\n${restartNotice(appeared(".git/config"))}`);
+  });
+
+  it("does not restart for a new entry under a folder its wrap denies already", async () => {
+    mkdirSync(join(folder, ".idea"));
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 608")).ok.session_id as string;
+    // An IDE's save, made outside the app: it is read-only inside the runner as it is.
+    writeFileSync(join(folder, ".idea", "x"), "");
+    // Past two timed looks.
+    await new Promise((resolve) => setTimeout(resolve, 11_000));
+    expect((await poll(harness, session_id)).status).toBe("running");
+    expect((await run(harness, tryWrite(".idea/x"))).ok?.output).toBe("denied\n");
   });
 
   it("gives commands sandboxes of their own when the new runner is refused, and refuses starts", async () => {

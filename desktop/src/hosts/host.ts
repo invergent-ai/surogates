@@ -7,7 +7,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, type Stats, statSync } from "node:fs";
 import type { Server } from "node:net";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -22,7 +22,7 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
-import { appeared, extraDenies, GRANT_CHANGED, protectedKeys } from "./restarts.js";
+import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
 
@@ -63,8 +63,9 @@ let processes: Processes | null = null;
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
 let watching: NodeJS.Timeout | null = null;
-// The live runner's protected keys, from a walk that started once it was up (performance.now()).
-type Baseline = { keys: ReadonlySet<string>; since: number };
+// The live runner's protected keys, from a walk that started once it was up (performance.now()),
+// and each path its wrap denies writes to, as the wrap held it (restarts.ts identity).
+type Baseline = { keys: ReadonlySet<string>; since: number; targets: ReadonlyMap<string, string | null> };
 let baseline: Baseline | null = null;
 // While the runner restarts, run and start wait for the new one.
 let restarting: Promise<void> | null = null;
@@ -380,11 +381,16 @@ function launch(): Promise<SessionRunner> {
 // one the host's walk finds that they do not cover (restarts.ts).
 // Its baseline is what the folder holds once it is up: srt's placeholders are there by then.
 async function openRunner(ready: CommandContext, onLost: () => void): Promise<{ started: SessionRunner; keys: Baseline }> {
-  const denyWrite = extraDenies(ready.folder, await protectedKeys(ready.folder));
+  const literals = extraDenies(ready.folder, await protectedKeys(ready.folder));
+  // Each as it is just before the wrap. srt would leave a placeholder for one gone
+  // since the walk: it is left out, and its return restarts the runner.
+  const targets = new Map(literals.map((path) => [path, identity(path)]));
+  const denyWrite = literals.filter((path) => targets.get(path) !== null);
   const started = await startRunner(ready, onLost, { denyWrite, allowWrite: [] });
   const since = performance.now();
+  for (const path of srtTargets(ready.folder)) targets.set(path, identity(path));
   try {
-    return { started, keys: { keys: await protectedKeys(ready.folder), since } };
+    return { started, keys: { keys: await protectedKeys(ready.folder), since, targets } };
   } catch (error) {
     await started.stop();
     throw error;
@@ -392,17 +398,25 @@ async function openRunner(ready: CommandContext, onLost: () => void): Promise<{ 
 }
 
 // What a look found, against the live runner's baseline: a protected key that was
-// not there when the runner was wrapped is writable inside it, so it restarts.
+// not there when the runner was wrapped is writable inside it, unless it lies under a
+// path the wrap denies; so is a denied path replaced or made since. Either restarts it.
 // A look that started before the baseline's walk may have seen the old runner's folder.
 // While a restart waits for its window, a key seen again adds nothing: that restart takes a new baseline.
-// A look between commands leaves runs in flight to finish, and the look after the last
-// one restarts: until then background processes can write the new path, as a command
-// in a sandbox of its own can.
+// A look between commands leaves runs in flight to finish: the first of them to end
+// decides with its own look, and a restart then cuts the others. Until then background
+// processes can write the new path, as a command in a sandbox of its own can.
 function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): void {
   const known = baseline;
   if (!liveRunner || deferred || !folder || !known || startedAt < known.since || (between && runnerRuns > 0)) return;
-  const added = [...keys].filter((key) => !known.keys.has(key)).sort();
-  if (added[0]) restart(appeared(relative(folder.path, added[0])));
+  const root = folder.path;
+  const covered = (key: string) => {
+    for (let at = key; at.length > root.length; at = dirname(at)) if (known.targets.has(at)) return true;
+    return false;
+  };
+  const added = [...keys].filter((key) => !known.keys.has(key) && !covered(key));
+  const changed = [...known.targets].filter(([path, was]) => identity(path) !== was).map(([path]) => path);
+  const first = [...added, ...changed].sort()[0];
+  if (first) restart(appeared(relative(root, first)));
 }
 
 // A new runner, wrapped from the folder as it is now: srt then sees a new .git as a

@@ -28,6 +28,21 @@ const SRT_TOP = new Set([
   ".vscode", ".idea", ".claude/commands", ".claude/agents",
 ]);
 
+// srt's own deny targets at the folder's top, .git's hooks and config among them
+// (denied only when .git is a folder). One absent at the wrap is watched for appearing.
+export const srtTargets = (folder: string): string[] => [...SRT_TOP, ".git/hooks", ".git/config"].map((name) => join(folder, name));
+
+// A deny target as the runner's wrap held it, or null when absent. srt's mounts hold the
+// inode the path had then: one renamed over or made again from outside is writable inside.
+export function identity(path: string): string | null {
+  try {
+    const stats = lstatSync(path);
+    return `${stats.dev}:${stats.ino}`;
+  } catch {
+    return null;
+  }
+}
+
 // The folder's protected keys, from one walk. A walk that takes too long, or that
 // could not read a folder, fails closed: a key hidden there would get no deny.
 export async function protectedKeys(folder: string, timeoutMs = SCAN_TIMEOUT_MS): Promise<Set<string>> {
