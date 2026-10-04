@@ -88,6 +88,29 @@ async def test_update_session_status(session_store, session_factory):
     assert updated.status == "paused"
 
 
+async def test_update_session_status_never_revives_an_archived_session(
+    session_store, session_factory,
+):
+    """A worker failing a turn after the user deleted the session leaves it archived."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+    await session_store.archive_session_tree_and_delete_schedules(
+        session.id, org_id=org_id, agent_id="test-agent",
+    )
+
+    await session_store.update_session_status(session.id, "failed")
+
+    assert (await session_store.get_session(session.id)).status == "archived"
+
+
+async def test_update_session_status_missing_session_raises(session_store):
+    with pytest.raises(SessionNotFoundError):
+        await session_store.update_session_status(uuid.uuid4(), "failed")
+
+
 async def test_update_session_title_if_empty_sets_once(session_store, session_factory):
     """Generated titles are persisted without overwriting existing titles."""
     org_id = await create_org(session_factory)
@@ -474,6 +497,25 @@ async def test_lease_renew(session_store, session_factory):
         session.id, "worker-1", ttl_seconds=30
     )
     assert new_lease is not None
+
+
+async def test_lease_renew_returns_session_status(session_store, session_factory):
+    """The holder learns of a delete even when the interrupt signal is lost."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent"
+    )
+    lease = await session_store.try_acquire_lease(
+        session.id, "worker-1", ttl_seconds=10
+    )
+    assert await session_store.renew_lease(session.id, lease.lease_token) == "active"
+
+    await session_store.archive_session_tree_and_delete_schedules(
+        session.id, org_id=org_id, agent_id="test-agent",
+    )
+
+    assert await session_store.renew_lease(session.id, lease.lease_token) == "archived"
 
 
 async def test_lease_release(session_store, session_factory):

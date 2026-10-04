@@ -202,6 +202,20 @@ async def test_ripgrep_reports_a_bad_regex(wio, root):
         await wio.ripgrep(str(root), mode="json", pattern="(")
 
 
+@needs_rg
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable files")
+async def test_ripgrep_keeps_partial_results_past_an_unreadable_file(wio, root):
+    (root / "a.txt").write_text("hit\n")
+    locked = root / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        counts = await wio.ripgrep(str(root), mode="count", pattern="hit")
+    finally:
+        locked.chmod(0o755)
+    assert counts.splitlines() == [f"{root / 'a.txt'}:1"]
+
+
 async def test_ripgrep_missing_binary(wio, root, monkeypatch):
     monkeypatch.setattr(local_module, "_RIPGREP_PATH", None)
     with pytest.raises(RipgrepError, match="ripgrep \\(rg\\) not found on PATH"):

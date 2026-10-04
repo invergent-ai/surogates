@@ -49,7 +49,7 @@ class RunResult:
 
 
 class RipgrepError(RuntimeError):
-    """ripgrep is missing, or exited 2+ (exit 1 only means no matches)."""
+    """ripgrep is missing, or exited 2+ with no output (exit 1 only means no matches)."""
 
 
 class WorkspaceIO(Protocol):

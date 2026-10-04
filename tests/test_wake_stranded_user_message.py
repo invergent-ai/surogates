@@ -228,3 +228,21 @@ async def test_paused_session_with_pending_user_message_skips(monkeypatch):
     assert result is None
     store.update_session_status.assert_not_called()
     assert _resume_calls(store) == []
+
+
+@pytest.mark.asyncio
+async def test_archived_session_skips_wake(monkeypatch):
+    """A deleted session never runs again: its workspace is already gone."""
+    session = _session("archived")
+    store = _stub_store(
+        session,
+        cursor=100,
+        pending_user_messages=[_user_message_event(105)],
+    )
+    harness = _harness(store)
+    _patch_resolver(monkeypatch)
+
+    result = await harness.wake(session.id)
+
+    assert result is None
+    store.try_acquire_lease.assert_not_called()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -207,3 +208,75 @@ async def test_successful_wake_without_pending_flag_does_not_enqueue(
     await orchestrator._process(session_id)
 
     redis.zadd.assert_not_called()
+
+
+class _FakePubSub:
+    """One pub/sub connection: ``listen`` yields *messages*, then raises *error*."""
+
+    def __init__(self, messages: list[dict], error: Exception | None) -> None:
+        self._messages = messages
+        self._error = error
+        self.closed = False
+
+    async def psubscribe(self, _pattern: str) -> None:
+        pass
+
+    async def punsubscribe(self, _pattern: str) -> None:
+        raise ConnectionError("connection already dead")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def listen(self):
+        for message in self._messages:
+            yield message
+        if self._error is not None:
+            raise self._error
+        await asyncio.Event().wait()
+
+
+async def test_interrupt_listener_resubscribes_after_redis_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped Redis connection must not end the listener for good."""
+    session_id = uuid4()
+    pubsubs = [
+        _FakePubSub([], ConnectionError("Connection reset by peer")),
+        _FakePubSub(
+            [{
+                "type": b"pmessage",
+                "channel": f"surogates:interrupt:{session_id}".encode(),
+                "data": b'{"reason": "session deleted"}',
+            }],
+            None,
+        ),
+    ]
+    redis = SimpleNamespace(pubsub=lambda: pubsubs.pop(0))
+    monkeypatch.setattr(
+        "surogates.orchestrator.dispatcher._INTERRUPT_RECONNECT_INITIAL_DELAY", 0,
+    )
+    orchestrator = Orchestrator(
+        redis_client=redis,
+        session_store=object(),
+        harness_factory=lambda _sid: None,
+        agent_id="support-bot",
+        queue_key="surogates:work_queue:support-bot",
+        max_concurrent=1,
+    )
+    handled = asyncio.Event()
+    received: list[tuple] = []
+
+    async def _handle(sid, reason):
+        received.append((sid, reason))
+        handled.set()
+
+    orchestrator._handle_interrupt_signal = _handle
+    first, second = pubsubs
+
+    task = asyncio.create_task(orchestrator._listen_for_interrupts())
+    await asyncio.wait_for(handled.wait(), timeout=2)
+    task.cancel()
+    await task
+
+    assert received == [(session_id, "session deleted")]
+    assert first.closed and second.closed

@@ -2339,6 +2339,8 @@ async def _search_files_handler(
             }, ensure_ascii=False)
 
         key = await wio.resolve(path)
+        if await wio.stat(key) is None:
+            return _tool_error(f"Path not found: {path}")
 
         if target == "files":
             result_dict = await _files_target_rg(wio, pattern, key, offset, limit)

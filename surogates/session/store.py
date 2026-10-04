@@ -471,14 +471,20 @@ class SessionStore:
             await db.commit()
 
     async def update_session_status(self, session_id: UUID, status: str) -> None:
-        """Set a session's status and touch ``updated_at``."""
+        """Set a session's status and touch ``updated_at``.
+
+        ``archived`` is final: a write that lands after the user deleted the
+        session (a worker failing the turn it was still running) is a no-op.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 update(SessionRow)
-                .where(SessionRow.id == session_id)
+                .where(SessionRow.id == session_id, SessionRow.status != "archived")
                 .values(status=status, updated_at=func.now())
             )
-            if result.rowcount == 0:
+            if result.rowcount == 0 and await db.scalar(
+                select(SessionRow.id).where(SessionRow.id == session_id)
+            ) is None:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
@@ -2112,8 +2118,12 @@ class SessionStore:
         session_id: UUID,
         lease_token: UUID,
         ttl_seconds: int = 30,
-    ) -> None:
-        """Extend the lease expiry.  Raises ``LeaseNotHeldError`` on mismatch."""
+    ) -> str:
+        """Extend the lease expiry and return the session's status.
+
+        The status lets the holder notice a pause or delete whose interrupt
+        signal never reached it.  Raises ``LeaseNotHeldError`` on mismatch.
+        """
         async with self._sf() as db:
             result = await db.execute(
                 text(
@@ -2123,6 +2133,7 @@ class SessionStore:
                         updated_at = now()
                     WHERE session_id = :session_id
                       AND lease_token = :token
+                    RETURNING (SELECT status FROM sessions WHERE id = :session_id)
                     """
                 ),
                 {
@@ -2131,11 +2142,13 @@ class SessionStore:
                     "ttl": ttl_seconds,
                 },
             )
-            if result.rowcount == 0:
+            row = result.first()
+            if row is None:
                 raise LeaseNotHeldError(
                     f"lease for session {session_id} not held by token {lease_token}"
                 )
             await db.commit()
+            return row[0]
 
     async def release_lease(
         self,
