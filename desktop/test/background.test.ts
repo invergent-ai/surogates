@@ -238,7 +238,7 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     await first.exited;
     await until(() => running("^sleep 681$") === 0);
     const left = readRecord(record);
-    expect(left?.hooks).not.toBeNull();
+    expect(left?.hooks).toEqual(expect.objectContaining({ [join(folder, ".git", "hooks", "pre-push")]: expect.any(String) }));
     expect(left?.processes.map((handle) => handle.id)).toEqual([session_id]);
     const second = await host();
     expect((await run(second, "test -x .git/hooks/pre-commit || echo not")).ok?.output).toBe("not\n");

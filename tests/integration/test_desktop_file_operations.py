@@ -12,7 +12,9 @@ import asyncio
 import base64
 import json
 import os
+import re
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 
@@ -222,6 +224,8 @@ PROCESS_CASES = [
         ("wait", {"session_id": "{id}", "timeout": 1}),
         ("wait", {"session_id": "{id}", "timeout": -1}),
         ("poll", {"session_id": "{id}"}),
+        ("read_output", {"session_id": "{id}", "offset": 0, "limit": 200}),
+        ("list_processes", {"task_id": "cross-3"}),
         ("kill", {"session_id": "{id}"}),
         ("poll", {"session_id": "{id}"}),
         ("wait", {"session_id": "{id}", "timeout": 5}),
@@ -267,7 +271,7 @@ async def play(run, steps) -> list[dict]:
 
 
 def normalised(value):
-    """What must match: ids, pids, uptimes and start times differ by nature."""
+    """What must match: ids, pids, uptimes and start times differ by nature, so only their types are checked."""
     if isinstance(value, list):
         return [normalised(item) for item in value]
     if not isinstance(value, dict):
@@ -275,12 +279,16 @@ def normalised(value):
     out = {}
     for key, item in value.items():
         if key == "session_id" and item != "proc_000000000000":
+            assert isinstance(item, str) and re.fullmatch(r"proc_[0-9a-f]{12}", item), item
             item = "<id>"
         elif key == "pid" and item is not None:
+            assert type(item) is int and item >= 0, item
             item = "<pid>"
         elif key == "uptime_seconds":
+            assert type(item) is int and item >= 0, item
             item = 0
         elif key == "started_at":
+            assert isinstance(item, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", item), item
             item = "<time>"
         out[key] = normalised(item)
     return out
@@ -392,13 +400,16 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         refused = await on_app(laptop_rig, "run", {"command": "curl -sS -o /dev/null https://example.com 2>&1", "workdir": None, "timeout": 20})
         assert "403" in refused["ok"]["output"]
         # A later command reaches a server a background process started: they share the runner's sandbox.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
         started = await on_app(laptop_rig, "start", {
-            "command": "python3 -m http.server 18793 --bind 127.0.0.1", "workdir": None, "task_id": "strict",
+            "command": f"python3 -m http.server {port} --bind 127.0.0.1", "workdir": None, "task_id": "strict",
             "pty": False, "notify_on_complete": False, "watcher_interval": None,
         })
         assert started["ok"]["session_id"].startswith("proc_")
         for _ in range(50):
-            fetched = await on_app(laptop_rig, "run", {"command": "curl -sS http://127.0.0.1:18793/a.txt", "workdir": None, "timeout": 10})
+            fetched = await on_app(laptop_rig, "run", {"command": f"curl -sS http://127.0.0.1:{port}/a.txt", "workdir": None, "timeout": 10})
             if fetched["ok"]["output"] == "alpha\nbeta\n":
                 break
             await asyncio.sleep(0.2)
