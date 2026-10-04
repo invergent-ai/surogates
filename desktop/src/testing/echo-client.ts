@@ -17,7 +17,6 @@ import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { Approvals } from "../binding/approvals.js";
 import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
@@ -84,18 +83,14 @@ const binder = confirm && hosts
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
-    approvals: new Approvals({
-      bindings: journal.bindings,
-      prompts: {
-        approve: (request) => {
-          say({ event: "approval", ...request });
-          const named = request.kind === "command" ? request.command : request.kind === "change" ? request.path : request.data;
-          return Promise.resolve(ask !== undefined && named.includes(ask) ? "deny" : "allow");
-        },
-        confirmFreeMode: () => Promise.resolve(false),
+    approvalPrompts: {
+      approve: (request) => {
+        say({ event: "approval", ...request });
+        const named = request.kind === "command" ? request.command : request.kind === "change" ? request.path : request.data;
+        return Promise.resolve(ask !== undefined && named.includes(ask) ? "deny" : "allow");
       },
-      agent: "the cross-check",
-    }),
+      confirmFreeMode: () => Promise.resolve(false),
+    },
     onError: sayError,
   })
   : null;

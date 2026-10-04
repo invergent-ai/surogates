@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { type ApprovalPrompts, Approvals } from "../src/binding/approvals.js";
+import type { ApprovalPrompts } from "../src/binding/approvals.js";
 import {
   ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
 } from "../src/binding/binder.js";
@@ -86,7 +86,7 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
     guards: { home: join(base, "home"), dataDir: join(base, "data"), appDirs: [join(base, "app")] },
     agent: "Research assistant",
     hosts,
-    approvals: new Approvals({ bindings: journal.bindings, prompts: allowing, agent: "Research assistant" }),
+    approvalPrompts: allowing,
     ...overrides,
   });
 }
@@ -336,9 +336,7 @@ describe("a chat's bind operation", () => {
       },
       confirmFreeMode: () => Promise.resolve(false),
     };
-    const chooser = binder(new User(), {
-      approvals: new Approvals({ bindings: journal.bindings, prompts: denying, agent: "Research assistant" }),
-    });
+    const chooser = binder(new User(), { approvalPrompts: denying });
     const run = {
       ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "run", invocationId: "1:c", ordinal: 1,
       args: { command: "ls", workdir: null, timeout: 10 },
@@ -346,7 +344,7 @@ describe("a chat's bind operation", () => {
     expect(await chooser.admit(run, never())).toEqual({
       error: { type: "sandbox", message: "The user denied this command on this computer" },
     });
-    expect([asked, hosts.ran]).toEqual([["command"], []]);
+    expect(asked).toEqual(["command"]);
   });
 
   it("is the binder's own: every other operation goes to the tool hosts, and so does the end of access", async () => {

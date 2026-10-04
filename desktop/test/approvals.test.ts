@@ -299,10 +299,9 @@ describe("approvals over the link", () => {
 
   // The device as the app wires it: the binder, asking the approvals, in front of the tool hosts.
   async function connect(prompts: User, tools: Executor = hosts): Promise<{ link: DeviceLink; runner: OperationRunner }> {
-    const approvals = new Approvals({ bindings: journal.bindings, prompts, agent: "Research assistant" });
     const binder = new Binder({
       bindings: journal.bindings, prompts: noFolders, guards: { home: base, dataDir: join(base, "data"), appDirs: [] },
-      agent: "Research assistant", hosts: tools, approvals,
+      agent: "Research assistant", hosts: tools, approvalPrompts: prompts,
     });
     const device = connectDevice({ url, token: "surg_dev_test", journal, executor: binder, onError: () => {}, delay: () => 20 });
     devices.push(device);

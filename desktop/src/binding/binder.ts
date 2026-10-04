@@ -13,7 +13,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
-import type { Approvals } from "./approvals.js";
+import { type ApprovalPrompts, Approvals } from "./approvals.js";
 import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -61,7 +61,7 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
-  approvals: Approvals; // asks the user about every other operation first, in a chat that asks every time
+  approvalPrompts: ApprovalPrompts; // the user is asked about every other operation first, in a chat that asks every time
   preparedMs?: number;
   onError?: (error: unknown) => void; // a binding that could not be recorded, and why
 }
@@ -85,8 +85,12 @@ export class Binder implements Executor {
   private readonly byToken = new Map<string, Preparation>();
   // Bind operations answered, until the server acknowledges them.
   private readonly answered = new Map<string, Preparation>();
+  // Built on the binder's own bindings, so the two cannot read different journals.
+  readonly approvals: Approvals;
 
-  constructor(private readonly options: BinderOptions) {}
+  constructor(private readonly options: BinderOptions) {
+    this.approvals = new Approvals({ bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent });
+  }
 
   /**
    * The folder for a new chat, as the user confirms it in the sheet: the last one
@@ -144,7 +148,7 @@ export class Binder implements Executor {
   // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
   // other operation is the approvals', which settle once the signal aborts.
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
-    if (operation.kind !== "bind") return this.options.approvals.admit(operation, signal);
+    if (operation.kind !== "bind") return this.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;
