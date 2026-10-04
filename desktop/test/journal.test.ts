@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { INTERRUPTED, MAX_OPEN_REPORTED, OperationJournal, RETAIN_MS } from "../src/journal/journal.js";
+import type { Binding } from "../src/journal/bindings.js";
 import type { Operation } from "../src/link/protocol.js";
 
 function operation(id: string, digest = `digest-${id}`): Operation {
@@ -228,6 +229,58 @@ describe("what the journal reports", () => {
     now += RETAIN_MS + 1;
     expect(journal.prune()).toBe(1);
     expect(journal.receive(operation("a"))).toEqual({ action: "ignore" });
+    journal.close();
+  });
+});
+
+describe("an operation answered before it started", () => {
+  it("is finished with its outcome, sent until acknowledged, and never runs", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    expect(journal.answer("a", { ok: undefined })).toBe(true);
+    expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: { ok: null } }]);
+    expect(journal.start("a")).toBe(false);
+    expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: null } });
+    journal.close();
+  });
+
+  it("is not answered once it was cancelled, started or finished, nor when unknown", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("cancelled"));
+    journal.cancel("cancelled");
+    journal.receive(operation("started"));
+    journal.start("started");
+    journal.receive(operation("finished"));
+    journal.answer("finished", { ok: 1 });
+    for (const id of ["cancelled", "started", "finished", "unknown"]) expect(journal.answer(id, { ok: 2 })).toBe(false);
+    expect(journal.receive(operation("finished"))).toEqual({ action: "reply", outcome: { ok: 1 } });
+    journal.close();
+  });
+});
+
+describe("the bindings", () => {
+  const binding = (root: string, boundAt: number): Binding => ({
+    root, nonce: `nonce-${root}`, folder: `/home/me/${root}`, dev: 2049, ino: 7_340_033, mode: "free", boundAt,
+  });
+
+  it("keep each root's folder across a restart, and give the latest", () => {
+    const before = new OperationJournal(path);
+    expect(before.bindings.last()).toBeUndefined();
+    before.bindings.add(binding("r1", 2));
+    before.bindings.add(binding("r2", 1));
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.get("r1")).toEqual(binding("r1", 2));
+    expect(after.bindings.get("r3")).toBeUndefined();
+    expect(after.bindings.last()).toEqual(binding("r1", 2));
+    after.close();
+  });
+
+  it("bind a root once", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    expect(() => journal.bindings.add({ ...binding("r1", 2), folder: "/elsewhere" })).toThrow();
+    expect(journal.bindings.get("r1")?.folder).toBe("/home/me/r1");
     journal.close();
   });
 });
