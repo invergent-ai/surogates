@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE } from "../src/hosts/processes.js";
+import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
+import { appeared } from "../src/hosts/restarts.js";
 import { Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
@@ -165,7 +166,7 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     expect(counts).toEqual([1, 0]);
   });
 
-  it("stops a hook a background process writes between commands, and says so with the next one", async () => {
+  it("stops a hook a background process writes between commands, and says so with the next one, after the restart its repository brings", async () => {
     const harness = await host();
     // Made executable before it is put in place, so only a look can have changed it.
     await begin(
@@ -174,23 +175,29 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     );
     const hook = join(folder, "sub", ".git", "hooks", "pre-commit");
     await until(() => existsSync(hook) && (statSync(hook).mode & 0o111) === 0, 15_000);
-    expect((await run(harness, "true")).ok?.output).toBe(`${HOOKS_NOTICE}sub/.git/hooks/pre-commit`);
+    expect((await run(harness, "true")).ok?.output)
+      .toBe(`${HOOKS_NOTICE}sub/.git/hooks/pre-commit\n${restartNotice(appeared("sub/.git/config"))}`);
   });
 
   it("watches a process started while the last timed look runs", { timeout: 90_000 }, async () => {
+    // 100 000 hooks that cannot run, there before the host: each look over them takes seconds,
+    // and the runner, wrapped after them, restarts for none of them.
+    mkdirSync(join(folder, "many", ".git", "hooks"), { recursive: true });
+    spawnSync("bash", ["-c", "seq 1 100000 | xargs touch"], { cwd: join(folder, "many", ".git", "hooks") });
     const harness = await host();
-    // 100 000 hooks that cannot run, none the user's: each look over them takes seconds.
-    await begin(harness, "mkdir -p many/.git/hooks && cd many/.git/hooks && seq 1 100000 | xargs touch");
+    await begin(harness, "true");
+    // The look the start armed comes at most 5 s after it went live, which was before its answer.
     const firstLook = Date.now() + 5_000;
     await until(async () => (await ask(harness, "list_processes", { task_id: "t" })).ok[0]?.status === "exited", 15_000);
     expect(Date.now()).toBeLessThan(firstLook);
-    // The look the first start armed runs now, with nothing alive.
+    // The look the first start armed runs now, with no process alive.
     await new Promise((done) => setTimeout(done, firstLook + 500 - Date.now()));
+    // A new repository: the runner's hooks folders are read-only inside it, this one is not until a restart.
     await begin(
       harness,
-      "sleep 2; printf '#!/bin/sh\\n' > many/.git/h && chmod +x many/.git/h && mv many/.git/h many/.git/hooks/pre-commit; sleep 677",
+      "sleep 2; git -c init.defaultBranch=main init -q other && printf '#!/bin/sh\\n' > other/.git/h && chmod +x other/.git/h && mv other/.git/h other/.git/hooks/pre-commit; sleep 677",
     );
-    const hook = join(folder, "many", ".git", "hooks", "pre-commit");
+    const hook = join(folder, "other", ".git", "hooks", "pre-commit");
     await until(() => existsSync(hook), 20_000);
     await until(() => (statSync(hook).mode & 0o111) === 0, 30_000);
   });

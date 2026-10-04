@@ -7,7 +7,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, type Stats, statSync } from "node:fs";
 import type { Server } from "node:net";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -22,7 +22,7 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
-import { extraDenies, protectedKeys } from "./restarts.js";
+import { appeared, extraDenies, protectedKeys } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
 
@@ -61,6 +61,10 @@ let processes: Processes | null = null;
 let runner: Promise<SessionRunner> | null = null;
 let liveRunner: SessionRunner | null = null;
 let watching: NodeJS.Timeout | null = null;
+// The live runner's protected keys, from a walk that started once it was up (performance.now()).
+let baseline: { keys: ReadonlySet<string>; since: number } | null = null;
+// While the runner restarts, run and start wait for the new one.
+let restarting: Promise<void> | null = null;
 
 process.on("message", (raw) => {
   const message = raw as ToHost;
@@ -192,7 +196,7 @@ async function start(message: HostStart): Promise<void> {
   // Its first look finds the user's own hooks, while srt starts. After a killed
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
-  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)] });
+  guard = new HookGuard(path, { inherited, known: running, writable: [path, ...spellings(tmp)], seen });
   mkdirSync(tmp, { recursive: true });
   makeCaches(tmp);
   const env = commandEnvironment(message.env, tmp);
@@ -305,17 +309,20 @@ async function start(message: HostStart): Promise<void> {
   save({ processes: processes.handles() });
 }
 
-// A look every WATCH_MS while any background process is alive, and one more after
-// the last one ends: it may have written a hook on its way out. Decided again after
-// the look: a process started during it found a look already set and armed none.
+// A look every WATCH_MS while any background process or the runner is alive, and one
+// more after the last one ends: it may have written a hook on its way out. An idle
+// runner is looked at too: a protected path made outside the app restarts it before
+// the next command. Decided again after the look: a process started during it found
+// a look already set and armed none.
 function watchHooks(): void {
   if (watching || !guard || stopping) return;
   const hooks = guard;
+  const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null;
   watching = setTimeout(() => void (async () => {
-    const alive = (processes?.live ?? 0) > 0;
+    const was = alive();
     await hooks.watch();
     watching = null;
-    if (alive || (processes?.live ?? 0) > 0) watchHooks();
+    if (was || alive()) watchHooks();
   })(), WATCH_MS);
 }
 
@@ -323,17 +330,25 @@ function watchHooks(): void {
 // unexpectedly ends its processes (the registry notes why); the next start
 // starts another, and commands get sandboxes of their own until then.
 function sessionRunner(): Promise<SessionRunner> {
+  return restarting ? restarting.then(sessionRunner) : launch();
+}
+
+function launch(): Promise<SessionRunner> {
   if (!context || stopping) return Promise.reject(new Error("the tool host is stopping"));
   if (runner) return runner;
   // Each clears only itself: a runner that went may answer after the next one started.
   let up: SessionRunner | null = null;
   const starting: Promise<SessionRunner> = openRunner(context, () => {
     if (runner === starting) runner = null;
-    if (liveRunner === up) liveRunner = null;
+    if (liveRunner === up) {
+      liveRunner = null;
+      baseline = null;
+    }
   }).then(
     (started) => {
       up = started;
       if (runner === starting) liveRunner = started;
+      watchHooks();
       return started;
     },
     (error: unknown) => {
@@ -347,9 +362,63 @@ function sessionRunner(): Promise<SessionRunner> {
 
 // srt's own denies miss protected paths: the runner's wrap denies writes to every
 // one the host's walk finds that they do not cover (restarts.ts).
+// Its baseline is what the folder holds once it is up: srt's placeholders are there by then.
 async function openRunner(ready: CommandContext, onLost: () => void): Promise<SessionRunner> {
   const denyWrite = extraDenies(ready.folder, await protectedKeys(ready.folder));
-  return startRunner(ready, onLost, { denyWrite, allowWrite: [] });
+  const started = await startRunner(ready, onLost, { denyWrite, allowWrite: [] });
+  const since = performance.now();
+  try {
+    baseline = { keys: await protectedKeys(ready.folder), since };
+  } catch (error) {
+    await started.stop();
+    throw error;
+  }
+  return started;
+}
+
+// What a look found, against the live runner's baseline: a protected key that was
+// not there when the runner was wrapped is writable inside it, so it restarts.
+// A look that started before the baseline's walk may have seen the old runner's folder.
+function seen(keys: ReadonlySet<string>, startedAt: number): void {
+  const known = baseline;
+  if (!liveRunner || !folder || !known || startedAt < known.since) return;
+  const added = [...keys].filter((key) => !known.keys.has(key)).sort();
+  if (added[0]) restart(appeared(relative(folder.path, added[0])));
+}
+
+// A new runner, wrapped from the folder as it is now: srt then sees a new .git as a
+// folder and covers its hooks and config. Its live processes end, released from srt's
+// count once, with its bwrap; work that comes meanwhile waits for the new one.
+function restart(reason: string): void {
+  if (stopping || restarting || !liveRunner) return;
+  const old = liveRunner;
+  const registry = processes;
+  runner = null;
+  liveRunner = null;
+  baseline = null;
+  restarting = (async () => {
+    registry?.restart(reason);
+    await stopRunner(null, old, STOP_COMMANDS_MS);
+    // One that cannot start leaves none: the next start tries again, and commands get sandboxes of their own.
+    await launch().catch(() => {});
+  })().finally(() => {
+    restarting = null;
+  });
+}
+
+// The runner a command goes to: the new one, once a restart is done.
+async function commandRunner(): Promise<SessionRunner | null> {
+  while (restarting) await restarting;
+  return liveRunner;
+}
+
+// A restart's notice, after any hooks notice, in the next run that answers ok.
+function withNotice(outcome: Outcome): Outcome {
+  if (!("ok" in outcome)) return outcome;
+  const notice = processes?.takeNotice();
+  if (!notice) return outcome;
+  const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
+  return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${notice}` } };
 }
 
 function save(change: Partial<FolderRecord>): void {
@@ -381,7 +450,7 @@ function command(id: string, args: Record<string, unknown>): void {
     // Stopped or cancelled while the folder was looked through: it never starts.
     const outcome = refused ?? (stopping || controller.signal.aborted
       ? CANCELLED
-      : await hooks.after(await runCommand(args, ready, controller.signal, id, liveRunner)));
+      : withNotice(await hooks.after(await runCommand(args, ready, controller.signal, id, await commandRunner()))));
     commands.delete(id);
     if (!failing) send({ type: "result", id, outcome });
   })();
@@ -413,6 +482,8 @@ async function stop(code = 0): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
+  // A restart stops its old runner within its own bound; the new one is then the one to stop.
+  await Promise.race([restarting, new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS))]);
   // Its background processes go with its sandbox, before the last look.
   await stopRunner(runner, liveRunner, STOP_COMMANDS_MS);
   // What a stopped command left, before the record can say the host stopped

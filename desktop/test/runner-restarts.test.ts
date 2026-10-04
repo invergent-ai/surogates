@@ -1,0 +1,152 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import type { HostStart } from "../src/hosts/messages.js";
+import { RESTARTED, restartNotice } from "../src/hosts/processes.js";
+import { appeared, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
+import { Harness, PACKAGE } from "./host-harness.js";
+
+type Answer = { ok?: any; error?: { type: string; message: string } };
+
+let base: string;
+let folder: string;
+let harnesses: Harness[];
+let next = 0;
+const id = () => `rr-${next++}`;
+
+async function host(): Promise<Harness> {
+  const harness = new Harness();
+  harnesses.push(harness);
+  const start: HostStart = {
+    type: "start",
+    folder,
+    tmp: join(base, "data", "tmp", "root"),
+    dataDir: join(base, "data"),
+    env: { HOME: join(base, "home"), LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
+    appDirs: [dirname(process.execPath), PACKAGE],
+  };
+  harness.send(start);
+  await harness.until((messages) => messages.find((message) => message.type === "ready"));
+  return harness;
+}
+
+const ask = (harness: Harness, kind: string, args: Record<string, unknown>) => harness.op(id(), kind, args) as Promise<Answer>;
+const begin = (harness: Harness, command: string) => ask(harness, "start", { command, workdir: null, task_id: "t", pty: false });
+const run = (harness: Harness, command: string) => ask(harness, "run", { command, workdir: null, timeout: 10 });
+const poll = async (harness: Harness, session_id: string) => (await ask(harness, "poll", { session_id })).ok;
+const tryWrite = (path: string) => `if { printf x >> ${path}; } 2>/dev/null; then echo written; else echo denied; fi`;
+const tryCreate = (path: string) => `if { : > ${path}; } 2>/dev/null; then echo written; else echo denied; fi`;
+const GIT_INIT = "git -c init.defaultBranch=main init -q";
+
+async function until(check: () => boolean | Promise<boolean>, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error("timed out");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+beforeEach(() => {
+  base = realpathSync(mkdtempSync(join(tmpdir(), "runner-restarts-")));
+  folder = join(base, "folder");
+  mkdirSync(folder);
+  mkdirSync(join(base, "home"));
+  harnesses = [];
+});
+
+afterEach(async () => {
+  for (const harness of harnesses) await harness.stop();
+  rmSync(base, { recursive: true, force: true });
+});
+
+describe("restarting a session runner", { timeout: 40_000 }, () => {
+  it("restarts when a background process makes a repository: the next command cannot write its config or hooks, and is told once", async () => {
+    const harness = await host();
+    const first = (await begin(harness, `sleep 0.5; ${GIT_INIT} .; sleep 633`)).ok.session_id as string;
+    // The timed look finds the repository.
+    await until(async () => (await poll(harness, first)).status === "exited");
+    expect(await poll(harness, first)).toMatchObject({ exit_code: null, note: RESTARTED });
+    expect((await run(harness, `${tryWrite(".git/config")}; ${tryCreate(".git/hooks/x")}`)).ok?.output)
+      .toBe(`denied\ndenied\n\n${restartNotice(appeared(".git/config"))}`);
+    expect((await run(harness, "echo again")).ok?.output).toBe("again\n");
+  });
+
+  it("restarts without a word when no background process is alive", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "true")).ok.session_id as string;
+    await ask(harness, "wait", { session_id, timeout: 10 });
+    // The look after this command restarts the runner.
+    expect((await run(harness, `${GIT_INIT} . && echo made`)).ok?.output).toBe("made\n");
+    expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe("denied\n");
+    expect((await ask(harness, "list_processes", { task_id: "t" })).ok[0]).not.toHaveProperty("note");
+  });
+
+  it("does not restart for a protected name under node_modules", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "sleep 634")).ok.session_id as string;
+    expect((await run(harness, "mkdir -p node_modules/pkg/.vscode && touch node_modules/pkg/.vscode/settings.json && echo made")).ok?.output)
+      .toBe("made\n");
+    expect((await run(harness, "echo next")).ok?.output).toBe("next\n");
+    expect((await poll(harness, session_id)).status).toBe("running");
+  });
+
+  it("runs commands and starts that come during a restart in the new runner, and tells the command", async () => {
+    const harness = await host();
+    const old = (await begin(harness, "sleep 635")).ok.session_id as string;
+    // The look after this command starts the restart before its answer is sent.
+    expect((await run(harness, "mkdir -p sub/.vscode && touch sub/.vscode/a && echo made")).ok?.output).toBe("made\n");
+    const [after, started] = await Promise.all([
+      run(harness, "readlink /proc/self/ns/net"),
+      begin(harness, "readlink /proc/self/ns/net; sleep 636"),
+    ]);
+    const [namespace, ...rest] = (after.ok?.output as string).split("\n");
+    expect(namespace).toMatch(/^net:\[\d+\]$/);
+    // The old runner is gone: its process ended with it. A namespace's number is reused once it is freed.
+    expect(await poll(harness, old)).toMatchObject({ status: "exited", note: RESTARTED });
+    expect(rest.join("\n")).toBe(`\n${restartNotice(appeared("sub/.vscode"))}`);
+    const session_id = started.ok.session_id as string;
+    await until(async () => (await poll(harness, session_id)).output_preview !== "");
+    expect((await poll(harness, session_id)).output_preview).toBe(`${namespace}\n`);
+  });
+
+  it("protects a repository a command makes deeper than srt's scan, once the runner has restarted", async () => {
+    const harness = await host();
+    await begin(harness, "sleep 640");
+    const deep = Array.from({ length: 12 }, (_, i) => `n${i + 1}`).join("/");
+    expect((await run(harness, `mkdir -p ${deep} && ${GIT_INIT} ${deep} && echo made`)).ok?.output).toBe("made\n");
+    expect((await run(harness, tryWrite(`${deep}/.git/config`))).ok?.output)
+      .toBe(`denied\n\n${restartNotice(appeared(`${deep}/.git/config`))}`);
+  });
+
+  it("restarts an idle runner when a repository is made outside the app, before the next command runs", async () => {
+    const harness = await host();
+    const session_id = (await begin(harness, "true")).ok.session_id as string;
+    await ask(harness, "wait", { session_id, timeout: 10 });
+    // Past the one look that follows the last process's end: from here only the runner keeps them coming.
+    await new Promise((resolve) => setTimeout(resolve, 6_000));
+    // Made outside the app: no command of this chat runs, and no process lives.
+    spawnSync("git", ["-c", "init.defaultBranch=main", "init", "-q", folder]);
+    // The runner's next timed look sees it.
+    await new Promise((resolve) => setTimeout(resolve, 6_500));
+    expect((await run(harness, tryWrite(".git/config"))).ok?.output).toBe("denied\n");
+  });
+
+  it("gives commands sandboxes of their own when the new runner is refused, and refuses starts", async () => {
+    const harness = await host();
+    await begin(harness, "sleep 624");
+    const deep = Array.from({ length: 10 }, (_, i) => `d${i + 1}`).join("/");
+    const many = `for i in $(seq 0 ${MAX_EXTRA_DENIES}); do mkdir -p ${deep}/p$i/.vscode && : > ${deep}/p$i/.vscode/a; done; echo made`;
+    expect((await run(harness, many)).ok?.output).toBe("made\n");
+    expect((await run(harness, "true")).ok?.output).toBe(restartNotice(appeared(`${deep}/p0/.vscode`)));
+    // Sandboxes of their own: two commands at once are in two network namespaces (a freed one's number is reused).
+    const together = await Promise.all([0, 1].map(() => run(harness, "readlink /proc/self/ns/net; sleep 1")));
+    expect(new Set(together.map((answer) => answer.ok?.output)).size).toBe(2);
+    expect(await begin(harness, "sleep 625")).toEqual({
+      error: { type: "sandbox", message: expect.stringContaining(`this folder has ${MAX_EXTRA_DENIES + 1} protected paths`) },
+    });
+  });
+});

@@ -15,6 +15,8 @@ import { GLOB } from "./policy.js";
 // here. A parent folder of about 130 checkouts already needs 256.
 export const MAX_EXTRA_DENIES = 1024;
 
+export const appeared = (key: string) => `a protected file appeared in the folder (${key})`;
+
 // srt 0.0.77's own write denies (linux-sandbox-utils.js) that hold whatever happens:
 // these names at the folder's top, and .git's hooks and config there when .git is a
 // folder. Its nested scan is not credited: srt drops it silently when rg fails, as
