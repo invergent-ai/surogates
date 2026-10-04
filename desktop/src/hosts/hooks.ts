@@ -9,6 +9,7 @@ import { access, constants, lstat, open, readdir, readlink, realpath, stat } fro
 import { dirname, join, relative } from "node:path";
 
 import { inside } from "../files/paths.js";
+import { protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
@@ -20,6 +21,9 @@ export interface HookScan {
   hooks: Map<string, string>;
   // Folders that could not be read where a command could have hidden a hook.
   unreadable: string[];
+  // Every entry under one of the folder's protected names (protectedInFolder),
+  // files and folders alike, but not a .git folder itself: a .git file is one.
+  protectedKeys: Set<string>;
 }
 
 export interface GuardOptions {
@@ -30,6 +34,8 @@ export interface GuardOptions {
   // Every folder a command can write: a hook linked into one is a command's to change.
   writable?: readonly string[];
   timeoutMs?: number;
+  // Told the protected keys of every look that finished, and when it started (performance.now()).
+  seen?: (keys: ReadonlySet<string>, startedAt: number) => void;
 }
 
 // A key under a hooks folder inside a .git folder, at any depth and in any case.
@@ -66,7 +72,7 @@ async function describe(path: string): Promise<string | null> {
 // Never rejects. Linked folders are not followed; node_modules and git's object
 // stores are skipped: they are large, and git runs no hook from them.
 export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1): Promise<HookScan> {
-  const scan: HookScan = { hooks: new Map(), unreadable: [] };
+  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set() };
   const walk = async (dir: string, inGit: boolean): Promise<void> => {
     let entries;
     try {
@@ -90,6 +96,7 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
     await Promise.all(entries.map(async (entry) => {
       const path = join(dir, entry.name);
       const name = entry.name.toLowerCase();
+      if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) scan.protectedKeys.add(path);
       if (entry.isDirectory()) {
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -171,12 +178,14 @@ export class HookGuard {
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
   private readonly timeoutMs: number;
+  private readonly seen: (keys: ReadonlySet<string>, startedAt: number) => void;
 
   constructor(private readonly folder: string, options: GuardOptions = {}) {
     this.baseline = options.inherited ?? null;
     this.known = options.known ?? (() => {});
     this.writable = options.writable ?? [folder];
     this.timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
+    this.seen = options.seen ?? (() => {});
     // The first look starts at once, while srt starts. After a crash it also
     // catches what the killed host's commands left.
     this.first = this.check();
@@ -236,8 +245,10 @@ export class HookGuard {
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
     });
+    const startedAt = performance.now();
     const scan = await Promise.race([scanHooks(this.folder), late]);
     clearTimeout(timer);
+    if (scan) this.seen(scan.protectedKeys, startedAt);
     const unseen = !scan
       ? `Blocked: the computer could not look through this folder for git hooks within ${this.timeoutMs / 1000} seconds, so commands cannot run here.`
       : scan.unreadable.length > 0

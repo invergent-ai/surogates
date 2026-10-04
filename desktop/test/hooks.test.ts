@@ -361,3 +361,53 @@ describe("the guard", () => {
     }
   });
 });
+
+describe("the walk's protected keys", () => {
+  it("are every entry under a protected name at any depth, folders too, and a .git file, but not a .git folder", async () => {
+    const deep = hook("a/b/c/d/e/f/g/h/i/j/k/.git/hooks/pre-commit");
+    mkdirSync(join(folder, ".vscode"));
+    writeFileSync(join(folder, ".vscode", "settings.json"), "{}");
+    mkdirSync(join(folder, ".git"));
+    writeFileSync(join(folder, ".git", "config"), "");
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+    mkdirSync(join(folder, "wt"));
+    writeFileSync(join(folder, "wt", ".git"), "gitdir: /elsewhere\n");
+    writeFileSync(join(folder, "README.md"), "");
+    expect([...(await scanHooks(folder)).protectedKeys].sort()).toEqual([
+      join(folder, ".git", "config"),
+      join(folder, ".vscode"),
+      join(folder, ".vscode", "settings.json"),
+      join(folder, "a/b/c/d/e/f/g/h/i/j/k/.git/hooks"),
+      deep,
+      join(folder, "wt", ".git"),
+    ].sort());
+  });
+
+  it("leave out node_modules and a git folder's object store", async () => {
+    mkdirSync(join(folder, "node_modules", "pkg", ".vscode"), { recursive: true });
+    writeFileSync(join(folder, "node_modules", "pkg", ".vscode", "settings.json"), "{}");
+    mkdirSync(join(folder, ".git", "objects", ".vscode"), { recursive: true });
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+    expect([...(await scanHooks(folder)).protectedKeys]).toEqual([]);
+  });
+
+  it("are told for every look, with when it started", async () => {
+    const told: Array<{ keys: string[]; startedAt: number }> = [];
+    const guard = new HookGuard(folder, { seen: (keys, startedAt) => told.push({ keys: [...keys], startedAt }) });
+    await guard.refusal();
+    const before = performance.now();
+    writeFileSync(join(folder, ".mcp.json"), "{}");
+    await guard.watch();
+    expect(told.map((look) => look.keys)).toEqual([[], [join(folder, ".mcp.json")]]);
+    expect(told[1]?.startedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("are not told for a look that timed out, and take a .git link as a key", async () => {
+    for (let i = 0; i < 300; i += 1) mkdirSync(join(folder, `d${i}`, "e"), { recursive: true });
+    const told: unknown[] = [];
+    await new HookGuard(folder, { timeoutMs: 0, seen: (keys) => told.push(keys) }).refusal();
+    expect(told).toEqual([]);
+    symlinkSync("/elsewhere", join(folder, "d0", ".git"));
+    expect([...(await scanHooks(folder)).protectedKeys]).toEqual([join(folder, "d0", ".git")]);
+  });
+});
