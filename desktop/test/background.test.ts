@@ -165,11 +165,12 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     await begin(harness, "mkdir -p many/.git/hooks && cd many/.git/hooks && seq 1 100000 | xargs touch");
     const firstLook = Date.now() + 5_000;
     await until(async () => (await ask(harness, "list_processes", { task_id: "t" })).ok[0]?.status === "exited", 15_000);
+    expect(Date.now()).toBeLessThan(firstLook);
     // The look the first start armed runs now, with nothing alive.
     await new Promise((done) => setTimeout(done, firstLook + 500 - Date.now()));
     await begin(
       harness,
-      "sleep 9; printf '#!/bin/sh\\n' > many/.git/h && chmod +x many/.git/h && mv many/.git/h many/.git/hooks/pre-commit; sleep 677",
+      "sleep 2; printf '#!/bin/sh\\n' > many/.git/h && chmod +x many/.git/h && mv many/.git/h many/.git/hooks/pre-commit; sleep 677",
     );
     const hook = join(folder, "many", ".git", "hooks", "pre-commit");
     await until(() => existsSync(hook), 20_000);
