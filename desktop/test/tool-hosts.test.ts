@@ -379,6 +379,16 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await second).toEqual(HOST_STOPPED);
   });
 
+  it("ends every host without stopping, and starts a new one for the next operation", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    await executor.run(op("resolve", { path: "" }, ROOT_B), signal());
+    await executor.end();
+    expect([sent(0, "stop"), sent(1, "stop")]).toEqual([1, 1]);
+    expect(await executor.run(resolve(), signal())).toEqual({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(3);
+  });
+
   it("makes a second stop wait for the first", async () => {
     const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
       if (message.type === "start") host.say({ type: "ready" });

@@ -412,6 +412,26 @@ describe("suspending local work", () => {
     expect(journal.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: ACCESS_ENDED }]);
   });
 
+  it("ends the executor's local work once what ran is recorded, and reports an end that fails", async () => {
+    const executor = new RecordingExecutor(true);
+    const errors: unknown[] = [];
+    let recorded: number | null = null;
+    const ending: Executor = {
+      run: (operation, signal) => executor.run(operation, signal),
+      end: async () => {
+        recorded = journal.unsent().length;
+        throw new Error("could not end");
+      },
+    };
+    const { journal } = await start(ending, open(), (error) => errors.push(error));
+    server.send(opFrame("a"));
+    await server.until(() => executor.ran.length === 1);
+    server.close(4403);
+    await server.until(() => errors.length === 1);
+    expect(recorded).toBe(1);
+    expect((errors[0] as Error).message).toBe("could not end");
+  });
+
   it("records what runs with the outcome it is given, and settles once each is recorded", async () => {
     const executor = new RecordingExecutor(true);
     // Answers a tick after the abort, so the rows are recorded only if suspend waits for them.

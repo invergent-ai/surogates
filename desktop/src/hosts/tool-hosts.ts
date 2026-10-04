@@ -132,6 +132,12 @@ export class ToolHosts implements Executor {
     return this.stopping;
   }
 
+  // The device's access ended: every host stops, and its background processes with it.
+  // The next operation for a root starts a new host, which answers for them from the record.
+  end(): Promise<void> {
+    return this.stopHosts();
+  }
+
   private async stopHosts(): Promise<void> {
     const hosts = [...this.live];
     this.hosts.clear();

@@ -78,6 +78,12 @@ export interface Executor {
    * try/catch here or in the caller can contain.
    */
   run(operation: Operation, signal: AbortSignal): Promise<Outcome>;
+  /**
+   * End what goes on locally that no operation holds, such as background
+   * processes, once the computer's access has ended. The executor still runs
+   * operations afterwards.
+   */
+  end?(): Promise<void>;
 }
 
 export class OperationRunner {
