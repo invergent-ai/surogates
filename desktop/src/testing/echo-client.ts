@@ -5,7 +5,9 @@
 // does: before it connects it confirms that folder, as a user accepting the sheet
 // would, and says the sheet ("sheet") and the folder and nonce the page would send
 // ("prepared"); then it answers a chat's bind operation against that confirmation,
-// and runs the chat's other operations through the real tool hosts. One JSON line
+// and runs the chat's other operations through the real tool hosts. With --ask
+// WORD as well, those chats ask every time: each approval is said ("approval"),
+// and denied when what it asks about names WORD, allowed otherwise. One JSON line
 // per event on stdout; a link that stops itself says why as an "error" event.
 // The journal's file stays locked while this runs, so each op_ack the server sends is
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
@@ -31,11 +33,15 @@ const { values } = parseArgs({
     hold: { type: "boolean", default: false },
     folder: { type: "string" },
     confirm: { type: "string" },
+    ask: { type: "string" },
   },
 });
-// --folder binds every root by itself, so it cannot stand beside a confirmed folder.
-if (!values.url || !values.token || !values.journal || (values.folder && values.confirm)) {
-  process.stderr.write("usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH]\n");
+// --folder binds every root by itself, so it cannot stand beside a confirmed folder; only a confirmed one asks.
+const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm);
+if (!values.url || !values.token || !values.journal || usage) {
+  process.stderr.write(
+    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]]\n",
+  );
   process.exit(2);
 }
 
@@ -61,7 +67,7 @@ if (values.folder) {
 const hosts = values.folder || values.confirm
   ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env })
   : null;
-const confirm = values.confirm;
+const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts
   ? new Binder({
@@ -71,12 +77,21 @@ const binder = confirm && hosts
       confirmFolder: (sheet) => {
         say({ event: "sheet", ...sheet });
         refusal = sheet.refusal;
-        return Promise.resolve(refusal === null ? { mode: sheet.mode } : null);
+        return Promise.resolve(refusal === null ? { mode: ask === undefined ? sheet.mode : "ask" } : null);
       },
     },
     guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
+    approvalPrompts: {
+      approve: (request) => {
+        say({ event: "approval", ...request });
+        const named = request.kind === "command" ? request.command : request.kind === "change" ? request.path : request.data;
+        // Without --ask no chat asks: a prompt then is a fault, and fails loudly.
+        return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
+      },
+      confirmFreeMode: () => Promise.resolve(false),
+    },
     onError: sayError,
   })
   : null;

@@ -2,8 +2,9 @@
 // user confirms one in the desktop's own sheet; the page creates the chat with
 // the confirmation's nonce; the server sends that chat's bind operation, which is
 // answered as it arrives, against the confirmation; bindSession tells the page
-// once the server has recorded the answer. Every other operation goes to the
-// tool hosts, which find their folder in the bindings.
+// once the server has recorded the answer. Every other operation is put to the
+// approvals first (approvals.ts), then goes to the tool hosts, which find their
+// folder in the bindings.
 
 import { randomBytes } from "node:crypto";
 
@@ -12,6 +13,7 @@ import type { Binding, Bindings, Mode } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { report } from "../report.js";
+import { type ApprovalPrompts, Approvals } from "./approvals.js";
 import { BOOT_ID, checkFolder, type FolderGuards } from "./folder.js";
 import { type LinkSummary, scanLinks } from "./links.js";
 
@@ -59,8 +61,9 @@ export interface BinderOptions {
   guards: FolderGuards;
   agent: string;
   hosts: Executor; // runs everything but the binding
+  approvalPrompts: ApprovalPrompts; // the user is asked about every other operation first, in a chat that asks every time
   preparedMs?: number;
-  onError?: (error: unknown) => void; // a binding that could not be recorded, and why
+  onError?: (error: unknown) => void; // a binding, or a "Stop asking", that could not be recorded, and why
 }
 
 interface Preparation {
@@ -82,8 +85,14 @@ export class Binder implements Executor {
   private readonly byToken = new Map<string, Preparation>();
   // Bind operations answered, until the server acknowledges them.
   private readonly answered = new Map<string, Preparation>();
+  // Built on the binder's own bindings, so the two cannot read different journals.
+  readonly approvals: Approvals;
 
-  constructor(private readonly options: BinderOptions) {}
+  constructor(private readonly options: BinderOptions) {
+    this.approvals = new Approvals({
+      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, onError: options.onError,
+    });
+  }
 
   /**
    * The folder for a new chat, as the user confirms it in the sheet: the last one
@@ -137,10 +146,11 @@ export class Binder implements Executor {
   // The binding is made when its operation arrives, before the journal marks it
   // started: an app that stops between recording it and answering finds it here
   // when the server sends the operation again. It touches no file: the host checks
-  // the folder against the binding's identity before any work. It waits on nothing,
-  // so it settles at once, an aborted one too: suspend waits for it.
-  async admit(operation: Operation): Promise<Outcome | null> {
-    if (operation.kind !== "bind") return null;
+  // the folder against the binding's identity before any work. A bind waits on
+  // nothing, so it settles at once, an aborted one too: suspend waits for it. Every
+  // other operation is the approvals', which settle once the signal aborts.
+  async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    if (operation.kind !== "bind") return this.approvals.admit(operation, signal);
     const root = operation.sessionId;
     const { folder, nonce } = operation.args;
     const own = operation.callingSessionId === root && operation.invocationId === "bind" && operation.ordinal === 0;

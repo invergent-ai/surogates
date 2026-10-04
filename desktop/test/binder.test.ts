@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { ApprovalPrompts } from "../src/binding/approvals.js";
 import {
   ALREADY_BOUND, Binder, type BinderOptions, type FolderPrompts, type FolderSheet, NOT_RECORDED, type Prepared,
 } from "../src/binding/binder.js";
@@ -72,6 +73,12 @@ function open(): OperationJournal {
   return opened;
 }
 
+// The user at the approval prompts: allows each operation, and never lets a chat work freely.
+const allowing: ApprovalPrompts = {
+  approve: () => Promise.resolve("allow"),
+  confirmFreeMode: () => Promise.resolve(false),
+};
+
 function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
   return new Binder({
     bindings: journal.bindings,
@@ -79,6 +86,7 @@ function binder(user: User, overrides: Partial<BinderOptions> = {}): Binder {
     guards: { home: join(base, "home"), dataDir: join(base, "data"), appDirs: [join(base, "app")] },
     agent: "Research assistant",
     hosts,
+    approvalPrompts: allowing,
     ...overrides,
   });
 }
@@ -220,7 +228,7 @@ describe("a chat's bind operation", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser, notes, "ask");
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual({ ok: null });
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
     const { dev, ino } = statSync(notes);
     expect(journal.bindings.get(ROOT)).toEqual({
       root: ROOT, nonce: ready.nonce, folder: notes, dev, ino, boot: BOOT_ID, mode: "ask", boundAt: expect.any(Number),
@@ -231,9 +239,9 @@ describe("a chat's bind operation", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser);
-    expect(await chooser.admit(bindOp(ROOT, { ...ready, nonce: "x".repeat(32) }))).toEqual(NOT_BOUND);
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual({ ok: null });
-    expect(await chooser.admit(bindOp(OTHER, ready))).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, { ...ready, nonce: "x".repeat(32) }), never())).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
+    expect(await chooser.admit(bindOp(OTHER, ready), never())).toEqual(NOT_BOUND);
     expect(journal.bindings.get(OTHER)).toBeUndefined();
   });
 
@@ -241,8 +249,8 @@ describe("a chat's bind operation", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser);
-    expect(await chooser.admit(bindOp(ROOT, { ...ready, folder: `${notes}/` }))).toEqual(NOT_BOUND);
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, { ...ready, folder: `${notes}/` }), never())).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual(NOT_BOUND);
     expect(journal.bindings.get(ROOT)).toBeUndefined();
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toThrow("The server named another folder for this chat");
   });
@@ -256,7 +264,7 @@ describe("a chat's bind operation", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser);
-    expect(await chooser.admit(bindOp(ROOT, ready, changes))).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, ready, changes), never())).toEqual(NOT_BOUND);
     expect(journal.bindings.get(ROOT)).toBeUndefined();
   });
 
@@ -265,7 +273,7 @@ describe("a chat's bind operation", () => {
     const chooser = binder(user, { preparedMs: 20 });
     const ready = await confirmed(user, chooser);
     await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual(NOT_BOUND);
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual(NOT_BOUND);
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW))
       .rejects.toThrow("This folder's confirmation expired before its chat was created");
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toThrow("This folder was not confirmed in this window");
@@ -283,7 +291,7 @@ describe("a chat's bind operation", () => {
     const ready = await confirmed(user, chooser);
     const { dev, ino } = statSync(notes);
     change();
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual({ ok: null });
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual({ ok: null });
     expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, dev, ino });
   });
 
@@ -296,7 +304,7 @@ describe("a chat's bind operation", () => {
     vi.spyOn(journal.bindings, "add").mockImplementation(() => {
       throw full;
     });
-    expect(await chooser.admit(bindOp(ROOT, ready))).toEqual(NOT_RECORDED);
+    expect(await chooser.admit(bindOp(ROOT, ready), never())).toEqual(NOT_RECORDED);
     await expect(chooser.bindSession(ROOT, ready.token, WINDOW)).rejects.toBe(full);
     expect(failures).toEqual([full]);
     expect(journal.bindings.get(ROOT)).toBeUndefined();
@@ -307,9 +315,9 @@ describe("a chat's bind operation", () => {
     journal.bindings.add({ root: ROOT, nonce, folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
     // A restarted app has no confirmations; the binding is in the journal.
     const restarted = binder(new User());
-    expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce }))).toEqual({ ok: null });
-    expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce: "y".repeat(32) }))).toEqual(ALREADY_BOUND);
-    expect(await restarted.admit(bindOp(ROOT, { folder: join(base, "other"), nonce }))).toEqual(ALREADY_BOUND);
+    expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce }), never())).toEqual({ ok: null });
+    expect(await restarted.admit(bindOp(ROOT, { folder: notes, nonce: "y".repeat(32) }), never())).toEqual(ALREADY_BOUND);
+    expect(await restarted.admit(bindOp(ROOT, { folder: join(base, "other"), nonce }), never())).toEqual(ALREADY_BOUND);
   });
 
   it("never answers with a message that ends in a full stop", () => {
@@ -318,10 +326,31 @@ describe("a chat's bind operation", () => {
     }
   });
 
+  it("asks the approvals about every other operation before the tool hosts run it", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "ask", boundAt: 1 });
+    const asked: string[] = [];
+    const denying: ApprovalPrompts = {
+      approve: (request) => {
+        asked.push(request.kind);
+        return Promise.resolve("deny");
+      },
+      confirmFreeMode: () => Promise.resolve(false),
+    };
+    const chooser = binder(new User(), { approvalPrompts: denying });
+    const run = {
+      ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "run", invocationId: "1:c", ordinal: 1,
+      args: { command: "ls", workdir: null, timeout: 10 },
+    };
+    expect(await chooser.admit(run, never())).toEqual({
+      error: { type: "sandbox", message: "The user denied this command on this computer" },
+    });
+    expect(asked).toEqual(["command"]);
+  });
+
   it("is the binder's own: every other operation goes to the tool hosts, and so does the end of access", async () => {
     const chooser = binder(new User());
     const op = { ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "resolve", invocationId: "1:c", ordinal: 1 };
-    expect(await chooser.admit(op)).toBeNull();
+    expect(await chooser.admit(op, never())).toBeNull();
     expect(await chooser.run(op, never())).toEqual({ ok: "ran resolve" });
     await chooser.end();
     expect([hosts.ran, hosts.ended]).toEqual([[op], 1]);
@@ -337,14 +366,14 @@ describe("waiting for a chat's binding", () => {
     void chooser.bindSession(ROOT, ready.token, WINDOW).then((binding) => {
       bound = binding;
     });
-    await chooser.admit(bindOp(ROOT, ready));
+    await chooser.admit(bindOp(ROOT, ready), never());
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(bound).toBeNull();
     chooser.acknowledged(`bind-${ROOT}`);
     await vi.waitFor(() => expect(bound).toMatchObject({ root: ROOT, folder: notes }));
     expect(await chooser.bindSession(ROOT, ready.token, WINDOW)).toEqual(bound);
     const later = await confirmed(user, chooser, join(base, "other"));
-    await chooser.admit(bindOp(OTHER, later));
+    await chooser.admit(bindOp(OTHER, later), never());
     chooser.acknowledged(`bind-${OTHER}`);
     expect(await chooser.bindSession(OTHER, later.token, WINDOW)).toMatchObject({ root: OTHER });
   });
@@ -361,7 +390,7 @@ describe("waiting for a chat's binding", () => {
     chooser.acknowledged(`bind-${ROOT}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(bound).toBeNull();
-    await chooser.admit(bindOp(ROOT, ready));
+    await chooser.admit(bindOp(ROOT, ready), never());
     chooser.acknowledged(`bind-${ROOT}`);
     chooser.acknowledged(`bind-${ROOT}`);
     await vi.waitFor(() => expect(bound).toMatchObject({ root: ROOT, folder: notes }));
@@ -371,7 +400,7 @@ describe("waiting for a chat's binding", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser);
-    await chooser.admit(bindOp(ROOT, ready));
+    await chooser.admit(bindOp(ROOT, ready), never());
     chooser.acknowledged(`bind-${ROOT}`);
     await expect(chooser.bindSession(ROOT, ready.token, "window-2")).rejects.toThrow("not confirmed in this window");
     await expect(chooser.bindSession(ROOT, "unknown", WINDOW)).rejects.toThrow("not confirmed in this window");
@@ -382,7 +411,7 @@ describe("waiting for a chat's binding", () => {
     const user = new User();
     const chooser = binder(user);
     const ready = await confirmed(user, chooser);
-    await chooser.admit(bindOp(ROOT, ready));
+    await chooser.admit(bindOp(ROOT, ready), never());
     const waiting = chooser.bindSession(ROOT, ready.token, WINDOW);
     await chooser.end();
     await expect(waiting).rejects.toThrow("This computer's access to the agent ended before its chat's folder was recorded");

@@ -75,12 +75,12 @@ class Client:
 
 async def client(
     built_client: Path, url: str, token: str, journal: Path, *,
-    hold: bool = False, folder: Path | None = None, confirm: Path | None = None,
+    hold: bool = False, folder: Path | None = None, confirm: Path | None = None, ask: str | None = None,
 ) -> Client:
     args = ["node", str(built_client), "--url", url, "--token", token, "--journal", str(journal)]
     process = await asyncio.create_subprocess_exec(
         *args, *(["--hold"] if hold else []), *(["--folder", str(folder)] if folder else []),
-        *(["--confirm", str(confirm)] if confirm else []),
+        *(["--confirm", str(confirm)] if confirm else []), *(["--ask", ask] if ask is not None else []),
         stdout=asyncio.subprocess.PIPE,
     )
     return Client(process)
