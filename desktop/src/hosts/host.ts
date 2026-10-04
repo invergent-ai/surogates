@@ -23,7 +23,7 @@ import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
-import { type SessionRunner, startRunner } from "./session-runner.js";
+import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
@@ -403,13 +403,8 @@ async function stop(code = 0): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
-  // Its background processes go with its sandbox, before the last look. A runner
-  // still starting gets no longer than the commands did: ToolHosts kills a host
-  // that takes too long, and the next one clears up after it.
-  await Promise.race([
-    runner?.then((up) => up.stop(), () => {}),
-    new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
-  ]);
+  // Its background processes go with its sandbox, before the last look.
+  await stopRunner(runner, liveRunner, STOP_COMMANDS_MS);
   // What a stopped command left, before the record can say the host stopped
   // cleanly. A look that could not see the whole folder, or a host killed
   // during it, leaves "running" and the baseline for the next host.

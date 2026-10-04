@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FromRunner, SpawnRequest, ToRunner } from "../src/hosts/messages.js";
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
 import { CANCELLED, type CommandContext, type CommandEnd, runCommand, SANDBOX_STOPPED } from "../src/hosts/run.js";
-import { type RunnerChild, SessionRunner } from "../src/hosts/session-runner.js";
+import { type RunnerChild, SessionRunner, stopRunner } from "../src/hosts/session-runner.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/hosts/runner.js", import.meta.url));
 
@@ -293,5 +293,23 @@ describe("run, in a session runner", { timeout: 20_000 }, () => {
     await until(() => running("^sleep 657$") === 1);
     raw[0]?.kill("SIGKILL");
     expect(await answer).toEqual(SANDBOX_STOPPED);
+  });
+});
+
+describe("stopping a host's runner", () => {
+  it("waits out a runner that is up, however long it takes to go, and gives one still starting its time", async () => {
+    // As one that ignores the end of its stdin: it goes only at its SIGKILL, after the host's own time.
+    let gone = false;
+    const slow = {
+      stop: () => new Promise<void>((resolve) => setTimeout(() => {
+        gone = true;
+        resolve();
+      }, 300)),
+    };
+    await stopRunner(Promise.resolve(slow), slow, 50);
+    expect(gone).toBe(true);
+    const began = Date.now();
+    await stopRunner(new Promise(() => {}), null, 50);
+    expect(Date.now() - began).toBeLessThan(250);
   });
 });

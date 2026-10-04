@@ -177,6 +177,19 @@ export class SessionRunner {
   }
 }
 
+// How the host ends its runner before its last look, which must find the runner
+// gone: one that is up is stopped, and its SIGKILL bounds that. One still starting
+// gets *ms*: ToolHosts kills a host that takes too long, and the next clears up after it.
+export async function stopRunner(
+  starting: Promise<Pick<SessionRunner, "stop">> | null, up: Pick<SessionRunner, "stop"> | null, ms: number,
+): Promise<void> {
+  if (up) return up.stop();
+  await Promise.race([
+    starting?.then((started) => started.stop(), () => {}),
+    new Promise((resolve) => setTimeout(resolve, ms)),
+  ]);
+}
+
 // A root's runner, wrapped with srt from the host's working folder, which is the
 // session folder, and spawned as the host spawns a command: the app-built
 // environment, srt's outer bash without startup files, /tmp/claude hidden.
