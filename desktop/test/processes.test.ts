@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
-import { MAX_PROCESSES, Processes, type ProcessesOptions, RUNNER_GONE, TOO_MANY } from "../src/hosts/processes.js";
-import { CANCELLED } from "../src/hosts/run.js";
+import { MAX_PROCESSES, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY } from "../src/hosts/processes.js";
+import { CANCELLED, type CommandEnd } from "../src/hosts/run.js";
 import { SessionRunner } from "../src/hosts/session-runner.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/hosts/runner.js", import.meta.url));
@@ -39,6 +39,29 @@ function processes(options: Partial<ProcessesOptions> = {}): Processes {
     ...options,
   });
   return registry;
+}
+
+// A runner whose children the test drives: each starts with *pid*, or with none
+// after ending {failed} when *fails* is given.
+function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
+  const spawned: { output(text: string): void; end(end: CommandEnd): void }[] = [];
+  const spawner: Spawner = {
+    spawn() {
+      const outputs: ((chunk: Buffer, err: boolean) => void)[] = [];
+      const ends: ((end: CommandEnd) => void)[] = [];
+      const end = (value: CommandEnd) => { for (const listener of ends) listener(value); };
+      spawned.push({ output: (text) => { for (const listener of outputs) listener(Buffer.from(text), false); }, end });
+      return {
+        started: fails === undefined
+          ? Promise.resolve(pid)
+          : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)),
+        onOutput: (listener) => { outputs.push(listener); },
+        onEnd: (listener) => { ends.push(listener); },
+        kill() {}, signal() {}, write() {},
+      };
+    },
+  };
+  return { runner: async () => spawner, spawned };
 }
 
 const ask = (kind: string, args: Record<string, unknown>, signal = new AbortController().signal) =>
@@ -261,6 +284,12 @@ describe("background processes", { timeout: 20_000 }, () => {
     });
     expect(await answer("nope")).toEqual({ error: { type: "os", code: "ENOENT", message: `No such file or directory: '${base}/nope'` } });
     expect(await answer(null, "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
+    // Popen refuses the NUL before it looks at the cwd.
+    expect(await answer("nope", "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
+    // A refusal quotes the workdir as it came, lone surrogate and all.
+    expect((await answer("/\ud800")).error?.message).toBe(
+      `Blocked: Path traversal blocked: '/\ufffd' resolves to '/\ufffd' which is outside the workspace '${base}'. All commands must run within the workspace directory.`,
+    );
     expect((await answer("/etc", "a\0b")).error?.type).toBe("sandbox");
   });
 
@@ -281,13 +310,58 @@ describe("background processes", { timeout: 20_000 }, () => {
 
   it("marks what ran in a runner that died as ended, with a note", async () => {
     processes();
-    const id = await start("sleep 666");
-    await until(() => running("^sleep 666$") === 1);
-    // Bare, the runner leaves its commands behind when it dies; a sandbox's would go with it.
-    children[0]?.kill("SIGKILL");
-    await until(async () => (await ask("poll", { session_id: id })).ok.status === "exited");
-    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ exit_code: null, note: RUNNER_GONE });
-    expect((await ask("list_processes", { task_id: "t" })).ok[0]).toMatchObject({ status: "exited", note: RUNNER_GONE });
-    spawnSync("pkill", ["-KILL", "-f", "^sleep 666$"]);
+    try {
+      const id = await start("sleep 666");
+      await until(() => running("^sleep 666$") === 1);
+      // Bare, the runner leaves its commands behind when it dies; a sandbox's would go with it.
+      children[0]?.kill("SIGKILL");
+      await until(async () => (await ask("poll", { session_id: id })).ok.status === "exited");
+      expect((await ask("poll", { session_id: id })).ok).toMatchObject({ exit_code: null, note: RUNNER_GONE });
+      expect((await ask("list_processes", { task_id: "t" })).ok[0]).toMatchObject({ status: "exited", note: RUNNER_GONE });
+    } finally {
+      spawnSync("pkill", ["-KILL", "-f", "^sleep 666$"]);
+    }
+  });
+
+  it("reads carriage returns as newlines without a pty, as the cloud's universal newlines do", async () => {
+    processes();
+    const id = await start("printf 'a\\r\\nb\\rc\\n'");
+    expect((await ask("wait", { session_id: id, timeout: 10 })).ok.output).toBe("a\nb\nc\n");
+  });
+
+  it("counts a carriage return and a newline split across two chunks once, and a last one as a newline", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    spawned[0]?.output("a\r");
+    spawned[0]?.output("\nb\r");
+    spawned[0]?.end({ code: 0, signal: null });
+    expect((await ask("wait", { session_id: id, timeout: 10 })).ok.output).toBe("a\nb\n");
+  });
+
+  it(`refuses one of two starts that come together at ${MAX_PROCESSES - 1} running`, async () => {
+    processes({ runner: fake().runner });
+    for (let i = 0; i < MAX_PROCESSES - 1; i += 1) await start("x");
+    const answers = await Promise.all([1, 2].map(() => ask("start", { command: "x", workdir: null, task_id: "t", pty: false })));
+    expect(answers.filter((answer) => answer.error?.message === TOO_MANY)).toHaveLength(1);
+    expect(answers.filter((answer) => answer.ok)).toHaveLength(1);
+  });
+
+  it("keeps a flood of astral characters bounded without trimming at every chunk", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    spawned[0]?.output("😀".repeat(200_000));
+    const begun = Date.now();
+    for (let i = 0; i < 2_000; i += 1) spawned[0]?.output("😀");
+    expect(Date.now() - begun).toBeLessThan(250);
+    expect((await ask("poll", { session_id: id })).ok.output_preview).toBe("😀".repeat(1000));
+  });
+
+  it("answers a command that could not be spawned with its message", async () => {
+    processes({ runner: fake({ fails: "spawn E2BIG" }).runner });
+    expect(await ask("start", { command: "x", workdir: null, task_id: "t", pty: false })).toEqual({
+      error: { type: "other", message: "spawn E2BIG" },
+    });
   });
 });

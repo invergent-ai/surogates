@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { constants as osConstants } from "node:os";
 import { TextDecoder } from "node:util";
 
-import { Failure, osError, sandboxError, valueError } from "../files/answers.js";
+import { Failure, osError, type Refusal, sandboxError, valueError } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import type { SpawnRequest } from "./messages.js";
 import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "./output.js";
@@ -55,21 +55,43 @@ interface Tracked {
   handle: ProcessHandle;
   pid: number | null;
   child: Spawned | null;
-  // Up to twice MAX_OUTPUT_CHARS, cut down to it in bulk; read through output().
+  // Cut down to MAX_OUTPUT_CHARS code points in bulk; read through output().
   buffer: string;
+  // The buffer's length after its last cut: the next comes MAX_OUTPUT_CHARS later.
+  kept: number;
   decoder: TextDecoder;
+  // Without a pty, \r and \r\n read as \n, as the cloud's universal newlines do;
+  // held: a \r that ended a chunk, until the next shows whether \n follows.
+  newlines: boolean;
+  held: boolean;
   exited: boolean;
   exitCode: number | null;
   note: string | null;
   // Stopped by kill: the cloud's -15, however it ended.
   killed: boolean;
   failed: string | null;
-  exit: Promise<void>;
-  settleExit: () => void;
+  // Called once at its end.
+  waiters: Set<() => void>;
 }
 
 const notFound = (id: string) => ({ status: "not_found", error: `No process with ID ${id}` });
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref());
+
+// Resolves at the record's end, after *ms* or at *signal*, whichever comes first,
+// and leaves no timer, listener or waiter behind.
+function settled(record: Tracked, ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (record.exited || signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      record.waiters.delete(done);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms).unref();
+    record.waiters.add(done);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
 const output = (record: Tracked) => lastPoints(record.buffer, MAX_OUTPUT_CHARS);
 const status = (record: Tracked) => (record.exited ? "exited" : "running");
 
@@ -108,11 +130,10 @@ export class Processes {
       const value = await this.dispatch(kind, args, signal);
       return value === CANCELLED ? CANCELLED : { ok: capStrings(value) };
     } catch (error) {
-      return {
-        error: error instanceof Failure
-          ? error.refusal
-          : { type: "other", message: error instanceof Error ? `${error.name}: ${error.message}` : String(error) },
-      };
+      const refusal = error instanceof Failure
+        ? error.refusal
+        : { type: "other", message: error instanceof Error ? `${error.name}: ${error.message}` : String(error) };
+      return { error: capStrings(refusal) as Refusal };
     }
   }
 
@@ -137,11 +158,12 @@ export class Processes {
     const taskId = args.task_id ?? null;
     if (taskId !== null && typeof taskId !== "string") throw valueError("'task_id' must be a string or null");
     // notify_on_complete and watcher_interval are taken and ignored: nothing in the cloud reads them yet.
-    // The cloud resolves the workdir before it sees the NUL.
+    // The cloud resolves the workdir before it sees the NUL, and Popen sees the NUL
+    // before it enters the workdir.
     const cwd = workdir(this.options.context, requested);
+    if (command.includes("\0")) throw valueError("embedded null byte");
     const code = unenterable(cwd);
     if (code) throw osError(code, cwd);
-    if (command.includes("\0")) throw valueError("embedded null byte");
     const refused = await this.options.refusal?.();
     if (refused && "error" in refused) throw new Failure(refused.error);
     this.prune();
@@ -154,9 +176,13 @@ export class Processes {
       throw new Failure({ type: "unavailable", message: `This computer could not start the sandbox for background processes: ${why}` });
     }
     if (signal.aborted) return CANCELLED;
+    // Again: starts that came together each passed the check above before any was counted.
+    this.prune();
+    if (this.running.size >= MAX_PROCESSES) throw sandboxError(TOO_MANY);
+    const pty = args.pty === true;
     const handle: ProcessHandle = { id: `proc_${randomBytes(6).toString("hex")}`, command, cwd, task_id: taskId, started_at: this.now() };
-    const child = runner.spawn({ id: handle.id, command, cwd, env: { PYTHONUNBUFFERED: "1" }, pty: args.pty === true, stdin: true });
-    const record = this.record(handle, child);
+    const child = runner.spawn({ id: handle.id, command, cwd, env: { PYTHONUNBUFFERED: "1" }, pty, stdin: true });
+    const record = this.record(handle, child, pty);
     this.running.set(handle.id, record);
     const pid = await child.started;
     if (pid === null) {
@@ -204,14 +230,7 @@ export class Processes {
     const effective = clamped ? MAX_WAIT_SECONDS : (requested as number | null | undefined) || MAX_WAIT_SECONDS;
     // As the cloud's loop: a wait of no time at all sees nothing, not even an exit.
     if (effective > 0) {
-      let onAbort = () => {};
-      const aborted = new Promise<void>((resolve) => {
-        onAbort = resolve;
-        signal.addEventListener("abort", onAbort, { once: true });
-      });
-      if (signal.aborted) onAbort();
-      await Promise.race([record.exit, sleep(effective * 1000), aborted]);
-      signal.removeEventListener("abort", onAbort);
+      await settled(record, effective * 1000, signal);
       if (signal.aborted) return CANCELLED;
       if (record.exited) {
         return {
@@ -235,10 +254,10 @@ export class Processes {
     if (record.exited) return { status: "already_exited", exit_code: record.exitCode };
     record.killed = true;
     record.child?.signal("SIGTERM");
-    const ended = () => Promise.race([record.exit.then(() => true), sleep(KILL_GRACE_MS).then(() => false)]);
-    if (!(await ended())) {
+    await settled(record, KILL_GRACE_MS);
+    if (!record.exited) {
       record.child?.signal("SIGKILL");
-      await ended();
+      await settled(record, KILL_GRACE_MS);
     }
     // A runner that does not answer still leaves the record ended, as the cloud's does.
     this.end(record, { code: null, signal: "SIGTERM" });
@@ -269,14 +288,10 @@ export class Processes {
       }));
   }
 
-  private record(handle: ProcessHandle, child: Spawned | null): Tracked {
-    let settleExit = () => {};
-    const exit = new Promise<void>((resolve) => {
-      settleExit = resolve;
-    });
+  private record(handle: ProcessHandle, child: Spawned | null, pty = false): Tracked {
     const record: Tracked = {
-      handle, pid: null, child, buffer: "", decoder: new TextDecoder("utf-8", { ignoreBOM: true }),
-      exited: false, exitCode: null, note: null, killed: false, failed: null, exit, settleExit,
+      handle, pid: null, child, buffer: "", kept: 0, decoder: new TextDecoder("utf-8", { ignoreBOM: true }),
+      newlines: !pty, held: false, exited: false, exitCode: null, note: null, killed: false, failed: null, waiters: new Set(),
     };
     if (child) {
       void child.started.then((pid) => {
@@ -288,9 +303,20 @@ export class Processes {
     return record;
   }
 
-  private push(record: Tracked, text: string): void {
+  // last: the end of its output, where a held \r is a newline.
+  private push(record: Tracked, text: string, last = false): void {
+    if (record.newlines) {
+      if (record.held) text = `\r${text}`;
+      record.held = !last && text.endsWith("\r");
+      if (record.held) text = text.slice(0, -1);
+      text = text.replace(/\r\n?/g, "\n");
+    }
     record.buffer += text;
-    if (record.buffer.length > 2 * MAX_OUTPUT_CHARS) record.buffer = lastPoints(record.buffer, MAX_OUTPUT_CHARS);
+    // Measured from the last cut, so astral output, two units a code point, is cut as seldom.
+    if (record.buffer.length > record.kept + MAX_OUTPUT_CHARS) {
+      record.buffer = lastPoints(record.buffer, MAX_OUTPUT_CHARS);
+      record.kept = record.buffer.length;
+    }
   }
 
   // Once: its exit code (128 + N for a signal, as a shell says; -15 after kill),
@@ -298,7 +324,7 @@ export class Processes {
   private end(record: Tracked, end: CommandEnd): void {
     if (record.exited) return;
     if ("failed" in end) record.failed = end.failed;
-    this.push(record, record.decoder.decode());
+    this.push(record, record.decoder.decode(), true);
     record.exited = true;
     record.child = null;
     if (record.killed) record.exitCode = -15;
@@ -306,7 +332,7 @@ export class Processes {
     else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
-    record.settleExit();
+    for (const waiter of record.waiters) waiter();
   }
 
   // _prune_if_needed: finished records older than the TTL, from their start; then,
