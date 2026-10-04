@@ -10,6 +10,7 @@ import {
 import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
+import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { ToolHosts } from "../src/hosts/tool-hosts.js";
 import type { Mode } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -239,9 +240,10 @@ describe("a chat that asks every time", () => {
     expect(await asking.admit(op("write_stdin", { session_id: "p", data: "y" }), never())).toEqual(INPUT_DENIED);
   });
 
-  it("lets an operation for a chat this computer did not bind go on to its host, which refuses it", async () => {
+  it("answers what would ask, for a chat this computer did not bind, as its host would, and asks nothing", async () => {
     user.auto = "deny";
-    expect(await approvals.admit(op("run", RUN, OTHER), never())).toBeNull();
+    expect(await approvals.admit(op("run", RUN, OTHER), never())).toEqual(FOLDER_UNAVAILABLE);
+    expect(await approvals.admit(op("read", { key: `${FOLDER}/a.txt` }, OTHER), never())).toBeNull();
     expect(user.asked).toEqual([]);
   });
 });
@@ -287,22 +289,26 @@ describe("approvals over the link", () => {
   let devices: Array<{ link: DeviceLink; runner: OperationRunner }>;
   let ran: Operation[];
 
-  // The tool hosts, as far as the binder sees them.
+  // The tool hosts, as far as the binder sees them: as ToolHosts does, they look the
+  // chat's folder up in the bindings when the operation runs.
   const hosts: Executor = {
     run: (operation) => {
+      if (!journal.bindings.get(operation.sessionId)) return Promise.resolve(FOLDER_UNAVAILABLE);
       ran.push(operation);
       return Promise.resolve({ ok: `ran ${operation.kind}` });
     },
   };
-  // No folder is prepared here: every chat is bound already.
+  // No folder is prepared, unless a test says so: every chat is bound already.
   const noFolders: FolderPrompts = { confirmFolder: () => Promise.resolve(null), pickFolder: () => Promise.resolve(null) };
 
   // The device as the app wires it: the binder, asking the approvals, in front of the tool hosts.
-  async function connect(prompts: User, tools: Executor = hosts): Promise<{ link: DeviceLink; runner: OperationRunner }> {
-    const binder = new Binder({
-      bindings: journal.bindings, prompts: noFolders, guards: { home: base, dataDir: join(base, "data"), appDirs: [] },
-      agent: "Research assistant", hosts: tools, approvalPrompts: prompts,
-    });
+  const binderFor = (prompts: User, tools: Executor = hosts, folders = noFolders) => new Binder({
+    bindings: journal.bindings, prompts: folders, guards: { home: base, dataDir: join(base, "data"), appDirs: [] },
+    agent: "Research assistant", hosts: tools, approvalPrompts: prompts,
+  });
+
+  async function connect(prompts: User | Binder, tools: Executor = hosts): Promise<{ link: DeviceLink; runner: OperationRunner }> {
+    const binder = prompts instanceof Binder ? prompts : binderFor(prompts, tools);
     const device = connectDevice({ url, token: "surg_dev_test", journal, executor: binder, onError: () => {}, delay: () => 20 });
     devices.push(device);
     device.link.start();
@@ -367,6 +373,30 @@ describe("approvals over the link", () => {
     await server.until(() => results(after.id).length === 1);
     expect(results(after.id)[0]?.outcome).toEqual(COMMAND_DENIED);
     expect([results(stopped.id), ran, journal.openIds()]).toEqual([[], [], []]);
+  });
+
+  it("answers a command that comes just before its chat's bind folder_unavailable, and never runs it", async () => {
+    const notes = join(base, "notes");
+    mkdirSync(notes);
+    const binder = binderFor(user, hosts, {
+      pickFolder: () => Promise.resolve(notes),
+      confirmFolder: () => Promise.resolve({ mode: "ask" }),
+    });
+    const ready = await binder.prepareFolder("pick", "window-1", never());
+    if (!ready) throw new Error("the folder was not confirmed");
+    const run = op("run", RUN);
+    const bindChat: Operation = {
+      id: "bind-1", sessionId: ROOT, callingSessionId: ROOT, invocationId: "bind", ordinal: 0, kind: "bind",
+      args: { folder: ready.folder, nonce: ready.nonce }, digest: "b",
+    };
+    // One burst: ws hands the app both frames in one tick, the chat's bind behind the command.
+    server.behindWelcome = [frame(run), frame(bindChat)];
+    await connect(binder);
+    await server.until(() => results(run.id).length === 1 && results(bindChat.id).length === 1);
+    expect(results(run.id)[0]?.outcome).toEqual(FOLDER_UNAVAILABLE);
+    expect(results(bindChat.id)[0]?.outcome).toEqual({ ok: null });
+    expect([ran, user.asked]).toEqual([[], []]);
+    expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
   });
 
   it("gives a command its whole timeout once it is allowed, however long its prompt was open", { timeout: 30_000 }, async () => {

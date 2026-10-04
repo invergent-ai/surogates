@@ -8,6 +8,7 @@
 // a chat to Ask every time, and Work freely needs the desktop's own confirmation,
 // or "Stop asking" on one of its prompts.
 
+import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
@@ -103,6 +104,9 @@ export class Approvals {
    * and its open prompt is dismissed.
    */
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    // Fail closed: the tool hosts read the binding again only when it runs, so a bind
+    // arriving meanwhile must not let it run unasked.
+    if (ASKED.has(operation.kind) && !this.options.bindings.get(operation.sessionId)) return FOLDER_UNAVAILABLE;
     if (!this.asking(operation)) return null;
     const root = operation.sessionId;
     const before = this.lines.get(root) ?? Promise.resolve();
@@ -154,8 +158,7 @@ export class Approvals {
     return true;
   }
 
-  // The chat's binding, when this operation must be asked about now. An operation for
-  // a chat this computer did not bind goes on to its host, which answers folder_unavailable.
+  // The chat's binding, when this operation must be asked about now.
   private asking(operation: Operation): Binding | undefined {
     if (!ASKED.has(operation.kind)) return undefined;
     const binding = this.options.bindings.get(operation.sessionId);
