@@ -45,7 +45,7 @@ createInterface({ input: runner.stdout }).on("line", (line) => {
   process.stdout.write(line + "\\n");
   const message = JSON.parse(line);
   if (message.type === "started") {
-    for (const bad of [null, 42, { type: "bogus", id: message.id }, { type: "exit", id: 7, code: 1, signal: null }]) {
+    for (const bad of [null, 42, { type: "bogus", id: message.id }, { type: "exit", id: 7, code: 1, signal: null }, { type: "data", id: message.id, data: 42 }]) {
       process.stdout.write(JSON.stringify(bad) + "\\n");
     }
   }

@@ -53,7 +53,7 @@ export class RunnerChild implements CommandChild {
     if (message.type === "started") {
       this.pid = message.pid;
       this.settleStarted(message.pid);
-    } else if (message.type === "data") {
+    } else if (message.type === "data" && typeof message.data === "string") {
       this.output(Buffer.from(message.data, "base64"), message.err === true);
     } else if (message.type === "exit") {
       this.finish({ code: message.code, signal: message.signal });
