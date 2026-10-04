@@ -34,8 +34,9 @@ export interface GuardOptions {
   // Every folder a command can write: a hook linked into one is a command's to change.
   writable?: readonly string[];
   timeoutMs?: number;
-  // Told the protected keys of every look that finished, and when it started (performance.now()).
-  seen?: (keys: ReadonlySet<string>, startedAt: number) => void;
+  // Told the protected keys of every look that finished, when it started (performance.now()),
+  // and whether it was a look between commands.
+  seen?: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
 }
 
 // A key under a hooks folder inside a .git folder, at any depth and in any case.
@@ -178,7 +179,7 @@ export class HookGuard {
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
   private readonly timeoutMs: number;
-  private readonly seen: (keys: ReadonlySet<string>, startedAt: number) => void;
+  private readonly seen: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
 
   constructor(private readonly folder: string, options: GuardOptions = {}) {
     this.baseline = options.inherited ?? null;
@@ -215,7 +216,7 @@ export class HookGuard {
   // hook at any time. What it stops is told with the next command's output.
   async watch(): Promise<void> {
     await this.first;
-    for (const key of (await this.check()).changed) this.unreported.add(key);
+    for (const key of (await this.check(true)).changed) this.unreported.add(key);
   }
 
   // The last look, when the host stops: what a stopped command left. False when
@@ -230,9 +231,9 @@ export class HookGuard {
   // One look, numbered. Only the newest says whether commands may run: an older
   // one may have seen the folder before the newest did. Its own verdict goes back
   // to the caller either way.
-  private async check(): Promise<{ changed: string[]; blocked: string | null }> {
+  private async check(between = false): Promise<{ changed: string[]; blocked: string | null }> {
     const mine = ++this.looks;
-    const verdict = await this.look();
+    const verdict = await this.look(between);
     if (mine === this.looks) this.blocked = verdict.blocked;
     return verdict;
   }
@@ -240,7 +241,7 @@ export class HookGuard {
   // The first look that sees the whole folder sets the baseline, which is
   // recorded before any command runs; every look makes what is not in it unable
   // to run, as far as it can see. What it changed, and why commands may not run, or null.
-  private async look(): Promise<{ changed: string[]; blocked: string | null }> {
+  private async look(between: boolean): Promise<{ changed: string[]; blocked: string | null }> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
@@ -250,7 +251,7 @@ export class HookGuard {
     clearTimeout(timer);
     let untold: string | null = null;
     try {
-      if (scan) this.seen(scan.protectedKeys, startedAt);
+      if (scan) this.seen(scan.protectedKeys, startedAt, between);
     } catch (error) {
       untold = `Blocked: the computer could not check this folder's protected paths, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`;
     }

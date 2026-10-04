@@ -179,7 +179,7 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
       .toBe(`${HOOKS_NOTICE}sub/.git/hooks/pre-commit\n${restartNotice(appeared("sub/.git/config"))}`);
   });
 
-  it("watches a process started while the last timed look runs", { timeout: 90_000 }, async () => {
+  it("keeps looking while the runner lives, and stops a hook a process started after a timed look writes in a new repository", { timeout: 90_000 }, async () => {
     // 100 000 hooks that cannot run, there before the host: each look over them takes seconds,
     // and the runner, wrapped after them, restarts for none of them.
     mkdirSync(join(folder, "many", ".git", "hooks"), { recursive: true });
