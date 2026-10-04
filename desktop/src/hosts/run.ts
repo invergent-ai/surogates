@@ -29,6 +29,19 @@ const HOME_ALIASES = new Set(["$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORK
 const MAX_TIMER_MS = 2 ** 31 - 1;
 export const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
 
+// How a command ended: it exited, it never started, or the sandbox it ran in went first.
+export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null } | { failed: string } | { lost: true };
+
+// What run needs of a running command, in a sandbox of its own or in the session runner.
+export interface CommandChild {
+  // Each chunk of its output, as it comes; err: from its stderr.
+  onOutput(listener: (chunk: Buffer, err: boolean) => void): void;
+  // Once: after all its output, or at once after kill.
+  onEnd(listener: (end: CommandEnd) => void): void;
+  // Ends it and everything it started.
+  kill(): void;
+}
+
 const ran = (output: string, returncode: number, timed_out = false): Outcome => ({ ok: { output, returncode, timed_out } });
 const describe = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
