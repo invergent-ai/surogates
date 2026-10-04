@@ -9,7 +9,8 @@ import { BOOT_ID } from "../src/binding/folder.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type ToHost } from "../src/hosts/messages.js";
 import {
-  CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts, type ToolHostsOptions,
+  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
@@ -459,6 +460,17 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(fakes[0]?.sent[0]).toMatchObject({
       type: "start", folder: folders[ROOT_A], expect: identities.get(folders[ROOT_A] ?? ""),
     });
+  });
+
+  it("gives the binder the folder guards its hosts start with, and none without a HOME", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering), appDirs: [join(base, "app")] });
+    await executor.run(resolve(), signal());
+    const start = fakes[0]?.sent[0];
+    expect(start?.type).toBe("start");
+    if (start?.type !== "start") return;
+    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, appDirs: start.appDirs });
+    expect(toolHosts().guards().appDirs).toEqual(APP_DIRS);
+    expect(() => toolHosts({ env: { PATH: "/usr/bin:/bin" } }).guards()).toThrow("the app's environment has no HOME");
   });
 
   it("looks up no folder for an ill-formed session id", async () => {

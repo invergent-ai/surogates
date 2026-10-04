@@ -6,6 +6,7 @@ import { fork } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { FolderGuards } from "../binding/folder.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
@@ -127,6 +128,14 @@ export class ToolHosts implements Executor {
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
     return this.hostFor(operation.sessionId, binding).run(operation, signal);
+  }
+
+  // The guards each host checks its folder against: the binder's must be these, or the
+  // sheet could accept a folder every host refuses. Without a HOME, as a host would, it throws.
+  guards(): FolderGuards {
+    const home = this.options.env.HOME;
+    if (!home) throw new Error("the app's environment has no HOME");
+    return { home, dataDir: this.options.dataDir, appDirs: this.options.appDirs ?? APP_DIRS };
   }
 
   stop(): Promise<void> {

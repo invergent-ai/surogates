@@ -12,7 +12,6 @@
 // the file only after it quits.
 
 import { statSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -20,7 +19,7 @@ import { Binder } from "../binding/binder.js";
 import { BOOT_ID } from "../binding/folder.js";
 import { connectDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
-import { APP_DIRS, ToolHosts } from "../hosts/tool-hosts.js";
+import { ToolHosts } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 
@@ -71,7 +70,7 @@ const binder = confirm && hosts
         return Promise.resolve(sheet.refusal === null ? { mode: sheet.mode } : null);
       },
     },
-    guards: { home: env.HOME ?? homedir(), dataDir, appDirs: APP_DIRS },
+    guards: hosts.guards(),
     agent: "the cross-check",
     hosts,
   })
