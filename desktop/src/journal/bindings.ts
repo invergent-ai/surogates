@@ -18,20 +18,23 @@ export interface Binding {
   boundAt: number;
 }
 
+// Read as bigints: node:sqlite throws on an INTEGER above 2^53, and SMB/CIFS and
+// overlayfs give inode numbers that large. Each began as a JS number, so Number()
+// gives it back exactly.
 interface Row {
   root: string;
   nonce: string;
   folder: string;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
   mode: string;
-  bound_at: number;
+  bound_at: bigint;
 }
 
 const read = (row: Row | undefined): Binding | undefined =>
   row && {
-    root: row.root, nonce: row.nonce, folder: row.folder, dev: row.dev, ino: row.ino,
-    mode: row.mode as Mode, boundAt: row.bound_at,
+    root: row.root, nonce: row.nonce, folder: row.folder, dev: Number(row.dev), ino: Number(row.ino),
+    mode: row.mode as Mode, boundAt: Number(row.bound_at),
   };
 
 export class Bindings {
@@ -45,11 +48,15 @@ export class Bindings {
   }
 
   get(root: string): Binding | undefined {
-    return read(this.db.prepare(`SELECT * FROM bindings WHERE root = ?`).get(root) as Row | undefined);
+    const select = this.db.prepare(`SELECT * FROM bindings WHERE root = ?`);
+    select.setReadBigInts(true);
+    return read(select.get(root) as Row | undefined);
   }
 
   /** The latest binding: a new chat's folder, unless the user picks another. */
   last(): Binding | undefined {
-    return read(this.db.prepare(`SELECT * FROM bindings ORDER BY bound_at DESC, rowid DESC LIMIT 1`).get() as Row | undefined);
+    const select = this.db.prepare(`SELECT * FROM bindings ORDER BY bound_at DESC, rowid DESC LIMIT 1`);
+    select.setReadBigInts(true);
+    return read(select.get() as Row | undefined);
   }
 }

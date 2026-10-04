@@ -242,6 +242,14 @@ describe("an operation answered before it started", () => {
     expect(journal.start("a")).toBe(false);
     expect(journal.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: null } });
     journal.close();
+    const after = new OperationJournal(path);
+    expect(after.recovered).toBe(0);
+    expect(after.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome: { ok: null } }]);
+    after.acknowledge("a");
+    expect(after.unsent()).toEqual([]);
+    expect(after.answer("a", { ok: 2 })).toBe(false);
+    expect(after.receive(operation("a"))).toEqual({ action: "reply", outcome: { ok: null } });
+    after.close();
   });
 
   it("is not answered once it was cancelled, started or finished, nor when unknown", () => {
@@ -281,6 +289,15 @@ describe("the bindings", () => {
     journal.bindings.add(binding("r1", 1));
     expect(() => journal.bindings.add({ ...binding("r1", 2), folder: "/elsewhere" })).toThrow();
     expect(journal.bindings.get("r1")?.folder).toBe("/home/me/r1");
+    journal.close();
+  });
+
+  it("read back a folder whose device and inode numbers are past 2^53", () => {
+    const journal = new OperationJournal(path);
+    const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };
+    journal.bindings.add(large);
+    expect(journal.bindings.get("r1")).toEqual(large);
+    expect(journal.bindings.last()).toEqual(large);
     journal.close();
   });
 });
