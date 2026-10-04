@@ -9,6 +9,7 @@ import { access, constants, lstat, open, readdir, readlink, realpath, stat } fro
 import { dirname, join, relative } from "node:path";
 
 import { inside } from "../files/paths.js";
+import { protectedInFolder } from "../files/protect.js";
 import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
@@ -20,6 +21,9 @@ export interface HookScan {
   hooks: Map<string, string>;
   // Folders that could not be read where a command could have hidden a hook.
   unreadable: string[];
+  // Every entry under one of the folder's protected names (protectedInFolder),
+  // files and folders alike, but not a .git folder itself: a .git file is one.
+  protectedKeys: Set<string>;
 }
 
 export interface GuardOptions {
@@ -30,6 +34,9 @@ export interface GuardOptions {
   // Every folder a command can write: a hook linked into one is a command's to change.
   writable?: readonly string[];
   timeoutMs?: number;
+  // Told the protected keys of every look that finished, when it started (performance.now()),
+  // and whether it was a look between commands.
+  seen?: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
 }
 
 // A key under a hooks folder inside a .git folder, at any depth and in any case.
@@ -42,7 +49,7 @@ export function isGitHook(folder: string, key: string): boolean {
 }
 
 // Folder-relative names, sorted, at most MAX_LISTED of them.
-function listed(folder: string, paths: readonly string[]): string {
+export function listed(folder: string, paths: readonly string[]): string {
   const names = paths.map((path) => relative(folder, path)).sort();
   return names.length > MAX_LISTED
     ? `${names.slice(0, MAX_LISTED).join(", ")} and ${names.length - MAX_LISTED} more`
@@ -66,7 +73,7 @@ async function describe(path: string): Promise<string | null> {
 // Never rejects. Linked folders are not followed; node_modules and git's object
 // stores are skipped: they are large, and git runs no hook from them.
 export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1): Promise<HookScan> {
-  const scan: HookScan = { hooks: new Map(), unreadable: [] };
+  const scan: HookScan = { hooks: new Map(), unreadable: [], protectedKeys: new Set() };
   const walk = async (dir: string, inGit: boolean): Promise<void> => {
     let entries;
     try {
@@ -89,7 +96,13 @@ export async function scanHooks(folder: string, uid = process.getuid?.() ?? -1):
     const gitFolder = inGit && entries.some((entry) => entry.name === "HEAD");
     await Promise.all(entries.map(async (entry) => {
       const path = join(dir, entry.name);
+      // A name that is not valid UTF-8 reads back with U+FFFD, and no path reaches it.
+      if (entry.name.includes("\uFFFD")) {
+        scan.unreadable.push(path);
+        return;
+      }
       const name = entry.name.toLowerCase();
+      if (!(entry.isDirectory() && name === ".git") && protectedInFolder(folder, path)) scan.protectedKeys.add(path);
       if (entry.isDirectory()) {
         const store = gitFolder && name === "objects"
           && await lstat(join(path, "HEAD")).then(() => false, (error: NodeJS.ErrnoException) => error.code === "ENOENT");
@@ -171,12 +184,14 @@ export class HookGuard {
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
   private readonly timeoutMs: number;
+  private readonly seen: (keys: ReadonlySet<string>, startedAt: number, between: boolean) => void;
 
   constructor(private readonly folder: string, options: GuardOptions = {}) {
     this.baseline = options.inherited ?? null;
     this.known = options.known ?? (() => {});
     this.writable = options.writable ?? [folder];
     this.timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
+    this.seen = options.seen ?? (() => {});
     // The first look starts at once, while srt starts. After a crash it also
     // catches what the killed host's commands left.
     this.first = this.check();
@@ -202,11 +217,11 @@ export class HookGuard {
     return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${HOOKS_NOTICE}${listed(this.folder, told)}` } };
   }
 
-  // A look between commands, while background processes run: one may write a
-  // hook at any time. What it stops is told with the next command's output.
+  // A look between commands, while background processes or an idle runner live: one
+  // may write a hook at any time. What it stops is told with the next command's output.
   async watch(): Promise<void> {
     await this.first;
-    for (const key of (await this.check()).changed) this.unreported.add(key);
+    for (const key of (await this.check(true)).changed) this.unreported.add(key);
   }
 
   // The last look, when the host stops: what a stopped command left. False when
@@ -221,9 +236,9 @@ export class HookGuard {
   // One look, numbered. Only the newest says whether commands may run: an older
   // one may have seen the folder before the newest did. Its own verdict goes back
   // to the caller either way.
-  private async check(): Promise<{ changed: string[]; blocked: string | null }> {
+  private async check(between = false): Promise<{ changed: string[]; blocked: string | null }> {
     const mine = ++this.looks;
-    const verdict = await this.look();
+    const verdict = await this.look(between);
     if (mine === this.looks) this.blocked = verdict.blocked;
     return verdict;
   }
@@ -231,19 +246,26 @@ export class HookGuard {
   // The first look that sees the whole folder sets the baseline, which is
   // recorded before any command runs; every look makes what is not in it unable
   // to run, as far as it can see. What it changed, and why commands may not run, or null.
-  private async look(): Promise<{ changed: string[]; blocked: string | null }> {
+  private async look(between: boolean): Promise<{ changed: string[]; blocked: string | null }> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), this.timeoutMs);
     });
+    const startedAt = performance.now();
     const scan = await Promise.race([scanHooks(this.folder), late]);
     clearTimeout(timer);
+    let untold: string | null = null;
+    try {
+      if (scan) this.seen(scan.protectedKeys, startedAt, between);
+    } catch (error) {
+      untold = `Blocked: the computer could not check this folder's protected paths, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`;
+    }
     const unseen = !scan
       ? `Blocked: the computer could not look through this folder for git hooks within ${this.timeoutMs / 1000} seconds, so commands cannot run here.`
       : scan.unreadable.length > 0
         ? `Blocked: the computer cannot read ${listed(this.folder, scan.unreadable)} in this folder, so it cannot check there for git hooks, which would run outside the sandbox. Make it readable to run commands here.`
         : null;
-    if (!scan || (unseen && !this.baseline)) return { changed: [], blocked: unseen };
+    if (!scan || (unseen && !this.baseline)) return { changed: [], blocked: [unseen, untold].filter(Boolean).join(" ") || null };
     this.baseline ??= scan.hooks;
     if (!this.recorded) {
       try {
@@ -252,7 +274,10 @@ export class HookGuard {
       } catch (error) {
         return {
           changed: [],
-          blocked: `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
+          blocked: [
+            `Blocked: the computer could not record this folder's state, so commands cannot run here: ${error instanceof Error ? error.message : String(error)}`,
+            untold,
+          ].filter(Boolean).join(" "),
         };
       }
     }
@@ -260,6 +285,6 @@ export class HookGuard {
     const unstopped = stuck.length > 0
       ? `Blocked: the computer could not stop these git hooks from running outside the sandbox: ${listed(this.folder, stuck)}. Remove them or make them non-executable to run commands here.`
       : null;
-    return { changed, blocked: [unstopped, unseen].filter(Boolean).join(" ") || null };
+    return { changed, blocked: [unstopped, unseen, untold].filter(Boolean).join(" ") || null };
   }
 }

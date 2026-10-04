@@ -6,10 +6,11 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
+import { OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
 import {
-  APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY,
+  APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RESTARTED, RUNNER_GONE, type Spawner, TOO_MANY,
+  restartNotice,
 } from "../src/hosts/processes.js";
 import { CANCELLED, type CommandEnd } from "../src/hosts/run.js";
 import { SessionRunner } from "../src/hosts/session-runner.js";
@@ -43,9 +44,9 @@ function processes(options: Partial<ProcessesOptions> = {}): Processes {
   return registry;
 }
 
-// A runner whose children the test drives: each starts with *pid*, or with none
-// after ending {failed} when *fails* is given.
-function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
+// A runner whose children the test drives: each starts with *pid*, once *held*
+// resolves, or with none after ending {failed} when *fails* is given.
+function fake({ pid = 7, fails, held }: { pid?: number; fails?: string; held?: Promise<void> } = {}) {
   const spawned: { output(text: string): void; end(end: CommandEnd): void }[] = [];
   const spawner: Spawner = {
     spawn() {
@@ -54,9 +55,9 @@ function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
       const end = (value: CommandEnd) => { for (const listener of ends) listener(value); };
       spawned.push({ output: (text) => { for (const listener of outputs) listener(Buffer.from(text), false); }, end });
       return {
-        started: fails === undefined
-          ? Promise.resolve(pid)
-          : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)),
+        started: (held ?? Promise.resolve()).then(() => (fails === undefined
+          ? pid
+          : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)))),
         onOutput: (listener) => { outputs.push(listener); },
         onEnd: (listener) => { ends.push(listener); },
         kill() {}, signal() {}, write: async () => null,
@@ -323,6 +324,13 @@ describe("background processes", { timeout: 20_000 }, () => {
     });
   });
 
+  it("answers the sandbox's own refusal to start a runner as it is", async () => {
+    processes({ runner: async () => { throw sandboxError("Blocked: too many protected paths"); } });
+    expect(await ask("start", { command: "true", workdir: null, task_id: "t", pty: false })).toEqual({
+      error: { type: "sandbox", message: "Blocked: too many protected paths" },
+    });
+  });
+
   it("marks what ran in a runner that died as ended, with a note", async () => {
     processes();
     try {
@@ -373,11 +381,168 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect((await ask("poll", { session_id: id })).ok.output_preview).toBe("😀".repeat(1000));
   });
 
+  it("answers a start cancelled while it waits for the runner at once", async () => {
+    processes({ runner: () => new Promise(() => {}) });
+    const controller = new AbortController();
+    const starting = ask("start", { command: "x", workdir: null, task_id: "t", pty: false }, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    expect(await starting).toEqual(CANCELLED);
+  });
+
   it("answers a command that could not be spawned with its message", async () => {
     processes({ runner: fake({ fails: "spawn E2BIG" }).runner });
     expect(await ask("start", { command: "x", workdir: null, task_id: "t", pty: false })).toEqual({
       error: { type: "other", message: "spawn E2BIG" },
     });
+  });
+});
+
+describe("a runner restart", () => {
+  const notice = restartNotice("a folder grant changed");
+
+  it("ends every live process with a note of its own, however it goes, and keeps it for the next host", async () => {
+    const { runner: driven, spawned } = fake();
+    const saves: ProcessHandle[][] = [];
+    processes({ runner: driven, save: (handles) => saves.push(handles) });
+    const first = await start("x");
+    const second = await start("y");
+    registry.restart("a folder grant changed");
+    spawned[0]?.end({ lost: true });
+    spawned[1]?.end({ code: null, signal: "SIGKILL" });
+    for (const id of [first, second]) {
+      expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
+    }
+    await Promise.resolve();
+    expect(saves.at(-1)?.map((handle) => handle.ended?.note)).toEqual([RESTARTED, RESTARTED]);
+  });
+
+  it("tells the next answer that has no note of its own, once", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    registry.restart("a folder grant changed");
+    spawned[0]?.end({ lost: true });
+    // The process's own note says it was restarted: the notice waits.
+    expect((await ask("wait", { session_id: id, timeout: 5 })).ok.note).toBe(RESTARTED);
+    expect((await ask("kill", { session_id: id })).ok).toEqual({ status: "already_exited", exit_code: null, note: notice });
+    expect((await ask("kill", { session_id: id })).ok).toEqual({ status: "already_exited", exit_code: null });
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("puts the notice on each process the restart ended in a list, once", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const done = await start("done");
+    spawned[0]?.end({ code: 0, signal: null });
+    const live = await start("live");
+    registry.restart("a folder grant changed");
+    spawned[1]?.end({ lost: true });
+    const listed = (await ask("list_processes", { task_id: "t" })).ok as Array<{ session_id: string; note?: string }>;
+    expect(listed.map((entry) => [entry.session_id, entry.note])).toEqual([[done, undefined], [live, notice]]);
+    const again = (await ask("list_processes", { task_id: "t" })).ok as Array<{ session_id: string; note?: string }>;
+    expect(again.map((entry) => entry.note)).toEqual([undefined, RESTARTED]);
+  });
+
+  it("gives the notice to a run's output once, and never to a start", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    await start("x");
+    registry.restart("a folder grant changed");
+    // Not before the process has ended.
+    expect(registry.takeNotice()).toBeNull();
+    spawned[0]?.end({ lost: true });
+    expect(Object.keys((await ask("start", { command: "y", workdir: null, task_id: "t", pty: false })).ok).sort()).toEqual(["pid", "session_id"]);
+    expect(registry.takeNotice()).toBe(notice);
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("tells two restarts the agent has not heard of yet once, with the later reason, on every process they ended", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const first = await start("x");
+    registry.restart("a folder grant changed");
+    spawned[0]?.end({ lost: true });
+    const second = await start("y");
+    registry.restart("a protected file appeared in the folder (.git/config)");
+    spawned[1]?.end({ lost: true });
+    const later = restartNotice("a protected file appeared in the folder (.git/config)");
+    const listed = (await ask("list_processes", { task_id: "t" })).ok as Array<{ session_id: string; note?: string }>;
+    expect(listed.map((entry) => [entry.session_id, entry.note])).toEqual([[first, later], [second, later]]);
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("ends a process still spawning when it flags, with the notice", async () => {
+    let release = () => {};
+    const { runner: driven, spawned } = fake({ held: new Promise((resolve) => { release = resolve; }) });
+    processes({ runner: driven });
+    const starting = start("x");
+    await until(() => spawned.length === 1);
+    registry.restart("a folder grant changed");
+    release();
+    const id = await starting;
+    expect(id).toBeDefined();
+    spawned[0]?.end({ lost: true });
+    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
+    expect(registry.takeNotice()).toBe(notice);
+  });
+
+  it("raises the notice for a process that ended before the registry knew its pid", async () => {
+    let release = () => {};
+    const { runner: driven, spawned } = fake({ held: new Promise((resolve) => { release = resolve; }) });
+    processes({ runner: driven });
+    const starting = start("x");
+    await until(() => spawned.length === 1);
+    registry.restart("a folder grant changed");
+    // Its start and its end in one chunk from the runner: the end comes before the pid is read.
+    release();
+    spawned[0]?.end({ lost: true });
+    expect(await starting).toBeDefined();
+    expect(registry.takeNotice()).toBe(notice);
+  });
+
+  it("raises no notice for a start that fails after it flags", async () => {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const { runner: driven, spawned } = fake({ fails: "no shell", held });
+    processes({ runner: driven });
+    const starting = ask("start", { command: "x", workdir: null, task_id: "t", pty: false });
+    await until(() => spawned.length === 1);
+    registry.restart("a folder grant changed");
+    release();
+    expect((await starting).error).toEqual({ type: "other", message: "no shell" });
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("puts the notice on a poll for a process it does not know", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    await start("x");
+    registry.restart("a folder grant changed");
+    spawned[0]?.end({ lost: true });
+    expect((await ask("poll", { session_id: "proc_none" })).ok).toEqual({ status: "not_found", error: "No process with ID proc_none", note: notice });
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("ends a process killed while it restarts with no exit code", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    registry.restart("a folder grant changed");
+    const killing = ask("kill", { session_id: id });
+    spawned[0]?.end({ code: null, signal: "SIGTERM" });
+    expect((await killing).ok).toEqual({ status: "killed", session_id: id, note: notice });
+    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
+  });
+
+  it("is silent when no process was live", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    spawned[0]?.end({ code: 0, signal: null });
+    registry.restart("a folder grant changed");
+    expect((await ask("poll", { session_id: id })).ok).not.toHaveProperty("note");
+    expect(registry.takeNotice()).toBeNull();
   });
 });
 

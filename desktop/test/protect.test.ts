@@ -144,7 +144,10 @@ const GIT_RUNS_CODE = [
   ".git/commondir", ".git/config.worktree", ".git/config",
   ".git/modules/sub/config", ".git/modules/sub/hooks/pre-commit", ".git/modules/sub/hooks",
   ".git/worktrees/w/config.worktree", ".git/worktrees/w/commondir", ".git/worktrees/w/anything", ".git/worktrees",
-  ".git/modules/a/modules/b/config",
+  ".git/modules/a/modules/b/config", ".git/hooks/pre-commit", ".git/modules/a/hooks/x", ".git/worktrees/w/config",
+  // A submodule's name can hold slashes, and its git folder has worktrees and paused state of its own.
+  ".git/modules/libs/foo/config", ".git/modules/libs/foo/hooks/pre-commit", ".git/modules/sub/worktrees/w/config",
+  ".git/modules/sub/worktrees/w/commondir", ".git/modules/sub/rebase-merge/git-rebase-todo",
   // A paused rebase or cherry-pick runs the exec lines of its todo on --continue.
   ".git/rebase-merge/git-rebase-todo", ".git/rebase-apply/next", ".git/sequencer/todo",
 ];
@@ -158,6 +161,8 @@ const GIT_STAYS_OPEN = [
   ".git/HEAD", ".git/info/exclude", ".git/objects/ab/cdef", ".git/refs/heads/main", ".git/index", ".git/modules/sub/HEAD",
   ".git/modules/sub/objects/ab", ".git/modules/sub/info/exclude", "sub/.git/HEAD",
   "commondir", "config", "config.worktree", "hooks/x", "worktrees/w/config", "sub/commondir", "gitconfig/x",
+  // Branch and tag names are the user's: a ref named hooks or config runs nothing.
+  ".git/refs/heads/fix/hooks", ".git/logs/refs/heads/fix/hooks", ".git/refs/heads/chore/config", ".git/refs/tags/config",
 ];
 
 describe("the rest of a .git folder that runs code", () => {

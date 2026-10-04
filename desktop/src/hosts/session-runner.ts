@@ -214,16 +214,34 @@ export async function stopRunner(
   ]);
 }
 
+// Write rules for one runner's wrap, on top of the host's own.
+export interface RunnerPaths {
+  denyWrite: readonly string[];
+  allowWrite: readonly string[];
+}
+
 // A root's runner, wrapped with srt from the host's working folder, which is the
 // session folder, and spawned as the host spawns a command: the app-built
 // environment, srt's outer bash without startup files, /tmp/claude hidden.
 // srt counts it as one command for its whole life, and its placeholders stay in
 // the folder while it lives; it is released once, after its bwrap has gone.
-export async function startRunner(context: CommandContext, onLost: () => void): Promise<SessionRunner> {
+export async function startRunner(
+  context: CommandContext, onLost: () => void, paths: RunnerPaths = { denyWrite: [], allowWrite: [] },
+): Promise<SessionRunner> {
+  const filesystem = SandboxManager.getConfig()?.filesystem;
+  if (!filesystem) throw new Error("the sandbox is not set up");
+  // A wrap's own filesystem rules replace the host's whole, so they start from them: /tmp/claude's deny among them.
+  const custom = {
+    filesystem: {
+      ...filesystem,
+      allowWrite: [...filesystem.allowWrite, ...paths.allowWrite],
+      denyWrite: [...filesystem.denyWrite, ...paths.denyWrite],
+    },
+  };
   acquire(context);
   let argv: string[];
   try {
-    ({ argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(RUNNER)}`));
+    ({ argv } = await SandboxManager.wrapWithSandboxArgv(`${quote(process.execPath)} ${quote(RUNNER)}`, undefined, custom));
   } catch (error) {
     // A wrap that rejects has released srt's count itself.
     release(context, false);

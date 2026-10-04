@@ -72,10 +72,22 @@ export function protectedInFolder(folder: string, key: string): boolean {
 // whose exec lines git runs on --continue.
 const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
 
+// In the git folder itself, hooks and configs count only directly under it:
+// elsewhere (refs, logs) the names are a branch's or a tag's. A submodule's git
+// folder lies under modules/<name>, and its name can hold slashes, so there the
+// names count at any depth after the name's first component.
+// ponytail: under modules/ the names are told apart by position only, so some
+// paths are protected that run nothing: refs whose names hold hooks, config or a
+// state name, and the whole git folder of a submodule whose name, after its first
+// part, holds hooks or a state name or ends in a config name (tools/hooks,
+// libs/config). Telling them apart needs .gitmodules.
 function runsCode(rest: string[]): boolean {
-  const last = rest.at(-1);
-  const first = rest[0];
-  return (last !== undefined && GIT_CONFIGS.has(last)) || rest.includes("hooks") || (first !== undefined && GIT_STATE.has(first));
+  const [first, ...after] = rest;
+  if (first === "modules" && after.length > 1) {
+    const below = after.slice(1);
+    return below.some((part) => part === "hooks" || GIT_STATE.has(part)) || GIT_CONFIGS.has(below.at(-1) ?? "");
+  }
+  return first !== undefined && (GIT_STATE.has(first) || first === "hooks" || (rest.length === 1 && GIT_CONFIGS.has(first)));
 }
 
 export function inFolderRefusal(path: string): string {
