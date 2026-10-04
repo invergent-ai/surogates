@@ -374,6 +374,17 @@ class TestSearch:
         out = await call(file_ops._list_files_handler, ws, path=ws.root, pattern="*.py")
         assert out["matches"] == [ws.path("new.py"), ws.path("old.py")]
 
+    @pytest.mark.parametrize("target", ["content", "files"])
+    async def test_missing_path_is_reported(self, ws, target):
+        out = await call(
+            file_ops._search_files_handler, ws, pattern="x", target=target, path="gone",
+        )
+        assert out == {"error": "Path not found: gone"}
+
+    async def test_list_files_on_a_missing_path(self, ws):
+        out = await call(file_ops._list_files_handler, ws, path="gone")
+        assert out == {"error": "Path not found: gone"}
+
     async def test_truncation_hint(self, ws):
         for name in ("a", "b", "c"):
             (ws.real / f"{name}.txt").write_text("hit\n")
