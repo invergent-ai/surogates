@@ -6,6 +6,8 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 
+import type { ProcessHandle } from "./processes.js";
+
 // srt 0.0.77 mounts a placeholder over each of these in the folder while a command
 // runs, where it is absent: its dangerous files and folders, and .git's two when
 // .git is a folder. .claude is also the empty folder run.ts makes. Children come
@@ -31,6 +33,8 @@ export interface FolderRecord {
   present: string[];
   // That host's baseline of the user's own hooks (see HookGuard), once it knew it.
   hooks: Record<string, string> | null;
+  // The background processes it started, so a later host can say they ended when the app quit.
+  processes: ProcessHandle[];
 }
 
 // One host per folder, by device and inode however it is spelled: a name in the
@@ -64,10 +68,23 @@ export function readRecord(path: string): FolderRecord | null {
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as FolderRecord;
     const hooks = value.hooks === null || (typeof value.hooks === "object" && !Array.isArray(value.hooks));
-    return (value.state === "running" || value.state === "stopped") && Array.isArray(value.present) && hooks ? value : null;
+    if (!(value.state === "running" || value.state === "stopped") || !Array.isArray(value.present) || !hooks) return null;
+    // A record written before records kept processes has none.
+    const processes = Array.isArray(value.processes) ? value.processes.filter(isHandle) : [];
+    return { ...value, processes };
   } catch {
     return null;
   }
+}
+
+function isHandle(value: unknown): value is ProcessHandle {
+  const handle = value as ProcessHandle;
+  return typeof handle === "object" && handle !== null && typeof handle.id === "string" && typeof handle.command === "string"
+    && typeof handle.cwd === "string" && (handle.task_id === null || typeof handle.task_id === "string")
+    && typeof handle.started_at === "number"
+    && (handle.ended === undefined || (typeof handle.ended === "object" && handle.ended !== null
+      && (handle.ended.exit_code === null || typeof handle.ended.exit_code === "number")
+      && typeof handle.ended.output === "string" && (handle.ended.note === null || typeof handle.ended.note === "string")));
 }
 
 // Whole or not at all, and on disk before it returns: a crash right after must find it.

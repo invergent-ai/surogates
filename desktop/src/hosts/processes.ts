@@ -19,16 +19,19 @@ export const MAX_PROCESSES = 64;
 // The cloud's TERMINAL_TIMEOUT: wait's default and its most.
 export const MAX_WAIT_SECONDS = 180;
 export const KILL_GRACE_MS = 2_000;
+export const APP_QUIT = "The process ended when the app quit";
 export const RUNNER_GONE = "The process ended because the computer's sandbox stopped";
 export const TOO_MANY = `This computer is already running ${MAX_PROCESSES} background processes for this chat; stop one before starting another.`;
 
-// A process as it was started.
+// What the folder's record keeps of a process, to answer for it after the app quit.
 export interface ProcessHandle {
   id: string;
   command: string;
   cwd: string;
   task_id: string | null;
   started_at: number; // seconds since the epoch
+  // Once it has ended: how, and the last of what it said, as wait shows it.
+  ended?: { exit_code: number | null; output: string; note: string | null };
 }
 
 // A process in the session runner, as the registry sees it.
@@ -50,6 +53,10 @@ export interface ProcessesOptions {
   refusal?(): Promise<Outcome | null>;
   // Told how many processes are alive, after each change.
   live?(count: number): void;
+  // Told every handle to keep, each time a process starts or ends.
+  save?(handles: ProcessHandle[]): void;
+  // Handles from before the app last quit.
+  ended?: readonly ProcessHandle[];
   now?(): number; // seconds
 }
 
@@ -124,6 +131,15 @@ export class Processes {
 
   constructor(private readonly options: ProcessesOptions) {
     this.now = options.now ?? (() => Date.now() / 1000);
+    for (const handle of options.ended ?? []) {
+      if (this.now() - handle.started_at > FINISHED_TTL_SECONDS) continue;
+      const record = this.record(handle, null);
+      record.exited = true;
+      record.exitCode = handle.ended?.exit_code ?? null;
+      record.buffer = handle.ended?.output ?? "";
+      record.note = handle.ended ? handle.ended.note : APP_QUIT;
+      this.finished.set(handle.id, record);
+    }
   }
 
   // How many are alive.
@@ -345,8 +361,17 @@ export class Processes {
     this.changed();
   }
 
+  // A host that idles out keeps how a process ended for the next one, as the cloud keeps it for 30 minutes;
+  // one its sandbox took with it, as when the host stops, ended when the app quit.
   private changed(): void {
     this.options.live?.(this.running.size);
+    this.options.save?.(this.handles());
+  }
+
+  private handles(): ProcessHandle[] {
+    return [...this.running.values(), ...this.finished.values()].map((record) => (record.exited && record.note !== RUNNER_GONE
+      ? { ...record.handle, ended: { exit_code: record.exitCode, output: lastPoints(record.buffer, 2000), note: record.note } }
+      : record.handle));
   }
 
   // _prune_if_needed: finished records older than the TTL, from their start; then,

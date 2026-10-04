@@ -8,7 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
-import { MAX_PROCESSES, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY } from "../src/hosts/processes.js";
+import {
+  APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RUNNER_GONE, type Spawner, TOO_MANY,
+} from "../src/hosts/processes.js";
 import { CANCELLED, type CommandEnd } from "../src/hosts/run.js";
 import { SessionRunner } from "../src/hosts/session-runner.js";
 
@@ -363,6 +365,28 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect(await ask("start", { command: "x", workdir: null, task_id: "t", pty: false })).toEqual({
       error: { type: "other", message: "spawn E2BIG" },
     });
+  });
+});
+
+describe("processes from before the app quit", { timeout: 20_000 }, () => {
+  it("are answered as ended until 30 minutes after they started, then forgotten", async () => {
+    const now = 1_000_000;
+    const handle = (id: string, started_at: number): ProcessHandle => ({ id, command: "sleep 1", cwd: base, task_id: "t", started_at });
+    processes({ now: () => now, ended: [handle("proc_aaaaaaaaaaaa", now - 10), handle("proc_bbbbbbbbbbbb", now - 1801)] });
+    expect((await ask("poll", { session_id: "proc_aaaaaaaaaaaa" })).ok).toEqual({
+      session_id: "proc_aaaaaaaaaaaa", command: "sleep 1", status: "exited", pid: null, uptime_seconds: 10,
+      output_preview: "", exit_code: null, note: APP_QUIT,
+    });
+    expect((await ask("poll", { session_id: "proc_bbbbbbbbbbbb" })).ok.status).toBe("not_found");
+  });
+
+  it("are kept with every process started since, each time one starts", async () => {
+    const saves: string[][] = [];
+    const old: ProcessHandle = { id: "proc_aaaaaaaaaaaa", command: "x", cwd: base, task_id: "t", started_at: Date.now() / 1000 };
+    processes({ ended: [old], save: (handles) => saves.push(handles.map((handle) => handle.id)) });
+    const id = await start("true");
+    // The first save is the start's; the process's end saves again.
+    expect(saves[0]).toEqual([id, old.id]);
   });
 });
 

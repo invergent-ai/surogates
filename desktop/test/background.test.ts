@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { RUNNER_GONE } from "../src/hosts/processes.js";
+import { APP_QUIT, RUNNER_GONE } from "../src/hosts/processes.js";
 import { Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
@@ -175,5 +175,43 @@ describe("background processes in a tool host", { timeout: 30_000 }, () => {
     const hook = join(folder, "many", ".git", "hooks", "pre-commit");
     await until(() => existsSync(hook), 20_000);
     await until(() => (statSync(hook).mode & 0o111) === 0, 30_000);
+  });
+
+  it.each([
+    ["stopped", (harness: Harness) => harness.stop()],
+    ["killed", async (harness: Harness) => {
+      harness.killGroup();
+      await harness.exited;
+    }],
+  ])("answers for a process a host that %s had started: it ended when the app quit", async (_how, end) => {
+    const first = await host();
+    const session_id = (await begin(first, "echo hi; sleep 677")).ok.session_id as string;
+    await end(first);
+    await until(() => running("^sleep 677$") === 0);
+    const second = await host();
+    expect((await ask(second, "poll", { session_id })).ok).toEqual({
+      session_id, command: "echo hi; sleep 677", status: "exited", pid: null, uptime_seconds: expect.any(Number),
+      output_preview: "", exit_code: null, note: APP_QUIT,
+    });
+    expect((await ask(second, "wait", { session_id, timeout: 5 })).ok).toEqual({ status: "exited", exit_code: null, output: "", note: APP_QUIT });
+    expect((await ask(second, "read_output", { session_id, offset: 0, limit: 200 })).ok).toEqual({
+      session_id, status: "exited", output: "", total_lines: 0, showing: "0 lines", note: APP_QUIT,
+    });
+    expect(await ask(second, "kill", { session_id })).toEqual({ ok: { status: "already_exited", exit_code: null } });
+    expect(await ask(second, "write_stdin", { session_id, data: "x" })).toEqual({
+      ok: { status: "already_exited", error: "Process has already finished" },
+    });
+    expect((await ask(second, "list_processes", { task_id: "t" })).ok).toEqual([
+      expect.objectContaining({ session_id, status: "exited", exit_code: null, note: APP_QUIT }),
+    ]);
+  });
+
+  it("answers how a process that ended before its host idled out ended, to the next host", async () => {
+    const first = await host();
+    const session_id = (await begin(first, "echo hi; exit 3")).ok.session_id as string;
+    expect((await ask(first, "wait", { session_id, timeout: 10 })).ok).toEqual({ status: "exited", exit_code: 3, output: "hi\n" });
+    await first.stop();
+    const second = await host();
+    expect((await ask(second, "wait", { session_id, timeout: 5 })).ok).toEqual({ status: "exited", exit_code: 3, output: "hi\n" });
   });
 });

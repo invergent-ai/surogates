@@ -17,11 +17,11 @@ import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
 import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
-import { lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
+import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
-import { Processes } from "./processes.js";
+import { FINISHED_TTL_SECONDS, Processes } from "./processes.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
 import { type SessionRunner, startRunner } from "./session-runner.js";
 
@@ -51,6 +51,8 @@ let guard: HookGuard | null = null;
 // Held for the host's life: the kernel lets go of it when the host goes.
 let lock: Server | null = null;
 let recordPath: string | null = null;
+// What the folder's record holds, while this host runs.
+let saved: FolderRecord | null = null;
 const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
 let processes: Processes | null = null;
 // The root's session runner: starting from its first background process, then up
@@ -177,12 +179,15 @@ async function start(message: HostStart): Promise<void> {
   if (killed) removePlaceholders(path, killed.present);
   const present = presentIn(path);
   const inherited = killed?.hooks ? new Map(Object.entries(killed.hooks)) : null;
-  const running = (hooks: ReadonlyMap<string, string> | null) =>
-    writeRecord(record, { state: "running", present, hooks: hooks ? Object.fromEntries(hooks) : null });
+  // The processes the last host started ended with it; they are answered for until the cloud would forget them.
+  const now = Date.now() / 1000;
+  const ended = (last?.processes ?? []).filter((handle) => now - handle.started_at <= FINISHED_TTL_SECONDS);
   // On disk before srt puts anything in the folder, with a killed host's baseline
   // kept: commands wait for the guard, which records its own once it knows it.
-  running(inherited);
+  saved = { state: "running", present, hooks: killed?.hooks ?? null, processes: ended };
+  writeRecord(record, saved);
   recordPath = record;
+  const running = (hooks: ReadonlyMap<string, string>) => save({ hooks: Object.fromEntries(hooks) });
   // Its first look finds the user's own hooks, while srt starts. After a killed
   // host, that host's are the user's, and the look catches what its commands left.
   // Commands can write the folder and the session's temp folder: a hook linked into either is theirs.
@@ -281,6 +286,15 @@ async function start(message: HostStart): Promise<void> {
     context,
     runner: sessionRunner,
     refusal: () => hooks.refusal(),
+    ended,
+    // The handle is only for answering after the app quit: a record that cannot be written does not stop the process.
+    save: (handles) => {
+      try {
+        save({ processes: handles });
+      } catch {
+        // Kept from the last write.
+      }
+    },
     live: (count) => {
       send({ type: "processes", live: count });
       watchHooks();
@@ -326,6 +340,12 @@ function sessionRunner(): Promise<SessionRunner> {
   );
   runner = starting;
   return starting;
+}
+
+function save(change: Partial<FolderRecord>): void {
+  if (!recordPath || !saved) return;
+  saved = { ...saved, ...change };
+  writeRecord(recordPath, saved);
 }
 
 function sameFolder(): boolean {
@@ -402,7 +422,7 @@ async function stop(code = 0): Promise<void> {
 async function leave(code: number, clean: boolean): Promise<void> {
   await SandboxManager.reset().catch(() => {});
   try {
-    if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null });
+    if (recordPath && clean) writeRecord(recordPath, { state: "stopped", present: [], hooks: null, processes: saved?.processes ?? [] });
   } finally {
     lock?.close();
     process.exit(code);
