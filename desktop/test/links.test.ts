@@ -4,10 +4,36 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { scanLinks } from "../src/binding/links.js";
+
+// The calls are real unless a test holds one lstat or hands out large inode numbers.
+const calls = vi.hoisted(() => ({
+  // An lstat of this path waits for release(), as one on a hung mount never returns.
+  hung: "",
+  release: () => {},
+  // Inode numbers past 2^53 a large filesystem hands out, by path.
+  inodes: new Map<string, bigint>(),
+}));
+
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return {
+    ...fs,
+    lstat: async (...args: Parameters<typeof fs.lstat>) => {
+      const path = String(args[0]);
+      if (path === calls.hung) await new Promise<void>((resolve) => { calls.release = resolve; });
+      const stats = await fs.lstat(...args);
+      const ino = calls.inodes.get(path);
+      // As Node reads it: whole as a bigint, rounded to the nearest double as a number.
+      if (ino !== undefined) Object.assign(stats, { ino: typeof stats.ino === "bigint" ? ino : Number(ino) });
+      return stats;
+    },
+  };
+});
 
 let base: string;
 let folder: string;
@@ -22,6 +48,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  calls.release();
+  calls.hung = "";
+  calls.inodes.clear();
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -89,6 +118,54 @@ describe("the files in a folder linked from elsewhere", () => {
     expect(await scanLinks(folder)).toEqual({ count: 2, examples: ["a/.git/objects/HEAD", "b/objects/x"], complete: true });
   });
 
+  it("look into the objects folder beside a HEAD outside any .git, and in a folder under .git that holds no HEAD", async () => {
+    mkdirSync(join(folder, "proj"));
+    writeFileSync(join(folder, "proj", "HEAD"), "ref: refs/heads/main\n");
+    linkedIn("proj/objects/x");
+    mkdirSync(join(folder, ".git", "sub"), { recursive: true });
+    writeFileSync(join(folder, ".git", "HEAD"), "ref: refs/heads/main\n");
+    linkedIn(".git/sub/objects/x");
+    expect(await scanLinks(folder)).toEqual({ count: 2, examples: [".git/sub/objects/x", "proj/objects/x"], complete: true });
+  });
+
+  it("know git's folders by the names git writes, and node_modules in any case", async () => {
+    mkdirSync(join(folder, "a", ".GIT"), { recursive: true });
+    writeFileSync(join(folder, "a", ".GIT", "HEAD"), "ref: refs/heads/main\n");
+    linkedIn("a/.GIT/objects/x");
+    mkdirSync(join(folder, "b", ".git"), { recursive: true });
+    writeFileSync(join(folder, "b", ".git", "HEAD"), "ref: refs/heads/main\n");
+    linkedIn("b/.git/OBJECTS/x");
+    linkedIn("Node_Modules/x");
+    expect(await scanLinks(folder)).toEqual({ count: 2, examples: ["a/.GIT/objects/x", "b/.git/OBJECTS/x"], complete: true });
+  });
+
+  it("tell apart two files whose inode numbers are past 2^53", async () => {
+    linkedIn("a.txt");
+    linkedIn("b.txt");
+    // Neighbours a JavaScript number cannot hold apart.
+    calls.inodes.set(join(folder, "a.txt"), 2n ** 53n);
+    calls.inodes.set(join(folder, "b.txt"), 2n ** 53n + 1n);
+    expect(await scanLinks(folder)).toEqual({ count: 2, examples: ["a.txt", "b.txt"], complete: true });
+  });
+
+  it("do not hold up the process while they look through many files", async () => {
+    for (let i = 0; i < 50_000; i += 1) writeFileSync(join(folder, `f${i}`), "");
+    const delay = monitorEventLoopDelay({ resolution: 10 });
+    delay.enable();
+    expect(await scanLinks(folder)).toBeNull();
+    delay.disable();
+    expect(delay.max / 1e6).toBeLessThan(100);
+  });
+
+  it("stop at their deadline when a look at a file never returns, with what they found", async () => {
+    linkedIn("a.txt");
+    linkedIn("sub/slow.txt");
+    calls.hung = join(folder, "sub", "slow.txt");
+    const started = performance.now();
+    expect(await scanLinks(folder, { deadlineMs: 200 })).toEqual({ count: 1, examples: ["a.txt"], complete: false });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("say when the look stopped early, at its cap or its deadline", async () => {
     for (let i = 0; i < 20; i += 1) writeFileSync(join(folder, `f${i}.txt`), "");
     linkedIn("z.txt");
@@ -99,6 +176,12 @@ describe("the files in a folder linked from elsewhere", () => {
   it("say when a file in it could not be looked at, such as one whose name is not valid UTF-8", async () => {
     writeFileSync(join(outside, "o.txt"), "o");
     linkSync(join(outside, "o.txt"), Buffer.from([...Buffer.from(`${folder}/bad-`), 0xff]));
+    expect(await scanLinks(folder)).toEqual({ count: 0, examples: [], complete: false });
+  });
+
+  it("say when they missed a name that is not valid UTF-8, beside a valid name it reads back as", async () => {
+    writeFileSync(Buffer.from([...Buffer.from(`${folder}/a`), 0xff]), "");
+    linkedIn("a\uFFFD");
     expect(await scanLinks(folder)).toEqual({ count: 0, examples: [], complete: false });
   });
 
