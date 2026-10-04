@@ -493,6 +493,8 @@ describe("run, in the session runner", { timeout: 30_000 }, () => {
       command: "sleep 680", workdir: null, task_id: "t", pty: false, notify_on_complete: false, watcher_interval: null,
     });
     expect(started).toMatchObject({ ok: { session_id: expect.any(String) } });
+    // Only the runner marks a command: this pass is not the per-call wrap again.
+    expect((await run(harness, "env")).ok?.output).toMatch(/^SUROGATE_PROCESS=/m);
     return harness;
   }
 
@@ -557,6 +559,37 @@ describe("run, in the session runner", { timeout: 30_000 }, () => {
     expect(lines).toContain(`XDG_CACHE_HOME=${start.tmp}/cache`);
     const refused = await run(harness, "curl -sS -o /dev/null https://example.com 2>&1; echo \"exit $?\"", null, 20);
     expect(refused.ok?.output).toMatch(/403/);
+  });
+
+  it("protects the folder's code-running names inside a command", async () => {
+    mkdirSync(join(folder, ".git"));
+    writeFileSync(join(folder, ".git", "config"), "[core]\n");
+    const harness = await inRunner();
+    expect((await run(harness, "echo x > .bashrc")).ok?.output).toMatch(/Read-only file system|Permission denied/);
+    expect((await run(harness, "echo y >> .git/config")).ok?.output).toMatch(/Read-only file system/);
+    expect(readFileSync(join(folder, ".git", "config"), "utf8")).toBe("[core]\n");
+    // srt's placeholder, there while the runner lives, and still empty.
+    expect(readFileSync(join(folder, ".bashrc"), "utf8")).toBe("");
+  });
+
+  it("hides the home folder and srt's shared temp folder", async () => {
+    const harness = await inRunner();
+    expect((await run(harness, 'cat "$HOME/secret.txt"')).ok?.output).toMatch(/No such file or directory/);
+    const marker = join("/tmp/claude", `run-test-runner-${process.pid}`);
+    writeFileSync(marker, "x");
+    try {
+      expect((await run(harness, "ls -A /tmp/claude 2>/dev/null | wc -l")).ok?.output.trim()).toBe("0");
+    } finally {
+      rmSync(marker, { force: true });
+    }
+  });
+
+  it("answers commands that come at once, all in the one runner", async () => {
+    const harness = await inRunner();
+    const together = await Promise.all([0, 1, 2, 3].map(() => run(harness, "readlink /proc/self/ns/net")));
+    expect(together.map((answer) => answer.ok?.returncode)).toEqual([0, 0, 0, 0]);
+    // One network namespace: one runner.
+    expect(new Set(together.map((answer) => answer.ok?.output)).size).toBe(1);
   });
 
   it("makes the hooks a command adds non-executable, and says so", async () => {

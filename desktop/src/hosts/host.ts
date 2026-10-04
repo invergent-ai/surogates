@@ -282,20 +282,25 @@ async function start(message: HostStart): Promise<void> {
 // starts another, and commands get sandboxes of their own until then.
 function sessionRunner(): Promise<SessionRunner> {
   if (!context || stopping) return Promise.reject(new Error("the tool host is stopping"));
-  runner ??= startRunner(context, () => {
-    runner = null;
-    liveRunner = null;
+  if (runner) return runner;
+  // Each clears only itself: a runner that went may answer after the next one started.
+  let up: SessionRunner | null = null;
+  const starting: Promise<SessionRunner> = startRunner(context, () => {
+    if (runner === starting) runner = null;
+    if (liveRunner === up) liveRunner = null;
   }).then(
-    (up) => {
-      liveRunner = up;
-      return up;
+    (started) => {
+      up = started;
+      if (runner === starting) liveRunner = started;
+      return started;
     },
     (error: unknown) => {
-      runner = null;
+      if (runner === starting) runner = null;
       throw error;
     },
   );
-  return runner;
+  runner = starting;
+  return starting;
 }
 
 function sameFolder(): boolean {
