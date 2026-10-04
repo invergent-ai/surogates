@@ -15,16 +15,35 @@ def build_minimal_pdf(path: Path, heading: str = "Hello PDF") -> Path:
 
     Uses ``reportlab`` so the fixture contains a real extractable text
     stream (a raw pypdf-only PDF with no text wouldn't round-trip).
+    Each page also gets a body line so its text layer is dense enough
+    not to be mistaken for a scan and OCR'd.
+    """
+    from reportlab.pdfgen import canvas
+
+    body = "Body text on this page gives the document a real text layer."
+    c = canvas.Canvas(str(path))
+    for title in (heading, f"{heading} page 2"):
+        c.setFont("Helvetica", 14)
+        c.drawString(72, 720, title)
+        c.setFont("Helvetica", 11)
+        c.drawString(72, 700, body)
+        c.showPage()
+    c.save()
+    return path
+
+
+def build_textless_pdf(path: Path, pages: int = 3) -> Path:
+    """Write a PDF whose pages carry only drawn shapes, no text layer.
+
+    Stands in for a scanned document: extraction without OCR yields
+    nothing.
     """
     from reportlab.pdfgen import canvas
 
     c = canvas.Canvas(str(path))
-    c.setFont("Helvetica", 14)
-    c.drawString(72, 720, heading)
-    c.showPage()
-    c.setFont("Helvetica", 14)
-    c.drawString(72, 720, f"{heading} page 2")
-    c.showPage()
+    for _ in range(pages):
+        c.rect(72, 600, 300, 100, fill=1)
+        c.showPage()
     c.save()
     return path
 

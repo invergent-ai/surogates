@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,7 @@ from tests.tools.fixtures.build_documents import (
     build_minimal_pdf,
     build_minimal_pptx,
     build_minimal_xlsx,
+    build_textless_pdf,
 )
 
 
@@ -181,3 +185,87 @@ async def test_missing_document_returns_clean_error(
     result = json.loads(result_json)
     assert "error" in result
     assert "not found" in result["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# OCR only for scanned PDFs + a timeout that isn't held back by the parse
+# ---------------------------------------------------------------------------
+
+
+def _spy_liteparse(monkeypatch, ocr_text: str = "OCR TEXT") -> list[dict]:
+    """Record every ``LiteParse(...)`` call's kwargs.
+
+    Non-OCR parses run for real; OCR parses return ``ocr_text`` so the
+    test doesn't depend on Tesseract.
+    """
+    from liteparse import LiteParse
+    from liteparse.types import ParseResult
+
+    from surogates.tools.builtin import file_ops
+
+    calls: list[dict] = []
+
+    class SpyLiteParse:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self._kwargs = kwargs
+
+        def parse(self, path_str):
+            if self._kwargs.get("ocr_enabled") is False:
+                return LiteParse(**self._kwargs).parse(path_str)
+            return ParseResult(pages=[], text=ocr_text)
+
+    monkeypatch.setattr(file_ops, "_load_liteparse", lambda: SpyLiteParse)
+    return calls
+
+
+def test_text_layer_pdf_is_parsed_without_ocr(tmp_path: Path, monkeypatch) -> None:
+    from surogates.tools.builtin import file_ops
+
+    calls = _spy_liteparse(monkeypatch)
+    pdf = build_minimal_pdf(tmp_path / "p.pdf", heading="Hello PDF")
+
+    text = file_ops._convert_to_text_sync(pdf)
+
+    assert "Hello PDF" in text
+    assert [c.get("ocr_enabled") for c in calls] == [False]
+
+
+def test_textless_pdf_is_ocrd_up_to_the_page_cap(tmp_path: Path, monkeypatch) -> None:
+    from surogates.tools.builtin import file_ops
+
+    calls = _spy_liteparse(monkeypatch)
+    monkeypatch.setattr(file_ops, "_OCR_MAX_PAGES", 2)
+    pdf = build_textless_pdf(tmp_path / "scan.pdf", pages=3)
+
+    text = file_ops._convert_to_text_sync(pdf)
+
+    assert [c.get("ocr_enabled") for c in calls] == [False, True]
+    assert calls[1]["max_pages"] == 2
+    assert "OCR TEXT" in text
+    assert "first 2 of 3 pages" in text
+
+
+def test_thread_parse_timeout_is_not_held_back_by_the_parse(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The sandbox child runs tools under ``asyncio.run``; a parse still
+    running past the timeout must not delay the timeout error."""
+    from surogates.tools.builtin import file_ops
+
+    release = threading.Event()
+    monkeypatch.setattr(file_ops, "_use_subprocess_parse", lambda: False)
+    monkeypatch.setattr(file_ops, "_DOCUMENT_PARSE_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(
+        file_ops, "_convert_to_text_sync", lambda path: release.wait(5) and "",
+    )
+
+    start = time.monotonic()
+    try:
+        with pytest.raises(file_ops.DocumentParseError, match="timeout"):
+            asyncio.run(file_ops._parse_document_to_text(tmp_path / "slow.pdf"))
+        elapsed = time.monotonic() - start
+    finally:
+        release.set()
+
+    assert elapsed < 2, elapsed
