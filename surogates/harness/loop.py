@@ -3062,7 +3062,9 @@ class AgentHarness(
                         logger.debug("Memory manager on_pre_compress failed", exc_info=True)
 
                 compressed, summary_data = await self._compressor.compress(
-                    messages, self._llm, pre_compress_guidance=pre_compress_text,
+                    messages, self._llm,
+                    current_tokens=input_tokens or None,
+                    pre_compress_guidance=pre_compress_text,
                 )
                 await self._store.emit_event(
                     session.id,
@@ -4245,10 +4247,16 @@ class AgentHarness(
         compression could not reduce the context further.
         """
         async def _compress(_api_messages: list[dict]) -> list[dict] | None:
+            # The provider just rejected the request, so it held at least a
+            # full window -- the real size the chars/4 estimate is scaled to.
             compressed, summary_data = await self._compressor.compress(
                 messages, self._llm,
+                current_tokens=self._compressor.context_length,
             )
-            if len(compressed) >= len(messages):
+            if (
+                summary_data["compressed_token_estimate"]
+                >= summary_data["original_token_estimate"]
+            ):
                 return None  # Compression didn't help.
             try:
                 await self._store.emit_event(

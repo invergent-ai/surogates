@@ -20,6 +20,7 @@ import re
 import time
 from typing import Any, Optional
 
+from surogates.harness.context_files import truncate_context
 from surogates.harness.model_metadata import (
     ModelInfo,
     estimate_tokens,
@@ -64,6 +65,9 @@ _SUMMARY_TOKENS_CEILING: int = 12_000
 
 # Placeholder used when pruning old tool results.
 _PRUNED_TOOL_PLACEHOLDER: str = "[Old tool output cleared to save context space]"
+
+# Size an oversized tool result is cut down to when the history is too large.
+_TRUNCATED_TOOL_RESULT_CHARS: int = 4_000
 
 # Chars per token rough estimate.
 _CHARS_PER_TOKEN: int = 4
@@ -364,6 +368,47 @@ class ContextCompressor:
                 pruned += 1
 
         return result, pruned
+
+    def _truncate_tool_results_to_budget(
+        self, messages: list[dict[str, Any]], current_tokens: int | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Cut oversized tool results, oldest first, until the history fits.
+
+        Summarising needs a middle to summarise, but a short conversation
+        still overflows when a few tool results are huge (spreadsheet dumps,
+        long terminal output).  Those are the one thing that can shrink
+        without an LLM call and that the agent can fetch again, so they are
+        cut to head+tail until the estimate drops under half the threshold,
+        leaving room for the next results before compaction trips again.
+
+        chars/4 undercounts dense content -- a spreadsheet rendered as a
+        markdown table runs near 2 chars per token -- so the estimate is
+        scaled by the real prompt size the provider last reported.
+        """
+        rough = _estimate_messages_tokens_rough(messages)
+        real = current_tokens or self.last_prompt_tokens
+        scale = max(1.0, real / rough) if rough else 1.0
+        excess = int(rough * scale) - self.threshold_tokens // 2
+        if excess <= 0:
+            return messages, 0
+
+        result = list(messages)
+        truncated = 0
+        for i, msg in enumerate(result):
+            if excess <= 0:
+                break
+            content = msg.get("content")
+            if (
+                msg.get("role") != "tool"
+                or not isinstance(content, str)
+                or len(content) <= _TRUNCATED_TOOL_RESULT_CHARS
+            ):
+                continue
+            cut = truncate_context(content, _TRUNCATED_TOOL_RESULT_CHARS, "tool output")
+            result[i] = {**msg, "content": cut}
+            excess -= int((len(content) - len(cut)) / _CHARS_PER_TOKEN * scale)
+            truncated += 1
+        return result, truncated
 
     def prune_stale_browser_states(
         self, messages: list[dict[str, Any]],
@@ -1035,8 +1080,14 @@ Use this exact structure:
         n_messages = len(messages)
         original_tokens = _estimate_messages_tokens_rough(messages)
 
+        messages, truncated_count = self._truncate_tool_results_to_budget(
+            messages, current_tokens,
+        )
+        if truncated_count and not self.quiet_mode:
+            logger.info("Pre-compression: truncated %d oversized tool result(s)", truncated_count)
+
         if n_messages <= self.protect_first_n + self.protect_last_n + 1:
-            if not self.quiet_mode:
+            if not truncated_count and not self.quiet_mode:
                 logger.warning(
                     "Cannot compress: only %d messages (need > %d)",
                     n_messages,
@@ -1046,8 +1097,8 @@ Use this exact structure:
                 original_count=n_messages,
                 original_tokens=original_tokens,
                 compressed_count=n_messages,
-                compressed_tokens=original_tokens,
-                strategy="too_few_messages",
+                compressed_tokens=_estimate_messages_tokens_rough(messages),
+                strategy="truncate_tool_results" if truncated_count else "too_few_messages",
             )
 
         display_tokens = current_tokens if current_tokens else self.last_prompt_tokens or _estimate_messages_tokens_rough(messages)
