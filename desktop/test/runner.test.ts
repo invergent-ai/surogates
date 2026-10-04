@@ -465,3 +465,144 @@ describe("suspending local work", () => {
     expect(executor.aborted).toEqual([]);
   });
 });
+
+// Answers each operation before it starts as the test says, or holds it until released.
+// A held one that is aborted answers late, as a prompt that cannot be dismissed would.
+class Gate implements Executor {
+  readonly asked: string[] = [];
+  readonly ran: string[] = [];
+  readonly acked: string[] = [];
+  private readonly held = new Map<string, (answer: Outcome | null) => void>();
+
+  constructor(private readonly decide: (operation: Operation) => Outcome | null | "hold") {}
+
+  admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    this.asked.push(operation.id);
+    const answer = this.decide(operation);
+    if (answer !== "hold") return Promise.resolve(answer);
+    return new Promise((resolve) => {
+      this.held.set(operation.id, resolve);
+      signal.addEventListener("abort", () => resolve({ ok: "late" }));
+    });
+  }
+
+  release(id: string, answer: Outcome | null): void {
+    this.held.get(id)?.(answer);
+  }
+
+  run(operation: Operation): Promise<Outcome> {
+    this.ran.push(operation.id);
+    return Promise.resolve({ ok: `ran ${operation.id}` });
+  }
+
+  acknowledged(id: string): void {
+    this.acked.push(id);
+  }
+}
+
+describe("an operation the executor admits before it starts", () => {
+  it("is answered without running when the executor answers it, and a repeat gets that answer", async () => {
+    const gate = new Gate((operation) => ({ ok: `admitted ${operation.id}` }));
+    await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 2);
+    expect(results("a").map((f) => f.outcome)).toEqual([{ ok: "admitted a" }, { ok: "admitted a" }]);
+    expect([gate.asked, gate.ran]).toEqual([["a"], []]);
+  });
+
+  it("runs when the executor lets it through", async () => {
+    const gate = new Gate(() => null);
+    await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "ran a" });
+    expect(gate.ran).toEqual(["a"]);
+  });
+
+  it("is asked once while it waits, is held open across a reconnect, and is answered once", async () => {
+    const gate = new Gate(() => "hold");
+    await start(gate);
+    server.send(opFrame("a"));
+    server.send(opFrame("a"));
+    server.send(opFrame("z"));
+    await server.until(() => gate.asked.length === 2);
+    server.close(1011);
+    await server.until(() => server.connections === 2 && link?.status === "connected");
+    expect(server.hellos.at(-1)?.open).toEqual(["z", "a"]);
+    // Sent again by the server after the reconnect: still waiting, so not asked again. Once "y" is asked, "a" was read.
+    server.send(opFrame("a"));
+    server.send(opFrame("y"));
+    await server.until(() => gate.asked.length === 3);
+    gate.release("a", { ok: "allowed" });
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "allowed" });
+    expect(gate.asked).toEqual(["a", "z", "y"]);
+  });
+
+  it("is asked again at the next launch when the app stopped while it waited, and nothing ran", async () => {
+    const path = join(dir, "journal.sqlite");
+    const before = new OperationJournal(path);
+    before.receive({
+      id: "a", sessionId: "r", callingSessionId: "r", invocationId: "1:c", ordinal: 1,
+      kind: "run", args: {}, digest: "digest-a",
+    });
+    before.close();
+    const gate = new Gate(() => ({ ok: "answered" }));
+    const { journal } = await start(gate, open(path));
+    expect(journal.recovered).toBe(0);
+    expect(server.hellos[0]?.open).toEqual(["a"]);
+    server.send(opFrame("a", "run"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ ok: "answered" });
+    expect(gate.ran).toEqual([]);
+  });
+
+  it("records nothing when suspended while it waits, and leaves it open to be asked again", async () => {
+    const gate = new Gate(() => "hold");
+    const { runner, journal } = await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => gate.asked.length === 1);
+    await runner.suspend(APP_CLOSED);
+    expect(journal.unsent()).toEqual([]);
+    expect(journal.openIds()).toEqual(["a"]);
+    expect(results("a")).toEqual([]);
+    expect(gate.ran).toEqual([]);
+  });
+
+  it("records nothing and never runs when cancelled while it waits", async () => {
+    const gate = new Gate(() => "hold");
+    const { journal } = await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => gate.asked.length === 1);
+    server.send({ type: "cancel", id: "a" });
+    server.send(opFrame("a"));
+    server.send(opFrame("z", "run"));
+    await server.until(() => gate.asked.length === 2);
+    gate.release("z", null);
+    await server.until(() => results("z").length === 1);
+    expect(results("a")).toEqual([]);
+    expect(gate.ran).toEqual(["z"]);
+    expect(journal.openIds()).toEqual([]);
+  });
+
+  it("is answered as an error when the executor's admit fails", async () => {
+    await start({ admit: () => Promise.reject(new Error("boom")), run: () => Promise.resolve({ ok: "ran" }) });
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual({ error: { type: "other", message: "boom" } });
+  });
+});
+
+describe("an acknowledgement", () => {
+  it("reaches the executor", async () => {
+    const gate = new Gate(() => ({ ok: null }));
+    await start(gate);
+    server.send(opFrame("a"));
+    await server.until(() => results("a").length === 1);
+    server.send({ type: "op_ack", id: "a" });
+    await server.until(() => gate.acked.length === 1);
+    expect(gate.acked).toEqual(["a"]);
+  });
+});

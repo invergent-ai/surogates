@@ -79,6 +79,17 @@ export interface Executor {
    */
   run(operation: Operation, signal: AbortSignal): Promise<Outcome>;
   /**
+   * Answer the operation without running it, or let it run (null). Asked before the
+   * journal marks it started, so whatever this waits on survives an app restart: the
+   * operation is still "received", and the server sends it again. It may therefore be
+   * asked more than once for one operation. A throw or a rejection is answered as an
+   * error. After an abort (a cancel, a suspend) its answer is dropped: the operation
+   * neither runs nor is answered here.
+   */
+  admit?(operation: Operation, signal: AbortSignal): Promise<Outcome | null>;
+  /** The server recorded this operation's outcome (op_ack). */
+  acknowledged?(id: string): void;
+  /**
    * End what goes on locally that no operation holds, such as background
    * processes, once the computer's access has ended. The executor still runs
    * operations afterwards.
@@ -112,13 +123,14 @@ export class OperationRunner {
       return;
     }
     if (received.action === "ignore" || this.running.has(operation.id)) return;
-    // The journal's claim decides: false if it was cancelled or started meanwhile.
-    if (!this.journal.start(operation.id)) return;
     const controller = new AbortController();
     this.running.set(operation.id, controller);
-    const done: Promise<void> = this.execute(operation, controller.signal)
+    const done: Promise<void> = this.admitted(operation, controller.signal)
       .catch((error: unknown) => report(this.onError, error))
-      .finally(() => this.inflight.delete(done));
+      .finally(() => {
+        if (this.running.get(operation.id) === controller) this.running.delete(operation.id);
+        this.inflight.delete(done);
+      });
     this.inflight.add(done);
   }
 
@@ -135,10 +147,32 @@ export class OperationRunner {
 
   acknowledged(id: string): void {
     this.journal.acknowledge(id);
+    this.executor.acknowledged?.(id);
   }
 
   openIds(): string[] {
     return this.journal.openIds();
+  }
+
+  // What the executor answers before the operation starts is recorded without a
+  // start. A cancel meanwhile has marked it cancelled; one suspended stays received,
+  // and is asked again at the next launch.
+  private async admitted(operation: Operation, signal: AbortSignal): Promise<void> {
+    let answer: Outcome | null;
+    try {
+      answer = (await this.executor.admit?.(operation, signal)) ?? null;
+    } catch (error) {
+      answer = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
+    }
+    if (signal.aborted) return;
+    if (answer) {
+      const outcome = sendable(operation, answer);
+      if (this.journal.answer(operation.id, outcome)) this.send(opResult(operation, outcome));
+      return;
+    }
+    // The journal's claim decides: false if it was cancelled or started meanwhile.
+    if (!this.journal.start(operation.id)) return;
+    await this.execute(operation, signal);
   }
 
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {
