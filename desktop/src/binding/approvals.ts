@@ -55,12 +55,17 @@ const DENIED = {
   input: "The user denied this input on this computer",
 } as const;
 
+// What each kind's prompt is about: a change, an input, or (any other kind) a command.
+const shapeOf = (kind: string): ApprovalRequest["kind"] =>
+  kind === "write" || kind === "delete" ? "change" : kind === "write_stdin" ? "input" : "command";
+
 // An operation that did not happen, in the shape its tool reads that way
 // (surogates/devices/workspace.py): a command is blocked (WorkspaceSandboxError),
 // a change fails with a PermissionError, an input as a write that failed.
-function denied(request: ApprovalRequest, why: string): Outcome {
-  if (request.kind === "change") return { error: { type: "os", code: "EACCES", message: why } };
-  if (request.kind === "input") return { ok: { status: "error", error: why } };
+function denied(kind: string, why: string = DENIED[shapeOf(kind)]): Outcome {
+  const shape = shapeOf(kind);
+  if (shape === "change") return { error: { type: "os", code: "EACCES", message: why } };
+  if (shape === "input") return { ok: { status: "error", error: why } };
   return { error: { type: "sandbox", message: why } };
 }
 
@@ -79,16 +84,13 @@ function requestFor(operation: Operation, binding: Binding, agent: string): Appr
   return { kind: "command", chat, command: text("command"), workdir, background: kind === "start" };
 }
 
-// Settles when *promise* does, or at once when *signal* aborts.
-function settled(promise: Promise<void>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const done = () => {
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    signal.addEventListener("abort", done, { once: true });
-    void promise.then(done);
+// Settles as *promise* does, or with undefined at once when *signal* aborts.
+function settled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+  if (signal.aborted) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    const aborted = () => resolve(undefined);
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
   });
 }
 
@@ -100,8 +102,8 @@ export class Approvals {
 
   /**
    * Null lets the operation run; an outcome is its denial. Settles once *signal*
-   * aborts (a cancel, a suspend): an operation waiting its turn leaves the line,
-   * and its open prompt is dismissed.
+   * aborts (a cancel, a suspend), with a denial: an operation waiting its turn
+   * leaves the line, and its open prompt is dismissed.
    */
   async admit(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
     // Fail closed: the tool hosts read the binding again only when it runs, so a bind
@@ -120,21 +122,24 @@ export class Approvals {
     });
     try {
       await settled(before, signal);
+      // Stopped: the runner drops what this answers, and it never lets it run.
+      if (signal.aborted) return denied(operation.kind);
       // A "Stop asking" while it waited its turn lets it through unasked.
-      const binding = signal.aborted ? undefined : this.asking(operation);
+      const binding = this.asking(operation);
       if (!binding) return null;
       const request = requestFor(operation, binding, this.options.agent);
-      let answer: ApprovalAnswer;
+      let answer: ApprovalAnswer | undefined;
       try {
-        answer = await this.options.prompts.approve(request, signal);
+        // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
+        answer = await settled(this.options.prompts.approve(request, signal), signal);
       } catch (error) {
         const why = error instanceof Error ? error.message : String(error);
-        return denied(request, `This computer could not ask its user about this: ${why}`);
+        return denied(operation.kind, `This computer could not ask its user about this: ${why}`);
       }
       // A dismissed prompt's answer is not its user's.
-      if (signal.aborted) return null;
+      if (signal.aborted) return denied(operation.kind);
       if (answer === "stop_asking") this.options.bindings.setMode(root, "free");
-      return answer === "allow" || answer === "stop_asking" ? null : denied(request, DENIED[request.kind]);
+      return answer === "allow" || answer === "stop_asking" ? null : denied(operation.kind);
     } finally {
       done();
     }

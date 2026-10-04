@@ -214,19 +214,41 @@ describe("a chat that asks every time", () => {
     const waiting = approvals.admit(op("run", RUN), leaving.signal);
     await vi.waitFor(() => expect(user.open).toHaveLength(1));
     leaving.abort();
-    await waiting;
+    // The runner drops what a stopped operation's admit answers; Approvals itself never lets it run.
+    expect(await waiting).toEqual(COMMAND_DENIED);
     // The one that left was last in line, and the first is still open: the next still waits for it.
     const after = approvals.admit(op("run", RUN), never());
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(user.asked).toHaveLength(1);
     stopped.abort();
-    await first;
+    // The dismissed prompt settled with "stop_asking", which is not its user's answer.
+    expect(await first).toEqual(COMMAND_DENIED);
     await vi.waitFor(() => expect(user.open).toHaveLength(1));
     expect([user.asked.length, user.dismissed]).toEqual([2, 1]);
     // What a dismissed prompt settles with is not its user's answer: the chat still asks.
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
     user.answer("allow");
     expect(await after).toBeNull();
+  });
+
+  it("settles once its signal aborts, even when its prompt never does, and the next in line is asked", async () => {
+    bind(ROOT, "ask");
+    const ignoring: ApprovalPrompts = {
+      approve: (request) => {
+        user.asked.push(request);
+        return user.asked.length === 1 ? new Promise(() => {}) : Promise.resolve("allow");
+      },
+      confirmFreeMode: () => Promise.resolve(false),
+    };
+    const asking = new Approvals({ bindings: journal.bindings, prompts: ignoring, agent: "Research assistant" });
+    const stopped = new AbortController();
+    const first = asking.admit(op("run", RUN), stopped.signal);
+    const next = asking.admit(op("write", { key: `${FOLDER}/a.txt`, data: "" }), never());
+    await vi.waitFor(() => expect(user.asked).toHaveLength(1));
+    stopped.abort();
+    expect(await first).toEqual(COMMAND_DENIED);
+    expect(await next).toBeNull();
+    expect(user.asked).toHaveLength(2);
   });
 
   it("denies when the prompt cannot be shown, and on an answer it does not know", async () => {
