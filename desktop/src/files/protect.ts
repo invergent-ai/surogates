@@ -76,7 +76,11 @@ const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequenc
 // elsewhere (refs, logs) the names are a branch's or a tag's. A submodule's git
 // folder lies under modules/<name>, and its name can hold slashes, so there the
 // names count at any depth after the name's first component.
-// ponytail: submodule refs whose names hold hooks, config or a state name stay protected; telling them apart needs .gitmodules.
+// ponytail: under modules/ the names are told apart by position only, so some
+// paths are protected that run nothing: refs whose names hold hooks, config or a
+// state name, and the whole git folder of a submodule whose name, after its first
+// part, holds hooks or a state name or ends in a config name (tools/hooks,
+// libs/config). Telling them apart needs .gitmodules.
 function runsCode(rest: string[]): boolean {
   const [first, ...after] = rest;
   if (first === "modules" && after.length > 1) {
