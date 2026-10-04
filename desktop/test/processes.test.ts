@@ -44,9 +44,9 @@ function processes(options: Partial<ProcessesOptions> = {}): Processes {
   return registry;
 }
 
-// A runner whose children the test drives: each starts with *pid*, or with none
-// after ending {failed} when *fails* is given.
-function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
+// A runner whose children the test drives: each starts with *pid*, once *held*
+// resolves, or with none after ending {failed} when *fails* is given.
+function fake({ pid = 7, fails, held }: { pid?: number; fails?: string; held?: Promise<void> } = {}) {
   const spawned: { output(text: string): void; end(end: CommandEnd): void }[] = [];
   const spawner: Spawner = {
     spawn() {
@@ -55,9 +55,9 @@ function fake({ pid = 7, fails }: { pid?: number; fails?: string } = {}) {
       const end = (value: CommandEnd) => { for (const listener of ends) listener(value); };
       spawned.push({ output: (text) => { for (const listener of outputs) listener(Buffer.from(text), false); }, end });
       return {
-        started: fails === undefined
-          ? Promise.resolve(pid)
-          : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)),
+        started: (held ?? Promise.resolve()).then(() => (fails === undefined
+          ? pid
+          : new Promise((resolve) => setTimeout(() => { end({ failed: fails }); resolve(null); }, 0)))),
         onOutput: (listener) => { outputs.push(listener); },
         onEnd: (listener) => { ends.push(listener); },
         kill() {}, signal() {}, write: async () => null,
@@ -461,6 +461,56 @@ describe("a runner restart", () => {
     const listed = (await ask("list_processes", { task_id: "t" })).ok as Array<{ session_id: string; note?: string }>;
     expect(listed.map((entry) => [entry.session_id, entry.note])).toEqual([[first, later], [second, later]]);
     expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("ends a process still spawning when it flags, with the notice", async () => {
+    let release = () => {};
+    const { runner: driven, spawned } = fake({ held: new Promise((resolve) => { release = resolve; }) });
+    processes({ runner: driven });
+    const starting = start("x");
+    await until(() => spawned.length === 1);
+    // Not counted: it may yet fail to start.
+    expect(registry.restart("a folder grant changed")).toBe(0);
+    release();
+    const id = await starting;
+    expect(id).toBeDefined();
+    spawned[0]?.end({ lost: true });
+    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
+    expect(registry.takeNotice()).toBe(notice);
+  });
+
+  it("raises no notice for a start that fails after it flags", async () => {
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const { runner: driven, spawned } = fake({ fails: "no shell", held });
+    processes({ runner: driven });
+    const starting = ask("start", { command: "x", workdir: null, task_id: "t", pty: false });
+    await until(() => spawned.length === 1);
+    registry.restart("a folder grant changed");
+    release();
+    expect((await starting).error).toEqual({ type: "other", message: "no shell" });
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("puts the notice on a poll for a process it does not know", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    await start("x");
+    registry.restart("a folder grant changed");
+    spawned[0]?.end({ lost: true });
+    expect((await ask("poll", { session_id: "proc_none" })).ok).toEqual({ status: "not_found", error: "No process with ID proc_none", note: notice });
+    expect(registry.takeNotice()).toBeNull();
+  });
+
+  it("ends a process killed while it restarts with no exit code", async () => {
+    const { runner: driven, spawned } = fake();
+    processes({ runner: driven });
+    const id = await start("x");
+    registry.restart("a folder grant changed");
+    const killing = ask("kill", { session_id: id });
+    spawned[0]?.end({ code: null, signal: "SIGTERM" });
+    expect((await killing).ok).toEqual({ status: "killed", session_id: id, note: notice });
+    expect((await ask("poll", { session_id: id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RESTARTED });
   });
 
   it("is silent when no process was live", async () => {

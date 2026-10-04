@@ -189,10 +189,11 @@ export class Processes {
   // with RESTARTED, and once one has, the next answer that can carry it gets the notice.
   // How many were live.
   restart(reason: string): number {
-    // One still starting has no pid yet: its start answers how it ended.
-    const live = [...this.running.values()].filter((record) => record.pid !== null);
-    for (const record of live) record.restarted = reason;
-    return live.length;
+    // One still starting is flagged too, because the runner may yet spawn it; it is
+    // counted, and raises the notice, only once it has a pid.
+    const running = [...this.running.values()];
+    for (const record of running) record.restarted = reason;
+    return running.filter((record) => record.pid !== null).length;
   }
 
   // The notice, once, for a run's output.
@@ -412,8 +413,9 @@ export class Processes {
     else if (record.killed) record.exitCode = -15;
     else if ("lost" in end) record.note = RUNNER_GONE;
     else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
-    // A restart's notice is due once one of its processes has ended.
-    if (record.restarted !== null) {
+    // A restart's notice is due once one of its processes has ended. One that never
+    // started has its start's answer instead.
+    if (record.restarted !== null && record.pid !== null) {
       this.notice = { text: restartNotice(record.restarted), ids: new Set([...(this.notice?.ids ?? []), record.handle.id]) };
     }
     this.running.delete(record.handle.id);
