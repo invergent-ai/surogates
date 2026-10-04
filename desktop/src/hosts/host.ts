@@ -28,8 +28,11 @@ const READY_TIMEOUT_MS = 15_000;
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 const STOP_COMMANDS_MS = 2_000;
 
-const send = (message: FromHost, then?: () => void) => {
-  process.send?.(message, undefined, undefined, then);
+// A channel the app has closed is not an error: with no callback, Node would raise
+// one on process and end the host before its final look. Every exit goes through stop.
+const send = (message: FromHost, then: () => void = () => {}) => {
+  if (process.connected) process.send?.(message, undefined, undefined, then);
+  else then();
 };
 const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 

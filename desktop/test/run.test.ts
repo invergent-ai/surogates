@@ -458,6 +458,19 @@ describe("run", { timeout: 30_000 }, () => {
     await until(() => running("^sleep 627$") === 0);
   });
 
+  it("stops cleanly when the app's channel closes during a command", async () => {
+    const harness = await host();
+    harness.send({ type: "op", id: id(), kind: "run", args: { command: "sleep 629", workdir: null, timeout: 60 } });
+    await until(() => running("^sleep 629$") === 1);
+    harness.child.disconnect();
+    const code = await harness.exited;
+    const { dev, ino } = statSync(folder);
+    const record = JSON.parse(readFileSync(join(start.dataDir, "folders", `${dev}-${ino}.json`), "utf8")) as { state: string };
+    // Its final look and srt's reset ran: the way out every stop takes.
+    expect({ code, sockets: sockets(), state: record.state }).toEqual({ code: 0, sockets: [], state: "stopped" });
+    await until(() => running("^sleep 629$") === 0);
+  });
+
   it("says so when the app's data folder's path is too long for srt's sockets", async () => {
     const harness = new Harness();
     harnesses.push(harness);
