@@ -49,6 +49,11 @@ export class Bindings {
       .run(binding.root, binding.nonce, binding.folder, binding.dev, binding.ino, binding.boot, binding.mode, binding.boundAt);
   }
 
+  /** A root's mode from now on, for it and its sub-agents. An unknown root changes nothing. */
+  setMode(root: string, mode: Mode): void {
+    this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ?`).run(mode, root);
+  }
+
   get(root: string): Binding | undefined {
     const select = this.db.prepare(`SELECT * FROM bindings WHERE root = ?`);
     select.setReadBigInts(true);

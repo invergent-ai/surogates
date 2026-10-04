@@ -292,6 +292,20 @@ describe("the bindings", () => {
     journal.close();
   });
 
+  it("change a root's mode, and keep it across a restart", () => {
+    const before = new OperationJournal(path);
+    before.bindings.add(binding("r1", 1));
+    before.bindings.add(binding("r2", 2));
+    before.bindings.setMode("r1", "ask");
+    before.bindings.setMode("r3", "ask");
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.get("r1")).toEqual({ ...binding("r1", 1), mode: "ask" });
+    expect(after.bindings.get("r2")?.mode).toBe("free");
+    expect(after.bindings.get("r3")).toBeUndefined();
+    after.close();
+  });
+
   it("read back a folder whose device and inode numbers are past 2^53", () => {
     const journal = new OperationJournal(path);
     const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };
