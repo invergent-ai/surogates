@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,12 +33,13 @@ let exits: number;
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "revocation-")));
   mkdirSync(join(base, "folder"));
+  const { dev, ino } = statSync(join(base, "folder"));
   server = new FakeLinkServer();
   link = null;
   exits = 0;
   journal = new OperationJournal(join(base, "journal.sqlite"));
   hosts = new ToolHosts({
-    bindingOf: () => ({ folder: join(base, "folder") }),
+    bindingOf: () => ({ folder: join(base, "folder"), dev, ino }),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     spawnHost: () => {

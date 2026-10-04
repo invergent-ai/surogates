@@ -131,7 +131,7 @@ function sweep(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
-// The bound folder is gone, or is not a folder. The app has no folder to check
+// The bound folder is gone, is not a folder, or was replaced. The app has no folder to check
 // before it starts a host (a stat on a stuck mount would freeze it), so the host says.
 class FolderUnavailable extends Error {}
 
@@ -146,6 +146,9 @@ async function start(message: HostStart): Promise<void> {
   const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
   const { path, dev, ino } = checked;
+  if (message.expect && (message.expect.dev !== dev || message.expect.ino !== ino)) {
+    throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
+  }
   folder = { path, dev, ino };
   // One host per folder. Then, if the host before this one was killed, what srt
   // left over the names that were absent when it started.

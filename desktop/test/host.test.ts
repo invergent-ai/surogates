@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -115,6 +115,23 @@ describe("a tool host", { timeout: 30_000 }, () => {
     const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
     expect(failed).toMatchObject({ type: "failed", folder: true });
     expect(await harness.exited).toBe(1);
+  });
+
+  it("answers a folder replaced since its chat was bound as unavailable, and goes", async () => {
+    const { dev, ino } = statSync(folder);
+    renameSync(folder, `${folder}-old`);
+    mkdirSync(folder);
+    const harness = host({ expect: { dev, ino } });
+    const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
+    expect(failed).toMatchObject({ type: "failed", folder: true, message: expect.stringMatching(/replaced/) });
+    expect(await harness.exited).toBe(1);
+  });
+
+  it("starts in the folder its chat was bound to", async () => {
+    const { dev, ino } = statSync(folder);
+    const harness = host({ expect: { dev, ino } });
+    await ready(harness);
+    expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${folder}/a.txt` });
   });
 
   it("refuses a folder that holds the app's own data or files, or the whole system", async () => {

@@ -6,6 +6,7 @@ import { fork } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
@@ -13,6 +14,8 @@ import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 const HOST = join(PACKAGE, "dist", "hosts", "host.js");
+// Read-only folders a sandbox needs, and no chat's folder may hold: the runtime and the app's files.
+export const APP_DIRS = [dirname(process.execPath), PACKAGE];
 const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
 // How long a host with nothing to do keeps its folder: another chat may want it.
@@ -34,9 +37,8 @@ const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
 
-export interface Binding {
-  folder: string;
-}
+// What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
+type BoundFolder = Pick<Binding, "folder" | "dev" | "ino">;
 
 export interface HostProcess {
   send(message: ToHost): void;
@@ -101,7 +103,7 @@ export function forkHost(options: ForkOptions = {}): HostProcess {
 }
 
 export interface ToolHostsOptions {
-  bindingOf(rootSessionId: string): Binding | undefined;
+  bindingOf(rootSessionId: string): BoundFolder | undefined;
   dataDir: string;
   env: Record<string, string>;
   appDirs?: string[];
@@ -144,17 +146,18 @@ export class ToolHosts implements Executor {
     await Promise.all(hosts.map((host) => host.stop()));
   }
 
-  private hostFor(root: string, binding: Binding): Host {
+  private hostFor(root: string, binding: BoundFolder): Host {
     const known = this.hosts.get(root);
     if (known) return known;
     const { dataDir, env, bwrapPath } = this.options;
     const start: HostStart = {
       type: "start",
       folder: binding.folder,
+      expect: { dev: binding.dev, ino: binding.ino },
       tmp: join(dataDir, "tmp", root),
       dataDir,
       env,
-      appDirs: this.options.appDirs ?? [dirname(process.execPath), PACKAGE],
+      appDirs: this.options.appDirs ?? APP_DIRS,
       ...(bwrapPath ? { bwrapPath } : {}),
     };
     const host = new Host(

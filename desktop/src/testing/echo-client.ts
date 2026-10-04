@@ -7,6 +7,7 @@
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
 // the file only after it quits.
 
+import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -39,11 +40,13 @@ class SpokenJournal extends OperationJournal {
   }
 }
 
-// With --folder, every session works on that folder through the real tool hosts.
+// With --folder, every session works on that folder through the real tool hosts,
+// as if each had been bound to it there.
 const folder = values.folder;
-const hosts = folder
+const bound = folder ? statSync(folder) : null;
+const hosts = folder && bound
   ? new ToolHosts({
-    bindingOf: () => ({ folder }),
+    bindingOf: () => ({ folder, dev: bound.dev, ino: bound.ino }),
     dataDir: join(dirname(values.journal), "data"),
     env: await appEnvironment(),
   })

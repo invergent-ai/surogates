@@ -5,6 +5,8 @@ import type { Outcome } from "../link/protocol.js";
 export interface HostStart {
   type: "start";
   folder: string; // the bound folder; the host resolves it
+  // The folder's identity when the chat was bound: a folder replaced since is not the chat's.
+  expect?: { dev: number; ino: number };
   tmp: string; // the root session's temp folder
   dataDir: string; // the app's own data, never inside the folder
   env: Record<string, string>; // the app-built environment: HOME, LANG, PATH
@@ -22,7 +24,7 @@ export type ToHost =
 
 export type FromHost =
   | { type: "ready" }
-  // folder: the bound folder is not there, or is not a folder; the app answers folder_unavailable.
+  // folder: the bound folder is not there, is not a folder, or was replaced; the app answers folder_unavailable.
   | { type: "failed"; message: string; folder?: true }
   | { type: "result"; id: string; outcome: Outcome }
   // How many background processes are alive: a host with any is never idle.
