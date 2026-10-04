@@ -59,7 +59,7 @@ let active = 0;
 // leaves an empty .claude/ behind. While any command is wrapping or running, a
 // folder that had no .claude gets an empty one, so every wrap sees the same; it
 // goes when the last command is done (rmdir refuses anything that is not empty).
-function acquire(context: CommandContext): void {
+export function acquire(context: CommandContext): void {
   active += 1;
   if (active > 1 || !context.claudeWasAbsent) return;
   try {
@@ -70,7 +70,7 @@ function acquire(context: CommandContext): void {
 }
 
 // *wrapped*: srt counted the command (a wrap that rejects has released itself).
-function release(context: CommandContext, wrapped = true): void {
+export function release(context: CommandContext, wrapped = true): void {
   if (wrapped) SandboxManager.cleanupAfterCommand();
   active -= 1;
   if (active > 0 || !context.claudeWasAbsent) return;

@@ -21,12 +21,15 @@ import { lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } fr
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
+import { Processes } from "./processes.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
+import { type SessionRunner, startRunner } from "./session-runner.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
 const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 const STOP_COMMANDS_MS = 2_000;
+const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
 // A channel the app has closed is not an error: with no callback, Node would raise
 // one on process and end the host before its final look. Every exit goes through stop.
@@ -47,6 +50,11 @@ let guard: HookGuard | null = null;
 let lock: Server | null = null;
 let recordPath: string | null = null;
 const commands = new Map<string, { controller: AbortController; done: Promise<void> }>();
+let processes: Processes | null = null;
+// The root's session runner: starting from its first background process, then up
+// until it stops or dies. Until it is up, commands get a sandbox of their own.
+let runner: Promise<SessionRunner> | null = null;
+let liveRunner: SessionRunner | null = null;
 
 process.on("message", (raw) => {
   const message = raw as ToHost;
@@ -68,6 +76,7 @@ process.on("message", (raw) => {
     case "op":
       if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
       else if (message.kind === "run") command(message.id, message.args);
+      else if (PROCESS_KINDS.has(message.kind)) processOp(message.id, message.kind, message.args);
       else helper?.stdin?.write(`${JSON.stringify({ id: message.id, kind: message.kind, args: message.args })}\n`);
       break;
     case "cancel":
@@ -264,6 +273,29 @@ async function start(message: HostStart): Promise<void> {
   // would keep srt from ever removing a command's placeholders.
   SandboxManager.cleanupAfterCommand();
   context = { folder: path, home, env, claudeWasAbsent: !existsSync(join(path, ".claude")) };
+  const hooks = guard;
+  processes = new Processes({ context, runner: sessionRunner, refusal: () => hooks.refusal() });
+}
+
+// Started at the root's first background process, once. A runner that dies
+// unexpectedly ends its processes (the registry notes why); the next start
+// starts another, and commands get sandboxes of their own until then.
+function sessionRunner(): Promise<SessionRunner> {
+  if (!context || stopping) return Promise.reject(new Error("the tool host is stopping"));
+  runner ??= startRunner(context, () => {
+    runner = null;
+    liveRunner = null;
+  }).then(
+    (up) => {
+      liveRunner = up;
+      return up;
+    },
+    (error: unknown) => {
+      runner = null;
+      throw error;
+    },
+  );
+  return runner;
 }
 
 function sameFolder(): boolean {
@@ -289,7 +321,20 @@ function command(id: string, args: Record<string, unknown>): void {
     // Stopped or cancelled while the folder was looked through: it never starts.
     const outcome = refused ?? (stopping || controller.signal.aborted
       ? CANCELLED
-      : await hooks.after(await runCommand(args, ready, controller.signal, id)));
+      : await hooks.after(await runCommand(args, ready, controller.signal, id, liveRunner)));
+    commands.delete(id);
+    if (!failing) send({ type: "result", id, outcome });
+  })();
+  commands.set(id, { controller, done });
+}
+
+// The background process kinds. A wait can last minutes: a cancel or a stop ends it.
+function processOp(id: string, kind: string, args: Record<string, unknown>): void {
+  if (!processes || stopping || commands.has(id)) return;
+  const registry = processes;
+  const controller = new AbortController();
+  const done = (async () => {
+    const outcome = await registry.answer(kind, args, controller.signal);
     commands.delete(id);
     if (!failing) send({ type: "result", id, outcome });
   })();
@@ -307,6 +352,13 @@ async function stop(code = 0): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
+  // Its background processes go with its sandbox, before the last look. A runner
+  // still starting gets no longer than the commands did: ToolHosts kills a host
+  // that takes too long, and the next one clears up after it.
+  await Promise.race([
+    runner?.then((up) => up.stop(), () => {}),
+    new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
+  ]);
   // What a stopped command left, before the record can say the host stopped
   // cleanly. A look that could not see the whole folder, or a host killed
   // during it, leaves "running" and the baseline for the next host.

@@ -483,3 +483,89 @@ describe("run", { timeout: 30_000 }, () => {
     expect(await harness.exited).toBe(1);
   });
 });
+
+// The main cases again, with the root's commands in its session runner: a
+// background process has started it, and every later command runs in it.
+describe("run, in the session runner", { timeout: 30_000 }, () => {
+  async function inRunner(overrides: Partial<HostStart> = {}): Promise<Harness> {
+    const harness = await host(overrides);
+    const started = await harness.op(id(), "start", {
+      command: "sleep 680", workdir: null, task_id: "t", pty: false, notify_on_complete: false, watcher_interval: null,
+    });
+    expect(started).toMatchObject({ ok: { session_id: expect.any(String) } });
+    return harness;
+  }
+
+  it("answers a command's output and exit code as the cloud does", async () => {
+    const harness = await inRunner();
+    expect(await run(harness, "echo out; echo err >&2; exit 3")).toEqual({ ok: { output: "out\n\nerr\n", returncode: 3, timed_out: false } });
+    expect(await run(harness, "printf 'a\\000b'")).toEqual({ ok: { output: "a\u0000b", returncode: 0, timed_out: false } });
+    expect(await run(harness, "printf '\\377A'")).toEqual({ ok: { output: "�A", returncode: 0, timed_out: false } });
+    expect(await run(harness, "a\0b")).toEqual({ ok: { output: "embedded null byte", returncode: -1, timed_out: false } });
+    expect((await run(harness, "kill -9 $$")).ok?.returncode).toBe(137);
+  });
+
+  it("keeps the head and the tail of a long output", async () => {
+    const harness = await inRunner();
+    const output = (await run(harness, "printf START; head -c 600000 /dev/zero | tr '\\000' x; printf END", null, 30)).ok?.output ?? "";
+    expect(output.startsWith("START") && output.endsWith("END")).toBe(true);
+    expect(pyJsonLength(output)).toBeLessThan(OUTPUT_CAP_CHARS + 200);
+  });
+
+  it("stops a command at its timeout, and everything it started", async () => {
+    const harness = await inRunner();
+    expect(await run(harness, "sleep 681 & setsid sleep 682 & (sleep 683 &); sleep 684", null, 1)).toEqual({
+      ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true },
+    });
+    await until(() => running("^sleep 68[1-4]$") === 0);
+  });
+
+  it("stops a command the session cancels, and everything it started", async () => {
+    const harness = await inRunner();
+    const opId = id();
+    harness.send({ type: "op", id: opId, kind: "run", args: { command: "setsid sleep 685 & sleep 686", workdir: null, timeout: 60 } });
+    await until(() => running("^sleep 68[56]$") === 2);
+    harness.send({ type: "cancel", id: opId });
+    await until(() => running("^sleep 68[56]$") === 0);
+  });
+
+  it("ends what a command leaves running when it ends", async () => {
+    const harness = await inRunner();
+    expect(await run(harness, "sleep 687 & echo started")).toEqual({ ok: { output: "started\n", returncode: 0, timed_out: false } });
+    await until(() => running("^sleep 687$") === 0);
+  });
+
+  it("runs in the folder or the workdir asked for, and refuses one outside it", async () => {
+    const harness = await inRunner();
+    expect((await run(harness, "pwd")).ok?.output).toBe(`${folder}\n`);
+    expect((await run(harness, "pwd", "sub")).ok?.output).toBe(`${folder}/sub\n`);
+    expect((await run(harness, "pwd", "~")).ok?.output).toBe(`${folder}\n`);
+    expect(await run(harness, "pwd", "/etc")).toMatchObject({ error: { type: "sandbox" } });
+    expect(await run(harness, "pwd", "nope")).toEqual({
+      ok: { output: `[Errno 2] No such file or directory: '${folder}/nope'`, returncode: -1, timed_out: false },
+    });
+  });
+
+  it("writes the folder and nowhere else, with the app's environment and the package hosts only", async () => {
+    const harness = await inRunner({ env: { ...start.env, SECRET: "s" } });
+    expect((await run(harness, "echo hi > made.txt && cat made.txt")).ok?.output).toBe("hi\n");
+    expect((await run(harness, `echo x > '${base}/outside.txt'`)).ok?.returncode).toBe(0);
+    expect(existsSync(join(base, "outside.txt"))).toBe(false);
+    expect((await run(harness, 'cat "$HOME/secret.txt"')).ok?.output).toMatch(/No such file or directory/);
+    const lines = ((await run(harness, "env")).ok?.output ?? "").split("\n");
+    expect(lines.filter((line) => /^(SECRET|ELECTRON_RUN_AS_NODE|SUROGATE_FOLDER)=/.test(line))).toEqual([]);
+    expect(lines).toContain(`XDG_CACHE_HOME=${start.tmp}/cache`);
+    const refused = await run(harness, "curl -sS -o /dev/null https://example.com 2>&1; echo \"exit $?\"", null, 20);
+    expect(refused.ok?.output).toMatch(/403/);
+  });
+
+  it("makes the hooks a command adds non-executable, and says so", async () => {
+    const harness = await inRunner();
+    const answer = await run(
+      harness,
+      "git -c init.defaultBranch=main init -q && printf '#!/bin/sh\\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit && echo made",
+    );
+    expect(answer.ok?.output.endsWith(`made\n\n${HOOKS_NOTICE}.git/hooks/pre-commit`)).toBe(true);
+    expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
+  });
+});
