@@ -72,10 +72,15 @@ export function protectedInFolder(folder: string, key: string): boolean {
 // whose exec lines git runs on --continue.
 const GIT_STATE = new Set(["worktrees", "rebase-merge", "rebase-apply", "sequencer"]);
 
+// Hooks and configs count only in a git folder itself, which a submodule's lies
+// in its parent's under modules/<name>: elsewhere (refs, logs) the names are a
+// branch's or a tag's.
 function runsCode(rest: string[]): boolean {
-  const last = rest.at(-1);
   const first = rest[0];
-  return (last !== undefined && GIT_CONFIGS.has(last)) || rest.includes("hooks") || (first !== undefined && GIT_STATE.has(first));
+  if (first !== undefined && GIT_STATE.has(first)) return true;
+  let own = rest;
+  while (own[0] === "modules" && own.length > 2) own = own.slice(2);
+  return own[0] === "hooks" || (own.length === 1 && GIT_CONFIGS.has(own[0] ?? ""));
 }
 
 export function inFolderRefusal(path: string): string {
