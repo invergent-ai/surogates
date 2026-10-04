@@ -379,6 +379,16 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await second).toEqual(HOST_STOPPED);
   });
 
+  it("ends every host without stopping, and starts a new one for the next operation", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    await executor.run(op("resolve", { path: "" }, ROOT_B), signal());
+    await executor.end();
+    expect([sent(0, "stop"), sent(1, "stop")]).toEqual([1, 1]);
+    expect(await executor.run(resolve(), signal())).toEqual({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(3);
+  });
+
   it("makes a second stop wait for the first", async () => {
     const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
       if (message.type === "start") host.say({ type: "ready" });
@@ -480,6 +490,30 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     }) });
     await executor.run(resolve(), signal());
     void executor.run(op("stat", { key: "/x" }), signal());
+    await new Promise((done) => setTimeout(done, 250));
+    expect(sent(0, "stop")).toBe(0);
+  });
+
+  it("does not stop a host while its background processes run, and stops it once they end", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn((host, message) => {
+      readyOnly(host, message);
+      if (message.type === "op") {
+        host.say({ type: "processes", live: 1 });
+        host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
+      }
+    }) });
+    await executor.run(op("start", { command: "sleep 1" }), signal());
+    await new Promise((done) => setTimeout(done, 250));
+    expect(sent(0, "stop")).toBe(0);
+    fakes[0]?.say({ type: "processes", live: 0 });
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("does not stop a host whose processes count comes after its last operation's answer", async () => {
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
+    await executor.run(op("start", { command: "sleep 1" }), signal());
+    // The idle stop is already armed when the count comes.
+    fakes[0]?.say({ type: "processes", live: 1 });
     await new Promise((done) => setTimeout(done, 250));
     expect(sent(0, "stop")).toBe(0);
   });

@@ -165,6 +165,8 @@ export class HookGuard {
   private recorded = false;
   private blocked: string | null = null;
   private looks = 0;
+  // Hooks a look between commands stopped, for the next command's output.
+  private readonly unreported = new Set<string>();
   private readonly first: Promise<unknown>;
   private readonly known: (hooks: ReadonlyMap<string, string>) => void;
   private readonly writable: readonly string[];
@@ -192,9 +194,19 @@ export class HookGuard {
   async after(outcome: Outcome): Promise<Outcome> {
     await this.first;
     const { changed } = await this.check();
-    if (changed.length === 0 || !("ok" in outcome)) return outcome;
+    if (!("ok" in outcome)) return outcome;
+    const told = [...new Set([...this.unreported, ...changed])];
+    this.unreported.clear();
+    if (told.length === 0) return outcome;
     const ok = outcome.ok as { output: string; returncode: number; timed_out: boolean };
-    return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${HOOKS_NOTICE}${listed(this.folder, changed)}` } };
+    return { ok: { ...ok, output: `${ok.output}${ok.output ? "\n" : ""}${HOOKS_NOTICE}${listed(this.folder, told)}` } };
+  }
+
+  // A look between commands, while background processes run: one may write a
+  // hook at any time. What it stops is told with the next command's output.
+  async watch(): Promise<void> {
+    await this.first;
+    for (const key of (await this.check()).changed) this.unreported.add(key);
   }
 
   // The last look, when the host stops: what a stopped command left. False when

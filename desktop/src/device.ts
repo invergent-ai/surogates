@@ -51,7 +51,11 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onCancel: (id) => runner.cancel(id),
       onAck: (id) => runner.acknowledged(id),
       onStatus: (status) => {
-        if (SUSPENDING.includes(status)) void runner.suspend(ACCESS_ENDED);
+        if (SUSPENDING.includes(status)) {
+          // What runs is recorded first; then what no operation holds ends too.
+          void runner.suspend(ACCESS_ENDED).then(() => options.executor.end?.())
+            .catch((error: unknown) => report(options.onError, error));
+        }
         options.onStatus?.(status);
       },
       onError: options.onError,

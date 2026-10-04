@@ -74,10 +74,10 @@ describe("the folder record", () => {
   it("is read back as written, and is nothing when missing or not a record", () => {
     const path = join(dir, "folders", "1-2.json");
     expect(readRecord(path)).toBeNull();
-    writeRecord(path, { state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" } });
-    expect(readRecord(path)).toEqual({ state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" } });
-    writeRecord(path, { state: "stopped", present: [], hooks: null });
-    expect(readRecord(path)).toEqual({ state: "stopped", present: [], hooks: null });
+    writeRecord(path, { state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
+    expect(readRecord(path)).toEqual({ state: "running", present: [".bashrc"], hooks: { "/f/.git/hooks/x": "1:2:3:4" }, processes: [] });
+    writeRecord(path, { state: "stopped", present: [], hooks: null, processes: [] });
+    expect(readRecord(path)).toEqual({ state: "stopped", present: [], hooks: null, processes: [] });
     expect(readdirSync(join(dir, "folders"))).toEqual(["1-2.json"]);
     writeFileSync(path, "{");
     expect(readRecord(path)).toBeNull();
@@ -85,6 +85,17 @@ describe("the folder record", () => {
     expect(readRecord(path)).toBeNull();
     writeFileSync(path, JSON.stringify({ state: "running", present: [], hooks: [] }));
     expect(readRecord(path)).toBeNull();
+  });
+
+  it("keeps the handles of a host's background processes, and has none in a record without them", () => {
+    const path = join(dir, "folders", "1-3.json");
+    const handle = { id: "proc_0123456789ab", command: "sleep 1", cwd: "/f", task_id: "t", started_at: 1_700_000_000.5 };
+    writeRecord(path, { state: "stopped", present: [], hooks: null, processes: [handle] });
+    expect(readRecord(path)?.processes).toEqual([handle]);
+    writeFileSync(path, JSON.stringify({ state: "stopped", present: [], hooks: null, processes: [handle, { id: 1 }] }));
+    expect(readRecord(path)?.processes).toEqual([handle]);
+    writeFileSync(path, JSON.stringify({ state: "stopped", present: [], hooks: null }));
+    expect(readRecord(path)).toEqual({ state: "stopped", present: [], hooks: null, processes: [] });
   });
 });
 

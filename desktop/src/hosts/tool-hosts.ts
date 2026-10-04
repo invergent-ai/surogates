@@ -132,6 +132,12 @@ export class ToolHosts implements Executor {
     return this.stopping;
   }
 
+  // The device's access ended: every host stops, and its background processes with it.
+  // The next operation for a root starts a new host, which answers for them from the record.
+  end(): Promise<void> {
+    return this.stopHosts();
+  }
+
   private async stopHosts(): Promise<void> {
     const hosts = [...this.live];
     this.hosts.clear();
@@ -172,6 +178,7 @@ class Host {
   private settleStart: (failure: Outcome | null) => void = () => {};
   private gone = false;
   private running = 0;
+  private live = 0;
   private idleTimer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -212,14 +219,19 @@ class Host {
       return await this.answer(operation, signal);
     } finally {
       this.running -= 1;
-      // Out of the list first: the next operation for this root starts a new host.
-      if (this.running === 0 && !this.gone) {
-        this.idleTimer = setTimeout(() => {
-          this.onGone();
-          void this.stop();
-        }, this.idleMs).unref();
-      }
+      this.idle();
     }
+  }
+
+  // With no operation running and no background process alive, the host keeps its
+  // folder for idleMs. Out of the list first: the next operation for this root starts a new host.
+  private idle(): void {
+    clearTimeout(this.idleTimer);
+    if (this.running > 0 || this.live > 0 || this.gone) return;
+    this.idleTimer = setTimeout(() => {
+      this.onGone();
+      void this.stop();
+    }, this.idleMs).unref();
   }
 
   private async answer(operation: Operation, signal: AbortSignal): Promise<Outcome> {
@@ -277,6 +289,9 @@ class Host {
       // A host that failed to start is exiting: the next operation starts a new one.
       this.onGone();
       this.settleStart(message.folder ? FOLDER_UNAVAILABLE : unavailable(message.message));
+    } else if (message.type === "processes") {
+      this.live = message.live;
+      this.idle();
     } else {
       const answer = this.pending.get(message.id);
       this.pending.delete(message.id);

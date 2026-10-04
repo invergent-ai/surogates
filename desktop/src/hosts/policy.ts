@@ -39,6 +39,9 @@ export function hideSrtTmp(line: string): string {
   return `${line.slice(0, at)} --tmpfs /tmp/claude${line.slice(at)}`;
 }
 
+// One word on a bash line: in '...', an embedded quote written as '\''.
+export const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
+
 // Where *text* first appears among the line's words, never inside a quoted word:
 // srt's scan puts paths the agent named in the folder on the line, and one can hold
 // the anchor. srt quotes a word in '...' and writes an embedded quote as "'".

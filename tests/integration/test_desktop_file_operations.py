@@ -12,6 +12,10 @@ import asyncio
 import base64
 import json
 import os
+import re
+import shutil
+import socket
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -31,6 +35,15 @@ from .test_devices import (  # noqa: F401  (fixtures)
 )
 
 pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
+
+
+@pytest.fixture
+def journal_dir():
+    """Where the app keeps its journal and data. srt's sockets go under it, and a
+    unix socket's path holds at most 107 bytes, which pytest's tmp_path is too long for."""
+    path = Path(tempfile.mkdtemp(prefix="sd-", dir="/tmp"))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def prepare(base: Path) -> Path:
@@ -180,12 +193,112 @@ SAME_RUN = [
     ("run", {"command": "exit 0", "workdir": None, "timeout": 10}),
 ]
 
+# Background processes, step by step. "{id}" in a step is the session id its case's
+# first start answered. Each case has its own task id: the cloud's registry is the
+# whole process's.
+PROCESS_CASES = [
+    [
+        ("start", {"command": "printf 'one\\ntwo\\nthree\\n'; echo err >&2; (exit 3)", "workdir": None, "task_id": "cross-1",
+                   "pty": False, "notify_on_complete": False, "watcher_interval": None}),
+        ("wait", {"session_id": "{id}", "timeout": 10}),
+        ("poll", {"session_id": "{id}"}),
+        ("read_output", {"session_id": "{id}", "offset": 0, "limit": 2}),
+        ("read_output", {"session_id": "{id}", "offset": 1, "limit": 1}),
+        ("read_output", {"session_id": "{id}", "offset": -2, "limit": 5}),
+        ("read_output", {"session_id": "{id}", "offset": 0, "limit": 200}),
+        ("list_processes", {"task_id": "cross-1"}),
+        ("kill", {"session_id": "{id}"}),
+        ("write_stdin", {"session_id": "{id}", "data": "x"}),
+        ("wait", {"session_id": "{id}", "timeout": 500}),
+    ],
+    [
+        ("poll", {"session_id": "proc_000000000000"}),
+        ("read_output", {"session_id": "proc_000000000000", "offset": 0, "limit": 200}),
+        ("wait", {"session_id": "proc_000000000000", "timeout": 1}),
+        ("kill", {"session_id": "proc_000000000000"}),
+        ("write_stdin", {"session_id": "proc_000000000000", "data": "x"}),
+    ],
+    [
+        ("start", {"command": "sleep 30", "workdir": None, "task_id": "cross-3", "pty": False,
+                   "notify_on_complete": True, "watcher_interval": 30}),
+        ("wait", {"session_id": "{id}", "timeout": 1}),
+        ("wait", {"session_id": "{id}", "timeout": -1}),
+        ("poll", {"session_id": "{id}"}),
+        ("read_output", {"session_id": "{id}", "offset": 0, "limit": 200}),
+        ("list_processes", {"task_id": "cross-3"}),
+        ("kill", {"session_id": "{id}"}),
+        ("poll", {"session_id": "{id}"}),
+        ("wait", {"session_id": "{id}", "timeout": 5}),
+        ("list_processes", {"task_id": "cross-3"}),
+    ],
+    [
+        ("start", {"command": "head -n 1", "workdir": None, "task_id": "cross-4", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("write_stdin", {"session_id": "{id}", "data": "hé\n"}),
+        ("wait", {"session_id": "{id}", "timeout": 10}),
+    ],
+    [
+        ("start", {"command": "printf '\\033[1mbold\\033[0m\\n'", "workdir": "sub", "task_id": "cross-5", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("wait", {"session_id": "{id}", "timeout": 10}),
+        ("read_output", {"session_id": "{id}", "offset": 0, "limit": 200}),
+        ("list_processes", {"task_id": "cross-5"}),
+    ],
+    [
+        ("start", {"command": "true", "workdir": "/etc", "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("start", {"command": "true", "workdir": "nope", "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("start", {"command": "true", "workdir": "a.txt", "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("start", {"command": "a\0b", "workdir": None, "task_id": "cross-6", "pty": False,
+                   "notify_on_complete": False, "watcher_interval": None}),
+        ("list_processes", {"task_id": "cross-6"}),
+    ],
+]
 
-async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path):
+
+async def play(run, steps) -> list[dict]:
+    """Each step's outcome, "{id}" filled in from the case's first start."""
+    session_id = ""
+    outcomes = []
+    for kind, args in steps:
+        outcome = await run(kind, json.loads(json.dumps(args).replace("{id}", session_id)))
+        if kind == "start" and "ok" in outcome and not session_id:
+            session_id = outcome["ok"]["session_id"]
+        outcomes.append(outcome)
+    return outcomes
+
+
+def normalised(value):
+    """What must match: ids, pids, uptimes and start times differ by nature, so only their types are checked."""
+    if isinstance(value, list):
+        return [normalised(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for key, item in value.items():
+        if key == "session_id" and item != "proc_000000000000":
+            assert isinstance(item, str) and re.fullmatch(r"proc_[0-9a-f]{12}", item), item
+            item = "<id>"
+        elif key == "pid" and item is not None:
+            assert type(item) is int and item >= 0, item
+            item = "<pid>"
+        elif key == "uptime_seconds":
+            assert type(item) is int and item >= 0, item
+            item = 0
+        elif key == "started_at":
+            assert isinstance(item, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", item), item
+            item = "<time>"
+        out[key] = normalised(item)
+    return out
+
+
+async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path, journal_dir):
     folder = prepare(tmp_path)
     prepared = sorted(os.listdir(folder))
     cloud = LocalWorkspaceIO(str(folder))
-    app = await client(built_client, link_url, laptop_rig.token, tmp_path / "journal.sqlite", folder=folder)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
         for kind, template in SAME + SAME_FAILURES + SAME_RUN:
@@ -199,9 +312,9 @@ async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_
         await app.close()
 
 
-async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path):
+async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path, journal_dir):
     folder = prepare(tmp_path)
-    app = await client(built_client, link_url, laptop_rig.token, tmp_path / "journal.sqlite", folder=folder)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
         assert await on_app(laptop_rig, "write", {"key": f"{folder}/new/deep/n.txt", "data": b64(b"new\n")}) == {"ok": None}
@@ -219,10 +332,31 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
         await app.close()
 
 
-async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop_rig, link_url, tmp_path):
+async def test_the_app_runs_background_processes_as_the_cloud_does(
+    built_client, laptop_rig, link_url, tmp_path, journal_dir, monkeypatch,
+):
+    folder = prepare(tmp_path)
+    # The cloud starts a process with $SHELL -lic, HOME at the folder. With bash, and a
+    # .hushlogin there, Ubuntu's login files add nothing to its output; no case calls
+    # the exit builtin, which makes a login shell say "logout".
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    (folder / ".hushlogin").touch()
+    cloud = LocalWorkspaceIO(str(folder))
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
+    try:
+        await app.until(connected)
+        for steps in PROCESS_CASES:
+            got = await play(lambda kind, args: on_app(laptop_rig, kind, args), steps)
+            want = await play(lambda kind, args: perform(cloud, kind, args), steps)
+            assert normalised(got) == normalised(want), (steps, got, want)
+    finally:
+        await app.close()
+
+
+async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop_rig, link_url, tmp_path, journal_dir):
     folder = prepare(tmp_path)
     outside = tmp_path / "outside" / "o.txt"
-    app = await client(built_client, link_url, laptop_rig.token, tmp_path / "journal.sqlite", folder=folder)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
         assert await on_app(laptop_rig, "read", {"key": f"{folder}/special/pipe", "max_bytes": None}) == {
@@ -253,7 +387,6 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         assert await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": big}) == {
             "error": {"type": "os", "code": "EFBIG", "message": TOO_LARGE},
         }
-        assert (await on_app(laptop_rig, "start", {"command": "true", "workdir": None}))["error"]["type"] == "unsupported"
         home = os.environ["HOME"]
         # The command's HOME is the app's, not the folder (the toolchains find themselves through it).
         assert (await on_app(laptop_rig, "run", {"command": "echo $HOME", "workdir": None, "timeout": 10}))["ok"]["output"] == f"{home}\n"
@@ -266,13 +399,34 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         # A host off the package list is refused by the sandbox's proxy.
         refused = await on_app(laptop_rig, "run", {"command": "curl -sS -o /dev/null https://example.com 2>&1", "workdir": None, "timeout": 20})
         assert "403" in refused["ok"]["output"]
+        # A later command reaches a server a background process started: they share the runner's sandbox.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        started = await on_app(laptop_rig, "start", {
+            "command": f"python3 -m http.server {port} --bind 127.0.0.1", "workdir": None, "task_id": "strict",
+            "pty": False, "notify_on_complete": False, "watcher_interval": None,
+        })
+        assert started["ok"]["session_id"].startswith("proc_")
+        for _ in range(50):
+            fetched = await on_app(laptop_rig, "run", {"command": f"curl -sS http://127.0.0.1:{port}/a.txt", "workdir": None, "timeout": 10})
+            if fetched["ok"]["output"] == "alpha\nbeta\n":
+                break
+            await asyncio.sleep(0.2)
+        assert fetched["ok"]["output"] == "alpha\nbeta\n"
+        # A real terminal, which the cloud gives only with ptyprocess installed.
+        tty = await on_app(laptop_rig, "start", {
+            "command": "tty", "workdir": None, "task_id": "strict", "pty": True, "notify_on_complete": False, "watcher_interval": None,
+        })
+        waited = await on_app(laptop_rig, "wait", {"session_id": tty["ok"]["session_id"], "timeout": 10})
+        assert waited["ok"]["output"].startswith("/dev/pts/")
     finally:
         await app.close()
 
 
-async def test_a_moved_folder_is_unavailable(built_client, laptop_rig, link_url, tmp_path):
+async def test_a_moved_folder_is_unavailable(built_client, laptop_rig, link_url, tmp_path, journal_dir):
     folder = prepare(tmp_path)
-    app = await client(built_client, link_url, laptop_rig.token, tmp_path / "journal.sqlite", folder=folder)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
         assert await on_app(laptop_rig, "resolve", {"path": "a.txt"}) == {"ok": f"{folder}/a.txt"}
