@@ -356,6 +356,9 @@ describe("run", { timeout: 30_000 }, () => {
     await first.exited;
     expect(readdirSync(folder).sort()).not.toEqual(before);
     await host();
+    // What this recovery leaves. srt 0.0.77 itself removes an empty, write-protected,
+    // single-link file under its protected names once any command ends, so the user's
+    // empty 0444 .zshrc goes after the next command, whatever the recovery does.
     expect(readdirSync(folder).sort()).toEqual(before);
     expect(readdirSync(join(folder, ".git"))).toEqual([]);
   });
