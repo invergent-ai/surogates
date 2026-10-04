@@ -5,10 +5,11 @@ and deleting skills and their supporting files.  All endpoints are
 tenant-scoped via ``TenantContext``.
 
 User and org-shared skills are stored on a ``StorageBackend`` (local
-filesystem in dev, S3 in production).  Platform skills come from the
-per-agent Surogate Hub bundle (``skills/<name>/...``) and are
-read-only — they are included in list/view responses via the bundle
-accessor, not the filesystem.
+filesystem in dev, S3 in production).  Platform skills come from a
+Surogate Hub bundle — built-ins from the shared system bundle
+(``<name>/...``), org-attached ones from the per-agent bundle
+(``skills/<name>/...``) — and are read-only; they are included in
+list/view responses via the bundle accessor, not the filesystem.
 
 ``GET /skills/{name}`` and ``GET /skills/{name}/file`` accept an
 optional ``session_id`` query parameter.  When supplied, the skill's
@@ -225,6 +226,21 @@ def _staging_preamble(skill_name: str, staged_at: str) -> str:
     )
 
 
+def _skill_bundle(
+    skill_def: Any, bundle: Any, system_bundle: Any,
+) -> tuple[Any, str]:
+    """Return the ``(bundle, prefix)`` a platform skill's files live under.
+
+    Built-ins load from the shared system bundle and org-attached skills
+    from the per-agent bundle; ``bundle_prefix`` is the directory the
+    loader read SKILL.md from.  ``(None, "")`` for a platform skill with
+    no bundle behind it (the in-code advisor).
+    """
+    if skill_def.bundle_prefix is None:
+        return None, ""
+    return (system_bundle if skill_def.builtin else bundle), skill_def.bundle_prefix
+
+
 async def _authorize_session_for_staging(
     request: Request,
     tenant: TenantContext,
@@ -260,6 +276,7 @@ async def _stage_skill_for_session(
     linked_files: list[str] | dict[str, list[str]] | None,
     storage_key_prefix: str = "",
     bundle: Any = None,
+    system_bundle: Any = None,
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -270,10 +287,9 @@ async def _stage_skill_for_session(
     tenant via :func:`_authorize_session_for_staging` before calling this
     function.
 
-    ``bundle`` is the per-tenant Hub-backed bundle for shared-runtime
-    sessions; when set AND the platform skill has no on-disk source
-    directory (i.e. it came from the bundle's ``skills/{name}/`` tree),
-    we stage from the bundle instead of failing.
+    ``bundle`` and ``system_bundle`` are the per-agent and shared
+    system Hub bundles; a platform skill stages from whichever one
+    :func:`_skill_bundle` says it was loaded from.
     """
     from surogates.tools.loader import SKILL_SOURCE_PLATFORM
 
@@ -283,17 +299,18 @@ async def _stage_skill_for_session(
     stager = _get_skill_stager(request, storage_key_prefix=storage_key_prefix)
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
-        if bundle is None:
+        source_bundle, prefix = _skill_bundle(skill_def, bundle, system_bundle)
+        if source_bundle is None:
             logger.warning(
-                "Cannot stage platform skill '%s': no bundle available "
-                "(agent has no hub_ref configured)",
+                "Cannot stage platform skill '%s': no bundle available",
                 skill_def.name,
             )
             return None
         return await stager.stage_from_bundle(
             session_id=session_id,
             skill_name=skill_def.name,
-            bundle=bundle,
+            bundle=source_bundle,
+            prefix=prefix,
         )
 
     # Everything else is tenant-bucket-backed.  Resolve by asking the
@@ -585,6 +602,7 @@ async def view_skill(
     # never ``org``, so a project skill with a ``hub_ref`` reported no
     # linked files, skipped staging entirely, and left the model reading
     # a ``.skills/{name}/`` tree that was never materialised.
+    source_bundle, prefix = _skill_bundle(skill_def, bundle, system_bundle)
     if skill_def.source != SKILL_SOURCE_PLATFORM:
         ts = _get_tenant_storage(request, tenant)
         existing = await ts.skill_exists(name)
@@ -592,17 +610,17 @@ async def view_skill(
             files = await ts.list_skill_files(existing["key_prefix"])
             from surogates.tools.builtin.skill_validation import is_graph_file
             detail.linked_files = [f for f in files if f != "SKILL.md" and not is_graph_file(f)]
-    elif bundle is not None:
-        # Bundle-backed platform skill: enumerate the bundle's
-        # ``skills/{name}/`` prefix.  SKILL.md and the root SKILL.graph.json
-        # are excluded so the list contains only the auxiliary files that
-        # get auto-staged.  The graph-file exclusion is anchored at the
-        # root (exact match on ``{prefix}{GRAPH_FILE}``) rather than
-        # ``endswith``, so a same-named file inside a subdirectory (e.g.
-        # ``references/SKILL.graph.json``) is a normal, listed file.
+    elif source_bundle is not None:
+        # Bundle-backed platform skill: enumerate the skill's directory in
+        # the bundle it was loaded from.  SKILL.md and the root
+        # SKILL.graph.json are excluded so the list contains only the
+        # auxiliary files that get auto-staged.  The graph-file exclusion
+        # is anchored at the root (exact match on ``{prefix}{GRAPH_FILE}``)
+        # rather than ``endswith``, so a same-named file inside a
+        # subdirectory (e.g. ``references/SKILL.graph.json``) is a normal,
+        # listed file.
         from surogates.tools.builtin.skill_validation import GRAPH_FILE
-        prefix = f"skills/{name}/"
-        bundle_paths = await bundle.list(prefix)
+        bundle_paths = await source_bundle.list(prefix)
         detail.linked_files = sorted(
             p[len(prefix):] for p in bundle_paths
             if p.startswith(prefix) and not p.endswith("/SKILL.md")
@@ -623,6 +641,7 @@ async def view_skill(
             linked_files=detail.linked_files,
             storage_key_prefix=_session_storage_key_prefix(session),
             bundle=bundle,
+            system_bundle=system_bundle,
         )
         if staged_at is not None:
             detail.staged_at = staged_at
@@ -713,6 +732,8 @@ async def read_skill_file(
             session_id=session_id,
             linked_files=[path],  # forces stageable_assets to be True
             storage_key_prefix=key_prefix,
+            bundle=bundle,
+            system_bundle=system_bundle,
         )
         if staged_at is None:
             return None
@@ -729,16 +750,16 @@ async def read_skill_file(
             ),
         }
 
-    # Platform skills come from the per-agent Surogate Hub bundle.
+    # Platform skills come from a Surogate Hub bundle.
     if skill_def.source == SKILL_SOURCE_PLATFORM:
-        if bundle is None:
+        source_bundle, prefix = _skill_bundle(skill_def, bundle, system_bundle)
+        if source_bundle is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"Skill '{name}' source not found (no bundle).",
             )
-        bundle_path = f"skills/{name}/{path}"
         try:
-            content = await bundle.read_text(bundle_path)
+            content = await source_bundle.read_text(f"{prefix}{path}")
         except LookupError:
             raise HTTPException(
                 status_code=404,
