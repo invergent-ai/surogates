@@ -97,7 +97,7 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     expect((await run(harness, tryWrite("sub/.git/config"))).ok?.output).toBe("denied\n");
   });
 
-  it("answers a run cancelled while it waits for a restart at once, before the restart ends", async () => {
+  it("answers a run and a start cancelled while they wait for a restart at once, before the restart ends", async () => {
     // 300 000 files: each walk of the folder takes about a second, and a restart does two.
     mkdirSync(join(folder, "many"));
     spawnSync("bash", ["-c", "seq 1 300000 | xargs touch"], { cwd: join(folder, "many") });
@@ -106,19 +106,28 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     // The look after this command starts the restart before its answer is sent.
     expect((await run(harness, "mkdir -p sub/.vscode && touch sub/.vscode/a && echo made")).ok?.output).toBe("made\n");
     const order: string[] = [];
-    const queued = id();
-    const cancelled = harness.op(queued, "run", { command: "echo never", workdir: null, timeout: 10 }).then((answer) => {
-      order.push("run");
+    const at: Record<string, number> = {};
+    const answered = (name: string) => (answer: unknown) => {
+      order.push(name);
+      at[name] = Date.now();
       return answer;
-    });
+    };
+    const [queuedRun, queuedStart] = [id(), id()];
+    const cancelled = harness.op(queuedRun, "run", { command: "echo never", workdir: null, timeout: 10 }).then(answered("run"));
+    const cancelledStart = harness.op(queuedStart, "start", { command: "true", workdir: null, task_id: "t", pty: false })
+      .then(answered("cancelled start"));
     // A start answers once the new runner is up, so once the restart has ended.
-    const started = begin(harness, "sleep 627").then(() => order.push("start"));
-    // Once the run waits for the restart, which takes seconds.
+    const started = begin(harness, "sleep 606").then(answered("start"));
+    // Once they wait for the restart, which takes seconds.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    harness.send({ type: "cancel", id: queued });
+    harness.send({ type: "cancel", id: queuedRun });
+    harness.send({ type: "cancel", id: queuedStart });
     expect(await cancelled).toEqual(CANCELLED);
+    expect(await cancelledStart).toEqual(CANCELLED);
     await started;
-    expect(order).toEqual(["run", "start"]);
+    expect(order).toEqual(["run", "cancelled start", "start"]);
+    // Not at the restart's end: a walk of the folder and more were still to come.
+    expect((at.start ?? 0) - (at["cancelled start"] ?? 0)).toBeGreaterThan(500);
   });
 
   it("does not restart for a protected name under node_modules", async () => {

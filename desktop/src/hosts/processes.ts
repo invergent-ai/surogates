@@ -51,8 +51,9 @@ export interface Spawner {
 
 export interface ProcessesOptions {
   context: CommandContext;
-  // The root's session runner, started at the first start; rejects when it cannot start.
-  runner(): Promise<Spawner>;
+  // The root's session runner, started at the first start; rejects when it cannot start,
+  // or when *signal* cancels the start that waits for it.
+  runner(signal: AbortSignal): Promise<Spawner>;
   // Why a command may not run now, or null (the hook guard).
   refusal?(): Promise<Outcome | null>;
   // Told how many processes are alive, after each change.
@@ -236,9 +237,15 @@ export class Processes {
     this.prune();
     if (this.running.size >= MAX_PROCESSES) throw sandboxError(TOO_MANY);
     let runner: Spawner;
+    // A cancel does not wait out a restart, or the runner's start.
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      if (signal.aborted) reject(CANCELLED);
+      signal.addEventListener("abort", () => reject(CANCELLED), { once: true });
+    });
     try {
-      runner = await this.options.runner();
+      runner = await Promise.race([this.options.runner(signal), cancelled]);
     } catch (error) {
+      if (signal.aborted) return CANCELLED;
       // The sandbox's own refusal, such as too many protected paths, is the agent's to read.
       if (error instanceof Failure) throw error;
       const why = error instanceof Error ? error.message : String(error);

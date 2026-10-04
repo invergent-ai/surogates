@@ -381,6 +381,15 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect((await ask("poll", { session_id: id })).ok.output_preview).toBe("😀".repeat(1000));
   });
 
+  it("answers a start cancelled while it waits for the runner at once", async () => {
+    processes({ runner: () => new Promise(() => {}) });
+    const controller = new AbortController();
+    const starting = ask("start", { command: "x", workdir: null, task_id: "t", pty: false }, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    expect(await starting).toEqual(CANCELLED);
+  });
+
   it("answers a command that could not be spawned with its message", async () => {
     processes({ runner: fake({ fails: "spawn E2BIG" }).runner });
     expect(await ask("start", { command: "x", workdir: null, task_id: "t", pty: false })).toEqual({

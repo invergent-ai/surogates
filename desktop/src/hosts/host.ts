@@ -341,9 +341,12 @@ function watchHooks(): void {
 
 // Started at the root's first background process. A runner that dies unexpectedly
 // ends its processes (the registry notes why); the next start starts another, and
-// commands get sandboxes of their own until then. A restart starts the next one itself.
-function sessionRunner(): Promise<SessionRunner> {
-  return restarting ? restarting.then(sessionRunner) : launch();
+// commands get sandboxes of their own until then. A restart starts the next one itself;
+// a start cancelled while it waited starts none.
+async function sessionRunner(signal: AbortSignal): Promise<SessionRunner> {
+  await restarted(signal);
+  if (signal.aborted) throw new Error("the start was cancelled");
+  return launch();
 }
 
 function launch(): Promise<SessionRunner> {
