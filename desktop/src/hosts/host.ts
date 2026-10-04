@@ -69,6 +69,8 @@ type Baseline = { keys: ReadonlySet<string>; since: number; targets: ReadonlyMap
 let baseline: Baseline | null = null;
 // While the runner restarts, run and start wait for the new one.
 let restarting: Promise<void> | null = null;
+// A restart's stop of its old runner, which SIGKILL bounds.
+let retiring: Promise<void> = Promise.resolve();
 let lastRestart = -Infinity;
 let deferred: NodeJS.Timeout | null = null;
 // The latest reason asked for while a restart is deferred: the one the agent is told.
@@ -446,13 +448,13 @@ function restart(reason: string): void {
   const old = liveRunner;
   if (!old) return;
   lastRestart = performance.now();
-  const registry = processes;
   runner = null;
   liveRunner = null;
   baseline = null;
+  processes?.restart(reason);
+  retiring = old.stop();
   restarting = (async () => {
-    registry?.restart(reason);
-    await stopRunner(null, old, STOP_COMMANDS_MS);
+    await retiring;
     // One that cannot start leaves none: the next start tries again, and commands get sandboxes of their own.
     await launch().catch(() => {});
   })().finally(() => {
@@ -551,8 +553,9 @@ async function stop(code = 0): Promise<void> {
     new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS)),
   ]);
   helper?.kill("SIGKILL");
-  // A restart stops its old runner within its own bound; the new one is then the one to stop.
-  await Promise.race([restarting, new Promise((resolve) => setTimeout(resolve, STOP_COMMANDS_MS))]);
+  // A restart's old runner first: its own SIGKILL bounds its stop. A new one then
+  // starts no more, or is the runner to stop, its launch bounded as a first one's is.
+  await retiring;
   // Its background processes go with its sandbox, before the last look.
   await stopRunner(runner, liveRunner, STOP_COMMANDS_MS);
   // What a stopped command left, before the record can say the host stopped
