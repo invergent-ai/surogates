@@ -12,7 +12,7 @@ import { inside } from "../files/paths.js";
 import type { Outcome } from "../link/protocol.js";
 
 export const SCAN_TIMEOUT_MS = 30_000;
-export const HOOKS_NOTICE = "The computer made these git hooks non-executable, because git would run them outside the sandbox: ";
+export const HOOKS_NOTICE = "The computer stopped these git hooks from running, because git would run them outside the sandbox (where it closed a hooks folder, that repository's other hooks are off until you make it searchable again): ";
 export const MAX_LISTED = 20;
 
 export interface HookScan {
