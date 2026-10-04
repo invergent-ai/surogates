@@ -10,7 +10,7 @@ import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
 import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
 import { appeared } from "../src/hosts/restarts.js";
-import { Harness, PACKAGE } from "./host-harness.js";
+import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: any; error?: { type: string; message: string } };
 
@@ -52,6 +52,7 @@ beforeEach(() => {
   start = {
     type: "start",
     folder,
+    expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: join(base, "home"), LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

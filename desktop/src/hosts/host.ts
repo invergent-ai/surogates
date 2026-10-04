@@ -5,7 +5,7 @@
 // is the parent of every command's bwrap. A Node child process with an IPC channel.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, type Stats, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import type { Server } from "node:net";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
+import { BOOT_ID, checkFolder, spellings } from "../binding/folder.js";
 import { findOnPath } from "../files/operations.js";
 import type { Outcome } from "../link/protocol.js";
 import { inside, realpath } from "../files/paths.js";
@@ -20,7 +21,7 @@ import { absolutePath, commandEnvironment, makeCaches } from "./environment.js";
 import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholders, writeRecord } from "./folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
-import { GLOB, hideSrtTmp, isReserved, quote, sandboxPolicy } from "./policy.js";
+import { GLOB, hideSrtTmp, quote, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
 import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
 import { CANCELLED, type CommandContext, runCommand } from "./run.js";
@@ -28,7 +29,6 @@ import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;
-const CREDENTIALS = [".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh"];
 const STOP_COMMANDS_MS = 2_000;
 // While background processes or the runner live, the hook guard looks this often: one may write a hook between commands.
 const WATCH_MS = 5_000;
@@ -116,14 +116,6 @@ process.on("message", (raw) => {
 process.on("disconnect", () => void stop());
 process.on("SIGTERM", () => void stop());
 
-// A path as spelled, and as the file system resolves it. Where it does not exist yet, or cannot be
-// read, the part that exists is still resolved: a guard that is not there yet is still where its links lead.
-function spellings(path: string): string[] {
-  const plain = resolve(path);
-  const { path: real } = realpath(plain);
-  return real === plain ? [plain] : [plain, real];
-}
-
 // What a host killed together with the app left of srt: its bridges (socat, whose
 // command line names their socket), then its files.
 function sweep(dir: string): void {
@@ -139,7 +131,7 @@ function sweep(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
-// The bound folder is gone, or is not a folder. The app has no folder to check
+// The bound folder is gone, is not a folder, or was replaced. The app has no folder to check
 // before it starts a host (a stat on a stuck mount would freeze it), so the host says.
 class FolderUnavailable extends Error {}
 
@@ -149,36 +141,22 @@ async function start(message: HostStart): Promise<void> {
   if (!isAbsolute(message.tmp)) throw new Error(`the temp folder must be an absolute path: ${message.tmp}`);
   const tmp = resolve(message.tmp);
   const appDirs = message.appDirs.map((dir) => resolve(dir));
-  let path: string;
-  let stats: Stats;
-  try {
-    path = realpathSync(message.folder);
-    stats = statSync(path);
-  } catch {
-    throw new FolderUnavailable(`the folder ${message.folder} is not there`);
-  }
-  if (!stats.isDirectory()) throw new FolderUnavailable(`the folder ${message.folder} is not a folder`);
-  const globbed = [path, tmp, ...appDirs].find((entry) => GLOB.test(entry));
+  const checked = checkFolder(message.folder, { home, dataDir: message.dataDir, appDirs });
+  if (!checked.ok) throw checked.missing ? new FolderUnavailable(checked.message) : new Error(checked.message);
+  const globbed = [tmp, ...appDirs].find((entry) => GLOB.test(entry));
   if (globbed) throw new Error(`this computer cannot sandbox a folder whose path holds *, ?, [ or ]: ${globbed}`);
-  if (isReserved(path)) {
-    throw new Error(`the folder ${path} is inside one of this computer's system folders`);
+  const { path, dev, ino } = checked;
+  // A reboot can renumber the folder's mount: after one, only the inode is compared.
+  // A boot id that could not be read counts as this boot.
+  const { expect } = message;
+  const rebooted = expect.boot !== "" && BOOT_ID !== "" && expect.boot !== BOOT_ID;
+  if (expect.ino !== ino || (!rebooted && expect.dev !== dev)) {
+    throw new FolderUnavailable(`the folder ${message.folder} was replaced after it was confirmed for this chat`);
   }
-  // A sandbox whose writable folder held the home folder, the app's own data or
-  // files (which run outside the sandbox) or a credential folder would hand all
-  // of it to the agent. Each is compared as spelled and as resolved: a link
-  // would otherwise walk around the check.
-  const homes = spellings(home);
-  const guarded = [message.dataDir, ...appDirs, ...homes.flatMap((dir) => CREDENTIALS.map((name) => join(dir, name)))]
-    .flatMap(spellings);
-  const refused = [...new Set([resolve(message.folder), path])].some(
-    (candidate) => candidate === "/" || homes.some((dir) => inside(dir, candidate)) ||
-      guarded.some((dir) => inside(dir, candidate) || inside(candidate, dir)),
-  );
-  if (refused) throw new Error(`the folder ${path} holds this computer's home folder or the app's own data`);
-  folder = { path, dev: stats.dev, ino: stats.ino };
+  folder = { path, dev, ino };
   // One host per folder. Then, if the host before this one was killed, what srt
   // left over the names that were absent when it started.
-  const key = `${stats.dev}-${stats.ino}`;
+  const key = `${dev}-${ino}`;
   // srt's own temp files (its bridges' sockets, the empty folders it mounts) go
   // through os.tmpdir(), read at each call: here, in a folder only this folder's
   // host uses, so whatever a killed host left there is provably its own.
@@ -187,7 +165,7 @@ async function start(message: HostStart): Promise<void> {
   if (Buffer.byteLength(join(srtTmp, `claude-socks-${"0".repeat(16)}.sock`)) > 107) {
     throw new Error(`the app's data folder's path is too long for the sandbox's sockets: ${srtTmp}`);
   }
-  lock = await lockFolder(stats.dev, stats.ino);
+  lock = await lockFolder(dev, ino);
   // Before anything in the folder is touched: the bridges (socat) a host killed with
   // the app left running, and anything else whose command line names srt's folder.
   sweep(srtTmp);
@@ -334,6 +312,8 @@ function watchHooks(): void {
   const hooks = guard;
   const alive = () => (processes?.live ?? 0) > 0 || liveRunner !== null;
   watching = setTimeout(() => void (async () => {
+    // A folder replaced since the start is not this chat's: no look or runner goes over it.
+    if (!sameFolder()) return void stop(1);
     const was = alive();
     await hooks.watch();
     watching = null;
@@ -432,6 +412,8 @@ function seen(keys: ReadonlySet<string>, startedAt: number, between: boolean): v
 // count once, with its bwrap; work that comes meanwhile waits for the new one.
 function restart(reason: string): void {
   if (stopping || !(liveRunner || restarting)) return;
+  // A new runner would be wrapped over the replacement, and leave srt's placeholders in it.
+  if (!sameFolder()) return void stop(1);
   if (deferred) {
     deferredReason = reason;
     return;
@@ -570,8 +552,9 @@ async function stop(code = 0): Promise<void> {
   await stopRunner(runner, liveRunner, STOP_COMMANDS_MS);
   // What a stopped command left, before the record can say the host stopped
   // cleanly. A look that could not see the whole folder, or a host killed
-  // during it, leaves "running" and the baseline for the next host.
-  const clean = (await guard?.settle()) ?? true;
+  // during it, leaves "running" and the baseline for the next host. So does a folder
+  // moved or replaced: the look would change the hooks of a folder that is not this chat's.
+  const clean = sameFolder() && ((await guard?.settle()) ?? true);
   await leave(code, clean);
 }
 

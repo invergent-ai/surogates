@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { Harness, PACKAGE } from "./host-harness.js";
+import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 type Answer = { ok?: { output: string; returncode: number; timed_out: boolean }; error?: { type: string; message: string } };
 
@@ -70,6 +70,7 @@ beforeEach(() => {
   start = {
     type: "start",
     folder,
+    expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },

@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, expect, it } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import { connectDevice } from "../src/device.js";
 import { forkHost, ToolHosts } from "../src/hosts/tool-hosts.js";
 import { OperationJournal } from "../src/journal/journal.js";
@@ -33,12 +34,13 @@ let exits: number;
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "revocation-")));
   mkdirSync(join(base, "folder"));
+  const { dev, ino } = statSync(join(base, "folder"));
   server = new FakeLinkServer();
   link = null;
   exits = 0;
   journal = new OperationJournal(join(base, "journal.sqlite"));
   hosts = new ToolHosts({
-    bindingOf: () => ({ folder: join(base, "folder") }),
+    bindingOf: () => ({ folder: join(base, "folder"), dev, ino, boot: BOOT_ID }),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
     spawnHost: () => {

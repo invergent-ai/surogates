@@ -1,7 +1,8 @@
 // What this computer did with each operation it was sent, kept on disk so a
 // reconnect or a crash never runs one twice. One row per operation id:
 //
-//   received      sent to us, not started; safe to run (nothing happened yet)
+//   received      sent to us, not started; safe to run (nothing happened yet). One the
+//                 executor answers before it starts (admit) goes straight to finished
 //   started       written durably before the operation acts
 //   finished      its outcome, written durably before it is sent
 //   acknowledged  the server recorded the outcome; after RETAIN_MS its payload goes
@@ -14,6 +15,7 @@
 import { DatabaseSync } from "node:sqlite";
 
 import type { Operation, Outcome } from "../link/protocol.js";
+import { Bindings } from "./bindings.js";
 
 export const INTERRUPTED: Outcome = {
   error: {
@@ -63,7 +65,18 @@ export class OperationJournal {
           updated_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS operations_by_state ON operations (state, updated_at);
+        CREATE TABLE IF NOT EXISTS bindings (
+          root TEXT PRIMARY KEY,
+          nonce TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          dev INTEGER NOT NULL,
+          ino INTEGER NOT NULL,
+          boot TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          bound_at INTEGER NOT NULL
+        );
       `);
+      this.bindings = new Bindings(this.db);
       // Opened once per process: what a crash cut off is interrupted before
       // anything is reported or run.
       this.recovered = this.recover();
@@ -76,6 +89,9 @@ export class OperationJournal {
 
   /** How many operations a crash had cut off, answered "interrupted" when this journal was opened. */
   readonly recovered: number;
+
+  /** The folder each root session works on: in this file, under its lock. */
+  readonly bindings: Bindings;
 
   /** Tie this journal to one device; false if it already belongs to another. */
   claim(deviceId: string): boolean {
@@ -137,6 +153,19 @@ export class OperationJournal {
     const stored = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
     const result = this.db
       .prepare(`UPDATE operations SET state = 'finished', outcome = ?, updated_at = ? WHERE id = ? AND state = 'started'`)
+      .run(JSON.stringify(stored), this.now(), id);
+    return Number(result.changes) === 1;
+  }
+
+  /**
+   * Durably record the outcome of an operation that never started, before it is
+   * sent. True when this call recorded it; false, with nothing recorded, when it
+   * was cancelled meanwhile, or is unknown, started or finished.
+   */
+  answer(id: string, outcome: Outcome): boolean {
+    const stored = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
+    const result = this.db
+      .prepare(`UPDATE operations SET state = 'finished', outcome = ?, updated_at = ? WHERE id = ? AND state = 'received'`)
       .run(JSON.stringify(stored), this.now(), id);
     return Number(result.changes) === 1;
   }

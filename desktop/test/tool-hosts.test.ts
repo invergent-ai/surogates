@@ -1,14 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import type { Operation } from "../src/link/protocol.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type ToHost } from "../src/hosts/messages.js";
 import {
-  CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts, type ToolHostsOptions,
+  APP_DIRS, CANCELLED, forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND, START_TIMEOUT_MS, ToolHosts,
+  type ToolHostsOptions,
 } from "../src/hosts/tool-hosts.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
@@ -28,6 +30,8 @@ async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
 
 let base: string;
 let folders: Record<string, string>;
+// Each folder's identity as it was made: the one its binding holds.
+let identities: Map<string, { dev: number; ino: number; boot: string }>;
 let spawned: HostProcess[];
 let exits: number;
 let hosts: ToolHosts | null;
@@ -40,7 +44,8 @@ function toolHosts(overrides: Partial<ToolHostsOptions> = {}): ToolHosts {
   hosts = new ToolHosts({
     bindingOf: (root) => {
       const folder = folders[root];
-      return folder ? { folder } : undefined;
+      const made = folder === undefined ? undefined : identities.get(folder);
+      return folder && made ? { folder, ...made } : undefined;
     },
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: `${folders[ROOT_A]}/bin:/usr/bin:/bin` },
@@ -62,7 +67,12 @@ const signal = () => new AbortController().signal;
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "tool-hosts-")));
   folders = { [ROOT_A]: join(base, "a"), [ROOT_B]: join(base, "b") };
-  for (const folder of Object.values(folders)) mkdirSync(folder);
+  identities = new Map();
+  for (const folder of Object.values(folders)) {
+    mkdirSync(folder);
+    const { dev, ino } = statSync(folder);
+    identities.set(folder, { dev, ino, boot: BOOT_ID });
+  }
   // An rg that never answers, for operations that are still running; its sleep
   // has a length only it uses, so the test can see it run and stop.
   mkdirSync(join(folders[ROOT_A] ?? "", "bin"));
@@ -143,6 +153,14 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     expect(spawned).toHaveLength(2);
     // Each of them goes on its own; none is left to exit during the next test.
     await until(() => exits === 2);
+  });
+
+  it("answers folder_unavailable for a folder replaced since it was bound, before its host starts", async () => {
+    const executor = toolHosts();
+    renameSync(folders[ROOT_B] ?? "", `${folders[ROOT_B]}-old`);
+    mkdirSync(folders[ROOT_B] ?? "");
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toEqual(FOLDER_UNAVAILABLE);
+    await until(() => exits === 1);
   });
 
   it("starts no host once stopped", async () => {
@@ -436,12 +454,31 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "op")).toBe(2);
   });
 
+  it("tells a host the identity its folder was bound with", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    expect(fakes[0]?.sent[0]).toMatchObject({
+      type: "start", folder: folders[ROOT_A], expect: identities.get(folders[ROOT_A] ?? ""),
+    });
+  });
+
+  it("gives the binder the folder guards its hosts start with, and none without a HOME", async () => {
+    const executor = toolHosts({ spawnHost: fakeSpawn(answering), appDirs: [join(base, "app")] });
+    await executor.run(resolve(), signal());
+    const start = fakes[0]?.sent[0];
+    expect(start?.type).toBe("start");
+    if (start?.type !== "start") return;
+    expect(executor.guards()).toEqual({ home: start.env.HOME, dataDir: start.dataDir, appDirs: start.appDirs });
+    expect(toolHosts().guards().appDirs).toEqual(APP_DIRS);
+    expect(() => toolHosts({ env: { PATH: "/usr/bin:/bin" } }).guards()).toThrow("the app's environment has no HOME");
+  });
+
   it("looks up no folder for an ill-formed session id", async () => {
     let looked = 0;
     const executor = toolHosts({
       bindingOf: () => {
         looked += 1;
-        return { folder: folders[ROOT_A] ?? "" };
+        return { folder: folders[ROOT_A] ?? "", dev: 0, ino: 0, boot: "" };
       },
       spawnHost: fakeSpawn(answering),
     });

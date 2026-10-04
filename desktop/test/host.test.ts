@@ -1,25 +1,28 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { BOOT_ID } from "../src/binding/folder.js";
 import { findOnPath } from "../src/files/operations.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
-import { Harness, PACKAGE } from "./host-harness.js";
+import { bound, Harness, PACKAGE } from "./host-harness.js";
 
 let base: string;
 let folder: string;
 let start: HostStart;
 let harnesses: Harness[];
 
+// Bound to its folder as that folder is now, unless the test says otherwise.
 function host(overrides: Partial<HostStart> = {}, cwd?: string): Harness {
   const harness = new Harness(cwd);
   harnesses.push(harness);
-  harness.send({ ...start, ...overrides });
+  harness.send({ ...start, expect: bound(overrides.folder ?? start.folder), ...overrides });
   return harness;
 }
 
@@ -40,6 +43,7 @@ beforeEach(() => {
   start = {
     type: "start",
     folder,
+    expect: bound(folder),
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: process.env.HOME ?? "/home/tester", LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
@@ -115,6 +119,40 @@ describe("a tool host", { timeout: 30_000 }, () => {
     const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
     expect(failed).toMatchObject({ type: "failed", folder: true });
     expect(await harness.exited).toBe(1);
+  });
+
+  it("answers a folder replaced since its chat was bound as unavailable, and goes", async () => {
+    const expected = bound(folder);
+    renameSync(folder, `${folder}-old`);
+    mkdirSync(folder);
+    const harness = host({ expect: expected });
+    const failed = await harness.until((messages) => messages.find((message) => message.type === "failed"));
+    expect(failed).toMatchObject({ type: "failed", folder: true, message: expect.stringMatching(/replaced/) });
+    expect(await harness.exited).toBe(1);
+    expect(existsSync(join(base, "data", "folders"))).toBe(false);
+  });
+
+  it("starts in the folder its chat was bound to", async () => {
+    const harness = host({ expect: bound(folder) });
+    await ready(harness);
+    expect(await harness.op("1", "resolve", { path: "a.txt" })).toEqual({ ok: `${folder}/a.txt` });
+  });
+
+  // An unreadable boot id compares as this boot.
+  it.each([BOOT_ID, ""])("refuses a folder on another device in the boot it was bound in (%j)", async (boot) => {
+    const { dev, ino } = statSync(folder);
+    expect(await refusal(host({ expect: { dev: dev + 1, ino, boot } }))).toMatch(/replaced/);
+  });
+
+  // st_dev belongs to a mount, which a reboot can number anew.
+  it("starts in its folder after a reboot that changed the folder's device number", async () => {
+    const { dev, ino } = statSync(folder);
+    await ready(host({ expect: { dev: dev + 1, ino, boot: "another-boot" } }));
+  });
+
+  it("refuses a folder with another inode after a reboot", async () => {
+    const { dev, ino } = statSync(folder);
+    expect(await refusal(host({ expect: { dev, ino: ino + 1, boot: "another-boot" } }))).toMatch(/replaced/);
   });
 
   it("refuses a folder that holds the app's own data or files, or the whole system", async () => {
