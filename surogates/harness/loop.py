@@ -1182,6 +1182,16 @@ class AgentHarness(
                 {"worker_id": self._worker_id, "cursor": cursor},
             )
 
+            # 5'. Another worker woke a local-folder session since this one
+            # did: it may have compacted or cleared the history, and reset
+            # only its own dedup.  This worker's points at results gone.
+            woken_by = next((
+                event.data.get("worker_id") for event in reversed(all_events)
+                if event.type == EventType.HARNESS_WAKE.value
+            ), None)
+            if woken_by != self._worker_id and device_of(session.config) is not None:
+                reset_file_dedup(str(session.id))
+
             # 5a. Initialize memory manager if available.
             if self._memory_manager is not None:
                 try:

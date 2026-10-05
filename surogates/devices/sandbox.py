@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import json
 import logging
+import weakref
 from contextvars import Token
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from surogates.devices.binding import device_of
 from surogates.devices.binding import device_owners as _owners
 from surogates.devices.operations import DeviceOperations, JournalRunner
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.tools.builtin.file_ops import clear_read_tracker
 
 if TYPE_CHECKING:
     from surogates.tools.registry import ToolRegistry
@@ -61,7 +63,8 @@ class DeviceCall:
 
     It has the SandboxPool methods tool code calls, so a harness tool handed
     it as its sandbox pool (the expert tool loop, the citation check) reaches
-    the computer through the same call.
+    the computer through the same call.  Their tool calls are another
+    conversation, so they keep their own reads, for as long as the call.
     """
 
     def __init__(
@@ -72,6 +75,10 @@ class DeviceCall:
         self._workspace_io = workspace_io
         self._task_id = task_id
         self._read_tracker_id = read_tracker_id
+        self._harness_tool_tracker_id = f"{read_tracker_id}:{uuid4()}"
+        # Cleared when the call goes, however it ends: a cancel or a lost
+        # lease skips the call's last steps.
+        weakref.finalize(self, clear_read_tracker, self._harness_tool_tracker_id)
         self._runner = runner
 
     @property
@@ -99,8 +106,8 @@ class DeviceCall:
         except Exception:
             logger.warning("could not mark what a tool call read as consumed", exc_info=True)
 
-    async def dispatch(self, name: str, args: dict[str, Any]) -> str:
-        """Run a sandbox tool's handler on the computer."""
+    async def dispatch(self, name: str, args: dict[str, Any], *, read_tracker_id: str | None = None) -> str:
+        """Run a sandbox tool's handler on the computer, reading as the session unless *read_tracker_id* says."""
         return await self._tools.dispatch(
             name,
             args,
@@ -111,7 +118,7 @@ class DeviceCall:
             task_id=self._task_id,
             # What this session read, apart from its root and its sub-agents:
             # a result in one's conversation is not in the others'.
-            read_tracker_id=self._read_tracker_id,
+            read_tracker_id=read_tracker_id or self._read_tracker_id,
             tools=self._tools,
         )
 
@@ -129,7 +136,7 @@ class DeviceCall:
         if not isinstance(args, dict):
             return json.dumps({"error": "Tool arguments must be a JSON object"})
         args.pop("_trace_context", None)
-        return await self.dispatch(name, args)
+        return await self.dispatch(name, args, read_tracker_id=self._harness_tool_tracker_id)
 
 
 def device_call_for(

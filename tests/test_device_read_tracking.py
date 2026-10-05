@@ -1,5 +1,6 @@
-"""What a session on the user's computer has read: its own, apart from its root's and its sub-agents', and its
-dedup forgotten once its history is compacted or cleared.  A cloud session's tracker is left as it was."""
+"""What a session on the user's computer has read: its own, apart from its root's, its sub-agents' and its experts',
+and its dedup forgotten once its history is compacted or cleared, on any worker.  A cloud session's tracker is left
+as it was."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import pytest
 from surogates.devices.sandbox import DeviceCall, device_call_for
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.harness.loop import AgentHarness
+from surogates.session.events import EventType
 from surogates.tools.builtin import file_ops
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
@@ -21,6 +23,8 @@ from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import InProcessRunner
 from tests.test_loop_ordering import _drive, _harness, _resp, _tool_resp
 from tests.test_steer_loop import _make_loop_harness, _make_session
+from tests.test_wake_slash_command_gate import _harness as _wake_harness
+from tests.test_wake_slash_command_gate import _permissive, _stub_store
 
 ROOT, CHILD = str(uuid4()), str(uuid4())
 READ = ("/home/me/notes/a.txt", 1, 2000)
@@ -79,6 +83,33 @@ async def test_a_sub_agent_reads_a_file_before_it_overwrites_it(folder):
     assert refused["error"].startswith("Refusing to overwrite")
     await run(child, "read_file", path="a.txt")
     assert (await run(child, "write_file", path="a.txt", content="beta\n"))["status"] == "ok"
+
+
+async def run_for_harness_tool(call: DeviceCall, name: str, **args) -> dict:
+    """A tool call a harness tool makes through the call, as an expert's tool loop does."""
+    return json.loads(await call.execute(CHILD, name, json.dumps(args)))
+
+
+async def test_an_experts_read_is_not_a_reference_to_its_sessions(folder):
+    call = call_of(folder, CHILD)
+    await run(call, "read_file", path="a.txt")
+    # The expert's transcript is another conversation: it has not seen the session's result.
+    assert (await run_for_harness_tool(call, "read_file", path="a.txt"))["content"] == "alpha\n"
+
+
+async def test_a_sessions_read_is_not_a_reference_to_its_experts(folder):
+    call = call_of(folder, CHILD)
+    await run_for_harness_tool(call, "read_file", path="a.txt")
+    # The session's model sees only the expert's answer.
+    assert (await run(call, "read_file", path="a.txt"))["content"] == "alpha\n"
+
+
+async def test_an_experts_reads_last_as_long_as_its_call(folder):
+    call = call_of(folder, CHILD)
+    await run_for_harness_tool(call, "read_file", path="a.txt")
+    assert (await run_for_harness_tool(call, "write_file", path="a.txt", content="beta\n"))["status"] == "ok"
+    del call
+    assert file_ops._read_tracker == {}
 
 
 class Recording:
@@ -210,3 +241,47 @@ async def test_clear_forgets_a_device_sessions_dedup():
     await harness._handle_clear_command(session, SimpleNamespace(lease_token="t"))
     assert dedup_of(str(session.id)) == {}
     assert file_ops.has_read(READ[0], str(session.id))
+
+
+def event(event_id: int, kind: EventType, **data) -> SimpleNamespace:
+    return SimpleNamespace(id=event_id, type=kind.value, data=data)
+
+
+async def wake(monkeypatch, session, earlier: list) -> None:
+    """Wake *session* on "test-worker" for a message after *earlier*, up to its loop."""
+    monkeypatch.setattr("surogates.harness.loop.resolve_agent_def", AsyncMock(return_value=None))
+    events = [*earlier, event(len(earlier) + 1, EventType.USER_MESSAGE, content="read a.txt again")]
+    harness = _wake_harness(_stub_store(session, events), _permissive())
+    harness._compressor.prune_stale_browser_states = lambda messages: messages
+    harness._run_loop = AsyncMock()
+    await harness.wake(session.id)
+
+
+# Another worker woke the session last and compacted its history there.
+ELSEWHERE = [
+    event(1, EventType.HARNESS_WAKE, worker_id="another-worker", cursor=0),
+    event(2, EventType.CONTEXT_COMPACT, compacted_messages=[]),
+]
+
+
+async def test_a_wake_after_another_workers_forgets_the_dedup_this_worker_kept(monkeypatch, folder):
+    session = device_session()
+    call = call_of(folder, str(session.id))
+    await run(call, "read_file", path="a.txt")
+    await wake(monkeypatch, session, ELSEWHERE)
+    assert (await run(call, "read_file", path="a.txt"))["content"] == "alpha\n"
+
+
+async def test_a_wake_after_this_workers_own_keeps_the_dedup(monkeypatch, folder):
+    session = device_session()
+    call = call_of(folder, str(session.id))
+    await run(call, "read_file", path="a.txt")
+    await wake(monkeypatch, session, [event(1, EventType.HARNESS_WAKE, worker_id="test-worker", cursor=0)])
+    assert (await run(call, "read_file", path="a.txt"))["dedup"] is True
+
+
+async def test_a_cloud_wake_after_another_workers_keeps_the_tracker(monkeypatch):
+    session = _make_session()
+    read_by(str(session.id))
+    await wake(monkeypatch, session, ELSEWHERE)
+    assert dedup_of(str(session.id))
