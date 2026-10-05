@@ -6,7 +6,9 @@ import asyncio
 import base64
 import hashlib
 import io
+import logging
 import os
+import re
 from datetime import timedelta
 from uuid import UUID
 
@@ -178,6 +180,27 @@ async def test_data_that_does_not_match_its_sha256_is_recorded_as_an_error_and_a
     # Bytes known to be wrong are not kept.
     assert await stored(session_factory, op["id"]) == b""
     assert await transfers_of(session_factory, rig.device_id) == 0
+
+
+async def test_a_transfer_the_link_closes_on_is_logged_with_the_close(laptop_rig, link_url, caplog):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(read_request(rig)))
+    with caplog.at_level(logging.INFO, logger="surogates.devices.link"):
+        async with linked(link_url, rig.token) as (ws, _):
+            op = await _first_op(ws)
+            await send(ws, header(op, DATA))
+            await send(ws, chunk(op, DATA, 1))
+            assert await close_code(ws) == 4400
+    [line] = [
+        record.getMessage() for record in caplog.records
+        if record.name == "surogates.devices.link" and " transfer " in record.getMessage()
+    ]
+    assert re.fullmatch(
+        rf"device {rig.device_id} transfer {op['id']} closed 4400 \(chunk out of order\): {len(DATA)} bytes, "
+        r"\d+\.\d\d s from its header",
+        line,
+    ), line
+    await stop(waiting)
 
 
 async def test_a_transfer_cut_off_is_sent_again_whole_on_the_next_connection(

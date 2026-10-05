@@ -206,6 +206,7 @@ class _Incoming:
     outcome: dict[str, Any]
     size: int
     sha256: str
+    started: float  # when its header came, on the monotonic clock
     received: int = 0
     seq: int = 0
     hasher: Any = field(default_factory=hashlib.sha256)
@@ -345,6 +346,7 @@ class _Link:
         self, operation_id: UUID, digest: str, outcome: dict[str, Any], size: int, sha256: str,
     ) -> None:
         """Take a result header: its chunks follow, unless the operation is closed."""
+        started = time.monotonic()
         if self._incoming is not None:
             raise _Close(CLOSE_PROTOCOL, "one transfer at a time")
         # A connection another has superseded must not take a transfer over
@@ -361,13 +363,15 @@ class _Link:
         if status == "rejected":
             raise _Close(CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read")
         if status == "busy":
+            self._ended("busy", operation_id, size, started)
             # The app reconnects and sends it again whole, or hears it is
             # unwanted when the other connection's last chunk answered it.
             raise _Close(CLOSE_PROTOCOL, "another connection started this transfer at the same moment")
         if status == "unwanted":
+            self._ended("unwanted", operation_id, size, started)
             await self._unwanted(operation_id)
             return
-        self._incoming = _Incoming(operation_id, digest, outcome, size, sha256)
+        self._incoming = _Incoming(operation_id, digest, outcome, size, sha256, started)
 
     async def chunk(self, frame: dict[str, Any]) -> None:
         """Store one chunk of the transfer under way, then acknowledge it."""
@@ -400,22 +404,41 @@ class _Link:
         if status == "stale":
             raise _Close(CLOSE_REVOKED, "credentials rotated")
         if status == "lost":
+            self._incoming = None
+            self._ended("lost", operation_id, incoming.size, incoming.started)
             # 4409 is final on the app, so only for a superseded connection.
             # The live one lost it to a stalled one's start: it sends it again.
             if await _bounded(self._presence.refresh(self._device.id, self._holder)):
                 raise _Close(CLOSE_PROTOCOL, "this transfer was started again meanwhile")
             raise _Close(CLOSE_SUPERSEDED, "another connection sends this transfer now")
         if status == "unwanted":
+            self._ended("unwanted", operation_id, incoming.size, incoming.started)
             await self._unwanted(operation_id)
             return
         incoming.received += len(data)
         incoming.seq += 1
         if status == "completed":
+            how = "damaged" if outcome is DAMAGED_OUTCOME else "completed"
+            self._ended(how, operation_id, incoming.size, incoming.started)
             self._incoming = None
             self._delivered.discard(operation_id)
             await self.send({"type": "op_ack", "id": str(operation_id)})
             return
         await self.send({"type": "chunk_ack", "id": str(operation_id), "seq": seq})
+
+    def closed(self, code: int, reason: str) -> None:
+        """The connection ends with this close: so does a transfer under way."""
+        if (incoming := self._incoming) is not None:
+            self._incoming = None
+            self._ended(f"closed {code} ({reason})", incoming.operation_id, incoming.size, incoming.started)
+
+    def _ended(self, how: str, operation_id: UUID, size: int, started: float) -> None:
+        # One line per transfer, with the time from its header: what PROD's
+        # ingress does to transfers shows here.
+        logger.info(
+            "device %s transfer %s %s: %d bytes, %.2f s from its header",
+            self._device.id, operation_id, how, size, time.monotonic() - started,
+        )
 
     async def _unwanted(self, operation_id: UUID) -> None:
         self._incoming = None
@@ -445,6 +468,7 @@ async def serve_device_link(
         return
 
     holder = new_holder()
+    link = _Link(websocket, device=device, holder=holder, presence=presence, operations=operations)
     pubsub: PubSub | None = None
     claimed = False
     try:
@@ -457,9 +481,6 @@ async def serve_device_link(
         await _bounded(presence.claim(device.id, holder))
         # A revocation or rotation published before the subscription was missed.
         _check_current(await _bounded(store.touch(device.id)), device)
-        link = _Link(
-            websocket, device=device, holder=holder, presence=presence, operations=operations,
-        )
         await link.send({
             "type": "welcome",
             "protocol": PROTOCOL_VERSION,
@@ -478,12 +499,14 @@ async def serve_device_link(
         link.deliver_soon()
         await _serve(link, pubsub, device=device, holder=holder, store=store, presence=presence)
     except _Close as close:
+        link.closed(close.code, close.reason)
         with contextlib.suppress(Exception):
             await websocket.close(code=close.code, reason=close.reason)
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as gone:
+        link.closed(gone.code, gone.reason or "disconnected")
     except Exception:
         logger.exception("device link %s failed", device.id)
+        link.closed(1011, "server error")
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="server error")
     finally:

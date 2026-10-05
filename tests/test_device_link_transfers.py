@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
+import re
 import uuid
 from types import SimpleNamespace
 
@@ -107,6 +109,19 @@ async def test_a_header_and_its_chunks_are_stored_in_order_and_the_last_is_ackno
         {"type": "chunk_ack", "id": str(OPERATION), "seq": 1},
         {"type": "op_ack", "id": str(OPERATION)},
     ]
+
+
+async def test_a_transfer_that_completes_is_logged_once_with_its_device_size_and_time(caplog):
+    link, _ = make_link(FakeOperations())
+    with caplog.at_level(logging.INFO, logger="surogates.devices.link"):
+        await link.record(header())
+        for frame in chunks():
+            await link.chunk(frame)
+    [line] = [record.getMessage() for record in caplog.records if record.name == "surogates.devices.link"]
+    assert re.fullmatch(
+        rf"device {link._device.id} transfer {OPERATION} completed: {len(DATA)} bytes, \d+\.\d\d s from its header",
+        line,
+    ), line
 
 
 async def test_data_that_does_not_match_its_sha256_is_recorded_as_damaged():
