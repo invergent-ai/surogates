@@ -47,6 +47,19 @@ async def test_session_deleted_interrupt_destroys_browser_pool(
     assert browser_pool.destroyed_sessions == [str(session_id)]
 
 
+async def test_a_hang_up_tears_the_calls_browser_down_quietly(
+    browser_pool: _BrowserPool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A phone call's browser must not outlive the call; no turn running at hang-up is normal."""
+    session_id = uuid4()
+    orchestrator = _orchestrator(browser_pool)
+
+    await orchestrator._handle_interrupt_signal(session_id, "call_ended")
+
+    assert browser_pool.destroyed_sessions == [str(session_id)]
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "WARNING")]
+
+
 async def test_pause_interrupt_does_not_destroy_browser_pool(
     browser_pool: _BrowserPool,
 ) -> None:

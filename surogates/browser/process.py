@@ -153,9 +153,11 @@ class ProcessBrowserBackend:
 
         try:
             await self._wait_ready(endpoint, spec.pod_ready_timeout)
-        except Exception:
-            await self._docker.run(["stop", container_id])
-            await self._docker.run(["rm", container_id])
+        except BaseException:
+            # BaseException: a stopped turn cancels this task mid-wait, and CancelledError is not an
+            # Exception. The container is in no map or registry yet, so nothing else would remove it.
+            await asyncio.shield(self._docker.run(["stop", container_id]))
+            await asyncio.shield(self._docker.run(["rm", container_id]))
             raise
 
         self._entries[container_id] = _Entry(

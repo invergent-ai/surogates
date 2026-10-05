@@ -198,9 +198,9 @@ class CallSession:
         turn (tools, browsers, model calls) for a caller who is gone, and fails a silent call after
         repeated recoveries. ``completed`` with ``call_ended`` is the end of the conversation.
         """
+        # always: it stops a turn still running and tears the call's browser down (dispatcher)
+        await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": "call_ended"}))
         status = (await self.store.get_session(self.session_id)).status
-        if status in ("active", "processing"):  # a stop for a harness that is not running is logged as an error
-            await self.interrupt()
         if status != "completed":  # a turn that already completed the session leaves nothing to close
             await self.store.update_session_status(self.session_id, "completed")
             await self.store.emit_event(self.session_id, EventType.SESSION_COMPLETE, {"reason": "call_ended"})

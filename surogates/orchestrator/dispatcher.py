@@ -940,7 +940,12 @@ class Orchestrator:
             )
 
     async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
-        delivered = self.interrupt_session(session_id, reason)
+        # A phone hang-up ends the call whether or not a turn is running here; most of the time
+        # none is, and that is not worth an error in the log.
+        if reason == "call_ended" and session_id not in self._active_harnesses:
+            delivered = False
+        else:
+            delivered = self.interrupt_session(session_id, reason)
         # A turn waiting to take its slot back on a full worker would not see
         # the interrupt until a slot freed.  Only a delivered interrupt ends
         # the turn, so only then may it go on without its slot.
@@ -948,7 +953,8 @@ class Orchestrator:
             for slots, dequeued in list(self._turns.values()):
                 if dequeued.session_id == str(session_id):
                     slots.interrupt()
-        if reason == "session deleted" and self._browser_pool is not None:
+        # A deleted session, or a phone call that ended, has no one left to use its browser.
+        if reason in ("session deleted", "call_ended") and self._browser_pool is not None:
             try:
                 await self._browser_pool.destroy_for_session(str(session_id))
             except Exception:
@@ -957,7 +963,7 @@ class Orchestrator:
                     session_id,
                     exc_info=True,
                 )
-        if not delivered:
+        if not delivered and reason != "call_ended":
             logger.warning(
                 "Interrupt for session %s could not be delivered "
                 "(no active harness on this worker)",
