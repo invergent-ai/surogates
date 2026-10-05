@@ -316,6 +316,8 @@ async def test_a_write_too_large_for_a_frame_lands_only_on_the_revision_it_expec
     # Its data came whole, in chunks, and still it is not written.
     with pytest.raises(RevisionConflict):
         await asyncio.wait_for(wio.write(key, BIG, expected_revision=stale), 10.0)
+    [_, operation_id] = rig.laptop.outcomes
+    assert rig.laptop.chunks_received == [(operation_id, seq) for seq in range(7)]
     assert (rig.folder / "big.bin").read_bytes() == b"newer"
     seen = (await asyncio.wait_for(wio.stat(key), 5.0)).revision
     await asyncio.wait_for(wio.write(key, BIG, expected_revision=seen), 10.0)
