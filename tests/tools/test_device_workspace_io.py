@@ -28,7 +28,7 @@ from surogates.devices.workspace import (
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RipgrepError
-from tests.fake_laptop import BAD_PAGE, InProcessRunner
+from tests.fake_laptop import BAD_PAGE, InProcessRunner, perform
 
 
 @pytest.fixture
@@ -359,8 +359,25 @@ async def test_a_page_asks_for_at_most_one_frame_of_data(root):
     })]
 
 
+def sparse(path: Path, size: int) -> str:
+    with open(path, "wb") as fh:
+        fh.truncate(size)
+    return str(path)
+
+
+async def test_a_full_page_crosses_in_one_message(wio, root):
+    # InProcessRunner checks that the reply fits one message.
+    (root / "line.txt").write_bytes(b"x" * (MAX_PAYLOAD_BYTES + 10))
+    page = await wio.read_lines(str(root / "line.txt"), **{**PAGE, "max_bytes": 4 * MAX_PAYLOAD_BYTES})
+    assert page == LinePage(b"x" * MAX_PAYLOAD_BYTES, 1)
+
+
+async def test_a_page_of_a_file_at_the_cap_is_paged(wio, root):
+    assert await wio.read_lines(sparse(root / "most.log", MAX_READ_BYTES), **PAGE) == LinePage(b"\0" * 8192, 1)
+
+
 async def test_a_page_of_a_file_over_the_cap_fails_before_it_is_scanned(wio, root, monkeypatch):
-    (root / "huge.log").write_bytes(b"y\n" * (MAX_READ_BYTES // 2 + 1))
+    sparse(root / "huge.log", MAX_READ_BYTES + 1)
 
     async def scanned(*args, **kwargs):
         raise AssertionError("the file was scanned")
@@ -419,6 +436,13 @@ async def test_a_number_the_app_reads_as_finite_is_paged(wio, root):
     (root / "a.txt").write_text("one\n")
     asked = {**PAGE, "offset": 10**308, "limit": -(2**1024 - 2**970 - 1)}
     assert await wio.read_lines(str(root / "a.txt"), **asked) == LinePage(b"", 1)
+
+
+async def test_the_reference_laptop_takes_no_bool_for_an_integer(root):
+    # The worker sends a bool as an int; the app refuses true, as Number.isInteger(true) is false.
+    (root / "a.txt").write_text("one\n")
+    args = {"key": str(root / "a.txt"), **PAGE, "limit": True}
+    assert await perform(LocalWorkspaceIO(str(root)), "read_lines", args) == {"error": {"type": "value", "message": BAD_PAGE}}
 
 
 async def test_a_bool_offset_or_limit_reads_as_the_cloud_reads_it(wio, root):

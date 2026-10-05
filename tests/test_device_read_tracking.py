@@ -317,6 +317,8 @@ async def test_a_wake_after_another_workers_forgets_the_dedup_this_worker_kept(m
     call = call_of(folder, str(session.id))
     await run(call, "read_file", path="a.txt")
     await wake(monkeypatch, session, ELSEWHERE)
+    # It still knows the file was read, so a write needs no read again.
+    assert file_ops.has_read(str(folder / "a.txt"), str(session.id))
     assert (await run(call, "read_file", path="a.txt"))["content"] == "alpha\n"
 
 
