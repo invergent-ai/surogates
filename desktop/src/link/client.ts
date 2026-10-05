@@ -105,9 +105,11 @@ export class DeviceLink {
   }
 
   /**
-   * Send a frame on the welcomed connection; false when there is none. *written* is
-   * called once ws has handed the frame to the socket, or failed to: the frame has
-   * then left ws's bufferedAmount.
+   * Send a frame on the welcomed connection; false when there is none. *written* runs
+   * once for each frame sent, never before send returns: once ws has written the frame
+   * to the socket, or once the socket closed before it could. A close calls it before
+   * ws's close event, while the socket is closing, so a send made from inside it
+   * returns false. The transfer sender relies on all three.
    */
   send(frame: Record<string, unknown>, written?: () => void): boolean {
     const socket = this.socket;

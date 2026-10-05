@@ -78,7 +78,7 @@ async def test_a_worker_stopped_after_the_app_sent_a_30_mib_pdf_resumes_with_the
         assert consumed is not None
     finally:
         await app.close()
-    # The app ran each operation once: its journal holds nothing it was asked again.
+    # The app journaled every operation it was given.
     assert journal_rows(journal) == asked - 1  # the bind was answered by the server-side rig, not the app
 
 
