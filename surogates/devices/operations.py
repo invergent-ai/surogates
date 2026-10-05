@@ -71,8 +71,9 @@ _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
 
-# How long a transfer's data is kept once the tool result that read it is
-# committed, and how long one nothing has read is kept at all.
+# How long a read's data is kept once the tool result that read it is
+# committed, and how long a read's data nothing has read is kept at all.  A
+# write's goes at the first pass after the write closes, whatever its age.
 RETAIN_CONSUMED = timedelta(hours=24)
 ORPHAN_AFTER = timedelta(days=7)
 
