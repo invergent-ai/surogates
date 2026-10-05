@@ -242,4 +242,24 @@ describe("the sender", () => {
     sender.acked("a", 1);
     expect(sent()).toEqual([0, 1, 2, 3, 4, 5]);
   });
+
+  it("hands ws the next transfer's first chunk only once ws has written the last one's", () => {
+    const frames: Record<string, unknown>[] = [];
+    const unwritten: Array<() => void> = [];
+    const send: Send = (frame, written) => {
+      frames.push(frame);
+      if (written) unwritten.push(written);
+      return true;
+    };
+    const sender = new TransferSender(send, (_id, seq) => (seq < 7 ? Buffer.alloc(1, seq) : null));
+    const sent = () => frames.map((f) => (f.type === "chunk" ? `${String(f.id)}${String(f.seq)}` : `${String(f.id)} header`));
+
+    sender.add("a", "digest-a", NAMED);
+    sender.add("b", "digest-b", NAMED);
+    // The server does not want a while ws still holds a0: b's header goes, b0 waits for a0.
+    sender.done("a");
+    expect(sent()).toEqual(["a header", "a0", "b header"]);
+    unwritten.shift()?.();
+    expect(sent()).toEqual(["a header", "a0", "b header", "b0"]);
+  });
 });

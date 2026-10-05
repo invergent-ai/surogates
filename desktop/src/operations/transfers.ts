@@ -17,12 +17,13 @@ interface Sending {
   count: number; // its chunks
   next: number; // the next chunk to send
   acked: number; // how many the server has acknowledged
-  writing: boolean; // a chunk ws has not written to the socket yet
 }
 
 export class TransferSender {
   private readonly queue: Sending[] = [];
   private current: Sending | null = null;
+  // A chunk ws has not written to the socket yet, whichever transfer it was: ws has one buffer.
+  private writing = false;
   // Counts connections: what an earlier one's socket calls back changes nothing.
   private connection = 0;
 
@@ -37,7 +38,7 @@ export class TransferSender {
     const transfer = transferOf(outcome);
     if (transfer === null || this.current?.id === id || this.queue.some((s) => s.id === id)) return;
     const count = Math.ceil(transfer.size / CHUNK_BYTES);
-    this.queue.push({ id, digest, outcome, count, next: 0, acked: 0, writing: false });
+    this.queue.push({ id, digest, outcome, count, next: 0, acked: 0 });
     this.pump();
   }
 
@@ -45,6 +46,7 @@ export class TransferSender {
   restart(): void {
     this.connection += 1;
     this.current = null;
+    this.writing = false;
     this.queue.length = 0;
   }
 
@@ -77,13 +79,13 @@ export class TransferSender {
       this.current = next;
     }
     const sending = this.current;
-    if (sending.writing || sending.next >= sending.count || sending.next - sending.acked >= TRANSFER_WINDOW) return;
+    if (this.writing || sending.next >= sending.count || sending.next - sending.acked >= TRANSFER_WINDOW) return;
     const data = this.chunk(sending.id, sending.next);
     if (data === null) return;
     const connection = this.connection;
     const sent = this.send(chunkFrame(sending.id, sending.next, data), () => {
-      if (connection !== this.connection || this.current !== sending) return;
-      sending.writing = false;
+      if (connection !== this.connection) return;
+      this.writing = false;
       // Called by ws, where a throw would be uncaught.
       try {
         this.pump();
@@ -92,7 +94,7 @@ export class TransferSender {
       }
     });
     if (!sent) return;
-    sending.writing = true;
+    this.writing = true;
     sending.next += 1;
   }
 }
