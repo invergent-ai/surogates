@@ -39,10 +39,13 @@ app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
 
 A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
-decimal, as LocalWorkspaceIO.stat makes it.  The worker never reads it: it
-compares it and hands it back as a write's expected_revision.  A write that
-names one replaces the file only while it is at that revision; otherwise, the
-file gone included, it is answered with a conflict and nothing is written.
+decimal (dev and ino unsigned), as LocalWorkspaceIO.stat makes it.  The worker
+never reads it: it compares it and hands it back as a write's
+expected_revision.  A write that names one replaces the file only while it is
+at that revision; otherwise, the file gone included, it is answered with a
+conflict and nothing is written.  An expected_revision absent or null is no
+expectation: the write replaces whatever is there.  A write over
+MAX_WRITE_BYTES is answered with EFBIG before its revision is checked.
 
 read_lines is a page of a text file, as WorkspaceIO.read_lines defines it
 (surogates.tools.workspace_io.base): encoding is one of the six codecs

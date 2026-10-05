@@ -34,8 +34,14 @@ RipgrepMode = Literal["files", "count", "json"]
 class FileStat:
     """What a handler may know about a file without reading it.
 
-    ``revision`` names this version of the file, opaquely: a change to it, a
-    file renamed onto its path, or an mtime put back gives another.  Handlers
+    ``revision`` names this version of the file, opaquely, from its stat:
+    device, inode, size, mtime and ctime.  Another file renamed onto its path
+    and a change of size give another.  So does any other change to its
+    content or metadata (an mtime put back, chmod, a new hard link, an xattr)
+    made after the filesystem's timestamp tick.  A same-size change in place
+    within one tick keeps it, and that tick can be seconds on FAT or HFS+; on
+    vfat the ctime does not track changes.  A network folder whose attribute
+    cache answers the stat can keep it for that cache's timeout.  Handlers
     only compare it and hand it back to :meth:`WorkspaceIO.write`.
     """
 

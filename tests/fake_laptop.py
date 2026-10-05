@@ -191,7 +191,9 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         if len(data) > MAX_WRITE_BYTES:
             raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
         expected = a.get("expected_revision")
-        # Checked here, as the app checks it: LocalWorkspaceIO writes whatever is there.
+        # Checked here, as the app checks it: LocalWorkspaceIO writes whatever is there.  Nothing between this
+        # check and folder.write may await: LocalWorkspaceIO's stat and write never suspend, so the two are one
+        # step on the event loop, as the app's synchronous helper never yields between them.
         if expected is not None:
             st = await folder.stat(a["key"])
             if st is None or st.revision != expected:
