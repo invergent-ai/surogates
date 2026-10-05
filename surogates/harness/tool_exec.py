@@ -1775,6 +1775,8 @@ async def _run_single_tool(
     except LeaseNotHeldError:
         detach_turn()
         raise asyncio.CancelledError("another worker runs this session now") from None
+    if device_call is not None:
+        await device_call.consumed()
 
     # Advance the cursor through the result event.
     try:

@@ -12,6 +12,7 @@ computer makes the operation wait, never the pool replace it.
 from __future__ import annotations
 
 import json
+import logging
 from contextvars import Token
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -24,6 +25,8 @@ from surogates.sandbox.pool import sandbox_session_key
 
 if TYPE_CHECKING:
     from surogates.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 NOT_AVAILABLE = "not available for sessions on a local folder"
 
@@ -82,6 +85,18 @@ class DeviceCall:
         """Cancel what this call's first run left open on the computer."""
         if self._runner is not None:
             await self._runner.close_open()
+
+    async def consumed(self) -> None:
+        """This call's result is committed: what it read in transfers may go, a day later.
+
+        Best effort: one left unmarked goes as an orphan instead.
+        """
+        if self._runner is None:
+            return
+        try:
+            await self._runner.consumed()
+        except Exception:
+            logger.warning("could not mark what a tool call read as consumed", exc_info=True)
 
     async def dispatch(self, name: str, args: dict[str, Any]) -> str:
         """Run a sandbox tool's handler on the computer."""

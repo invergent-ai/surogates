@@ -2247,6 +2247,13 @@ async def run_worker(settings: Settings) -> None:
         name="board-maintenance-sweeper",
     )
 
+    # Large results read from users' computers, kept until their tool result is committed.
+    from surogates.jobs.device_transfers import run_transfer_reaper_loop
+    transfer_reaper_task = asyncio.create_task(
+        run_transfer_reaper_loop(session_factory),
+        name="device-transfer-reaper",
+    )
+
     # Browsers die without the server hearing (host kills, OOM, external
     # cleanup), leaving registry entries that every consumer then trips over
     # separately. The reaper probes each entry, prunes the provably dead, and
@@ -2297,6 +2304,11 @@ async def run_worker(settings: Settings) -> None:
         board_maintenance_task.cancel()
         try:
             await board_maintenance_task
+        except asyncio.CancelledError:
+            pass
+        transfer_reaper_task.cancel()
+        try:
+            await transfer_reaper_task
         except asyncio.CancelledError:
             pass
         browser_reaper_task.cancel()

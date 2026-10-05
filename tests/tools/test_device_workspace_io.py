@@ -217,6 +217,22 @@ async def test_a_read_over_the_cap_fails_but_its_head_does_not(wio, root, max_by
     assert await wio.read(str(root / "huge.bin"), max_bytes=8192) == b"y" * 8192
 
 
+class Answering:
+    """A runner that answers every operation with one outcome."""
+
+    def __init__(self, outcome: dict) -> None:
+        self.outcome = outcome
+
+    async def run(self, kind: str, args: dict) -> dict:
+        return self.outcome
+
+
+async def test_a_read_answered_with_its_bytes_takes_them_as_they_are(root):
+    # The journal's runner hands over a transfer's data this way.
+    wio = DeviceWorkspaceIO(Answering({"ok": b"\x00raw"}), root=str(root))
+    assert await wio.read(str(root / "x")) == b"\x00raw"
+
+
 async def test_a_local_file_is_a_private_copy_removed_after_use(wio, root):
     (root / "doc.pdf").write_bytes(b"%PDF-1.7")
     async with wio.local_file(str(root / "doc.pdf")) as local:

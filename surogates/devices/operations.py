@@ -16,12 +16,13 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import and_, delete, exists, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -70,6 +71,11 @@ _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
 
+# How long a transfer's data is kept once the tool result that read it is
+# committed, and how long one nothing has read is kept at all.
+RETAIN_CONSUMED = timedelta(hours=24)
+ORPHAN_AFTER = timedelta(days=7)
+
 
 def operation_channel(operation_id: UUID) -> str:
     """Where the API announces that an operation's outcome was recorded."""
@@ -114,6 +120,10 @@ def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: st
 
 class OperationConflict(RuntimeError):
     """The same invocation and ordinal were recorded with a different request."""
+
+
+class TransferGone(DeviceOperationError):
+    """A read's recorded result names a transfer whose data is no longer kept."""
 
 
 async def _check_session(db: AsyncSession, request: OperationRequest, device: Any) -> bool:
@@ -621,6 +631,42 @@ class DeviceOperations:
             for row in rows
         ]
 
+    async def transfer_chunks(self, calling_session_id: UUID, invocation_id: str, ordinal: int) -> list[bytes]:
+        """The chunks of the transfer an operation's outcome names, in order; none once it is gone."""
+        async def fetch() -> list[bytes]:
+            async with self._sf() as db:
+                return list((await db.execute(
+                    select(DeviceTransferChunk.data)
+                    .join(DeviceTransfer, DeviceTransfer.operation_id == DeviceTransferChunk.operation_id)
+                    .join(DeviceOperation, DeviceOperation.id == DeviceTransfer.operation_id)
+                    .where(
+                        DeviceOperation.calling_session_id == calling_session_id,
+                        DeviceOperation.invocation_id == invocation_id,
+                        DeviceOperation.ordinal == ordinal,
+                        DeviceTransfer.received == DeviceTransfer.size,
+                    )
+                    .order_by(DeviceTransferChunk.seq)
+                )).scalars())
+        return await self._while_database_recovers("reading the data of", fetch)
+
+    async def consume(self, calling_session_id: UUID, invocation_id: str) -> int:
+        """Mark the transfers one tool call read as consumed: its result is committed."""
+        async with self._sf() as db:
+            marked = (await db.execute(
+                update(DeviceTransfer)
+                .where(
+                    DeviceTransfer.consumed_at.is_(None),
+                    DeviceTransfer.operation_id.in_(select(DeviceOperation.id).where(
+                        DeviceOperation.calling_session_id == calling_session_id,
+                        DeviceOperation.invocation_id == invocation_id,
+                    )),
+                )
+                .values(consumed_at=func.now())
+                .returning(DeviceTransfer.operation_id)
+            )).all()
+            await db.commit()
+        return len(marked)
+
     async def recorded(self, calling_session_id: UUID, invocation_id: str) -> int:
         """How many operations of one invocation are in the journal."""
         async with self._sf() as db:
@@ -859,8 +905,44 @@ class DeviceOperations:
             )
 
 
+async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> int:
+    """Delete the transfers nothing will read again; their operations' rows stay.
+
+    Those are: one consumed RETAIN_CONSUMED ago; one its operation closed
+    without, half-sent (cancelled, revoked); and one nothing consumed for
+    ORPHAN_AFTER (a tool call that never committed its result, or a session
+    never resumed), which a replay then reports interrupted.
+    """
+    closed = exists().where(
+        DeviceOperation.id == DeviceTransfer.operation_id, DeviceOperation.completed_at.is_not(None),
+    )
+    async with session_factory() as db:
+        reaped = (await db.execute(
+            delete(DeviceTransfer)
+            .where(or_(
+                DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
+                and_(DeviceTransfer.received < DeviceTransfer.size, closed),
+                and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
+            ))
+            .returning(DeviceTransfer.operation_id)
+        )).all()
+        await db.commit()
+    return len(reaped)
+
+
+def _whole(chunks: list[bytes], transfer: dict[str, Any]) -> bytes | None:
+    """A transfer's data, joined, if it is all there and hashes to its name."""
+    data = b"".join(chunks)
+    if not chunks or len(data) != transfer["size"] or hashlib.sha256(data).hexdigest() != transfer["sha256"]:
+        return None
+    return data
+
+
 class JournalRunner:
-    """The operations of one tool call, numbered in the order its handler asks for them."""
+    """The operations of one tool call, numbered in the order its handler asks for them.
+
+    A read answered with a transfer comes back as ``{"ok": <its bytes>}``.
+    """
 
     def __init__(
         self,
@@ -886,18 +968,30 @@ class JournalRunner:
             # A resumed call that took another path asks the computer for nothing more.
             raise OperationConflict(f"{self._invocation_id} took another path than its first run")
         self._ordinal += 1
+        # This operation's own: another of the call's may be asked for while this one waits.
+        ordinal = self._ordinal
         try:
-            return await self._operations.run(OperationRequest(
+            outcome = await self._operations.run(OperationRequest(
                 device_id=self._device_id,
                 root_session_id=self._root_session_id,
                 calling_session_id=self._calling_session_id,
                 invocation_id=self._invocation_id,
-                ordinal=self._ordinal,
+                ordinal=ordinal,
                 kind=kind,
                 args=args,
                 lease_token=self._lease_token,
             ))
-        except OperationConflict:
+            transfer = transfer_of(outcome)
+            if transfer is None:
+                return outcome
+            chunks = await self._operations.transfer_chunks(self._calling_session_id, self._invocation_id, ordinal)
+            # Up to 50 MiB: joined and hashed off the event loop the worker's other sessions share.
+            data = await asyncio.to_thread(_whole, chunks, transfer)
+            if data is None:
+                raise TransferGone("The computer's answer to this read is no longer kept: read the file again")
+            return {"ok": data}
+        except (OperationConflict, TransferGone):
+            # A resumed call that cannot get what its first run got is reported interrupted.
             self._conflicted = True
             raise
 
@@ -912,3 +1006,7 @@ class JournalRunner:
     async def close_open(self) -> int:
         """Cancel what this call's first run left open: a call reported interrupted must not act later."""
         return await self._operations.cancel_invocation(self._calling_session_id, self._invocation_id)
+
+    async def consumed(self) -> int:
+        """This call's result is committed: what it read in transfers may go on the retention schedule."""
+        return await self._operations.consume(self._calling_session_id, self._invocation_id)

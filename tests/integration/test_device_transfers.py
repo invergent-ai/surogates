@@ -5,33 +5,48 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import os
+from datetime import timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import delete, func, select
+from pypdf import PdfReader, PdfWriter
+from reportlab.pdfgen import canvas
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Delete, Insert, Update
 
 from surogates.db.models import DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.devices.link import DAMAGED_OUTCOME, TRANSFER_WINDOW
-from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationRequest
+from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationRequest, reap_transfers
 from surogates.devices.presence import presence_key
+from surogates.devices.sandbox import INTERRUPTED
 from surogates.devices.workspace import CHUNK_BYTES
+from surogates.session.events import EventType
+from surogates.session.store import SessionStore
+from surogates.tools.builtin import file_ops
 
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
     _first_op,
     api,
+    bound_device,
+    builtin_tools,
     close_code,
+    device_io,
     eventually,
+    forget_result,
     laptop_rig,
     link_url,
     linked,
     receive,
     request_for,
+    resume_call,
     send,
     stop,
+    take_over,
+    tool_call,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -349,3 +364,195 @@ async def test_the_reference_laptop_sends_a_read_too_large_for_a_frame_in_chunks
     # Four chunks: three acknowledged, the last answered with the op_ack.
     assert rig.laptop.chunks_sent == [(operation_id, seq) for seq in range(4)]
     assert rig.laptop.frames.count("chunk_ack") == 3
+
+
+async def test_a_read_too_large_for_a_frame_reaches_its_handler_whole(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    data = os.urandom(3 * CHUNK_BYTES + 5)
+    (rig.folder / "big.bin").write_bytes(data)
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    assert await asyncio.wait_for(wio.read(str(rig.folder / "big.bin")), 10.0) == data
+
+
+def big_text(lines: int = 60_000) -> str:
+    return "".join(f"line {n:06d} of a log too large for one frame\n" for n in range(lines))
+
+
+async def consumed_of(session_factory, root: UUID, call_id: str) -> list:
+    async with session_factory() as db:
+        return list((await db.execute(
+            select(DeviceTransfer.consumed_at)
+            .join(DeviceOperation, DeviceOperation.id == DeviceTransfer.operation_id)
+            .where(DeviceOperation.root_session_id == root, DeviceOperation.invocation_id.endswith(f":{call_id}"))
+        )).scalars())
+
+
+async def test_a_committed_tool_result_marks_what_it_read_consumed(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    (rig.folder / "app.log").write_text(big_text())
+    store = SessionStore(session_factory)
+    read = await tool_call(
+        rig, store, builtin_tools(), "call_1", "read_file", {"path": "app.log"},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    assert "line 000000 of a log" in read["content"]
+    [consumed] = await consumed_of(session_factory, rig.root, "call_1")
+    assert consumed is not None
+
+
+async def test_a_resumed_call_whose_result_is_no_longer_kept_is_reported_interrupted(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    (rig.folder / "app.log").write_text(big_text())
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "app.log"}, **io)
+    await forget_result(store, session_factory, rig.root, "call_1")
+    async with session_factory() as db:
+        await db.execute(delete(DeviceTransfer))
+        await db.commit()
+    file_ops._read_tracker.clear()
+    ran = len(rig.laptop.ran)
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "read_file", {"path": "app.log"}, **io)
+
+    assert resumed["content"] == INTERRUPTED
+    assert len(rig.laptop.ran) == ran
+
+
+async def answered(rig, ops: DeviceOperations, data: bytes = DATA, device_id: UUID | None = None, root=None) -> UUID:
+    """A read answered with a whole transfer, stored as the link stores it."""
+    device_id, root = device_id or rig.device_id, root or rig.root
+    request = OperationRequest(**{**_fields(read_request(rig)), "device_id": device_id, "root_session_id": root,
+                                  "calling_session_id": root})
+    waiting = asyncio.create_task(ops.run(request))
+    await eventually(lambda: _has_open(ops, device_id))
+    [op] = await ops.pending(device_id, 1)
+    sha = hashlib.sha256(data).hexdigest()
+    assert await ops.start_transfer(device_id, 1, "conn", op.id, op.digest, len(data), sha) == "started"
+    count = -(-len(data) // CHUNK_BYTES)
+    for seq in range(count):
+        await ops.store_chunk(
+            device_id, 1, "conn", op.id, op.digest, seq, data[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES],
+            named(data) if seq == count - 1 else None,
+        )
+    assert await asyncio.wait_for(waiting, 5.0) == named(data)
+    return op.id
+
+
+async def _has_open(ops: DeviceOperations, device_id: UUID) -> bool:
+    return bool(await ops.pending(device_id, 1))
+
+
+async def half_sent(rig, ops: DeviceOperations, device_id: UUID, root: UUID) -> tuple[UUID, asyncio.Task]:
+    """A read whose transfer stopped after its first chunk, its operation still open."""
+    request = OperationRequest(**{**_fields(read_request(rig)), "device_id": device_id, "root_session_id": root,
+                                  "calling_session_id": root})
+    waiting = asyncio.create_task(ops.run(request))
+    await eventually(lambda: _has_open(ops, device_id))
+    [op] = await ops.pending(device_id, 1)
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert await ops.start_transfer(device_id, 1, "conn", op.id, op.digest, len(DATA), sha) == "started"
+    assert await ops.store_chunk(device_id, 1, "conn", op.id, op.digest, 0, DATA[:CHUNK_BYTES], None) == "stored"
+    return op.id, waiting
+
+
+async def aged(session_factory, operation_id: UUID, **values) -> None:
+    async with session_factory() as db:
+        await db.execute(update(DeviceTransfer).where(DeviceTransfer.operation_id == operation_id).values(**values))
+        await db.commit()
+
+
+async def kept(session_factory) -> set[UUID]:
+    async with session_factory() as db:
+        return set((await db.execute(select(DeviceTransfer.operation_id))).scalars())
+
+
+async def test_the_reaper_deletes_what_nothing_will_read_and_keeps_every_operation(laptop_rig, api, session_factory):
+    rig = laptop_rig
+    ops = rig.ops
+    async with session_factory() as db:
+        await db.execute(delete(DeviceTransfer))
+        await db.commit()
+    consumed_long_ago = await answered(rig, ops)
+    await aged(session_factory, consumed_long_ago, consumed_at=func.now() - timedelta(hours=25))
+    consumed_lately = await answered(rig, ops)
+    await aged(session_factory, consumed_lately, consumed_at=func.now() - timedelta(hours=1))
+    orphan = await answered(rig, ops)
+    await aged(session_factory, orphan, created_at=func.now() - timedelta(days=8))
+    waiting_for_its_tool = await answered(rig, ops)
+    await aged(session_factory, waiting_for_its_tool, created_at=func.now() - timedelta(days=1))
+    stopped_mid_way, stopped = await half_sent(rig, ops, rig.device_id, rig.root)
+    await ops.cancel([rig.root])
+    await asyncio.wait_for(stopped, 5.0)
+    # Another computer's transfer under way: one half-sent transfer per device.
+    other, other_root = await bound_device(api, "Other laptop")
+    under_way, still_open = await half_sent(rig, ops, UUID(other["id"]), other_root)
+    async with session_factory() as db:
+        operations = (await db.execute(select(func.count()).select_from(DeviceOperation))).scalar_one()
+
+    assert await reap_transfers(session_factory) == 3
+
+    assert await kept(session_factory) == {consumed_lately, waiting_for_its_tool, under_way}
+    async with session_factory() as db:
+        assert (await db.execute(select(func.count()).select_from(DeviceOperation))).scalar_one() == operations
+        assert (await db.execute(
+            select(func.count()).select_from(DeviceTransferChunk)
+            .where(DeviceTransferChunk.operation_id.in_([consumed_long_ago, orphan, stopped_mid_way]))
+        )).scalar_one() == 0
+    await stop(still_open)
+
+
+PDF_TEXT = "Transfers carry this document whole."
+
+
+def pdf(size: int = 30 * 1024 * 1024) -> bytes:
+    """A one-page PDF that says PDF_TEXT, made about *size* bytes by an attachment."""
+    page = io.BytesIO()
+    drawing = canvas.Canvas(page)
+    drawing.drawString(72, 720, PDF_TEXT)
+    drawing.save()
+    writer = PdfWriter(PdfReader(io.BytesIO(page.getvalue())))
+    writer.add_attachment("padding.bin", os.urandom(size))
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+class StoppingStore(SessionStore):
+    """A worker that stops just before it commits a tool result."""
+
+    async def emit_event(self, session_id, kind, data, **kwargs):
+        if kind == EventType.TOOL_RESULT:
+            raise asyncio.CancelledError("the worker stopped")
+        return await super().emit_event(session_id, kind, data, **kwargs)
+
+
+async def test_a_worker_stopped_after_the_computer_sent_a_30_mib_pdf_resumes_with_the_same_bytes(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    (rig.folder / "report.pdf").write_bytes(pdf())
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io_ = {"redis_client": redis_client, "session_factory": session_factory}
+    with pytest.raises(asyncio.CancelledError):
+        await tool_call(rig, StoppingStore(session_factory), tools, "call_1", "read_file", {"path": "report.pdf"}, **io_)
+    # The computer sent the whole PDF; no result was committed, so nothing is consumed.
+    assert rig.laptop.ran[-1] == "read" and rig.laptop.chunks_sent[-1][1] == 30
+    assert await consumed_of(session_factory, rig.root, "call_1") == [None]
+    ran, sent = len(rig.laptop.ran), len(rig.laptop.chunks_sent)
+    file_ops._read_tracker.clear()
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "read_file", {"path": "report.pdf"}, **io_)
+
+    assert PDF_TEXT in resumed["content"]
+    assert (len(rig.laptop.ran), len(rig.laptop.chunks_sent)) == (ran, sent)
+    [consumed] = await consumed_of(session_factory, rig.root, "call_1")
+    assert consumed is not None

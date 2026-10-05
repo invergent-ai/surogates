@@ -177,6 +177,9 @@ class DeviceWorkspaceIO:
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         data = await self._call("read", key=key, max_bytes=max_bytes)
+        if isinstance(data, bytes):
+            # A transfer's data, which the journal's runner fetched and checked.
+            return data
         try:
             # Strict: a lenient decode drops what it does not know, such as the
             # "-" and "_" of base64url, and a patch would write the result back.
