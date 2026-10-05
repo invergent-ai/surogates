@@ -2084,7 +2084,8 @@ async def run_worker(settings: Settings) -> None:
         # summary model is configured.
         from surogates.harness.turn_summarizer import TurnSummarizer
 
-        if settings.worker.emit_turn_summaries:
+        # A phone call skips recaps (see wants_turn_summary): no summarizer, no summary calls.
+        if settings.worker.emit_turn_summaries and session.channel != "voice":
             turn_summarizer: TurnSummarizer | None = TurnSummarizer(
                 base_client=llm_client,
                 base_model=model_id,

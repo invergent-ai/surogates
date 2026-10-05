@@ -51,6 +51,24 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
     return bool((session.config or {}).get(config_key))
 
 
+def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
+    """Whether a finished turn gets its recap and deliverables scan.
+
+    Orchestrated sessions skip it: a mission / auto-research coordinator ends its turn repeatedly
+    across the orchestration loop, and a "Task complete" recap after each one reads as the chat
+    stopping while the run goes on (``active_mission_id``, or ``active_research_run_id`` which an
+    Arbor coordinator keeps after a terminal verdict). A phone call skips it too: the caller heard
+    the answer, nothing renders a recap card on a call, and the drain (up to 10 s of summary calls)
+    holds the session while the caller's next words wait for it.
+    """
+    config = getattr(session, "config", None) or {}
+    if config.get("active_mission_id") or config.get("active_research_run_id"):
+        return False
+    if getattr(session, "channel", None) == "voice":
+        return False
+    return turn_id is not None and reason in {"stop", "done", "complete", "completed"}
+
+
 class ArtifactCompletionMixin:
     async def _promote_fenced_artifacts(
         self,
@@ -890,19 +908,10 @@ class ArtifactCompletionMixin:
         # research coordinator also carries ``active_research_run_id`` (and
         # keeps running report turns even after the mission id is cleared at
         # a terminal verdict), so suppress on either key.
-        config = session.config or {}
-        is_orchestrated_session = bool(
-            config.get("active_mission_id")
-            or config.get("active_research_run_id")
-        )
         # Not gated on the summarizer: deciding what was delivered is
         # bookkeeping now, so the download card survives with recaps
         # turned off. Only the recap itself needs a model.
-        if (
-            turn_id is not None
-            and reason in {"stop", "done", "complete", "completed"}
-            and not is_orchestrated_session
-        ):
+        if wants_turn_summary(session, turn_id=turn_id, reason=reason):
             try:
                 await self._drain_and_emit_turn_summary(
                     session_id=session.id,

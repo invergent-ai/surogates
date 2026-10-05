@@ -4777,7 +4777,9 @@ class AgentHarness(
         list refresh.  Messages are snapshotted so the chat thread can keep
         mutating the live list without racing the background reader.
         """
-        if (session.title or "").strip():
+        # A phone call is titled when it opens ("Apel de la …"); an LLM title would be one more
+        # background call the session waits on before the caller's next turn.
+        if (session.title or "").strip() or getattr(session, "channel", None) == "voice":
             return
         task = asyncio.create_task(
             self._run_title_generation(

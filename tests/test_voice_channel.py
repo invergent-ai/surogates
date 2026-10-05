@@ -56,3 +56,27 @@ async def test_end_call_tells_the_agent_to_say_goodbye():
 
     out = json.loads(await _end_call_handler({"reason": "caller is done"}))
     assert out["success"] is True and "goodbye" in out["message"].lower()
+
+
+def test_a_call_skips_the_turn_recap_and_deliverables_scan():
+    """After a spoken answer the harness used to wait up to 10 s on summary calls that only Studio
+    cards and search read; the caller's next words waited behind them."""
+    from surogates.harness.loop_artifact_completion import wants_turn_summary
+
+    chat = SimpleNamespace(channel="web", config={})
+    call = SimpleNamespace(channel="voice", config={})
+    mission = SimpleNamespace(channel="web", config={"active_mission_id": "m1"})
+    assert wants_turn_summary(chat, turn_id="t", reason="completed")
+    assert not wants_turn_summary(call, turn_id="t", reason="completed")
+    assert not wants_turn_summary(mission, turn_id="t", reason="completed")
+    assert not wants_turn_summary(chat, turn_id=None, reason="completed")
+
+
+def test_a_call_gets_no_auto_title_task():
+    from surogates.harness.loop import AgentHarness
+
+    tasks = set()
+    harness = SimpleNamespace(_background_tasks=tasks, _run_title_generation=lambda **_: None)
+    AgentHarness._maybe_generate_title(harness, session=SimpleNamespace(title="", channel="voice", id="s"),
+                                       messages=[], model="m")
+    assert not tasks

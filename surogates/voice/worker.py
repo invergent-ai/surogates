@@ -152,6 +152,10 @@ async def entrypoint(ctx: JobContext) -> None:
         return await apologize(ctx, vs.tts_url, config.voice, SORRY, rt.redis)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
+    try:  # how the call reads in Studio's session list; cosmetic, never worth failing a call over
+        await call.store.update_session_title_if_empty(call.session_id, f"Apel de la {call.caller}")
+    except Exception:
+        log.debug("could not title call %s", info.call_id, exc_info=True)
 
     agent = VoiceAgent(config)
     tts = RoTTS(url=vs.tts_url, voice=config.voice)
