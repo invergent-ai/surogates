@@ -19,7 +19,8 @@ ALPHABET = ["a", "bb", "é", "€", "😀", "\n", "\r\n", "\r", "x" * 7, "中文
 
 
 def lines_of(data: bytes, encoding: str) -> list[str]:
-    return io.TextIOWrapper(io.BytesIO(data), encoding=encoding, errors="replace").readlines()
+    # Line ends untranslated: a page that ends after a CR is not one that ends after its CR LF.
+    return io.TextIOWrapper(io.BytesIO(data), encoding=encoding, errors="replace", newline="").readlines()
 
 
 def decoded(page: LinePage, encoding: str) -> list[str]:
@@ -150,7 +151,7 @@ async def test_a_piece_with_no_line_end_is_not_walked(page, monkeypatch):
 
 
 async def test_a_utf16_page_starts_at_its_line(page):
-    data = "﻿one\ntwo\nthree\n".encode("utf-16-le")
+    data = "\ufeffone\ntwo\nthree\n".encode("utf-16-le")
     assert await page(data, "utf-16-le", offset=2) == LinePage("two\nthree\n".encode("utf-16-le"), 3)
 
 

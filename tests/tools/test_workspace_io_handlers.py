@@ -217,7 +217,7 @@ class TestReadFile:
         assert (rest["content"], rest["total_lines"], rest["truncated"]) == ("c\n", 3, False)
 
     async def test_a_utf16_file_is_read_from_its_second_line(self, ws):
-        (ws.real / "u.txt").write_bytes("﻿one\ntwo\nthree\n".encode("utf-16-le"))
+        (ws.real / "u.txt").write_bytes("\ufeffone\ntwo\nthree\n".encode("utf-16-le"))
         out = await call(file_ops._read_file_handler, ws, path=ws.path("u.txt"), offset=2)
         assert (out["content"], out["total_lines"]) == ("two\nthree\n", 3)
 

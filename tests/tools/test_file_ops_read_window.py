@@ -61,7 +61,7 @@ async def test_a_page_reads_as_the_whole_file_did(tmp_path: Path, monkeypatch) -
     rng = random.Random(11)
     path = tmp_path / "f.txt"
     # U+FEFF too: a utf-8-sig page decoded as utf-8-sig would drop one.
-    alphabet = ["a", "bb", "é", "€", "😀", "\n", "\r\n", "\r", "x" * 7, "中文", "上", "不", "﻿"]
+    alphabet = ["a", "bb", "é", "€", "😀", "\n", "\r\n", "\r", "x" * 7, "中文", "上", "不", "\ufeff"]
     for _ in range(1500):
         max_chars = rng.randint(1, 14)
         monkeypatch.setattr("surogates.tools.builtin.file_ops.get_max_bytes", lambda m=max_chars: m)
@@ -78,3 +78,15 @@ async def test_a_page_reads_as_the_whole_file_did(tmp_path: Path, monkeypatch) -
         ))
         want = whole_file_read(bom + body, offset, limit)
         assert {key: got.get(key) for key in want} == want, (bom + body, offset, limit, max_chars)
+
+
+@pytest.mark.asyncio
+async def test_a_budget_over_a_device_page_still_pages_as_the_whole_file_did(tmp_path: Path, monkeypatch) -> None:
+    # The 1 MiB clamp is the device's: at 300 000 characters of 4-byte text, a cloud page holds more than 1 MiB.
+    monkeypatch.setattr("surogates.tools.builtin.file_ops.get_max_bytes", lambda: 300_000)
+    path = tmp_path / "f.txt"
+    path.write_bytes(("😀" * 300 + "\n").encode() * 2000)
+    clear_read_tracker()
+    got = json.loads(await _read_file_handler({"path": str(path)}, workspace_io=LocalWorkspaceIO(str(tmp_path))))
+    want = whole_file_read(path.read_bytes(), 1, 2000)
+    assert {key: got.get(key) for key in want} == want
