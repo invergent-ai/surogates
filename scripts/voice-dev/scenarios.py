@@ -144,8 +144,13 @@ async def question(call: Call, r: Result) -> None:
 async def tool_question(call: Call, r: Result) -> None:
     await call.listen(call.dialed_at)
     line = "Caută pe internet cât este cursul euro astăzi."
-    a = r.heard(line, await call.ask(line, timeout=60))
-    r.check("answers", bool(a.text), a.text)
+    first = r.heard(line, await call.ask(line, timeout=60))
+    r.check("something is said while the search runs (within 7 s)", first.delay is not None and first.delay < 7,
+            f"{first.delay} s: {first.text}")
+    answer = first
+    if not any(c.isdigit() for c in first.text):  # that was the "O clipă, verific": the answer follows
+        answer = r.heard("(the search)", await call.listen(time.monotonic(), timeout=60))
+    r.check("answers with the rate", any(c.isdigit() for c in answer.text) or "lei" in plain(answer.text), answer.text)
     r.check("used a tool", any(e["type"] == "tool.call" for e in await DB().events(call.room_name)))
 
 
