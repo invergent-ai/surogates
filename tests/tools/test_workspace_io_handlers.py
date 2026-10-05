@@ -73,8 +73,8 @@ class RemappingWorkspaceIO:
     async def read_lines(self, key, **page):
         return await self._inner.read_lines(self._to_real(key), **page)
 
-    async def write(self, key, data):
-        await self._inner.write(self._to_real(key), data)
+    async def write(self, key, data, *, expected_revision=None):
+        await self._inner.write(self._to_real(key), data, expected_revision=expected_revision)
 
     async def delete(self, key):
         await self._inner.delete(self._to_real(key))

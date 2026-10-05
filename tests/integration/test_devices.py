@@ -2060,6 +2060,20 @@ async def test_a_resumed_patch_after_a_read_returns_what_the_computer_did(
     assert resumed["content"] == first["content"]
     assert json.loads(resumed["content"]).get("error") is None
     assert (rig.folder / "notes.md").read_text() == "one\n2\nthree\n"
+    # The write expects the revision of the stat before its read. The resumed call got that stat's recorded
+    # outcome back, not today's file, so it asked for the same write.
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeviceOperation.kind, DeviceOperation.args, DeviceOperation.outcome)
+            .where(DeviceOperation.root_session_id == rig.root, DeviceOperation.invocation_id.endswith(":call_2"))
+            .order_by(DeviceOperation.ordinal)
+        )).all()
+    kinds = [row.kind for row in rows]
+    stat, write = rows[kinds.index("read") - 1], rows[kinds.index("write")]
+    assert stat.kind == "stat"
+    assert write.args["expected_revision"] == stat.outcome["ok"]["revision"]
+    now = await LocalWorkspaceIO(str(rig.folder)).stat(str(rig.folder / "notes.md"))
+    assert write.args["expected_revision"] != now.revision
 
 
 def model_call(call_id: str, name: str, args: dict) -> dict:

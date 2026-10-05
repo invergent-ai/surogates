@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from surogates.tools.registry import ToolRegistry, ToolSchema
-from surogates.tools.workspace_io import WorkspaceIO, workspace_io_from
+from surogates.tools.workspace_io import RevisionConflict, WorkspaceIO, workspace_io_from
 
 logger = logging.getLogger(__name__)
 
@@ -583,7 +583,7 @@ def _is_blocked_device(filepath: str) -> bool:
 
 def _is_expected_write_exception(exc: Exception) -> bool:
     """Return True for expected write denials that should not hit error logs."""
-    if isinstance(exc, PermissionError):
+    if isinstance(exc, (PermissionError, RevisionConflict)):
         return True
     if isinstance(exc, OSError) and exc.errno in _EXPECTED_WRITE_ERRNOS:
         return True
@@ -1569,7 +1569,8 @@ async def _write_file_handler(
         # describe, and the recovery -- read it, then write -- costs one
         # call. Existence is checked here rather than in the harness
         # because this is the side that has the filesystem.
-        if await wio.stat(key) is not None and not has_read(key, task_id):
+        st = await wio.stat(key)
+        if st is not None and not has_read(key, task_id):
             return _tool_error(
                 f"Refusing to overwrite '{path}': it already exists and has "
                 "not been read in this session. Call read_file on it first, "
@@ -1579,8 +1580,9 @@ async def _write_file_handler(
 
         stale_warning = await _check_file_staleness(wio, key, task_id)
 
-        # Atomic write that creates parent directories.
-        await wio.write(key, content.encode("utf-8"))
+        # Atomic write that creates parent directories, on the revision this
+        # call saw: a file changed since is never written over.
+        await wio.write(key, content.encode("utf-8"), expected_revision=None if st is None else st.revision)
 
         lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         result_dict: dict[str, Any] = {
@@ -1604,6 +1606,10 @@ async def _write_file_handler(
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as exc:
+        if isinstance(exc, RevisionConflict):
+            # The model is told to read it again: that read must show the
+            # file, whatever its mtime.
+            _invalidate_dedup_for_path(key, task_id)
         if _is_expected_write_exception(exc):
             logger.debug("write_file expected denial: %s: %s", type(exc).__name__, exc)
         else:
@@ -1651,6 +1657,8 @@ async def _patch_handler(
 
     try:
         keys = {p: await wio.resolve(p) for p in paths_to_check}
+        # The keys of files whose write found them changed since this call read them.
+        conflicted: set[str] = set()
 
         # Check staleness for all files this patch will touch.
         stale_warnings: list[str] = []
@@ -1663,14 +1671,14 @@ async def _patch_handler(
             if not patch_content:
                 return _tool_error("patch content required")
             # V4A patch mode — apply multi-file patches
-            result_dict = await _apply_v4a_patch(wio, patch_content)
+            result_dict = await _apply_v4a_patch(wio, patch_content, conflicted=conflicted)
         elif mode == "replace":
             if not path:
                 return _tool_error("path required")
             if old_string is None or new_string is None:
                 return _tool_error("old_string and new_string required")
             result_dict = await _apply_replace(
-                wio, path, old_string, new_string, replace_all,
+                wio, path, old_string, new_string, replace_all, conflicted=conflicted,
             )
         else:
             return _tool_error(f"Unknown mode: {mode}")
@@ -1682,9 +1690,16 @@ async def _patch_handler(
                 else " | ".join(stale_warnings)
             )
 
+        # A file whose write conflicted was not written: it is neither linted
+        # nor recorded as read.  The model is told to read it again, and that
+        # read must show the file, whatever its mtime.
+        written = [p for p in paths_to_check if keys[p] not in conflicted]
+        for key in conflicted:
+            _invalidate_dedup_for_path(key, task_id)
+
         # Auto-lint after successful patch
         if not result_dict.get("error"):
-            for p in paths_to_check:
+            for p in written:
                 lint_result = await _check_lint(wio, keys[p])
                 if lint_result:
                     result_dict.setdefault("lint", {})[p] = lint_result
@@ -1692,7 +1707,7 @@ async def _patch_handler(
         # Refresh stored timestamps for all successfully-patched paths so
         # consecutive edits by this task don't trigger false warnings.
         if not result_dict.get("error"):
-            for p in paths_to_check:
+            for p in written:
                 await _update_read_timestamp(wio, keys[p], task_id)
 
         result_json = json.dumps(result_dict, ensure_ascii=False)
@@ -1750,13 +1765,16 @@ async def _apply_replace(
     old_string: str,
     new_string: str,
     replace_all: bool,
+    *,
+    conflicted: set[str] | None = None,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
     Tries an exact match first, then a whitespace-insensitive line-window
     match that must be unique.  Either way the replacement is spliced into
     the original text, so nothing outside the matched region is rewritten.
-    Returns a result dict.
+    Returns a result dict.  *conflicted* gets the key when the file changed
+    since it was read, and was not written.
     """
     if not old_string.strip():
         return {
@@ -1779,7 +1797,8 @@ async def _apply_replace(
 
     key = await wio.resolve(path)
 
-    if await wio.stat(key) is None:
+    st = await wio.stat(key)
+    if st is None:
         return {"error": f"File not found: {path}"}
 
     try:
@@ -1808,7 +1827,7 @@ async def _apply_replace(
         else:
             new_content = content.replace(old_string, new_string)
 
-        return await _write_patched(wio, key, path, content, new_content)
+        return await _write_patched(wio, key, path, content, new_content, st.revision, conflicted)
 
     # --- Scoped fuzzy match ---
     # Whitespace differences (indentation, tabs vs spaces, runs of spaces,
@@ -1842,7 +1861,7 @@ async def _apply_replace(
             + replacement
             + "".join(content_lines[end:])
         )
-        return await _write_patched(wio, key, path, content, new_content)
+        return await _write_patched(wio, key, path, content, new_content, st.revision, conflicted)
 
     return {
         "error": f"Could not find the specified text in {path}",
@@ -1853,11 +1872,14 @@ async def _apply_replace(
 async def _apply_v4a_patch(
     wio: WorkspaceIO,
     patch_content: str,
+    *,
+    conflicted: set[str] | None = None,
 ) -> dict[str, Any]:
     """Apply a V4A-format multi-file patch.
 
     Parses the V4A patch format and applies each file operation
-    (Update, Add, Delete) in sequence.
+    (Update, Add, Delete) in sequence.  *conflicted* gets the key of each
+    file that changed since it was read, and was not written.
 
     V4A format::
 
@@ -1920,7 +1942,7 @@ async def _apply_v4a_patch(
     errors: list[str] = []
 
     for filepath, operation, hunk_lines in operations:
-        result = await _apply_v4a_file_op(wio, filepath, operation, hunk_lines)
+        result = await _apply_v4a_file_op(wio, filepath, operation, hunk_lines, conflicted)
         results.append(result)
         if result.get("error"):
             errors.append(result["error"])
@@ -2036,6 +2058,7 @@ async def _apply_v4a_file_op(
     filepath: str,
     operation: str,
     hunk_lines: list[str],
+    conflicted: set[str] | None,
 ) -> dict[str, Any]:
     """Apply a single V4A file operation (Update, Add, or Delete)."""
     try:
@@ -2071,7 +2094,8 @@ async def _apply_v4a_file_op(
             return {"path": filepath, "error": f"Failed to create: {exc}"}
 
     # Operation == "Update"
-    if await wio.stat(resolved) is None:
+    st = await wio.stat(resolved)
+    if st is None:
         return {"path": filepath, "error": f"File not found: {filepath}"}
 
     try:
@@ -2154,7 +2178,8 @@ async def _apply_v4a_file_op(
 
     new_content = "\n".join(new_lines)
     try:
-        await wio.write(resolved, new_content.encode("utf-8"))
+        # On the revision it read: a file changed since is this file's error.
+        await wio.write(resolved, new_content.encode("utf-8"), expected_revision=st.revision)
         return {
             "path": filepath,
             "operation": "updated",
@@ -2162,6 +2187,8 @@ async def _apply_v4a_file_op(
             "bytes_written": len(new_content.encode("utf-8")),
         }
     except OSError as exc:
+        if isinstance(exc, RevisionConflict) and conflicted is not None:
+            conflicted.add(resolved)
         return {"path": filepath, "error": f"Failed to write: {exc}"}
 
 
@@ -2171,14 +2198,20 @@ async def _write_patched(
     display_path: str,
     original: str,
     new_content: str,
+    revision: str,
+    conflicted: set[str] | None,
 ) -> dict[str, Any]:
     """Write patched content and return a unified diff result.
 
     Used by ``_apply_replace`` after a successful match (exact or fuzzy).
+    *revision* is the file's when it was read: a file changed since is not
+    written over, and its key goes in *conflicted*.
     """
     try:
-        await wio.write(key, new_content.encode("utf-8"))
+        await wio.write(key, new_content.encode("utf-8"), expected_revision=revision)
     except OSError as exc:
+        if isinstance(exc, RevisionConflict) and conflicted is not None:
+            conflicted.add(key)
         return {"error": f"Failed to write patched file: {exc}"}
 
     # Generate unified diff for the response
