@@ -71,12 +71,27 @@ def _malformed_write(args: dict[str, Any]) -> bool:
     )
 
 
+def _integer(value: Any) -> bool:
+    """As Number.isInteger sees what JSON.parse made of *value*.
+
+    A bool is no integer, as Number.isInteger(true) is false, and one too
+    large for a double is read as Infinity or -Infinity, which are none.
+    """
+    if type(value) is not int:
+        return False
+    try:
+        float(value)
+    except OverflowError:
+        return False
+    return True
+
+
 def _page_args(args: dict[str, Any]) -> bool:
-    """As the app checks a page's args.  A bool is no integer, as Number.isInteger(true) is false."""
+    """As the app checks a page's args."""
     encoding, offset, limit, max_bytes = (args.get(name) for name in ("encoding", "offset", "limit", "max_bytes"))
     return (
         isinstance(encoding, str) and encoding in CODE_UNITS
-        and type(offset) is int and offset >= 1 and type(limit) is int
+        and _integer(offset) and offset >= 1 and _integer(limit)
         and type(max_bytes) is int and 0 <= max_bytes <= MAX_PAYLOAD_BYTES
     )
 

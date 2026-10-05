@@ -217,18 +217,22 @@ class DeviceWorkspaceIO:
     async def read_lines(
         self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
     ) -> LinePage:
+        # At most one frame's data, so a page is always the ok value itself.
+        asked = min(max_bytes, MAX_PAYLOAD_BYTES)
         value = await self._call(
             "read_lines", key=key, encoding=encoding,
             # Python's slice reads True as 1, as the cloud does; JSON would send true.
             offset=int(offset) if isinstance(offset, bool) else offset,
             limit=int(limit) if isinstance(limit, bool) else limit,
-            # At most one frame's data, so a page is always the ok value itself.
-            max_bytes=min(max_bytes, MAX_PAYLOAD_BYTES),
+            max_bytes=asked,
         )
         try:
-            if type(value["total_lines"]) is int:
+            if type(value["total_lines"]) is int and value["total_lines"] >= 0:
                 # Strict, as a read's data is.
-                return LinePage(base64.b64decode(value["data"], validate=True), value["total_lines"])
+                data = base64.b64decode(value["data"], validate=True)
+                # No correct computer sends more than it was asked for.
+                if len(data) <= asked:
+                    return LinePage(data, value["total_lines"])
         except (KeyError, TypeError, ValueError):
             pass
         raise DeviceOperationError("The computer returned an invalid page")

@@ -388,8 +388,11 @@ async def test_a_page_fails_as_the_cloud_fails(wio, root):
 
 @pytest.mark.parametrize(
     "args",
-    [{"encoding": "latin-1"}, {"encoding": None}, {"offset": 0}, {"limit": 1.5}, {"max_bytes": -1}],
-    ids=["unknown encoding", "no encoding", "offset 0", "fractional limit", "negative max_bytes"],
+    [{"encoding": "latin-1"}, {"encoding": None}, {"offset": 0}, {"limit": 1.5}, {"max_bytes": -1},
+     # The app's JSON.parse reads these as Infinity and -Infinity, which are no integers.
+     {"offset": 9 * 10**308}, {"limit": -(2**1024 - 2**970)}],
+    ids=["unknown encoding", "no encoding", "offset 0", "fractional limit", "negative max_bytes",
+         "offset read as infinite", "limit read as infinite"],
 )
 async def test_a_page_the_computer_cannot_take_is_refused(wio, root, args):
     (root / "a.txt").write_text("one\n")
@@ -401,12 +404,21 @@ async def test_a_page_the_computer_cannot_take_is_refused(wio, root, args):
 @pytest.mark.parametrize(
     "value",
     [None, "", [], {"total_lines": 0}, {"data": "", "total_lines": "1"}, {"data": "", "total_lines": True},
-     {"data": "AA", "total_lines": 1}, {"data": 7, "total_lines": 1}],
-    ids=["null", "string", "list", "no data", "count as text", "count as bool", "unpadded data", "data as number"],
+     {"data": "AA", "total_lines": 1}, {"data": 7, "total_lines": 1}, {"data": "", "total_lines": -1},
+     {"data": base64.b64encode(b"x" * (PAGE["max_bytes"] + 1)).decode(), "total_lines": 1}],
+    ids=["null", "string", "list", "no data", "count as text", "count as bool", "unpadded data", "data as number",
+         "negative count", "data over max_bytes"],
 )
 async def test_a_page_that_is_not_one_is_an_error_not_a_wrong_page(value):
     with pytest.raises(DeviceOperationError, match="returned an invalid page"):
         await DeviceWorkspaceIO(_Answers(value), root="/").read_lines("/f", **PAGE)
+
+
+async def test_a_number_the_app_reads_as_finite_is_paged(wio, root):
+    # 309 digits, and the largest double: JSON.parse reads both as integers.
+    (root / "a.txt").write_text("one\n")
+    asked = {**PAGE, "offset": 10**308, "limit": -(2**1024 - 2**970 - 1)}
+    assert await wio.read_lines(str(root / "a.txt"), **asked) == LinePage(b"", 1)
 
 
 async def test_a_bool_offset_or_limit_reads_as_the_cloud_reads_it(wio, root):
