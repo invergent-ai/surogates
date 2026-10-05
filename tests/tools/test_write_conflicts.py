@@ -200,6 +200,17 @@ async def test_a_v4a_patch_writes_nothing_more_to_a_file_whose_write_conflicted(
     assert runner.inner.kinds.count("write") == 1
 
 
+@pytest.mark.parametrize("block", ["*** Delete File: a.py\n-one\n", "*** Add File: a.py\n+new\n"])
+async def test_a_v4a_patch_neither_deletes_nor_replaces_a_file_whose_write_conflicted(folder, block):
+    runner = Saving(folder, folder / "a.py")
+    result = await patch(on_device(runner), mode="patch", patch=(
+        f"*** Begin Patch\n*** Update File: a.py\n-two\n+2\n{block}*** End Patch"
+    ))
+    failed = f"Failed to write: {CONFLICT.format(folder / 'a.py')}"
+    assert result["files"] == [{"path": "a.py", "error": failed}, {"path": "a.py", "error": failed}]
+    assert (folder / "a.py").read_bytes() == SAVED
+
+
 @pytest.mark.parametrize("call", ["replace", "v4a", "write_file"])
 async def test_the_read_a_conflict_asks_for_shows_the_file_even_with_its_mtime_put_back(folder, call):
     kwargs = on_device(Saving(folder, folder / "a.py", keep_mtime=True))

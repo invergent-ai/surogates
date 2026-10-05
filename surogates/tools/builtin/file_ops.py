@@ -2098,6 +2098,11 @@ async def _apply_v4a_file_op(
     except WorkspaceSandboxError as exc:
         return {"path": filepath, "error": str(exc)}
 
+    if conflicted is not None and resolved in conflicted:
+        # An earlier block's write conflicted: an Update, Add or Delete of the
+        # file now would land on the user's change, or take it away.
+        return {"path": filepath, "error": f"Failed to write: {conflicted[resolved]}"}
+
     if operation == "Delete":
         try:
             await wio.delete(resolved)
@@ -2126,10 +2131,6 @@ async def _apply_v4a_file_op(
             return {"path": filepath, "error": f"Failed to create: {exc}"}
 
     # Operation == "Update"
-    if conflicted is not None and resolved in conflicted:
-        # An earlier block's write conflicted: this one would land on the
-        # user's change without it.
-        return {"path": filepath, "error": f"Failed to write: {conflicted[resolved]}"}
     st = await wio.stat(resolved)
     if st is None:
         return {"path": filepath, "error": f"File not found: {filepath}"}
