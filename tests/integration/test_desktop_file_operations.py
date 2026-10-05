@@ -155,6 +155,10 @@ SAME = [
     ("stat", {"key": "{f}"}),
     ("stat", {"key": "{f}/missing"}),
     ("stat", {"key": "{f}/special/pipe"}),
+    # The helper's sandbox binds the folder in place: each revision matches the one Python makes outside it.
+    ("stat", {"key": "{f}/.git/config"}),
+    ("stat", {"key": "{f}/special/locked.txt"}),
+    ("stat", {"key": "{f}/hard.txt"}),
     ("read", {"key": "{f}/a.txt", "max_bytes": None}),
     ("read", {"key": "{f}/a.txt", "max_bytes": 3}),
     ("read", {"key": "{f}/a.txt", "max_bytes": 0}),

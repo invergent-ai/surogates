@@ -9,7 +9,7 @@ enforces its rules; the worker never touches the folder.
   bind            folder, nonce                                 null
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
-  stat            key                                           {is_dir, size, mtime} or null
+  stat            key                                           {is_dir, size, mtime, revision} or null
   read            key, max_bytes (int or null)                  data (base64), or
                                                                 {"transfer": {size, sha256}}
   read_lines      key, encoding, offset, limit, max_bytes       {data (base64), total_lines}
@@ -36,6 +36,10 @@ recorded the binding; it refuses one it cannot match with
 {"type": "binding", "message"}.  Every other operation is for a session the
 app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
+
+A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
+decimal, as LocalWorkspaceIO.stat makes it.  The worker never reads it: it
+compares it and hands it back as a write's expected_revision.
 
 read_lines is a page of a text file, as WorkspaceIO.read_lines defines it
 (surogates.tools.workspace_io.base): encoding is one of the six codecs
@@ -200,7 +204,12 @@ class DeviceWorkspaceIO:
 
     async def stat(self, key: str) -> FileStat | None:
         value = await self._call("stat", key=key)
-        return None if value is None else FileStat(**value)
+        if value is None:
+            return None
+        # Writes check it and the document cache keys by it: a stat without one is no stat.
+        if not isinstance(value, dict) or not isinstance(value.get("revision"), str):
+            raise DeviceOperationError("The computer returned an invalid stat")
+        return FileStat(**value)
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         data = await self._call("read", key=key, max_bytes=max_bytes)

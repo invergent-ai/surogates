@@ -6,8 +6,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync,
-  renameSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -109,6 +109,10 @@ function textOrNull(args: Record<string, unknown>, name: string): string | null 
   return args[name] === null ? null : text(args, name);
 }
 
+// This version of the file, as LocalWorkspaceIO.stat names it (surogates/tools/workspace_io/local.py):
+// the ctime moves with every change, and utimes cannot set it back.
+const revisionOf = (st: BigIntStats): string => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+
 function stat(args: Record<string, unknown>, { folder }: Context): unknown {
   try {
     const st = statSync(keyInFolder(folder, text(args, "key")), { bigint: true });
@@ -120,7 +124,10 @@ function stat(args: Record<string, unknown>, { folder }: Context): unknown {
       seconds -= 1n;
       nanoseconds += 1_000_000_000n;
     }
-    return { is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9 };
+    return {
+      is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
+      revision: revisionOf(st),
+    };
   } catch {
     return null;
   }

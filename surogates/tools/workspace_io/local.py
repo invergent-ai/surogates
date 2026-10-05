@@ -587,6 +587,8 @@ class LocalWorkspaceIO:
             return None
         return FileStat(
             is_dir=stat_module.S_ISDIR(st.st_mode), size=st.st_size, mtime=st.st_mtime,
+            # The ctime moves with every change, and utime cannot set it back.
+            revision=f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}",
         )
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:

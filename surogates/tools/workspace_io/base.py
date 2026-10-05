@@ -32,11 +32,17 @@ RipgrepMode = Literal["files", "count", "json"]
 
 @dataclass(frozen=True, slots=True)
 class FileStat:
-    """What a handler may know about a file without reading it."""
+    """What a handler may know about a file without reading it.
+
+    ``revision`` names this version of the file, opaquely: a change to it, a
+    file renamed onto its path, or an mtime put back gives another.  Handlers
+    only compare it and hand it back to :meth:`WorkspaceIO.write`.
+    """
 
     is_dir: bool
     size: int
     mtime: float
+    revision: str
 
 
 @dataclass(frozen=True, slots=True)

@@ -53,7 +53,11 @@ async def test_files_round_trip_through_operations(wio, root):
     assert (root / "a" / "b.txt").read_bytes() == b"\x00\xffbytes"
     assert await wio.read(key) == b"\x00\xffbytes"
     assert await wio.read(key, max_bytes=2) == b"\x00\xff"
-    assert await wio.stat(key) == FileStat(is_dir=False, size=7, mtime=os.stat(key).st_mtime)
+    st = os.stat(key)
+    assert await wio.stat(key) == FileStat(
+        is_dir=False, size=7, mtime=st.st_mtime,
+        revision=f"{st.st_dev}:{st.st_ino}:7:{st.st_mtime_ns}:{st.st_ctime_ns}",
+    )
     assert await wio.stat(str(root / "missing")) is None
     assert await wio.list_dir(str(root / "a")) == ["b.txt"]
     await wio.delete(key)
@@ -451,3 +455,15 @@ async def test_a_bool_offset_or_limit_reads_as_the_cloud_reads_it(wio, root):
     page = await wio.read_lines(str(root / "a.txt"), **asked)
     assert page == LinePage(b"one\n", 3)
     assert page == await LocalWorkspaceIO(str(root)).read_lines(str(root / "a.txt"), **asked)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"is_dir": False, "size": 1, "mtime": 0.0, "revision": None},
+     {"is_dir": False, "size": 1, "mtime": 0.0, "revision": 5},
+     {"is_dir": False, "size": 1, "mtime": 0.0}],
+    ids=["null revision", "number", "no revision"],
+)
+async def test_a_stat_without_a_revision_is_an_error_not_a_file_no_write_can_check(value):
+    with pytest.raises(DeviceOperationError, match="returned an invalid stat"):
+        await DeviceWorkspaceIO(Answering({"ok": value}), root="/").stat("/f")

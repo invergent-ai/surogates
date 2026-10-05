@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
-  statSync, symlinkSync, writeFileSync,
+  statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,9 +61,11 @@ describe("resolve and check_write", () => {
 });
 
 describe("stat", () => {
-  it("answers exactly is_dir, size and mtime", async () => {
+  const revision = async (key: string) => ((await run("stat", { key })) as { ok: { revision: string } }).ok.revision;
+
+  it("answers exactly is_dir, size, mtime and revision", async () => {
     const answer = await run("stat", { key: `${folder}/a.txt` });
-    expect(Object.keys((answer as { ok: object }).ok).sort()).toEqual(["is_dir", "mtime", "size"]);
+    expect(Object.keys((answer as { ok: object }).ok).sort()).toEqual(["is_dir", "mtime", "revision", "size"]);
     expect(answer).toMatchObject({ ok: { is_dir: false, size: 6 } });
     const { mtime } = (answer as { ok: { mtime: number } }).ok;
     expect(mtime).toBeCloseTo(statSync(join(folder, "a.txt")).mtimeMs / 1000, 3);
@@ -84,6 +86,24 @@ describe("stat", () => {
     execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
     const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
     expect(answer.ok.mtime).toBe(expected);
+  });
+
+  it("answers the revision as the cloud makes it: dev, inode, size, and mtime and ctime in nanoseconds", async () => {
+    const key = join(folder, "a.txt");
+    const shown = execFileSync("stat", ["-c", "%d:%i:%s:%.9Y:%.9Z", key], { env: { ...process.env, LC_ALL: "C" } });
+    expect(await revision(key)).toBe(shown.toString().trim().replaceAll(".", ""));
+  });
+
+  it("answers another revision once the file changes, even with its size and mtime put back", async () => {
+    const key = join(folder, "a.txt");
+    utimesSync(key, 1_700_000_000, 1_700_000_000);
+    const before = await revision(key);
+    // Past the filesystem's timestamp tick, so the ctime moves.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(key, "ALPHA\n");
+    utimesSync(key, 1_700_000_000, 1_700_000_000);
+    expect(statSync(key, { bigint: true }).mtimeNs).toBe(1_700_000_000_000_000_000n);
+    expect(await revision(key)).not.toBe(before);
   });
 
   it("answers null for anything it cannot stat", async () => {

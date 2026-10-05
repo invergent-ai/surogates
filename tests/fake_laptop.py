@@ -158,7 +158,9 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         return await folder.check_write(a["path"])
     if kind == "stat":
         st = await folder.stat(a["key"])
-        return None if st is None else {"is_dir": st.is_dir, "size": st.size, "mtime": st.mtime}
+        if st is None:
+            return None
+        return {"is_dir": st.is_dir, "size": st.size, "mtime": st.mtime, "revision": st.revision}
     if kind == "read":
         wanted = a["max_bytes"]
         limit = MAX_READ_BYTES + 1 if wanted is None else min(wanted, MAX_READ_BYTES + 1)
