@@ -158,7 +158,7 @@ async def test_a_tool_started_in_silence_is_announced():
                       ("tool.result", {"name": "web_search"}), ("llm.request", {}),
                       ("llm.delta", {"content": "Euro e 4,97 lei."}),
                       ("llm.response", {"message": {"role": "assistant", "content": "Euro e 4,97 lei."}})))
-    assert [t async for t in call.stream(0)] == [FILLER, "Euro e 4,97 lei."]
+    assert [t async for t in call.stream(0)] == [FILLER + " ", "Euro e 4,97 lei."]
 
 
 async def test_no_filler_when_the_agent_already_spoke_or_calls_more_tools():
@@ -204,3 +204,17 @@ async def test_end_call_marks_the_call_as_ending_and_is_not_announced():
                       ("llm.response", {"message": {"role": "assistant", "content": "La revedere!"}})))
     assert [t async for t in call.stream(0)] == ["La revedere!"]  # no "O clipă, verific." before a goodbye
     assert call.ending
+
+
+async def test_the_filler_is_spoken_while_the_tool_still_runs():
+    """The filler must leave the sentence splitter on its own: before, it waited in the buffer for the
+    answer's first word, so the caller heard it only once the tool had returned."""
+    from surogates.voice.sessions import FILLER
+    from surogates.voice.text import SentenceSplitter
+
+    call = _call(_Log(("llm.request", {}), ("tool.call", {"name": "web_search", "arguments": "{}"})))
+    first = None
+    async for piece in call.stream(0, turn_timeout=0.3):  # the tool never returns in this log
+        first = piece
+        break
+    assert SentenceSplitter().push(first) == [FILLER]

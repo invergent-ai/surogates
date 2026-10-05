@@ -172,7 +172,7 @@ class CallSession:
                     elif e.type == EventType.TOOL_CALL.value and not said and not announced:
                         # a tool started in silence: the caller would hear only typing until it returns
                         announced = True
-                        yield FILLER
+                        yield FILLER + " "  # the space releases it from the sentence splitter now
                     elif _final_answer(e):
                         # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
                         if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
