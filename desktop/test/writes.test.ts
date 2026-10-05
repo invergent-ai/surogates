@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -11,6 +13,7 @@ import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { CHUNK_BYTES, type Operation, type Outcome } from "../src/link/protocol.js";
 import { APP_CLOSED, DAMAGED, type Executor, MALFORMED_TRANSFER, type OperationRunner } from "../src/operations/runner.js";
+import { TransferReceiver } from "../src/operations/receiver.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 let dir: string;
@@ -29,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  Buffer.allocUnsafe = ALLOC_UNSAFE;
   for (const link of links) await link.stop();
   await server.stop();
   for (const journal of journals) journal.close();
@@ -46,9 +50,26 @@ function writeOp(id: string, transfer: Record<string, unknown> = NAMED): Record<
   };
 }
 
+const piece = (seq: number, data: Buffer = DATA) => data.subarray(seq * CHUNK_BYTES, (seq + 1) * CHUNK_BYTES);
+
 function chunk(id: string, seq: number, data: Buffer = DATA): Record<string, unknown> {
-  return { type: "chunk", id, seq, data: data.subarray(seq * CHUNK_BYTES, (seq + 1) * CHUNK_BYTES).toString("base64") };
+  return { type: "chunk", id, seq, data: piece(seq, data).toString("base64") };
 }
+
+// What holds a write's data, seen from outside: each buffer of its size made meanwhile,
+// weakly, as the receiver makes one for each write's data; and a full collection.
+const ALLOC_UNSAFE = Buffer.allocUnsafe;
+function watch(size: number): Array<WeakRef<Buffer>> {
+  const made: Array<WeakRef<Buffer>> = [];
+  Buffer.allocUnsafe = (bytes: number) => {
+    const buffer = ALLOC_UNSAFE.call(Buffer, bytes);
+    if (bytes === size) made.push(new WeakRef(buffer));
+    return buffer;
+  };
+  return made;
+}
+setFlagsFromString("--expose-gc");
+const gc = runInNewContext("gc") as () => void;
 
 // Records what it is asked to admit and to run, and how many chunks the server had
 // sent by then; it lets everything run, and answers each write with ok. It counts
@@ -155,6 +176,25 @@ describe("a write whose data comes in a transfer", () => {
     await server.until(() => results("a").length === 1);
     expect(results("a")[0]?.outcome).toEqual(DAMAGED);
     expect(executor.ran).toEqual([]);
+  });
+
+  it("holds its data only as the base64 it runs with, once it runs", async () => {
+    const made = watch(DATA.length);
+    let held: boolean | undefined;
+    const executor = new Recording();
+    executor.run = async (operation) => {
+      executor.ran.push(operation);
+      await pause(10);
+      gc();
+      held = made[0]?.deref() !== undefined;
+      return { ok: null };
+    };
+    await start(executor);
+    send(writeOp("a"));
+    for (const seq of [0, 1, 2]) send(chunk("a", seq));
+    await server.until(() => results("a").length === 1);
+    expect(made).toHaveLength(1);
+    expect(held).toBe(false);
   });
 
   it.each([
@@ -302,5 +342,23 @@ describe("a write that carries its data", () => {
     expect(results("b")[0]?.outcome).toEqual(MALFORMED_TRANSFER);
     expect(executor.admitted.map((op) => op.id)).toEqual(["a"]);
     expect(executor.ran.map((op) => op.id)).toEqual(["a"]);
+  });
+});
+
+describe("the data of writes, as it comes", () => {
+  it("starts again in a new buffer on a new connection, letting go of what came on the last", async () => {
+    const made = watch(DATA.length);
+    const receiver = new TransferReceiver();
+    const whole = receiver.whole("a", NAMED, new AbortController().signal);
+    receiver.chunk("a", 0, piece(0));
+    receiver.restart();
+    for (const seq of [0, 1, 2]) receiver.chunk("a", seq, piece(seq));
+    const data = await whole;
+    expect(data?.equals(DATA)).toBe(true);
+    expect(made).toHaveLength(2);
+    expect(made[1]?.deref()).toBe(data);
+    await pause(10);
+    gc();
+    expect(made[0]?.deref()).toBeUndefined();
   });
 });

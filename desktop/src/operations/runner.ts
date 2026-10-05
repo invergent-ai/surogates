@@ -305,7 +305,10 @@ export class OperationRunner {
     }
     // The journal's claim decides: false if it was cancelled or started meanwhile.
     if (!this.journal.start(operation.id)) return;
-    await this.execute(data === null ? operation : inline(operation, data), signal);
+    const running = data === null ? operation : inline(operation, data);
+    // Its base64 is what runs: the buffer goes, not held beside it while it runs.
+    data = null;
+    await this.execute(running, signal);
   }
 
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {

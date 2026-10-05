@@ -60,6 +60,8 @@ export class TransferReceiver {
   /** A new connection: what came of each write's data on the last one is dropped. */
   restart(): void {
     for (const receiving of this.receiving.values()) {
+      // Made again at its next first chunk: the next connection may send another write's data first.
+      receiving.data = null;
       receiving.received = 0;
       receiving.next = 0;
       receiving.hash = createHash("sha256");
