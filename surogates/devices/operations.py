@@ -237,8 +237,10 @@ async def _keep_payload(db: AsyncSession, operation_id: UUID, transfer: dict[str
         # Stored by the worker: no connection sends it in.
         holder="",
     ))
+    # Views, not slices: a slice of bytes is a copy, and the chunks would hold a second one of the data.
+    view = memoryview(data)
     await db.execute(insert(DeviceTransferChunk), [
-        {"operation_id": operation_id, "seq": seq, "data": data[at:at + CHUNK_BYTES]}
+        {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]}
         for seq, at in enumerate(range(0, len(data), CHUNK_BYTES))
     ])
 
@@ -493,6 +495,13 @@ class DeviceOperations:
             # encode, and every connection would end before reaching the
             # operations behind it.
             raise ValueError("Operation arguments must be valid Unicode")
+        transfer = request.args.get("transfer")
+        if (request.payload is None) != (transfer is None) or (
+            request.payload is not None
+            and (not isinstance(transfer, dict) or transfer.get("size") != len(request.payload))
+        ):
+            # Recorded, the link would send an op whose data never comes, or that the computer finds damaged.
+            raise ValueError("A write's data and the transfer its args name must come together, of one size")
         digest = request.digest
         async with self._sf() as db:
             # A shared lock on the device row, held until the insert commits: a

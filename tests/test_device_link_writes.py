@@ -79,8 +79,25 @@ class FakePresence:
         return True
 
 
-async def started(*operations: OpenOperation) -> tuple[_Link, FakeSocket, FakeOperations, asyncio.Task]:
-    socket, journal = FakeSocket(), FakeOperations(*operations)
+class FetchedBeforeItCloses(FakeOperations):
+    """Reads the chunk after the first window before the write closes, and returns it once let go."""
+
+    def __init__(self, *operations: OpenOperation) -> None:
+        super().__init__(*operations)
+        self.fetching, self.go = asyncio.Event(), asyncio.Event()
+
+    async def outgoing_chunk(self, device_id, generation, operation_id, seq):
+        data = await super().outgoing_chunk(device_id, generation, operation_id, seq)
+        if seq == TRANSFER_WINDOW:
+            self.fetching.set()
+            await self.go.wait()
+        return data
+
+
+async def started(
+    *operations: OpenOperation, journal: FakeOperations | None = None,
+) -> tuple[_Link, FakeSocket, FakeOperations, asyncio.Task]:
+    socket, journal = FakeSocket(), journal or FakeOperations(*operations)
     link = _Link(
         socket, device=SimpleNamespace(id=uuid.uuid4(), credential_generation=1), holder="holder",
         presence=FakePresence(), operations=journal,
@@ -148,6 +165,24 @@ async def test_a_transfer_stops_once_its_write_is_cancelled_answered_or_closed(h
     assert socket.chunks(op) == [0, 1, 2, 3]
     # The next write's data goes.
     assert socket.chunks(after) == [0, 1, 2, 3]
+    task.cancel()
+
+
+@pytest.mark.parametrize("how", ["cancelled", "answered"])
+async def test_no_chunk_follows_a_cancel_or_an_answer_that_comes_while_the_chunk_is_fetched(how):
+    op = write()
+    link, socket, journal, task = await started(journal=FetchedBeforeItCloses(op))
+    await link.deliver()
+    await settled()
+    link.chunk_acked(ack(op, 0))
+    await asyncio.wait_for(journal.fetching.wait(), 1.0)
+    if how == "cancelled":
+        link.forget(op.id)  # a live cancel
+    else:
+        await link.record({"type": "op_result", "id": str(op.id), "digest": op.digest, "outcome": {"ok": None}})
+    journal.go.set()
+    await settled()
+    assert socket.chunks(op) == [0, 1, 2, 3]
     task.cancel()
 
 
@@ -233,6 +268,20 @@ async def test_a_write_queued_behind_another_counts_its_time_from_its_op(caplog)
     assert f"transfer {op.id} sent" in first and f"transfer {after.id} stopped" in second
     assert float(re.search(r"(\d+\.\d\d) s from its header", second).group(1)) >= 0.3
     task.cancel()
+
+
+async def test_a_connection_that_ends_logs_each_write_it_had_still_to_send_as_cut_off(caplog):
+    op, after = write(), write(ordinal=2)
+    link, _, _, task = await started(op, after)
+    with caplog.at_level(logging.INFO, logger="surogates.devices.link"):
+        await link.deliver()
+        await settled()
+        task.cancel()  # the first write's data under way, the second's op sent
+        await settled()
+    lines = [record.getMessage() for record in caplog.records if record.name == "surogates.devices.link"]
+    assert [re.search(r"transfer (\S+) (.+?):", line).groups() for line in lines] == [
+        (str(op.id), "cut off"), (str(after.id), "cut off"),
+    ], lines
 
 
 @pytest.mark.parametrize(("end", "how"), [("acknowledged", "sent"), ("cancelled", "stopped"), ("cut off", "cut off")])

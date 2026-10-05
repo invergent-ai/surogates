@@ -345,11 +345,17 @@ class _Link:
 
     async def transfers(self) -> None:
         """Send each write's data after its op, one write at a time, until the connection ends."""
-        while True:
-            await self._outgoing_wanted.wait()
-            self._outgoing_wanted.clear()
+        try:
+            while True:
+                await self._outgoing_wanted.wait()
+                self._outgoing_wanted.clear()
+                while self._outgoing:
+                    await self._send_data(*self._outgoing.popleft())
+        finally:
+            # The writes queued behind the one under way had their ops, their headers, sent too.
             while self._outgoing:
-                await self._send_data(*self._outgoing.popleft())
+                operation, started = self._outgoing.popleft()
+                self._ended("cut off", operation.id, operation.args["transfer"]["size"], started)
 
     async def _send_data(self, operation: OpenOperation, started: float) -> None:
         """Send one write's data in chunks, at most TRANSFER_WINDOW the app has not acknowledged.
@@ -370,7 +376,8 @@ class _Link:
                     ))
                     if operation.id in self._delivered else None
                 )
-                if data is None:
+                # Checked again after the fetch: a cancel or an answer may have come meanwhile.
+                if data is None or operation.id not in self._delivered:
                     # Answered, or closed (a cancel tells the app), its data maybe reaped.
                     how = "stopped"
                     return

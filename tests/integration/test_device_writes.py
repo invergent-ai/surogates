@@ -7,7 +7,9 @@ import base64
 import hashlib
 import json
 import os
+import tracemalloc
 import uuid
+from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
@@ -23,6 +25,7 @@ from surogates.devices.operations import (
     DeviceOperations,
     OperationConflict,
     OperationRequest,
+    _keep_payload,
     reap_transfers,
 )
 from surogates.devices.store import REVOKED_OUTCOME
@@ -90,6 +93,48 @@ async def test_a_write_too_large_for_a_frame_is_kept_with_its_operation(laptop_r
         )).scalar_one()
     assert (transfer.size, transfer.received, transfer.sha256) == (len(DATA), len(DATA), named(DATA)["sha256"])
     await stop(waiting)
+
+
+async def test_a_writes_data_is_kept_without_a_second_copy_of_it():
+    """Its chunks are views of the payload: recording 50 MiB holds no second 50 MiB in the worker."""
+    rows: list[dict] = []
+
+    class Recording:
+        async def execute(self, statement, parameters=None):
+            rows.extend(parameters or [])
+
+    transfer = named(BIG)
+    tracemalloc.start()
+    try:
+        await _keep_payload(Recording(), uuid.uuid4(), transfer, BIG)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert b"".join(row["data"] for row in rows) == BIG
+    assert peak < CHUNK_BYTES, peak
+
+
+@pytest.mark.parametrize("which", ["no data", "no transfer", "another size"])
+async def test_a_write_whose_data_and_transfer_do_not_come_together_is_refused_before_it_is_recorded(
+    laptop_rig, session_factory, which,
+):
+    rig = laptop_rig
+    request = write_request(rig)
+    if which == "no data":
+        # The link would send its op, and the computer wait for data that never comes.
+        request = replace(request, payload=None)
+    elif which == "no transfer":
+        request = replace(request, args={"key": request.args["key"]})
+    else:
+        request = replace(request, payload=DATA[:-1])
+    with pytest.raises(ValueError, match="come together"):
+        await asyncio.wait_for(rig.ops.run(request), 5.0)
+    async with session_factory() as db:
+        assert (await db.execute(
+            select(func.count()).select_from(DeviceOperation)
+            .where(DeviceOperation.invocation_id == request.invocation_id)
+        )).scalar_one() == 0
+    assert await transfers_of(session_factory, rig.device_id) == 0
 
 
 async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, engine, session_factory, redis_client):
