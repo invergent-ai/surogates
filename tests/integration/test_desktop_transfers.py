@@ -1,4 +1,4 @@
-"""Reads too large for one frame, through the real desktop app over the real link."""
+"""Reads and writes too large for one frame, through the real desktop app over the real link."""
 
 from __future__ import annotations
 

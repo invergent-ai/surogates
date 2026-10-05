@@ -238,8 +238,8 @@ export class OperationRunner {
 
   /**
    * Stop every running operation and record it as *outcome*; settles once each is
-   * recorded. One still in admit is dropped: it stays "received", and is asked again
-   * at the next launch.
+   * recorded. One still in admit, or a write still waiting for its data, is dropped: it
+   * stays "received", and is asked again at the next launch.
    */
   suspend(outcome: Outcome): Promise<void> {
     for (const controller of this.running.values()) controller.abort(new Suspension(outcome));
