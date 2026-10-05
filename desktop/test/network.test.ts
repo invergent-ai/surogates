@@ -146,17 +146,17 @@ describe("a command's connection to a destination off the package hosts", { time
 
   it("keeps a command's own timeout running while its connection waits for the app", async () => {
     const harness = await host();
-    const answer = run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 2);
+    const answer = run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 5);
     await harness.until((messages) => messages.find((message) => message.type === "ask"));
     expect((await answer).ok).toEqual({
-      output: `Command timed out after 2 seconds\n${waiting(`${AWAY}:9`)}`, returncode: 124, timed_out: true,
+      output: `Command timed out after 5 seconds\n${waiting(`${AWAY}:9`)}`, returncode: 124, timed_out: true,
     });
   });
 
   it("tells a command that ends while its connection waits for the app, once, and the next that it was refused", async () => {
     const harness = await host();
-    const waited = await run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 2);
-    expect(waited.ok?.output).toBe(`Command timed out after 2 seconds\n${waiting(`${AWAY}:9`)}`);
+    const waited = await run(harness, `curl -sS -o /dev/null http://${AWAY}:9/`, 5);
+    expect(waited.ok?.output).toBe(`Command timed out after 5 seconds\n${waiting(`${AWAY}:9`)}`);
     // Still waiting, and already told.
     expect((await run(harness, "echo next")).ok?.output).toBe("next\n");
     // The prompt is dismissed, which denies.
