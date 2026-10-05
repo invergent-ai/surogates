@@ -5,6 +5,7 @@ only: the session keeps the agent's text exactly as written.
 """
 from __future__ import annotations
 
+import asyncio
 import difflib
 import re
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
@@ -63,6 +64,11 @@ class SentenceSplitter:
         tail, self._buf = clean(self._buf), ""
         return tail if HAS_WORDS.search(tail) else ""
 
+    def ends_sentence(self) -> bool:
+        """The buffer holds a finished sentence that only lacks the space after its full stop."""
+        tail = self._buf.rstrip()
+        return bool(tail) and tail[-1] in ".!?…" and not ABBREVIATION_END.search(tail)
+
 
 def words(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
@@ -78,8 +84,16 @@ def is_preamble(sentence: str) -> bool:
     return bool(PREAMBLE.search(sentence)) and len(words(sentence)) <= 14
 
 
+FLUSH_AFTER = 0.35  # seconds without new text after a full stop: the sentence is finished, say it
+
+
 async def spoken_sentences(deltas: AsyncIterable[str]) -> AsyncIterator[str]:
-    """One answer's sentences in speaking order, without a second preamble."""
+    """One answer's sentences in speaking order, without a second preamble.
+
+    A sentence that ends in a full stop and gets no more text for ``FLUSH_AFTER`` is spoken without
+    waiting for the next one: the agent says "O clipă, verific." and then runs a tool, and filters
+    upstream (LiveKit's markdown filter) drop the trailing space a split would need.
+    """
     splitter, preambled = SentenceSplitter(), False
 
     def keep(sentence: str) -> bool:
@@ -89,10 +103,25 @@ async def spoken_sentences(deltas: AsyncIterable[str]) -> AsyncIterator[str]:
         first, preambled = not preambled, True
         return first
 
-    async for delta in deltas:
-        for sentence in splitter.push(delta):
-            if keep(sentence):
-                yield sentence
+    it = deltas.__aiter__()
+    pending = asyncio.ensure_future(it.__anext__())  # never cancelled on a timeout: that would end the stream
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=FLUSH_AFTER if splitter.ends_sentence() else None)
+            if not done:
+                if (sentence := splitter.flush()) and keep(sentence):
+                    yield sentence
+                continue
+            try:
+                delta = pending.result()
+            except StopAsyncIteration:
+                break
+            pending = asyncio.ensure_future(it.__anext__())
+            for sentence in splitter.push(delta):
+                if keep(sentence):
+                    yield sentence
+    finally:
+        pending.cancel()
     if (tail := splitter.flush()) and keep(tail):
         yield tail
 

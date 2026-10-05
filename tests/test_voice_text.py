@@ -53,3 +53,31 @@ def test_goodbye_and_farewell():
     assert not caller_says_goodbye("Papa Francisc a spus ceva")
     assert is_farewell("La revedere, o zi bună!")
     assert not is_farewell("La revedere? Mai aveți o întrebare?")
+
+
+async def test_a_finished_sentence_is_spoken_when_no_more_text_comes():
+    """The agent says "O clipă, verific." and goes quiet while a tool runs. LiveKit's markdown filter
+    drops the trailing space, so without a timer the sentence waited for the answer's first word."""
+    import asyncio
+    import time
+
+    async def deltas():
+        yield "O clipă, verific."
+        await asyncio.sleep(5)  # the tool runs
+        yield " Euro e 4,97 lei."
+
+    started = time.monotonic()
+    it = spoken_sentences(deltas()).__aiter__()
+    assert await asyncio.wait_for(it.__anext__(), 2) == "O clipă, verific."
+    assert time.monotonic() - started < 1.0
+
+
+async def test_an_abbreviation_at_a_pause_is_not_a_sentence():
+    import asyncio
+
+    async def deltas():
+        yield "Locuiesc pe str."
+        await asyncio.sleep(0.6)
+        yield " Mihai Eminescu nr. 5."
+
+    assert [s async for s in spoken_sentences(deltas())] == ["Locuiesc pe str. Mihai Eminescu nr. 5."]
