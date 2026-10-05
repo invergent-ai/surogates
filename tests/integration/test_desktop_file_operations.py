@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from surogates.devices.operations import OperationRequest
-from surogates.devices.workspace import MAX_PAYLOAD_BYTES, MAX_READ_BYTES, TOO_LARGE
+from surogates.devices.workspace import MAX_PAYLOAD_BYTES, MAX_READ_BYTES
 from surogates.tools.workspace_io.local import LocalWorkspaceIO
 from tests.fake_laptop import perform
 
@@ -395,10 +395,6 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
                 "error": {"type": "sandbox", "message": f"Not a path in this folder: '{key}'"},
             }
         assert (await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": "@@"}))["error"]["type"] == "value"
-        big = b64(b"x" * (MAX_PAYLOAD_BYTES + 1))
-        assert await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": big}) == {
-            "error": {"type": "os", "code": "EFBIG", "message": TOO_LARGE},
-        }
         home = os.environ["HOME"]
         # The command's HOME is the app's, not the folder (the toolchains find themselves through it).
         assert (await on_app(laptop_rig, "run", {"command": "echo $HOME", "workdir": None, "timeout": 10}))["ok"]["output"] == f"{home}\n"

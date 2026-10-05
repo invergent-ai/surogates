@@ -12,10 +12,10 @@ import {
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import type { Outcome } from "../link/protocol.js";
+import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, OUTPUT_CAP_CHARS, osError,
-  pyJsonLength, READ_TOO_LARGE, sandboxError, TOO_LARGE, valueError,
+  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_READ_BYTES, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError,
+  pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -40,8 +40,7 @@ const KINDS: Record<string, Kind> = {
   which,
 };
 
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-const EFBIG = new Failure({ type: "os", code: "EFBIG", message: TOO_LARGE });
+const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_LARGE });
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
 // What one read call takes from the file at a time.
 const READ_PIECE_BYTES = 1024 * 1024;
@@ -158,11 +157,11 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   // left to the operating system's own permissions.
   if (protectedInFolder(folder, key)) throw sandboxError(inFolderRefusal(key));
   const encoded = text(args, "data");
-  // The check comes first: the pattern overflows the regex engine's stack on megabytes of text.
-  if (encoded.length > Math.ceil(MAX_PAYLOAD_BYTES / 3) * 4) throw EFBIG;
-  if (!BASE64.test(encoded)) throw valueError("data is not standard padded base64");
+  // Up to 50 MiB: a write's data that came in a transfer reaches the helper inline, once whole.
+  if (encoded.length > Math.ceil(MAX_WRITE_BYTES / 3) * 4) throw WRITE_EFBIG;
+  if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
-  if (data.length > MAX_PAYLOAD_BYTES) throw EFBIG;
+  if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
   const parent = dirname(key);
   makeDirs(parent);
   // The rename replaces the name and never opens the file, so a file this user

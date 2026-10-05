@@ -70,6 +70,15 @@ export type ServerFrame =
 
 export class ProtocolError extends Error {}
 
+/**
+ * Whether *text* is standard padded base64, as surogates/devices/workspace.py requires
+ * data to be. One pass: a pattern with a repeated group overflows the regex engine's
+ * stack on megabytes of text.
+ */
+export function isBase64(text: string): boolean {
+  return text.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(text);
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
