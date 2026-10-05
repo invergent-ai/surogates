@@ -592,7 +592,8 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 
 # ---------------------------------------------------------------------------
 # Read tracker — detect re-read loops and deduplicate reads.
-# Per task_id we store:
+# Per entry, which _tracker_of picks for a call: its ``read_tracker_id``, the
+# session's own on the user's computer, else its ``task_id``.  We store:
 #   "last_key":     the key of the most recent read/search call (or None)
 #   "consecutive":  how many times that exact call has been repeated in a row
 #   "read_history": set of (path, offset, limit) tuples for get_read_files_summary
@@ -601,11 +602,11 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 #                   context compression (the original content is summarised
 #                   away so the model needs the full content again).
 #   "read_timestamps": dict mapping resolved_path → modification-time float
-#                      recorded when the file was last read (or written) by
-#                      this task.  Used by write_file and patch to detect
+#                      recorded when the file was last read (or written)
+#                      under this entry.  Used by write_file and patch to detect
 #                      external changes between the agent's read and write.
 #                      Updated after successful writes so consecutive edits
-#                      by the same task don't trigger false warnings.
+#                      under the same entry don't trigger false warnings.
 # ---------------------------------------------------------------------------
 _read_tracker_lock = threading.Lock()
 _read_tracker: dict = {}
@@ -1182,8 +1183,9 @@ def _apply_line_window(
     """Slice ``lines`` into a 1-indexed window.
 
     Returns ``(selected, total_lines, start_idx, end_idx, truncated)``.
-    Shared by ``_handle_text`` and ``_handle_document`` so both paths
-    paginate identically.
+    Shared by ``_handle_document`` and the image read in
+    ``surogates/harness/image_read.py``, which hold all their lines.  Text
+    pages through ``WorkspaceIO.read_lines`` instead, to the same window.
     """
     total_lines = len(lines)
     start_idx = offset - 1  # 1-indexed → 0-indexed
