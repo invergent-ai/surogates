@@ -54,6 +54,7 @@ class ToolRuntime:
             channel_files,
             channel_messages,
             checkin,
+            voice_call,
             coding_agent,
             coordinator,
             cron,
@@ -115,6 +116,7 @@ class ToolRuntime:
             channel_messages,  # fetch_channel_messages (read recent channel messages)
             whiteboard,  # whiteboard_draw (canvas chat surface)
             checkin,  # checkin_outcome, checkin_escalate (Program check-ins)
+            voice_call,  # end_call (a phone call's agent hangs up)
         ]
 
         for mod in modules:

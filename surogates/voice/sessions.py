@@ -107,6 +107,7 @@ class CallSession:
     user_id: UUID
     caller: str
     note: str = ""  # said to the agent before the caller's next words (greeting, what a barge-in cut)
+    ending: bool = False  # the agent called end_call: hang up once its goodbye is spoken
     _user_event: int = 0
 
     async def send(self, text: str) -> int:
@@ -162,6 +163,8 @@ class CallSession:
                         if question := question_text(data.get("arguments"), said):
                             yield f" {question}" if said else question
                         return
+                    elif e.type == EventType.TOOL_CALL.value and data.get("name") == "end_call":
+                        self.ending = True  # its goodbye follows; nothing to announce
                     elif e.type == EventType.TOOL_CALL.value and not said and not announced:
                         # a tool started in silence: the caller would hear only typing until it returns
                         announced = True

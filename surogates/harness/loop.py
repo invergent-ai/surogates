@@ -76,8 +76,8 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.channels.memory_boundary import MANAGED_CHANNELS
 from surogates.harness.tool_schemas import (
+    channel_tool_flags,
     drop_unusable_tools,
     filter_schemas_for_tenant,
 )
@@ -1824,7 +1824,7 @@ class AgentHarness(
             # Default to "has it" when the attribute is absent: an
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
-            has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
+            **channel_tool_flags(getattr(session, "channel", None)),
             is_scheduled=bool(
                 (getattr(session, "config", None) or {}).get(
                     "scheduled_session_id")

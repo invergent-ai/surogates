@@ -172,7 +172,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:
-        if ev.new_state == "listening" and agent.hangup_after_reply:
+        if ev.new_state == "listening" and (agent.hangup_after_reply or call.ending):
             agent.hangup_after_reply = False
             spawn(hang_up())
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from surogates.channels.memory_boundary import MANAGED_CHANNELS
+
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
@@ -69,6 +71,18 @@ _CRON_TOOLS: frozenset[str] = frozenset({
 _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
     "whiteboard_draw",
 })
+_VOICE_TOOLS: frozenset[str] = frozenset({
+    "end_call",
+})
+
+
+def channel_tool_flags(channel: str | None) -> dict[str, bool]:
+    """Which channel-bound tools a session on ``channel`` can use.
+
+    ``voice`` is a managed channel for its memory boundary, but the text channels' tools (read the
+    channel's messages or files, post into it) mean nothing on a phone call; it gets its own.
+    """
+    return {"has_channel": channel in MANAGED_CHANNELS and channel != "voice", "is_voice": channel == "voice"}
 
 
 def drop_unusable_tools(
@@ -78,6 +92,7 @@ def drop_unusable_tools(
     has_channel: bool,
     is_scheduled: bool,
     is_whiteboard: bool = False,
+    is_voice: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -99,6 +114,8 @@ def drop_unusable_tools(
         drop |= _CRON_TOOLS
     if not is_whiteboard:
         drop |= _WHITEBOARD_TOOLS
+    if not is_voice:
+        drop |= _VOICE_TOOLS
     if not drop:
         return schemas
 

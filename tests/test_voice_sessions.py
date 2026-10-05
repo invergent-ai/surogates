@@ -196,3 +196,11 @@ def _status(status):
     async def get_session(session_id):
         return SimpleNamespace(status=status)
     return get_session
+
+
+async def test_end_call_marks_the_call_as_ending_and_is_not_announced():
+    call = _call(_Log(("llm.request", {}), ("tool.call", {"name": "end_call", "arguments": "{}"}),
+                      ("llm.request", {}), ("llm.delta", {"content": "La revedere!"}),
+                      ("llm.response", {"message": {"role": "assistant", "content": "La revedere!"}})))
+    assert [t async for t in call.stream(0)] == ["La revedere!"]  # no "O clipă, verific." before a goodbye
+    assert call.ending
