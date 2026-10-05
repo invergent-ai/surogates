@@ -12,6 +12,7 @@ enforces its rules; the worker never touches the folder.
   stat            key                                           {is_dir, size, mtime} or null
   read            key, max_bytes (int or null)                  data (base64), or
                                                                 {"transfer": {size, sha256}}
+  read_lines      key, encoding, offset, limit, max_bytes       {data (base64), total_lines}
   write           key, data (base64), or                        null
                   key, transfer {size, sha256}
   delete          key                                           null
@@ -35,6 +36,13 @@ recorded the binding; it refuses one it cannot match with
 {"type": "binding", "message"}.  Every other operation is for a session the
 app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
+
+read_lines is a page of a text file, as WorkspaceIO.read_lines defines it
+(surogates.tools.workspace_io.base): encoding is one of the six codecs
+read_file picks, offset counts lines from 1, limit is any integer and selects
+lines as a Python slice does, and max_bytes is at most MAX_PAYLOAD_BYTES.  The
+computer only finds line ends; the worker decodes the page and applies every
+rule.  Arguments it cannot take are answered with a value error.
 
 An error names the exception the worker raises again:
 
@@ -66,6 +74,9 @@ MAX_MESSAGE_CHARS, so it fits in one link frame:
     MAX_PAYLOAD_BYTES is the ok value itself.  More is a transfer: the ok
     value names it by its size and the SHA-256 of the data, in lowercase hex,
     and the data follows in chunks (surogates.devices.link);
+  - a read_lines page holds at most max_bytes, so it is always the ok value
+    itself.  A file over MAX_READ_BYTES fails with EFBIG (and READ_TOO_LARGE)
+    from its size, before it is scanned;
   - command output, and every string in a process outcome, keeps a head and a
     tail around a "chars omitted by the computer" marker, together at most
     OUTPUT_CAP_CHARS measured JSON-encoded (NUL and non-ASCII characters
@@ -97,7 +108,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io.base import FileStat, RipgrepError, RipgrepMode, RunResult
+from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RipgrepMode, RunResult
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_READ_BYTES = 50 * 1024 * 1024
@@ -202,6 +213,25 @@ class DeviceWorkspaceIO:
             return base64.b64decode(data, validate=True)
         except (ValueError, TypeError):
             raise DeviceOperationError("The computer returned invalid data") from None
+
+    async def read_lines(
+        self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
+    ) -> LinePage:
+        value = await self._call(
+            "read_lines", key=key, encoding=encoding,
+            # Python's slice reads True as 1, as the cloud does; JSON would send true.
+            offset=int(offset) if isinstance(offset, bool) else offset,
+            limit=int(limit) if isinstance(limit, bool) else limit,
+            # At most one frame's data, so a page is always the ok value itself.
+            max_bytes=min(max_bytes, MAX_PAYLOAD_BYTES),
+        )
+        try:
+            if type(value["total_lines"]) is int:
+                # Strict, as a read's data is.
+                return LinePage(base64.b64decode(value["data"], validate=True), value["total_lines"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        raise DeviceOperationError("The computer returned an invalid page")
 
     async def write(self, key: str, data: bytes) -> None:
         if len(data) <= MAX_PAYLOAD_BYTES:

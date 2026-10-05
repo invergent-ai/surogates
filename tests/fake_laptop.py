@@ -34,6 +34,7 @@ from surogates.devices.workspace import (
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RipgrepError, WorkspaceIO
+from surogates.tools.workspace_io.local import CODE_UNITS
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
 
@@ -48,6 +49,11 @@ MALFORMED_TRANSFER = {"error": {
     "message": "This write named its data in a form this computer does not take, so it was not written",
 }}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# What a page whose args the app does not take is answered, as the app answers it.
+BAD_PAGE = (
+    "read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit "
+    f"and a max_bytes from 0 to {MAX_PAYLOAD_BYTES}"
+)
 
 
 def _malformed_write(args: dict[str, Any]) -> bool:
@@ -62,6 +68,16 @@ def _malformed_write(args: dict[str, Any]) -> bool:
         isinstance(transfer, dict) and transfer.keys() == {"size", "sha256"} and "data" not in args
         and type(transfer["size"]) is int and MAX_PAYLOAD_BYTES < transfer["size"] <= MAX_WRITE_BYTES
         and isinstance(transfer["sha256"], str) and _SHA256.fullmatch(transfer["sha256"]) is not None
+    )
+
+
+def _page_args(args: dict[str, Any]) -> bool:
+    """As the app checks a page's args.  A bool is no integer, as Number.isInteger(true) is false."""
+    encoding, offset, limit, max_bytes = (args.get(name) for name in ("encoding", "offset", "limit", "max_bytes"))
+    return (
+        isinstance(encoding, str) and encoding in CODE_UNITS
+        and type(offset) is int and offset >= 1 and type(limit) is int
+        and type(max_bytes) is int and 0 <= max_bytes <= MAX_PAYLOAD_BYTES
     )
 
 
@@ -135,6 +151,17 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         if len(data) > MAX_READ_BYTES:
             raise OSError(errno.EFBIG, READ_TOO_LARGE)
         return base64.b64encode(data).decode("ascii")
+    if kind == "read_lines":
+        if not _page_args(a):
+            raise ValueError(BAD_PAGE)
+        # As the app: refused from the file's size, before it is scanned.
+        st = await folder.stat(a["key"])
+        if st is not None and st.size > MAX_READ_BYTES:
+            raise OSError(errno.EFBIG, READ_TOO_LARGE)
+        page = await folder.read_lines(
+            a["key"], encoding=a["encoding"], offset=a["offset"], limit=a["limit"], max_bytes=a["max_bytes"],
+        )
+        return {"data": base64.b64encode(page.data).decode("ascii"), "total_lines": page.total_lines}
     if kind == "write":
         data = base64.b64decode(a["data"])
         if len(data) > MAX_WRITE_BYTES:
