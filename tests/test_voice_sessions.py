@@ -149,3 +149,21 @@ async def test_a_paraphrased_question_is_not_asked_twice():
     call = _call(_Log(("llm.request", {}), ("llm.delta", {"content": "Sigur. În ce zi doriți să vă programez? "}),
                       ("tool.call", {"name": "ask_user_question", "arguments": json.dumps(args)})))
     assert [t async for t in call.stream(0)] == ["Sigur. În ce zi doriți să vă programez? ", " Variante: luni, marți."]
+
+
+async def test_a_tool_started_in_silence_is_announced():
+    """The model often calls a tool without a word first; the caller would hear only typing for seconds."""
+    from surogates.voice.sessions import FILLER
+    call = _call(_Log(("llm.request", {}), ("tool.call", {"name": "web_search", "arguments": "{}"}),
+                      ("tool.result", {"name": "web_search"}), ("llm.request", {}),
+                      ("llm.delta", {"content": "Euro e 4,97 lei."}),
+                      ("llm.response", {"message": {"role": "assistant", "content": "Euro e 4,97 lei."}})))
+    assert [t async for t in call.stream(0)] == [FILLER, "Euro e 4,97 lei."]
+
+
+async def test_no_filler_when_the_agent_already_spoke_or_calls_more_tools():
+    call = _call(_Log(("llm.request", {}), ("llm.delta", {"content": "O clipă, caut. "}),
+                      ("tool.call", {"name": "web_search", "arguments": "{}"}),
+                      ("tool.call", {"name": "web_extract", "arguments": "{}"}),
+                      ("llm.response", {"message": {"role": "assistant", "content": "Gata."}})))
+    assert [t async for t in call.stream(0)] == ["O clipă, caut. "]

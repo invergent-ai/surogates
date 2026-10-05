@@ -25,6 +25,7 @@ TERMINAL = frozenset({"session.complete", "session.fail", "session.stopped", "se
 POLL_SECONDS = 0.4  # pub/sub is a nudge; poll as a fallback, like the OpenAI route
 START_TIMEOUT = 45.0  # seconds for the harness to pick the turn up (a backlogged or dead worker)
 TURN_TIMEOUT = 120.0  # seconds for the whole turn, tools included
+FILLER = "O clipă, verific."  # said for the agent when it starts a tool without a word
 SORRY_TURN = "Îmi pare rău, nu am reușit să răspund acum. Vă rog să mai întrebați o dată."
 ANONYMOUS = "anonymous"
 HEARD_NONE = "[Apelantul te-a întrerupt înainte să audă răspunsul tău anterior.] "
@@ -129,7 +130,7 @@ class CallSession:
         await pubsub.subscribe(f"surogates:session:{self.session_id}")
         loop = asyncio.get_running_loop()
         began = loop.time()
-        cursor, started, said = after, False, ""
+        cursor, started, said, announced = after, False, "", False
         try:
             while True:
                 for e in await self.store.get_events(self.session_id, after=cursor):
@@ -146,6 +147,10 @@ class CallSession:
                         if question := question_text(data.get("arguments"), said):
                             yield f" {question}" if said else question
                         return
+                    elif e.type == EventType.TOOL_CALL.value and not said and not announced:
+                        # a tool started in silence: the caller would hear only typing until it returns
+                        announced = True
+                        yield FILLER
                     elif _final_answer(e):
                         # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
                         if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
