@@ -3534,6 +3534,11 @@ class AgentHarness(
             and session.channel != STUDIO_CHANNEL
         ):
             return None
+        # A phone caller has already heard the answer: there is no widget to
+        # rescue it into, and the judge's blocking calls would hold their next
+        # turn.  The voice channel speaks questions itself.
+        if session.channel == "voice":
+            return None
 
         decision = await self._judge_final_response_user_action(
             messages=messages,
