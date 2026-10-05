@@ -31,6 +31,7 @@ RATE = 24000
 FRAME = RATE // 50  # 20 ms
 QUIET_END = 1.5  # seconds of agent silence that end its reply
 LOUD = 300  # int16 RMS above which a frame is speech
+BUSY = 60  # RMS above which the background track is typing: the agent is still working
 
 
 async def speech(text: str, voice: str = "male") -> np.ndarray:
@@ -72,6 +73,7 @@ class Call:
         self.called, self.caller = called, caller
         self.room_name = f"call-qa-{uuid.uuid4().hex[:8]}"
         self.heard: list[tuple[float, np.ndarray, bool]] = []  # (when, frame, loud) of the agent's voice
+        self.busy_at: list[float] = []  # when the agent's background track was typing
         self.ended = asyncio.Event()
         self._room = rtc.Room()
         self._outbox: asyncio.Queue[np.ndarray] = asyncio.Queue()
@@ -97,8 +99,10 @@ class Call:
 
         @self._room.on("track_subscribed")
         def _track(track, publication, _participant):
-            if track.kind == rtc.TrackKind.KIND_AUDIO and publication.name != "background_audio":
-                self._tasks.append(asyncio.ensure_future(self._listen(track)))
+            if track.kind != rtc.TrackKind.KIND_AUDIO:
+                return
+            work = self._typing(track) if publication.name == "background_audio" else self._listen(track)
+            self._tasks.append(asyncio.ensure_future(work))
 
         self._room.on("disconnected", lambda *_: self.ended.set())
         self.dialed_at = time.monotonic()
@@ -126,6 +130,12 @@ class Call:
             x = np.frombuffer(ev.frame.data, "<i2")
             self.heard.append((time.monotonic(), x, float(np.sqrt(np.mean(x.astype(np.float32) ** 2))) > LOUD))
 
+    async def _typing(self, track: rtc.Track) -> None:
+        async for ev in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
+            x = np.frombuffer(ev.frame.data, "<i2").astype(np.float32)
+            if float(np.sqrt(np.mean(x ** 2))) > BUSY:
+                self.busy_at.append(time.monotonic())
+
     async def speak(self, text: str) -> float:
         """Say a line; returns when the last word left the microphone."""
         self._said.clear()
@@ -147,11 +157,14 @@ class Call:
         return start if time.monotonic() - start >= window else None
 
     async def listen(self, since: float, timeout: float = 30.0) -> Reply:
-        """Wait for the agent to start and finish speaking after ``since``."""
+        """Wait for the agent to start and finish answering after ``since``. Typing on its background track
+        means it is still working (a tool runs after "O clipă, verific"): only voice and typing both
+        quiet for QUIET_END ends the answer."""
         deadline = since + timeout
         while time.monotonic() < deadline and not self.ended.is_set():
             loud = [w for w, _, l in self.heard if l and w > since]
-            if loud and time.monotonic() - loud[-1] > QUIET_END:
+            last = max([loud[-1]] + [b for b in self.busy_at[-50:] if b > since]) if loud else None
+            if last is not None and time.monotonic() - last > QUIET_END:
                 break
             await asyncio.sleep(0.05)
         loud = [w for w, _, l in self.heard if l and w > since]
