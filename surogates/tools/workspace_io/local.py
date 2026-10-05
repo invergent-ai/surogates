@@ -567,6 +567,10 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
+    # Keys are this host's paths: a cache keys a file by the file itself.
+    identity: str | None = None
+    caches_documents: bool = True
+
     def __init__(self, workspace_path: str | None = None) -> None:
         self.root = workspace_path or None
 

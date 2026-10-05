@@ -84,6 +84,21 @@ class WorkspaceIO(Protocol):
     with or build keys; :meth:`resolve` does that.
     """
 
+    identity: str | None
+    """Whose files the keys name, for a cache that outlives the call: ``device:<id>``.
+
+    A cache then keys a file by this, its key and its revision, and finds it
+    before reading it.  None keys it by the file on this host, as the cloud
+    does.
+    """
+
+    caches_documents: bool
+    """Whether ``read_file`` may find or keep a document's parse in the cache.
+
+    False for a call a worker resumes on a computer: a hit would skip a read
+    its first run asked for, and that call would read as interrupted.
+    """
+
     # -- files -----------------------------------------------------------
 
     async def resolve(self, path: str) -> str:

@@ -194,9 +194,13 @@ def _raise(error: dict[str, Any]) -> None:
 class DeviceWorkspaceIO:
     """WorkspaceIO for a session's folder on the user's computer."""
 
-    def __init__(self, runner: OperationRunner, *, root: str) -> None:
+    def __init__(
+        self, runner: OperationRunner, *, root: str, identity: str | None = None, caches_documents: bool = True,
+    ) -> None:
         self._runner = runner
         self.root = root
+        self.identity = identity
+        self.caches_documents = caches_documents
 
     async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:

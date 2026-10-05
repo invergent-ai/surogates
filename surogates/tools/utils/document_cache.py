@@ -26,7 +26,7 @@ DEFAULT_MAX_ENTRY_BYTES = 2 * 1024 * 1024  # 2 MB
 
 
 class DocumentCache:
-    """LRU keyed on ``(abs_path, mtime_ns, size, ext)``.
+    """LRU keyed on ``(abs_path, mtime_ns, size, ext)``, or on a key the caller names.
 
     Eviction policy: at insert time, if the directory holds more than
     ``max_entries`` cache files, the entries with the oldest atime are
@@ -48,8 +48,7 @@ class DocumentCache:
     def _key(self, source: Path) -> str:
         st = source.stat()
         ext = source.suffix.lower()
-        raw = f"{source.resolve()}|{st.st_mtime_ns}|{st.st_size}|{ext}"
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"{source.resolve()}|{st.st_mtime_ns}|{st.st_size}|{ext}"
 
     def _entry_path(self, key: str) -> Path:
         return self._root / f"{key}.md"
@@ -73,7 +72,14 @@ class DocumentCache:
         except OSError as exc:
             logger.debug("cache key stat failed for %s: %s", source, exc)
             return await parse(source)
+        return await self.get_or_load(key, lambda: parse(source))
 
+    async def get_or_load(self, key: str, load: Callable[[], Awaitable[str]]) -> str:
+        """Return the markdown cached under *key*, or call ``load`` and store what it returns.
+
+        *key* names one version of one document, so a hit needs no source.
+        """
+        key = hashlib.sha256(key.encode("utf-8")).hexdigest()
         entry = self._entry_path(key)
         if entry.exists():
             try:
@@ -95,7 +101,7 @@ class DocumentCache:
         # moment the first parse finishes) and harmless when they do
         # happen — the second parse just overwrites the first via the
         # fcntl-locked rename in ``_maybe_store``.
-        markdown = await parse(source)
+        markdown = await load()
         self._maybe_store(key, markdown)
         return markdown
 

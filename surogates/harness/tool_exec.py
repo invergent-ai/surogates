@@ -1509,6 +1509,7 @@ async def _run_single_tool(
             lease_token=str(lease.lease_token),
             session_factory=session_factory,
             redis=redis,
+            resumed=replay_of is not None,
         )
         if on_device
         else None

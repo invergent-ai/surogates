@@ -135,7 +135,7 @@ def ws(request, tmp_path) -> Ws:
         # its WorkspaceIO would fail here too.
         laptop = RemappingWorkspaceIO(str(real))
         return Ws(VIRTUAL_ROOT, real, {
-            "workspace_io": DeviceWorkspaceIO(InProcessRunner(laptop), root=VIRTUAL_ROOT),
+            "workspace_io": DeviceWorkspaceIO(InProcessRunner(laptop), root=VIRTUAL_ROOT, identity="device:test"),
         })
     raise ValueError(f"unknown workspace kind {request.param}")
 

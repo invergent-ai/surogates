@@ -147,21 +147,28 @@ def device_call_for(
     lease_token: str | None,
     session_factory: Any,
     redis: Any,
+    resumed: bool = False,
 ) -> DeviceCall:
-    """The DeviceCall for one tool call of *session*, journaled under *invocation_id*."""
+    """The DeviceCall for one tool call of *session*, journaled under *invocation_id*.
+
+    A *resumed* call neither finds nor keeps a document in the cache: a hit
+    would skip a read its first run asked for, and a call that asks for less
+    reads as interrupted.
+    """
     # Imported here: both reach surogates.session, whose store imports the
     # harness, which imports this module.
     from surogates.devices.waits import DeviceWaitNotice
     from surogates.session.store import SessionStore
 
     root = sandbox_session_key(session)
+    # From the session the server stamped, never from tool input.
+    device_id = device_of(session.config)
     runner = JournalRunner(
         DeviceOperations(
             session_factory, redis,
             notice=DeviceWaitNotice(SessionStore(session_factory, redis), session_factory),
         ),
-        # From the session the server stamped, never from tool input.
-        device_id=device_of(session.config),
+        device_id=device_id,
         root_session_id=UUID(root),
         calling_session_id=session.id,
         invocation_id=invocation_id,
@@ -169,7 +176,10 @@ def device_call_for(
     )
     return DeviceCall(
         tools=tools,
-        workspace_io=DeviceWorkspaceIO(runner, root=session.config["workspace_path"]),
+        workspace_io=DeviceWorkspaceIO(
+            runner, root=session.config["workspace_path"], identity=f"device:{device_id}",
+            caches_documents=not resumed,
+        ),
         task_id=root,
         read_tracker_id=str(session.id),
         runner=runner,

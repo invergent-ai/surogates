@@ -1317,15 +1317,29 @@ async def _handle_document(
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
-    if await wio.stat(key) is None:
+    st = await wio.stat(key)
+    if st is None:
         return json.dumps(
             {"error": f"File not found: {path}"},
             ensure_ascii=False,
         )
 
     try:
-        async with wio.local_file(key) as local:
-            markdown = await default_cache().get_or_parse(local, _parse_document_to_text)
+        if not wio.caches_documents:
+            async with wio.local_file(key) as local:
+                markdown = await _parse_document_to_text(local)
+        elif wio.identity is None:
+            async with wio.local_file(key) as local:
+                markdown = await default_cache().get_or_parse(local, _parse_document_to_text)
+        else:
+            async def download_and_parse() -> str:
+                async with wio.local_file(key) as local:
+                    return await _parse_document_to_text(local)
+
+            # Found before it is downloaded: a hit moves nothing.
+            markdown = await default_cache().get_or_load(
+                f"{wio.identity}|{key}|{st.revision}|{Path(key).suffix.lower()}", download_and_parse,
+            )
     except DocumentParseError as exc:
         ext = Path(key).suffix.lower().lstrip(".")
         return _tool_error(
