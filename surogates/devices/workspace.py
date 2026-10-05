@@ -81,6 +81,7 @@ String.prototype.toWellFormed() repairs a string.)
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import errno
@@ -203,7 +204,10 @@ class DeviceWorkspaceIO:
         data = await self.read(key)
         with tempfile.TemporaryDirectory(prefix="surogates-device-") as folder:
             path = Path(folder) / f"document{Path(key).suffix}"
-            path.write_bytes(data)
+            # Up to MAX_READ_BYTES: written off the loop, and not held again in
+            # memory while the caller parses the file.
+            await asyncio.to_thread(path.write_bytes, data)
+            del data
             yield path
 
     async def ripgrep(

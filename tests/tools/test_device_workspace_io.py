@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -241,3 +242,23 @@ async def test_a_local_file_is_a_private_copy_removed_after_use(wio, root):
         assert local.read_bytes() == b"%PDF-1.7"
         copy = local
     assert not copy.exists()
+
+
+async def test_a_local_file_is_written_off_the_loop_and_its_bytes_are_not_held_through_the_parse(
+    wio, root, monkeypatch,
+):
+    (root / "doc.pdf").write_bytes(b"%PDF-1.7")
+    writers = []
+    write_bytes = Path.write_bytes
+
+    def recorded(path, data):
+        writers.append(threading.current_thread())
+        return write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", recorded)
+    copying = wio.local_file(str(root / "doc.pdf"))
+    async with copying as local:
+        assert local.read_bytes() == b"%PDF-1.7"
+        # Up to 50 MiB: written in a thread, and held only in the file while the caller parses it.
+        assert writers and threading.current_thread() not in writers
+        assert "data" not in copying.gen.ag_frame.f_locals
