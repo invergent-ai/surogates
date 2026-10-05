@@ -516,6 +516,9 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
 
     at = last = start  # where the piece starts, and where the last line end so far ends
     while piece := fh.read(_PIECE_BYTES):
+        if rem := len(piece) % width:
+            # A growing file's end can cut a unit: the next piece starts on one.
+            piece += fh.read(width - rem)
         marks = _marks(piece, width, low)
         if marks.endswith(b"\r"):
             # A CR LF across two pieces is one line end: its LF joins this piece.
@@ -529,7 +532,8 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
         if tail >= 0:
             last = at + (tail + 1) * width
         ends = _ends(marks)
-        if taking and total + ends >= first:
+        # A piece with no line end, as a minified file's, is only counted.
+        if taking and ends and total + ends >= first:
             for found in _LINE_END.finditer(marks):
                 total += 1
                 end = at + found.end() * width

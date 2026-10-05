@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import random
+import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -113,6 +115,38 @@ async def test_a_cr_lf_across_two_pieces_ends_one_line(page):
     assert await page(data, offset=2) == LinePage(b"y\r\n", 2)
     utf16 = ("x" * (512 * 1024 - 1) + "\r\ny\r\n").encode("utf-16-le")
     assert await page(utf16, "utf-16-le", offset=2) == LinePage("y\r\n".encode("utf-16-le"), 2)
+
+
+class ShortFirstRead(io.BytesIO):
+    """A file whose first read stops at byte *at*, as a growing file's end can, mid-unit."""
+
+    def __init__(self, data: bytes, at: int) -> None:
+        super().__init__(data)
+        self.at: int | None = at
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self.at is not None:
+            size, self.at = self.at, None
+        return super().read(size)
+
+
+def test_a_piece_cut_mid_unit_is_topped_up_to_a_whole_one():
+    data = "".join(f"line {number}\n" for number in range(11)).encode("utf-16-le")
+    assert local._page(ShortFirstRead(data, 9), "utf-16-le", 1, 2000, 1 << 30) == LinePage(data, 11)
+
+
+async def test_a_piece_with_no_line_end_is_not_walked(page, monkeypatch):
+    # A minified file's first line spans pieces that hold no line end.
+    monkeypatch.setattr(local, "_PIECE_BYTES", 4)
+    walked: list[bytes] = []
+
+    def finditer(marks: bytes):
+        walked.append(marks)
+        return re.finditer(rb"\r\n?|\n", marks)
+
+    monkeypatch.setattr(local, "_LINE_END", SimpleNamespace(finditer=finditer))
+    assert await page(b"x" * 10 + b"\ny\n") == LinePage(b"x" * 10 + b"\ny\n", 2)
+    assert walked and all(b"\n" in marks or b"\r" in marks for marks in walked)
 
 
 async def test_a_utf16_page_starts_at_its_line(page):
