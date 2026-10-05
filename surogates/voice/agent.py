@@ -20,6 +20,7 @@ STILL_THERE = "Mai sunteți acolo?"
 GOODBYE = "Vă mulțumesc că ați sunat. O zi bună!"
 SORRY = "Îmi pare rău, am o problemă tehnică. Vă rog să sunați puțin mai târziu."
 UNAVAILABLE = "Acest număr nu este disponibil momentan."
+BUSY = "Toate liniile sunt ocupate. Vă rog să reveniți în câteva minute."
 SENTENCE_PAUSE = 0.25  # Amami ends a sentence with almost no silence: without a breath, sentences run together
 ECHO_WINDOW = 20.0  # seconds: what we said this recently can come back through a speakerphone
 

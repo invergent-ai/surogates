@@ -21,7 +21,8 @@ from redis.asyncio import Redis
 
 from surogates.channels.resolve import resolve_tenant
 from surogates.config import load_settings
-from surogates.voice.agent import GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
+from surogates.voice.agent import BUSY, GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
+from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
 from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions
 from surogates.voice.stt import RoSTT
@@ -110,7 +111,7 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    call, tasks, tts = None, set(), None
+    call, tasks, tts, slots = None, set(), None, None
 
     async def cleanup() -> None:
         # in this order: the call's session is closed while Redis and the DB are still open
@@ -120,6 +121,8 @@ async def entrypoint(ctx: JobContext) -> None:
             await call.end()
         if tts is not None:
             await tts.aclose()
+        if slots is not None:
+            await slots.release(info.call_id)
         await rt.aclose()
 
     try:
@@ -134,6 +137,11 @@ async def entrypoint(ctx: JobContext) -> None:
         return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE, rt.redis)
 
     config = CallConfig.from_routing(tenant.get("config"))
+    held = CallSlots(rt.redis, vs.max_concurrent_calls)
+    if not await held.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
+        log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
+        return await apologize(ctx, vs.tts_url, config.voice, BUSY, rt.redis)
+    slots = held
     try:
         call = await rt.sessions.open_call(
             CallTarget(org_id=UUID(str(tenant["org_id"])), agent_id=tenant["agent_id"],

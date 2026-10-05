@@ -782,6 +782,7 @@ class VoiceSettings(BaseSettings):
     stt_url: str = "ws://127.0.0.1:18001/v1/audio/streams"
     tts_url: str = "http://127.0.0.1:18080/v1/audio/speech"
     max_calls: int = 8
+    max_concurrent_calls: int = 8  # across all voice workers: one STT pod carries 8 streams
     idle_processes: int = 2  # prewarmed job processes; LiveKit's default is one per CPU core
     process_init_timeout: float = 30.0  # importing surogates + loading Silero; LiveKit's 10 s is too tight
     health_port: int = 8003

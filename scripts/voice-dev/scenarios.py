@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 import asyncpg
 import yaml
+from redis.asyncio import Redis
 
 sys.path.insert(0, str(Path(__file__).parent))
 from caller import DID, Call, Reply  # noqa: E402
@@ -74,6 +75,7 @@ class DB:
     def __init__(self) -> None:
         cfg = yaml.safe_load(open(os.path.expanduser(os.environ["SUROGATES_CONFIG"])))
         self.urls = {k: cfg[k]["url"].replace("+asyncpg", "") for k in ("db", "ops_db")}
+        self.urls["redis"] = cfg["redis"]["url"]
         for k, u in self.urls.items():
             if urlparse(u).hostname not in ("127.0.0.1", "localhost"):
                 sys.exit(f"refusing: {k} is not a local database (this suite edits routing rows)")
@@ -208,6 +210,13 @@ async def unrouted(call: Call, r: Result) -> None:
     r.check("no session was created", not await DB().events(call.room_name))
 
 
+async def busy(call: Call, r: Result) -> None:
+    g = r.heard("(dial)", await call.listen(call.dialed_at))
+    r.check("says all lines are busy", "ocupate" in plain(g.text), g.text)
+    r.check("hangs up", await call.wait_hung_up(10))
+    r.check("no session was created", not await DB().events(call.room_name))
+
+
 async def silence(call: Call, r: Result) -> None:
     await call.listen(call.dialed_at)
     t = time.monotonic()
@@ -227,7 +236,7 @@ SCENARIOS = {  # name: (scenario, slow, called number)
     "greeting": (greeting, False, DID), "question": (question, False, DID),
     "tool_question": (tool_question, False, DID), "agent_asks": (agent_asks, False, DID),
     "barge_in": (barge_in, False, DID), "backchannel": (backchannel, False, DID),
-    "goodbye": (goodbye, False, DID), "unrouted": (unrouted, False, UNROUTED),
+    "goodbye": (goodbye, False, DID), "unrouted": (unrouted, False, UNROUTED), "busy": (busy, False, DID),
     "silence": (silence, True, DID), "time_limit": (time_limit, True, DID),
 }
 
@@ -238,6 +247,10 @@ async def run(name: str) -> Result:
     if name == "time_limit":
         await db.set_routing("max_call_seconds", 30)
         await asyncio.sleep(31)  # the worker's routing cache keeps a row 30 s
+    fillers = [f"qa-filler-{i}" for i in range(64)]
+    if name == "busy":  # every line taken (the worker's default capacity is 8; 64 covers any setting)
+        redis = Redis.from_url(db.urls["redis"])
+        await redis.zadd("voice:call_slots", {f: time.time() + 120 for f in fillers})
     call = Call(called=called)
     r = Result(scenario=name, room=call.room_name)
     try:
@@ -248,6 +261,9 @@ async def run(name: str) -> Result:
     finally:
         if name == "time_limit":
             await db.set_routing("max_call_seconds", None)
+        if name == "busy":
+            await redis.zrem("voice:call_slots", *fillers)
+            await redis.aclose()
     r.turns = turns(await db.events(call.room_name))
     return r
 
