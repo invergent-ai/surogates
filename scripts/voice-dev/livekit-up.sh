@@ -4,6 +4,9 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DID="${VOICE_DEV_DID:-+40300000001}"
+if [ "$(docker inspect -f '{{.State.Running}}' livekit 2>/dev/null)" = true ]; then
+  echo "LiveKit already running (ws://127.0.0.1:7880); stop it first to recreate the trunk"; exit 0
+fi
 docker network inspect lkdev >/dev/null 2>&1 || docker network create lkdev >/dev/null
 docker run -d --rm --name lk-redis --network lkdev redis:7-alpine >/dev/null
 docker run -d --rm --name livekit --network lkdev -p 127.0.0.1:7880:7880 \
