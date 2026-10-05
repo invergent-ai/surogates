@@ -25,6 +25,17 @@ accept frames that large.
                                                         session stopped it or its device was
                                                         revoked: end it, record that, and never
                                                         run it
+  app -> server   {"type": "op_result", "id", "digest",
+                   "outcome": {"ok": {"transfer": {"size", "sha256"}}}}
+                                                         a result header: a read's data of more
+                                                         than MAX_PAYLOAD_BYTES follows in chunks
+  app -> server   {"type": "chunk", "id", "seq", "data"} seq counts from 0; data is CHUNK_BYTES of
+                                                         the read's data in standard base64, the
+                                                         last chunk the rest
+  server -> app   {"type": "chunk_ack", "id", "seq"}     that chunk is stored
+  server -> app   {"type": "unwanted", "id"}             the server closed this operation: stop
+                                                         sending its transfer, and take its result
+                                                         as acknowledged
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -67,6 +78,24 @@ dismisses the folder prompt.  After a cancel the app need not send an
 op_result: one it sends anyway, with the operation's digest, is acknowledged
 with an op_ack as a duplicate and changes nothing.
 
+A read's data of more than MAX_PAYLOAD_BYTES, and at most MAX_READ_BYTES, is
+a transfer, named by its size and the SHA-256 of the data in lowercase hex.
+The app sends its result header, then the data in chunks, in order, with at
+most TRANSFER_WINDOW chunks the server has not acknowledged.  It sends one
+transfer at a time on a connection: the next header goes after an op_ack or
+an unwanted.  The server stores each chunk before it acknowledges it.  The
+last chunk is acknowledged with the op_ack: the data is whole and the outcome,
+which names the transfer, is recorded.  Data that does not match its SHA-256
+is recorded as an error instead, so it is not sent again.  A header for an
+operation the server has closed (stopped, revoked or already answered) is
+answered unwanted, and so is the next chunk after it closes; the chunks
+already on their way behind an unwanted are dropped.  A connection that ends
+mid-transfer loses it: on the next one the app sends the header again and the
+data from chunk 0, and whatever the device left half-sent goes.  A transfer
+for an operation that is not a read, a malformed header, a chunk out of order
+or of the wrong size, and a header while another transfer is under way are
+protocol errors.
+
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no frame from the server within
 2 x heartbeat_s of a ping.  Any frame counts as liveness, not only a pong:
@@ -77,11 +106,16 @@ before it.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
+import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 from uuid import UUID
 
@@ -96,7 +130,13 @@ from surogates.devices.presence import (
     new_holder,
 )
 from surogates.devices.store import DeviceRecord, DeviceStore
-from surogates.devices.workspace import is_well_formed
+from surogates.devices.workspace import (
+    CHUNK_BYTES,
+    MAX_PAYLOAD_BYTES,
+    MAX_READ_BYTES,
+    is_well_formed,
+    transfer_of,
+)
 from surogates.runtime.resolver import resolve_agent_id_soft
 
 logger = logging.getLogger(__name__)
@@ -118,10 +158,18 @@ LAST_SEEN_INTERVAL_S = 60.0
 # Pings faster than this are answered without touching Redis.
 MIN_REFRESH_INTERVAL_S = 1.0
 # One operation's 1 MiB of file data, base64-encoded, plus its envelope (the
-# operation contract keeps every args object and outcome under 1.5 MiB).
+# operation contract keeps every args object and outcome under 1.5 MiB, and a
+# chunk carries 1 MiB).
 MAX_FRAME_CHARS = 2 * 1024 * 1024
 # A client that stops reading must not stall the connection's other work.
 SEND_TIMEOUT_S = 10.0
+# The most chunks the app sends ahead of the server's acknowledgements.
+TRANSFER_WINDOW = 4
+# What a transfer whose data does not hash to its name is recorded as.
+DAMAGED_OUTCOME: dict[str, Any] = {
+    "error": {"type": "other", "message": "The computer's result did not match its SHA-256"},
+}
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 CLOSE_PROTOCOL = 4400
 CLOSE_UNAUTHENTICATED = 4401
@@ -149,8 +197,36 @@ class _Close(Exception):
         self.reason = reason
 
 
+@dataclass
+class _Incoming:
+    """The transfer a connection is receiving: what its header named, and how far it got."""
+
+    operation_id: UUID
+    digest: str
+    outcome: dict[str, Any]
+    size: int
+    sha256: str
+    received: int = 0
+    seq: int = 0
+    hasher: Any = field(default_factory=hashlib.sha256)
+
+
+def _named(transfer: Any) -> tuple[int, str]:
+    """The size and SHA-256 a result header names, as the protocol allows them."""
+    if (
+        not isinstance(transfer, dict)
+        or transfer.keys() != {"size", "sha256"}
+        or type(transfer["size"]) is not int
+        or not MAX_PAYLOAD_BYTES < transfer["size"] <= MAX_READ_BYTES
+        or not isinstance(transfer["sha256"], str)
+        or not _SHA256.fullmatch(transfer["sha256"])
+    ):
+        raise _Close(CLOSE_PROTOCOL, "malformed transfer")
+    return transfer["size"], transfer["sha256"]
+
+
 class _Link:
-    """One connection's sending side.
+    """One connection's sending side, and the transfer it is receiving.
 
     Frames go out one at a time, each within SEND_TIMEOUT_S.  Each open
     operation is delivered once per connection, and ``_delivered`` holds the
@@ -175,6 +251,7 @@ class _Link:
         self._send_lock = asyncio.Lock()
         self._delivered: set[UUID] = set()
         self._delivery_wanted = asyncio.Event()
+        self._incoming: _Incoming | None = None
 
     async def send(self, frame: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -246,6 +323,10 @@ class _Link:
             # Recorded, not refused: the app sends its journaled reply again on
             # every reconnect, so a refusal would loop.
             outcome = {"error": {"type": "other", "message": "The computer's result was not valid Unicode"}}
+        transfer = transfer_of(outcome)
+        if transfer is not None:
+            await self._start(operation_id, digest, outcome, *_named(transfer))
+            return
         status = await _bounded(self._operations.complete(
             self._device.id, self._device.credential_generation, operation_id, digest, outcome,
         ))
@@ -258,6 +339,80 @@ class _Link:
         # that carries it, bounded on a long-lived connection.
         self._delivered.discard(operation_id)
         await self.send({"type": "op_ack", "id": str(operation_id)})
+
+    async def _start(
+        self, operation_id: UUID, digest: str, outcome: dict[str, Any], size: int, sha256: str,
+    ) -> None:
+        """Take a result header: its chunks follow, unless the operation is closed."""
+        if self._incoming is not None:
+            raise _Close(CLOSE_PROTOCOL, "one transfer at a time")
+        # A connection another has superseded must not take a transfer over from the live one.
+        if not await _bounded(self._presence.holds(self._device.id, self._holder)):
+            raise _Close(CLOSE_SUPERSEDED, "superseded")
+        status = await _bounded(self._operations.start_transfer(
+            self._device.id, self._device.credential_generation, self._holder,
+            operation_id, digest, size, sha256,
+        ))
+        if status == "stale":
+            raise _Close(CLOSE_REVOKED, "credentials rotated")
+        if status == "rejected":
+            raise _Close(CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read")
+        if status == "busy":
+            # The app reconnects, and sends it again whole.
+            raise _Close(CLOSE_PROTOCOL, "another connection started this transfer at the same moment")
+        if status == "unwanted":
+            await self._unwanted(operation_id)
+            return
+        self._incoming = _Incoming(operation_id, digest, outcome, size, sha256)
+
+    async def chunk(self, frame: dict[str, Any]) -> None:
+        """Store one chunk of the transfer under way, then acknowledge it."""
+        try:
+            operation_id = UUID(str(frame["id"]))
+        except (KeyError, ValueError):
+            raise _Close(CLOSE_PROTOCOL, "malformed chunk") from None
+        incoming = self._incoming
+        if incoming is None or incoming.operation_id != operation_id:
+            # Sent before the app heard its transfer was unwanted.
+            return
+        seq, text = frame.get("seq"), frame.get("data")
+        if type(seq) is not int or seq != incoming.seq:
+            raise _Close(CLOSE_PROTOCOL, "chunk out of order")
+        try:
+            data = base64.b64decode(text, validate=True) if isinstance(text, str) else None
+        except binascii.Error:
+            data = None
+        if data is None or len(data) != min(CHUNK_BYTES, incoming.size - incoming.received):
+            raise _Close(CLOSE_PROTOCOL, "malformed chunk")
+        incoming.hasher.update(data)
+        last = incoming.received + len(data) == incoming.size
+        outcome = None
+        if last:
+            outcome = incoming.outcome if incoming.hasher.hexdigest() == incoming.sha256 else DAMAGED_OUTCOME
+        status = await _bounded(self._operations.store_chunk(
+            self._device.id, self._device.credential_generation, self._holder,
+            operation_id, incoming.digest, seq, data, outcome,
+        ))
+        if status == "stale":
+            raise _Close(CLOSE_REVOKED, "credentials rotated")
+        if status == "lost":
+            raise _Close(CLOSE_SUPERSEDED, "another connection sends this transfer now")
+        if status == "unwanted":
+            await self._unwanted(operation_id)
+            return
+        incoming.received += len(data)
+        incoming.seq += 1
+        if status == "completed":
+            self._incoming = None
+            self._delivered.discard(operation_id)
+            await self.send({"type": "op_ack", "id": str(operation_id)})
+            return
+        await self.send({"type": "chunk_ack", "id": str(operation_id), "seq": seq})
+
+    async def _unwanted(self, operation_id: UUID) -> None:
+        self._incoming = None
+        self._delivered.discard(operation_id)
+        await self.send({"type": "unwanted", "id": str(operation_id)})
 
 
 async def serve_device_link(
@@ -448,6 +603,9 @@ async def _heartbeats(
             raise _Close(CLOSE_REVOKED, "revoked")
         if kind == "op_result":
             await link.record(frame)
+            continue
+        if kind == "chunk":
+            await link.chunk(frame)
             continue
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
