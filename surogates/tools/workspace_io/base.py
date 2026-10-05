@@ -66,6 +66,13 @@ class RipgrepError(RuntimeError):
     """ripgrep is missing, or exited 2+ with no output (exit 1 only means no matches)."""
 
 
+class RevisionConflict(OSError):
+    """The file is not at the revision a write expected, so it was not written.
+
+    An OSError, so a handler that reports each file's failure reports this one too.
+    """
+
+
 class WorkspaceIO(Protocol):
     """Raw workspace operations.  Every rule about using them stays in the handlers."""
 
@@ -122,10 +129,13 @@ class WorkspaceIO(Protocol):
         same lines as the whole file does.  Raises OSError as :meth:`read` does.
         """
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         """Replace the file with *data* atomically, creating parent directories.
 
-        An existing file keeps its permission bits.  Raises OSError.
+        An existing file keeps its permission bits.  *expected_revision* is the
+        :attr:`FileStat.revision` a stat in the same call gave: a workspace that
+        checks it raises :class:`RevisionConflict` and writes nothing when the
+        file is at another revision, or gone.  Raises OSError.
         """
 
     async def delete(self, key: str) -> None:

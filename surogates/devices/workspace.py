@@ -14,7 +14,8 @@ enforces its rules; the worker never touches the folder.
                                                                 {"transfer": {size, sha256}}
   read_lines      key, encoding, offset, limit, max_bytes       {data (base64), total_lines}
   write           key, data (base64), or                        null
-                  key, transfer {size, sha256}
+                  key, transfer {size, sha256};
+                  and expected_revision, when the call has one
   delete          key                                           null
   list_dir        key                                           [name]
   ripgrep         key, mode, pattern, glob, context             stdout (str)
@@ -39,7 +40,9 @@ whatever the request says.
 
 A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
 decimal, as LocalWorkspaceIO.stat makes it.  The worker never reads it: it
-compares it and hands it back as a write's expected_revision.
+compares it and hands it back as a write's expected_revision.  A write that
+names one replaces the file only while it is at that revision; otherwise, the
+file gone included, it is answered with a conflict and nothing is written.
 
 read_lines is a page of a text file, as WorkspaceIO.read_lines defines it
 (surogates.tools.workspace_io.base): encoding is one of the six codecs
@@ -55,6 +58,8 @@ An error names the exception the worker raises again:
                                           message is str(exc) without "[Errno N] "
   {"type": "ripgrep", "message"}          RipgrepError
   {"type": "value", "message"}            ValueError, e.g. a NUL byte in a path
+  {"type": "conflict", "message"}         RevisionConflict: the file is not at the
+                                          revision the write expected
   any other type                          DeviceOperationError(message), including
                                           "revoked" (local access was revoked),
                                           "cancelled" (the session stopped it before
@@ -112,7 +117,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RipgrepMode, RunResult
+from surogates.tools.workspace_io.base import (
+    FileStat,
+    LinePage,
+    RevisionConflict,
+    RipgrepError,
+    RipgrepMode,
+    RunResult,
+)
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_READ_BYTES = 50 * 1024 * 1024
@@ -174,6 +186,8 @@ def _raise(error: dict[str, Any]) -> None:
         raise RipgrepError(message)
     if kind == "value":
         raise ValueError(message)
+    if kind == "conflict":
+        raise RevisionConflict(message)
     raise DeviceOperationError(message)
 
 
@@ -246,9 +260,11 @@ class DeviceWorkspaceIO:
             pass
         raise DeviceOperationError("The computer returned an invalid page")
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        # Only when there is one: a write that expects nothing asks for what it always did.
+        expected = {} if expected_revision is None else {"expected_revision": expected_revision}
         if len(data) <= MAX_PAYLOAD_BYTES:
-            await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"))
+            await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"), **expected)
             return
         if len(data) > MAX_WRITE_BYTES:
             raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
@@ -256,7 +272,7 @@ class DeviceWorkspaceIO:
         # for the same operation.  Up to 50 MiB: hashed off the event loop the
         # worker's other sessions share.
         transfer = await asyncio.to_thread(_transfer_for, data)
-        await self._call("write", payload=data, key=key, transfer=transfer)
+        await self._call("write", payload=data, key=key, transfer=transfer, **expected)
 
     async def delete(self, key: str) -> None:
         await self._call("delete", key=key)

@@ -5,13 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 from surogates.devices.binding import device_of, device_owners
-from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RunResult, WorkspaceIO
+from surogates.tools.workspace_io.base import (
+    FileStat,
+    LinePage,
+    RevisionConflict,
+    RipgrepError,
+    RunResult,
+    WorkspaceIO,
+)
 from surogates.tools.workspace_io.local import LocalWorkspaceIO
 
 __all__ = [
     "FileStat",
     "LinePage",
     "LocalWorkspaceIO",
+    "RevisionConflict",
     "RipgrepError",
     "RunResult",
     "WorkspaceIO",

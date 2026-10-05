@@ -33,6 +33,7 @@ from surogates.devices.workspace import CHUNK_BYTES
 from surogates.session.store import SessionStore
 from surogates.tools.builtin import file_ops
 from surogates.tools.registry import ToolSchema
+from surogates.tools.workspace_io import RevisionConflict
 
 from .test_device_transfers import StoppingStore, big_text, stored, transfers_of
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -302,6 +303,23 @@ async def test_the_reference_laptop_takes_a_write_too_large_for_a_frame_in_chunk
     assert (rig.folder / "big.bin").read_bytes() == BIG
     [operation_id] = rig.laptop.outcomes
     assert rig.laptop.chunks_received == [(operation_id, seq) for seq in range(7)]
+
+
+async def test_a_write_too_large_for_a_frame_lands_only_on_the_revision_it_expects(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    key = str(rig.folder / "big.bin")
+    (rig.folder / "big.bin").write_bytes(b"old")
+    stale = (await asyncio.wait_for(wio.stat(key), 5.0)).revision
+    (rig.folder / "big.bin").write_bytes(b"newer")
+    # Its data came whole, in chunks, and still it is not written.
+    with pytest.raises(RevisionConflict):
+        await asyncio.wait_for(wio.write(key, BIG, expected_revision=stale), 10.0)
+    assert (rig.folder / "big.bin").read_bytes() == b"newer"
+    seen = (await asyncio.wait_for(wio.stat(key), 5.0)).revision
+    await asyncio.wait_for(wio.write(key, BIG, expected_revision=seen), 10.0)
+    assert (rig.folder / "big.bin").read_bytes() == BIG
 
 
 async def test_a_large_read_and_large_writes_go_at_once_on_one_connection(laptop_rig):

@@ -83,6 +83,13 @@ async def test_a_revision_changes_with_the_file_even_when_its_size_and_mtime_are
     assert after.revision != before.revision
 
 
+async def test_a_write_lands_whatever_revision_it_expects(wio, root):
+    # The cloud writes as it always has.
+    (root / "f.txt").write_text("old")
+    await wio.write(str(root / "f.txt"), b"new", expected_revision="0:0:0:0:0")
+    assert (root / "f.txt").read_bytes() == b"new"
+
+
 async def test_read_whole_or_head(wio, root):
     (root / "f.bin").write_bytes(b"0123456789")
     assert await wio.read(str(root / "f.bin")) == b"0123456789"

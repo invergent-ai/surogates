@@ -601,7 +601,8 @@ class LocalWorkspaceIO:
         with open(key, "rb") as fh:
             return _page(fh, encoding, offset, limit, max_bytes)
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        # expected_revision is not checked: cloud behaviour does not change.
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         tmp = key + ".tmp"
         try:

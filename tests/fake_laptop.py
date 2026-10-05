@@ -33,7 +33,7 @@ from surogates.devices.workspace import (
     transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import RipgrepError, WorkspaceIO
+from surogates.tools.workspace_io import RevisionConflict, RipgrepError, WorkspaceIO
 from surogates.tools.workspace_io.local import CODE_UNITS
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
@@ -49,6 +49,11 @@ MALFORMED_TRANSFER = {"error": {
     "message": "This write named its data in a form this computer does not take, so it was not written",
 }}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# What a write is answered when its file is not at the revision it expects, as the app answers it; {} is the key.
+CONFLICT = (
+    "{} changed on this computer after it was read, so it was not written. "
+    "Read it again, then make the change again"
+)
 # What a page whose args the app does not take is answered, as the app answers it.
 BAD_PAGE = (
     "read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit "
@@ -102,6 +107,8 @@ async def perform(folder: WorkspaceIO, kind: str, args: dict[str, Any]) -> dict[
         outcome: dict[str, Any] = {"ok": await _run(folder, kind, args)}
     except WorkspaceSandboxError as exc:
         outcome = {"error": {"type": "sandbox", "message": str(exc)}}
+    except RevisionConflict as exc:
+        outcome = {"error": {"type": "conflict", "message": str(exc)}}
     except RipgrepError as exc:
         outcome = {"error": {"type": "ripgrep", "message": str(exc)}}
     except OSError as exc:
@@ -183,6 +190,12 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         data = base64.b64decode(a["data"])
         if len(data) > MAX_WRITE_BYTES:
             raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
+        expected = a.get("expected_revision")
+        # Checked here, as the app checks it: LocalWorkspaceIO writes whatever is there.
+        if expected is not None:
+            st = await folder.stat(a["key"])
+            if st is None or st.revision != expected:
+                raise RevisionConflict(CONFLICT.format(a["key"]))
         await folder.write(a["key"], data)
         return None
     if kind == "delete":
@@ -424,7 +437,9 @@ class FakeLaptop:
         if not in_place or hashlib.sha256(data).hexdigest() != transfer["sha256"]:
             # Answered, never run.
             self.outcomes[frame["id"]] = DAMAGED
-        args = {"key": op["args"]["key"], "data": base64.b64encode(data).decode("ascii")}
+        # As the app's runner puts the data back inline: the other args, an expected revision too, stay.
+        args = {name: value for name, value in op["args"].items() if name != "transfer"}
+        args["data"] = base64.b64encode(data).decode("ascii")
         await self._answer({**op, "args": args}, ws)
 
     async def _answer(self, frame: dict[str, Any], ws: ClientConnection) -> None:
