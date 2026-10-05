@@ -17,6 +17,8 @@ import { inFolderRefusal } from "../src/files/protect.js";
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
 // Each of `next`, while there are any, caps one read instead; a 0 finds the file's end there.
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
+// Run once as the file helper's next write begins: another writer, changing a file meanwhile.
+const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -26,7 +28,13 @@ vi.mock("node:fs", async (importOriginal) => {
     const cap = reads.next.shift() ?? reads.cap;
     return cap === 0 ? 0 : fs.readSync(fd, buffer, offset, Math.min(length, cap), position);
   };
-  return { ...fs, readSync, default: { ...fs, readSync } };
+  const writeSync = (fd: number, buffer: NodeJS.ArrayBufferView, offset?: number) => {
+    const run = meanwhile.run;
+    meanwhile.run = null;
+    run?.();
+    return fs.writeSync(fd, buffer, offset);
+  };
+  return { ...fs, readSync, writeSync, default: { ...fs, readSync, writeSync } };
 });
 
 let base: string;
@@ -425,6 +433,22 @@ describe("write", () => {
         error: { type: "conflict" },
       });
     }
+    expect(readdirSync(folder).sort()).toEqual(["a.txt", "link-in", "sub"]);
+  });
+
+  it("does not land over a change made while its temp file was written", async () => {
+    const key = `${folder}/a.txt`;
+    const seen = await revision(key);
+    // A chat bound to a folder nested in this one has its own helper, and an editor can save too.
+    meanwhile.run = () => writeFileSync(key, "theirs\n");
+    try {
+      expect(await run("write", { key, data: b64("ours\n"), expected_revision: seen })).toMatchObject({
+        error: { type: "conflict" },
+      });
+    } finally {
+      meanwhile.run = null;
+    }
+    expect(readFileSync(key, "utf8")).toBe("theirs\n");
     expect(readdirSync(folder).sort()).toEqual(["a.txt", "link-in", "sub"]);
   });
 

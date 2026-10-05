@@ -409,7 +409,7 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
 
 
 async def test_two_writes_on_one_revision_land_once_on_the_app(built_client, laptop_rig, link_url, tmp_path, journal_dir):
-    """Its file helper makes one change at a time, so the second write finds the file at another revision."""
+    """One chat's file helper makes one change at a time, so the second write finds the file at another revision."""
     folder = prepare(tmp_path)
     key = f"{folder}/a.txt"
     app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)

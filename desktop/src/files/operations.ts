@@ -1,8 +1,11 @@
 // The file operations, as surogates/devices/workspace.py defines them and the
 // cloud's LocalWorkspaceIO does them, run by the file helper inside the folder's
-// sandbox. Each is synchronous fs work, so two changes to one path never
-// interleave, and a write that expects a revision checks it in the same turn;
-// only ripgrep waits on a process.
+// sandbox. Each is synchronous fs work, so one helper's changes to a path never
+// interleave; only ripgrep waits on a process. One helper holds a folder at a
+// time, but a chat bound to a folder nested inside another chat's is a second
+// writer there, as an editor is. So a write that expects a revision checks it
+// before it makes anything, and again just before its rename, which leaves
+// another writer only microseconds.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -314,7 +317,10 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
   // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
   const expected = args.expected_revision;
-  if (expected !== undefined && expected !== null && revisionAt(key) !== expected) throw conflict(key);
+  const check = () => {
+    if (expected !== undefined && expected !== null && revisionAt(key) !== expected) throw conflict(key);
+  };
+  check();
   const parent = dirname(key);
   makeDirs(parent);
   // The rename replaces the name and never opens the file, so a file this user
@@ -348,6 +354,8 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
     } finally {
       io(key, () => closeSync(fd));
     }
+    // Again, now that the temp file is whole: another writer may have changed the file while it was written.
+    check();
     io(key, () => renameSync(temporary, key));
   } catch (error) {
     try {
