@@ -29,7 +29,9 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
     void link.stop();
   };
   // Opening the journal already answered what a crash cut off "interrupted".
-  const runner = new OperationRunner(options.journal, options.executor, (frame) => link.send(frame), fail);
+  const runner = new OperationRunner(
+    options.journal, options.executor, (frame, written) => link.send(frame, written), fail,
+  );
   const link: DeviceLink = new DeviceLink({
     url: options.url,
     token: options.token,
@@ -50,6 +52,8 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
       onOperation: (operation) => runner.operation(operation),
       onCancel: (id) => runner.cancel(id),
       onAck: (id) => runner.acknowledged(id),
+      onChunkAck: (id, seq) => runner.chunkAcked(id, seq),
+      onUnwanted: (id) => runner.unwanted(id),
       onStatus: (status) => {
         if (SUSPENDING.includes(status)) {
           // What runs is recorded first; then what no operation holds ends too.

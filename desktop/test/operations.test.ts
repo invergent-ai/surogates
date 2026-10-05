@@ -1,16 +1,28 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
-  symlinkSync, writeFileSync,
+  chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
+  statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, TOO_LARGE } from "../src/files/answers.js";
+import {
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, READ_TOO_LARGE, TOO_LARGE,
+} from "../src/files/answers.js";
 import { type Context, perform } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
+
+// The file helper's reads come back at most this long: some filesystems answer less than asked.
+const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY }));
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  const readSync = (
+    fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: ReadPosition | null,
+  ) => fs.readSync(fd, buffer, offset, Math.min(length, reads.cap), position);
+  return { ...fs, readSync, default: { ...fs, readSync } };
+});
 
 let base: string;
 let folder: string;
@@ -83,13 +95,35 @@ describe("read", () => {
     expect(await run("read", { key: `${folder}/a.txt`, max_bytes: 0 })).toEqual({ ok: "" });
   });
 
-  it("fails a file over 1 MiB, unless only its head is asked for", async () => {
-    writeFileSync(join(folder, "big.bin"), Buffer.alloc(MAX_PAYLOAD_BYTES + 10, 120));
-    expect(await run("read", { key: `${folder}/big.bin`, max_bytes: null })).toEqual({
-      error: { type: "os", code: "EFBIG", message: TOO_LARGE },
+  it("answers a file of up to 50 MiB whole, and fails a larger one unless only its head is asked for", async () => {
+    const most = Buffer.alloc(MAX_READ_BYTES, 120);
+    most.write("the end", MAX_READ_BYTES - 7);
+    writeFileSync(join(folder, "most.bin"), most);
+    const whole = await run("read", { key: `${folder}/most.bin`, max_bytes: null });
+    expect(Buffer.from((whole as { ok: string }).ok, "base64").equals(most)).toBe(true);
+    writeFileSync(join(folder, "huge.bin"), Buffer.alloc(MAX_READ_BYTES + 1, 120));
+    expect(await run("read", { key: `${folder}/huge.bin`, max_bytes: null })).toEqual({
+      error: { type: "os", code: "EFBIG", message: READ_TOO_LARGE },
     });
-    const head = await run("read", { key: `${folder}/big.bin`, max_bytes: 8192 });
+    const head = await run("read", { key: `${folder}/huge.bin`, max_bytes: 8192 });
     expect(Buffer.from((head as { ok: string }).ok, "base64").length).toBe(8192);
+  });
+
+  it("keeps only the bytes each short read returned", async () => {
+    // Every read of a 1 MiB piece comes back 64 KiB; a copy that size is not from Buffer's pool.
+    const size = 3 * 64 * 1024 + 5000;
+    writeFileSync(join(folder, "short.bin"), Buffer.alloc(size, 122));
+    reads.cap = 64 * 1024;
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const answer = await run("read", { key: `${folder}/short.bin`, max_bytes: null });
+      expect(Buffer.from((answer as { ok: string }).ok, "base64").equals(Buffer.alloc(size, 122))).toBe(true);
+      const [pieces] = concat.mock.calls[0] as [Buffer[]];
+      expect(pieces.map((piece) => piece.buffer.byteLength)).toEqual([65536, 65536, 65536, 5000]);
+    } finally {
+      reads.cap = Number.POSITIVE_INFINITY;
+      concat.mockRestore();
+    }
   });
 
   it("answers a file of exactly 1 MiB", async () => {

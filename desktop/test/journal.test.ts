@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -229,6 +230,64 @@ describe("what the journal reports", () => {
     now += RETAIN_MS + 1;
     expect(journal.prune()).toBe(1);
     expect(journal.receive(operation("a"))).toEqual({ action: "ignore" });
+    journal.close();
+  });
+});
+
+describe("a transfer's chunks", () => {
+  const chunks = [Buffer.from("first"), Buffer.from("second")];
+  const outcome = { ok: { transfer: { size: 11, sha256: "f".repeat(64) } } };
+
+  it("are kept with the outcome across a restart, and dropped once the server acknowledged it", () => {
+    const before = new OperationJournal(path);
+    before.receive(operation("a"));
+    before.start("a");
+    expect(before.finish("a", outcome, chunks)).toBe(true);
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome }]);
+    expect([after.chunk("a", 0), after.chunk("a", 1), after.chunk("a", 2)]).toEqual([...chunks, null]);
+    after.acknowledge("a");
+    expect(after.chunk("a", 0)).toBeNull();
+    // The record stays: a repeat is answered, never run.
+    expect(after.receive(operation("a"))).toEqual({ action: "reply", outcome });
+    after.close();
+  });
+
+  it("are not kept when one of them cannot be written, and the operation can still finish", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    journal.start("a");
+    expect(() => journal.finish("a", outcome, [Buffer.from("x"), undefined as unknown as Buffer])).toThrow(
+      "cannot be bound",
+    );
+    expect(journal.unsent()).toEqual([]);
+    expect(journal.chunk("a", 0)).toBeNull();
+    expect(journal.finish("a", { ok: 1 })).toBe(true);
+    journal.close();
+  });
+
+  it("that fill the disk fail with SQLite's own error, and the operation can still finish", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    journal.start("a");
+    // A full disk: SQLite fails the write and rolls the transaction back by itself.
+    const db = (journal as unknown as { db: DatabaseSync }).db;
+    const { page_count: pages } = db.prepare("PRAGMA page_count").get() as { page_count: number };
+    db.exec(`PRAGMA max_page_count = ${pages + 2}`);
+    expect(() => journal.finish("a", outcome, [Buffer.alloc(1024 * 1024)])).toThrow("database or disk is full");
+    expect(journal.chunk("a", 0)).toBeNull();
+    expect(journal.finish("a", { ok: 1 })).toBe(true);
+    journal.close();
+  });
+
+  it("are not kept for an outcome the journal does not record", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    journal.start("a");
+    journal.cancel("a");
+    expect(journal.finish("a", outcome, chunks)).toBe(false);
+    expect(journal.chunk("a", 0)).toBeNull();
     journal.close();
   });
 });

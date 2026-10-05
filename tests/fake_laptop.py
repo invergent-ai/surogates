@@ -11,18 +11,23 @@ from __future__ import annotations
 import asyncio
 import base64
 import errno
+import hashlib
 import json
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from surogates.devices.link import TRANSFER_WINDOW
 from surogates.devices.workspace import (
+    CHUNK_BYTES,
     MAX_MESSAGE_CHARS,
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
+    MAX_READ_BYTES,
     OUTPUT_CAP_CHARS,
-    TOO_LARGE,
+    READ_TOO_LARGE,
+    transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RipgrepError, WorkspaceIO
@@ -48,7 +53,8 @@ async def perform(folder: WorkspaceIO, kind: str, args: dict[str, Any]) -> dict[
         outcome = {"error": {"type": "value", "message": str(exc)}}
     except Exception as exc:
         outcome = {"error": {"type": "other", "message": f"{type(exc).__name__}: {exc}"}}
-    if len(json.dumps(outcome)) > MAX_MESSAGE_CHARS:
+    # A read is bounded by MAX_READ_BYTES instead: its data over MAX_PAYLOAD_BYTES goes as a transfer.
+    if kind != "read" and len(json.dumps(outcome)) > MAX_MESSAGE_CHARS:
         outcome = {"error": {"type": "too_large", "message": f"The result of {kind} is too large"}}
     return outcome
 
@@ -94,10 +100,10 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
         return None if st is None else {"is_dir": st.is_dir, "size": st.size, "mtime": st.mtime}
     if kind == "read":
         wanted = a["max_bytes"]
-        limit = MAX_PAYLOAD_BYTES + 1 if wanted is None else min(wanted, MAX_PAYLOAD_BYTES + 1)
+        limit = MAX_READ_BYTES + 1 if wanted is None else min(wanted, MAX_READ_BYTES + 1)
         data = await folder.read(a["key"], limit)
-        if len(data) > MAX_PAYLOAD_BYTES:
-            raise OSError(errno.EFBIG, TOO_LARGE)
+        if len(data) > MAX_READ_BYTES:
+            raise OSError(errno.EFBIG, READ_TOO_LARGE)
         return base64.b64encode(data).decode("ascii")
     if kind == "write":
         await folder.write(a["key"], base64.b64decode(a["data"]))
@@ -163,7 +169,9 @@ class InProcessRunner:
         self.kinds.append(kind)
         outcome = await perform(self.folder, kind, json.loads(json.dumps(args)))
         wire = json.dumps(outcome)
-        assert len(wire) <= MAX_MESSAGE_CHARS, f"{kind} outcome breaks the size contract"
+        # A read's data over MAX_PAYLOAD_BYTES crosses a link as a transfer, outside the outcome.
+        if kind != "read":
+            assert len(wire) <= MAX_MESSAGE_CHARS, f"{kind} outcome breaks the size contract"
         return json.loads(wire)
 
 
@@ -173,7 +181,10 @@ class FakeLaptop:
     Keeps each operation's outcome by id, like the app's journal, so an
     operation delivered again is answered without being run again.  It reports
     the operations it holds unfinished in its hello, and never runs one it was
-    told to cancel.
+    told to cancel.  A read's data over MAX_PAYLOAD_BYTES goes as a transfer,
+    one at a time, TRANSFER_WINDOW chunks ahead of the acknowledgements, and
+    from chunk 0 again whenever the operation is delivered again, until the
+    server acknowledges it or does not want it.
     """
 
     def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
@@ -184,6 +195,9 @@ class FakeLaptop:
         self.ran: list[str] = []
         self.received: list[str] = []
         self.outcomes: dict[str, dict[str, Any]] = {}
+        # The data of each read answered with a transfer, and every chunk sent, as (id, seq).
+        self.payloads: dict[str, bytes] = {}
+        self.chunks_sent: list[tuple[str, int]] = []
         # What the user confirmed with prepareFolder: nonce -> folder.
         self.prepared: dict[str, str] = {}
         # Root session id -> the folder the app bound it to.
@@ -198,21 +212,30 @@ class FakeLaptop:
         self.connected = False
         self._ws: ClientConnection | None = None
         self._tasks: list[asyncio.Task] = []
+        self._sending = asyncio.Lock()
+        # On this connection: chunks acknowledged per transfer, and transfers that ended.
+        self._chunk_acks: dict[str, int] = {}
+        self._ended: set[str] = set()
+        self._heard = asyncio.Event()
 
     async def connect(self) -> None:
         # The link's frames may be up to 2 MiB: one operation's 1 MiB of file
         # data, base64-encoded, plus its envelope.
-        self._ws = await connect(
+        ws = await connect(
             self.url,
             additional_headers={"Authorization": f"Bearer {self.token}"},
             max_size=4 * 1024 * 1024,
         )
+        self._ws = ws
         unfinished = [i for i in self.received if i not in self.outcomes and i not in self.cancelled]
-        await self._ws.send(json.dumps({"type": "hello", "protocols": [1], "open": unfinished}))
-        welcome = json.loads(await self._ws.recv())
+        await ws.send(json.dumps({"type": "hello", "protocols": [1], "open": unfinished}))
+        welcome = json.loads(await ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True
-        self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._ping())]
+        self._chunk_acks, self._ended = {}, set()
+        # Each task works on its own connection's socket. Added to, not replaced: an earlier
+        # connection's tasks still end at disconnect().
+        self._tasks += [asyncio.create_task(self._read(ws)), asyncio.create_task(self._ping(ws))]
 
     def prepare(self, nonce: str, folder: str) -> None:
         """Stand in for the user confirming *folder* for a new chat."""
@@ -222,30 +245,42 @@ class FakeLaptop:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = []
         if self._ws is not None:
             await self._ws.close()
         self.connected = False
 
-    async def _ping(self) -> None:
+    async def _ping(self, ws: ClientConnection) -> None:
         while True:
             await asyncio.sleep(self.ping_interval_s)
-            await self._ws.send(json.dumps({"type": "ping"}))
+            await ws.send(json.dumps({"type": "ping"}))
 
-    async def _read(self) -> None:
+    async def _read(self, ws: ClientConnection) -> None:
         try:
-            async for raw in self._ws:
+            async for raw in ws:
+                if self._ws is not ws:
+                    # A newer connection replaced this one: what it says is not for the laptop now.
+                    break
                 frame = json.loads(raw)
                 self.frames.append(frame["type"])
                 if frame["type"] == "op":
-                    await self._handle(frame)
+                    await self._handle(frame, ws)
                 elif frame["type"] == "op_ack":
                     self.acked.add(frame["id"])
+                    self._end(frame["id"])
+                elif frame["type"] == "unwanted":
+                    self._end(frame["id"])
+                elif frame["type"] == "chunk_ack":
+                    self._chunk_acks[frame["id"]] = frame["seq"] + 1
                 elif frame["type"] == "cancel":
                     self.cancelled.add(frame["id"])
+                self._heard.set()
         except ConnectionClosed:
             pass
         finally:
-            self.connected = False
+            if self._ws is ws:
+                self.connected = False
+            self._heard.set()
 
     def _bind(self, frame: dict[str, Any]) -> dict[str, Any]:
         args = frame["args"]
@@ -256,7 +291,7 @@ class FakeLaptop:
         self.bindings[frame["session_id"]] = folder
         return {"ok": None}
 
-    async def _handle(self, frame: dict[str, Any]) -> None:
+    async def _handle(self, frame: dict[str, Any], ws: ClientConnection) -> None:
         operation_id = frame["id"]
         self.received.append(operation_id)
         if operation_id in self.cancelled or (self.hold and operation_id not in self.outcomes):
@@ -264,16 +299,71 @@ class FakeLaptop:
             return
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
-            self.outcomes[operation_id] = (
+            outcome = (
                 self._bind(frame) if frame["kind"] == "bind"
                 else await perform(self.folder, frame["kind"], frame["args"])
             )
+            self.outcomes[operation_id] = self._carried(operation_id, frame["kind"], outcome)
         if not self.reply:
-            await self._ws.close()
+            await ws.close()
             return
-        await self._ws.send(json.dumps({
+        result = {
             "type": "op_result",
             "id": operation_id,
             "digest": frame["digest"],
             "outcome": self.outcomes[operation_id],
-        }))
+        }
+        if operation_id in self.payloads:
+            # From a task of its own: this reader goes on to read the acknowledgements.
+            self._tasks.append(asyncio.create_task(self._transfer(result, self.payloads[operation_id], ws)))
+        elif transfer_of(result["outcome"]) is None:
+            await ws.send(json.dumps(result))
+        # A transfer whose data is gone was acknowledged: the server has its result.
+
+    def _end(self, operation_id: str) -> None:
+        """The server recorded this result, or does not want it: its data is not sent again."""
+        self._ended.add(operation_id)
+        self.payloads.pop(operation_id, None)
+
+    def _carried(self, operation_id: str, kind: str, outcome: dict[str, Any]) -> dict[str, Any]:
+        """A read's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
+        encoded = outcome.get("ok") if kind == "read" else None
+        if not isinstance(encoded, str):
+            return outcome
+        data = base64.b64decode(encoded)
+        if len(data) <= MAX_PAYLOAD_BYTES:
+            return outcome
+        self.payloads[operation_id] = data
+        return {"ok": {"transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}}
+
+    async def _transfer(self, result: dict[str, Any], data: bytes, ws: ClientConnection) -> None:
+        operation_id = result["id"]
+        async with self._sending:
+            if not self._going(operation_id, ws):
+                return
+            self._chunk_acks[operation_id] = 0
+            try:
+                await ws.send(json.dumps(result))
+                for seq in range(-(-len(data) // CHUNK_BYTES)):
+                    while self._going(operation_id, ws) and seq - self._chunk_acks[operation_id] >= TRANSFER_WINDOW:
+                        await self._wait_to_hear()
+                    if not self._going(operation_id, ws):
+                        return
+                    piece = data[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES]
+                    await ws.send(json.dumps({
+                        "type": "chunk", "id": operation_id, "seq": seq,
+                        "data": base64.b64encode(piece).decode("ascii"),
+                    }))
+                    self.chunks_sent.append((operation_id, seq))
+                while self._going(operation_id, ws):
+                    await self._wait_to_hear()
+            except ConnectionClosed:
+                pass
+
+    def _going(self, operation_id: str, ws: ClientConnection) -> bool:
+        """Whether a transfer still goes: its connection is the laptop's and up, and the server has not ended it."""
+        return self._ws is ws and self.connected and operation_id not in self._ended
+
+    async def _wait_to_hear(self) -> None:
+        self._heard.clear()
+        await self._heard.wait()

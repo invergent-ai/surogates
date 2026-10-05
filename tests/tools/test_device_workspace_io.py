@@ -6,13 +6,16 @@ import errno
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
 
 from surogates.devices.workspace import (
     MAX_PAYLOAD_BYTES,
+    MAX_READ_BYTES,
     OUTPUT_CAP_CHARS,
+    READ_TOO_LARGE,
     DeviceOperationError,
     DeviceWorkspaceIO,
 )
@@ -199,13 +202,36 @@ async def test_a_write_over_the_cap_fails_before_it_is_sent(wio, runner, root):
     assert not (root / "big.bin").exists()
 
 
-@pytest.mark.parametrize("max_bytes", [None, 3 * MAX_PAYLOAD_BYTES])
+async def test_a_read_of_more_than_one_frame_comes_back_whole(wio, root):
+    data = os.urandom(2 * MAX_PAYLOAD_BYTES + 3)
+    (root / "big.bin").write_bytes(data)
+    assert await wio.read(str(root / "big.bin")) == data
+
+
+@pytest.mark.parametrize("max_bytes", [None, 3 * MAX_READ_BYTES])
 async def test_a_read_over_the_cap_fails_but_its_head_does_not(wio, root, max_bytes):
-    (root / "big.bin").write_bytes(b"y" * (MAX_PAYLOAD_BYTES + 1))
+    (root / "huge.bin").write_bytes(b"y" * (MAX_READ_BYTES + 1))
     with pytest.raises(OSError) as raised:
-        await wio.read(str(root / "big.bin"), max_bytes=max_bytes)
+        await wio.read(str(root / "huge.bin"), max_bytes=max_bytes)
     assert raised.value.errno == errno.EFBIG
-    assert await wio.read(str(root / "big.bin"), max_bytes=8192) == b"y" * 8192
+    assert str(raised.value) == f"[Errno 27] {READ_TOO_LARGE}"
+    assert await wio.read(str(root / "huge.bin"), max_bytes=8192) == b"y" * 8192
+
+
+class Answering:
+    """A runner that answers every operation with one outcome."""
+
+    def __init__(self, outcome: dict) -> None:
+        self.outcome = outcome
+
+    async def run(self, kind: str, args: dict) -> dict:
+        return self.outcome
+
+
+async def test_a_read_answered_with_its_bytes_takes_them_as_they_are(root):
+    # The journal's runner hands over a transfer's data this way.
+    wio = DeviceWorkspaceIO(Answering({"ok": b"\x00raw"}), root=str(root))
+    assert await wio.read(str(root / "x")) == b"\x00raw"
 
 
 async def test_a_local_file_is_a_private_copy_removed_after_use(wio, root):
@@ -216,3 +242,23 @@ async def test_a_local_file_is_a_private_copy_removed_after_use(wio, root):
         assert local.read_bytes() == b"%PDF-1.7"
         copy = local
     assert not copy.exists()
+
+
+async def test_a_local_file_is_written_off_the_loop_and_its_bytes_are_not_held_through_the_parse(
+    wio, root, monkeypatch,
+):
+    (root / "doc.pdf").write_bytes(b"%PDF-1.7")
+    writers = []
+    write_bytes = Path.write_bytes
+
+    def recorded(path, data):
+        writers.append(threading.current_thread())
+        return write_bytes(path, data)
+
+    monkeypatch.setattr(Path, "write_bytes", recorded)
+    copying = wio.local_file(str(root / "doc.pdf"))
+    async with copying as local:
+        assert local.read_bytes() == b"%PDF-1.7"
+        # Up to 50 MiB: written in a thread, and held only in the file while the caller parses it.
+        assert writers and threading.current_thread() not in writers
+        assert "data" not in copying.gen.ag_frame.f_locals

@@ -1325,6 +1325,46 @@ class DeviceOperation(Base):
     completed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class DeviceTransfer(Base):
+    """A read's result too large for one link frame, which the device sends in chunks.
+
+    The operation's outcome names it by size and SHA-256.  It completes its
+    operation with its last chunk, in one transaction, so a transfer whose
+    bytes are all here is one its operation was answered with.  Payloads go
+    on a schedule (``surogates.devices.operations.reap_transfers``); the
+    operation's row stays.
+    """
+
+    __tablename__ = "device_transfers"
+
+    operation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("device_operations.id", ondelete="CASCADE"), primary_key=True,
+    )
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    # Bytes stored so far, in order: the next chunk starts here.
+    received: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
+    # The link connection sending it: another connection's chunks never count.
+    holder: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    # When the tool result that read it was committed.
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class DeviceTransferChunk(Base):
+    __tablename__ = "device_transfer_chunks"
+
+    operation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("device_transfers.operation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------

@@ -7,6 +7,10 @@ export const WELCOME_TIMEOUT_MS = 10_000;
 // The largest frame either side sends: one operation's 1 MiB of file data,
 // base64-encoded, plus its envelope.
 export const MAX_FRAME_CHARS = 2 * 1024 * 1024;
+// A transfer's chunks carry this much of its data each, the last one the rest.
+export const CHUNK_BYTES = 1024 * 1024;
+// The most chunks sent ahead of the server's acknowledgements.
+export const TRANSFER_WINDOW = 4;
 // The longest heartbeat a welcome may ask for (the shortest is 1 s): a value
 // outside that makes the timers never fire or fire every millisecond.
 export const MAX_HEARTBEAT_S = 300;
@@ -22,6 +26,13 @@ export const Close = {
 export type Outcome =
   | { ok: unknown }
   | { error: { type: string; message: string; [detail: string]: unknown } };
+
+// What a result names in place of a read's data too large for one frame: the data
+// follows in chunks. sha256 is the data's, in lowercase hex.
+export interface Transfer {
+  size: number;
+  sha256: string;
+}
 
 export interface Operation {
   id: string;
@@ -49,6 +60,9 @@ export type ServerFrame =
   | { type: "op"; operation: Operation }
   | { type: "op_ack"; id: string }
   | { type: "cancel"; id: string }
+  | { type: "chunk_ack"; id: string; seq: number }
+  // The server closed the operation: stop sending its transfer; the result counts as acknowledged.
+  | { type: "unwanted"; id: string }
   | { type: "error"; code: string; supported: number[] }
   // A frame type this app does not know: ignored, so a newer server's
   // additions within protocol 1 do not end the link.
@@ -127,6 +141,15 @@ export function parseServerFrame(raw: string): ServerFrame {
       return { type: "op_ack", id: text(frame, "id") };
     case "cancel":
       return { type: "cancel", id: text(frame, "id") };
+    case "chunk_ack": {
+      const seq = frame.seq;
+      if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {
+        throw new ProtocolError("chunk_ack frame needs a whole seq");
+      }
+      return { type: "chunk_ack", id: text(frame, "id"), seq };
+    }
+    case "unwanted":
+      return { type: "unwanted", id: text(frame, "id") };
     case "error": {
       const supported = Array.isArray(frame.supported)
         ? frame.supported.filter((v): v is number => typeof v === "number")
@@ -150,4 +173,14 @@ export function opResult(
   // JSON.stringify drops an undefined ok, a frame the server refuses: send null.
   const sent = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
   return { type: "op_result", id: operation.id, digest: operation.digest, outcome: sent };
+}
+
+/** The transfer a result names in place of a read's data, or null. */
+export function transferOf(outcome: Outcome): Transfer | null {
+  if (!("ok" in outcome) || !isObject(outcome.ok) || !isObject(outcome.ok.transfer)) return null;
+  return outcome.ok.transfer as unknown as Transfer;
+}
+
+export function chunkFrame(id: string, seq: number, data: Buffer): Record<string, unknown> {
+  return { type: "chunk", id, seq, data: data.toString("base64") };
 }

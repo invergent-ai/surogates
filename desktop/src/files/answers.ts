@@ -5,10 +5,12 @@
 import { getSystemErrorMessage } from "node:util";
 
 export const MAX_PAYLOAD_BYTES = 1024 * 1024;
+export const MAX_READ_BYTES = 50 * 1024 * 1024;
 export const MAX_MESSAGE_CHARS = 1536 * 1024;
 export const OUTPUT_CAP_CHARS = 256 * 1024;
 export const MAX_NAMES = 10_000;
 export const TOO_LARGE = "File too large for one operation on a local folder (over 1 MiB)";
+export const READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)";
 
 export type Refusal = { type: string; message: string; [detail: string]: unknown };
 

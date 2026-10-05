@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -9,12 +10,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.runtime.turn_slots import current_turn, turn_waiting
 from surogates.sandbox.base import SandboxUnavailableError
+from surogates.session.store import LeaseNotHeldError
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.workspace_io import LocalWorkspaceIO, workspace_io_from
 from tests.test_turn_slots import held_turn
@@ -23,6 +26,12 @@ pytestmark = pytest.mark.asyncio
 
 FOLDER = "/home/flavius/notes"
 _ids = iter(range(1, 1_000_000))
+
+
+@pytest.fixture(autouse=True)
+def nothing_to_consume(monkeypatch):
+    """The consumed mark after each committed result, over these tests' MagicMock session factories."""
+    monkeypatch.setattr(DeviceOperations, "consume", AsyncMock(return_value=0))
 
 
 def registry_with(*names: str, output: str = '{"ok": true}', max_result_size: int = 50_000) -> ToolRegistry:
@@ -157,6 +166,57 @@ async def test_an_oversized_result_spills_onto_the_computer():
     assert isinstance(write.call_args.kwargs["workspace_io"], DeviceWorkspaceIO)
     # The spill reuses the runner of the call that produced the result.
     assert write.call_args.kwargs["workspace_io"] is registry.get("search_files").handler.call_args.kwargs["workspace_io"]
+
+
+async def test_a_committed_result_marks_what_the_call_read_consumed_after_the_commit(monkeypatch):
+    done: list[str] = []
+
+    async def consumed(self) -> None:
+        done.append("consumed")
+
+    def emit(session_id, kind, data, **fence) -> int:
+        done.append(f"emit {kind.value}")
+        return next(_ids)
+
+    monkeypatch.setattr(DeviceCall, "consumed", consumed)
+    store = make_store()
+    store.emit_event = AsyncMock(side_effect=emit)
+    await execute_single_tool(
+        {"id": "call_1", "function": {"name": "read_file", "arguments": json.dumps({"path": "a.pdf"})}},
+        session=device_session(),
+        lease=SimpleNamespace(lease_token=uuid4()),
+        store=store,
+        tools=registry_with("read_file"),
+        tenant=MagicMock(asset_root="/tmp/test"),
+        session_factory=MagicMock(),
+        redis=MagicMock(),
+    )
+    assert done[-2:] == ["emit tool.result", "consumed"]
+
+
+async def test_a_result_that_is_not_committed_leaves_what_the_call_read_for_the_next_worker(monkeypatch):
+    consumed = AsyncMock()
+    monkeypatch.setattr(DeviceCall, "consumed", consumed)
+
+    def emit(session_id, kind, data, **fence) -> int:
+        if kind.value == "tool.result":
+            raise LeaseNotHeldError("another worker runs this session now")
+        return next(_ids)
+
+    store = make_store()
+    store.emit_event = AsyncMock(side_effect=emit)
+    with pytest.raises(asyncio.CancelledError):
+        await execute_single_tool(
+            {"id": "call_1", "function": {"name": "read_file", "arguments": json.dumps({"path": "a.pdf"})}},
+            session=device_session(),
+            lease=SimpleNamespace(lease_token=uuid4()),
+            store=store,
+            tools=registry_with("read_file"),
+            tenant=MagicMock(asset_root="/tmp/test"),
+            session_factory=MagicMock(),
+            redis=MagicMock(),
+        )
+    consumed.assert_not_called()
 
 
 async def test_a_local_folder_session_never_gets_a_cloud_sandbox_spec():

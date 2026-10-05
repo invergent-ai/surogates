@@ -10,7 +10,8 @@ enforces its rules; the worker never touches the folder.
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
   stat            key                                           {is_dir, size, mtime} or null
-  read            key, max_bytes (int or null)                  data (base64)
+  read            key, max_bytes (int or null)                  data (base64), or
+                                                                {"transfer": {size, sha256}}
   write           key, data (base64)                            null
   delete          key                                           null
   list_dir        key                                           [name]
@@ -54,8 +55,13 @@ loosely.
 Sizes.  Every args object and every outcome, serialized, fits in
 MAX_MESSAGE_CHARS, so it fits in one link frame:
 
-  - a read or write carries at most MAX_PAYLOAD_BYTES of file data; a read
-    that would return more fails with EFBIG (and TOO_LARGE) instead;
+  - a write carries at most MAX_PAYLOAD_BYTES of file data, and is refused
+    with EFBIG (and TOO_LARGE) past it;
+  - a read returns at most MAX_READ_BYTES, and fails with EFBIG (and
+    READ_TOO_LARGE) when it would return more.  Data of up to
+    MAX_PAYLOAD_BYTES is the ok value itself.  More is a transfer: the ok
+    value names it by its size and the SHA-256 of the data, in lowercase hex,
+    and the data follows in chunks (surogates.devices.link);
   - command output, and every string in a process outcome, keeps a head and a
     tail around a "chars omitted by the computer" marker, together at most
     OUTPUT_CAP_CHARS measured JSON-encoded (NUL and non-ASCII characters
@@ -75,6 +81,7 @@ String.prototype.toWellFormed() repairs a string.)
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import errno
@@ -88,10 +95,14 @@ from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io.base import FileStat, RipgrepError, RipgrepMode, RunResult
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
+MAX_READ_BYTES = 50 * 1024 * 1024
+# A transfer's chunks carry this much of its data each, the last one the rest.
+CHUNK_BYTES = MAX_PAYLOAD_BYTES
 MAX_MESSAGE_CHARS = 1536 * 1024
 OUTPUT_CAP_CHARS = 256 * 1024
 MAX_NAMES = 10_000
 TOO_LARGE = "File too large for one operation on a local folder (over 1 MiB)"
+READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 
 
 class DeviceOperationError(RuntimeError):
@@ -110,6 +121,12 @@ def is_well_formed(value: Any) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def transfer_of(outcome: dict[str, Any]) -> Any:
+    """The transfer a read's outcome names in place of its data, or None."""
+    ok = outcome.get("ok")
+    return ok.get("transfer") if isinstance(ok, dict) else None
 
 
 def _raise(error: dict[str, Any]) -> None:
@@ -161,6 +178,9 @@ class DeviceWorkspaceIO:
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         data = await self._call("read", key=key, max_bytes=max_bytes)
+        if isinstance(data, bytes):
+            # A transfer's data, which the journal's runner fetched and checked.
+            return data
         try:
             # Strict: a lenient decode drops what it does not know, such as the
             # "-" and "_" of base64url, and a patch would write the result back.
@@ -184,7 +204,10 @@ class DeviceWorkspaceIO:
         data = await self.read(key)
         with tempfile.TemporaryDirectory(prefix="surogates-device-") as folder:
             path = Path(folder) / f"document{Path(key).suffix}"
-            path.write_bytes(data)
+            # Up to MAX_READ_BYTES: written off the loop, and not held again in
+            # memory while the caller parses the file.
+            await asyncio.to_thread(path.write_bytes, data)
+            del data
             yield path
 
     async def ripgrep(

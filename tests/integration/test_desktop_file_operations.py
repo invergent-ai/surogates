@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from surogates.devices.operations import OperationRequest
-from surogates.devices.workspace import MAX_PAYLOAD_BYTES, TOO_LARGE
+from surogates.devices.workspace import MAX_PAYLOAD_BYTES, MAX_READ_BYTES, TOO_LARGE
 from surogates.tools.workspace_io.local import LocalWorkspaceIO
 from tests.fake_laptop import perform
 
@@ -55,6 +56,7 @@ def prepare(base: Path) -> Path:
     (folder / "sub" / "deep" / "c.md").write_text("gamma\n")
     (folder / "My Files ü.txt").write_text("unicode\n")
     (folder / "big.bin").write_bytes(b"x" * (MAX_PAYLOAD_BYTES + 10))
+    (folder / "huge.bin").write_bytes(b"x" * (MAX_READ_BYTES + 1))
     (folder / "run.sh").write_text("#!/bin/sh\n")
     (folder / "run.sh").chmod(0o755)
     (folder / "special" / "locked.txt").write_text("secret")
@@ -80,9 +82,14 @@ def fill(value, folder: Path):
 
 
 def comparable(kind: str, args: dict, outcome: dict) -> dict:
-    """What must match: listings and searches in any order, rg's timings aside."""
+    """What must match: listings and searches in any order, rg's timings aside, and a
+    read's data too large for one frame as the transfer the app names it by."""
     if "error" in outcome:
         return outcome
+    if kind == "read" and isinstance(outcome["ok"], str):
+        data = base64.b64decode(outcome["ok"])
+        if len(data) > MAX_PAYLOAD_BYTES:
+            return {"ok": {"transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}}
     if kind == "list_dir":
         return {"ok": sorted(outcome["ok"])}
     if kind == "ripgrep":
@@ -139,6 +146,8 @@ SAME = [
     ("read", {"key": "{f}/a.txt", "max_bytes": 0}),
     ("read", {"key": "{f}/big.bin", "max_bytes": None}),
     ("read", {"key": "{f}/big.bin", "max_bytes": 8192}),
+    ("read", {"key": "{f}/huge.bin", "max_bytes": None}),
+    ("read", {"key": "{f}/huge.bin", "max_bytes": 8192}),
     ("read", {"key": "{f}/sub", "max_bytes": None}),
     ("read", {"key": "{f}/missing", "max_bytes": None}),
     ("read", {"key": "{f}/special/locked.txt", "max_bytes": None}),
@@ -326,7 +335,10 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
         assert not (folder / "a.txt").exists()
         # srt left nothing in the user's folder.
         assert sorted(os.listdir(folder)) == sorted(
-            [".git", "My Files ü.txt", "big.bin", "hard.txt", "link-in", "link-out", "new", "run.sh", "special", "sub"]
+            [
+                ".git", "My Files ü.txt", "big.bin", "hard.txt", "huge.bin", "link-in", "link-out", "new", "run.sh",
+                "special", "sub",
+            ]
         )
     finally:
         await app.close()

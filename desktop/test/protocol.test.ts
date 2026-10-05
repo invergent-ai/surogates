@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { reconnectDelayMs } from "../src/link/backoff.js";
-import { hello, opResult, parseServerFrame, ProtocolError } from "../src/link/protocol.js";
+import { chunkFrame, hello, opResult, parseServerFrame, ProtocolError, transferOf } from "../src/link/protocol.js";
 
 const welcome = {
   type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a", user_id: "u",
@@ -44,8 +44,15 @@ describe("server frames", () => {
     ["op_ack", { type: "op_ack", id: "x" }],
     ["cancel", { type: "cancel", id: "x" }],
     ["error", { type: "error", code: "unsupported_protocol", supported: [1] }],
+    ["unwanted", { type: "unwanted", id: "x" }],
   ])("reads a %s", (_name, frame) => {
     expect(parseServerFrame(JSON.stringify(frame)).type).toBe(frame.type);
+  });
+
+  it("reads a chunk's acknowledgement", () => {
+    expect(parseServerFrame(JSON.stringify({ type: "chunk_ack", id: "x", seq: 3 }))).toEqual({
+      type: "chunk_ack", id: "x", seq: 3,
+    });
   });
 
   it("ignores a frame type it does not know", () => {
@@ -63,6 +70,10 @@ describe("server frames", () => {
     ["an operation with a fractional ordinal", JSON.stringify({ ...op, ordinal: 1.5 })],
     ["a welcome without a heartbeat", JSON.stringify({ ...welcome, heartbeat_s: undefined })],
     ["a cancel without an id", JSON.stringify({ type: "cancel" })],
+    ["an unwanted without an id", JSON.stringify({ type: "unwanted" })],
+    ["a chunk_ack without a seq", JSON.stringify({ type: "chunk_ack", id: "x" })],
+    ["a chunk_ack with a fractional seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: 0.5 })],
+    ["a chunk_ack with a negative seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: -1 })],
   ])("refuses %s", (_name, text) => {
     expect(() => parseServerFrame(text)).toThrow(ProtocolError);
   });
@@ -91,6 +102,20 @@ describe("app frames", () => {
     expect(opResult({ id: "x", digest: "d" }, { ok: null })).toEqual({
       type: "op_result", id: "x", digest: "d", outcome: { ok: null },
     });
+  });
+});
+
+describe("a transfer", () => {
+  it("is what a result names in place of a read's data", () => {
+    const transfer = { size: 5_000_000, sha256: "f".repeat(64) };
+    expect(transferOf({ ok: { transfer } })).toEqual(transfer);
+    expect(transferOf({ ok: "ZGF0YQ==" })).toBeNull();
+    expect(transferOf({ ok: null })).toBeNull();
+    expect(transferOf({ error: { type: "os", message: "gone" } })).toBeNull();
+  });
+
+  it("sends its data in numbered chunks of standard base64", () => {
+    expect(chunkFrame("x", 2, Buffer.from([0xfb, 0xff]))).toEqual({ type: "chunk", id: "x", seq: 2, data: "+/8=" });
   });
 });
 
