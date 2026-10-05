@@ -78,8 +78,8 @@ def prepare(base: Path) -> Path:
     (pages / "long.txt").write_bytes(b"x" * 100 + b"\nshort\n")
     # 上 (U+4E0A) and 不 (U+4E0D) have units that hold 0x0A and 0x0D, and end no line.
     for name, encoding in [("u16le", "utf-16-le"), ("u16be", "utf-16-be"), ("u32le", "utf-32-le"), ("u32be", "utf-32-be")]:
-        (pages / f"{name}.txt").write_bytes("﻿上\r\n不\nlast".encode(encoding))
-    (pages / "sig.txt").write_bytes("﻿one\ntwo\n".encode())
+        (pages / f"{name}.txt").write_bytes("\ufeff上\r\n不\nlast".encode(encoding))
+    (pages / "sig.txt").write_bytes("\ufeffone\ntwo\n".encode())
     # A CR LF across the app's first two pieces of the file.
     (pages / "edge.txt").write_bytes(b"x" * (MAX_PAYLOAD_BYTES - 1) + b"\r\ny\r\n")
     return folder.resolve()

@@ -232,17 +232,17 @@ describe("read_lines", () => {
   it("finds line ends as code units of UTF-16 and UTF-32, in either byte order", async () => {
     // 上 (U+4E0A) and 不 (U+4E0D) have units that hold 0x0A and 0x0D, and end no line.
     for (const [encoding, encode] of ENCODED) {
-      writeFileSync(join(folder, "u.txt"), encode("﻿上\r\n不\nlast"));
-      expect(await page(`${folder}/u.txt`, { encoding })).toEqual(answer(encode("﻿上\r\n不\nlast"), 3));
+      writeFileSync(join(folder, "u.txt"), encode("\ufeff上\r\n不\nlast"));
+      expect(await page(`${folder}/u.txt`, { encoding })).toEqual(answer(encode("\ufeff上\r\n不\nlast"), 3));
       expect(await page(`${folder}/u.txt`, { encoding, offset: 2, limit: 1 })).toEqual(answer(encode("不\n"), 3));
     }
   });
 
   it("starts a utf-8-sig file's first line after its BOM", async () => {
-    writeFileSync(join(folder, "sig.txt"), "﻿one\ntwo\n");
+    writeFileSync(join(folder, "sig.txt"), "\ufeffone\ntwo\n");
     expect(await page(`${folder}/sig.txt`, { encoding: "utf-8-sig", limit: 1 })).toEqual(answer("one\n", 2));
-    expect(await page(`${folder}/sig.txt`, { limit: 1 })).toEqual(answer("﻿one\n", 2));
-    writeFileSync(join(folder, "bom.txt"), "﻿");
+    expect(await page(`${folder}/sig.txt`, { limit: 1 })).toEqual(answer("\ufeffone\n", 2));
+    writeFileSync(join(folder, "bom.txt"), "\ufeff");
     expect(await page(`${folder}/bom.txt`, { encoding: "utf-8-sig" })).toEqual(answer("", 0));
   });
 
