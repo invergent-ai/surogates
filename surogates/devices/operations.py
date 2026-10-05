@@ -672,6 +672,28 @@ class DeviceOperations:
                 )).scalars())
         return await self._while_database_recovers("reading the data of", fetch)
 
+    async def outgoing_chunk(self, device_id: UUID, generation: int, operation_id: UUID, seq: int) -> bytes | None:
+        """Chunk *seq* of the data a write's args name, while the write is open.
+
+        Only for the write's own device under its current credentials, as
+        ``pending`` and ``complete`` are: None once the write is closed, or for
+        a connection under rotated-out or revoked credentials.
+        """
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceTransferChunk.data)
+                .join(DeviceOperation, DeviceOperation.id == DeviceTransferChunk.operation_id)
+                .join(Device, Device.id == DeviceOperation.device_id)
+                .where(
+                    DeviceTransferChunk.operation_id == operation_id,
+                    DeviceTransferChunk.seq == seq,
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.completed_at.is_(None),
+                    Device.credential_generation == generation,
+                    Device.revoked_at.is_(None),
+                )
+            )).scalar_one_or_none()
+
     async def consume(self, calling_session_id: UUID, invocation_id: str) -> int:
         """Mark the transfers one tool call read as consumed: its result is committed."""
         async with self._sf() as db:

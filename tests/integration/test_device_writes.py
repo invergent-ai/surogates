@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import os
+import uuid
 
 import pytest
 from sqlalchemy import func, select
@@ -12,24 +14,30 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 from surogates.db.models import DeviceOperation, DeviceTransfer
-from surogates.devices.operations import DeviceOperations, OperationConflict, OperationRequest
+from surogates.devices.link import TRANSFER_WINDOW
+from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationConflict, OperationRequest
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES
 
 from .test_device_transfers import stored, transfers_of
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
+    _first_op,
     api,
     eventually,
     laptop_rig,
     link_url,
+    linked,
+    receive,
     request_for,
+    send,
     stop,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 DATA = os.urandom(CHUNK_BYTES * 5 // 2)  # two chunks and a half
+BIG = os.urandom(CHUNK_BYTES * 6 + 5)  # seven chunks, the last one short
 
 
 def named(data: bytes) -> dict:
@@ -115,3 +123,83 @@ async def test_a_write_for_a_revoked_device_is_answered_so_and_keeps_no_data(lap
     assert await asyncio.wait_for(rig.ops.run(write_request(rig)), 5.0) == REVOKED_OUTCOME
     # Recorded as answered: its data would never be sent.
     assert await transfers_of(session_factory, rig.device_id) == 0
+
+
+def joined(frames: list[dict]) -> bytes:
+    return b"".join(base64.b64decode(frame["data"], validate=True) for frame in frames)
+
+
+async def answer(ws, op: dict) -> dict:
+    """Answer a write as the app does once its data is whole and written."""
+    await send(ws, {"type": "op_result", "id": op["id"], "digest": op["digest"], "outcome": {"ok": None}})
+    return await receive(ws)
+
+
+async def test_a_writes_data_comes_after_its_op_at_most_four_chunks_ahead_of_the_acknowledgements(
+    laptop_rig, link_url,
+):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig, BIG)))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        assert op["args"] == {"key": f"{rig.folder}/big.bin", "transfer": named(BIG)}
+        frames = [await receive(ws) for _ in range(TRANSFER_WINDOW)]
+        assert [(f["type"], f["id"], f["seq"]) for f in frames] == [("chunk", op["id"], seq) for seq in range(4)]
+        # Nothing more until the app acknowledges, and a ping is answered meanwhile.
+        await send(ws, {"type": "ping"})
+        assert await receive(ws) == {"type": "pong"}
+        await send(ws, {"type": "chunk_ack", "id": op["id"], "seq": 3})
+        frames += [await receive(ws) for _ in range(3)]
+        assert [f["seq"] for f in frames] == list(range(7))
+        assert joined(frames) == BIG
+        await send(ws, {"type": "chunk_ack", "id": op["id"], "seq": 6})
+        assert await answer(ws, op) == {"type": "op_ack", "id": op["id"]}
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": None}
+
+
+async def test_a_connection_that_ends_mid_transfer_sends_the_write_and_its_data_again_from_chunk_0(
+    laptop_rig, link_url,
+):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        assert (await receive(ws))["seq"] == 0
+    async with linked(link_url, rig.token) as (ws, _):
+        again = await _first_op(ws)
+        assert again["id"] == op["id"]
+        frames = [await receive(ws) for _ in range(3)]
+        assert [f["seq"] for f in frames] == [0, 1, 2]
+        assert joined(frames) == DATA
+        assert await answer(ws, again) == {"type": "op_ack", "id": op["id"]}
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": None}
+
+
+async def test_a_write_stopped_mid_transfer_sends_no_more_of_its_data(laptop_rig, link_url):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig, BIG)))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        assert [(await receive(ws))["seq"] for _ in range(TRANSFER_WINDOW)] == [0, 1, 2, 3]
+        await rig.ops.cancel([rig.root])
+        assert await receive(ws) == {"type": "cancel", "id": op["id"]}
+        await send(ws, {"type": "chunk_ack", "id": op["id"], "seq": 3})
+        await send(ws, {"type": "ping"})
+        # No chunk before the pong: the transfer stopped.
+        assert await receive(ws) == {"type": "pong"}
+    assert await asyncio.wait_for(waiting, 5.0) == CANCELLED_OUTCOME
+
+
+async def test_a_writes_data_goes_only_to_its_device_under_its_current_credentials(laptop_rig, api):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
+    await eventually(lambda: open_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 0) == DATA[:CHUNK_BYTES]
+    assert await rig.ops.outgoing_chunk(uuid.uuid4(), 1, op.id, 0) is None
+    # Rotated: a connection still open under the old credentials gets no more of it.
+    response = await api.client.post(f"/v1/devices/{rig.device_id}/reauthorize", headers=api.auth())
+    assert response.status_code == 200, response.text
+    assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 1) is None
+    assert await rig.ops.outgoing_chunk(rig.device_id, 2, op.id, 1) == DATA[CHUNK_BYTES:2 * CHUNK_BYTES]
+    await stop(waiting)

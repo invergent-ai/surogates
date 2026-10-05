@@ -36,6 +36,11 @@ accept frames that large.
   server -> app   {"type": "unwanted", "id"}             the server closed this operation: stop
                                                          sending its transfer, and take its result
                                                          as acknowledged
+  server -> app   {"type": "chunk", "id", "seq", "data"} a write's data, after its op: seq counts
+                                                         from 0; data is CHUNK_BYTES of it in
+                                                         standard base64, the last chunk the rest
+  app -> server   {"type": "chunk_ack", "id", "seq"}     the app has that chunk of the write's data,
+                                                         and every one before it
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -96,6 +101,19 @@ for an operation that is not a read, a malformed header, a chunk out of order
 or of the wrong size, and a header while another transfer is under way are
 protocol errors.
 
+A write's data of more than MAX_PAYLOAD_BYTES, and at most MAX_WRITE_BYTES, is
+a transfer the other way: the op's args name it by size and SHA-256 in place of
+the data (surogates.devices.workspace), and its chunks follow the op, in order,
+with at most TRANSFER_WINDOW the app has not acknowledged.  One write's data
+goes at a time on a connection: the next write's chunks start once the app has
+acknowledged all of this one's.  Other frames go between the chunks.  The app
+acknowledges every chunk it gets, one it does not want too, and holds the data
+until it is whole and hashes to its name: only then is the write asked about
+and run.  Data that does not come whole and matching is answered with an
+error, and nothing is written.  The server stops sending once the write is
+answered or closed; a closed one is told with a cancel.  A connection that ends
+mid-transfer loses it: the next one sends the op again, and its data from chunk 0.
+
 The app also drops the connection, and reconnects with backoff, when no welcome
 arrives within 10 s of connecting, or no frame from the server within
 2 x heartbeat_s of a ping.  Any frame counts as liveness, not only a pong:
@@ -114,7 +132,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 from uuid import UUID
@@ -122,7 +141,7 @@ from uuid import UUID
 from fastapi import WebSocket, WebSocketDisconnect
 from redis.asyncio.client import PubSub
 
-from surogates.devices.operations import DeviceOperations
+from surogates.devices.operations import DeviceOperations, OpenOperation
 from surogates.devices.presence import (
     HEARTBEAT_INTERVAL_S,
     PRESENCE_TTL_S,
@@ -163,7 +182,7 @@ MIN_REFRESH_INTERVAL_S = 1.0
 MAX_FRAME_CHARS = 2 * 1024 * 1024
 # A client that stops reading must not stall the connection's other work.
 SEND_TIMEOUT_S = 10.0
-# The most chunks the app sends ahead of the server's acknowledgements.
+# The most chunks either side sends ahead of the other's acknowledgements.
 TRANSFER_WINDOW = 4
 # What a transfer whose data does not hash to its name is recorded as.
 DAMAGED_OUTCOME: dict[str, Any] = {
@@ -229,12 +248,13 @@ def _named(ok: dict[str, Any]) -> tuple[int, str]:
 
 
 class _Link:
-    """One connection's sending side, and the transfer it is receiving.
+    """One connection's sending side, and the transfers it is receiving and sending.
 
     Frames go out one at a time, each within SEND_TIMEOUT_S.  Each open
     operation is delivered once per connection, and ``_delivered`` holds the
     ones sent but not yet answered; a repeat across connections is harmless,
-    because the app's journal answers it without running it again.
+    because the app's journal answers it without running it again.  A write
+    whose data is a transfer is queued for ``transfers()`` once its op is sent.
     """
 
     def __init__(
@@ -255,6 +275,16 @@ class _Link:
         self._delivered: set[UUID] = set()
         self._delivery_wanted = asyncio.Event()
         self._incoming: _Incoming | None = None
+        # Writes whose data goes after their op, in order, each with when its op
+        # was sent; the one going, and how many of its chunks went and the app
+        # has acknowledged.
+        self._outgoing: deque[tuple[OpenOperation, float]] = deque()
+        self._outgoing_wanted = asyncio.Event()
+        self._sending: UUID | None = None
+        self._sent = 0
+        self._acked = 0
+        # Set on each acknowledgement, and whenever an operation stops being delivered.
+        self._heard = asyncio.Event()
 
     async def send(self, frame: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -291,7 +321,7 @@ class _Link:
         # answered.  Dropping them also keeps the delivered set bounded.
         if self._delivered:
             for operation_id in await _bounded(self._operations.closed_among(self._device.id, self._delivered)):
-                self._delivered.discard(operation_id)
+                self.forget(operation_id)
                 await self.send({"type": "cancel", "id": str(operation_id)})
         for operation in await _bounded(self._operations.pending(
             self._device.id, self._device.credential_generation, exclude=self._delivered,
@@ -301,11 +331,84 @@ class _Link:
             if operation.id in self._delivered:
                 continue
             self._delivered.add(operation.id)
+            sent_at = time.monotonic()
             await self.send(operation.frame())
+            if operation.kind == "write" and "transfer" in operation.args:
+                # A write whose data follows its op: its transfer's time starts with the op.
+                self._outgoing.append((operation, sent_at))
+                self._outgoing_wanted.set()
 
     def forget(self, operation_id: UUID) -> None:
-        """Stop tracking an operation as sent and unanswered."""
+        """Stop tracking an operation as sent and unanswered, and stop sending its data."""
         self._delivered.discard(operation_id)
+        self._heard.set()
+
+    async def transfers(self) -> None:
+        """Send each write's data after its op, one write at a time, until the connection ends."""
+        while True:
+            await self._outgoing_wanted.wait()
+            self._outgoing_wanted.clear()
+            while self._outgoing:
+                await self._send_data(*self._outgoing.popleft())
+
+    async def _send_data(self, operation: OpenOperation, started: float) -> None:
+        """Send one write's data in chunks, at most TRANSFER_WINDOW the app has not acknowledged.
+
+        It stops once the write is answered or closed.  The window is the
+        connection's, so it returns only once the app has every chunk.
+        """
+        size = operation.args["transfer"]["size"]
+        count = -(-size // CHUNK_BYTES)
+        self._sending, self._sent, self._acked = operation.id, 0, 0
+        how = "cut off"
+        try:
+            for seq in range(count):
+                await self._until(operation.id, lambda: seq - self._acked < TRANSFER_WINDOW)
+                data = (
+                    await _bounded(self._operations.outgoing_chunk(
+                        self._device.id, self._device.credential_generation, operation.id, seq,
+                    ))
+                    if operation.id in self._delivered else None
+                )
+                if data is None:
+                    # Answered, or closed (a cancel tells the app), its data maybe reaped.
+                    how = "stopped"
+                    return
+                # Counted before it goes: its acknowledgement can come before the send returns.
+                self._sent = seq + 1
+                await self.send({
+                    "type": "chunk", "id": str(operation.id), "seq": seq,
+                    "data": base64.b64encode(data).decode("ascii"),
+                })
+            await self._until(operation.id, lambda: self._acked == count)
+            how = "sent" if self._acked == count else "stopped"
+        finally:
+            self._sending = None
+            # A write's op is its header.
+            self._ended(how, operation.id, size, started)
+
+    async def _until(self, operation_id: UUID, done: Callable[[], bool]) -> None:
+        """Wait until *done*, or until the operation stops being delivered."""
+        while operation_id in self._delivered and not done():
+            self._heard.clear()
+            await self._heard.wait()
+
+    def chunk_acked(self, frame: dict[str, Any]) -> None:
+        """The app has this chunk of the write's data under way, and every one before it."""
+        try:
+            operation_id = UUID(str(frame["id"]))
+        except (KeyError, ValueError):
+            raise _Close(CLOSE_PROTOCOL, "malformed chunk_ack") from None
+        seq = frame.get("seq")
+        if type(seq) is not int or seq < 0:
+            raise _Close(CLOSE_PROTOCOL, "malformed chunk_ack")
+        # One for a write that went before is late: nothing waits on it.
+        if operation_id != self._sending:
+            return
+        if seq >= self._sent:
+            raise _Close(CLOSE_PROTOCOL, "chunk_ack for a chunk not sent")
+        self._acked = max(self._acked, seq + 1)
+        self._heard.set()
 
     async def record(self, frame: dict[str, Any]) -> None:
         """Record an ``op_result`` durably, then acknowledge it."""
@@ -339,7 +442,7 @@ class _Link:
         # Answered operations never come back from pending(), so only the
         # unanswered ones need excluding; this keeps the set, and the query
         # that carries it, bounded on a long-lived connection.
-        self._delivered.discard(operation_id)
+        self.forget(operation_id)
         await self.send({"type": "op_ack", "id": str(operation_id)})
 
     async def _start(
@@ -612,6 +715,7 @@ async def _serve(
         ),
         asyncio.create_task(_control(link, pubsub, device=device, holder=holder, presence=presence)),
         asyncio.create_task(link.deliveries()),
+        asyncio.create_task(link.transfers()),
     }
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -646,6 +750,9 @@ async def _heartbeats(
             continue
         if kind == "chunk":
             await link.chunk(frame)
+            continue
+        if kind == "chunk_ack":
+            link.chunk_acked(frame)
             continue
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")
