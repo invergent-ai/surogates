@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   wheel:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,7 +74,7 @@ jobs:
 
   images:
     needs: npm
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +133,7 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/invergent-ai/${{ matrix.name }}:buildcache,mode=max
 
   npm:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
     env:
@@ -176,7 +176,7 @@ jobs:
     needs:
       - wheel
       - images
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
