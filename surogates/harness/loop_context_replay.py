@@ -454,6 +454,7 @@ class ContextReplayMixin:
         # Invalidate system prompt cache -- conversation shape changed.
         self._system_prompt_cache.invalidate(session.id)
         self._memory_snapshot_cache.pop(session.id, None)
+        self._forget_compacted_reads(session)
 
         return compressed
 

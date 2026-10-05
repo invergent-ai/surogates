@@ -65,12 +65,13 @@ class DeviceCall:
     """
 
     def __init__(
-        self, *, tools: ToolRegistry, workspace_io: DeviceWorkspaceIO, task_id: str,
+        self, *, tools: ToolRegistry, workspace_io: DeviceWorkspaceIO, task_id: str, read_tracker_id: str,
         runner: JournalRunner | None = None,
     ) -> None:
         self._tools = tools
         self._workspace_io = workspace_io
         self._task_id = task_id
+        self._read_tracker_id = read_tracker_id
         self._runner = runner
 
     @property
@@ -108,6 +109,9 @@ class DeviceCall:
             # it as a path here.
             workspace_path=None,
             task_id=self._task_id,
+            # What this session read, apart from its root and its sub-agents:
+            # a result in one's conversation is not in the others'.
+            read_tracker_id=self._read_tracker_id,
             tools=self._tools,
         )
 
@@ -160,6 +164,7 @@ def device_call_for(
         tools=tools,
         workspace_io=DeviceWorkspaceIO(runner, root=session.config["workspace_path"]),
         task_id=root,
+        read_tracker_id=str(session.id),
         runner=runner,
     )
 

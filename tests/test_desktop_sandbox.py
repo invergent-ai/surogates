@@ -73,6 +73,7 @@ def laptop(tmp_path):
         tools=tools,
         workspace_io=DeviceWorkspaceIO(runner, root="/home/flavius/notes"),
         task_id="root-1",
+        read_tracker_id="root-1",
     )
     return SimpleNamespace(folder=folder, runner=runner, call=call)
 

@@ -611,6 +611,16 @@ _read_tracker: dict = {}
 _MAX_TRACKED_READ_ENTRIES = 1024
 
 
+def _tracker_of(kwargs: dict[str, Any]) -> str:
+    """The tracker entry a tool call reads and records in.
+
+    A call of a session on the user's computer keeps its session's own
+    (``read_tracker_id``), apart from its root and its sub-agents: their
+    ``task_id`` is the root's, which their background processes share.
+    """
+    return kwargs.get("read_tracker_id") or kwargs.get("task_id", "default")
+
+
 def _init_task_data(task_id: str) -> dict:
     """Return (and lazily create) the tracker state dict for *task_id*."""
     with _read_tracker_lock:
@@ -1357,7 +1367,7 @@ async def _handle_text(
     """
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
 
     # ── Dedup check ───────────────────────────────────────────────
     # If we already read this exact (path, offset, limit) and the
@@ -1516,7 +1526,7 @@ async def _write_file_handler(
     """
     path = arguments.get("path", "")
     content = arguments.get("content", "")
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     if not path:
@@ -1594,7 +1604,7 @@ async def _patch_handler(
     new_string = arguments.get("new_string")
     replace_all = arguments.get("replace_all", False)
     patch_content = arguments.get("patch")
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
@@ -2354,7 +2364,7 @@ async def _search_files_handler(
     offset = arguments.get("offset", 0)
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     # Map legacy target names
