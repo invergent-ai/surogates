@@ -178,6 +178,16 @@ describe("a write whose data comes in a transfer", () => {
     expect(executor.ran).toEqual([]);
   });
 
+  it("whose data comes beside it as well is answered, and never run", async () => {
+    const executor = new Recording();
+    await start(executor);
+    send({ ...writeOp("a"), args: { key: "/f/big.bin", transfer: NAMED, data: "aGk=" } });
+    await server.until(() => results("a").length === 1);
+    expect(results("a")[0]?.outcome).toEqual(MALFORMED_TRANSFER);
+    expect(executor.admitted).toEqual([]);
+    expect(executor.ran).toEqual([]);
+  });
+
   it("holds its data only as the base64 it runs with, once it runs", async () => {
     const made = watch(DATA.length);
     let held: boolean | undefined;
@@ -360,5 +370,17 @@ describe("the data of writes, as it comes", () => {
     await pause(10);
     gc();
     expect(made[0]?.deref()).toBeUndefined();
+  });
+
+  it("drops a chunk for a write whose data is whole, after a new connection too, and leaves that data as it was", async () => {
+    const made = watch(DATA.length);
+    const receiver = new TransferReceiver();
+    const whole = receiver.whole("a", NAMED, new AbortController().signal);
+    for (const seq of [0, 1, 2]) receiver.chunk("a", seq, piece(seq));
+    const data = await whole;
+    receiver.restart();
+    receiver.chunk("a", 0, Buffer.alloc(CHUNK_BYTES));
+    expect(data?.equals(DATA)).toBe(true);
+    expect(made).toHaveLength(1);
   });
 });

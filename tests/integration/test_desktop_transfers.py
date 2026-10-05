@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
+import re
 import sqlite3
 import time
 from uuid import UUID
@@ -211,7 +213,7 @@ async def test_a_3_mib_tool_result_spills_onto_the_computer_through_the_app(
 
 
 async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered_meanwhile(
-    built_client, laptop_rig, link_url, session_factory, journal_dir,
+    built_client, laptop_rig, link_url, journal_dir, caplog,
 ):
     """The other direction's measurement: from the worker's hash to the file on the computer."""
     rig = laptop_rig
@@ -223,26 +225,27 @@ async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered
         await app.until(connected)
         wio = device_io(rig.ops, rig.device_id, rig.root, folder)
         started = time.monotonic()
-        writing = asyncio.create_task(wio.write(str(folder / "most.bin"), data))
-        meanwhile = []
-        while not writing.done():
-            asked = time.monotonic()
-            assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 30.0) == {"ok": True}
-            meanwhile.append(time.monotonic() - asked)
-        await writing
+        with caplog.at_level(logging.INFO, logger="surogates.devices.link"):
+            writing = asyncio.create_task(wio.write(str(folder / "most.bin"), data))
+            meanwhile = []
+            while not writing.done():
+                asked = time.monotonic()
+                assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 30.0) == {"ok": True}
+                meanwhile.append(time.monotonic() - asked)
+            await writing
         elapsed = time.monotonic() - started
     finally:
         await app.close()
 
     assert (folder / "most.bin").read_bytes() == data
-    async with session_factory() as db:
-        recorded_to_answered = (await db.execute(
-            select(DeviceOperation.completed_at - DeviceOperation.created_at)
-            .where(DeviceOperation.device_id == rig.device_id, DeviceOperation.kind == "write")
-        )).scalar_one().total_seconds()
+    # The API's own line for the write's transfer: from its op to the app's last acknowledgement.
+    [on_the_link] = [
+        float(found.group(1)) for record in caplog.records
+        if (found := re.search(r"transfer \S+ sent: \d+ bytes, (\d+\.\d\d) s from its header", record.getMessage()))
+    ]
     print(
         f"\n50 MiB write in {elapsed:.2f} s ({MAX_WRITE_BYTES / 2**20 / elapsed:.1f} MiB/s), "
-        f"{recorded_to_answered:.2f} s of it from the operation recorded to its answer; "
+        f"{on_the_link:.2f} s of it on the link, from its op to the last chunk acknowledged; "
         f"meanwhile {len(meanwhile)} small operations answered, slowest {max(meanwhile, default=0) * 1000:.0f} ms",
     )
     # Loose bounds: they catch a regression, not this machine's speed.

@@ -238,7 +238,7 @@ describe("write", () => {
     expect(readFileSync(join(folder, "exact.bin")).equals(exact)).toBe(true);
   });
 
-  it("writes 50 MiB, the most it takes, checking its base64 in one pass", async () => {
+  it("writes 50 MiB, the most it takes, checking its base64 without growing a stack", async () => {
     const most = Buffer.alloc(MAX_WRITE_BYTES, 120);
     most.write("the end", MAX_WRITE_BYTES - 7);
     expect(await run("write", { key: `${folder}/most.bin`, data: b64(most) })).toEqual({ ok: null });
@@ -260,13 +260,14 @@ describe("write", () => {
   });
 
   it("answers data far over 50 MiB as too large, without checking or decoding it", async () => {
-    expect(await run("write", { key: `${folder}/x.txt`, data: "A".repeat(75_000_000) })).toEqual({
+    // Not base64 either: only the size of the text, checked first, answers it so.
+    expect(await run("write", { key: `${folder}/x.txt`, data: "@".repeat(75_000_000) })).toEqual({
       error: { type: "os", code: "EFBIG", message: WRITE_TOO_LARGE },
     });
   });
 
   it("refuses data that is not standard padded base64, or over 50 MiB", async () => {
-    for (const data of ["@@", "YQ", "YQ=\n", "Y-8_", "YQ==YQ==", "Y===", "===="]) {
+    for (const data of ["@@", "YQ", "YQ=\n", "Y-8_", "YQ==YQ==", "Y===", "====", "YWé=", "😀=="]) {
       expect(await run("write", { key: `${folder}/x.txt`, data })).toMatchObject({ error: { type: "value" } });
     }
     // As long, encoded, as 50 MiB: only its decoded size is over.
