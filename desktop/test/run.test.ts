@@ -71,6 +71,7 @@ beforeEach(() => {
     type: "start",
     folder,
     expect: bound(folder),
+    domains: [],
     tmp: join(base, "data", "tmp", "root"),
     dataDir: join(base, "data"),
     env: { HOME: home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" },
@@ -198,10 +199,12 @@ describe("run", { timeout: 30_000 }, () => {
     expect(lines).toContain(`XDG_CACHE_HOME=${start.tmp}/cache`);
   });
 
-  it("refuses a network host that is not a package host", async () => {
+  it("refuses a network host that is not a package host once the app denies it", async () => {
     const harness = await host();
-    const answer = await run(harness, "curl -sS -o /dev/null https://example.com 2>&1; echo \"exit $?\"", null, 20);
-    expect(answer.ok?.output).toMatch(/403/);
+    // TEST-NET-1 (RFC 5737): an address no host answers, which needs no lookup.
+    const answer = run(harness, "curl -sS -o /dev/null https://192.0.2.1 2>&1; echo \"exit $?\"", null, 20);
+    expect(await harness.answer(false)).toMatchObject({ host: "192.0.2.1", port: 443 });
+    expect((await answer).ok?.output).toMatch(/403/);
   });
 
   it("leaves the folder as it was after commands, one after another and at once", async () => {
@@ -558,8 +561,9 @@ describe("run, in the session runner", { timeout: 30_000 }, () => {
     const lines = ((await run(harness, "env")).ok?.output ?? "").split("\n");
     expect(lines.filter((line) => /^(SECRET|ELECTRON_RUN_AS_NODE|SUROGATE_FOLDER)=/.test(line))).toEqual([]);
     expect(lines).toContain(`XDG_CACHE_HOME=${start.tmp}/cache`);
-    const refused = await run(harness, "curl -sS -o /dev/null https://example.com 2>&1; echo \"exit $?\"", null, 20);
-    expect(refused.ok?.output).toMatch(/403/);
+    const refused = run(harness, "curl -sS -o /dev/null https://192.0.2.1 2>&1; echo \"exit $?\"", null, 20);
+    await harness.answer(false);
+    expect((await refused).ok?.output).toMatch(/403/);
   });
 
   it("protects the folder's code-running names inside a command", async () => {

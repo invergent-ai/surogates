@@ -2,6 +2,23 @@
 
 import type { Outcome } from "../link/protocol.js";
 
+// A destination a command asked srt's proxy for: its host as srt compares it, and its port (policy.ts destination).
+export interface Destination {
+  host: string;
+  port: number;
+}
+
+// What the app is asked about: a destination, and whether it is on a private network
+// (RFC 1918, shared address space, link-local, unique-local), which the prompt shows.
+// This computer's own is never asked about.
+export interface NetworkAsk extends Destination {
+  privateNetwork: boolean;
+}
+
+// What the app decides about a destination: let through the connections asking now,
+// let its host through on every port for the rest of the chat as well, or refuse them.
+export type NetworkAnswer = "allow" | "allow_session" | "deny";
+
 export interface HostStart {
   type: "start";
   folder: string; // the bound folder; the host resolves it
@@ -11,6 +28,8 @@ export interface HostStart {
   dataDir: string; // the app's own data, never inside the folder
   env: Record<string, string>; // the app-built environment: HOME, LANG, PATH
   appDirs: string[]; // read-only folders the sandbox needs: the runtime and the app's files
+  // The hosts the chat's user allowed for the chat past the package hosts, on every port: srt's allowedDomains entries.
+  domains: string[];
   bwrapPath?: string;
 }
 
@@ -20,6 +39,8 @@ export type ToHost =
   | { type: "cancel"; id: string }
   // A filesystem grant changed: the session runner, if one is up, is wrapped again.
   | { type: "restart"; reason: "grant" }
+  // The app's answer to a network ask. With remember, its host goes through from now on, on every port, without asking.
+  | { type: "answer"; id: number; allow: boolean; remember: boolean }
   | { type: "stop" };
 
 export type FromHost =
@@ -28,7 +49,10 @@ export type FromHost =
   | { type: "failed"; message: string; folder?: true }
   | { type: "result"; id: string; outcome: Outcome }
   // How many background processes are alive: a host with any is never idle.
-  | { type: "processes"; live: number };
+  | { type: "processes"; live: number }
+  // A command asked for a destination off the list, and its connection waits for the app's answer.
+  // One at a time per destination: the connections asking meanwhile wait for the same answer.
+  | { type: "ask"; id: number; host: string; port: number; privateNetwork: boolean };
 
 export const FOLDER_UNAVAILABLE: Outcome = {
   error: { type: "folder_unavailable", message: "The folder for this chat is no longer available on this computer" },

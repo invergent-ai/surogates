@@ -54,6 +54,17 @@ export class Bindings {
     this.db.prepare(`UPDATE bindings SET mode = ? WHERE root = ?`).run(mode, root);
   }
 
+  /** Let *domain* (a host, as srt's allowedDomains takes it) through for a bound root from now on. Once each; an unknown root changes nothing. */
+  allowDomain(root: string, domain: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO domains (root, domain) SELECT root, ? FROM bindings WHERE root = ?`).run(domain, root);
+  }
+
+  /** What a root's user allowed for it past the package hosts, in the order allowed. */
+  domains(root: string): string[] {
+    const rows = this.db.prepare(`SELECT domain FROM domains WHERE root = ? ORDER BY rowid`).all(root) as Array<{ domain: string }>;
+    return rows.map((row) => row.domain);
+  }
+
   get(root: string): Binding | undefined {
     const select = this.db.prepare(`SELECT * FROM bindings WHERE root = ?`);
     select.setReadBigInts(true);

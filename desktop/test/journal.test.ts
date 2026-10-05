@@ -306,6 +306,22 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("keep the hosts a root's user allowed for it, once each, for a bound root only", () => {
+    const before = new OperationJournal(path);
+    before.bindings.add(binding("r1", 1));
+    before.bindings.add(binding("r2", 2));
+    before.bindings.allowDomain("r1", "example.com");
+    before.bindings.allowDomain("r1", "[::1]");
+    before.bindings.allowDomain("r1", "example.com");
+    before.bindings.allowDomain("r3", "example.com");
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.bindings.domains("r1")).toEqual(["example.com", "[::1]"]);
+    expect([after.bindings.domains("r2"), after.bindings.domains("r3")]).toEqual([[], []]);
+    expect(after.bindings.get("r1")).toEqual(binding("r1", 1));
+    after.close();
+  });
+
   it("read back a folder whose device and inode numbers are past 2^53", () => {
     const journal = new OperationJournal(path);
     const large = { ...binding("r1", 1), dev: 2 ** 53 + 4, ino: 2 ** 53 + 2 };

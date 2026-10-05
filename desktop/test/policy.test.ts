@@ -1,10 +1,11 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { isIP } from "node:net";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { hideSrtTmp, isReserved, PACKAGE_HOSTS, sandboxPolicy } from "../src/hosts/policy.js";
+import { destination, hideSrtTmp, isReserved, PACKAGE_HOSTS, reach, sandboxPolicy } from "../src/hosts/policy.js";
 
 let base = "";
 afterEach(() => rmSync(base, { recursive: true, force: true }));
@@ -64,6 +65,79 @@ describe("the package hosts", () => {
     expect(policy).toMatchObject({ bwrapPath: "/b/bwrap", socatPath: "/s/socat" });
     // srt's scan for nested protected names must not read the folder's ignore files.
     expect(policy.ripgrep).toEqual({ command: "/r/rg", args: ["--no-ignore"] });
+  });
+});
+
+describe("a destination", () => {
+  it.each([
+    ["Example.COM.", 443, "example.com"],
+    ["127.1", 8080, "127.0.0.1"],
+    ["::1", 3000, "[::1]"],
+    ["[::1]", 3000, "[::1]"],
+    ["::ffff:127.0.0.1", 80, "127.0.0.1"],
+    ["[::ffff:c000:201]", 9, "192.0.2.1"],
+    ["files_1.example-cdn.net", 80, "files_1.example-cdn.net"],
+  ])("is spelled as srt compares it: %s", (host, port, spelled) => {
+    expect(destination(host, port)).toEqual({ host: spelled, port });
+  });
+
+  it.each([
+    ["*.example.com", 443], ["example.com", 0], ["example.com", 65_536], ["example.com", 1.5], ["example.com", undefined],
+    ["", 443], ["a b", 443], ["a..b", 443],
+  ])("is refused for %s, port %s, so no grant can let more through", (host, port) => {
+    expect(destination(host, port)).toBeNull();
+  });
+});
+
+describe("where a destination leads", () => {
+  // This computer's own addresses, as its interfaces would give them.
+  const local = () => ["127.0.0.1", "::1", "192.168.100.139", "fe80::2d6:c59:8d66:3938"];
+  const names: Record<string, string[]> = {
+    "printer.lan": ["192.168.1.20"],
+    "example.com": ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"],
+    "sneaky.example": ["93.184.215.14", "127.0.0.1"],
+    "mine.example": ["192.168.100.139"],
+    "odd.example": ["not an address"],
+  };
+  const resolve = (name: string) => (name in names ? Promise.resolve(names[name] ?? []) : Promise.reject(new Error("ENOTFOUND")));
+  const where = (host: string) => reach(host, { local, resolve });
+
+  it.each([
+    "127.0.0.1", "127.8.9.10", "[::1]", "0.0.0.0", "[::]", "[::ffff:7f00:1]", "192.168.100.139", "[fe80::2d6:c59:8d66:3938]",
+    "localhost", "dev.localhost", "sneaky.example", "mine.example",
+    "169.254.169.254", "100.100.100.200", "168.63.129.16", "[fd00:ec2::254]",
+  ])("is this computer for %s", async (host) => {
+    expect(await where(host)).toBe("own");
+  });
+
+  it.each(["10.1.2.3", "172.16.0.1", "192.168.1.1", "100.101.2.3", "169.254.1.1", "[fd00::1]", "[fe80::1]", "printer.lan"])(
+    "is a private network for %s",
+    async (host) => {
+      expect(await where(host)).toBe("private");
+    },
+  );
+
+  it.each(["192.0.2.1", "[2001:db8::1]", "example.com"])("is elsewhere for %s", async (host) => {
+    expect(await where(host)).toBe("public");
+  });
+
+  it("is unknown for a name that cannot be looked up, gives no address, or takes too long", async () => {
+    expect(await where("nowhere.invalid")).toBeNull();
+    // A lookup that fails: the resolver rejects.
+    expect(await where("nowhere.example")).toBeNull();
+    // RFC 6761: decided without a lookup, so a resolver that answers for it changes nothing.
+    expect(await reach("surogate-test.invalid", { local, resolve: () => Promise.resolve(["93.184.215.14"]) })).toBeNull();
+    expect(await where("odd.example")).toBeNull();
+    const started = performance.now();
+    expect(await reach("slow.example", { local, resolve: () => new Promise(() => {}), timeoutMs: 50 })).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  // An address of this computer's own interfaces, other than loopback.
+  const lan = Object.values(networkInterfaces()).flat().find((entry) => entry && !entry.internal)?.address;
+  it.skipIf(!lan)("reads this computer's own addresses from its interfaces by default", async () => {
+    const address = lan ?? "";
+    expect(await reach(isIP(address) === 6 ? `[${address}]` : address)).toBe("own");
   });
 });
 
