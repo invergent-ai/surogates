@@ -146,6 +146,14 @@ async def test_a_read_cut_short_is_not_one_to_refer_to(folder):
     assert await call.dispatch("read_file", {"path": "a.txt"}) == first
 
 
+async def test_a_read_cut_short_is_never_one_to_refer_to_after_a_block(folder):
+    (folder / "a.txt").write_text(("\x01" * 100 + "\n") * 200)
+    call = call_of(folder, CHILD)
+    reads = [await call.dispatch("read_file", {"path": "a.txt"}) for _ in range(5)]
+    assert "BLOCKED" in reads[3]
+    assert "File unchanged since last read" not in reads[4]
+
+
 class Recording:
     """A tool registry that keeps what each dispatch was given."""
 

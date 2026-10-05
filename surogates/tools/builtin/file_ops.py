@@ -613,7 +613,7 @@ _read_tracker: dict = {}
 _MAX_TRACKED_READ_ENTRIES = 1024
 # Where the registry cuts a read_file result short.
 _READ_FILE_MAX_RESULT_CHARS = 100_000
-# Entries forget_read_tracker queued, dropped at the tracker's next use.
+# Entries forget_read_tracker queued, dropped at the next read or search.
 _forgotten: deque[str] = deque()
 
 
@@ -709,7 +709,7 @@ def clear_read_tracker(task_id: str | None = None) -> None:
 
 
 def forget_read_tracker(task_id: str) -> None:
-    """Drop *task_id*'s entry at the tracker's next use.
+    """Drop *task_id*'s entry at the next read or search.
 
     It takes no lock, so a finalizer may call it: the garbage collector can
     run one while this very thread holds the tracker's lock.
@@ -1501,12 +1501,25 @@ async def _handle_text(
             task_data["consecutive"] = 1
         count = task_data["consecutive"]
 
+    if 3 <= count < 4:
+        result_dict["_warning"] = (
+            f"You have read this exact file region {count} times consecutively. "
+            "The content has not changed since your last read. Use the information you already have. "
+            "If you are stuck in a loop, stop reading and proceed with writing or responding."
+        )
+    result = json.dumps(result_dict, ensure_ascii=False)
+    # The model sees a result over the limit cut short: a later identical
+    # read shows the page again, never a reference to it.
+    seen_whole = len(result) <= _READ_FILE_MAX_RESULT_CHARS
+
+    with _read_tracker_lock:
         # Store mtime at read time for two purposes:
         # 1. Dedup: skip identical re-reads of unchanged files.
         # 2. Staleness: warn on write/patch if the file changed since
         #    the agent last read it (external edit, concurrent agent, etc.).
         if after is not None:
-            task_data["dedup"][dedup_key] = after.mtime
+            if seen_whole:
+                task_data["dedup"][dedup_key] = after.mtime
             task_data.setdefault("read_timestamps", {})[key] = after.mtime
             _cap_read_tracker_data(task_data)
 
@@ -1521,19 +1534,6 @@ async def _handle_text(
             "path": path,
             "already_read": count,
         }, ensure_ascii=False)
-    elif count >= 3:
-        result_dict["_warning"] = (
-            f"You have read this exact file region {count} times consecutively. "
-            "The content has not changed since your last read. Use the information you already have. "
-            "If you are stuck in a loop, stop reading and proceed with writing or responding."
-        )
-
-    result = json.dumps(result_dict, ensure_ascii=False)
-    if len(result) > _READ_FILE_MAX_RESULT_CHARS:
-        # The model sees this result cut short: a later identical read shows
-        # the page again, never a reference to it.
-        with _read_tracker_lock:
-            task_data["dedup"].pop(dedup_key, None)
     return result
 
 
