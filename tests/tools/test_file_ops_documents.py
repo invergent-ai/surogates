@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.builtin.file_ops import _read_file_handler
+from surogates.tools.utils.document_cache import DocumentCache
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import InProcessRunner
 from tests.tools.fixtures.build_documents import (
@@ -248,6 +250,24 @@ async def test_a_resumed_device_document_read_neither_finds_nor_keeps_a_cache_en
     assert runner.kinds.count("read") == 2
     assert len(parsed) == 2
     assert len(list(isolated_document_cache._root.glob("*.md"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_document_cache_hit_marks_its_entry_used_now_and_leaves_no_lock_file(tmp_path: Path) -> None:
+    cache = DocumentCache(root=tmp_path / "doc-cache")
+
+    async def load() -> str:
+        return "markdown"
+
+    await cache.get_or_load("a", load)
+    [entry] = cache._root.glob("*.md")
+    # An atime ahead of the ctime, which a relatime or noatime mount leaves as it is: only the cache moves it.
+    os.utime(entry, ns=(time.time_ns() + 3_600 * 10**9, entry.stat().st_mtime_ns))
+    before = time.time_ns()
+    assert await cache.get_or_load("a", load) == "markdown"
+    # Eviction takes the oldest atime, so a document being paged is not the first to go.
+    assert before <= entry.stat().st_atime_ns <= time.time_ns()
+    assert [p.suffix for p in cache._root.iterdir()] == [".md"]
 
 
 @pytest.mark.asyncio

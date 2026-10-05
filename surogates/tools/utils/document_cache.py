@@ -4,16 +4,18 @@ The K8s sandbox spawns a fresh ``tool-executor`` Python process per
 tool call, so an in-memory cache would be empty on every subsequent
 ``read_file``.  Persisting to ``/tmp`` (pod-local) survives across
 exec calls within the same pod while staying out of the user
-workspace, and a cross-process ``fcntl`` lock keeps concurrent
-executors from racing on the same entry.
+workspace.  Each store writes its own temp file and renames it into
+place, so concurrent executors never see a partial entry and need no
+lock.
 """
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import logging
 import os
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -53,9 +55,6 @@ class DocumentCache:
     def _entry_path(self, key: str) -> Path:
         return self._root / f"{key}.md"
 
-    def _lock_path(self, key: str) -> Path:
-        return self._root / f"{key}.lock"
-
     async def get_or_parse(
         self,
         source: Path,
@@ -84,9 +83,9 @@ class DocumentCache:
         if entry.exists():
             try:
                 content = entry.read_text(encoding="utf-8")
-                # Bump atime so LRU eviction prefers other entries.
-                now = entry.stat().st_mtime
-                os.utime(entry, (os.path.getatime(entry), now))
+                # Used now: eviction takes the oldest atime, whatever the
+                # mount's atime rule did with this read.
+                os.utime(entry, ns=(time.time_ns(), entry.stat().st_mtime_ns))
                 return content
             except OSError as exc:
                 logger.debug("cache read failed for %s: %s", entry, exc)
@@ -100,7 +99,7 @@ class DocumentCache:
         # races are rare in practice (the cache file appears the
         # moment the first parse finishes) and harmless when they do
         # happen — the second parse just overwrites the first via the
-        # fcntl-locked rename in ``_maybe_store``.
+        # atomic rename in ``_maybe_store``.
         markdown = await load()
         self._maybe_store(key, markdown)
         return markdown
@@ -115,20 +114,13 @@ class DocumentCache:
             return
 
         entry = self._entry_path(key)
-        tmp = entry.with_suffix(".tmp")
-        lock_file = self._lock_path(key)
-
-        # Best-effort cross-process lock.  We hold a file lock only
-        # while the rename happens, not while parsing.
+        # This writer's own: two stores of one key each rename a whole file.
+        tmp = self._root / f"{key}.{uuid.uuid4().hex}.tmp"
         try:
-            with open(lock_file, "w") as lf:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-                try:
-                    tmp.write_bytes(encoded)
-                    os.replace(tmp, entry)
-                finally:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            tmp.write_bytes(encoded)
+            os.replace(tmp, entry)
         except OSError as exc:
+            tmp.unlink(missing_ok=True)
             logger.debug("cache write failed for %s: %s", entry, exc)
             return
 
