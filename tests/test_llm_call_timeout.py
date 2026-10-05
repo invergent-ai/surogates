@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -91,3 +92,43 @@ async def test_non_streaming_heartbeat_path_propagates_error(monkeypatch) -> Non
             llm_client=client,
             store=store,
         )
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_call_returns_at_once_when_the_turn_is_stopped() -> None:
+    """The fallback after a failed stream used to ignore a stop: a phone caller who talked over the
+    agent waited for the whole non-streaming completion (4+ s) before the turn ended."""
+    stopped_at = None
+
+    async def slow_create(**kwargs):
+        await asyncio.sleep(10)
+        return _fake_response()
+
+    def interrupt_check() -> bool:
+        return stopped_at is not None and time.monotonic() >= stopped_at
+
+    client = SimpleNamespace(base_url=_PROXY_URL, chat=SimpleNamespace(completions=SimpleNamespace(create=slow_create)))
+    stopped_at = time.monotonic() + 0.1
+    started = time.monotonic()
+    message, usage = await call_llm_non_streaming(
+        session=_make_session(), create_kwargs={"model": "glm-5.2", "messages": []}, iteration=1,
+        llm_client=client, store=SimpleNamespace(emit_event=AsyncMock()), turn_id="t1", iteration_index=0,
+        interrupt_check=interrupt_check,
+    )
+    assert time.monotonic() - started < 1.0
+    assert usage["finish_reason"] == "interrupted" and not message.get("content")
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_turn_starts_no_new_llm_call() -> None:
+    """After a backoff, the retry loop used to start a whole new call for a turn that was stopped."""
+    from surogates.harness.llm_call import call_llm_with_retry
+
+    create = AsyncMock(return_value=_fake_response())
+    client = SimpleNamespace(base_url=_PROXY_URL, chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    message, usage = await call_llm_with_retry(
+        session=_make_session(), create_kwargs={"model": "glm-5.2", "messages": []}, iteration=1, llm_client=client,
+        store=SimpleNamespace(emit_event=AsyncMock()), streaming_enabled=False, interrupt_check=lambda: True,
+        activate_fallback=lambda: False, get_current_model=lambda: None, set_streaming_enabled=lambda _: None,
+    )
+    assert usage["finish_reason"] == "interrupted" and create.await_count == 0
