@@ -11,16 +11,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
-import { type Context, perform } from "../src/files/operations.js";
+import { BAD_PAGE, type Context, perform } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
-// The file helper's reads come back at most this long: some filesystems answer less than asked.
-const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY }));
+// The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
+const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
     fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: ReadPosition | null,
-  ) => fs.readSync(fd, buffer, offset, Math.min(length, reads.cap), position);
+  ) => {
+    reads.calls += 1;
+    return fs.readSync(fd, buffer, offset, Math.min(length, reads.cap), position);
+  };
   return { ...fs, readSync, default: { ...fs, readSync } };
 });
 
@@ -171,6 +174,132 @@ describe("read", () => {
   it("refuses a max_bytes that is not a whole number", async () => {
     for (const max_bytes of [-1, 1.5, "3"]) {
       expect(await run("read", { key: `${folder}/a.txt`, max_bytes })).toMatchObject({ error: { type: "value" } });
+    }
+  });
+});
+
+describe("read_lines", () => {
+  const page = (key: string, more: Record<string, unknown> = {}) =>
+    run("read_lines", { key, encoding: "utf-8", offset: 1, limit: 2000, max_bytes: 200_000, ...more });
+  const answer = (data: string | Buffer, total_lines: number) => ({ ok: { data: b64(data), total_lines } });
+  // As Python's utf-32-le and utf-32-be codecs encode it.
+  const utf32 = (text: string, little: boolean) => {
+    const points = [...text].map((character) => character.codePointAt(0) ?? 0);
+    const out = Buffer.alloc(points.length * 4);
+    points.forEach((point, i) => (little ? out.writeUInt32LE(point, i * 4) : out.writeUInt32BE(point, i * 4)));
+    return out;
+  };
+  const ENCODED: [string, (text: string) => Buffer][] = [
+    ["utf-16-le", (text) => Buffer.from(text, "utf16le")],
+    ["utf-16-be", (text) => Buffer.from(text, "utf16le").swap16()],
+    ["utf-32-le", (text) => utf32(text, true)],
+    ["utf-32-be", (text) => utf32(text, false)],
+  ];
+
+  it("answers the bytes of a window of whole lines, and how many lines the file has", async () => {
+    writeFileSync(join(folder, "mixed.txt"), "one\ntwo\r\nthree\rfour");
+    expect(await page(`${folder}/mixed.txt`)).toEqual(answer("one\ntwo\r\nthree\rfour", 4));
+    expect(await page(`${folder}/mixed.txt`, { offset: 2, limit: 2 })).toEqual(answer("two\r\nthree\r", 4));
+    expect(await page(`${folder}/mixed.txt`, { offset: 4 })).toEqual(answer("four", 4));
+  });
+
+  it("selects lines as a Python slice does: none past the end, and a limit below one too", async () => {
+    writeFileSync(join(folder, "three.txt"), "one\ntwo\nthree\n");
+    for (const [more, data] of [
+      [{ offset: 4 }, ""],
+      [{ limit: 0 }, ""],
+      [{ offset: 2, limit: -1 }, ""],
+      [{ limit: -1 }, "one\ntwo\n"],
+      [{ limit: -2 }, "one\n"],
+      [{ limit: -3 }, ""],
+      [{ offset: 2, limit: -4 }, ""],
+      [{ offset: 2, limit: -2 }, "two\n"],
+    ] as const) {
+      expect(await page(`${folder}/three.txt`, more)).toEqual(answer(data, 3));
+    }
+  });
+
+  it("answers the first max_bytes of a first line longer than that, and only whole lines otherwise", async () => {
+    writeFileSync(join(folder, "long.txt"), `${"x".repeat(100)}\nshort\n`);
+    expect(await page(`${folder}/long.txt`, { max_bytes: 10 })).toEqual(answer("x".repeat(10), 2));
+    writeFileSync(join(folder, "two.txt"), "ab\ncd\n");
+    expect(await page(`${folder}/two.txt`, { max_bytes: 4 })).toEqual(answer("ab\n", 2));
+    expect(await page(`${folder}/two.txt`, { max_bytes: 0 })).toEqual(answer("", 2));
+  });
+
+  it("finds line ends as code units of UTF-16 and UTF-32, in either byte order", async () => {
+    // 上 (U+4E0A) and 不 (U+4E0D) have units that hold 0x0A and 0x0D, and end no line.
+    for (const [encoding, encode] of ENCODED) {
+      writeFileSync(join(folder, "u.txt"), encode("﻿上\r\n不\nlast"));
+      expect(await page(`${folder}/u.txt`, { encoding })).toEqual(answer(encode("﻿上\r\n不\nlast"), 3));
+      expect(await page(`${folder}/u.txt`, { encoding, offset: 2, limit: 1 })).toEqual(answer(encode("不\n"), 3));
+    }
+  });
+
+  it("starts a utf-8-sig file's first line after its BOM", async () => {
+    writeFileSync(join(folder, "sig.txt"), "﻿one\ntwo\n");
+    expect(await page(`${folder}/sig.txt`, { encoding: "utf-8-sig", limit: 1 })).toEqual(answer("one\n", 2));
+    expect(await page(`${folder}/sig.txt`, { limit: 1 })).toEqual(answer("﻿one\n", 2));
+    writeFileSync(join(folder, "bom.txt"), "﻿");
+    expect(await page(`${folder}/bom.txt`, { encoding: "utf-8-sig" })).toEqual(answer("", 0));
+  });
+
+  it("ends one line at a CR LF across two pieces of the file", async () => {
+    writeFileSync(join(folder, "edge.txt"), `${"x".repeat(1024 * 1024 - 1)}\r\ny\r\n`);
+    expect(await page(`${folder}/edge.txt`, { offset: 2 })).toEqual(answer("y\r\n", 2));
+    writeFileSync(join(folder, "edge16.txt"), Buffer.from(`${"x".repeat(512 * 1024 - 1)}\r\ny\r\n`, "utf16le"));
+    expect(await page(`${folder}/edge16.txt`, { encoding: "utf-16-le", offset: 2 })).toEqual(
+      answer(Buffer.from("y\r\n", "utf16le"), 2),
+    );
+  });
+
+  it("pages alike when every read comes back shorter than a code unit", async () => {
+    const encode = (text: string) => utf32(text, true);
+    writeFileSync(join(folder, "u.txt"), encode("one\r\ntwo\rthree\n"));
+    reads.cap = 3;
+    try {
+      expect(await page(`${folder}/u.txt`, { encoding: "utf-32-le", offset: 2 })).toEqual(answer(encode("two\rthree\n"), 3));
+    } finally {
+      reads.cap = Number.POSITIVE_INFINITY;
+    }
+  });
+
+  it("answers a page of 1 MiB, inside one message", async () => {
+    writeFileSync(join(folder, "line.txt"), "x".repeat(MAX_PAYLOAD_BYTES + 10));
+    expect(await page(`${folder}/line.txt`, { max_bytes: MAX_PAYLOAD_BYTES })).toEqual(
+      answer(Buffer.alloc(MAX_PAYLOAD_BYTES, "x"), 1),
+    );
+  });
+
+  it("answers a file over 50 MiB as too large from its size, before reading a byte of it", async () => {
+    writeFileSync(join(folder, "huge.log"), Buffer.alloc(MAX_READ_BYTES + 1, 10));
+    reads.calls = 0;
+    expect(await page(`${folder}/huge.log`)).toEqual({ error: { type: "os", code: "EFBIG", message: READ_TOO_LARGE } });
+    expect(reads.calls).toBe(0);
+  });
+
+  it("answers OS errors in Python's words, and a FIFO at once", async () => {
+    expect(await page(`${folder}/sub`)).toEqual({
+      error: { type: "os", code: "EISDIR", message: `Is a directory: '${folder}/sub'` },
+    });
+    expect(await page(`${folder}/missing`)).toEqual({
+      error: { type: "os", code: "ENOENT", message: `No such file or directory: '${folder}/missing'` },
+    });
+    execFileSync("mkfifo", [join(folder, "pipe")]);
+    expect(await page(`${folder}/pipe`)).toEqual({
+      error: { type: "os", code: "EINVAL", message: `Not a regular file: '${folder}/pipe'` },
+    });
+  });
+
+  it("refuses a key that is not a resolved path in the folder, and arguments it does not take", async () => {
+    for (const key of [`${base}/outside/o.txt`, `${folder}/link-in`]) {
+      expect(await page(key)).toEqual({ error: { type: "sandbox", message: `Not a path in this folder: '${key}'` } });
+    }
+    for (const more of [
+      { encoding: "latin-1" }, { encoding: null }, { offset: 0 }, { offset: 1.5 }, { limit: "3" }, { limit: true },
+      { max_bytes: -1 }, { max_bytes: MAX_PAYLOAD_BYTES + 1 },
+    ]) {
+      expect(await page(`${folder}/a.txt`, more)).toEqual({ error: { type: "value", message: BAD_PAGE } });
     }
   });
 });
