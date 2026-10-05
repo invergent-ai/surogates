@@ -158,3 +158,12 @@ def caller_says_goodbye(text: str) -> bool:
 def is_farewell(reply: str) -> bool:
     """A whole reply that is only a goodbye: the call can end after it."""
     return bool(FAREWELL.match(reply.strip()))
+
+
+DETAILS = re.compile(r"\b(nume|numele|prenume|telefon|număr|numărul|e-?mail|adres[aă]|data|cnp|cod|ziua|ora)\b", re.I)
+
+
+def asks_for_details(sentence: str) -> bool:
+    """The agent asked for something a person would write down (a name, a number, an address…)."""
+    s = sentence.strip()
+    return s.endswith("?") and bool(DETAILS.search(s))
