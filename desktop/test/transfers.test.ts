@@ -210,6 +210,19 @@ describe("a read whose chunks the journal cannot keep", () => {
     expect(errors).toEqual([]);
     expect(link?.status).toBe("connected");
   });
+
+  it("whose answer cannot be kept either stops the link, with the error said", async () => {
+    await start(reading(DATA));
+    const failure = new Error("disk I/O error");
+    vi.spyOn(journal, "finish").mockImplementation(() => {
+      throw failure;
+    });
+    server.send(readOp("a"));
+    await server.until(() => errors.length === 1);
+    expect(errors).toEqual([failure]);
+    await server.until(() => link?.status === "stopped");
+    expect(headers("a")).toEqual([]);
+  });
 });
 
 describe("the sender", () => {
