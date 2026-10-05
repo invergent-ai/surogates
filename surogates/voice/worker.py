@@ -23,7 +23,7 @@ from surogates.channels.resolve import resolve_tenant
 from surogates.config import load_settings
 from surogates.voice.agent import GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
 from surogates.voice.llm import SurogatesLLM
-from surogates.voice.sessions import CallTarget, VoiceSessions
+from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions
 from surogates.voice.stt import RoSTT
 from surogates.voice.tts import RoTTS
 
@@ -83,8 +83,16 @@ def prewarm(proc: JobProcess) -> None:
 
 
 async def say_and_hang_up(ctx: JobContext, session: AgentSession, text: str) -> None:
+    await session.interrupt(force=True)  # cut in: never queue a goodbye behind speech that may never end
     await session.say(text, allow_interruptions=False, add_to_chat_ctx=False).wait_for_playout()
     await ctx.delete_room()
+
+
+async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str) -> None:
+    """Say one sentence and end the call, before (or instead of) a conversation."""
+    bare = AgentSession(tts=RoTTS(url=tts_url, voice=voice))
+    await bare.start(agent=Agent(instructions=""), room=ctx.room)
+    await say_and_hang_up(ctx, bare, text)
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -93,15 +101,16 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    rt = await Runtime.open(settings)
-    ctx.add_shutdown_callback(rt.aclose)
-
-    tenant = await resolve_tenant(rt.routing, "voice", info.called) if info else None
+    try:
+        rt = await Runtime.open(settings)
+        ctx.add_shutdown_callback(rt.aclose)
+        tenant = await resolve_tenant(rt.routing, "voice", info.called) if info else None
+    except Exception:  # ops down, 401, a timeout: the caller hears why, not silence
+        log.exception("could not resolve room %s (called %s)", ctx.room.name, info and info.called)
+        return await apologize(ctx, vs.tts_url, "female", SORRY)
     if info is None or tenant is None:
         log.warning("no agent for room %s (called %s)", ctx.room.name, info and info.called)
-        bare = AgentSession(tts=RoTTS(url=vs.tts_url))
-        await bare.start(agent=Agent(instructions=""), room=ctx.room)
-        return await say_and_hang_up(ctx, bare, UNAVAILABLE)
+        return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE)
 
     config = CallConfig.from_routing(tenant.get("config"))
     try:
@@ -111,9 +120,7 @@ async def entrypoint(ctx: JobContext) -> None:
             call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.greeting)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
-        bare = AgentSession(tts=RoTTS(url=vs.tts_url, voice=config.voice))
-        await bare.start(agent=Agent(instructions=""), room=ctx.room)
-        return await say_and_hang_up(ctx, bare, SORRY)
+        return await apologize(ctx, vs.tts_url, config.voice, SORRY)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
 
@@ -127,6 +134,19 @@ async def entrypoint(ctx: JobContext) -> None:
         task = asyncio.create_task(coro)
         tasks.add(task)
         task.add_done_callback(tasks.discard)
+
+    @session.on("error")
+    def _error(ev) -> None:
+        if isinstance(ev.source, SurogatesLLM):  # the turn failed: say so instead of leaving silence
+            log.warning("call %s turn failed: %r", info.call_id, ev.error)
+            session.say(SORRY_TURN, add_to_chat_ctx=False)
+
+    @session.on("close")
+    def _closed(ev) -> None:
+        # the session gave up (unrecoverable STT/LLM/TTS errors, or the caller left): never keep a caller
+        # on the line with nobody there
+        log.info("call %s session closed: %s", info.call_id, ev.reason)
+        spawn(ctx.delete_room())
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:
