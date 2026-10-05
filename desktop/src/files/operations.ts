@@ -114,8 +114,10 @@ function textOrNull(args: Record<string, unknown>, name: string): string | null 
 }
 
 // This version of the file, as LocalWorkspaceIO.stat names it (surogates/tools/workspace_io/local.py):
-// the ctime moves with every change, and utimes cannot set it back.
-const revisionOf = (st: BigIntStats): string => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+// the ctime moves with every change, and utimes cannot set it back. dev and ino are unsigned there, and
+// Node reads them from a signed array, so an inode at or above 2^63 is put back to the number Python gives.
+export const revisionOf = (st: BigIntStats): string =>
+  `${BigInt.asUintN(64, st.dev)}:${BigInt.asUintN(64, st.ino)}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
 
 // The file's revision now, or null when it cannot be stat'ed.
 function revisionAt(key: string): string | null {

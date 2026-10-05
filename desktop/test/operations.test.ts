@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
+  type BigIntStats, chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
   statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
-import { BAD_PAGE, type Context, perform } from "../src/files/operations.js";
+import { BAD_PAGE, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
@@ -111,6 +111,12 @@ describe("stat", () => {
     utimesSync(key, 1_700_000_000, 1_700_000_000);
     expect(statSync(key, { bigint: true }).mtimeNs).toBe(1_700_000_000_000_000_000n);
     expect(await revision(key)).not.toBe(before);
+  });
+
+  it("answers an inode at or above 2^63 unsigned, as Python's st_ino is", () => {
+    // Node fills BigIntStats from a signed array: mergerfs hashes and SMB file ids read as negative there.
+    const st = { dev: 66313n, ino: -2n, size: 6n, mtimeNs: -1n, ctimeNs: 7n } as BigIntStats;
+    expect(revisionOf(st)).toBe("66313:18446744073709551614:6:-1:7");
   });
 
   it("answers null for anything it cannot stat", async () => {
