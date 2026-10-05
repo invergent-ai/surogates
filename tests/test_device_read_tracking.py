@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -109,7 +112,38 @@ async def test_an_experts_reads_last_as_long_as_its_call(folder):
     await run_for_harness_tool(call, "read_file", path="a.txt")
     assert (await run_for_harness_tool(call, "write_file", path="a.txt", content="beta\n"))["status"] == "ok"
     del call
-    assert file_ops._read_tracker == {}
+    # Gone at the tracker's next use.
+    file_ops._init_task_data(ROOT)
+    assert list(file_ops._read_tracker) == [ROOT]
+
+
+# A call held in a cycle, as a turn that failed leaves it, goes when the collector runs, which can be while this
+# thread holds the tracker's lock.  In a process of its own: a hang there would hold the lock for good.
+COLLECTED_WHILE_LOCKED = """
+import gc
+from surogates.devices.sandbox import DeviceCall
+from surogates.tools.builtin import file_ops
+call = DeviceCall(tools=None, workspace_io=None, task_id="root", read_tracker_id="child")
+call.cycle = call
+del call
+with file_ops._read_tracker_lock:
+    gc.collect()
+"""
+
+
+def test_a_call_collected_while_the_tracker_is_locked_does_not_hang():
+    subprocess.run(
+        [sys.executable, "-c", COLLECTED_WHILE_LOCKED], cwd=Path(__file__).parents[1], timeout=30, check=True,
+    )
+
+
+async def test_a_read_cut_short_is_not_one_to_refer_to(folder):
+    # Escaped, the page's JSON is over read_file's 100 000 characters: the registry cuts it short.
+    (folder / "a.txt").write_text(("\x01" * 100 + "\n") * 200)
+    call = call_of(folder, CHILD)
+    first = await call.dispatch("read_file", {"path": "a.txt"})
+    assert first.endswith("[truncated at 100000 chars]")
+    assert await call.dispatch("read_file", {"path": "a.txt"}) == first
 
 
 class Recording:
@@ -241,6 +275,20 @@ async def test_clear_forgets_a_device_sessions_dedup():
     await harness._handle_clear_command(session, SimpleNamespace(lease_token="t"))
     assert dedup_of(str(session.id)) == {}
     assert file_ops.has_read(READ[0], str(session.id))
+
+
+async def test_a_reset_of_the_history_restarts_the_count_of_repeated_reads(folder):
+    session = device_session()
+    call = call_of(folder, str(session.id))
+    for second in range(3):
+        os.utime(folder / "a.txt", (second, second))
+        await run(call, "read_file", path="a.txt")
+    harness = _make_loop_harness(session_store=AsyncMock())
+    compressing(harness, [])
+    await harness._handle_clear_command(session, SimpleNamespace(lease_token="t"))
+    # Not the fourth read in a row of what the model still has: it has none of them.
+    again = await run(call, "read_file", path="a.txt")
+    assert again["content"] == "alpha\n" and "_warning" not in again
 
 
 def event(event_id: int, kind: EventType, **data) -> SimpleNamespace:

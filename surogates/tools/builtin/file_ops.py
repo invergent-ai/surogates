@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import threading
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -609,6 +610,10 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 _read_tracker_lock = threading.Lock()
 _read_tracker: dict = {}
 _MAX_TRACKED_READ_ENTRIES = 1024
+# Where the registry cuts a read_file result short.
+_READ_FILE_MAX_RESULT_CHARS = 100_000
+# Entries forget_read_tracker queued, dropped at the tracker's next use.
+_forgotten: deque[str] = deque()
 
 
 def _tracker_of(kwargs: dict[str, Any]) -> str:
@@ -624,6 +629,8 @@ def _tracker_of(kwargs: dict[str, Any]) -> str:
 def _init_task_data(task_id: str) -> dict:
     """Return (and lazily create) the tracker state dict for *task_id*."""
     with _read_tracker_lock:
+        while _forgotten:
+            _read_tracker.pop(_forgotten.popleft(), None)
         task_data = _read_tracker.setdefault(task_id, {
             "last_key": None,
             "consecutive": 0,
@@ -698,6 +705,15 @@ def clear_read_tracker(task_id: str | None = None) -> None:
             _read_tracker.pop(task_id, None)
         else:
             _read_tracker.clear()
+
+
+def forget_read_tracker(task_id: str) -> None:
+    """Drop *task_id*'s entry at the tracker's next use.
+
+    It takes no lock, so a finalizer may call it: the garbage collector can
+    run one while this very thread holds the tracker's lock.
+    """
+    _forgotten.append(task_id)
 
 
 def reset_file_dedup(task_id: str | None = None) -> None:
@@ -1092,7 +1108,7 @@ def register(registry: ToolRegistry) -> None:
         schema=READ_FILE_SCHEMA,
         handler=_read_file_handler,
         toolset="file",
-        max_result_size=100_000,
+        max_result_size=_READ_FILE_MAX_RESULT_CHARS,
     )
 
     # ── write_file ────────────────────────────────────────────────────
@@ -1510,7 +1526,13 @@ async def _handle_text(
             "If you are stuck in a loop, stop reading and proceed with writing or responding."
         )
 
-    return json.dumps(result_dict, ensure_ascii=False)
+    result = json.dumps(result_dict, ensure_ascii=False)
+    if len(result) > _READ_FILE_MAX_RESULT_CHARS:
+        # The model sees this result cut short: a later identical read shows
+        # the page again, never a reference to it.
+        with _read_tracker_lock:
+            task_data["dedup"].pop(dedup_key, None)
+    return result
 
 
 async def _write_file_handler(

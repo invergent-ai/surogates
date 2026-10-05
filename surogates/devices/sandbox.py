@@ -23,7 +23,7 @@ from surogates.devices.binding import device_owners as _owners
 from surogates.devices.operations import DeviceOperations, JournalRunner
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.tools.builtin.file_ops import clear_read_tracker
+from surogates.tools.builtin.file_ops import forget_read_tracker
 
 if TYPE_CHECKING:
     from surogates.tools.registry import ToolRegistry
@@ -76,9 +76,9 @@ class DeviceCall:
         self._task_id = task_id
         self._read_tracker_id = read_tracker_id
         self._harness_tool_tracker_id = f"{read_tracker_id}:{uuid4()}"
-        # Cleared when the call goes, however it ends: a cancel or a lost
-        # lease skips the call's last steps.
-        weakref.finalize(self, clear_read_tracker, self._harness_tool_tracker_id)
+        # Dropped once the call is collected, however it ends: a cancel or a
+        # lost lease skips the call's last steps.
+        weakref.finalize(self, forget_read_tracker, self._harness_tool_tracker_id)
         self._runner = runner
 
     @property
