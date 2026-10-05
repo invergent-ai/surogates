@@ -70,3 +70,32 @@ async def test_stream_raises_on_error_frame():
         with pytest.raises(APIError):
             async for _ in stream:
                 pass
+
+
+async def _stream_until_error(handler):
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        stream = RoSTT(url=f"ws://127.0.0.1:{port}").stream(conn_options=APIConnectOptions(max_retry=0))
+        stream.push_frame(_frame())
+        with pytest.raises(APIError):
+            async for _ in stream:
+                pass
+
+
+async def test_a_dropped_stt_connection_is_a_retryable_error():
+    """An STT pod restarting mid-call must surface as an API error LiveKit retries, not a dead ear."""
+    async def handler(ws):
+        await ws.send(json.dumps({"type": "ready"}))
+        await ws.recv()
+        ws.transport.abort()  # no close frame: the pod went away
+
+    await _stream_until_error(handler)
+
+
+async def test_a_clean_close_before_done_is_an_error_too():
+    async def handler(ws):
+        await ws.send(json.dumps({"type": "ready"}))
+        await ws.recv()
+        await ws.close()
+
+    await _stream_until_error(handler)

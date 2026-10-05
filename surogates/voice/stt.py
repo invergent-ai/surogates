@@ -14,6 +14,7 @@ from livekit.agents import (
 )
 from livekit.agents.utils import AudioBuffer
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 T = stt.SpeechEventType
 
@@ -80,6 +81,7 @@ class RoSTTStream(stt.RecognizeStream):
                 await ws.send(json.dumps({"type": "finish"}))
 
             sender = asyncio.create_task(send())
+            sender.add_done_callback(lambda t: t.cancelled() or t.exception())  # a closed socket ends it; seen below
             speaking = False
             try:
                 async for raw in ws:
@@ -87,9 +89,13 @@ class RoSTTStream(stt.RecognizeStream):
                     if ev.get("type") == "error":
                         raise APIConnectionError(f"STT error: {(ev.get('error') or {}).get('message', '')}")
                     if ev.get("type") == "done":
-                        break
+                        return
                     out, speaking = translate(ev, speaking)
                     for e in out:
                         self._event_ch.send_nowait(e)
+            except ConnectionClosed as e:  # the STT pod went away mid-call: LiveKit retries an APIError
+                raise APIConnectionError(f"STT connection lost: {e!r}") from e
             finally:
                 sender.cancel()
+            # closed without "done": the caller would go unheard for the rest of the call
+            raise APIConnectionError("STT closed the stream")
