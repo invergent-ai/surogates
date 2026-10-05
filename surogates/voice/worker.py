@@ -8,15 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from livekit.agents import (
-    Agent, AgentServer, AgentSession, AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip, JobContext, JobProcess,
-)
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess
 from livekit.plugins import silero
 from redis.asyncio import Redis
 
@@ -25,8 +24,10 @@ from surogates.config import load_settings
 from surogates.voice.agent import BUSY, GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
+from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
 from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.stt import RoSTT
+from surogates.voice.text import asks_for_details
 from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
@@ -106,13 +107,52 @@ async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str, redis=
     await say_and_hang_up(ctx, bare, text, PhraseCache(redis, tts) if redis is not None else None)
 
 
+def follow_call(session: AgentSession, agent: Any, scape: Any) -> None:
+    """The background follows the call: who speaks, the agent thinking, the caller giving details."""
+    pen_for = {"said": None}
+
+    @session.on("agent_state_changed")
+    def _agent(ev) -> None:
+        scape.agent_speaking(ev.new_state == "speaking")
+        scape.agent_thinking(ev.new_state == "thinking")
+
+    @session.on("user_state_changed")
+    def _caller(ev) -> None:
+        speaking = ev.new_state == "speaking"
+        if speaking and agent.last_said != pen_for["said"]:
+            pen_for["said"] = agent.last_said  # once per question, however many breaths the answer takes
+            if asks_for_details(agent.last_said):
+                scape.writing()
+        scape.caller_speaking(speaking)
+
+
+async def start_background(ctx: JobContext, session: AgentSession, agent: Any, config: CallConfig,
+                           client: Any, cache: str) -> SoundscapePlayer | None:
+    """The call's background sound, if the agent has one. Never fails the call: no pack, no background."""
+    if config.sound.silent:
+        return None
+    try:
+        directory = await fetch_pack(client.get_voice_sound, Path(cache).expanduser(), config.sound)
+        if directory is None:
+            return None
+        pack = await asyncio.to_thread(Pack.load, directory, config.sound)
+        scape = Soundscape(pack, config.sound)
+        follow_call(session, agent, scape)
+        player = SoundscapePlayer(scape)
+        await player.start(ctx.room)
+        return player
+    except Exception:
+        log.warning("call %s: no background sound", ctx.room.name, exc_info=True)
+        return None
+
+
 async def entrypoint(ctx: JobContext) -> None:
     settings = load_settings()
     vs = settings.voice
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    call, tasks, tts, slots, tenant = None, set(), None, None, None
+    call, tasks, tts, slots, tenant, background = None, set(), None, None, None, None
     started = datetime.now(timezone.utc)
 
     async def report(outcome: str) -> None:
@@ -129,6 +169,8 @@ async def entrypoint(ctx: JobContext) -> None:
         # in this order: the call's session is closed while Redis and the DB are still open
         for task in list(tasks):
             task.cancel()
+        if background is not None:
+            await background.aclose()
         if call is not None:
             await call.end()
             await report("completed")
@@ -222,9 +264,13 @@ async def entrypoint(ctx: JobContext) -> None:
         await say_and_hang_up(ctx, session, GOODBYE, phrases)
 
     await session.start(agent=agent, room=ctx.room)
-    background = BackgroundAudioPlayer(thinking_sound=[AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5)])
-    await background.start(room=ctx.room, agent_session=session)
     fixed(session, phrases, config.greeting)
+
+    async def _background() -> None:  # alongside the greeting: a slow download never delays the call
+        nonlocal background
+        background = await start_background(ctx, session, agent, config, rt.client, vs.sounds_cache)
+
+    spawn(_background())
     spawn(time_limit())
 
 

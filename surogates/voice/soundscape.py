@@ -95,6 +95,7 @@ class Pack:
 
     rate: int
     level_dbfs: float
+    voice_dbfs: float = -20.0  # how loud our TTS voice is: every layer is placed relative to it
     beds: dict[str, np.ndarray] = field(default_factory=dict)
     events: dict[str, list[list[np.ndarray]]] = field(default_factory=dict)  # scene → kinds → variants
     actions: dict[str, list[np.ndarray]] = field(default_factory=dict)  # keys, click, pen, …
@@ -105,7 +106,7 @@ class Pack:
              decode: Callable[[Path, int], np.ndarray] = decode_av) -> Pack:
         """Only what ``settings`` uses; an unknown scene or hold loads nothing for it."""
         m = json.loads((directory / "manifest.json").read_text())
-        pack = cls(rate=rate, level_dbfs=float(m["level_dbfs"]))
+        pack = cls(rate=rate, level_dbfs=float(m["level_dbfs"]), voice_dbfs=float(m.get("voice_dbfs", -20.0)))
         if settings.silent:
             return pack
         get = lambda name: decode(directory / name, rate)  # noqa: E731
@@ -185,12 +186,12 @@ class Soundscape:
     """Mixes one call's background, 20 ms at a time. Driven by the call's events; pure and deterministic
     for a given seed, so the same code renders Studio's preview calls and the live line."""
 
-    def __init__(self, pack: Pack, settings: SoundSettings, *, voice_dbfs: float = -20.0,
+    def __init__(self, pack: Pack, settings: SoundSettings, *, voice_dbfs: float | None = None,
                  seed: int | None = None) -> None:
         self.pack, self.settings, self.rate = pack, settings, pack.rate
         self.n = pack.rate // 50
         self.rng = random.Random(seed)
-        self._base = voice_dbfs - pack.level_dbfs  # dB to bring a stored clip to the voice's level
+        self._base = (pack.voice_dbfs if voice_dbfs is None else voice_dbfs) - pack.level_dbfs  # dB to bring a stored clip to the voice's level
         self.t = 0
         self._voices: list[_Voice] = []
         self._last: dict[str, int] = {}

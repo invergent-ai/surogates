@@ -35,3 +35,18 @@ async def test_ops_trouble_is_logged_never_raised(caplog):
         with caplog.at_level(logging.WARNING):
             await client.report_voice_call(**CALL)  # must not raise: a hang-up never fails on reporting
     assert sum("SCL_1" in r.getMessage() for r in caplog.records) == 2
+
+
+async def test_the_sound_pack_is_downloaded_with_the_runtime_token():
+    import pytest
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers["authorization"]))
+        return httpx.Response(200, content=b"ogg") if request.url.path.endswith(".ogg") else httpx.Response(404)
+
+    client = PlatformClient(base_url="http://ops", token="rt-token", transport=httpx.MockTransport(handler))
+    assert await client.get_voice_sound("room-clinic-1a2b.ogg") == b"ogg"
+    assert seen == [("/api/voice/sounds/files/room-clinic-1a2b.ogg", "Bearer rt-token")]
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_voice_sound("gone.mp3")

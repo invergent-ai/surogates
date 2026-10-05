@@ -13,6 +13,7 @@ from typing import Any
 from livekit import rtc
 from livekit.agents import Agent, ModelSettings, StopResponse, llm, stt
 
+from surogates.voice.soundscape import SoundSettings
 from surogates.voice.text import caller_says_goodbye, is_echo, is_farewell, say_as, spoken_sentences
 
 GREETING_DEFAULT = "Bună ziua! Cu ce vă pot ajuta?"
@@ -43,6 +44,7 @@ class CallConfig:
     max_call_seconds: float = 600.0
     idle_ask_seconds: float = 30.0
     idle_hangup_seconds: float = 15.0
+    sound: SoundSettings = field(default_factory=SoundSettings)
 
     @classmethod
     def from_routing(cls, cfg: Any) -> CallConfig:
@@ -65,7 +67,8 @@ class CallConfig:
                    pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
                    max_call_seconds=seconds("max_call_seconds", 30, 3600),
                    idle_ask_seconds=seconds("idle_ask_seconds", 5, 300),
-                   idle_hangup_seconds=seconds("idle_hangup_seconds", 5, 300))
+                   idle_hangup_seconds=seconds("idle_hangup_seconds", 5, 300),
+                   sound=SoundSettings.from_routing(cfg.get("sound")))
 
 
 def silence(rate: int, seconds: float) -> rtc.AudioFrame:
@@ -79,6 +82,7 @@ class VoiceAgent(Agent):
         self.config = config
         self.recent: list[tuple[float, str]] = []  # (when, sentence) we spoke, for the echo check
         self.hangup_after_reply = False
+        self.last_said = ""  # the last sentence spoken: did it ask for something to write down?
 
     def _recent_said(self) -> list[str]:
         now = time.monotonic()
@@ -112,6 +116,7 @@ class VoiceAgent(Agent):
                 yield silence(tts.sample_rate, SENTENCE_PAUSE)
             said.append(sentence)
             self.recent.append((time.monotonic(), sentence))
+            self.last_said = sentence
             # async with: a barge-in closes the generator here, and the sentence's TTS request with it
             async with tts.synthesize(say_as(sentence, self.config.pronunciations)) as stream:
                 async for audio in stream:

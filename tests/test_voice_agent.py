@@ -48,3 +48,10 @@ async def test_our_own_voice_coming_back_never_reaches_turn_taking(monkeypatch):
 def test_only_text_pronunciations_are_spoken():
     cfg = CallConfig.from_routing({"pronunciations": {"Nvidia": None, "DAX": "Dax", "BET": 5, "": "x"}})
     assert dict(cfg.pronunciations) == {"DAX": "Dax"}  # None would have been said aloud as "None"
+
+
+def test_call_config_carries_the_background_sound():
+    from surogates.voice.soundscape import SoundSettings
+    cfg = CallConfig.from_routing({"sound": {"scene": "clinic", "room": "low", "hold": "piano"}})
+    assert cfg.sound == SoundSettings(scene="clinic", room="low", hold="piano")
+    assert CallConfig().sound.silent and CallConfig.from_routing({"sound": "loud"}).sound.silent
