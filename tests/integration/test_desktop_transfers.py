@@ -101,6 +101,13 @@ async def under_way(session_factory, device_id: UUID) -> bool:
 async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
     built_client, laptop_rig, link_url, session_factory, journal_dir,
 ):
+    """Throughput, and how long a small operation waits, before the header and on the link.
+
+    Before the header the app reads, decodes, hashes and journals the 50 MiB. Localhost
+    cannot exercise backpressure: nothing queues on it, so these bounds hold with or
+    without the sender's window and write gate. The sender's unit test in
+    desktop/test/transfers.test.ts is what pins those.
+    """
     rig = laptop_rig
     folder = journal_dir / "folder"
     folder.mkdir()
@@ -117,13 +124,13 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
 
         started = time.monotonic()
         reading = asyncio.create_task(rig.ops.run(read_of(rig, str(folder / "most.bin"))))
-        while not reading.done() and not await under_way(session_factory, rig.device_id):
-            await asyncio.sleep(0.01)
-        meanwhile = []
+        # Each small operation counts in the phase it was asked in.
+        before_header, on_link = [], []
         while not reading.done():
+            phase = on_link if on_link or await under_way(session_factory, rig.device_id) else before_header
             asked = time.monotonic()
             assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 30.0) == {"ok": True}
-            meanwhile.append(time.monotonic() - asked)
+            phase.append(time.monotonic() - asked)
         outcome = await reading
         elapsed = time.monotonic() - started
     finally:
@@ -140,8 +147,10 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
         f"\n50 MiB read in {elapsed:.2f} s ({MAX_READ_BYTES / 2**20 / elapsed:.1f} MiB/s), "
         f"{on_the_link:.2f} s of it from the header to the last chunk stored; "
         f"a small operation alone: median {sorted(alone)[2] * 1000:.0f} ms; "
-        f"during the transfer: {len(meanwhile)} answered, slowest {max(meanwhile) * 1000:.0f} ms",
+        f"before the header: {len(before_header)} answered, slowest {max(before_header, default=0) * 1000:.0f} ms; "
+        f"on the link: {len(on_link)} answered, slowest {max(on_link, default=0) * 1000:.0f} ms",
     )
     # Loose bounds: they catch a regression, not this machine's speed.
     assert elapsed < 60
-    assert meanwhile and max(meanwhile) < 10
+    assert before_header and max(before_header) < 10
+    assert on_link and max(on_link) < 10
