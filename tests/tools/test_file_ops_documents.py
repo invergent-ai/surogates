@@ -242,13 +242,16 @@ async def test_a_resumed_device_document_read_neither_finds_nor_keeps_a_cache_en
 ) -> None:
     parsed = counting(monkeypatch)
     folder, runner = laptop(tmp_path)
-    first = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one")
-    await _read_file_handler({"path": "p.pdf"}, workspace_io=first)
     resumed = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one", caches_documents=False)
     await _read_file_handler({"path": "p.pdf"}, workspace_io=resumed)
-    # It asked for its read, as its first run did, and kept nothing beside the first read's entry.
-    assert runner.kinds.count("read") == 2
-    assert len(parsed) == 2
+    # On an empty cache: it keeps nothing.
+    assert list(isolated_document_cache._root.glob("*.md")) == []
+    first = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one")
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=first)
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=resumed)
+    # Beside the first run's entry: it finds nothing, and asks for its read, as its first run did.
+    assert runner.kinds.count("read") == 3
+    assert len(parsed) == 3
     assert len(list(isolated_document_cache._root.glob("*.md"))) == 1
 
 
