@@ -14,6 +14,7 @@ from surogates.devices.sandbox import (
     DEVICE_SANDBOX_ID,
     NOT_AVAILABLE,
     DeviceCall,
+    device_call_for,
     enter_device_session,
     leave_device_session,
     refusal,
@@ -180,3 +181,19 @@ async def test_arguments_that_are_not_an_object_are_an_error_not_a_crash(laptop,
     reply = json.loads(await laptop.call.execute("any", "read_file", arguments))
     assert "JSON object" in reply["error"]
     assert laptop.runner.kinds == []
+
+
+async def test_a_call_names_its_computer_and_a_resumed_one_skips_the_document_cache():
+    session = device_session()
+
+    def call(**resumed) -> DeviceCall:
+        return device_call_for(
+            session, tools=ToolRegistry(), invocation_id="1:call_1", lease_token=None,
+            session_factory=None, redis=None, **resumed,
+        )
+
+    computer = f"device:{session.config['execution']['device_id']}"
+    assert (call().workspace_io.identity, call().workspace_io.caches_documents) == (computer, True)
+    # A hit would ask the computer for less than the first run did, and the call would read as interrupted.
+    resumed = call(resumed=True).workspace_io
+    assert (resumed.identity, resumed.caches_documents) == (computer, False)

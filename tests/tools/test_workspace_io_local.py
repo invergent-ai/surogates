@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -58,12 +59,35 @@ async def test_unbound_resolve_is_absolute_from_the_cwd(tmp_path, monkeypatch):
 async def test_stat(wio, root):
     (root / "f.txt").write_bytes(b"abc")
     (root / "d").mkdir()
+    st = os.stat(root / "f.txt")
     assert await wio.stat(str(root / "f.txt")) == FileStat(
-        is_dir=False, size=3, mtime=os.stat(root / "f.txt").st_mtime,
+        is_dir=False, size=3, mtime=st.st_mtime,
+        revision=f"{st.st_dev}:{st.st_ino}:3:{st.st_mtime_ns}:{st.st_ctime_ns}",
     )
     assert (await wio.stat(str(root / "d"))).is_dir
     assert await wio.stat(str(root / "missing")) is None
     assert await wio.stat(str(root / "nul\x00byte")) is None
+
+
+async def test_a_revision_changes_with_the_file_even_when_its_size_and_mtime_are_put_back(wio, root):
+    path = root / "f.txt"
+    path.write_bytes(b"abc")
+    before = await wio.stat(str(path))
+    st = os.stat(path)
+    # Past the filesystem's timestamp tick, so the ctime moves.
+    time.sleep(0.02)
+    path.write_bytes(b"xyz")
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    after = await wio.stat(str(path))
+    assert (after.size, after.mtime) == (before.size, before.mtime)
+    assert after.revision != before.revision
+
+
+async def test_a_write_lands_whatever_revision_it_expects(wio, root):
+    # The cloud writes as it always has.
+    (root / "f.txt").write_text("old")
+    await wio.write(str(root / "f.txt"), b"new", expected_revision="0:0:0:0:0")
+    assert (root / "f.txt").read_bytes() == b"new"
 
 
 async def test_read_whole_or_head(wio, root):

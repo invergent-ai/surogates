@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.builtin.file_ops import _read_file_handler
+from surogates.tools.utils.document_cache import DocumentCache
+from surogates.tools.workspace_io import LocalWorkspaceIO
+from tests.fake_laptop import InProcessRunner
 from tests.tools.fixtures.build_documents import (
     build_minimal_docx,
     build_minimal_pdf,
@@ -174,6 +180,108 @@ async def test_document_cache_hit_skips_reparse(
     # Different window — must hit the cache, not re-parse.
     await _read_file_handler({"path": str(pdf), "offset": 10, "limit": 5})
     assert calls["n"] == 1
+
+
+def counting(monkeypatch) -> list[bytes]:
+    """Each document parsed, as the bytes the parser got: a page of 51 lines."""
+    from surogates.tools.builtin import file_ops
+
+    parsed: list[bytes] = []
+
+    async def parse(path: Path) -> str:
+        parsed.append(path.read_bytes())
+        return "# header\n" + "\n".join(f"line {i}" for i in range(50)) + "\n"
+
+    monkeypatch.setattr(file_ops, "_parse_document_to_text", parse)
+    return parsed
+
+
+def laptop(tmp_path: Path) -> tuple[Path, InProcessRunner]:
+    folder = (tmp_path / "laptop").resolve()
+    folder.mkdir()
+    (folder / "p.pdf").write_bytes(b"%PDF placeholder")
+    return folder, InProcessRunner(LocalWorkspaceIO(str(folder)))
+
+
+@pytest.mark.asyncio
+async def test_a_device_documents_next_page_moves_nothing_until_it_changes(
+    tmp_path: Path, isolated_document_cache, monkeypatch,
+) -> None:
+    parsed = counting(monkeypatch)
+    folder, runner = laptop(tmp_path)
+    wio = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one")
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=wio)
+    page = json.loads(await _read_file_handler({"path": "p.pdf", "offset": 10, "limit": 5}, workspace_io=wio))
+    assert page["content"] == "".join(f"line {i}\n" for i in range(8, 13))
+    # Found by the computer, its file and its revision: the second page asked only where it is and its stat.
+    assert runner.kinds == ["resolve", "stat", "read", "resolve", "stat"]
+    assert parsed == [b"%PDF placeholder"]
+    # Another revision is another document.
+    (folder / "p.pdf").write_bytes(b"%PDF placeholder, changed")
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=wio)
+    assert runner.kinds[5:] == ["resolve", "stat", "read"]
+    assert parsed == [b"%PDF placeholder", b"%PDF placeholder, changed"]
+
+
+@pytest.mark.asyncio
+async def test_a_device_document_is_found_in_the_cache_by_that_device_only(
+    tmp_path: Path, isolated_document_cache, monkeypatch,
+) -> None:
+    parsed = counting(monkeypatch)
+    folder, runner = laptop(tmp_path)
+    for device in ("device:one", "device:two"):
+        wio = DeviceWorkspaceIO(runner, root=str(folder), identity=device)
+        await _read_file_handler({"path": "p.pdf"}, workspace_io=wio)
+    assert runner.kinds.count("read") == 2
+    assert len(parsed) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_device_document_read_neither_finds_nor_keeps_a_cache_entry(
+    tmp_path: Path, isolated_document_cache, monkeypatch,
+) -> None:
+    parsed = counting(monkeypatch)
+    folder, runner = laptop(tmp_path)
+    resumed = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one", caches_documents=False)
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=resumed)
+    # On an empty cache: it keeps nothing.
+    assert list(isolated_document_cache._root.glob("*.md")) == []
+    first = DeviceWorkspaceIO(runner, root=str(folder), identity="device:one")
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=first)
+    await _read_file_handler({"path": "p.pdf"}, workspace_io=resumed)
+    # Beside the first run's entry: it finds nothing, and asks for its read, as its first run did.
+    assert runner.kinds.count("read") == 3
+    assert len(parsed) == 3
+    assert len(list(isolated_document_cache._root.glob("*.md"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_document_cache_hit_marks_its_entry_used_now_and_leaves_no_lock_file(tmp_path: Path) -> None:
+    cache = DocumentCache(root=tmp_path / "doc-cache")
+
+    async def load() -> str:
+        return "markdown"
+
+    await cache.get_or_load("a", load)
+    [entry] = cache._root.glob("*.md")
+    # An atime ahead of the ctime, which a relatime or noatime mount leaves as it is: only the cache moves it.
+    os.utime(entry, ns=(time.time_ns() + 3_600 * 10**9, entry.stat().st_mtime_ns))
+    before = time.time_ns()
+    assert await cache.get_or_load("a", load) == "markdown"
+    # Eviction takes the oldest atime, so a document being paged is not the first to go.
+    assert before <= entry.stat().st_atime_ns <= time.time_ns()
+    assert [p.suffix for p in cache._root.iterdir()] == [".md"]
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_document_keeps_its_cache_key(tmp_path: Path, isolated_document_cache, monkeypatch) -> None:
+    counting(monkeypatch)
+    pdf = tmp_path / "p.pdf"
+    pdf.write_bytes(b"%PDF placeholder")
+    await _read_file_handler({"path": str(pdf)})
+    st = pdf.stat()
+    key = hashlib.sha256(f"{pdf.resolve()}|{st.st_mtime_ns}|{st.st_size}|.pdf".encode()).hexdigest()
+    assert [entry.name for entry in isolated_document_cache._root.glob("*.md")] == [f"{key}.md"]
 
 
 @pytest.mark.asyncio

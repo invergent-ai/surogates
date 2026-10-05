@@ -567,6 +567,10 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
+    # Keys are this host's paths: a cache keys a file by the file itself.
+    identity: str | None = None
+    caches_documents: bool = True
+
     def __init__(self, workspace_path: str | None = None) -> None:
         self.root = workspace_path or None
 
@@ -587,6 +591,8 @@ class LocalWorkspaceIO:
             return None
         return FileStat(
             is_dir=stat_module.S_ISDIR(st.st_mode), size=st.st_size, mtime=st.st_mtime,
+            # The ctime moves with every change, and utime cannot set it back.
+            revision=f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}",
         )
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
@@ -599,7 +605,8 @@ class LocalWorkspaceIO:
         with open(key, "rb") as fh:
             return _page(fh, encoding, offset, limit, max_bytes)
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        # expected_revision is not checked: cloud behaviour does not change.
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         tmp = key + ".tmp"
         try:

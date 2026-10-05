@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
-  statSync, symlinkSync, writeFileSync,
+  type BigIntStats, chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
+  statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,12 +11,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
-import { BAD_PAGE, type Context, perform } from "../src/files/operations.js";
+import { BAD_PAGE, type Context, perform, revisionOf } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
 // Each of `next`, while there are any, caps one read instead; a 0 finds the file's end there.
 const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
+// Run once as the file helper's next write begins: another writer, changing a file meanwhile.
+const meanwhile = vi.hoisted(() => ({ run: null as (() => void) | null }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
@@ -26,7 +28,13 @@ vi.mock("node:fs", async (importOriginal) => {
     const cap = reads.next.shift() ?? reads.cap;
     return cap === 0 ? 0 : fs.readSync(fd, buffer, offset, Math.min(length, cap), position);
   };
-  return { ...fs, readSync, default: { ...fs, readSync } };
+  const writeSync = (fd: number, buffer: NodeJS.ArrayBufferView, offset?: number) => {
+    const run = meanwhile.run;
+    meanwhile.run = null;
+    run?.();
+    return fs.writeSync(fd, buffer, offset);
+  };
+  return { ...fs, readSync, writeSync, default: { ...fs, readSync, writeSync } };
 });
 
 let base: string;
@@ -35,6 +43,7 @@ let context: Context;
 
 const run = (kind: string, args: Record<string, unknown>) => perform(kind, args, context, new AbortController().signal);
 const b64 = (text: string | Buffer) => Buffer.from(text).toString("base64");
+const revision = async (key: string) => ((await run("stat", { key })) as { ok: { revision: string } }).ok.revision;
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "operations-")));
@@ -61,9 +70,9 @@ describe("resolve and check_write", () => {
 });
 
 describe("stat", () => {
-  it("answers exactly is_dir, size and mtime", async () => {
+  it("answers exactly is_dir, size, mtime and revision", async () => {
     const answer = await run("stat", { key: `${folder}/a.txt` });
-    expect(Object.keys((answer as { ok: object }).ok).sort()).toEqual(["is_dir", "mtime", "size"]);
+    expect(Object.keys((answer as { ok: object }).ok).sort()).toEqual(["is_dir", "mtime", "revision", "size"]);
     expect(answer).toMatchObject({ ok: { is_dir: false, size: 6 } });
     const { mtime } = (answer as { ok: { mtime: number } }).ok;
     expect(mtime).toBeCloseTo(statSync(join(folder, "a.txt")).mtimeMs / 1000, 3);
@@ -84,6 +93,30 @@ describe("stat", () => {
     execFileSync("touch", ["-d", time, join(folder, "a.txt")]);
     const answer = (await run("stat", { key: `${folder}/a.txt` })) as { ok: { mtime: number } };
     expect(answer.ok.mtime).toBe(expected);
+  });
+
+  it("answers the revision as the cloud makes it: dev, inode, size, and mtime and ctime in nanoseconds", async () => {
+    const key = join(folder, "a.txt");
+    const shown = execFileSync("stat", ["-c", "%d:%i:%s:%.9Y:%.9Z", key], { env: { ...process.env, LC_ALL: "C" } });
+    expect(await revision(key)).toBe(shown.toString().trim().replaceAll(".", ""));
+  });
+
+  it("answers another revision once the file changes, even with its size and mtime put back", async () => {
+    const key = join(folder, "a.txt");
+    utimesSync(key, 1_700_000_000, 1_700_000_000);
+    const before = await revision(key);
+    // Past the filesystem's timestamp tick, so the ctime moves.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(key, "ALPHA\n");
+    utimesSync(key, 1_700_000_000, 1_700_000_000);
+    expect(statSync(key, { bigint: true }).mtimeNs).toBe(1_700_000_000_000_000_000n);
+    expect(await revision(key)).not.toBe(before);
+  });
+
+  it("answers an inode at or above 2^63 unsigned, as Python's st_ino is", () => {
+    // Node fills BigIntStats from a signed array: mergerfs hashes and SMB file ids read as negative there.
+    const st = { dev: 66313n, ino: -2n, size: 6n, mtimeNs: -1n, ctimeNs: 7n } as BigIntStats;
+    expect(revisionOf(st)).toBe("66313:18446744073709551614:6:-1:7");
   });
 
   it("answers null for anything it cannot stat", async () => {
@@ -112,6 +145,19 @@ describe("read", () => {
     });
     const head = await run("read", { key: `${folder}/huge.bin`, max_bytes: 8192 });
     expect(Buffer.from((head as { ok: string }).ok, "base64").length).toBe(8192);
+  });
+
+  it("answers a file over 50 MiB asked for whole as too large from its size, before reading a byte of it", async () => {
+    // Sparse: 2 GiB costs nothing to make.
+    writeFileSync(join(folder, "huge.bin"), "");
+    truncateSync(join(folder, "huge.bin"), 2 * 1024 ** 3);
+    reads.calls = 0;
+    for (const max_bytes of [null, MAX_READ_BYTES + 1]) {
+      expect(await run("read", { key: `${folder}/huge.bin`, max_bytes })).toEqual({
+        error: { type: "os", code: "EFBIG", message: READ_TOO_LARGE },
+      });
+    }
+    expect(reads.calls).toBe(0);
   });
 
   it("keeps only the bytes each short read returned", async () => {
@@ -373,6 +419,48 @@ describe("write", () => {
     });
     expect(await run("write", { key: `${base}/outside/o.txt`, data: b64("x") })).toMatchObject({ error: { type: "sandbox" } });
     expect(readFileSync(join(base, "outside", "o.txt"), "utf8")).toBe("outside\n");
+  });
+
+  it("writes only while the file is at the revision the write expects, and makes nothing otherwise", async () => {
+    const key = `${folder}/a.txt`;
+    const seen = await revision(key);
+    expect(await run("write", { key, data: b64("two\n"), expected_revision: seen })).toEqual({ ok: null });
+    expect(readFileSync(key, "utf8")).toBe("two\n");
+    // As the cloud's reference laptop words it (tests/fake_laptop.py's CONFLICT).
+    expect(await run("write", { key, data: b64("three\n"), expected_revision: seen })).toEqual({
+      error: {
+        type: "conflict",
+        message: `${key} changed on this computer after it was read, so it was not written. Read it again, then make the change again`,
+      },
+    });
+    expect(readFileSync(key, "utf8")).toBe("two\n");
+    for (const expected of [seen, 5]) {
+      expect(await run("write", { key: `${folder}/gone/n.txt`, data: b64("x"), expected_revision: expected })).toMatchObject({
+        error: { type: "conflict" },
+      });
+    }
+    expect(readdirSync(folder).sort()).toEqual(["a.txt", "link-in", "sub"]);
+  });
+
+  it("does not land over a change made while its temp file was written", async () => {
+    const key = `${folder}/a.txt`;
+    const seen = await revision(key);
+    // A chat bound to a folder nested in this one has its own helper, and an editor can save too.
+    meanwhile.run = () => writeFileSync(key, "theirs\n");
+    try {
+      expect(await run("write", { key, data: b64("ours\n"), expected_revision: seen })).toMatchObject({
+        error: { type: "conflict" },
+      });
+    } finally {
+      meanwhile.run = null;
+    }
+    expect(readFileSync(key, "utf8")).toBe("theirs\n");
+    expect(readdirSync(folder).sort()).toEqual(["a.txt", "link-in", "sub"]);
+  });
+
+  it("writes whatever is there when the write expects no revision", async () => {
+    expect(await run("write", { key: `${folder}/a.txt`, data: b64("x"), expected_revision: null })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "a.txt"), "utf8")).toBe("x");
   });
 
   it("writes exactly 1 MiB", async () => {

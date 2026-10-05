@@ -9,12 +9,13 @@ enforces its rules; the worker never touches the folder.
   bind            folder, nonce                                 null
   resolve         path                                          key (str)
   check_write     path                                          refusal (str) or null
-  stat            key                                           {is_dir, size, mtime} or null
+  stat            key                                           {is_dir, size, mtime, revision} or null
   read            key, max_bytes (int or null)                  data (base64), or
                                                                 {"transfer": {size, sha256}}
   read_lines      key, encoding, offset, limit, max_bytes       {data (base64), total_lines}
   write           key, data (base64), or                        null
-                  key, transfer {size, sha256}
+                  key, transfer {size, sha256};
+                  and expected_revision, when the call has one
   delete          key                                           null
   list_dir        key                                           [name]
   ripgrep         key, mode, pattern, glob, context             stdout (str)
@@ -37,6 +38,15 @@ recorded the binding; it refuses one it cannot match with
 app bound, or one created under it, and runs in the folder the app recorded,
 whatever the request says.
 
+A revision is "dev:ino:size:mtime_ns:ctime_ns", each the file's stat field in
+decimal (dev and ino unsigned), as LocalWorkspaceIO.stat makes it.  The worker
+never reads it: it compares it and hands it back as a write's
+expected_revision.  A write that names one replaces the file only while it is
+at that revision; otherwise, the file gone included, it is answered with a
+conflict and nothing is written.  An expected_revision absent or null is no
+expectation: the write replaces whatever is there.  A write over
+MAX_WRITE_BYTES is answered with EFBIG before its revision is checked.
+
 read_lines is a page of a text file, as WorkspaceIO.read_lines defines it
 (surogates.tools.workspace_io.base): encoding is one of the six codecs
 read_file picks, offset counts lines from 1, limit is any integer and selects
@@ -51,6 +61,8 @@ An error names the exception the worker raises again:
                                           message is str(exc) without "[Errno N] "
   {"type": "ripgrep", "message"}          RipgrepError
   {"type": "value", "message"}            ValueError, e.g. a NUL byte in a path
+  {"type": "conflict", "message"}         RevisionConflict: the file is not at the
+                                          revision the write expected
   any other type                          DeviceOperationError(message), including
                                           "revoked" (local access was revoked),
                                           "cancelled" (the session stopped it before
@@ -108,7 +120,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RipgrepMode, RunResult
+from surogates.tools.workspace_io.base import (
+    FileStat,
+    LinePage,
+    RevisionConflict,
+    RipgrepError,
+    RipgrepMode,
+    RunResult,
+)
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_READ_BYTES = 50 * 1024 * 1024
@@ -170,15 +189,21 @@ def _raise(error: dict[str, Any]) -> None:
         raise RipgrepError(message)
     if kind == "value":
         raise ValueError(message)
+    if kind == "conflict":
+        raise RevisionConflict(message)
     raise DeviceOperationError(message)
 
 
 class DeviceWorkspaceIO:
     """WorkspaceIO for a session's folder on the user's computer."""
 
-    def __init__(self, runner: OperationRunner, *, root: str) -> None:
+    def __init__(
+        self, runner: OperationRunner, *, root: str, identity: str | None = None, caches_documents: bool = True,
+    ) -> None:
         self._runner = runner
         self.root = root
+        self.identity = identity
+        self.caches_documents = caches_documents
 
     async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:
@@ -200,7 +225,12 @@ class DeviceWorkspaceIO:
 
     async def stat(self, key: str) -> FileStat | None:
         value = await self._call("stat", key=key)
-        return None if value is None else FileStat(**value)
+        if value is None:
+            return None
+        # Writes check it and the document cache keys by it: a stat without one is no stat.
+        if not isinstance(value, dict) or not isinstance(value.get("revision"), str):
+            raise DeviceOperationError("The computer returned an invalid stat")
+        return FileStat(**value)
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         data = await self._call("read", key=key, max_bytes=max_bytes)
@@ -237,9 +267,11 @@ class DeviceWorkspaceIO:
             pass
         raise DeviceOperationError("The computer returned an invalid page")
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
+        # Only when there is one: a write that expects nothing asks for what it always did.
+        expected = {} if expected_revision is None else {"expected_revision": expected_revision}
         if len(data) <= MAX_PAYLOAD_BYTES:
-            await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"))
+            await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"), **expected)
             return
         if len(data) > MAX_WRITE_BYTES:
             raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
@@ -247,7 +279,7 @@ class DeviceWorkspaceIO:
         # for the same operation.  Up to 50 MiB: hashed off the event loop the
         # worker's other sessions share.
         transfer = await asyncio.to_thread(_transfer_for, data)
-        await self._call("write", payload=data, key=key, transfer=transfer)
+        await self._call("write", payload=data, key=key, transfer=transfer, **expected)
 
     async def delete(self, key: str) -> None:
         await self._call("delete", key=key)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import hashlib
@@ -27,8 +28,8 @@ from surogates.devices.workspace import (
 )
 from surogates.tools.builtin import file_ops
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
-from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RipgrepError
-from tests.fake_laptop import BAD_PAGE, InProcessRunner, perform
+from surogates.tools.workspace_io import FileStat, LinePage, LocalWorkspaceIO, RevisionConflict, RipgrepError
+from tests.fake_laptop import BAD_PAGE, CONFLICT, InProcessRunner, perform
 
 
 @pytest.fixture
@@ -53,7 +54,11 @@ async def test_files_round_trip_through_operations(wio, root):
     assert (root / "a" / "b.txt").read_bytes() == b"\x00\xffbytes"
     assert await wio.read(key) == b"\x00\xffbytes"
     assert await wio.read(key, max_bytes=2) == b"\x00\xff"
-    assert await wio.stat(key) == FileStat(is_dir=False, size=7, mtime=os.stat(key).st_mtime)
+    st = os.stat(key)
+    assert await wio.stat(key) == FileStat(
+        is_dir=False, size=7, mtime=st.st_mtime,
+        revision=f"{st.st_dev}:{st.st_ino}:7:{st.st_mtime_ns}:{st.st_ctime_ns}",
+    )
     assert await wio.stat(str(root / "missing")) is None
     assert await wio.list_dir(str(root / "a")) == ["b.txt"]
     await wio.delete(key)
@@ -451,3 +456,82 @@ async def test_a_bool_offset_or_limit_reads_as_the_cloud_reads_it(wio, root):
     page = await wio.read_lines(str(root / "a.txt"), **asked)
     assert page == LinePage(b"one\n", 3)
     assert page == await LocalWorkspaceIO(str(root)).read_lines(str(root / "a.txt"), **asked)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{"is_dir": False, "size": 1, "mtime": 0.0, "revision": None},
+     {"is_dir": False, "size": 1, "mtime": 0.0, "revision": 5},
+     {"is_dir": False, "size": 1, "mtime": 0.0}],
+    ids=["null revision", "number", "no revision"],
+)
+async def test_a_stat_without_a_revision_is_an_error_not_a_file_no_write_can_check(value):
+    with pytest.raises(DeviceOperationError, match="returned an invalid stat"):
+        await DeviceWorkspaceIO(Answering({"ok": value}), root="/").stat("/f")
+
+
+async def test_a_write_lands_only_on_the_revision_it_expects(wio, root):
+    key = str(root / "a.txt")
+    (root / "a.txt").write_text("one\n")
+    seen = (await wio.stat(key)).revision
+    await wio.write(key, b"two\n", expected_revision=seen)
+    assert (root / "a.txt").read_text() == "two\n"
+    # The file is at another revision now: the same expectation writes nothing.
+    with pytest.raises(RevisionConflict) as raised:
+        await wio.write(key, b"three\n", expected_revision=seen)
+    assert str(raised.value) == CONFLICT.format(key)
+    assert (root / "a.txt").read_text() == "two\n"
+    assert os.listdir(root) == ["a.txt"]
+
+
+async def test_a_write_that_expects_a_file_that_is_gone_makes_nothing(wio, root):
+    key = str(root / "gone" / "a.txt")
+    with pytest.raises(RevisionConflict):
+        await wio.write(key, b"x", expected_revision="1:2:3:4:5")
+    assert os.listdir(root) == []
+
+
+async def test_a_write_too_large_for_a_frame_checks_its_revision_too(wio, root):
+    key = str(root / "big.bin")
+    (root / "big.bin").write_bytes(b"old")
+    stale = (await wio.stat(key)).revision
+    (root / "big.bin").write_bytes(b"newer")
+    with pytest.raises(RevisionConflict):
+        await wio.write(key, os.urandom(MAX_PAYLOAD_BYTES + 1), expected_revision=stale)
+    assert (root / "big.bin").read_bytes() == b"newer"
+
+
+async def test_two_writes_on_one_revision_land_once(wio, root):
+    key = str(root / "a.txt")
+    (root / "a.txt").write_text("one\n")
+    seen = (await wio.stat(key)).revision
+    writes = [b"first\n", b"second\n"]
+    outcomes = await asyncio.gather(
+        *(wio.write(key, data, expected_revision=seen) for data in writes), return_exceptions=True,
+    )
+    [landed] = [data for data, outcome in zip(writes, outcomes) if outcome is None]
+    assert [type(outcome) for outcome in outcomes if outcome is not None] == [RevisionConflict]
+    assert (root / "a.txt").read_bytes() == landed
+
+
+async def test_a_writes_expected_revision_goes_beside_its_data_or_its_transfer(root):
+    runner = Recording()
+    wio = DeviceWorkspaceIO(runner, root=str(root))
+    data = os.urandom(MAX_PAYLOAD_BYTES + 1)
+    await wio.write(str(root / "big.bin"), data, expected_revision="1:2:3:4:5")
+    await wio.write(str(root / "small.bin"), b"x", expected_revision="6:7:8:9:10")
+    assert runner.asked == [
+        ("write", {"key": str(root / "big.bin"), "transfer": {
+            "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+        }, "expected_revision": "1:2:3:4:5"}, data),
+        ("write", {"key": str(root / "small.bin"), "data": "eA==", "expected_revision": "6:7:8:9:10"}, None),
+    ]
+
+
+async def test_a_conflict_is_an_os_error_of_its_own(root):
+    wio = DeviceWorkspaceIO(Answering({"error": {"type": "conflict", "message": "changed"}}), root=str(root))
+    with pytest.raises(RevisionConflict) as raised:
+        await wio.write(str(root / "a.txt"), b"x", expected_revision="1:2:3:4:5")
+    # An OSError, so a V4A patch reports it as that file's error and goes on with the others.
+    assert isinstance(raised.value, OSError) and raised.value.errno is None
+    assert str(raised.value) == "changed"

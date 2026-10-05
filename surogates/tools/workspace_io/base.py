@@ -32,11 +32,23 @@ RipgrepMode = Literal["files", "count", "json"]
 
 @dataclass(frozen=True, slots=True)
 class FileStat:
-    """What a handler may know about a file without reading it."""
+    """What a handler may know about a file without reading it.
+
+    ``revision`` names this version of the file, opaquely, from its stat:
+    device, inode, size, mtime and ctime.  Another file renamed onto its path
+    and a change of size give another.  So does any other change to its
+    content or metadata (an mtime put back, chmod, a new hard link, an xattr)
+    made after the filesystem's timestamp tick.  A same-size change in place
+    within one tick keeps it, and that tick can be seconds on FAT or HFS+; on
+    vfat the ctime does not track changes.  A network folder whose attribute
+    cache answers the stat can keep it for that cache's timeout.  Handlers
+    only compare it and hand it back to :meth:`WorkspaceIO.write`.
+    """
 
     is_dir: bool
     size: int
     mtime: float
+    revision: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +72,13 @@ class RipgrepError(RuntimeError):
     """ripgrep is missing, or exited 2+ with no output (exit 1 only means no matches)."""
 
 
+class RevisionConflict(OSError):
+    """The file is not at the revision a write expected, so it was not written.
+
+    An OSError, so a handler that reports each file's failure reports this one too.
+    """
+
+
 class WorkspaceIO(Protocol):
     """Raw workspace operations.  Every rule about using them stays in the handlers."""
 
@@ -69,6 +88,21 @@ class WorkspaceIO(Protocol):
     Not a key: it is not resolved, so it may differ from the prefix of keys.
     Handlers use it only to tell whether a workspace is bound, never to compare
     with or build keys; :meth:`resolve` does that.
+    """
+
+    identity: str | None
+    """Whose files the keys name, for a cache that outlives the call: ``device:<id>``.
+
+    A cache then keys a file by this, its key and its revision, and finds it
+    before reading it.  None keys it by the file on this host, as the cloud
+    does.
+    """
+
+    caches_documents: bool
+    """Whether ``read_file`` may find or keep a document's parse in the cache.
+
+    False for a call a worker resumes on a computer: a hit would skip a read
+    its first run asked for, and that call would read as interrupted.
     """
 
     # -- files -----------------------------------------------------------
@@ -116,10 +150,13 @@ class WorkspaceIO(Protocol):
         same lines as the whole file does.  Raises OSError as :meth:`read` does.
         """
 
-    async def write(self, key: str, data: bytes) -> None:
+    async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         """Replace the file with *data* atomically, creating parent directories.
 
-        An existing file keeps its permission bits.  Raises OSError.
+        An existing file keeps its permission bits.  *expected_revision* is the
+        :attr:`FileStat.revision` a stat in the same call gave: a workspace that
+        checks it raises :class:`RevisionConflict` and writes nothing when the
+        file is at another revision, or gone.  Raises OSError.
         """
 
     async def delete(self, key: str) -> None:

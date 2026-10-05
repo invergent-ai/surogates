@@ -1,20 +1,24 @@
 // The file operations, as surogates/devices/workspace.py defines them and the
 // cloud's LocalWorkspaceIO does them, run by the file helper inside the folder's
-// sandbox. Each is synchronous fs work, so two changes to one path never
-// interleave; only ripgrep waits on a process.
+// sandbox. Each is synchronous fs work, so one helper's changes to a path never
+// interleave; only ripgrep waits on a process. One helper holds a folder at a
+// time, but a chat bound to a folder nested inside another chat's is a second
+// writer there, as an editor is. So a write that expects a revision checks it
+// before it makes anything, and again just before its rename, which leaves
+// another writer only microseconds.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync,
-  renameSync, type Stats, statSync, unlinkSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
+  readdirSync, readSync, renameSync, type Stats, statSync, unlinkSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
+  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
   OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
@@ -109,6 +113,21 @@ function textOrNull(args: Record<string, unknown>, name: string): string | null 
   return args[name] === null ? null : text(args, name);
 }
 
+// This version of the file, as LocalWorkspaceIO.stat names it (surogates/tools/workspace_io/local.py):
+// the ctime moves with every change, and utimes cannot set it back. dev and ino are unsigned there, and
+// Node reads them from a signed array, so an inode at or above 2^63 is put back to the number Python gives.
+export const revisionOf = (st: BigIntStats): string =>
+  `${BigInt.asUintN(64, st.dev)}:${BigInt.asUintN(64, st.ino)}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+
+// The file's revision now, or null when it cannot be stat'ed.
+function revisionAt(key: string): string | null {
+  try {
+    return revisionOf(statSync(key, { bigint: true }));
+  } catch {
+    return null;
+  }
+}
+
 function stat(args: Record<string, unknown>, { folder }: Context): unknown {
   try {
     const st = statSync(keyInFolder(folder, text(args, "key")), { bigint: true });
@@ -120,7 +139,10 @@ function stat(args: Record<string, unknown>, { folder }: Context): unknown {
       seconds -= 1n;
       nanoseconds += 1_000_000_000n;
     }
-    return { is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9 };
+    return {
+      is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
+      revision: revisionOf(st),
+    };
   } catch {
     return null;
   }
@@ -140,7 +162,8 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
   const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
   try {
-    regular(fd, key);
+    // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
+    if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
     // In pieces, as far as the file goes: a small file costs one piece, not the cap.
     const pieces: Buffer[] = [];
     let size = 0;
@@ -294,6 +317,12 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
+  // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
+  const expected = args.expected_revision;
+  const check = () => {
+    if (expected !== undefined && expected !== null && revisionAt(key) !== expected) throw conflict(key);
+  };
+  check();
   const parent = dirname(key);
   makeDirs(parent);
   // The rename replaces the name and never opens the file, so a file this user
@@ -327,6 +356,8 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
     } finally {
       io(key, () => closeSync(fd));
     }
+    // Again, now that the temp file is whole: another writer may have changed the file while it was written.
+    check();
     io(key, () => renameSync(temporary, key));
   } catch (error) {
     try {
