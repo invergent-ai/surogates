@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -24,7 +25,7 @@ from surogates.config import load_settings
 from surogates.voice.agent import BUSY, GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UNAVAILABLE, CallConfig, VoiceAgent
 from surogates.voice.capacity import CallSlots
 from surogates.voice.llm import SurogatesLLM
-from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions
+from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions, normalize_caller
 from surogates.voice.stt import RoSTT
 from surogates.voice.tts import PhraseCache, RoTTS
 
@@ -111,7 +112,18 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    call, tasks, tts, slots = None, set(), None, None
+    call, tasks, tts, slots, tenant = None, set(), None, None, None
+    started = datetime.now(timezone.utc)
+
+    async def report(outcome: str) -> None:
+        """Tell ops about this call (recorded now, charged later). Never raises."""
+        ended = datetime.now(timezone.utc)
+        await rt.client.report_voice_call(
+            call_id=info.call_id, agent_id=tenant["agent_id"], number=info.called,
+            caller=call.caller if call is not None else normalize_caller(info.caller),
+            session_id=str(call.session_id) if call is not None else None,
+            started_at=started.isoformat(), ended_at=ended.isoformat(),
+            seconds=int((ended - started).total_seconds()), outcome=outcome)
 
     async def cleanup() -> None:
         # in this order: the call's session is closed while Redis and the DB are still open
@@ -119,6 +131,7 @@ async def entrypoint(ctx: JobContext) -> None:
             task.cancel()
         if call is not None:
             await call.end()
+            await report("completed")
         if tts is not None:
             await tts.aclose()
         if slots is not None:
@@ -140,6 +153,7 @@ async def entrypoint(ctx: JobContext) -> None:
     held = CallSlots(rt.redis, vs.max_concurrent_calls)
     if not await held.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
+        await report("busy")
         return await apologize(ctx, vs.tts_url, config.voice, BUSY, rt.redis)
     slots = held
     try:
@@ -149,6 +163,7 @@ async def entrypoint(ctx: JobContext) -> None:
             call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.greeting)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
+        await report("error")
         return await apologize(ctx, vs.tts_url, config.voice, SORRY, rt.redis)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
