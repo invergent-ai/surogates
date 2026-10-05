@@ -139,7 +139,8 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
       const piece = Buffer.allocUnsafe(Math.min(READ_PIECE_BYTES, limit - size));
       const count = io(key, () => readSync(fd, piece, 0, piece.length, null));
       if (count === 0) break;
-      pieces.push(piece.subarray(0, count));
+      // A short read keeps a copy of what it read, not the whole piece.
+      pieces.push(count === piece.length ? piece : Buffer.from(piece.subarray(0, count)));
       size += count;
     }
     if (size > MAX_READ_BYTES) throw READ_EFBIG;
