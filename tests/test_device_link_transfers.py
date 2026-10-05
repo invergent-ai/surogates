@@ -39,11 +39,17 @@ class FakeOperations:
 
 
 class FakePresence:
-    def __init__(self, holds: bool) -> None:
-        self.held = holds
+    """The device's presence key: the connection that holds it, or None once it expired."""
 
-    async def holds(self, device_id, holder) -> bool:
-        return self.held
+    def __init__(self, key: str | None) -> None:
+        self.key = key
+
+    async def refresh(self, device_id, holder) -> bool:
+        # An expired key is the connection's to take back, as DevicePresence's script does.
+        if self.key not in (None, holder):
+            return False
+        self.key = holder
+        return True
 
 
 class FakeSocket:
@@ -54,13 +60,13 @@ class FakeSocket:
         self.sent.append(frame)
 
 
-def make_link(operations: FakeOperations, *, holds: bool = True) -> tuple[_Link, FakeSocket]:
+def make_link(operations: FakeOperations, *, key: str | None = "holder") -> tuple[_Link, FakeSocket]:
     socket = FakeSocket()
     link = _Link(
         socket,
         device=SimpleNamespace(id=uuid.uuid4(), credential_generation=1),
         holder="holder",
-        presence=FakePresence(holds),
+        presence=FakePresence(key),
         operations=operations,
     )
     return link, socket
@@ -185,6 +191,17 @@ async def test_a_malformed_header_is_a_protocol_error(transfer):
     assert operations.starts == []
 
 
+async def test_a_header_whose_ok_value_carries_more_than_the_transfer_is_a_protocol_error():
+    operations = FakeOperations()
+    link, _ = make_link(operations)
+    frame = header()
+    frame["outcome"]["ok"]["data"] = "AAAA"
+    with pytest.raises(_Close) as closed:
+        await link.record(frame)
+    assert closed.value.code == 4400
+    assert operations.starts == []
+
+
 async def test_a_second_header_while_a_transfer_is_under_way_is_a_protocol_error():
     link, _ = make_link(FakeOperations())
     await link.record(header())
@@ -195,7 +212,7 @@ async def test_a_second_header_while_a_transfer_is_under_way_is_a_protocol_error
 
 async def test_a_header_on_a_connection_another_superseded_takes_nothing_over():
     operations = FakeOperations()
-    link, socket = make_link(operations, holds=False)
+    link, socket = make_link(operations, key="another")
     with pytest.raises(_Close) as closed:
         await link.record(header())
     assert closed.value.code == 4409
@@ -203,12 +220,30 @@ async def test_a_header_on_a_connection_another_superseded_takes_nothing_over():
     assert socket.sent == []
 
 
+async def test_a_header_after_the_presence_key_expired_takes_it_back():
+    operations = FakeOperations()
+    link, socket = make_link(operations, key=None)
+    await link.record(header())
+    await link.chunk(chunks()[0])
+    assert link._presence.key == "holder"
+    assert socket.sent == [{"type": "chunk_ack", "id": str(OPERATION), "seq": 0}]
+
+
+@pytest.mark.parametrize(("key", "code"), [("another", 4409), ("holder", 4400)], ids=["superseded", "live"])
+async def test_a_lost_transfer_ends_a_superseded_connection_for_good_and_the_live_one_for_a_resend(key, code):
+    link, _ = make_link(FakeOperations(chunk="lost"))
+    await link.record(header())
+    link._presence.key = key
+    with pytest.raises(_Close) as closed:
+        await link.chunk(chunks()[0])
+    assert closed.value.code == code
+
+
 @pytest.mark.parametrize(("start", "chunk", "code"), [
     ("rejected", None, 4400),
     ("busy", None, 4400),
     ("stale", None, 4403),
     ("started", "stale", 4403),
-    ("started", "lost", 4409),
 ])
 async def test_what_the_journal_refuses_ends_the_link(start, chunk, code):
     link, _ = make_link(FakeOperations(start=start, chunk=chunk))

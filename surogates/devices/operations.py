@@ -686,7 +686,8 @@ class DeviceOperations:
         "unwanted": the operation is closed, so its data is not needed.
         "rejected": unknown, another device's, asked for with a different
         digest, or not a read.  "busy": another connection started this
-        transfer at the same moment.  "stale": rotated-out or revoked credentials.
+        transfer at the same moment, or its last chunk landed meanwhile.
+        "stale": rotated-out or revoked credentials.
 
         A device sends one transfer at a time, so what it left half-sent
         before, this operation's or another's, goes: a connection that ends
@@ -705,14 +706,12 @@ class DeviceOperations:
                 return "rejected"
             if row.completed_at is not None:
                 return "unwanted"
+            # Half-sent only: a whole one is a last chunk that landed since the check above.
             await db.execute(delete(DeviceTransfer).where(
-                (DeviceTransfer.operation_id == operation_id)
-                | (
-                    (DeviceTransfer.received < DeviceTransfer.size)
-                    & DeviceTransfer.operation_id.in_(
-                        select(DeviceOperation.id).where(DeviceOperation.device_id == device_id)
-                    )
-                )
+                DeviceTransfer.received < DeviceTransfer.size,
+                DeviceTransfer.operation_id.in_(
+                    select(DeviceOperation.id).where(DeviceOperation.device_id == device_id)
+                ),
             ))
             started = (await db.execute(
                 pg_insert(DeviceTransfer)
@@ -741,7 +740,8 @@ class DeviceOperations:
 
         "completed": that was the last chunk and the outcome is recorded, in
         the same transaction.  "unwanted": the operation closed meanwhile.
-        "lost": another connection started this transfer again since.
+        "lost": this half-sent transfer was dropped since, by another
+        connection's start of it or of another of the device's transfers.
         "stale": rotated-out or revoked credentials.
         """
         async with self._sf() as db:

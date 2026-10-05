@@ -11,11 +11,12 @@ from uuid import UUID
 import pytest
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.sql.dml import Insert, Update
+from sqlalchemy.sql.dml import Delete, Insert, Update
 
 from surogates.db.models import DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.devices.link import DAMAGED_OUTCOME, TRANSFER_WINDOW
 from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationRequest
+from surogates.devices.presence import presence_key
 from surogates.devices.workspace import CHUNK_BYTES
 
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -183,6 +184,22 @@ async def test_a_transfer_cut_off_is_sent_again_whole_on_the_next_connection(
     assert await stored(session_factory, op["id"]) == DATA
 
 
+async def test_a_header_after_the_presence_key_expired_is_taken_on_the_live_connection(
+    laptop_rig, link_url, redis_client,
+):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(read_request(rig)))
+    async with linked(link_url, rig.token) as (ws, _):
+        op = await _first_op(ws)
+        # A Redis restart or an eviction: no other connection holds the device.
+        await redis_client.delete(presence_key(rig.device_id))
+        await send(ws, header(op, DATA))
+        await send(ws, chunk(op, DATA, 0))
+        assert await receive(ws) == {"type": "chunk_ack", "id": op["id"], "seq": 0}
+        assert await redis_client.exists(presence_key(rig.device_id))
+    await stop(waiting)
+
+
 async def test_a_device_keeps_one_transfer_half_sent(laptop_rig, session_factory):
     rig = laptop_rig
     first = asyncio.create_task(rig.ops.run(read_request(rig)))
@@ -235,14 +252,14 @@ async def test_a_transfer_for_an_operation_that_is_not_a_read_is_a_protocol_erro
     await stop(waiting)
 
 
-def racing(engine, table: str, meanwhile):
-    """Sessions that run *meanwhile* once, just before their first insert or update on *table*:
+def racing(engine, table: str, meanwhile, kinds: tuple[type, ...] = (Insert, Update)):
+    """Sessions that run *meanwhile* once, just before their first statement of *kinds* on *table*:
     another transaction landing between a check and a write."""
     pending = [meanwhile]
 
     class Racing(AsyncSession):
         async def execute(self, statement, *args, **kwargs):
-            if pending and isinstance(statement, (Insert, Update)) and statement.table.name == table:
+            if pending and isinstance(statement, kinds) and statement.table.name == table:
                 await pending.pop()()
             return await super().execute(statement, *args, **kwargs)
 
@@ -292,3 +309,29 @@ async def test_two_connections_starting_one_transfer_at_once_leave_it_to_one(
         rig.device_id, 1, "conn-2", op.id, op.digest, 0, DATA[:CHUNK_BYTES], None,
     ) == "stored"
     await stop(waiting)
+
+
+async def test_a_header_racing_the_last_chunk_of_its_transfer_leaves_the_data_whole(
+    laptop_rig, engine, session_factory, redis_client,
+):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(read_request(rig)))
+    await eventually(lambda: _pending_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert await rig.ops.start_transfer(rig.device_id, 1, "conn-1", op.id, op.digest, len(DATA), sha) == "started"
+    for seq in (0, 1):
+        assert await rig.ops.store_chunk(
+            rig.device_id, 1, "conn-1", op.id, op.digest, seq, DATA[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES], None,
+        ) == "stored"
+
+    async def the_last_chunk_lands() -> None:
+        assert await rig.ops.store_chunk(
+            rig.device_id, 1, "conn-1", op.id, op.digest, 2, DATA[2 * CHUNK_BYTES:], named(DATA),
+        ) == "completed"
+
+    ops = DeviceOperations(racing(engine, "device_transfers", the_last_chunk_lands, kinds=(Delete,)), redis_client)
+    # The old connection's last chunk answered the operation: its data stays.
+    assert await ops.start_transfer(rig.device_id, 1, "conn-2", op.id, op.digest, len(DATA), sha) == "busy"
+    assert await asyncio.wait_for(waiting, 5.0) == named(DATA)
+    assert await stored(session_factory, str(op.id)) == DATA

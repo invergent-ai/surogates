@@ -211,10 +211,12 @@ class _Incoming:
     hasher: Any = field(default_factory=hashlib.sha256)
 
 
-def _named(transfer: Any) -> tuple[int, str]:
-    """The size and SHA-256 a result header names, as the protocol allows them."""
+def _named(ok: dict[str, Any]) -> tuple[int, str]:
+    """The size and SHA-256 a result header's ok value names, as the protocol allows them."""
+    transfer = ok["transfer"]
     if (
-        not isinstance(transfer, dict)
+        ok.keys() != {"transfer"}
+        or not isinstance(transfer, dict)
         or transfer.keys() != {"size", "sha256"}
         or type(transfer["size"]) is not int
         or not MAX_PAYLOAD_BYTES < transfer["size"] <= MAX_READ_BYTES
@@ -323,9 +325,8 @@ class _Link:
             # Recorded, not refused: the app sends its journaled reply again on
             # every reconnect, so a refusal would loop.
             outcome = {"error": {"type": "other", "message": "The computer's result was not valid Unicode"}}
-        transfer = transfer_of(outcome)
-        if transfer is not None:
-            await self._start(operation_id, digest, outcome, *_named(transfer))
+        if transfer_of(outcome) is not None:
+            await self._start(operation_id, digest, outcome, *_named(outcome["ok"]))
             return
         status = await _bounded(self._operations.complete(
             self._device.id, self._device.credential_generation, operation_id, digest, outcome,
@@ -346,8 +347,10 @@ class _Link:
         """Take a result header: its chunks follow, unless the operation is closed."""
         if self._incoming is not None:
             raise _Close(CLOSE_PROTOCOL, "one transfer at a time")
-        # A connection another has superseded must not take a transfer over from the live one.
-        if not await _bounded(self._presence.holds(self._device.id, self._holder)):
+        # A connection another has superseded must not take a transfer over
+        # from the live one.  An expired key is this one's to take back, as a
+        # ping does.
+        if not await _bounded(self._presence.refresh(self._device.id, self._holder)):
             raise _Close(CLOSE_SUPERSEDED, "superseded")
         status = await _bounded(self._operations.start_transfer(
             self._device.id, self._device.credential_generation, self._holder,
@@ -358,7 +361,8 @@ class _Link:
         if status == "rejected":
             raise _Close(CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read")
         if status == "busy":
-            # The app reconnects, and sends it again whole.
+            # The app reconnects and sends it again whole, or hears it is
+            # unwanted when the other connection's last chunk answered it.
             raise _Close(CLOSE_PROTOCOL, "another connection started this transfer at the same moment")
         if status == "unwanted":
             await self._unwanted(operation_id)
@@ -396,6 +400,10 @@ class _Link:
         if status == "stale":
             raise _Close(CLOSE_REVOKED, "credentials rotated")
         if status == "lost":
+            # 4409 is final on the app, so only for a superseded connection.
+            # The live one lost it to a stalled one's start: it sends it again.
+            if await _bounded(self._presence.refresh(self._device.id, self._holder)):
+                raise _Close(CLOSE_PROTOCOL, "this transfer was started again meanwhile")
             raise _Close(CLOSE_SUPERSEDED, "another connection sends this transfer now")
         if status == "unwanted":
             await self._unwanted(operation_id)
