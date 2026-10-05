@@ -395,6 +395,13 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
                 "error": {"type": "sandbox", "message": f"Not a path in this folder: '{key}'"},
             }
         assert (await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": "@@"}))["error"]["type"] == "value"
+        # Over 1 MiB a write's data comes in a transfer: inline, it is refused before anything is asked or run.
+        big = b64(b"x" * (MAX_PAYLOAD_BYTES + 1))
+        assert await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": big}) == {"error": {
+            "type": "other",
+            "message": "This write named its data in a form this computer does not take, so it was not written",
+        }}
+        assert not (folder / "x.txt").exists()
         home = os.environ["HOME"]
         # The command's HOME is the app's, not the folder (the toolchains find themselves through it).
         assert (await on_app(laptop_rig, "run", {"command": "echo $HOME", "workdir": None, "timeout": 10}))["ok"]["output"] == f"{home}\n"

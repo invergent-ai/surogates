@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { reconnectDelayMs } from "../src/link/backoff.js";
-import { chunkFrame, hello, opResult, parseServerFrame, ProtocolError, transferOf } from "../src/link/protocol.js";
+import { chunkAck, chunkFrame, hello, opResult, parseServerFrame, ProtocolError, transferOf } from "../src/link/protocol.js";
 
 const welcome = {
   type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a", user_id: "u",
@@ -55,6 +55,12 @@ describe("server frames", () => {
     });
   });
 
+  it("reads a chunk of a write's data, decoded", () => {
+    expect(parseServerFrame(JSON.stringify({ type: "chunk", id: "x", seq: 2, data: "+/8=" }))).toEqual({
+      type: "chunk", id: "x", seq: 2, data: Buffer.from([0xfb, 0xff]),
+    });
+  });
+
   it("ignores a frame type it does not know", () => {
     expect(parseServerFrame(JSON.stringify({ type: "surprise" }))).toEqual({ type: "unknown" });
   });
@@ -74,6 +80,11 @@ describe("server frames", () => {
     ["a chunk_ack without a seq", JSON.stringify({ type: "chunk_ack", id: "x" })],
     ["a chunk_ack with a fractional seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: 0.5 })],
     ["a chunk_ack with a negative seq", JSON.stringify({ type: "chunk_ack", id: "x", seq: -1 })],
+    ["a chunk without data", JSON.stringify({ type: "chunk", id: "x", seq: 0 })],
+    ["a chunk with a fractional seq", JSON.stringify({ type: "chunk", id: "x", seq: 0.5, data: "AAAA" })],
+    ["a chunk whose data is not padded", JSON.stringify({ type: "chunk", id: "x", seq: 0, data: "+/8" })],
+    ["a chunk whose data is base64url", JSON.stringify({ type: "chunk", id: "x", seq: 0, data: "-_8=" })],
+    ["a chunk whose data has a line break", JSON.stringify({ type: "chunk", id: "x", seq: 0, data: "AAAA\nAAAA" })],
   ])("refuses %s", (_name, text) => {
     expect(() => parseServerFrame(text)).toThrow(ProtocolError);
   });
@@ -116,6 +127,10 @@ describe("a transfer", () => {
 
   it("sends its data in numbered chunks of standard base64", () => {
     expect(chunkFrame("x", 2, Buffer.from([0xfb, 0xff]))).toEqual({ type: "chunk", id: "x", seq: 2, data: "+/8=" });
+  });
+
+  it("acknowledges each chunk of a write's data by its id and seq", () => {
+    expect(chunkAck("x", 2)).toEqual({ type: "chunk_ack", id: "x", seq: 2 });
   });
 });
 

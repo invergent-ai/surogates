@@ -35,6 +35,7 @@ export interface LinkHandlers {
   onCancel(id: string): void;
   onAck(id: string): void;
   onChunkAck?(id: string, seq: number): void;
+  onChunk?(id: string, seq: number, data: Buffer): void;
   onUnwanted?(id: string): void;
   onStatus?(status: LinkStatus): void;
   // A handler above threw: what it keeps is broken, so the link stops (it is not
@@ -219,6 +220,9 @@ export class DeviceLink {
             break;
           case "unwanted":
             this.options.handlers.onUnwanted?.(frame.id);
+            break;
+          case "chunk":
+            this.options.handlers.onChunk?.(frame.id, frame.seq, frame.data);
             break;
           case "error":
             if (frame.code === "unsupported_protocol") final = "update_required";

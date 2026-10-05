@@ -2,14 +2,18 @@
 // whether one is new, already answered, cancelled or still running; the
 // executor does the work. A cancelled operation is stopped and answered with
 // nothing; an outcome that could not be sent is sent again after a reconnect. A
-// read's data too large for one frame goes as a transfer (transfers.ts).
+// read's data too large for one frame goes as a transfer (transfers.ts), and so
+// comes a write's (receiver.ts).
 
 import { createHash } from "node:crypto";
 
-import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES } from "../files/answers.js";
+import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES } from "../files/answers.js";
 import type { OperationJournal } from "../journal/journal.js";
-import { CHUNK_BYTES, MAX_FRAME_CHARS, opResult, type Operation, type Outcome, transferOf } from "../link/protocol.js";
+import {
+  CHUNK_BYTES, chunkAck, MAX_FRAME_CHARS, opResult, type Operation, type Outcome, type Transfer, transferOf,
+} from "../link/protocol.js";
 import { report } from "../report.js";
+import { TransferReceiver } from "./receiver.js";
 import { type Send, TransferSender } from "./transfers.js";
 
 // The answer to an operation whose result would not fit one frame: the server
@@ -49,6 +53,18 @@ const NOT_KEPT: Outcome = {
 };
 // SQLite's result code for a full disk, as node:sqlite reports it in errcode.
 const SQLITE_FULL = 13;
+
+// A write whose data did not come as its args name it. Neither ran.
+export const DAMAGED: Outcome = {
+  error: {
+    type: "other",
+    message: "The data this computer received for this write was incomplete or did not match, so it was not written",
+  },
+};
+export const MALFORMED_TRANSFER: Outcome = {
+  error: { type: "other", message: "This write named its data in a form this computer does not take, so it was not written" },
+};
+const SHA256 = /^[0-9a-f]{64}$/;
 
 // An answer given before the operation started that could not be sent: nothing ran.
 const ANSWER_TOO_LARGE: Outcome = {
@@ -115,6 +131,33 @@ function carried(operation: Operation, outcome: Outcome): { outcome: Outcome; ch
   return { outcome: { ok: { transfer: { size: data.length, sha256 } } }, chunks };
 }
 
+// The data a write's args name by size and SHA-256 in place of carrying it, as
+// surogates/devices/workspace.py allows it: null when they carry at most MAX_PAYLOAD_BYTES
+// of it, and for any other kind. More data inline, or a transfer named another way, is
+// malformed: the file helper takes more than that only from the runner, once a transfer is whole.
+function sentTransfer(operation: Operation): Transfer | "malformed" | null {
+  const { data, transfer: named } = operation.args;
+  if (operation.kind !== "write") return null;
+  if (named === undefined) {
+    return typeof data === "string" && Buffer.byteLength(data, "base64") > MAX_PAYLOAD_BYTES ? "malformed" : null;
+  }
+  if (
+    !isRecord(named) || Object.keys(named).length !== 2 || data !== undefined
+    || typeof named.size !== "number" || !Number.isInteger(named.size)
+    || named.size <= MAX_PAYLOAD_BYTES || named.size > MAX_WRITE_BYTES
+    || typeof named.sha256 !== "string" || !SHA256.test(named.sha256)
+  ) {
+    return "malformed";
+  }
+  return { size: named.size, sha256: named.sha256 };
+}
+
+// The write as the file helper takes it: its data in the args, in base64, in place of the transfer.
+function inline(operation: Operation, data: Buffer): Operation {
+  const { transfer: _named, ...args } = operation.args;
+  return { ...operation, args: { ...args, data: data.toString("base64") } };
+}
+
 export interface Executor {
   /**
    * Do the operation and answer it. A throw or a rejection is answered as an error.
@@ -147,6 +190,7 @@ export class OperationRunner {
   private readonly running = new Map<string, AbortController>();
   private readonly inflight = new Set<Promise<void>>();
   private readonly transfers: TransferSender;
+  private readonly receiver = new TransferReceiver();
 
   constructor(
     private readonly journal: OperationJournal,
@@ -165,6 +209,7 @@ export class OperationRunner {
   /** The link is back: send every outcome the server has not acknowledged, each transfer from its start. */
   connected(): void {
     this.transfers.restart();
+    this.receiver.restart();
     for (const result of this.journal.unsent()) this.deliver(result, result.outcome);
   }
 
@@ -217,21 +262,42 @@ export class OperationRunner {
     this.transfers.acked(id, seq);
   }
 
+  /**
+   * A chunk of a write's data. Each is acknowledged, wanted or not, so the server's
+   * window never waits on one this app will not use.
+   */
+  chunk(id: string, seq: number, data: Buffer): void {
+    this.receiver.chunk(id, seq, data);
+    this.send(chunkAck(id, seq));
+  }
+
   openIds(): string[] {
     return this.journal.openIds();
   }
 
   // What the executor answers before the operation starts is recorded without a
   // start. A cancel meanwhile has marked it cancelled; one suspended stays received,
-  // and is asked again at the next launch.
+  // and is asked again at the next launch. A write whose data comes in a transfer
+  // waits for it whole and checked first, so its user is asked about the data it writes.
   private async admitted(operation: Operation, signal: AbortSignal): Promise<void> {
-    let answer: Outcome | null;
-    try {
-      answer = (await this.executor.admit?.(operation, signal)) ?? null;
-    } catch (error) {
-      answer = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
+    let answer: Outcome | null = null;
+    let data: Buffer | null = null;
+    const transfer = sentTransfer(operation);
+    if (transfer === "malformed") {
+      answer = MALFORMED_TRANSFER;
+    } else if (transfer !== null) {
+      data = await this.receiver.whole(operation.id, transfer, signal);
+      if (data === null) answer = DAMAGED;
     }
     if (signal.aborted) return;
+    if (answer === null) {
+      try {
+        answer = (await this.executor.admit?.(operation, signal)) ?? null;
+      } catch (error) {
+        answer = { error: { type: "other", message: error instanceof Error ? error.message : String(error) } };
+      }
+      if (signal.aborted) return;
+    }
     if (answer) {
       const outcome = sendable(operation, answer, false);
       if (this.journal.answer(operation.id, outcome)) this.deliver(operation, outcome);
@@ -239,7 +305,7 @@ export class OperationRunner {
     }
     // The journal's claim decides: false if it was cancelled or started meanwhile.
     if (!this.journal.start(operation.id)) return;
-    await this.execute(operation, signal);
+    await this.execute(data === null ? operation : inline(operation, data), signal);
   }
 
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {

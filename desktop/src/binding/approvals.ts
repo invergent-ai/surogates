@@ -94,7 +94,9 @@ function requestFor(operation: Operation, binding: Binding, agent: string): Appr
   const chat = { agent, root: binding.root, calling: operation.callingSessionId, folder: binding.folder };
   const text = (name: string) => String(args[name] ?? "");
   if (kind === "write" || kind === "delete") {
-    const bytes = kind === "write" ? Buffer.byteLength(text("data"), "base64") : null;
+    // A write whose data comes in a transfer names its size: the runner asks only once that data is whole.
+    const named = (args.transfer as { size?: unknown } | undefined)?.size;
+    const bytes = kind === "delete" ? null : typeof named === "number" ? named : Buffer.byteLength(text("data"), "base64");
     return { kind: "change", chat, action: kind, path: text("key"), bytes };
   }
   if (kind === "write_stdin") return { kind: "input", chat, process: text("session_id"), data: text("data") };
