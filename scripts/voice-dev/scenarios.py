@@ -119,7 +119,8 @@ def turns(events) -> list[dict]:
 
         out.append({"said": data(u).get("content", "")[-60:],
                     "wake_s": first(lambda e: e["type"] == "llm.request"),
-                    "first_token_s": first(lambda e: e["type"] == "llm.delta"),
+                    # spoken words only: reasoning deltas are never heard
+                    "first_token_s": first(lambda e: e["type"] == "llm.delta" and bool(data(e).get("content"))),
                     "answer_s": first(lambda e: e["type"] == "llm.response" and not (data(e).get("message") or {}).get("tool_calls"))})
     return out
 
@@ -294,3 +295,5 @@ if __name__ == "__main__":
         if n not in SCENARIOS:
             sys.exit(f"unknown scenario {n!r}; known: {', '.join(SCENARIOS)}")
     asyncio.run(main(a.names or [n for n, (_, slow, _) in SCENARIOS.items() if a.all or not slow]))
+    sys.stdout.flush()
+    os._exit(0)  # LiveKit's FFI threads keep the interpreter alive after the last call
