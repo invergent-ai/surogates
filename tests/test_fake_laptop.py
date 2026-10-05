@@ -217,6 +217,8 @@ NAMED = {"size": len(DATA), "sha256": hashlib.sha256(DATA).hexdigest()}
 @pytest.mark.parametrize("args", [
     {"data": base64.b64encode(b"x" * (MAX_PAYLOAD_BYTES + 1)).decode("ascii")},
     {"transfer": NAMED, "data": "aGk="},
+    {"transfer": NAMED, "data": None},
+    {"transfer": None, "data": "aGk="},
     {"transfer": {**NAMED, "size": MAX_PAYLOAD_BYTES}},
     {"transfer": {**NAMED, "size": MAX_WRITE_BYTES + 1}},
     {"transfer": {**NAMED, "size": len(DATA) + 0.5}},
@@ -224,7 +226,7 @@ NAMED = {"size": len(DATA), "sha256": hashlib.sha256(DATA).hexdigest()}
     {"transfer": {**NAMED, "sha256": "0" * 63}},
     {"transfer": {**NAMED, "extra": 1}},
 ], ids=[
-    "inline-over-1-mib", "data-beside-a-transfer", "no-more-than-1-mib", "over-50-mib", "a-fractional-size",
+    "inline-over-1-mib", "data-beside-a-transfer", "null-data-beside-a-transfer", "a-null-transfer", "no-more-than-1-mib", "over-50-mib", "a-fractional-size",
     "an-upper-case-sha256", "a-short-sha256", "another-key",
 ])
 async def test_a_write_naming_its_data_in_a_form_the_app_does_not_take_is_answered_so_and_never_run(tmp_path, args):

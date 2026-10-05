@@ -282,18 +282,16 @@ async def test_a_writes_data_goes_only_to_its_device_under_its_current_credentia
 
 async def test_a_writes_data_goes_no_more_once_its_device_is_revoked_or_the_write_closed(laptop_rig, session_factory):
     rig = laptop_rig
-    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
-    await eventually(lambda: open_count(rig, 1))
-    [op] = await rig.ops.pending(rig.device_id, 1)
+    # Recorded with no call waiting on it: a waiter would close it on seeing the device revoked.
+    operation_id, _ = await rig.ops._record(write_request(rig))
     # Revoked in the row alone, the write left open: a revocation also closes it, which is the next check.
     for revoked_at, expected in [(func.now(), None), (None, DATA[:CHUNK_BYTES])]:
         async with session_factory() as db:
             await db.execute(update(Device).where(Device.id == rig.device_id).values(revoked_at=revoked_at))
             await db.commit()
-        assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 0) == expected
+        assert await rig.ops.outgoing_chunk(rig.device_id, 1, operation_id, 0) == expected
     await rig.ops.cancel([rig.root])
-    assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 0) is None
-    await stop(waiting)
+    assert await rig.ops.outgoing_chunk(rig.device_id, 1, operation_id, 0) is None
 
 
 async def test_the_reference_laptop_takes_a_write_too_large_for_a_frame_in_chunks(laptop_rig):

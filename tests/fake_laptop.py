@@ -52,12 +52,14 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 def _malformed_write(args: dict[str, Any]) -> bool:
     """As the app's sentTransfer: more than MAX_PAYLOAD_BYTES inline, or a transfer named any other way."""
-    data, transfer = args.get("data"), args.get("transfer")
-    if transfer is None:
+    # A key that is present counts, null or not, as the app's undefined checks count it.
+    if "transfer" not in args:
+        data = args.get("data")
         # As Buffer.byteLength(data, "base64") counts it.
         return isinstance(data, str) and len(data) * 3 // 4 - data[-2:].count("=") > MAX_PAYLOAD_BYTES
+    transfer = args["transfer"]
     return not (
-        isinstance(transfer, dict) and transfer.keys() == {"size", "sha256"} and data is None
+        isinstance(transfer, dict) and transfer.keys() == {"size", "sha256"} and "data" not in args
         and type(transfer["size"]) is int and MAX_PAYLOAD_BYTES < transfer["size"] <= MAX_WRITE_BYTES
         and isinstance(transfer["sha256"], str) and _SHA256.fullmatch(transfer["sha256"]) is not None
     )
