@@ -345,3 +345,24 @@ async def test_the_reaper_deletes_a_writes_data_once_it_is_closed_and_never_whil
     assert await stored(session_factory, str(closed.id)) == b""
     assert await stored(session_factory, str(still_open.id)) == DATA
     await stop(waiting)
+
+
+async def test_the_reaper_keeps_an_open_writes_data_while_its_computer_is_away_a_week(laptop_rig, session_factory):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
+    await eventually(lambda: open_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    # Nothing marks a waiting write's data consumed, so a read's orphan rule would take it.
+    async with session_factory() as db:
+        consumed = (await db.execute(
+            update(DeviceTransfer).where(DeviceTransfer.operation_id == op.id)
+            .values(created_at=func.now() - timedelta(days=8))
+            .returning(DeviceTransfer.consumed_at)
+        )).scalar_one()
+        await db.commit()
+    assert consumed is None
+
+    await reap_transfers(session_factory)
+
+    assert await stored(session_factory, str(op.id)) == DATA
+    await stop(waiting)
