@@ -15,14 +15,16 @@ import { BAD_PAGE, type Context, perform } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
 // The file helper's reads come back at most this long: some filesystems answer less than asked. And how many it made.
-const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0 }));
+// Each of `next`, while there are any, caps one read instead; a 0 finds the file's end there.
+const reads = vi.hoisted(() => ({ cap: Number.POSITIVE_INFINITY, calls: 0, next: [] as number[] }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
   const readSync = (
     fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: ReadPosition | null,
   ) => {
     reads.calls += 1;
-    return fs.readSync(fd, buffer, offset, Math.min(length, reads.cap), position);
+    const cap = reads.next.shift() ?? reads.cap;
+    return cap === 0 ? 0 : fs.readSync(fd, buffer, offset, Math.min(length, cap), position);
   };
   return { ...fs, readSync, default: { ...fs, readSync } };
 });
@@ -261,6 +263,18 @@ describe("read_lines", () => {
       expect(await page(`${folder}/u.txt`, { encoding: "utf-32-le", offset: 2 })).toEqual(answer(encode("two\rthree\n"), 3));
     } finally {
       reads.cap = Number.POSITIVE_INFINITY;
+    }
+  });
+
+  it("tops a piece up to a whole code unit when a growing file's end cuts one", async () => {
+    const lines = Buffer.from(Array.from({ length: 11 }, (_, number) => `line ${number}\n`).join(""), "utf16le");
+    writeFileSync(join(folder, "growing.txt"), lines);
+    // The first read stops at byte 9, mid-unit, and the next finds the file's end there, for a moment.
+    reads.next = [9, 0];
+    try {
+      expect(await page(`${folder}/growing.txt`, { encoding: "utf-16-le" })).toEqual(answer(lines, 11));
+    } finally {
+      reads.next = [];
     }
   });
 

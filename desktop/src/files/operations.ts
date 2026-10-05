@@ -224,10 +224,12 @@ function pageOf(
   let at = start; // where the piece starts in the file
   let last = start; // where the last line end so far ends
   for (;;) {
-    const count = fill(fd, key, buffer, at);
+    let count = fill(fd, key, buffer, at);
     if (count === 0) break;
+    // A growing file's end can cut a unit for a moment: the next piece starts on a whole one.
+    if (count % width) count += fill(fd, key, buffer.subarray(count, count + width - (count % width)), at + count);
     const piece = buffer.subarray(0, count);
-    // A unit cut off can only be the file's last bytes: fill reads whole pieces.
+    // A unit cut off can now only be the file's last bytes.
     const units = count - (count % width);
     let size = count;
     let lf = piece.indexOf(10, low);
