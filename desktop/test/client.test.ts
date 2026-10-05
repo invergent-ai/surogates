@@ -17,6 +17,8 @@ interface Seen {
   operations: Operation[];
   cancels: string[];
   acks: string[];
+  chunkAcks: Array<[string, number]>;
+  unwanted: string[];
   errors: unknown[];
 }
 
@@ -34,7 +36,7 @@ async function connected(
   const server = new FakeLinkServer(options);
   servers.push(server);
   const url = await server.start();
-  const seen: Seen = { statuses: [], operations: [], cancels: [], acks: [], errors: [] };
+  const seen: Seen = { statuses: [], operations: [], cancels: [], acks: [], chunkAcks: [], unwanted: [], errors: [] };
   const link = new DeviceLink({
     url,
     token: linkOptions.token ?? "surg_dev_test",
@@ -45,6 +47,8 @@ async function connected(
       onOperation: (operation) => seen.operations.push(operation),
       onCancel: (id) => seen.cancels.push(id),
       onAck: (id) => seen.acks.push(id),
+      onChunkAck: (id, seq) => seen.chunkAcks.push([id, seq]),
+      onUnwanted: (id) => seen.unwanted.push(id),
       onStatus: (status) => seen.statuses.push(status),
       onError: (error) => seen.errors.push(error),
       ...linkOptions.handlers,
@@ -273,6 +277,26 @@ describe("what the server sends", () => {
     expect(seen.operations[0]?.id).toBe("op-1");
     expect(seen.acks).toEqual(["op-0"]);
     expect(seen.cancels).toEqual(["op-2"]);
+  });
+});
+
+describe("a transfer", () => {
+  it("hears each chunk acknowledged, and an unwanted transfer", async () => {
+    const { server, link, seen } = await connected();
+    await server.until(() => link.status === "connected");
+    server.send({ type: "chunk_ack", id: "op-1", seq: 3 });
+    server.send({ type: "unwanted", id: "op-2" });
+    await server.until(() => seen.chunkAcks.length === 1 && seen.unwanted.length === 1);
+    expect(seen.chunkAcks).toEqual([["op-1", 3]]);
+    expect(seen.unwanted).toEqual(["op-2"]);
+  });
+
+  it("is told when a frame it sent has left for the socket", async () => {
+    const { server, link } = await connected();
+    await server.until(() => link.status === "connected");
+    let written = 0;
+    expect(link.send({ type: "chunk", id: "op-1", seq: 0, data: "AAAA" }, () => { written += 1; })).toBe(true);
+    await server.until(() => written === 1 && server.received.some((frame) => frame.type === "chunk"));
   });
 });
 

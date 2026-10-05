@@ -233,6 +233,37 @@ describe("what the journal reports", () => {
   });
 });
 
+describe("a transfer's chunks", () => {
+  const chunks = [Buffer.from("first"), Buffer.from("second")];
+  const outcome = { ok: { transfer: { size: 11, sha256: "f".repeat(64) } } };
+
+  it("are kept with the outcome across a restart, and dropped once the server acknowledged it", () => {
+    const before = new OperationJournal(path);
+    before.receive(operation("a"));
+    before.start("a");
+    expect(before.finish("a", outcome, chunks)).toBe(true);
+    before.close();
+    const after = new OperationJournal(path);
+    expect(after.unsent()).toEqual([{ id: "a", digest: "digest-a", outcome }]);
+    expect([after.chunk("a", 0), after.chunk("a", 1), after.chunk("a", 2)]).toEqual([...chunks, null]);
+    after.acknowledge("a");
+    expect(after.chunk("a", 0)).toBeNull();
+    // The record stays: a repeat is answered, never run.
+    expect(after.receive(operation("a"))).toEqual({ action: "reply", outcome });
+    after.close();
+  });
+
+  it("are not kept for an outcome the journal does not record", () => {
+    const journal = new OperationJournal(path);
+    journal.receive(operation("a"));
+    journal.start("a");
+    journal.cancel("a");
+    expect(journal.finish("a", outcome, chunks)).toBe(false);
+    expect(journal.chunk("a", 0)).toBeNull();
+    journal.close();
+  });
+});
+
 describe("an operation answered before it started", () => {
   it("is finished with its outcome, sent until acknowledged, and never runs", () => {
     const journal = new OperationJournal(path);

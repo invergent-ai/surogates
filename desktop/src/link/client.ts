@@ -34,6 +34,8 @@ export interface LinkHandlers {
   onOperation(operation: Operation): void;
   onCancel(id: string): void;
   onAck(id: string): void;
+  onChunkAck?(id: string, seq: number): void;
+  onUnwanted?(id: string): void;
   onStatus?(status: LinkStatus): void;
   // A handler above threw: what it keeps is broken, so the link stops (it is not
   // restarted) after this is told.
@@ -102,11 +104,15 @@ export class DeviceLink {
     if (!ENDED.includes(this.status)) this.setStatus("stopped");
   }
 
-  /** Send a frame on the welcomed connection; false when there is none. */
-  send(frame: Record<string, unknown>): boolean {
+  /**
+   * Send a frame on the welcomed connection; false when there is none. *written* is
+   * called once ws has handed the frame to the socket, or failed to: the frame has
+   * then left ws's bufferedAmount.
+   */
+  send(frame: Record<string, unknown>, written?: () => void): boolean {
     const socket = this.socket;
     if (socket === null || socket.readyState !== WebSocket.OPEN || !this.welcomed) return false;
-    socket.send(JSON.stringify(frame));
+    socket.send(JSON.stringify(frame), written && (() => written()));
     return true;
   }
 
@@ -205,6 +211,12 @@ export class DeviceLink {
             break;
           case "cancel":
             this.options.handlers.onCancel(frame.id);
+            break;
+          case "chunk_ack":
+            this.options.handlers.onChunkAck?.(frame.id, frame.seq);
+            break;
+          case "unwanted":
+            this.options.handlers.onUnwanted?.(frame.id);
             break;
           case "error":
             if (frame.code === "unsupported_protocol") final = "update_required";

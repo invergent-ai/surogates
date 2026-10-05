@@ -4,8 +4,10 @@
 //   received      sent to us, not started; safe to run (nothing happened yet). One the
 //                 executor answers before it starts (admit) goes straight to finished
 //   started       written durably before the operation acts
-//   finished      its outcome, written durably before it is sent
-//   acknowledged  the server recorded the outcome; after RETAIN_MS its payload goes
+//   finished      its outcome, written durably before it is sent; a read's data too
+//                 large for one frame is kept beside it as the transfer's chunks
+//   acknowledged  the server recorded the outcome; its chunks go at once, and after
+//                 RETAIN_MS its payload
 //   cancelled     never to run; a cancel may arrive before its op, so an unknown
 //                 id gets a row too
 //
@@ -80,6 +82,12 @@ export class OperationJournal {
           domain TEXT NOT NULL,
           PRIMARY KEY (root, domain)
         );
+        CREATE TABLE IF NOT EXISTS chunks (
+          id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          data BLOB NOT NULL,
+          PRIMARY KEY (id, seq)
+        );
       `);
       this.bindings = new Bindings(this.db);
       // Opened once per process: what a crash cut off is interrupted before
@@ -149,17 +157,30 @@ export class OperationJournal {
   }
 
   /**
-   * Durably record an outcome, before it is sent. True when this call recorded
-   * it. False, with nothing recorded, when the operation was cancelled meanwhile,
-   * was already finished, is unknown, or never started.
+   * Durably record an outcome, with the chunks of the transfer it names, before it
+   * is sent. True when this call recorded it. False, with nothing recorded, when the
+   * operation was cancelled meanwhile, was already finished, is unknown, or never started.
    */
-  finish(id: string, outcome: Outcome): boolean {
+  finish(id: string, outcome: Outcome, chunks: readonly Buffer[] = []): boolean {
     // JSON.stringify drops an undefined ok, leaving a frame the server refuses.
     const stored = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
-    const result = this.db
-      .prepare(`UPDATE operations SET state = 'finished', outcome = ?, updated_at = ? WHERE id = ? AND state = 'started'`)
-      .run(JSON.stringify(stored), this.now(), id);
-    return Number(result.changes) === 1;
+    return this.transaction(() => {
+      const result = this.db
+        .prepare(`UPDATE operations SET state = 'finished', outcome = ?, updated_at = ? WHERE id = ? AND state = 'started'`)
+        .run(JSON.stringify(stored), this.now(), id);
+      if (Number(result.changes) !== 1) return false;
+      const insert = this.db.prepare(`INSERT INTO chunks (id, seq, data) VALUES (?, ?, ?)`);
+      chunks.forEach((data, seq) => insert.run(id, seq, data));
+      return true;
+    });
+  }
+
+  /** Chunk *seq* of the transfer a finished outcome names, or null once it is gone. */
+  chunk(id: string, seq: number): Buffer | null {
+    const row = this.db.prepare(`SELECT data FROM chunks WHERE id = ? AND seq = ?`).get(id, seq) as
+      | { data: Uint8Array }
+      | undefined;
+    return row === undefined ? null : Buffer.from(row.data.buffer, row.data.byteOffset, row.data.byteLength);
   }
 
   /**
@@ -175,11 +196,14 @@ export class OperationJournal {
     return Number(result.changes) === 1;
   }
 
-  /** The server recorded the outcome. */
+  /** The server recorded the outcome: its transfer's chunks are not needed again. */
   acknowledge(id: string): void {
-    this.db
-      .prepare(`UPDATE operations SET state = 'acknowledged', updated_at = ? WHERE id = ? AND state = 'finished'`)
-      .run(this.now(), id);
+    this.transaction(() => {
+      this.db
+        .prepare(`UPDATE operations SET state = 'acknowledged', updated_at = ? WHERE id = ? AND state = 'finished'`)
+        .run(this.now(), id);
+      this.db.prepare(`DELETE FROM chunks WHERE id = ?`).run(id);
+    });
   }
 
   /** Never run this operation; what already finished keeps its outcome. */
@@ -220,5 +244,17 @@ export class OperationJournal {
 
   close(): void {
     this.db.close();
+  }
+
+  private transaction<T>(work: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
