@@ -124,6 +124,26 @@ async def test_a_transfer_that_completes_is_logged_once_with_its_device_size_and
     ), line
 
 
+@pytest.mark.parametrize(("start", "key", "ending"), [
+    ("rejected", "holder", r"closed 4400 \(transfer for an operation this device was not given, or not a read\)"),
+    ("stale", "holder", r"closed 4403 \(credentials rotated\)"),
+    ("started", "another", r"closed 4409 \(superseded\)"),
+    ("busy", "holder", "busy"),
+], ids=["rejected", "stale", "superseded", "busy"])
+async def test_a_refused_header_is_logged_once_with_how_it_ended(caplog, start, key, ending):
+    link, _ = make_link(FakeOperations(start=start), key=key)
+    with caplog.at_level(logging.INFO, logger="surogates.devices.link"):
+        with pytest.raises(_Close) as closed:
+            await link.record(header())
+        # As serve_device_link ends the connection.
+        link.closed(closed.value.code, closed.value.reason)
+    [line] = [record.getMessage() for record in caplog.records if record.name == "surogates.devices.link"]
+    assert re.fullmatch(
+        rf"device {link._device.id} transfer {OPERATION} {ending}: {len(DATA)} bytes, \d+\.\d\d s from its header",
+        line,
+    ), line
+
+
 async def test_data_that_does_not_match_its_sha256_is_recorded_as_damaged():
     operations = FakeOperations()
     link, socket = make_link(operations)

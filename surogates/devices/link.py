@@ -353,15 +353,19 @@ class _Link:
         # from the live one.  An expired key is this one's to take back, as a
         # ping does.
         if not await _bounded(self._presence.refresh(self._device.id, self._holder)):
-            raise _Close(CLOSE_SUPERSEDED, "superseded")
+            raise self._refused(CLOSE_SUPERSEDED, "superseded", operation_id, size, started)
         status = await _bounded(self._operations.start_transfer(
             self._device.id, self._device.credential_generation, self._holder,
             operation_id, digest, size, sha256,
         ))
         if status == "stale":
-            raise _Close(CLOSE_REVOKED, "credentials rotated")
+            raise self._refused(CLOSE_REVOKED, "credentials rotated", operation_id, size, started)
         if status == "rejected":
-            raise _Close(CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read")
+            # The app sends this header again at every welcome: its line shows the loop.
+            raise self._refused(
+                CLOSE_PROTOCOL, "transfer for an operation this device was not given, or not a read",
+                operation_id, size, started,
+            )
         if status == "busy":
             self._ended("busy", operation_id, size, started)
             # The app reconnects and sends it again whole, or hears it is
@@ -431,6 +435,11 @@ class _Link:
         if (incoming := self._incoming) is not None:
             self._incoming = None
             self._ended(f"closed {code} ({reason})", incoming.operation_id, incoming.size, incoming.started)
+
+    def _refused(self, code: int, reason: str, operation_id: UUID, size: int, started: float) -> _Close:
+        """The close that refuses a header, its transfer's end logged as any other."""
+        self._ended(f"closed {code} ({reason})", operation_id, size, started)
+        return _Close(code, reason)
 
     def _ended(self, how: str, operation_id: UUID, size: int, started: float) -> None:
         # One line per transfer, with the time from its header: what PROD's
