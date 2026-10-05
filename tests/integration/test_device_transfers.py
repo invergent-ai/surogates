@@ -466,10 +466,11 @@ async def test_a_resumed_call_whose_result_is_no_longer_kept_is_reported_interru
 ):
     rig = laptop_rig
     await rig.laptop.connect()
-    (rig.folder / "app.log").write_text(big_text())
+    # A document: its read is the call's last operation, so only the payload being gone makes the replay diverge.
+    (rig.folder / "report.pdf").write_bytes(pdf(2 * 1024 * 1024))
     store, tools = SessionStore(session_factory), builtin_tools()
     io = {"redis_client": redis_client, "session_factory": session_factory}
-    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "app.log"}, **io)
+    await tool_call(rig, store, tools, "call_1", "read_file", {"path": "report.pdf"}, **io)
     await forget_result(store, session_factory, rig.root, "call_1")
     async with session_factory() as db:
         await db.execute(delete(DeviceTransfer))
@@ -478,7 +479,7 @@ async def test_a_resumed_call_whose_result_is_no_longer_kept_is_reported_interru
     ran = len(rig.laptop.ran)
     await take_over(store, rig)
 
-    resumed = await resume_call(rig, store, tools, "call_1", "read_file", {"path": "app.log"}, **io)
+    resumed = await resume_call(rig, store, tools, "call_1", "read_file", {"path": "report.pdf"}, **io)
 
     assert resumed["content"] == INTERRUPTED
     assert len(rig.laptop.ran) == ran
