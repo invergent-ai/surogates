@@ -157,7 +157,8 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
   const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
   try {
-    regular(fd, key);
+    // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
+    if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
     // In pieces, as far as the file goes: a small file costs one piece, not the cap.
     const pieces: Buffer[] = [];
     let size = 0;

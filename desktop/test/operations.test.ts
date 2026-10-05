@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync, linkSync, mkdirSync, mkdtempSync, type ReadPosition, readdirSync, readFileSync, realpathSync, rmSync,
-  statSync, symlinkSync, utimesSync, writeFileSync,
+  statSync, symlinkSync, truncateSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,19 @@ describe("read", () => {
     });
     const head = await run("read", { key: `${folder}/huge.bin`, max_bytes: 8192 });
     expect(Buffer.from((head as { ok: string }).ok, "base64").length).toBe(8192);
+  });
+
+  it("answers a file over 50 MiB asked for whole as too large from its size, before reading a byte of it", async () => {
+    // Sparse: 2 GiB costs nothing to make.
+    writeFileSync(join(folder, "huge.bin"), "");
+    truncateSync(join(folder, "huge.bin"), 2 * 1024 ** 3);
+    reads.calls = 0;
+    for (const max_bytes of [null, MAX_READ_BYTES + 1]) {
+      expect(await run("read", { key: `${folder}/huge.bin`, max_bytes })).toEqual({
+        error: { type: "os", code: "EFBIG", message: READ_TOO_LARGE },
+      });
+    }
+    expect(reads.calls).toBe(0);
   });
 
   it("keeps only the bytes each short read returned", async () => {
