@@ -86,7 +86,7 @@ from surogates.runtime.context import SlashCommandConfig
 from surogates.runtime.turn_slots import current_turn, detach_turn, turn_joining
 from surogates.session import LeaseNotHeldError
 from surogates.session.events import EventType
-from surogates.tools.builtin.file_ops import clear_read_tracker
+from surogates.tools.builtin.file_ops import clear_read_tracker, notify_other_tool_call, reset_file_dedup
 
 if TYPE_CHECKING:
     from contextvars import Token
@@ -1182,6 +1182,16 @@ class AgentHarness(
                 {"worker_id": self._worker_id, "cursor": cursor},
             )
 
+            # 5'. Another worker woke a local-folder session since this one
+            # did: it may have compacted or cleared the history, and reset
+            # only its own dedup.  This worker's points at results gone.
+            woken_by = next((
+                event.data.get("worker_id") for event in reversed(all_events)
+                if event.type == EventType.HARNESS_WAKE.value
+            ), None)
+            if woken_by != self._worker_id:
+                self._forget_compacted_reads(session)
+
             # 5a. Initialize memory manager if available.
             if self._memory_manager is not None:
                 try:
@@ -1528,8 +1538,6 @@ class AgentHarness(
         (a local folder has none) or the turn transcript.  Only a sandbox
         tool is run again; a harness tool is reported interrupted.
         """
-        from surogates.sandbox.pool import sandbox_session_key
-
         tool_kwargs = self._tool_call_kwargs(
             session=session, lease=lease, saga=None, hint_tracker=None,
             model_id=self._current_model or session.model or self._default_model,
@@ -1537,9 +1545,9 @@ class AgentHarness(
         )
         # A worker resuming a call has not seen the reads the first run made:
         # each resumed call starts from what a fresh worker knows.  Any wake
-        # with unanswered calls clears it, even when the journal turns up
-        # nothing to resume; any other keeps what was read.
-        clear_read_tracker(sandbox_session_key(session))
+        # with unanswered calls clears the session's own reads, even when the
+        # journal turns up nothing to resume; any other keeps what was read.
+        clear_read_tracker(str(session.id))
 
         async def resume(call: dict[str, Any], event_id: int) -> dict[str, Any]:
             # The turn's own task steps out, so a resumed call that waits gives the slots back.
@@ -3092,6 +3100,7 @@ class AgentHarness(
                 # Invalidate system prompt cache -- conversation shape changed.
                 self._system_prompt_cache.invalidate(session.id)
                 self._memory_snapshot_cache.pop(session.id, None)
+                self._forget_compacted_reads(session)
 
             # Lease renewal is handled by a background task started in
             # ``wake()``; no per-iteration renewal needed here.
@@ -4234,6 +4243,20 @@ class AgentHarness(
     # Context compression callback (for LLM call retry module)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _forget_compacted_reads(session: Session) -> None:
+        """A local-folder session's read results were summarised away: its next read of a file shows the file.
+
+        Its count of repeated reads starts again too: the reads it counted
+        are gone from its history.  It keeps what it read, so a write still
+        knows the file was read.  A cloud session's tracker is left as it
+        was: its reads run in a forked child of the sandbox, whose tracker
+        dies with the call.
+        """
+        if device_of(session.config) is not None:
+            reset_file_dedup(str(session.id))
+            notify_other_tool_call(str(session.id))
+
     def _compress_context_callback(
         self,
         session: Session,
@@ -4286,6 +4309,7 @@ class AgentHarness(
             except Exception:
                 logger.debug("Failed to emit CONTEXT_COMPACT event", exc_info=True)
             messages[:] = compressed
+            self._forget_compacted_reads(session)
             return await build_api_messages(messages)
         return _compress
 
@@ -4460,6 +4484,7 @@ class AgentHarness(
                 "compressed_message_count": 0,
             },
         )
+        self._forget_compacted_reads(session)
 
         # Emit an assistant message confirming the clear.
         await self._store.emit_event(
@@ -4693,6 +4718,7 @@ class AgentHarness(
                 "compacted_messages": compressed,
             },
         )
+        self._forget_compacted_reads(session)
 
         # Emit an assistant message summarising the result.
         await self._store.emit_event(

@@ -7,7 +7,9 @@ Moving code here must not change what a cloud session sees.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
+import io
 import json
 import logging
 import os
@@ -16,7 +18,7 @@ import shutil
 import stat as stat_module
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from surogates.tools.utils.env_passthrough import is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
@@ -25,7 +27,7 @@ from surogates.tools.utils.workspace_sandbox import (
     validate_path,
     validate_workdir,
 )
-from surogates.tools.workspace_io.base import FileStat, RipgrepError, RipgrepMode, RunResult
+from surogates.tools.workspace_io.base import FileStat, LinePage, RipgrepError, RipgrepMode, RunResult
 
 logger = logging.getLogger(__name__)
 
@@ -451,6 +453,117 @@ def _check_sensitive_path(filepath: str) -> str | None:
 _RIPGREP_PATH: str | None = shutil.which("rg")
 
 
+# The codecs read_file decodes text in, which read_lines pages, and their code
+# units: the width in bytes, and the index of the byte that holds the value of
+# a line feed or a carriage return.
+CODE_UNITS: dict[str, tuple[int, int]] = {
+    "utf-8": (1, 0),
+    "utf-8-sig": (1, 0),
+    "utf-16-le": (2, 0),
+    "utf-16-be": (2, 1),
+    "utf-32-le": (4, 0),
+    "utf-32-be": (4, 3),
+}
+# read_lines scans a file in pieces of this size, a whole number of code units.
+_PIECE_BYTES = 1024 * 1024
+_LINE_END = re.compile(rb"\r\n?|\n")
+_LINE_END_BYTES = bytes(byte if byte in (0x0A, 0x0D) else 0 for byte in range(256))
+_NUL_ONLY = bytes([0xFF] + [0] * 255)
+
+
+def _marks(piece: bytes, width: int, low: int) -> bytes:
+    """One byte per whole code unit of *piece*: LF or CR where the unit is one, NUL elsewhere.
+
+    So line ends are found by bytes methods, at C speed, whatever the width.
+    A UTF-8 piece is its own: no byte of a multi-byte sequence is 0x0A or 0x0D.
+    """
+    if width == 1:
+        return piece
+    count = len(piece) // width
+    # The value byte where it is LF or CR, as one big number...
+    marks = int.from_bytes(piece[low::width][:count].translate(_LINE_END_BYTES), "big")
+    # ...kept where every other byte of the unit is NUL.
+    for at in range(width):
+        if at != low:
+            marks &= int.from_bytes(piece[at::width][:count].translate(_NUL_ONLY), "big")
+    return marks.to_bytes(count, "big")
+
+
+def _ends(marks: bytes, start: int = 0) -> int:
+    """How many line ends *marks* holds from *start*, a CR LF counting once."""
+    return marks.count(b"\n", start) + marks.count(b"\r", start) - marks.count(b"\r\n", start)
+
+
+def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) -> LinePage:
+    """WorkspaceIO.read_lines on an open file, in one pass.
+
+    Every piece is counted; only the pieces from line *offset* to the page's
+    end are walked line by line.
+    """
+    width, low = CODE_UNITS[encoding]
+    # utf-8-sig drops its BOM, so line 1 starts after it.  The other codecs
+    # keep a BOM as a character of line 1.
+    start = 3 if encoding == "utf-8-sig" and fh.read(3) == codecs.BOM_UTF8 else 0
+    fh.seek(start)
+    first = offset - 1
+    total = 0  # line ends so far
+    begin = start if first == 0 else None  # where line `first` starts
+    fits: list[int] = []  # where each line from `first` ends, while the page holds it
+    taking = True
+
+    def takes(end: int) -> bool:
+        return end - begin <= max_bytes and (limit <= 0 or len(fits) < limit)
+
+    at = last = start  # where the piece starts, and where the last line end so far ends
+    while piece := fh.read(_PIECE_BYTES):
+        if rem := len(piece) % width:
+            # A growing file's end can cut a unit: the next piece starts on one.
+            piece += fh.read(width - rem)
+        marks = _marks(piece, width, low)
+        if marks.endswith(b"\r"):
+            # A CR LF across two pieces is one line end: its LF joins this piece.
+            more = fh.read(width)
+            if _marks(more, width, low) == b"\n":
+                piece += more
+                marks += b"\n"
+            else:
+                fh.seek(-len(more), io.SEEK_CUR)
+        tail = max(marks.rfind(b"\n"), marks.rfind(b"\r"))
+        if tail >= 0:
+            last = at + (tail + 1) * width
+        ends = _ends(marks)
+        # A piece with no line end, as a minified file's, is only counted.
+        if taking and ends and total + ends >= first:
+            for found in _LINE_END.finditer(marks):
+                total += 1
+                end = at + found.end() * width
+                if total == first:
+                    begin = end
+                elif begin is not None:
+                    if not takes(end):
+                        taking = False
+                        total += _ends(marks, found.end())
+                        break
+                    fits.append(end)
+        else:
+            total += ends
+        at += len(piece)
+    if at > last:
+        # Bytes after the last line end are one more line.
+        total += 1
+        if taking and begin is not None and total > first and takes(at):
+            fits.append(at)
+    # The lines lines[first:min(first + limit, total)] selects, as Python
+    # slices them, a limit below one included.
+    window = range(total)[first:min(first + limit, total)]
+    if not window:
+        return LinePage(b"", total)
+    shown = min(len(window), len(fits))
+    fh.seek(begin)
+    # No whole line fits: the first one's first max_bytes, for the handler to cut.
+    return LinePage(fh.read(fits[shown - 1] - begin if shown else max_bytes), total)
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -479,6 +592,12 @@ class LocalWorkspaceIO:
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         with open(key, "rb") as fh:
             return fh.read(-1 if max_bytes is None else max_bytes)
+
+    async def read_lines(
+        self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
+    ) -> LinePage:
+        with open(key, "rb") as fh:
+            return _page(fh, encoding, offset, limit, max_bytes)
 
     async def write(self, key: str, data: bytes) -> None:
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)

@@ -14,8 +14,8 @@ import { dirname, join, resolve } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_READ_BYTES, MAX_WRITE_BYTES, OUTPUT_CAP_CHARS, osError,
-  pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
+  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
+  OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -33,6 +33,7 @@ const KINDS: Record<string, Kind> = {
   check_write: (args, { folder, home }) => checkWrite(folder, home, text(args, "path")),
   stat,
   read,
+  read_lines: readLines,
   write,
   delete: remove,
   list_dir: listDir,
@@ -44,6 +45,14 @@ const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
 // What one read call takes from the file at a time.
 const READ_PIECE_BYTES = 1024 * 1024;
+// The codecs read_file decodes text in, which read_lines pages, as surogates/tools/workspace_io/local.py's
+// CODE_UNITS: each one's code unit, as its width in bytes and where in it a line feed's or carriage return's value is.
+const CODE_UNITS: Record<string, readonly [width: number, low: number]> = {
+  "utf-8": [1, 0], "utf-8-sig": [1, 0], "utf-16-le": [2, 0], "utf-16-be": [2, 1], "utf-32-le": [4, 0], "utf-32-be": [4, 3],
+};
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+export const BAD_PAGE =
+  `read_lines takes one of the encodings read_file picks, an offset from 1, an integer limit and a max_bytes from 0 to ${MAX_PAYLOAD_BYTES}`;
 
 export const RG_MISSING =
   "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
@@ -118,10 +127,11 @@ function stat(args: Record<string, unknown>, { folder }: Context): unknown {
 }
 
 // An open file that is a regular file; refused otherwise, before any byte moves.
-function regular(fd: number, key: string): void {
+function regular(fd: number, key: string): Stats {
   const st = fstatSync(fd);
   if (st.isDirectory()) throw osError("EISDIR", key);
   if (!st.isFile()) throw osError("EINVAL", key, "Not a regular file");
+  return st;
 }
 
 function read(args: Record<string, unknown>, { folder }: Context): string {
@@ -147,6 +157,128 @@ function read(args: Record<string, unknown>, { folder }: Context): string {
   } finally {
     io(key, () => closeSync(fd));
   }
+}
+
+const isInteger = (value: unknown): value is number => Number.isInteger(value);
+
+// A page of a text file, as WorkspaceIO.read_lines defines it (surogates/tools/workspace_io/base.py): the bytes of the
+// whole lines Python's lines[offset - 1:min(offset - 1 + limit, total)] selects that fit in max_bytes, or, when not
+// even the first does, its first max_bytes; and how many lines the file has. Only line ends are found here: the cloud
+// decodes the page and applies every rule.
+function readLines(args: Record<string, unknown>, { folder }: Context): { data: string; total_lines: number } {
+  const key = keyInFolder(folder, text(args, "key"));
+  const { encoding, offset, limit, max_bytes: maxBytes } = args;
+  const unit = typeof encoding === "string" && Object.hasOwn(CODE_UNITS, encoding) ? CODE_UNITS[encoding] : undefined;
+  if (
+    !unit || !isInteger(offset) || offset < 1 || !isInteger(limit)
+    || !isInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_PAYLOAD_BYTES
+  ) {
+    throw valueError(BAD_PAGE);
+  }
+  const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
+  try {
+    // From the file's size, before a byte of it is read.
+    if (regular(fd, key).size > MAX_READ_BYTES) throw READ_EFBIG;
+    const page = pageOf(fd, key, unit, encoding === "utf-8-sig", offset, limit, maxBytes);
+    return { data: page.data.toString("base64"), total_lines: page.total };
+  } finally {
+    io(key, () => closeSync(fd));
+  }
+}
+
+// Fills *buffer* from *position* until it is full or the file ends: some filesystems answer less than asked.
+function fill(fd: number, key: string, buffer: Buffer, position: number): number {
+  let count = 0;
+  while (count < buffer.length) {
+    const got = io(key, () => readSync(fd, buffer, count, buffer.length - count, position + count));
+    if (got === 0) break;
+    count += got;
+  }
+  return count;
+}
+
+// One pass over the file in pieces. Its lines end as Python's readlines() ends them, at a line feed, a carriage return
+// or both, as code units of the encoding; candidates are found by memchr (indexOf) and checked as units.
+function pageOf(
+  fd: number, key: string, [width, low]: readonly [number, number], skipBom: boolean,
+  offset: number, limit: number, maxBytes: number,
+): { data: Buffer; total: number } {
+  const bom = Buffer.alloc(3);
+  // utf-8-sig drops its BOM, so line 1 starts after it. The other codecs keep a BOM as a character of line 1.
+  const start = skipBom && fill(fd, key, bom, 0) === 3 && bom.equals(UTF8_BOM) ? 3 : 0;
+  // The unit at *at* in *bytes*: a line feed (10), a carriage return (13), or neither (0).
+  const unitAt = (bytes: Buffer, at: number): number => {
+    const value = bytes[at + low];
+    if (value !== 10 && value !== 13) return 0;
+    for (let byte = 0; byte < width; byte++) if (byte !== low && bytes[at + byte] !== 0) return 0;
+    return value;
+  };
+  const first = offset - 1;
+  const buffer = Buffer.allocUnsafe(READ_PIECE_BYTES);
+  const peek = Buffer.alloc(width);
+  const fits: number[] = []; // where each line from the first ends, while the page holds it
+  let total = 0; // line ends so far
+  let begin = first === 0 ? start : -1; // where the first line starts
+  const takes = (end: number) => end - begin <= maxBytes && (limit <= 0 || fits.length < limit);
+  let taking = true;
+  let at = start; // where the piece starts in the file
+  let last = start; // where the last line end so far ends
+  for (;;) {
+    let count = fill(fd, key, buffer, at);
+    if (count === 0) break;
+    // A growing file's end can cut a unit for a moment: the next piece starts on a whole one.
+    if (count % width) count += fill(fd, key, buffer.subarray(count, count + width - (count % width)), at + count);
+    const piece = buffer.subarray(0, count);
+    // A unit cut off can now only be the file's last bytes.
+    const units = count - (count % width);
+    let size = count;
+    let lf = piece.indexOf(10, low);
+    let cr = piece.indexOf(13, low);
+    for (;;) {
+      const found = lf === -1 ? cr : cr === -1 ? lf : Math.min(lf, cr);
+      const i = found - low;
+      if (found === -1 || i + width > units) break;
+      const value = i % width === 0 ? unitAt(piece, i) : 0;
+      if (value === 0) {
+        if (found === lf) lf = piece.indexOf(10, found + 1);
+        else cr = piece.indexOf(13, found + 1);
+        continue;
+      }
+      let end = i + width;
+      if (value === 13) {
+        // CR LF is one line end, also across two pieces.
+        if (end < units) {
+          if (unitAt(piece, end) === 10) end += width;
+        } else if (fill(fd, key, peek, at + end) === width && unitAt(peek, 0) === 10) {
+          end += width;
+          size = end;
+        }
+      }
+      if (lf !== -1 && lf < end + low) lf = piece.indexOf(10, end + low);
+      if (cr !== -1 && cr < end + low) cr = piece.indexOf(13, end + low);
+      total += 1;
+      last = at + end;
+      if (total === first) begin = last;
+      else if (begin >= 0 && taking) {
+        if (takes(last)) fits.push(last);
+        else taking = false;
+      }
+    }
+    at += size;
+  }
+  if (at > last) {
+    // Bytes after the last line end are one more line.
+    total += 1;
+    if (taking && begin >= 0 && total > first && takes(at)) fits.push(at);
+  }
+  // Python's stop of lines[first:min(first + limit, total)], a limit below one included.
+  let stop = Math.min(first + limit, total);
+  if (stop < 0) stop = Math.max(stop + total, 0);
+  if (first >= total || stop <= first) return { data: Buffer.alloc(0), total };
+  const end = fits[Math.min(stop - first, fits.length) - 1];
+  // No whole line fits: the first one's first max_bytes, for the cloud to cut.
+  const data = Buffer.allocUnsafe(end === undefined ? maxBytes : end - begin);
+  return { data: data.subarray(0, fill(fd, key, data, begin)), total };
 }
 
 // Temp file and atomic rename, keeping the replaced file's mode, as the cloud does.

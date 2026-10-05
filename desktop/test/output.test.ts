@@ -70,7 +70,7 @@ describe("command output", () => {
 
   it("decodes invalid UTF-8 as Python's errors='replace', and keeps a BOM", () => {
     expect(commandOutput(windowOf(Buffer.from([0xff, 0x41]), 1), windowOf(Buffer.alloc(0), 2))).toBe("�A");
-    expect(commandOutput(windowOf(Buffer.from([0xef, 0xbb, 0xbf, 0x41]), 1), windowOf(Buffer.alloc(0), 2))).toBe("﻿A");
+    expect(commandOutput(windowOf(Buffer.from([0xef, 0xbb, 0xbf, 0x41]), 1), windowOf(Buffer.alloc(0), 2))).toBe("\ufeffA");
   });
 
   it("keeps a text that fits, and caps one that does not to the head and tail", () => {

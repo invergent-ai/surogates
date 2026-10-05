@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -23,8 +24,9 @@ import pytest
 
 from surogates.devices.operations import OperationRequest
 from surogates.devices.workspace import MAX_PAYLOAD_BYTES, MAX_READ_BYTES
-from surogates.tools.workspace_io.local import LocalWorkspaceIO
+from surogates.tools.workspace_io.local import CODE_UNITS, LocalWorkspaceIO
 from tests.fake_laptop import perform
+from tests.tools.test_workspace_io_read_lines import text
 
 from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
 from .test_devices import (  # noqa: F401  (fixtures)
@@ -70,6 +72,16 @@ def prepare(base: Path) -> Path:
     os.link(outside / "o.txt", folder / "hard.txt")
     (folder / ".git").mkdir()
     (folder / ".git" / "config").write_text("[core]\n")
+    pages = folder / "pages"
+    pages.mkdir()
+    (pages / "mixed.txt").write_bytes(b"one\ntwo\r\nthree\rfour")
+    (pages / "long.txt").write_bytes(b"x" * 100 + b"\nshort\n")
+    # 上 (U+4E0A) and 不 (U+4E0D) have units that hold 0x0A and 0x0D, and end no line.
+    for name, encoding in [("u16le", "utf-16-le"), ("u16be", "utf-16-be"), ("u32le", "utf-32-le"), ("u32be", "utf-32-be")]:
+        (pages / f"{name}.txt").write_bytes("\ufeff上\r\n不\nlast".encode(encoding))
+    (pages / "sig.txt").write_bytes("\ufeffone\ntwo\n".encode())
+    # A CR LF across the app's first two pieces of the file.
+    (pages / "edge.txt").write_bytes(b"x" * (MAX_PAYLOAD_BYTES - 1) + b"\r\ny\r\n")
     return folder.resolve()
 
 
@@ -113,6 +125,8 @@ def b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+PAGE = {"encoding": "utf-8", "offset": 1, "limit": 2000, "max_bytes": 200_000}
+
 SAME = [
     ("resolve", {"path": "a.txt"}),
     ("resolve", {"path": ""}),
@@ -153,6 +167,32 @@ SAME = [
     ("read", {"key": "{f}/special/locked.txt", "max_bytes": None}),
     ("read", {"key": "{f}/hard.txt", "max_bytes": None}),
     ("read", {"key": "{f}/My Files ü.txt", "max_bytes": None}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "offset": 2, "limit": 2}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "offset": 4}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "offset": 5}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "limit": 0}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "limit": -1}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "offset": 2, "limit": -1}),
+    ("read_lines", {"key": "{f}/pages/long.txt", **PAGE, "max_bytes": 10}),
+    ("read_lines", {"key": "{f}/pages/long.txt", **PAGE, "max_bytes": 0}),
+    ("read_lines", {"key": "{f}/pages/u16le.txt", **PAGE, "encoding": "utf-16-le", "offset": 2}),
+    ("read_lines", {"key": "{f}/pages/u16be.txt", **PAGE, "encoding": "utf-16-be"}),
+    ("read_lines", {"key": "{f}/pages/u32le.txt", **PAGE, "encoding": "utf-32-le", "offset": 2}),
+    ("read_lines", {"key": "{f}/pages/u32be.txt", **PAGE, "encoding": "utf-32-be"}),
+    ("read_lines", {"key": "{f}/pages/sig.txt", **PAGE, "encoding": "utf-8-sig"}),
+    ("read_lines", {"key": "{f}/pages/sig.txt", **PAGE, "encoding": "utf-8-sig", "offset": 2}),
+    ("read_lines", {"key": "{f}/pages/edge.txt", **PAGE, "offset": 2}),
+    ("read_lines", {"key": "{f}/big.bin", **PAGE, "max_bytes": MAX_PAYLOAD_BYTES}),
+    ("read_lines", {"key": "{f}/huge.bin", **PAGE}),
+    ("read_lines", {"key": "{f}/sub", **PAGE}),
+    ("read_lines", {"key": "{f}/missing", **PAGE}),
+    ("read_lines", {"key": "{f}/special/locked.txt", **PAGE}),
+    ("read_lines", {"key": "{f}/hard.txt", **PAGE}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "encoding": "latin-1"}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "offset": 0}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "limit": 1.5}),
+    ("read_lines", {"key": "{f}/pages/mixed.txt", **PAGE, "max_bytes": MAX_PAYLOAD_BYTES + 1}),
     ("list_dir", {"key": "{f}"}),
     ("list_dir", {"key": "{f}/sub"}),
     ("list_dir", {"key": "{f}/a.txt"}),
@@ -336,10 +376,33 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
         # srt left nothing in the user's folder.
         assert sorted(os.listdir(folder)) == sorted(
             [
-                ".git", "My Files ü.txt", "big.bin", "hard.txt", "huge.bin", "link-in", "link-out", "new", "run.sh",
-                "special", "sub",
+                ".git", "My Files ü.txt", "big.bin", "hard.txt", "huge.bin", "link-in", "link-out", "new", "pages",
+                "run.sh", "special", "sub",
             ]
         )
+    finally:
+        await app.close()
+
+
+async def test_the_app_pages_text_as_the_cloud_does(built_client, laptop_rig, link_url, tmp_path, journal_dir):
+    """Random text in every codec, invalid bytes and odd lengths too, paged at random by the app and the cloud."""
+    folder = prepare(tmp_path)
+    rng = random.Random(3)
+    cases = []
+    for number in range(40):
+        encoding = rng.choice(list(CODE_UNITS))
+        (folder / "pages" / f"random-{number}.txt").write_bytes(text(rng, encoding))
+        for _ in range(4):
+            cases.append({
+                "key": f"{folder}/pages/random-{number}.txt", "encoding": encoding, "offset": rng.randint(1, 12),
+                "limit": rng.randint(-14, 8), "max_bytes": rng.randint(0, 60),
+            })
+    cloud = LocalWorkspaceIO(str(folder))
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
+    try:
+        await app.until(connected)
+        for args in cases:
+            assert await on_app(laptop_rig, "read_lines", args) == await perform(cloud, "read_lines", args), args
     finally:
         await app.close()
 
@@ -371,9 +434,10 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
     app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
     try:
         await app.until(connected)
-        assert await on_app(laptop_rig, "read", {"key": f"{folder}/special/pipe", "max_bytes": None}) == {
-            "error": {"type": "os", "code": "EINVAL", "message": f"Not a regular file: '{folder}/special/pipe'"},
-        }
+        for kind, args in [("read", {"max_bytes": None}), ("read_lines", PAGE)]:
+            assert await on_app(laptop_rig, kind, {"key": f"{folder}/special/pipe", **args}) == {
+                "error": {"type": "os", "code": "EINVAL", "message": f"Not a regular file: '{folder}/special/pipe'"},
+            }
         assert await on_app(laptop_rig, "write", {"key": f"{folder}/hard.txt", "data": b64(b"changed")}) == {
             "error": {
                 "type": "os", "code": "EMLINK",
@@ -391,9 +455,10 @@ async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop
         assert not (folder / "sub" / ".git").exists()
         assert sorted(os.listdir(folder / "sub")) == listed
         for key in (str(outside), f"{folder}/link-in"):
-            assert await on_app(laptop_rig, "read", {"key": key, "max_bytes": None}) == {
-                "error": {"type": "sandbox", "message": f"Not a path in this folder: '{key}'"},
-            }
+            for kind, args in [("read", {"max_bytes": None}), ("read_lines", PAGE)]:
+                assert await on_app(laptop_rig, kind, {"key": key, **args}) == {
+                    "error": {"type": "sandbox", "message": f"Not a path in this folder: '{key}'"},
+                }
         assert (await on_app(laptop_rig, "write", {"key": f"{folder}/x.txt", "data": "@@"}))["error"]["type"] == "value"
         # Over 1 MiB a write's data comes in a transfer: inline, it is refused before anything is asked or run.
         big = b64(b"x" * (MAX_PAYLOAD_BYTES + 1))

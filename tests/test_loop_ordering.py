@@ -60,7 +60,7 @@ def _tool_resp(call_id: str, finish: str = "stop", content: str = "") -> tuple[d
                  "input_tokens": 1, "output_tokens": 1}
 
 
-async def _drive(harness, responses, monkeypatch, messages=None):
+async def _drive(harness, responses, monkeypatch, messages=None, session=None):
     log = iter(responses)
 
     async def fake_call(**_k):
@@ -78,7 +78,7 @@ async def _drive(harness, responses, monkeypatch, messages=None):
     monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", fake_exec)
     harness._find_invalid_tool_calls = MagicMock(return_value=[])
     messages = messages if messages is not None else [{"role": "user", "content": "q"}]
-    session = _make_session()
+    session = session or _make_session()
     await harness._run_loop(
         session, messages, "system", SimpleNamespace(lease_token=uuid4()), all_events=[],
     )

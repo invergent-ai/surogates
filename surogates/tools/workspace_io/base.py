@@ -40,6 +40,14 @@ class FileStat:
 
 
 @dataclass(frozen=True, slots=True)
+class LinePage:
+    """A page of a text file: its lines' bytes as they are, and how many lines the file has."""
+
+    data: bytes
+    total_lines: int
+
+
+@dataclass(frozen=True, slots=True)
 class RunResult:
     """A finished command.  ``output`` is stdout, then stderr."""
 
@@ -90,6 +98,23 @@ class WorkspaceIO(Protocol):
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         """The file's bytes, or only its first *max_bytes*.  Raises OSError."""
+
+    async def read_lines(
+        self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
+    ) -> LinePage:
+        """Lines *offset* (from 1) to *offset* + *limit* of the text file at *key*, as raw bytes.
+
+        Its lines end as ``TextIOWrapper.readlines()`` ends them in *encoding*,
+        one of :data:`surogates.tools.workspace_io.local.CODE_UNITS`: at a line
+        feed, a carriage return, or both, as code units of the encoding.
+        ``total_lines`` is how many lines ``readlines()`` gives.  ``data`` is
+        the bytes of the lines ``lines[offset - 1:min(offset - 1 + limit,
+        total_lines)]`` selects, a *limit* below one included, that fit whole
+        in *max_bytes*.  When not even the first fits, it is that line's first
+        *max_bytes* bytes.  A ``utf-8-sig`` file's BOM is in no line.  Decoded
+        alone, in *encoding* (``utf-8`` for ``utf-8-sig``), ``data`` gives the
+        same lines as the whole file does.  Raises OSError as :meth:`read` does.
+        """
 
     async def write(self, key: str, data: bytes) -> None:
         """Replace the file with *data* atomically, creating parent directories.

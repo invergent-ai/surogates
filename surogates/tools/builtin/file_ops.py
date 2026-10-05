@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import threading
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -591,7 +592,8 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 
 # ---------------------------------------------------------------------------
 # Read tracker — detect re-read loops and deduplicate reads.
-# Per task_id we store:
+# Per entry, which _tracker_of picks for a call: its ``read_tracker_id``, the
+# session's own on the user's computer, else its ``task_id``.  We store:
 #   "last_key":     the key of the most recent read/search call (or None)
 #   "consecutive":  how many times that exact call has been repeated in a row
 #   "read_history": set of (path, offset, limit) tuples for get_read_files_summary
@@ -600,20 +602,36 @@ def _is_expected_write_exception(exc: Exception) -> bool:
 #                   context compression (the original content is summarised
 #                   away so the model needs the full content again).
 #   "read_timestamps": dict mapping resolved_path → modification-time float
-#                      recorded when the file was last read (or written) by
-#                      this task.  Used by write_file and patch to detect
+#                      recorded when the file was last read (or written)
+#                      under this entry.  Used by write_file and patch to detect
 #                      external changes between the agent's read and write.
 #                      Updated after successful writes so consecutive edits
-#                      by the same task don't trigger false warnings.
+#                      under the same entry don't trigger false warnings.
 # ---------------------------------------------------------------------------
 _read_tracker_lock = threading.Lock()
 _read_tracker: dict = {}
 _MAX_TRACKED_READ_ENTRIES = 1024
+# Where the registry cuts a read_file result short.
+_READ_FILE_MAX_RESULT_CHARS = 100_000
+# Entries forget_read_tracker queued, dropped at the next read or search.
+_forgotten: deque[str] = deque()
+
+
+def _tracker_of(kwargs: dict[str, Any]) -> str:
+    """The tracker entry a tool call reads and records in.
+
+    A call of a session on the user's computer keeps its session's own
+    (``read_tracker_id``), apart from its root and its sub-agents: their
+    ``task_id`` is the root's, which their background processes share.
+    """
+    return kwargs.get("read_tracker_id") or kwargs.get("task_id", "default")
 
 
 def _init_task_data(task_id: str) -> dict:
     """Return (and lazily create) the tracker state dict for *task_id*."""
     with _read_tracker_lock:
+        while _forgotten:
+            _read_tracker.pop(_forgotten.popleft(), None)
         task_data = _read_tracker.setdefault(task_id, {
             "last_key": None,
             "consecutive": 0,
@@ -688,6 +706,15 @@ def clear_read_tracker(task_id: str | None = None) -> None:
             _read_tracker.pop(task_id, None)
         else:
             _read_tracker.clear()
+
+
+def forget_read_tracker(task_id: str) -> None:
+    """Drop *task_id*'s entry at the next read or search.
+
+    It takes no lock, so a finalizer may call it: the garbage collector can
+    run one while this very thread holds the tracker's lock.
+    """
+    _forgotten.append(task_id)
 
 
 def reset_file_dedup(task_id: str | None = None) -> None:
@@ -1082,7 +1109,7 @@ def register(registry: ToolRegistry) -> None:
         schema=READ_FILE_SCHEMA,
         handler=_read_file_handler,
         toolset="file",
-        max_result_size=100_000,
+        max_result_size=_READ_FILE_MAX_RESULT_CHARS,
     )
 
     # ── write_file ────────────────────────────────────────────────────
@@ -1156,8 +1183,9 @@ def _apply_line_window(
     """Slice ``lines`` into a 1-indexed window.
 
     Returns ``(selected, total_lines, start_idx, end_idx, truncated)``.
-    Shared by ``_handle_text`` and ``_handle_document`` so both paths
-    paginate identically.
+    Shared by ``_handle_document`` and the image read in
+    ``surogates/harness/image_read.py``, which hold all their lines.  Text
+    pages through ``WorkspaceIO.read_lines`` instead, to the same window.
     """
     total_lines = len(lines)
     start_idx = offset - 1  # 1-indexed → 0-indexed
@@ -1350,14 +1378,14 @@ async def _handle_text(
 ) -> str:
     """Text reader with BOM detection, dedup tracking and consecutive-loop guards.
 
-    Lifted verbatim from the pre-refactor ``_read_file_handler`` body so
-    behavior on ``.py``/``.md``/``.json``/UTF-16 files is identical.  The
-    only structural change is that line-windowing goes through
-    ``_apply_line_window``.
+    It reads only the page it shows: the workspace finds the line ends
+    (``read_lines``), and this decodes and renders the page as the whole file
+    would have rendered, so a page of a large file on the user's computer
+    moves the file's head and the page, never the file.
     """
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
 
     # ── Dedup check ───────────────────────────────────────────────
     # If we already read this exact (path, offset, limit) and the
@@ -1422,14 +1450,22 @@ async def _handle_text(
         pass  # Proceed with utf-8
 
     try:
-        lines = _decode(await wio.read(key), encoding, errors="replace").readlines()
-    except (OSError, UnicodeDecodeError) as exc:
+        page = await wio.read_lines(
+            key, encoding=encoding, offset=offset, limit=limit,
+            # A rendered character takes at most four bytes in UTF-8 and UTF-16
+            # and eight in UTF-32, where CR LF is one character of two units:
+            # the page holds every line the character budget can show.
+            max_bytes=(8 if encoding.startswith("utf-32") else 4) * get_max_bytes(),
+        )
+    except OSError as exc:
         return _tool_error(f"Failed to read file: {exc}")
+    total_lines = page.total_lines
 
-    selected, total_lines, _start_idx, _end_idx, _truncated = _apply_line_window(
-        lines, offset, limit,
-    )
-
+    # Cut at line ends, the page decodes to the lines the whole file would.
+    # A utf-8-sig page holds no BOM.
+    selected = _decode(
+        page.data, "utf-8" if encoding == "utf-8-sig" else encoding, errors="replace",
+    ).readlines()
     content, lines_shown, next_offset = _render_read_window(
         selected, offset, total_lines,
     )
@@ -1465,12 +1501,25 @@ async def _handle_text(
             task_data["consecutive"] = 1
         count = task_data["consecutive"]
 
+    if 3 <= count < 4:
+        result_dict["_warning"] = (
+            f"You have read this exact file region {count} times consecutively. "
+            "The content has not changed since your last read. Use the information you already have. "
+            "If you are stuck in a loop, stop reading and proceed with writing or responding."
+        )
+    result = json.dumps(result_dict, ensure_ascii=False)
+    # The model sees a result over the limit cut short: a later identical
+    # read shows the page again, never a reference to it.
+    seen_whole = len(result) <= _READ_FILE_MAX_RESULT_CHARS
+
+    with _read_tracker_lock:
         # Store mtime at read time for two purposes:
         # 1. Dedup: skip identical re-reads of unchanged files.
         # 2. Staleness: warn on write/patch if the file changed since
         #    the agent last read it (external edit, concurrent agent, etc.).
         if after is not None:
-            task_data["dedup"][dedup_key] = after.mtime
+            if seen_whole:
+                task_data["dedup"][dedup_key] = after.mtime
             task_data.setdefault("read_timestamps", {})[key] = after.mtime
             _cap_read_tracker_data(task_data)
 
@@ -1485,14 +1534,7 @@ async def _handle_text(
             "path": path,
             "already_read": count,
         }, ensure_ascii=False)
-    elif count >= 3:
-        result_dict["_warning"] = (
-            f"You have read this exact file region {count} times consecutively. "
-            "The content has not changed since your last read. Use the information you already have. "
-            "If you are stuck in a loop, stop reading and proceed with writing or responding."
-        )
-
-    return json.dumps(result_dict, ensure_ascii=False)
+    return result
 
 
 async def _write_file_handler(
@@ -1508,7 +1550,7 @@ async def _write_file_handler(
     """
     path = arguments.get("path", "")
     content = arguments.get("content", "")
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     if not path:
@@ -1586,7 +1628,7 @@ async def _patch_handler(
     new_string = arguments.get("new_string")
     replace_all = arguments.get("replace_all", False)
     patch_content = arguments.get("patch")
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
@@ -2346,7 +2388,7 @@ async def _search_files_handler(
     offset = arguments.get("offset", 0)
     output_mode = arguments.get("output_mode", "content")
     context = arguments.get("context", 0)
-    task_id = kwargs.get("task_id", "default")
+    task_id = _tracker_of(kwargs)
     wio = workspace_io_from(kwargs)
 
     # Map legacy target names
