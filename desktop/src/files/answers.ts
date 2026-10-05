@@ -113,6 +113,14 @@ export function sandboxError(message: string): Failure {
   return new Failure({ type: "sandbox", message });
 }
 
+// A write whose file is not at the revision it expects: the model reads it again.
+export function conflict(key: string): Failure {
+  return new Failure({
+    type: "conflict",
+    message: `${key} changed on this computer after it was read, so it was not written. Read it again, then make the change again`,
+  });
+}
+
 // A filesystem call about *path*: a Node error comes out as Python's OSError.
 // For synchronous calls only: a promise or a callback would escape the try.
 export function io<T>(path: string, call: () => T): T {

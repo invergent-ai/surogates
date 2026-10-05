@@ -35,6 +35,7 @@ let context: Context;
 
 const run = (kind: string, args: Record<string, unknown>) => perform(kind, args, context, new AbortController().signal);
 const b64 = (text: string | Buffer) => Buffer.from(text).toString("base64");
+const revision = async (key: string) => ((await run("stat", { key })) as { ok: { revision: string } }).ok.revision;
 
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "operations-")));
@@ -61,8 +62,6 @@ describe("resolve and check_write", () => {
 });
 
 describe("stat", () => {
-  const revision = async (key: string) => ((await run("stat", { key })) as { ok: { revision: string } }).ok.revision;
-
   it("answers exactly is_dir, size, mtime and revision", async () => {
     const answer = await run("stat", { key: `${folder}/a.txt` });
     expect(Object.keys((answer as { ok: object }).ok).sort()).toEqual(["is_dir", "mtime", "revision", "size"]);
@@ -393,6 +392,32 @@ describe("write", () => {
     });
     expect(await run("write", { key: `${base}/outside/o.txt`, data: b64("x") })).toMatchObject({ error: { type: "sandbox" } });
     expect(readFileSync(join(base, "outside", "o.txt"), "utf8")).toBe("outside\n");
+  });
+
+  it("writes only while the file is at the revision the write expects, and makes nothing otherwise", async () => {
+    const key = `${folder}/a.txt`;
+    const seen = await revision(key);
+    expect(await run("write", { key, data: b64("two\n"), expected_revision: seen })).toEqual({ ok: null });
+    expect(readFileSync(key, "utf8")).toBe("two\n");
+    // As the cloud's reference laptop words it (tests/fake_laptop.py's CONFLICT).
+    expect(await run("write", { key, data: b64("three\n"), expected_revision: seen })).toEqual({
+      error: {
+        type: "conflict",
+        message: `${key} changed on this computer after it was read, so it was not written. Read it again, then make the change again`,
+      },
+    });
+    expect(readFileSync(key, "utf8")).toBe("two\n");
+    for (const expected of [seen, 5]) {
+      expect(await run("write", { key: `${folder}/gone/n.txt`, data: b64("x"), expected_revision: expected })).toMatchObject({
+        error: { type: "conflict" },
+      });
+    }
+    expect(readdirSync(folder).sort()).toEqual(["a.txt", "link-in", "sub"]);
+  });
+
+  it("writes whatever is there when the write expects no revision", async () => {
+    expect(await run("write", { key: `${folder}/a.txt`, data: b64("x"), expected_revision: null })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "a.txt"), "utf8")).toBe("x");
   });
 
   it("writes exactly 1 MiB", async () => {

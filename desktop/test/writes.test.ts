@@ -142,6 +142,18 @@ describe("a write whose data comes in a transfer", () => {
     expect(results("a")[0]?.outcome).toEqual({ ok: null });
   });
 
+  it("runs with the args it came with, a revision it expects too", async () => {
+    const executor = new Recording();
+    await start(executor);
+    const args = { key: "/f/big.bin", transfer: NAMED, expected_revision: "1:2:3:4:5" };
+    send({ ...writeOp("a"), args });
+    for (const seq of [0, 1, 2]) send(chunk("a", seq));
+    await server.until(() => results("a").length === 1);
+    expect(executor.ran.map((op) => op.args)).toEqual([
+      { key: "/f/big.bin", expected_revision: "1:2:3:4:5", data: DATA.toString("base64") },
+    ]);
+  });
+
   it("whose data does not match its SHA-256 is answered so, and never run", async () => {
     const executor = new Recording();
     await start(executor);

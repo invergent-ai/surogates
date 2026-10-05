@@ -24,14 +24,16 @@ import pytest
 
 from surogates.devices.operations import OperationRequest
 from surogates.devices.workspace import MAX_PAYLOAD_BYTES, MAX_READ_BYTES
+from surogates.tools.workspace_io import RevisionConflict
 from surogates.tools.workspace_io.local import CODE_UNITS, LocalWorkspaceIO
-from tests.fake_laptop import perform
+from tests.fake_laptop import CONFLICT, perform
 from tests.tools.test_workspace_io_read_lines import text
 
 from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
     api,
+    device_io,
     laptop_rig,
     link_url,
     request_for,
@@ -217,6 +219,10 @@ SAME = [
 SAME_FAILURES = [
     ("write", {"key": "{f}/a.txt/x", "data": b64(b"x")}),
     ("write", {"key": "{f}/a.txt/sub/x", "data": b64(b"x")}),
+    # Not at the revision expected, or not there at all: a conflict, and nothing is made.
+    ("write", {"key": "{f}/a.txt", "data": b64(b"x"), "expected_revision": "0:0:0:0:0"}),
+    ("write", {"key": "{f}/a.txt", "data": b64(b"x"), "expected_revision": 5}),
+    ("write", {"key": "{f}/missing/new.txt", "data": b64(b"x"), "expected_revision": "0:0:0:0:0"}),
     ("delete", {"key": "{f}/missing"}),
     ("delete", {"key": "{f}/sub"}),
     ("delete", {"key": "{f}"}),
@@ -375,6 +381,20 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
         assert os.listdir(folder / "new" / "deep") == ["n.txt"]
         assert await on_app(laptop_rig, "write", {"key": f"{folder}/run.sh", "data": b64(b"#!/bin/sh\necho\n")}) == {"ok": None}
         assert (folder / "run.sh").stat().st_mode & 0o777 == 0o755
+        # On the revision its stat gave, a write lands; one too large for a frame too, once its data is whole.
+        seen = (await on_app(laptop_rig, "stat", {"key": f"{folder}/sub/b.txt"}))["ok"]["revision"]
+        assert await on_app(
+            laptop_rig, "write", {"key": f"{folder}/sub/b.txt", "data": b64(b"changed\n"), "expected_revision": seen},
+        ) == {"ok": None}
+        assert (folder / "sub" / "b.txt").read_bytes() == b"changed\n"
+        wio = device_io(laptop_rig.ops, laptop_rig.device_id, laptop_rig.root, folder)
+        big = os.urandom(MAX_PAYLOAD_BYTES + 1)
+        with pytest.raises(RevisionConflict):
+            await asyncio.wait_for(wio.write(f"{folder}/big.bin", big, expected_revision="0:0:0:0:0"), 30.0)
+        assert (folder / "big.bin").read_bytes() == b"x" * (MAX_PAYLOAD_BYTES + 10)
+        seen = (await asyncio.wait_for(wio.stat(f"{folder}/big.bin"), 30.0)).revision
+        await asyncio.wait_for(wio.write(f"{folder}/big.bin", big, expected_revision=seen), 30.0)
+        assert (folder / "big.bin").read_bytes() == big
         assert await on_app(laptop_rig, "delete", {"key": f"{folder}/a.txt"}) == {"ok": None}
         assert not (folder / "a.txt").exists()
         # srt left nothing in the user's folder.
@@ -384,6 +404,27 @@ async def test_the_app_changes_files_as_the_cloud_does(built_client, laptop_rig,
                 "run.sh", "special", "sub",
             ]
         )
+    finally:
+        await app.close()
+
+
+async def test_two_writes_on_one_revision_land_once_on_the_app(built_client, laptop_rig, link_url, tmp_path, journal_dir):
+    """Its file helper makes one change at a time, so the second write finds the file at another revision."""
+    folder = prepare(tmp_path)
+    key = f"{folder}/a.txt"
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder)
+    try:
+        await app.until(connected)
+        seen = (await on_app(laptop_rig, "stat", {"key": key}))["ok"]["revision"]
+        writes = [b"first\n", b"second\n"]
+        outcomes = await asyncio.gather(*(
+            on_app(laptop_rig, "write", {"key": key, "data": b64(data), "expected_revision": seen}) for data in writes
+        ))
+        [landed] = [data for data, outcome in zip(writes, outcomes) if outcome == {"ok": None}]
+        assert [outcome for outcome in outcomes if outcome != {"ok": None}] == [
+            {"error": {"type": "conflict", "message": CONFLICT.format(key)}},
+        ]
+        assert (folder / "a.txt").read_bytes() == landed
     finally:
         await app.close()
 

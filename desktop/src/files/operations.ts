@@ -1,7 +1,8 @@
 // The file operations, as surogates/devices/workspace.py defines them and the
 // cloud's LocalWorkspaceIO does them, run by the file helper inside the folder's
 // sandbox. Each is synchronous fs work, so two changes to one path never
-// interleave; only ripgrep waits on a process.
+// interleave, and a write that expects a revision checks it in the same turn;
+// only ripgrep waits on a process.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
-  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
+  conflict, Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES,
   OUTPUT_CAP_CHARS, osError, pyJsonLength, READ_TOO_LARGE, sandboxError, valueError, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
@@ -112,6 +113,15 @@ function textOrNull(args: Record<string, unknown>, name: string): string | null 
 // This version of the file, as LocalWorkspaceIO.stat names it (surogates/tools/workspace_io/local.py):
 // the ctime moves with every change, and utimes cannot set it back.
 const revisionOf = (st: BigIntStats): string => `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
+
+// The file's revision now, or null when it cannot be stat'ed.
+function revisionAt(key: string): string | null {
+  try {
+    return revisionOf(statSync(key, { bigint: true }));
+  } catch {
+    return null;
+  }
+}
 
 function stat(args: Record<string, unknown>, { folder }: Context): unknown {
   try {
@@ -301,6 +311,9 @@ function write(args: Record<string, unknown>, { folder }: Context): null {
   if (!isBase64(encoded)) throw valueError("data is not standard padded base64");
   const data = Buffer.from(encoded, "base64");
   if (data.length > MAX_WRITE_BYTES) throw WRITE_EFBIG;
+  // The revision this call's stat saw: anything else there, or nothing, is a conflict. Before anything is made.
+  const expected = args.expected_revision;
+  if (expected !== undefined && expected !== null && revisionAt(key) !== expected) throw conflict(key);
   const parent = dirname(key);
   makeDirs(parent);
   // The rename replaces the name and never opens the file, so a file this user
