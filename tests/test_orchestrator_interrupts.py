@@ -117,6 +117,34 @@ async def test_lease_held_wake_is_requeued(
     )
 
 
+async def test_a_wake_for_a_session_held_elsewhere_builds_no_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building a harness costs a full set of DB, vault and MCP round trips; a phone caller's next
+    turn re-queued behind a busy session paid that on every spin before learning the lease was held."""
+    session_id = uuid4()
+    org_id = uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    def fail_if_called(_session_id):
+        raise AssertionError("a session leased elsewhere must not get a harness")
+
+    session_store = SimpleNamespace(
+        has_live_lease=AsyncMock(return_value=True),
+        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot")),
+    )
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY", 0, raising=False)
+    orchestrator = Orchestrator(
+        redis_client=redis, session_store=session_store, harness_factory=fail_if_called,
+        agent_id="support-bot", queue_key="surogates:work_queue:support-bot", max_concurrent=1,
+    )
+
+    await orchestrator._process(session_id)
+
+    redis.zadd.assert_called_once()
+
+
 async def test_locally_active_wake_defers_rewake_without_zadd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

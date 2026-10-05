@@ -701,6 +701,16 @@ class Orchestrator:
                         )
                         return
 
+            # Another worker holds this session (e.g. a caller's next turn queued behind a wake still
+            # finishing): learn that before building a harness, which costs a full set of DB, vault
+            # and MCP round trips, instead of after it inside wake().
+            has_live_lease = getattr(self.session_store, "has_live_lease", None)
+            if has_live_lease is not None and await has_live_lease(session_id):
+                self._rewake_pending.discard(session_id)
+                logger.info("Session %s lease is held; requeueing wake", session_id)
+                await self._requeue_busy_session(session_id)
+                return
+
             harness = self.harness_factory(session_id)
             # Support both sync and async factories.
             if hasattr(harness, "__await__"):
