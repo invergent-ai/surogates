@@ -25,8 +25,10 @@ from surogates.devices.workspace import (
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    WRITE_TOO_LARGE,
     transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
@@ -106,7 +108,10 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
             raise OSError(errno.EFBIG, READ_TOO_LARGE)
         return base64.b64encode(data).decode("ascii")
     if kind == "write":
-        await folder.write(a["key"], base64.b64decode(a["data"]))
+        data = base64.b64decode(a["data"])
+        if len(data) > MAX_WRITE_BYTES:
+            raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
+        await folder.write(a["key"], data)
         return None
     if kind == "delete":
         await folder.delete(a["key"])
@@ -165,9 +170,14 @@ class InProcessRunner:
         self.folder = folder
         self.kinds: list[str] = []
 
-    async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         self.kinds.append(kind)
-        outcome = await perform(self.folder, kind, json.loads(json.dumps(args)))
+        sent = json.loads(json.dumps(args))
+        if payload is not None:
+            # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
+            assert sent.pop("transfer") == {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+            sent["data"] = base64.b64encode(payload).decode("ascii")
+        outcome = await perform(self.folder, kind, sent)
         wire = json.dumps(outcome)
         # A read's data over MAX_PAYLOAD_BYTES crosses a link as a transfer, outside the outcome.
         if kind != "read":

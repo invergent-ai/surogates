@@ -12,7 +12,8 @@ enforces its rules; the worker never touches the folder.
   stat            key                                           {is_dir, size, mtime} or null
   read            key, max_bytes (int or null)                  data (base64), or
                                                                 {"transfer": {size, sha256}}
-  write           key, data (base64)                            null
+  write           key, data (base64), or                        null
+                  key, transfer {size, sha256}
   delete          key                                           null
   list_dir        key                                           [name]
   ripgrep         key, mode, pattern, glob, context             stdout (str)
@@ -55,8 +56,11 @@ loosely.
 Sizes.  Every args object and every outcome, serialized, fits in
 MAX_MESSAGE_CHARS, so it fits in one link frame:
 
-  - a write carries at most MAX_PAYLOAD_BYTES of file data, and is refused
-    with EFBIG (and TOO_LARGE) past it;
+  - a write carries at most MAX_PAYLOAD_BYTES of file data as its data.  Up to
+    MAX_WRITE_BYTES the data is a transfer: in place of it the args name it by
+    its size and the SHA-256 of the data, in lowercase hex, and the data
+    follows the op in chunks (surogates.devices.link).  More is refused with
+    EFBIG (and WRITE_TOO_LARGE) before anything is sent;
   - a read returns at most MAX_READ_BYTES, and fails with EFBIG (and
     READ_TOO_LARGE) when it would return more.  Data of up to
     MAX_PAYLOAD_BYTES is the ok value itself.  More is a transfer: the ok
@@ -85,6 +89,7 @@ import asyncio
 import base64
 import contextlib
 import errno
+import hashlib
 import json
 import tempfile
 from collections.abc import AsyncIterator
@@ -96,13 +101,15 @@ from surogates.tools.workspace_io.base import FileStat, RipgrepError, RipgrepMod
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
 MAX_READ_BYTES = 50 * 1024 * 1024
+MAX_WRITE_BYTES = 50 * 1024 * 1024
 # A transfer's chunks carry this much of its data each, the last one the rest.
 CHUNK_BYTES = MAX_PAYLOAD_BYTES
 MAX_MESSAGE_CHARS = 1536 * 1024
 OUTPUT_CAP_CHARS = 256 * 1024
 MAX_NAMES = 10_000
-TOO_LARGE = "File too large for one operation on a local folder (over 1 MiB)"
+TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
+WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"
 
 
 class DeviceOperationError(RuntimeError):
@@ -110,8 +117,11 @@ class DeviceOperationError(RuntimeError):
 
 
 class OperationRunner(Protocol):
-    async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Run one operation on the laptop and return its outcome."""
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
+        """Run one operation on the laptop and return its outcome.
+
+        *payload* is a write's data that its args name as a transfer.
+        """
 
 
 def is_well_formed(value: Any) -> bool:
@@ -127,6 +137,11 @@ def transfer_of(outcome: dict[str, Any]) -> Any:
     """The transfer a read's outcome names in place of its data, or None."""
     ok = outcome.get("ok")
     return ok.get("transfer") if isinstance(ok, dict) else None
+
+
+def _transfer_for(data: bytes) -> dict[str, Any]:
+    """The transfer that carries *data*, named by its content."""
+    return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
 def _raise(error: dict[str, Any]) -> None:
@@ -154,10 +169,10 @@ class DeviceWorkspaceIO:
         self._runner = runner
         self.root = root
 
-    async def _call(self, kind: str, **args: Any) -> Any:
+    async def _call(self, kind: str, *, payload: bytes | None = None, **args: Any) -> Any:
         if len(json.dumps(args)) > MAX_MESSAGE_CHARS:
             raise OSError(errno.EFBIG, TOO_LARGE)
-        outcome = await self._runner.run(kind, args)
+        outcome = await self._runner.run(kind, args, payload)
         if "error" in outcome:
             _raise(outcome["error"])
         if "ok" not in outcome:
@@ -189,9 +204,16 @@ class DeviceWorkspaceIO:
             raise DeviceOperationError("The computer returned invalid data") from None
 
     async def write(self, key: str, data: bytes) -> None:
-        if len(data) > MAX_PAYLOAD_BYTES:
-            raise OSError(errno.EFBIG, TOO_LARGE)
-        await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"))
+        if len(data) <= MAX_PAYLOAD_BYTES:
+            await self._call("write", key=key, data=base64.b64encode(data).decode("ascii"))
+            return
+        if len(data) > MAX_WRITE_BYTES:
+            raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
+        # Named by its content, so a resumed call that makes the same bytes asks
+        # for the same operation.  Up to 50 MiB: hashed off the event loop the
+        # worker's other sessions share.
+        transfer = await asyncio.to_thread(_transfer_for, data)
+        await self._call("write", payload=data, key=key, transfer=transfer)
 
     async def delete(self, key: str) -> None:
         await self._call("delete", key=key)

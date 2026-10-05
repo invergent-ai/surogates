@@ -15,14 +15,14 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import and_, delete, exists, func, or_, select, text, update
+from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -226,6 +226,23 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
         raise DeviceOperationError(f"Too many sessions are waiting for {device.name}")
 
 
+async def _keep_payload(db: AsyncSession, operation_id: UUID, transfer: dict[str, Any], data: bytes) -> None:
+    """Store a write's data with its operation, in its transaction: the link sends it after the op."""
+    await db.execute(insert(DeviceTransfer).values(
+        operation_id=operation_id,
+        size=transfer["size"],
+        sha256=transfer["sha256"],
+        # Whole: a read's transfer starting on this device deletes only half-sent ones.
+        received=len(data),
+        # Stored by the worker: no connection sends it in.
+        holder="",
+    ))
+    await db.execute(insert(DeviceTransferChunk), [
+        {"operation_id": operation_id, "seq": seq, "data": data[at:at + CHUNK_BYTES]}
+        for seq, at in enumerate(range(0, len(data), CHUNK_BYTES))
+    ])
+
+
 @dataclass(frozen=True, slots=True)
 class OperationRequest:
     device_id: UUID
@@ -237,6 +254,9 @@ class OperationRequest:
     args: dict[str, Any]
     # The execution generation: recorded, never part of the digest.
     lease_token: str | None = None
+    # A write's data that its args name as a transfer: kept with the operation,
+    # never part of the digest, and never in a log line.
+    payload: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.invocation_id:
@@ -535,6 +555,9 @@ class DeviceOperations:
                 .on_conflict_do_nothing(constraint="uq_device_operations_invocation")
                 .returning(DeviceOperation.id)
             )).scalar_one_or_none()
+            if inserted is not None and request.payload is not None and not refused:
+                # Committed with the operation: the link may send the op as soon as it is.
+                await _keep_payload(db, inserted, request.args["transfer"], request.payload)
             await db.commit()
             if inserted is not None:
                 return inserted, REVOKED_OUTCOME if refused else None
@@ -963,7 +986,7 @@ class JournalRunner:
         self._ordinal = 0
         self._conflicted = False
 
-    async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         if self._conflicted:
             # A resumed call that took another path asks the computer for nothing more.
             raise OperationConflict(f"{self._invocation_id} took another path than its first run")
@@ -980,6 +1003,7 @@ class JournalRunner:
                 kind=kind,
                 args=args,
                 lease_token=self._lease_token,
+                payload=payload,
             ))
             transfer = transfer_of(outcome)
             if transfer is None:

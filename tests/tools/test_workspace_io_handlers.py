@@ -243,6 +243,13 @@ class TestWriteFile:
         out = await call(file_ops._write_file_handler, ws, path="/etc/passwd", content="x")
         assert out["error"] == "Write denied: '/etc/passwd' is a protected system/credential file."
 
+    async def test_writes_more_than_one_frame_of_data(self, ws):
+        # Over 1 MiB, a device's write goes as a transfer.
+        content = "".join(f"line {n:07d} of a file too large for one frame\n" for n in range(60_000))
+        out = await call(file_ops._write_file_handler, ws, path=ws.path("big.txt"), content=content)
+        assert out["status"] == "ok", out
+        assert (ws.real / "big.txt").read_text() == content
+
     @needs_python
     async def test_lints_python(self, ws):
         good = await call(file_ops._write_file_handler, ws, path=ws.path("ok.py"), content="x = 1\n")
@@ -272,6 +279,33 @@ class TestPatch:
         assert out["status"] == "ok"
         assert "-y = 2\n+y = 3\n" in out["diff"]
         assert (ws.real / "a.txt").read_text() == "x = 1\ny = 3\n"
+
+    async def test_replace_in_a_file_of_5_mib(self, ws):
+        lines = [f"row {n:07d} of a large file\n" for n in range(200_000)]
+        (ws.real / "big.txt").write_text("".join(lines))
+        out = await call(
+            file_ops._patch_handler, ws,
+            mode="replace", path=ws.path("big.txt"), old_string="row 0199998 of", new_string="ROW 0199998 OF",
+        )
+        assert out["status"] == "ok", out
+        lines[199_998] = "ROW 0199998 OF a large file\n"
+        assert (ws.real / "big.txt").read_text() == "".join(lines)
+
+    async def test_v4a_updates_a_file_of_2_mib(self, ws):
+        lines = [f"row {n:07d}\n" for n in range(180_000)]
+        (ws.real / "big.txt").write_text("".join(lines))
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {ws.path('big.txt')}\n"
+            "@@\n"
+            "-row 0179998\n"
+            "+ROW 0179998\n"
+            "*** End Patch"
+        )
+        out = await call(file_ops._patch_handler, ws, mode="patch", patch=patch)
+        assert out["status"] == "ok", out
+        lines[179_998] = "ROW 0179998\n"
+        assert (ws.real / "big.txt").read_text() == "".join(lines)
 
     async def test_replace_keeps_crlf(self, ws):
         (ws.real / "a.txt").write_bytes(b"one\r\ntwo\r\n")
@@ -554,6 +588,17 @@ class TestResearch:
         got = await call(research._research_outline_handler, ws, action="get")
         assert got["outline"].startswith("## One")
         assert (ws.real / ".research" / "memory.jsonl").is_file()
+
+    async def test_memory_keeps_growing_past_1_mib(self, ws):
+        for n in range(4):
+            added = await call(
+                research._research_memory_handler, ws,
+                action="add", url=f"https://example.org/{n}", title=f"T{n}", summary="s" * 400_000, evidence=["q"],
+            )
+            assert added["success"] is True, added
+        assert (ws.real / ".research" / "memory.jsonl").stat().st_size > 1024 * 1024
+        listed = await call(research._research_memory_handler, ws, action="list")
+        assert [s["source_id"] for s in listed["sources"]] == ["S1", "S2", "S3", "S4"]
 
 
 async def test_remapped_workspace_serves_the_real_directory(tmp_path):
