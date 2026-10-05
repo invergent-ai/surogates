@@ -1,11 +1,16 @@
 // Runs the operations the server sends, each at most once: the journal says
 // whether one is new, already answered, cancelled or still running; the
 // executor does the work. A cancelled operation is stopped and answered with
-// nothing; an outcome that could not be sent is sent again after a reconnect.
+// nothing; an outcome that could not be sent is sent again after a reconnect. A
+// read's data too large for one frame goes as a transfer (transfers.ts).
 
+import { createHash } from "node:crypto";
+
+import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES } from "../files/answers.js";
 import type { OperationJournal } from "../journal/journal.js";
-import { MAX_FRAME_CHARS, opResult, type Operation, type Outcome } from "../link/protocol.js";
+import { CHUNK_BYTES, MAX_FRAME_CHARS, opResult, type Operation, type Outcome, transferOf } from "../link/protocol.js";
 import { report } from "../report.js";
+import { type Send, TransferSender } from "./transfers.js";
 
 // The answer to an operation whose result would not fit one frame: the server
 // would refuse that frame, and the result would be resent forever. The operation
@@ -83,6 +88,22 @@ function sendable(operation: Operation, outcome: unknown, ran: boolean): Outcome
   return ran ? TOO_LARGE : ANSWER_TOO_LARGE;
 }
 
+// A read's data over MAX_PAYLOAD_BYTES leaves its outcome: the outcome names it by
+// size and SHA-256 (surogates/devices/link.py), and its chunks are journaled beside it.
+function carried(operation: Operation, outcome: Outcome): { outcome: Outcome; chunks: Buffer[] } {
+  const encoded = operation.kind === "read" && isRecord(outcome) && "ok" in outcome ? outcome.ok : undefined;
+  if (typeof encoded !== "string") return { outcome, chunks: [] };
+  const size = Buffer.byteLength(encoded, "base64");
+  if (size <= MAX_PAYLOAD_BYTES) return { outcome, chunks: [] };
+  // The file helper reads at most MAX_READ_BYTES. More, the server would refuse, and it would be resent forever.
+  if (size > MAX_READ_BYTES) return { outcome: TOO_LARGE, chunks: [] };
+  const data = Buffer.from(encoded, "base64");
+  const chunks: Buffer[] = [];
+  for (let at = 0; at < data.length; at += CHUNK_BYTES) chunks.push(data.subarray(at, at + CHUNK_BYTES));
+  const sha256 = createHash("sha256").update(data).digest("hex");
+  return { outcome: { ok: { transfer: { size: data.length, sha256 } } }, chunks };
+}
+
 export interface Executor {
   /**
    * Do the operation and answer it. A throw or a rejection is answered as an error.
@@ -114,28 +135,32 @@ export interface Executor {
 export class OperationRunner {
   private readonly running = new Map<string, AbortController>();
   private readonly inflight = new Set<Promise<void>>();
+  private readonly transfers: TransferSender;
 
   constructor(
     private readonly journal: OperationJournal,
     private readonly executor: Executor,
-    private readonly send: (frame: Record<string, unknown>) => boolean,
+    private readonly send: Send,
     // What failed outside the executor. A start or an answer that throws comes
     // before anything ran and leaves the row "received", to be asked again. A send
     // that throws leaves the row finished, and it is sent again at the next welcome;
     // a finish that throws leaves it "started", so the next launch answers it
     // "interrupted".
     private readonly onError?: (error: unknown) => void,
-  ) {}
+  ) {
+    this.transfers = new TransferSender(send, (id, seq) => journal.chunk(id, seq), onError);
+  }
 
-  /** The link is back: send every outcome the server has not acknowledged. */
+  /** The link is back: send every outcome the server has not acknowledged, each transfer from its start. */
   connected(): void {
-    for (const result of this.journal.unsent()) this.send(opResult(result, result.outcome));
+    this.transfers.restart();
+    for (const result of this.journal.unsent()) this.deliver(result, result.outcome);
   }
 
   operation(operation: Operation): void {
     const received = this.journal.receive(operation);
     if (received.action === "reply") {
-      this.send(opResult(operation, received.outcome));
+      this.deliver(operation, received.outcome);
       return;
     }
     if (received.action === "ignore" || this.running.has(operation.id)) return;
@@ -167,7 +192,18 @@ export class OperationRunner {
 
   acknowledged(id: string): void {
     this.journal.acknowledge(id);
+    this.transfers.done(id);
     this.executor.acknowledged?.(id);
+  }
+
+  /** The server closed this operation and does not want its transfer: it is never sent again. */
+  unwanted(id: string): void {
+    this.journal.acknowledge(id);
+    this.transfers.done(id);
+  }
+
+  chunkAcked(id: string, seq: number): void {
+    this.transfers.acked(id, seq);
   }
 
   openIds(): string[] {
@@ -187,7 +223,7 @@ export class OperationRunner {
     if (signal.aborted) return;
     if (answer) {
       const outcome = sendable(operation, answer, false);
-      if (this.journal.answer(operation.id, outcome)) this.send(opResult(operation, outcome));
+      if (this.journal.answer(operation.id, outcome)) this.deliver(operation, outcome);
       return;
     }
     // The journal's claim decides: false if it was cancelled or started meanwhile.
@@ -197,8 +233,10 @@ export class OperationRunner {
 
   private async execute(operation: Operation, signal: AbortSignal): Promise<void> {
     let outcome: Outcome;
+    let chunks: Buffer[] = [];
     try {
-      outcome = sendable(operation, await this.executor.run(operation, signal), true);
+      ({ outcome, chunks } = carried(operation, await this.executor.run(operation, signal)));
+      outcome = sendable(operation, outcome, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outcome = sendable(operation, { error: { type: "other", message } }, true);
@@ -206,8 +244,17 @@ export class OperationRunner {
       this.running.delete(operation.id);
     }
     // Stopped by suspend: what it did is unknown, whatever the executor said.
-    if (signal.reason instanceof Suspension) outcome = signal.reason.outcome;
+    if (signal.reason instanceof Suspension) {
+      outcome = signal.reason.outcome;
+      chunks = [];
+    }
     // A cancelled operation's late outcome is dropped: the server gave up on it.
-    if (this.journal.finish(operation.id, outcome)) this.send(opResult(operation, outcome));
+    if (this.journal.finish(operation.id, outcome, chunks)) this.deliver(operation, outcome);
+  }
+
+  // A result that names a transfer waits its turn; any other goes at once.
+  private deliver(operation: { id: string; digest: string }, outcome: Outcome): void {
+    if (transferOf(outcome) !== null) this.transfers.add(operation.id, operation.digest, outcome);
+    else this.send(opResult(operation, outcome));
   }
 }

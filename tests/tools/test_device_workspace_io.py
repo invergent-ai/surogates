@@ -12,7 +12,9 @@ import pytest
 
 from surogates.devices.workspace import (
     MAX_PAYLOAD_BYTES,
+    MAX_READ_BYTES,
     OUTPUT_CAP_CHARS,
+    READ_TOO_LARGE,
     DeviceOperationError,
     DeviceWorkspaceIO,
 )
@@ -199,13 +201,20 @@ async def test_a_write_over_the_cap_fails_before_it_is_sent(wio, runner, root):
     assert not (root / "big.bin").exists()
 
 
-@pytest.mark.parametrize("max_bytes", [None, 3 * MAX_PAYLOAD_BYTES])
+async def test_a_read_of_more_than_one_frame_comes_back_whole(wio, root):
+    data = os.urandom(2 * MAX_PAYLOAD_BYTES + 3)
+    (root / "big.bin").write_bytes(data)
+    assert await wio.read(str(root / "big.bin")) == data
+
+
+@pytest.mark.parametrize("max_bytes", [None, 3 * MAX_READ_BYTES])
 async def test_a_read_over_the_cap_fails_but_its_head_does_not(wio, root, max_bytes):
-    (root / "big.bin").write_bytes(b"y" * (MAX_PAYLOAD_BYTES + 1))
+    (root / "huge.bin").write_bytes(b"y" * (MAX_READ_BYTES + 1))
     with pytest.raises(OSError) as raised:
-        await wio.read(str(root / "big.bin"), max_bytes=max_bytes)
+        await wio.read(str(root / "huge.bin"), max_bytes=max_bytes)
     assert raised.value.errno == errno.EFBIG
-    assert await wio.read(str(root / "big.bin"), max_bytes=8192) == b"y" * 8192
+    assert str(raised.value) == f"[Errno 27] {READ_TOO_LARGE}"
+    assert await wio.read(str(root / "huge.bin"), max_bytes=8192) == b"y" * 8192
 
 
 async def test_a_local_file_is_a_private_copy_removed_after_use(wio, root):

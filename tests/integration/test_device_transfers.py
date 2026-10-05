@@ -335,3 +335,17 @@ async def test_a_header_racing_the_last_chunk_of_its_transfer_leaves_the_data_wh
     assert await ops.start_transfer(rig.device_id, 1, "conn-2", op.id, op.digest, len(DATA), sha) == "busy"
     assert await asyncio.wait_for(waiting, 5.0) == named(DATA)
     assert await stored(session_factory, str(op.id)) == DATA
+
+
+async def test_the_reference_laptop_sends_a_read_too_large_for_a_frame_in_chunks(laptop_rig, session_factory):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    data = os.urandom(3 * CHUNK_BYTES + 5)
+    (rig.folder / "big.bin").write_bytes(data)
+    outcome = await asyncio.wait_for(rig.ops.run(read_request(rig)), 10.0)
+    assert outcome == named(data)
+    [operation_id] = rig.laptop.payloads
+    assert await stored(session_factory, operation_id) == data
+    # Four chunks: three acknowledged, the last answered with the op_ack.
+    assert rig.laptop.chunks_sent == [(operation_id, seq) for seq in range(4)]
+    assert rig.laptop.frames.count("chunk_ack") == 3

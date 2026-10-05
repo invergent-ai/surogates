@@ -8,7 +8,9 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, TOO_LARGE } from "../src/files/answers.js";
+import {
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, READ_TOO_LARGE, TOO_LARGE,
+} from "../src/files/answers.js";
 import { type Context, perform } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
 
@@ -83,12 +85,17 @@ describe("read", () => {
     expect(await run("read", { key: `${folder}/a.txt`, max_bytes: 0 })).toEqual({ ok: "" });
   });
 
-  it("fails a file over 1 MiB, unless only its head is asked for", async () => {
-    writeFileSync(join(folder, "big.bin"), Buffer.alloc(MAX_PAYLOAD_BYTES + 10, 120));
-    expect(await run("read", { key: `${folder}/big.bin`, max_bytes: null })).toEqual({
-      error: { type: "os", code: "EFBIG", message: TOO_LARGE },
+  it("answers a file of up to 50 MiB whole, and fails a larger one unless only its head is asked for", async () => {
+    const most = Buffer.alloc(MAX_READ_BYTES, 120);
+    most.write("the end", MAX_READ_BYTES - 7);
+    writeFileSync(join(folder, "most.bin"), most);
+    const whole = await run("read", { key: `${folder}/most.bin`, max_bytes: null });
+    expect(Buffer.from((whole as { ok: string }).ok, "base64").equals(most)).toBe(true);
+    writeFileSync(join(folder, "huge.bin"), Buffer.alloc(MAX_READ_BYTES + 1, 120));
+    expect(await run("read", { key: `${folder}/huge.bin`, max_bytes: null })).toEqual({
+      error: { type: "os", code: "EFBIG", message: READ_TOO_LARGE },
     });
-    const head = await run("read", { key: `${folder}/big.bin`, max_bytes: 8192 });
+    const head = await run("read", { key: `${folder}/huge.bin`, max_bytes: 8192 });
     expect(Buffer.from((head as { ok: string }).ok, "base64").length).toBe(8192);
   });
 

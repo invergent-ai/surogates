@@ -14,8 +14,8 @@ import { dirname, join, resolve } from "node:path";
 
 import type { Outcome } from "../link/protocol.js";
 import {
-  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, OUTPUT_CAP_CHARS, osError, pyJsonLength,
-  sandboxError, TOO_LARGE, valueError,
+  Failure, fromNode, io, MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, OUTPUT_CAP_CHARS, osError,
+  pyJsonLength, READ_TOO_LARGE, sandboxError, TOO_LARGE, valueError,
 } from "./answers.js";
 import { keyInFolder, resolveInFolder } from "./paths.js";
 import { checkWrite, inFolderRefusal, protectedInFolder } from "./protect.js";
@@ -42,6 +42,9 @@ const KINDS: Record<string, Kind> = {
 
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const EFBIG = new Failure({ type: "os", code: "EFBIG", message: TOO_LARGE });
+const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
+// What one read call takes from the file at a time.
+const READ_PIECE_BYTES = 1024 * 1024;
 
 export const RG_MISSING =
   "ripgrep (rg) not found on PATH -- install it (apt/brew/dnf install ripgrep) on this computer";
@@ -69,7 +72,8 @@ export async function perform(
         : { type: "other", message: error instanceof Error ? `${error.name}: ${error.message}` : String(error) },
     };
   }
-  if (JSON.stringify(outcome).length > MAX_MESSAGE_CHARS) {
+  // A read is bounded by MAX_READ_BYTES instead: its data over MAX_PAYLOAD_BYTES goes as a transfer.
+  if (kind !== "read" && JSON.stringify(outcome).length > MAX_MESSAGE_CHARS) {
     return { error: { type: "too_large", message: `The result of ${kind} is too large` } };
   }
   return outcome;
@@ -124,19 +128,22 @@ function regular(fd: number, key: string): void {
 function read(args: Record<string, unknown>, { folder }: Context): string {
   const key = keyInFolder(folder, text(args, "key"));
   const wanted = wholeOrNull(args, "max_bytes");
-  const limit = wanted === null ? MAX_PAYLOAD_BYTES + 1 : Math.min(wanted, MAX_PAYLOAD_BYTES + 1);
+  const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
   const fd = io(key, () => openSync(key, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
   try {
     regular(fd, key);
-    const buffer = Buffer.alloc(limit);
+    // In pieces, as far as the file goes: a small file costs one piece, not the cap.
+    const pieces: Buffer[] = [];
     let size = 0;
     while (size < limit) {
-      const count = io(key, () => readSync(fd, buffer, size, limit - size, null));
+      const piece = Buffer.allocUnsafe(Math.min(READ_PIECE_BYTES, limit - size));
+      const count = io(key, () => readSync(fd, piece, 0, piece.length, null));
       if (count === 0) break;
+      pieces.push(piece.subarray(0, count));
       size += count;
     }
-    if (size > MAX_PAYLOAD_BYTES) throw EFBIG;
-    return buffer.subarray(0, size).toString("base64");
+    if (size > MAX_READ_BYTES) throw READ_EFBIG;
+    return Buffer.concat(pieces, size).toString("base64");
   } finally {
     io(key, () => closeSync(fd));
   }
