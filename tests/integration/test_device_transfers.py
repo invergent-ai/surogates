@@ -359,7 +359,7 @@ async def test_the_reference_laptop_sends_a_read_too_large_for_a_frame_in_chunks
     (rig.folder / "big.bin").write_bytes(data)
     outcome = await asyncio.wait_for(rig.ops.run(read_request(rig)), 10.0)
     assert outcome == named(data)
-    [operation_id] = rig.laptop.payloads
+    [operation_id] = rig.laptop.outcomes
     assert await stored(session_factory, operation_id) == data
     # Four chunks: three acknowledged, the last answered with the op_ack.
     assert rig.laptop.chunks_sent == [(operation_id, seq) for seq in range(4)]

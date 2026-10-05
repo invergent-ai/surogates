@@ -27,6 +27,7 @@ from surogates.devices.workspace import (
     MAX_READ_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RipgrepError, WorkspaceIO
@@ -182,7 +183,8 @@ class FakeLaptop:
     the operations it holds unfinished in its hello, and never runs one it was
     told to cancel.  A read's data over MAX_PAYLOAD_BYTES goes as a transfer,
     one at a time, TRANSFER_WINDOW chunks ahead of the acknowledgements, and
-    from chunk 0 again whenever the operation is delivered again.
+    from chunk 0 again whenever the operation is delivered again, until the
+    server acknowledges it or does not want it.
     """
 
     def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
@@ -265,9 +267,9 @@ class FakeLaptop:
                     await self._handle(frame, ws)
                 elif frame["type"] == "op_ack":
                     self.acked.add(frame["id"])
-                    self._ended.add(frame["id"])
+                    self._end(frame["id"])
                 elif frame["type"] == "unwanted":
-                    self._ended.add(frame["id"])
+                    self._end(frame["id"])
                 elif frame["type"] == "chunk_ack":
                     self._chunk_acks[frame["id"]] = frame["seq"] + 1
                 elif frame["type"] == "cancel":
@@ -313,9 +315,15 @@ class FakeLaptop:
         }
         if operation_id in self.payloads:
             # From a task of its own: this reader goes on to read the acknowledgements.
-            self._tasks.append(asyncio.create_task(self._transfer(result, ws)))
-        else:
+            self._tasks.append(asyncio.create_task(self._transfer(result, self.payloads[operation_id], ws)))
+        elif transfer_of(result["outcome"]) is None:
             await ws.send(json.dumps(result))
+        # A transfer whose data is gone was acknowledged: the server has its result.
+
+    def _end(self, operation_id: str) -> None:
+        """The server recorded this result, or does not want it: its data is not sent again."""
+        self._ended.add(operation_id)
+        self.payloads.pop(operation_id, None)
 
     def _carried(self, operation_id: str, kind: str, outcome: dict[str, Any]) -> dict[str, Any]:
         """A read's data over MAX_PAYLOAD_BYTES leaves its outcome, which names it by size and SHA-256."""
@@ -328,9 +336,8 @@ class FakeLaptop:
         self.payloads[operation_id] = data
         return {"ok": {"transfer": {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}}}
 
-    async def _transfer(self, result: dict[str, Any], ws: ClientConnection) -> None:
+    async def _transfer(self, result: dict[str, Any], data: bytes, ws: ClientConnection) -> None:
         operation_id = result["id"]
-        data = self.payloads[operation_id]
         async with self._sending:
             if not self._going(operation_id, ws):
                 return
