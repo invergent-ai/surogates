@@ -497,7 +497,8 @@ class DeviceOperations:
             # operations behind it.
             raise ValueError("Operation arguments must be valid Unicode")
         transfer = request.args.get("transfer")
-        if (request.payload is None) != (transfer is None) or (
+        # Present is what counts, as for the link, which queues a write's data on the key alone.
+        if ("transfer" in request.args) != (request.payload is not None) or (
             request.payload is not None
             and (not isinstance(transfer, dict) or transfer.get("size") != len(request.payload))
         ):

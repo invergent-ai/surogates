@@ -123,7 +123,7 @@ async def test_a_writes_data_is_kept_without_a_second_copy_of_it():
     assert peak < CHUNK_BYTES, peak
 
 
-@pytest.mark.parametrize("which", ["no data", "no transfer", "another size"])
+@pytest.mark.parametrize("which", ["no data", "no transfer", "another size", "a null transfer"])
 async def test_a_write_whose_data_and_transfer_do_not_come_together_is_refused_before_it_is_recorded(
     laptop_rig, session_factory, which,
 ):
@@ -134,6 +134,9 @@ async def test_a_write_whose_data_and_transfer_do_not_come_together_is_refused_b
         request = replace(request, payload=None)
     elif which == "no transfer":
         request = replace(request, args={"key": request.args["key"]})
+    elif which == "a null transfer":
+        # Named all the same: the link would queue it for data that is not there.
+        request = replace(request, args={"key": request.args["key"], "transfer": None}, payload=None)
     else:
         request = replace(request, payload=DATA[:-1])
     with pytest.raises(ValueError, match="come together"):
