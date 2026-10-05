@@ -71,7 +71,7 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 #: to their own agent, not a customer of it. ``teams`` remains reserved
 #: for a future adapter so its roster and activity stats stay aligned.
 END_USER_CHANNELS = frozenset(
-    {"web", "website", "slack", "telegram", "teams", "whatsapp"}
+    {"web", "website", "slack", "telegram", "teams", "whatsapp", "voice"}
 )
 
 #: Channels created by a service-account token rather than a logged-in
