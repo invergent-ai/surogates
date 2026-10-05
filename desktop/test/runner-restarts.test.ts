@@ -130,7 +130,9 @@ describe("restarting a session runner", { timeout: 40_000 }, () => {
     expect(await cancelled).toEqual(CANCELLED);
     expect(await cancelledStart).toEqual(CANCELLED);
     await started;
-    expect(order).toEqual(["run", "cancelled start", "start"]);
+    // The two cancels wait in different places, so either may answer first.
+    expect([...order.slice(0, 2)].sort()).toEqual(["cancelled start", "run"]);
+    expect(order[2]).toBe("start");
     // Not at the restart's end: a walk of the folder and more were still to come.
     expect((at.start ?? 0) - (at["cancelled start"] ?? 0)).toBeGreaterThan(500);
   });
