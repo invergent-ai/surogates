@@ -140,8 +140,9 @@ async def test_other_frames_go_while_a_transfer_waits_for_its_acknowledgements()
     await settled()
     assert socket.chunks(op) == [0, 1, 2, 3]
     journal.open.append(small)
-    await link.deliver()
-    await link.send({"type": "pong"})
+    # Bounded: a sender that held the send lock while it waits would hang them.
+    await asyncio.wait_for(link.deliver(), 1.0)
+    await asyncio.wait_for(link.send({"type": "pong"}), 1.0)
     assert [f["type"] for f in socket.sent[-2:]] == ["op", "pong"]
     assert socket.sent[-2]["id"] == str(small.id)
     task.cancel()

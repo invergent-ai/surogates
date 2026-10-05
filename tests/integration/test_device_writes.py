@@ -18,7 +18,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
-from surogates.db.models import DeviceOperation, DeviceTransfer
+from surogates.db.models import Device, DeviceOperation, DeviceTransfer, DeviceTransferChunk
 from surogates.devices.link import TRANSFER_WINDOW
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
@@ -92,6 +92,15 @@ async def test_a_write_too_large_for_a_frame_is_kept_with_its_operation(laptop_r
             select(DeviceTransfer).where(DeviceTransfer.operation_id == op.id)
         )).scalar_one()
     assert (transfer.size, transfer.received, transfer.sha256) == (len(DATA), len(DATA), named(DATA)["sha256"])
+    # No connection sends it in.
+    assert transfer.holder == ""
+    # The chunks the link sends as they are: seq from 0, every one CHUNK_BYTES but the last.
+    async with session_factory() as db:
+        layout = (await db.execute(
+            select(DeviceTransferChunk.seq, func.length(DeviceTransferChunk.data))
+            .where(DeviceTransferChunk.operation_id == op.id).order_by(DeviceTransferChunk.seq)
+        )).all()
+    assert [tuple(row) for row in layout] == [(0, CHUNK_BYTES), (1, CHUNK_BYTES), (2, CHUNK_BYTES // 2)]
     await stop(waiting)
 
 
@@ -149,7 +158,8 @@ async def test_a_write_whose_data_cannot_be_kept_is_not_recorded(laptop_rig, eng
     ops = DeviceOperations(async_sessionmaker(engine, class_=Failing, expire_on_commit=False), redis_client)
     request = write_request(rig)
     with pytest.raises(RuntimeError, match="the disk is full"):
-        await ops.run(request)
+        # Bounded: were the data dropped, the write would be recorded and wait for its computer.
+        await asyncio.wait_for(ops.run(request), 5.0)
     # The operation and its data commit together: no operation is left for the link to send without them.
     async with session_factory() as db:
         assert (await db.execute(
@@ -164,8 +174,8 @@ async def test_a_resumed_write_asks_for_the_same_operation_and_its_data_is_kept_
     first = write_request(rig)
     waiting = asyncio.create_task(rig.ops.run(first))
     await eventually(lambda: open_count(rig, 1))
-    # A worker resuming the call makes the same bytes again: the same digest, so it joins.
-    again = asyncio.create_task(rig.ops.run(write_request(rig, bytes(DATA), like=first)))
+    # A worker resuming the call makes the same bytes again, a copy of its own: the same digest, so it joins.
+    again = asyncio.create_task(rig.ops.run(write_request(rig, bytes(bytearray(DATA)), like=first)))
     await asyncio.sleep(0.2)
     assert not again.done()
     assert await transfers_of(session_factory, rig.device_id) == 1
@@ -267,6 +277,22 @@ async def test_a_writes_data_goes_only_to_its_device_under_its_current_credentia
     await stop(waiting)
 
 
+async def test_a_writes_data_goes_no_more_once_its_device_is_revoked_or_the_write_closed(laptop_rig, session_factory):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
+    await eventually(lambda: open_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    # Revoked in the row alone, the write left open: a revocation also closes it, which is the next check.
+    for revoked_at, expected in [(func.now(), None), (None, DATA[:CHUNK_BYTES])]:
+        async with session_factory() as db:
+            await db.execute(update(Device).where(Device.id == rig.device_id).values(revoked_at=revoked_at))
+            await db.commit()
+        assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 0) == expected
+    await rig.ops.cancel([rig.root])
+    assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 0) is None
+    await stop(waiting)
+
+
 async def test_the_reference_laptop_takes_a_write_too_large_for_a_frame_in_chunks(laptop_rig):
     rig = laptop_rig
     await rig.laptop.connect()
@@ -275,6 +301,32 @@ async def test_the_reference_laptop_takes_a_write_too_large_for_a_frame_in_chunk
     assert (rig.folder / "big.bin").read_bytes() == BIG
     [operation_id] = rig.laptop.outcomes
     assert rig.laptop.chunks_received == [(operation_id, seq) for seq in range(7)]
+
+
+async def test_a_large_read_and_large_writes_go_at_once_on_one_connection(laptop_rig):
+    rig = laptop_rig
+    up, most = os.urandom(CHUNK_BYTES * 3 + 11), os.urandom(CHUNK_BYTES * 20)
+    (rig.folder / "up.bin").write_bytes(up)
+    await rig.laptop.connect()
+    reading, *writing = [device_io(rig.ops, rig.device_id, rig.root, rig.folder) for _ in range(3)]
+    first = asyncio.create_task(writing[0].write(str(rig.folder / "a.bin"), most))
+
+    async def under_way() -> None:
+        while not rig.laptop.chunks_received:
+            await asyncio.sleep(0.005)
+
+    await asyncio.wait_for(under_way(), 10.0)
+    # The read's data goes up while the first write's 20 chunks come down, and a second write waits behind them.
+    read, *_ = await asyncio.wait_for(asyncio.gather(
+        reading.read(str(rig.folder / "up.bin")),
+        first,
+        writing[1].write(str(rig.folder / "b.bin"), BIG),
+    ), 15.0)
+    assert read == up
+    assert (rig.folder / "a.bin").read_bytes() == most
+    assert (rig.folder / "b.bin").read_bytes() == BIG
+    # One connection throughout: the laptop never reconnects by itself.
+    assert rig.laptop.connected
 
 
 async def test_write_file_and_research_notes_over_1_mib_land_on_the_computer(laptop_rig, session_factory, redis_client):

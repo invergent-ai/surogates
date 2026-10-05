@@ -11,7 +11,7 @@ import os
 import pytest
 from websockets.asyncio.server import serve
 
-from surogates.devices.workspace import CHUNK_BYTES
+from surogates.devices.workspace import CHUNK_BYTES, MAX_PAYLOAD_BYTES, MAX_WRITE_BYTES
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import FakeLaptop
 
@@ -147,9 +147,13 @@ def write_op(path, sha256: str | None = None) -> dict:
     }
 
 
-def chunk(seq: int) -> dict:
-    piece = DATA[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES]
-    return {"type": "chunk", "id": "op-1", "seq": seq, "data": base64.b64encode(piece).decode("ascii")}
+def piece(seq: int) -> bytes:
+    return DATA[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES]
+
+
+def chunk(seq: int, data: bytes | None = None) -> dict:
+    data = piece(seq) if data is None else data
+    return {"type": "chunk", "id": "op-1", "seq": seq, "data": base64.b64encode(data).decode("ascii")}
 
 
 async def sent_to(tmp_path, *frames: dict) -> tuple[FakeLaptop, list[dict]]:
@@ -189,16 +193,46 @@ async def test_a_write_stopped_while_its_data_comes_never_runs(tmp_path):
     assert not (tmp_path / "out.bin").exists()
 
 
-@pytest.mark.parametrize(("sha256", "order"), [
-    (None, [1, 0, 2]),
-    (None, [0, 2]),
-    ("0" * 64, [0, 1, 2]),
-], ids=["out-of-order", "a-chunk-missing", "another-sha256"])
-async def test_a_writes_data_that_does_not_come_whole_and_matching_is_answered_and_never_run(tmp_path, sha256, order):
-    laptop, back = await sent_to(tmp_path, write_op(tmp_path / "out.bin", sha256), *[chunk(seq) for seq in order])
+@pytest.mark.parametrize(("sha256", "sent"), [
+    # Named as the chunks come, so only the order check finds it.
+    (hashlib.sha256(piece(1) + piece(0) + piece(2)).hexdigest(), [chunk(1), chunk(0), chunk(2)]),
+    (None, [chunk(0), chunk(2)]),
+    # Its last chunk too long, named as it comes, so only the size check finds it.
+    (hashlib.sha256(DATA + b"more").hexdigest(), [chunk(0), chunk(1), chunk(2, piece(2) + b"more")]),
+    ("0" * 64, [chunk(0), chunk(1), chunk(2)]),
+], ids=["out-of-order", "a-chunk-missing", "a-chunk-too-long", "another-sha256"])
+async def test_a_writes_data_that_does_not_come_whole_and_matching_is_answered_and_never_run(tmp_path, sha256, sent):
+    laptop, back = await sent_to(tmp_path, write_op(tmp_path / "out.bin", sha256), *sent)
     assert laptop.ran == []
     assert [frame["outcome"] for frame in back if frame["type"] == "op_result"] == [{"error": {
         "type": "other",
         "message": "The data this computer received for this write was incomplete or did not match, so it was not written",
+    }}]
+    assert not (tmp_path / "out.bin").exists()
+
+
+NAMED = {"size": len(DATA), "sha256": hashlib.sha256(DATA).hexdigest()}
+
+
+@pytest.mark.parametrize("args", [
+    {"data": base64.b64encode(b"x" * (MAX_PAYLOAD_BYTES + 1)).decode("ascii")},
+    {"transfer": NAMED, "data": "aGk="},
+    {"transfer": {**NAMED, "size": MAX_PAYLOAD_BYTES}},
+    {"transfer": {**NAMED, "size": MAX_WRITE_BYTES + 1}},
+    {"transfer": {**NAMED, "size": len(DATA) + 0.5}},
+    {"transfer": {**NAMED, "sha256": NAMED["sha256"].upper()}},
+    {"transfer": {**NAMED, "sha256": "0" * 63}},
+    {"transfer": {**NAMED, "extra": 1}},
+], ids=[
+    "inline-over-1-mib", "data-beside-a-transfer", "no-more-than-1-mib", "over-50-mib", "a-fractional-size",
+    "an-upper-case-sha256", "a-short-sha256", "another-key",
+])
+async def test_a_write_naming_its_data_in_a_form_the_app_does_not_take_is_answered_so_and_never_run(tmp_path, args):
+    op = {**write_op(tmp_path / "out.bin"), "args": {"key": str(tmp_path / "out.bin"), **args}}
+    laptop, back = await sent_to(tmp_path, op)
+    assert laptop.ran == []
+    assert [frame["outcome"] for frame in back if frame["type"] == "op_result"] == [{"error": {
+        "type": "other",
+        "message": "This write named its data in a form this computer does not take, so it was not written",
     }}]
     assert not (tmp_path / "out.bin").exists()
