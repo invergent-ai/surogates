@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import AsyncIterator
@@ -20,6 +21,9 @@ from surogates.channels.inbound import build_principal_stamp
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.interactive_input import try_resolve_text_answer
+from surogates.tools.builtin.ask_user_question import ASK_USER_QUESTION_MAX_WAIT_SECONDS
+
+log = logging.getLogger("surogates.voice")
 
 TERMINAL = frozenset({"session.complete", "session.fail", "session.stopped", "session.pause"})
 POLL_SECONDS = 0.4  # pub/sub is a nudge; poll as a fallback, like the OpenAI route
@@ -35,9 +39,15 @@ GREETING_CUT = "[Ai răspuns la telefon, dar apelantul te-a întrerupt după: «
 
 
 def normalize_caller(raw: str | None) -> str:
-    """The caller's number as identities store it (no '+'), or ``anonymous`` when it is withheld."""
-    digits = (raw or "").strip().lstrip("+")
-    return digits if re.fullmatch(r"\d{3,15}", digits) else ANONYMOUS
+    """The caller's number as identities store it (digits only, no '+'), or ``anonymous`` when withheld.
+
+    One caller is one number however the carrier writes it: spaces and punctuation go, and a
+    Romanian national number (0721…) gets its country code (40721…).
+    """
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "4" + digits
+    return digits if 3 <= len(digits) <= 15 else ANONYMOUS
 
 
 def _words(text: str) -> str:
@@ -101,7 +111,12 @@ class CallSession:
 
     async def send(self, text: str) -> int:
         """Post what the caller said and wake the agent; returns the event id to stream after."""
-        answered = await try_resolve_text_answer(self.store, session_id=self.session_id, text=text)
+        try:  # the API route's safeguards: a question near its deadline counts as expired; a failure is a message
+            answered = await try_resolve_text_answer(self.store, session_id=self.session_id, text=text,
+                                                     max_age_seconds=ASK_USER_QUESTION_MAX_WAIT_SECONDS - 60)
+        except Exception:
+            log.warning("pending-question resolution failed for %s; sending as a message", self.session_id, exc_info=True)
+            answered = None
         if answered is not None:  # it answered the agent's pending question; the turn goes on
             self._user_event = answered
             return answered

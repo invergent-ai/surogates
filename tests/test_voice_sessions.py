@@ -167,3 +167,32 @@ async def test_no_filler_when_the_agent_already_spoke_or_calls_more_tools():
                       ("tool.call", {"name": "web_extract", "arguments": "{}"}),
                       ("llm.response", {"message": {"role": "assistant", "content": "Gata."}})))
     assert [t async for t in call.stream(0)] == ["O clipă, caut. "]
+
+
+@pytest.mark.parametrize("raw", ["+40 721 000 000", "0721000000", "(0721) 000-000", "40721000000"])
+def test_one_caller_is_one_number_however_it_is_written(raw):
+    assert normalize_caller(raw) == "40721000000"
+
+
+async def test_answering_the_agents_question_has_the_api_routes_safeguards(monkeypatch):
+    from surogates.voice import sessions as vs
+    seen = {}
+
+    async def resolver(store, *, session_id, text, max_age_seconds=None):
+        seen["max_age"] = max_age_seconds
+        raise RuntimeError("db blip")
+
+    monkeypatch.setattr(vs, "try_resolve_text_answer", resolver)
+    log = _Log()
+    log.get_session = _status("active")
+    call = _call(log)
+    call.redis.zadd = _noop
+    await call.send("Marți.")
+    assert seen["max_age"] == 30 * 60 - 60  # a question near its deadline is treated as expired
+    assert [e.data["content"] for e in log.events if e.type == "user.message"] == ["Marți."]  # delivered anyway
+
+
+def _status(status):
+    async def get_session(session_id):
+        return SimpleNamespace(status=status)
+    return get_session

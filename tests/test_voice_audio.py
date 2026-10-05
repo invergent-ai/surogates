@@ -1,6 +1,4 @@
 """TTS speech made fit for a phone line: no padding silence, telephone level, never clipped."""
-import audioop
-
 import numpy as np
 
 from surogates.voice.audio import PhoneVoice
@@ -10,6 +8,10 @@ RATE = 24000
 
 def _pcm(x: np.ndarray) -> bytes:
     return (x * 32767).astype("<i2").tobytes()
+
+
+def _rms(pcm: bytes) -> float:
+    return float(np.sqrt(np.mean(np.frombuffer(pcm, "<i2").astype(np.float64) ** 2)))
 
 
 def test_padding_silence_is_cut_and_the_speech_kept():
@@ -25,7 +27,7 @@ def test_padding_silence_is_cut_and_the_speech_kept():
 def test_louder_but_never_clipped():
     quiet = (np.sin(np.arange(RATE) * 2 * np.pi * 440 / RATE) * 0.05).astype(np.float32)
     out = PhoneVoice(RATE)(_pcm(quiet), last=True)
-    assert audioop.rms(out, 2) > 2.5 * audioop.rms(_pcm(quiet), 2)
+    assert _rms(out) > 2.5 * _rms(_pcm(quiet))
     loud = (np.sin(np.arange(RATE) * 2 * np.pi * 1000 / RATE) * 0.95).astype(np.float32)
     peak = np.abs(np.frombuffer(PhoneVoice(RATE)(_pcm(loud), last=True), "<i2"))
     assert (peak >= 32700).mean() < 0.01

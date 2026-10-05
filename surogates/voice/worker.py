@@ -53,6 +53,7 @@ class Runtime:
 
     engine: Any
     redis: Any
+    client: Any
     routing: Any
     sessions: VoiceSessions
 
@@ -71,9 +72,10 @@ class Runtime:
         routing = build_channel_routing_cache(settings=settings, platform_client=client)
         sessions = VoiceSessions(store=SessionStore(sf, redis=redis), redis=redis, session_factory=sf,
                                  storage=create_backend(settings), settings=settings)
-        return cls(engine=engine, redis=redis, routing=routing, sessions=sessions)
+        return cls(engine=engine, redis=redis, client=client, routing=routing, sessions=sessions)
 
     async def aclose(self) -> None:
+        await self.client.aclose()
         await self.redis.aclose()
         await self.engine.dispose()
 
@@ -108,7 +110,7 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
-    call, tasks = None, set()
+    call, tasks, tts = None, set(), None
 
     async def cleanup() -> None:
         # in this order: the call's session is closed while Redis and the DB are still open
@@ -116,6 +118,8 @@ async def entrypoint(ctx: JobContext) -> None:
             task.cancel()
         if call is not None:
             await call.end()
+        if tts is not None:
+            await tts.aclose()
         await rt.aclose()
 
     try:

@@ -58,7 +58,8 @@ class CallConfig:
             return float(v) if ok else getattr(d, key)
 
         pron = cfg.get("pronunciations")
-        pron = {str(k): str(v) for k, v in pron.items() if str(k).strip() and str(v).strip()} if isinstance(pron, dict) else {}
+        pron = ({k: v.strip() for k, v in pron.items() if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()}
+                if isinstance(pron, dict) else {})  # a non-text value would be spoken as "None" or "5"
         return cls(greeting=text("greeting"), voice=cfg.get("voice") if cfg.get("voice") in ("female", "male") else d.voice,
                    pronunciations=pron, remember_callers=cfg.get("remember_callers") is True,
                    max_call_seconds=seconds("max_call_seconds", 30, 3600),
@@ -110,7 +111,9 @@ class VoiceAgent(Agent):
                 yield silence(tts.sample_rate, SENTENCE_PAUSE)
             said.append(sentence)
             self.recent.append((time.monotonic(), sentence))
-            async for audio in tts.synthesize(say_as(sentence, self.config.pronunciations)):
-                yield audio.frame
+            # async with: a barge-in closes the generator here, and the sentence's TTS request with it
+            async with tts.synthesize(say_as(sentence, self.config.pronunciations)) as stream:
+                async for audio in stream:
+                    yield audio.frame
         if said and is_farewell(" ".join(said)):
             self.hangup_after_reply = True

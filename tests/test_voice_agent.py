@@ -43,3 +43,8 @@ async def test_our_own_voice_coming_back_never_reaches_turn_taking(monkeypatch):
     out = [ev async for ev in agent.stt_node(None, None)]
     assert [ev.alternatives[0].text if ev.alternatives else ev.type for ev in out] == \
         [stt.SpeechEventType.START_OF_SPEECH, "cât e euro azi"]
+
+
+def test_only_text_pronunciations_are_spoken():
+    cfg = CallConfig.from_routing({"pronunciations": {"Nvidia": None, "DAX": "Dax", "BET": 5, "": "x"}})
+    assert dict(cfg.pronunciations) == {"DAX": "Dax"}  # None would have been said aloud as "None"
