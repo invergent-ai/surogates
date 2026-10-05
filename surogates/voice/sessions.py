@@ -183,12 +183,18 @@ class VoiceSessions:
 
     async def open_call(self, target: CallTarget, *, call_id: str, called: str, caller: str | None,
                         greeting: str = "") -> CallSession:
-        """A fresh session for this call. Memory is the call's own unless the agent remembers known numbers."""
+        """A fresh session for this call. It is the call's own, identity and memory both, unless the agent
+        remembers callers and the number is known: then the number is the identity and the memory scope.
+
+        The identity matters as much as the memory boundary: session_search and other per-user lookups
+        are scoped by user, and a caller ID can be spoofed, so a shared identity would let one caller
+        reach another's past calls (and every withheld number would be the same user).
+        """
         caller_id = normalize_caller(caller)
-        ident = await get_or_create_channel_identity(self._sf, platform="voice", platform_user_id=caller_id,
-                                                     org_id=target.org_id,
-                                                     display_name=caller_id if caller_id != ANONYMOUS else "apelant anonim")
         remember = target.remember_callers and caller_id != ANONYMOUS
+        ident = await get_or_create_channel_identity(
+            self._sf, platform="voice", platform_user_id=caller_id if remember else f"call:{call_id}",
+            org_id=target.org_id, display_name=caller_id if caller_id != ANONYMOUS else "apelant anonim")
         session_id = await get_or_create_channel_session(
             self._store, self._redis, session_key=f"agent:voice:call:{call_id}", user_id=ident.user_id,
             org_id=target.org_id, agent_id=target.agent_id, channel="voice",

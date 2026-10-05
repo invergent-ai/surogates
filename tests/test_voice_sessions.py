@@ -39,17 +39,19 @@ async def test_open_call_isolates_each_call_by_default(monkeypatch):
     call, seen = await _open(monkeypatch, caller="+40722000111", remember=False)
     key, channel, config = seen["session"]
     assert (key, channel, config["memory_boundary"]) == ("agent:voice:call:SCL_1", "voice", "voice:call:SCL_1")
-    assert seen["identity"] == ("voice", "40722000111")
+    # its own identity too: session_search is scoped by user, and a caller ID can be spoofed
+    assert seen["identity"] == ("voice", "call:SCL_1")
 
 
 async def test_open_call_remembers_a_known_number_when_the_agent_asks(monkeypatch):
     _, seen = await _open(monkeypatch, caller="+40722000111", remember=True)
     assert seen["session"][2]["memory_boundary"] == "phone:40722000111"
+    assert seen["identity"] == ("voice", "40722000111")
 
 
 async def test_open_call_withheld_number_never_remembers(monkeypatch):
     call, seen = await _open(monkeypatch, caller=None, remember=True)
-    assert seen["identity"] == ("voice", "anonymous")
+    assert seen["identity"] == ("voice", "call:SCL_1")  # withheld callers never share one user
     assert seen["session"][2]["memory_boundary"] == "voice:call:SCL_1"
     assert call.caller == "anonymous"
 
