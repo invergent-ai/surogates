@@ -1326,13 +1326,16 @@ class DeviceOperation(Base):
 
 
 class DeviceTransfer(Base):
-    """A read's result too large for one link frame, which the device sends in chunks.
+    """An operation's data too large for one link frame, which goes in chunks.
 
-    The operation's outcome names it by size and SHA-256.  It completes its
-    operation with its last chunk, in one transaction, so a transfer whose
-    bytes are all here is one its operation was answered with.  Payloads go
-    on a schedule (``surogates.devices.operations.reap_transfers``); the
-    operation's row stays.
+    The operation's kind says which way: a read's result comes from the
+    device, a write's data goes to it.  A read's outcome names it by size and
+    SHA-256, and its last chunk completes the operation in one transaction, so
+    a read's transfer whose bytes are all here is one its operation was
+    answered with.  A write's args name it the same way; it is stored whole
+    in the operation's own transaction, so it is whole while the operation is
+    open, and no connection holds it.  Payloads go on a schedule
+    (``surogates.devices.operations.reap_transfers``); the operation's row stays.
     """
 
     __tablename__ = "device_transfers"
@@ -1342,14 +1345,17 @@ class DeviceTransfer(Base):
     )
     size: Mapped[int] = mapped_column(Integer, nullable=False)
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    # Bytes stored so far, in order: the next chunk starts here.
+    # Bytes stored so far, in order: the next chunk starts here.  A write's
+    # is its size from the start.
     received: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"), default=0)
-    # The link connection sending it: another connection's chunks never count.
+    # The link connection sending a read's: another connection's chunks never
+    # count.  Empty for a write's, which the worker stores whole.
     holder: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now()
     )
-    # When the tool result that read it was committed.
+    # When the tool result that read it was committed.  A write's is marked
+    # too, and nothing reads that mark.
     consumed_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 

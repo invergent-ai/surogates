@@ -13,6 +13,7 @@ import base64
 import errno
 import hashlib
 import json
+import re
 from typing import Any
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -25,14 +26,43 @@ from surogates.devices.workspace import (
     MAX_NAMES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    WRITE_TOO_LARGE,
     transfer_of,
 )
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io import RipgrepError, WorkspaceIO
 
 _PROCESS_KINDS = {"start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"}
+
+# What a write whose data does not come whole and matching is answered, as the app answers it.
+DAMAGED = {"error": {
+    "type": "other",
+    "message": "The data this computer received for this write was incomplete or did not match, so it was not written",
+}}
+# What a write whose args name its data in a form the app does not take is answered, as the app answers it.
+MALFORMED_TRANSFER = {"error": {
+    "type": "other",
+    "message": "This write named its data in a form this computer does not take, so it was not written",
+}}
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _malformed_write(args: dict[str, Any]) -> bool:
+    """As the app's sentTransfer: more than MAX_PAYLOAD_BYTES inline, or a transfer named any other way."""
+    # A key that is present counts, null or not, as the app's undefined checks count it.
+    if "transfer" not in args:
+        data = args.get("data")
+        # As Buffer.byteLength(data, "base64") counts it.
+        return isinstance(data, str) and len(data) * 3 // 4 - data[-2:].count("=") > MAX_PAYLOAD_BYTES
+    transfer = args["transfer"]
+    return not (
+        isinstance(transfer, dict) and transfer.keys() == {"size", "sha256"} and "data" not in args
+        and type(transfer["size"]) is int and MAX_PAYLOAD_BYTES < transfer["size"] <= MAX_WRITE_BYTES
+        and isinstance(transfer["sha256"], str) and _SHA256.fullmatch(transfer["sha256"]) is not None
+    )
 
 
 async def perform(folder: WorkspaceIO, kind: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -106,7 +136,10 @@ async def _run(folder: WorkspaceIO, kind: str, a: dict[str, Any]) -> Any:
             raise OSError(errno.EFBIG, READ_TOO_LARGE)
         return base64.b64encode(data).decode("ascii")
     if kind == "write":
-        await folder.write(a["key"], base64.b64decode(a["data"]))
+        data = base64.b64decode(a["data"])
+        if len(data) > MAX_WRITE_BYTES:
+            raise OSError(errno.EFBIG, WRITE_TOO_LARGE)
+        await folder.write(a["key"], data)
         return None
     if kind == "delete":
         await folder.delete(a["key"])
@@ -165,9 +198,15 @@ class InProcessRunner:
         self.folder = folder
         self.kinds: list[str] = []
 
-    async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         self.kinds.append(kind)
-        outcome = await perform(self.folder, kind, json.loads(json.dumps(args)))
+        sent = json.loads(json.dumps(args))
+        if payload is not None:
+            # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
+            named = sent.pop("transfer")
+            assert named == {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+            sent["data"] = base64.b64encode(payload).decode("ascii")
+        outcome = await perform(self.folder, kind, sent)
         wire = json.dumps(outcome)
         # A read's data over MAX_PAYLOAD_BYTES crosses a link as a transfer, outside the outcome.
         if kind != "read":
@@ -184,7 +223,9 @@ class FakeLaptop:
     told to cancel.  A read's data over MAX_PAYLOAD_BYTES goes as a transfer,
     one at a time, TRANSFER_WINDOW chunks ahead of the acknowledgements, and
     from chunk 0 again whenever the operation is delivered again, until the
-    server acknowledges it or does not want it.
+    server acknowledges it or does not want it.  A write whose data comes as a
+    transfer runs once that data is whole; every chunk is acknowledged, and a
+    new connection starts each one over.
     """
 
     def __init__(self, url: str, token: str, folder: WorkspaceIO, *, ping_interval_s: float = 0.2) -> None:
@@ -198,6 +239,8 @@ class FakeLaptop:
         # The data of each read answered with a transfer, and every chunk sent, as (id, seq).
         self.payloads: dict[str, bytes] = {}
         self.chunks_sent: list[tuple[str, int]] = []
+        # Every chunk of a write's data received, as (id, seq).
+        self.chunks_received: list[tuple[str, int]] = []
         # What the user confirmed with prepareFolder: nonce -> folder.
         self.prepared: dict[str, str] = {}
         # Root session id -> the folder the app bound it to.
@@ -217,6 +260,8 @@ class FakeLaptop:
         self._chunk_acks: dict[str, int] = {}
         self._ended: set[str] = set()
         self._heard = asyncio.Event()
+        # On this connection: each write waiting for its data, and what came of it.
+        self._incoming: dict[str, tuple[dict[str, Any], bytearray]] = {}
 
     async def connect(self) -> None:
         # The link's frames may be up to 2 MiB: one operation's 1 MiB of file
@@ -232,7 +277,7 @@ class FakeLaptop:
         welcome = json.loads(await ws.recv())
         assert welcome["type"] == "welcome", welcome
         self.connected = True
-        self._chunk_acks, self._ended = {}, set()
+        self._chunk_acks, self._ended, self._incoming = {}, set(), {}
         # Each task works on its own connection's socket. Added to, not replaced: an earlier
         # connection's tasks still end at disconnect().
         self._tasks += [asyncio.create_task(self._read(ws)), asyncio.create_task(self._ping(ws))]
@@ -272,6 +317,8 @@ class FakeLaptop:
                     self._end(frame["id"])
                 elif frame["type"] == "chunk_ack":
                     self._chunk_acks[frame["id"]] = frame["seq"] + 1
+                elif frame["type"] == "chunk":
+                    await self._chunk(frame, ws)
                 elif frame["type"] == "cancel":
                     self.cancelled.add(frame["id"])
                 self._heard.set()
@@ -297,6 +344,47 @@ class FakeLaptop:
         if operation_id in self.cancelled or (self.hold and operation_id not in self.outcomes):
             # A cancelled operation is never run; a held one is still running.
             return
+        if operation_id not in self.outcomes and frame["kind"] == "write":
+            if _malformed_write(frame["args"]):
+                # Answered, never run.
+                self.outcomes[operation_id] = MALFORMED_TRANSFER
+            elif "transfer" in frame["args"]:
+                # A write whose data follows: it runs once that data is whole.
+                self._incoming[operation_id] = (frame, bytearray())
+                return
+        await self._answer(frame, ws)
+
+    async def _chunk(self, frame: dict[str, Any], ws: ClientConnection) -> None:
+        """A chunk of a write's data: acknowledged, wanted or not, and checked, as the app does."""
+        self.chunks_received.append((frame["id"], frame["seq"]))
+        # This connection's: a newer one, made while this waits to send the ack, has its own.
+        incoming = self._incoming
+        await ws.send(json.dumps({"type": "chunk_ack", "id": frame["id"], "seq": frame["seq"]}))
+        if frame["id"] in self.cancelled:
+            # Stopped while its data came: it never runs.
+            incoming.pop(frame["id"], None)
+        if frame["id"] not in incoming:
+            return
+        op, data = incoming[frame["id"]]
+        transfer = op["args"]["transfer"]
+        piece = base64.b64decode(frame["data"], validate=True)
+        in_place = (
+            frame["seq"] == len(data) // CHUNK_BYTES
+            and len(piece) == min(CHUNK_BYTES, transfer["size"] - len(data))
+        )
+        if in_place:
+            data += piece
+            if len(data) < transfer["size"]:
+                return
+        del incoming[frame["id"]]
+        if not in_place or hashlib.sha256(data).hexdigest() != transfer["sha256"]:
+            # Answered, never run.
+            self.outcomes[frame["id"]] = DAMAGED
+        args = {"key": op["args"]["key"], "data": base64.b64encode(data).decode("ascii")}
+        await self._answer({**op, "args": args}, ws)
+
+    async def _answer(self, frame: dict[str, Any], ws: ClientConnection) -> None:
+        operation_id = frame["id"]
         if operation_id not in self.outcomes:
             self.ran.append(frame["kind"])
             outcome = (

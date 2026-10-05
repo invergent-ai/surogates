@@ -15,14 +15,14 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from uuid import UUID
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import and_, delete, exists, func, or_, select, text, update
+from sqlalchemy import and_, delete, exists, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -71,8 +71,9 @@ _STOPPED_STATUSES = frozenset({"paused", "archived", "failed"})
 # The longest a stopped call waits to close its own operation.
 _CANCEL_PATIENCE_S = 5.0
 
-# How long a transfer's data is kept once the tool result that read it is
-# committed, and how long one nothing has read is kept at all.
+# How long a read's data is kept once the tool result that read it is
+# committed, and how long a read's data nothing has read is kept at all.  A
+# write's goes at the first pass after the write closes, whatever its age.
 RETAIN_CONSUMED = timedelta(hours=24)
 ORPHAN_AFTER = timedelta(days=7)
 
@@ -226,6 +227,25 @@ async def _refuse_when_full(db: AsyncSession, request: OperationRequest, device:
         raise DeviceOperationError(f"Too many sessions are waiting for {device.name}")
 
 
+async def _keep_payload(db: AsyncSession, operation_id: UUID, transfer: dict[str, Any], data: bytes) -> None:
+    """Store a write's data with its operation, in its transaction: the link sends it after the op."""
+    await db.execute(insert(DeviceTransfer).values(
+        operation_id=operation_id,
+        size=transfer["size"],
+        sha256=transfer["sha256"],
+        # Whole: a read's transfer starting on this device deletes only half-sent ones.
+        received=len(data),
+        # Stored by the worker: no connection sends it in.
+        holder="",
+    ))
+    # Views, not slices: a slice of bytes is a copy, and the chunks would hold a second one of the data.
+    view = memoryview(data)
+    await db.execute(insert(DeviceTransferChunk), [
+        {"operation_id": operation_id, "seq": seq, "data": view[at:at + CHUNK_BYTES]}
+        for seq, at in enumerate(range(0, len(data), CHUNK_BYTES))
+    ])
+
+
 @dataclass(frozen=True, slots=True)
 class OperationRequest:
     device_id: UUID
@@ -237,6 +257,9 @@ class OperationRequest:
     args: dict[str, Any]
     # The execution generation: recorded, never part of the digest.
     lease_token: str | None = None
+    # A write's data that its args name as a transfer: kept with the operation,
+    # never part of the digest, and never in a log line.
+    payload: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.invocation_id:
@@ -473,6 +496,14 @@ class DeviceOperations:
             # encode, and every connection would end before reaching the
             # operations behind it.
             raise ValueError("Operation arguments must be valid Unicode")
+        transfer = request.args.get("transfer")
+        # Present is what counts, as for the link, which queues a write's data on the key alone.
+        if ("transfer" in request.args) != (request.payload is not None) or (
+            request.payload is not None
+            and (not isinstance(transfer, dict) or transfer.get("size") != len(request.payload))
+        ):
+            # Recorded, the link would send an op whose data never comes, or that the computer finds damaged.
+            raise ValueError("A write's data and the transfer its args name must come together, of one size")
         digest = request.digest
         async with self._sf() as db:
             # A shared lock on the device row, held until the insert commits: a
@@ -535,6 +566,9 @@ class DeviceOperations:
                 .on_conflict_do_nothing(constraint="uq_device_operations_invocation")
                 .returning(DeviceOperation.id)
             )).scalar_one_or_none()
+            if inserted is not None and request.payload is not None and not refused:
+                # Committed with the operation: the link may send the op as soon as it is.
+                await _keep_payload(db, inserted, request.args["transfer"], request.payload)
             await db.commit()
             if inserted is not None:
                 return inserted, REVOKED_OUTCOME if refused else None
@@ -648,6 +682,28 @@ class DeviceOperations:
                     .order_by(DeviceTransferChunk.seq)
                 )).scalars())
         return await self._while_database_recovers("reading the data of", fetch)
+
+    async def outgoing_chunk(self, device_id: UUID, generation: int, operation_id: UUID, seq: int) -> bytes | None:
+        """Chunk *seq* of the data a write's args name, while the write is open.
+
+        Only for the write's own device under its current credentials, as
+        ``pending`` and ``complete`` are: None once the write is closed, or for
+        a connection under rotated-out or revoked credentials.
+        """
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceTransferChunk.data)
+                .join(DeviceOperation, DeviceOperation.id == DeviceTransferChunk.operation_id)
+                .join(Device, Device.id == DeviceOperation.device_id)
+                .where(
+                    DeviceTransferChunk.operation_id == operation_id,
+                    DeviceTransferChunk.seq == seq,
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.completed_at.is_(None),
+                    Device.credential_generation == generation,
+                    Device.revoked_at.is_(None),
+                )
+            )).scalar_one_or_none()
 
     async def consume(self, calling_session_id: UUID, invocation_id: str) -> int:
         """Mark the transfers one tool call read as consumed: its result is committed."""
@@ -908,21 +964,28 @@ class DeviceOperations:
 async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> int:
     """Delete the transfers nothing will read again; their operations' rows stay.
 
-    Those are: one consumed RETAIN_CONSUMED ago; one its operation closed
-    without, half-sent (cancelled, revoked); and one nothing consumed for
+    A write's data went to the computer: it goes once its operation is closed
+    (answered, stopped or revoked), and never while it is open, however long
+    the computer stays away.  A read's result came from the computer, and goes
+    when it was consumed RETAIN_CONSUMED ago; when its operation closed without
+    it, half-sent (cancelled, revoked); and when nothing consumed it for
     ORPHAN_AFTER (a tool call that never committed its result, or a session
     never resumed), which a replay then reports interrupted.
     """
-    closed = exists().where(
-        DeviceOperation.id == DeviceTransfer.operation_id, DeviceOperation.completed_at.is_not(None),
-    )
+    def of_operation(*conditions: Any) -> Any:
+        return exists().where(DeviceOperation.id == DeviceTransfer.operation_id, *conditions)
+
+    closed = DeviceOperation.completed_at.is_not(None)
     async with session_factory() as db:
         reaped = (await db.execute(
             delete(DeviceTransfer)
             .where(or_(
-                DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
-                and_(DeviceTransfer.received < DeviceTransfer.size, closed),
-                and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
+                of_operation(DeviceOperation.kind == "write", closed),
+                and_(of_operation(DeviceOperation.kind == "read"), or_(
+                    DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
+                    and_(DeviceTransfer.received < DeviceTransfer.size, of_operation(closed)),
+                    and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
+                )),
             ))
             .returning(DeviceTransfer.operation_id)
         )).all()
@@ -963,7 +1026,7 @@ class JournalRunner:
         self._ordinal = 0
         self._conflicted = False
 
-    async def run(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def run(self, kind: str, args: dict[str, Any], payload: bytes | None = None) -> dict[str, Any]:
         if self._conflicted:
             # A resumed call that took another path asks the computer for nothing more.
             raise OperationConflict(f"{self._invocation_id} took another path than its first run")
@@ -980,6 +1043,7 @@ class JournalRunner:
                 kind=kind,
                 args=args,
                 lease_token=self._lease_token,
+                payload=payload,
             ))
             transfer = transfer_of(outcome)
             if transfer is None:

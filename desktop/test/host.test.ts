@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync,
-  writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +10,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
+import { MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { findOnPath } from "../src/files/operations.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
@@ -68,6 +70,16 @@ describe("a tool host", { timeout: 30_000 }, () => {
     });
     harness.send({ type: "stop" });
     expect(await harness.exited).toBe(0);
+  });
+
+  it("writes 50 MiB, the most a write takes, through its file helper", async () => {
+    const harness = host();
+    await ready(harness);
+    const data = randomBytes(MAX_WRITE_BYTES);
+    expect(await harness.op("1", "write", { key: `${folder}/most.bin`, data: data.toString("base64") })).toEqual({
+      ok: null,
+    });
+    expect(readFileSync(join(folder, "most.bin")).equals(data)).toBe(true);
   });
 
   it("cannot see what the sandbox hides", async () => {

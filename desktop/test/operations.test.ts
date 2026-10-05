@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, READ_TOO_LARGE, TOO_LARGE,
+  MAX_MESSAGE_CHARS, MAX_NAMES, MAX_PAYLOAD_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, READ_TOO_LARGE, WRITE_TOO_LARGE,
 } from "../src/files/answers.js";
 import { type Context, perform } from "../src/files/operations.js";
 import { inFolderRefusal } from "../src/files/protect.js";
@@ -238,6 +238,16 @@ describe("write", () => {
     expect(readFileSync(join(folder, "exact.bin")).equals(exact)).toBe(true);
   });
 
+  it("writes 50 MiB, the most it takes, checking its base64 without growing a stack", async () => {
+    const most = Buffer.alloc(MAX_WRITE_BYTES, 120);
+    most.write("the end", MAX_WRITE_BYTES - 7);
+    expect(await run("write", { key: `${folder}/most.bin`, data: b64(most) })).toEqual({ ok: null });
+    expect(readFileSync(join(folder, "most.bin")).equals(most)).toBe(true);
+    // A pattern with a repeated group overflows the regex engine's stack on this much text.
+    const broken = `${b64(most).slice(0, -4)}AA=A`;
+    expect(await run("write", { key: `${folder}/most.bin`, data: broken })).toMatchObject({ error: { type: "value" } });
+  });
+
   it("names the key, not the temporary file, when it cannot create one", async () => {
     chmodSync(folder, 0o555);
     try {
@@ -249,20 +259,23 @@ describe("write", () => {
     }
   });
 
-  it("answers data far over 1 MiB as too large, without running the base64 check on it", async () => {
-    expect(await run("write", { key: `${folder}/x.txt`, data: "A".repeat(6_000_000) })).toEqual({
-      error: { type: "os", code: "EFBIG", message: TOO_LARGE },
+  it("answers data far over 50 MiB as too large, without checking or decoding it", async () => {
+    // Not base64 either: only the size of the text, checked first, answers it so.
+    expect(await run("write", { key: `${folder}/x.txt`, data: "@".repeat(75_000_000) })).toEqual({
+      error: { type: "os", code: "EFBIG", message: WRITE_TOO_LARGE },
     });
   });
 
-  it("refuses data that is not standard padded base64, or over 1 MiB", async () => {
-    for (const data of ["@@", "YQ", "YQ=\n", "Y-8_"]) {
+  it("refuses data that is not standard padded base64, or over 50 MiB", async () => {
+    for (const data of ["@@", "YQ", "YQ=\n", "Y-8_", "YQ==YQ==", "Y===", "====", "YWé=", "😀=="]) {
       expect(await run("write", { key: `${folder}/x.txt`, data })).toMatchObject({ error: { type: "value" } });
     }
-    const big = Buffer.alloc(MAX_PAYLOAD_BYTES + 1).toString("base64");
+    // As long, encoded, as 50 MiB: only its decoded size is over.
+    const big = Buffer.alloc(MAX_WRITE_BYTES + 1).toString("base64");
     expect(await run("write", { key: `${folder}/x.txt`, data: big })).toEqual({
-      error: { type: "os", code: "EFBIG", message: TOO_LARGE },
+      error: { type: "os", code: "EFBIG", message: WRITE_TOO_LARGE },
     });
+    expect(readdirSync(folder)).not.toContain("x.txt");
   });
 });
 

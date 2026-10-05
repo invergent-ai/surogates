@@ -27,8 +27,8 @@ export type Outcome =
   | { ok: unknown }
   | { error: { type: string; message: string; [detail: string]: unknown } };
 
-// What a result names in place of a read's data too large for one frame: the data
-// follows in chunks. sha256 is the data's, in lowercase hex.
+// What a read's result or a write's args name in place of data too large for one
+// frame: the data follows in chunks. sha256 is the data's, in lowercase hex.
 export interface Transfer {
   size: number;
   sha256: string;
@@ -61,6 +61,8 @@ export type ServerFrame =
   | { type: "op_ack"; id: string }
   | { type: "cancel"; id: string }
   | { type: "chunk_ack"; id: string; seq: number }
+  // A chunk of a write's data, after its op: CHUNK_BYTES of it, the last chunk the rest.
+  | { type: "chunk"; id: string; seq: number; data: Buffer }
   // The server closed the operation: stop sending its transfer; the result counts as acknowledged.
   | { type: "unwanted"; id: string }
   | { type: "error"; code: string; supported: number[] }
@@ -69,6 +71,16 @@ export type ServerFrame =
   | { type: "unknown" };
 
 export class ProtocolError extends Error {}
+
+/**
+ * Whether *text* is standard padded base64, as surogates/devices/workspace.py requires
+ * data to be. One character class and no repeated group, which would overflow the regex
+ * engine's stack on megabytes of text: this never grows a stack, and scans in linear
+ * time, twice on a bad tail.
+ */
+export function isBase64(text: string): boolean {
+  return text.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(text);
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -150,6 +162,17 @@ export function parseServerFrame(raw: string): ServerFrame {
     }
     case "unwanted":
       return { type: "unwanted", id: text(frame, "id") };
+    case "chunk": {
+      const { seq, data } = frame;
+      if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {
+        throw new ProtocolError("chunk frame needs a whole seq");
+      }
+      // Strict: a lenient decode drops what it does not know, and the write would land changed.
+      if (typeof data !== "string" || !isBase64(data)) {
+        throw new ProtocolError("chunk frame needs data in standard padded base64");
+      }
+      return { type: "chunk", id: text(frame, "id"), seq, data: Buffer.from(data, "base64") };
+    }
     case "error": {
       const supported = Array.isArray(frame.supported)
         ? frame.supported.filter((v): v is number => typeof v === "number")
@@ -183,4 +206,8 @@ export function transferOf(outcome: Outcome): Transfer | null {
 
 export function chunkFrame(id: string, seq: number, data: Buffer): Record<string, unknown> {
   return { type: "chunk", id, seq, data: data.toString("base64") };
+}
+
+export function chunkAck(id: string, seq: number): Record<string, unknown> {
+  return { type: "chunk_ack", id, seq };
 }

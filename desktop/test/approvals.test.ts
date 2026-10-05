@@ -118,6 +118,11 @@ describe("a chat that asks every time", () => {
       { kind: "command", command: "npm run dev", workdir: null, background: true },
     ],
     ["a write", op("write", { key: `${FOLDER}/a.txt`, data: "aGVsbG8=" }), { kind: "change", action: "write", path: `${FOLDER}/a.txt`, bytes: 5 }],
+    [
+      "a write whose data comes in a transfer",
+      op("write", { key: `${FOLDER}/big.bin`, transfer: { size: 5_242_880, sha256: "a".repeat(64) } }),
+      { kind: "change", action: "write", path: `${FOLDER}/big.bin`, bytes: 5_242_880 },
+    ],
     ["a delete", op("delete", { key: `${FOLDER}/a.txt` }), { kind: "change", action: "delete", path: `${FOLDER}/a.txt`, bytes: null }],
     ["input to a process", op("write_stdin", { session_id: "proc_1", data: "y\n" }), { kind: "input", process: "proc_1", data: "y\n" }],
   ])("asks before %s, naming the chat and exactly what it does, and lets it run once allowed", async (_name, operation, shown) => {

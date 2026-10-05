@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -11,11 +13,15 @@ from pathlib import Path
 
 import pytest
 
+from surogates.devices import workspace
 from surogates.devices.workspace import (
+    MAX_MESSAGE_CHARS,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
     READ_TOO_LARGE,
+    WRITE_TOO_LARGE,
     DeviceOperationError,
     DeviceWorkspaceIO,
 )
@@ -128,7 +134,7 @@ class _Answers:
     def __init__(self, value) -> None:
         self.value = value
 
-    async def run(self, kind, args):
+    async def run(self, kind, args, payload=None):
         return {"ok": self.value}
 
 
@@ -196,10 +202,65 @@ async def test_the_search_tool_reports_a_search_too_large_for_one_operation(wio,
 
 async def test_a_write_over_the_cap_fails_before_it_is_sent(wio, runner, root):
     with pytest.raises(OSError) as raised:
-        await wio.write(str(root / "big.bin"), b"x" * (MAX_PAYLOAD_BYTES + 1))
+        await wio.write(str(root / "big.bin"), b"x" * (MAX_WRITE_BYTES + 1))
     assert raised.value.errno == errno.EFBIG
+    assert str(raised.value) == f"[Errno 27] {WRITE_TOO_LARGE}"
     assert "write" not in runner.kinds
     assert not (root / "big.bin").exists()
+
+
+class Recording:
+    """A runner that answers every operation ok, and keeps what it was asked."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, dict, bytes | None]] = []
+
+    async def run(self, kind: str, args: dict, payload: bytes | None = None) -> dict:
+        self.asked.append((kind, args, payload))
+        return {"ok": None}
+
+
+async def test_a_write_of_more_than_one_frame_is_named_by_its_content(root):
+    runner = Recording()
+    wio = DeviceWorkspaceIO(runner, root=str(root))
+    data = os.urandom(MAX_PAYLOAD_BYTES + 1)
+    await wio.write(str(root / "big.bin"), data)
+    await wio.write(str(root / "exact.bin"), data[:MAX_PAYLOAD_BYTES])
+    # Named by its size and SHA-256, so a resumed call asks for the same operation; the bytes go beside the args.
+    assert runner.asked == [
+        ("write", {"key": str(root / "big.bin"), "transfer": {
+            "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+        }}, data),
+        ("write", {"key": str(root / "exact.bin"), "data": base64.b64encode(data[:MAX_PAYLOAD_BYTES]).decode()}, None),
+    ]
+
+
+async def test_a_write_of_up_to_50_mib_lands_whole(wio, root):
+    data = os.urandom(MAX_WRITE_BYTES)
+    await wio.write(str(root / "most.bin"), data)
+    assert (root / "most.bin").read_bytes() == data
+
+
+async def test_a_large_write_is_named_off_the_event_loop(root, monkeypatch):
+    namers = []
+    transfer_for = workspace._transfer_for
+
+    def recorded(data):
+        namers.append(threading.current_thread())
+        return transfer_for(data)
+
+    monkeypatch.setattr(workspace, "_transfer_for", recorded)
+    await DeviceWorkspaceIO(Recording(), root=str(root)).write(str(root / "big.bin"), b"x" * (MAX_PAYLOAD_BYTES + 1))
+    # Up to 50 MiB to hash: in a thread, not on the loop the worker's other sessions share.
+    assert namers and threading.current_thread() not in namers
+
+
+async def test_args_too_large_for_one_operation_are_refused_in_words_that_fit_any_kind(wio, runner):
+    # No write reaches this any more: its data goes as a transfer past 1 MiB.
+    with pytest.raises(OSError) as raised:
+        await wio.run("x" * MAX_MESSAGE_CHARS, workdir=None, timeout=10)
+    assert str(raised.value) == "[Errno 27] Too large for one operation on a local folder (over 1.5 MiB)"
+    assert runner.kinds == []
 
 
 async def test_a_read_of_more_than_one_frame_comes_back_whole(wio, root):
@@ -224,7 +285,7 @@ class Answering:
     def __init__(self, outcome: dict) -> None:
         self.outcome = outcome
 
-    async def run(self, kind: str, args: dict) -> dict:
+    async def run(self, kind: str, args: dict, payload: bytes | None = None) -> dict:
         return self.outcome
 
 

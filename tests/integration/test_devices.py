@@ -430,8 +430,8 @@ async def close_code(ws, timeout: float = 5.0) -> int:
 
 @asynccontextmanager
 async def linked(url: str, token: str):
-    """A device connection past the handshake."""
-    async with connect(url, additional_headers=headers(token)) as ws:
+    """A device connection past the handshake, taking frames as large as the app takes."""
+    async with connect(url, additional_headers=headers(token), max_size=4 * link_module.MAX_FRAME_CHARS) as ws:
         await send(ws, {"type": "hello", "protocols": [1]})
         welcome = await receive(ws)
         assert welcome["type"] == "welcome", welcome
