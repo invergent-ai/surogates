@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from surogates.devices.workspace import DeviceWorkspaceIO
+from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
 from surogates.tools.builtin import file_ops, research, terminal
 from surogates.tools.utils import document_cache
 from surogates.tools.utils import process_registry as registry_module
@@ -69,6 +69,9 @@ class RemappingWorkspaceIO:
 
     async def read(self, key, max_bytes=None):
         return await self._inner.read(self._to_real(key), max_bytes)
+
+    async def read_lines(self, key, **page):
+        return await self._inner.read_lines(self._to_real(key), **page)
 
     async def write(self, key, data):
         await self._inner.write(self._to_real(key), data)
@@ -205,6 +208,49 @@ class TestReadFile:
     async def test_path_outside_workspace_is_refused(self, ws):
         out = await call(file_ops._read_file_handler, ws, path="/etc/hostname")
         assert "Path traversal blocked" in out["error"]
+
+    async def test_crlf_lines_are_read_page_by_page(self, ws):
+        (ws.real / "a.txt").write_bytes(b"a\r\nb\r\nc\r\n")
+        first = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), limit=2)
+        assert (first["content"], first["next_offset"]) == ("a\nb\n", 3)
+        rest = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), offset=3)
+        assert (rest["content"], rest["total_lines"], rest["truncated"]) == ("c\n", 3, False)
+
+    async def test_a_utf16_file_is_read_from_its_second_line(self, ws):
+        (ws.real / "u.txt").write_bytes("﻿one\ntwo\nthree\n".encode("utf-16-le"))
+        out = await call(file_ops._read_file_handler, ws, path=ws.path("u.txt"), offset=2)
+        assert (out["content"], out["total_lines"]) == ("two\nthree\n", 3)
+
+    async def test_a_first_line_over_the_budget_is_cut(self, ws, monkeypatch):
+        monkeypatch.setattr(file_ops, "get_max_bytes", lambda: 10)
+        (ws.real / "a.txt").write_text("x" * 100 + "\nshort\n")
+        out = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"))
+        assert (out["content"], out["lines_shown"], out["next_offset"]) == ("x" * 10, 1, 2)
+
+    async def test_an_offset_past_the_end_shows_nothing(self, ws):
+        (ws.real / "a.txt").write_text("one\ntwo\n")
+        out = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), offset=9)
+        assert (out["content"], out["total_lines"], out["lines_shown"], out["truncated"]) == ("", 2, 0, False)
+        assert "next_offset" not in out
+
+    async def test_a_limit_below_one_selects_lines_as_a_python_slice_does(self, ws):
+        (ws.real / "a.txt").write_text("one\ntwo\nthree\n")
+        none = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), limit=0)
+        assert (none["content"], none["next_offset"]) == ("", 1)
+        # lines[0:-1], as the cloud has always read it.
+        most = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), limit=-1)
+        assert (most["content"], most["next_offset"]) == ("one\ntwo\n", 3)
+        later = await call(file_ops._read_file_handler, ws, path=ws.path("a.txt"), offset=2, limit=-1)
+        assert later["content"] == ""
+
+    async def test_a_log_written_while_it_is_read_shows_its_new_lines_on_the_next_page(self, ws):
+        log = ws.real / "app.log"
+        log.write_text("one\ntwo\nthree\n")
+        first = await call(file_ops._read_file_handler, ws, path=ws.path("app.log"), limit=2)
+        with log.open("a") as fh:
+            fh.write("four\n")
+        rest = await call(file_ops._read_file_handler, ws, path=ws.path("app.log"), offset=first["next_offset"])
+        assert (rest["content"], rest["total_lines"]) == ("three\nfour\n", 4)
 
 
 @pytest.mark.parametrize("ws", EVERY_IO, indirect=True)
@@ -631,3 +677,58 @@ async def test_binary_file_is_refused_after_reading_only_its_head(tmp_path):
     )
     assert out["error"].startswith("Cannot read binary file")
     assert 0 < wio.bytes_read <= 8192
+
+
+class Measuring(InProcessRunner):
+    """The reference laptop's runner, adding up what each operation's outcome carries."""
+
+    def __init__(self, folder) -> None:
+        super().__init__(folder)
+        self.carried = 0
+
+    async def run(self, kind, args, payload=None):
+        outcome = await super().run(kind, args, payload)
+        self.carried += len(json.dumps(outcome))
+        return outcome
+
+
+async def test_a_page_of_a_large_file_on_a_device_moves_its_head_and_the_page(tmp_path):
+    root = tmp_path.resolve()
+    lines = [f"row {n:07d} of a large log\n" for n in range(200_000)]
+    (root / "big.log").write_text("".join(lines))
+    runner = Measuring(LocalWorkspaceIO(str(root)))
+    out = json.loads(await file_ops._read_file_handler(
+        {"path": str(root / "big.log"), "offset": 150_001, "limit": 100},
+        workspace_io=DeviceWorkspaceIO(runner, root=str(root)),
+    ))
+    assert out["content"] == "".join(lines[150_000:150_100])
+    assert (out["total_lines"], out["next_offset"]) == (200_000, 150_101)
+    assert runner.kinds == ["resolve", "stat", "read", "read_lines", "stat"]
+    # The 8 KiB head and 100 lines, in base64: never the file's 5 MiB.
+    assert runner.carried < 32 * 1024
+
+
+async def test_a_minified_file_on_a_device_moves_one_page_of_its_line(tmp_path):
+    root = tmp_path.resolve()
+    (root / "bundle.js").write_text("x" * (3 * 1024 * 1024))
+    runner = Measuring(LocalWorkspaceIO(str(root)))
+    out = json.loads(await file_ops._read_file_handler(
+        {"path": str(root / "bundle.js")}, workspace_io=DeviceWorkspaceIO(runner, root=str(root)),
+    ))
+    assert (out["content"], out["total_lines"], out["truncated"]) == ("x" * file_ops.get_max_bytes(), 1, False)
+    # The head and four bytes a character of the budget, in base64: never the file's 3 MiB.
+    assert runner.carried < 300 * 1024
+
+
+async def test_a_file_over_50_mib_on_a_device_is_refused_from_its_size(tmp_path):
+    root = tmp_path.resolve()
+    with open(root / "huge.log", "wb") as fh:
+        fh.write(b"line\n" * 2000)
+        # The rest is a hole: nothing is written, and nothing is scanned.
+        fh.truncate(MAX_READ_BYTES + 1)
+    runner = Measuring(LocalWorkspaceIO(str(root)))
+    out = json.loads(await file_ops._read_file_handler(
+        {"path": str(root / "huge.log")}, workspace_io=DeviceWorkspaceIO(runner, root=str(root)),
+    ))
+    assert out == {"error": "Failed to read file: [Errno 27] File too large to read from a local folder (over 50 MiB)"}
+    assert runner.kinds == ["resolve", "stat", "read", "read_lines"]

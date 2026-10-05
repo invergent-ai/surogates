@@ -1350,10 +1350,10 @@ async def _handle_text(
 ) -> str:
     """Text reader with BOM detection, dedup tracking and consecutive-loop guards.
 
-    Lifted verbatim from the pre-refactor ``_read_file_handler`` body so
-    behavior on ``.py``/``.md``/``.json``/UTF-16 files is identical.  The
-    only structural change is that line-windowing goes through
-    ``_apply_line_window``.
+    It reads only the page it shows: the workspace finds the line ends
+    (``read_lines``), and this decodes and renders the page as the whole file
+    would have rendered, so a page of a large file on the user's computer
+    moves the file's head and the page, never the file.
     """
     offset = max(arguments.get("offset", 1), 1)
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
@@ -1422,14 +1422,22 @@ async def _handle_text(
         pass  # Proceed with utf-8
 
     try:
-        lines = _decode(await wio.read(key), encoding, errors="replace").readlines()
-    except (OSError, UnicodeDecodeError) as exc:
+        page = await wio.read_lines(
+            key, encoding=encoding, offset=offset, limit=limit,
+            # A rendered character takes at most four bytes in UTF-8 and UTF-16
+            # and eight in UTF-32, where CR LF is one character of two units:
+            # the page holds every line the character budget can show.
+            max_bytes=(8 if encoding.startswith("utf-32") else 4) * get_max_bytes(),
+        )
+    except OSError as exc:
         return _tool_error(f"Failed to read file: {exc}")
+    total_lines = page.total_lines
 
-    selected, total_lines, _start_idx, _end_idx, _truncated = _apply_line_window(
-        lines, offset, limit,
-    )
-
+    # Cut at line ends, the page decodes to the lines the whole file would.
+    # A utf-8-sig page holds no BOM.
+    selected = _decode(
+        page.data, "utf-8" if encoding == "utf-8-sig" else encoding, errors="replace",
+    ).readlines()
     content, lines_shown, next_offset = _render_read_window(
         selected, offset, total_lines,
     )

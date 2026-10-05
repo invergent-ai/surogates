@@ -450,13 +450,14 @@ async def consumed_of(session_factory, root: UUID, call_id: str) -> list:
 async def test_a_committed_tool_result_marks_what_it_read_consumed(laptop_rig, session_factory, redis_client):
     rig = laptop_rig
     await rig.laptop.connect()
-    (rig.folder / "app.log").write_text(big_text())
+    # A document: it is read whole, while a text file's page never needs a transfer.
+    (rig.folder / "report.pdf").write_bytes(pdf(2 * 1024 * 1024))
     store = SessionStore(session_factory)
     read = await tool_call(
-        rig, store, builtin_tools(), "call_1", "read_file", {"path": "app.log"},
+        rig, store, builtin_tools(), "call_1", "read_file", {"path": "report.pdf"},
         redis_client=redis_client, session_factory=session_factory,
     )
-    assert "line 000000 of a log" in read["content"]
+    assert PDF_TEXT in read["content"]
     [consumed] = await consumed_of(session_factory, rig.root, "call_1")
     assert consumed is not None
 
