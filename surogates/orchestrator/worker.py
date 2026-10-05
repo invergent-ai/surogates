@@ -1583,6 +1583,8 @@ async def run_worker(settings: Settings) -> None:
                             session_id=session.id,
                             agent_id=ctx.agent_id,
                             is_service_account=is_service_account,
+                            # a call wakes once per caller turn; reuse its tool list
+                            cache_ttl=300 if session.channel == "voice" else 0,
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(

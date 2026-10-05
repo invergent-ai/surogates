@@ -8,6 +8,8 @@ the local ``ToolRegistry``, and forwards tool calls via
 
 from __future__ import annotations
 
+import time
+
 import json
 import logging
 from typing import Any
@@ -55,6 +57,8 @@ class McpProxyClient:
         # Subset of the above that came from the Composio tool-router, so the
         # harness can hide a channel agent's own-platform Composio toolkit.
         self._composio_by_agent: dict[str, set[str]] = {}
+        # Opt-in per-session reuse of a discovery (``cache_ttl``): session_id -> (when, names).
+        self._session_tools: dict[UUID, tuple[float, list[str]]] = {}
 
     async def discover_and_register(
         self,
@@ -64,6 +68,7 @@ class McpProxyClient:
         *,
         agent_id: str,
         is_service_account: bool = False,
+        cache_ttl: float = 0,
     ) -> list[str]:
         """Discover *agent_id*'s MCP tools via the proxy and register them.
 
@@ -78,6 +83,13 @@ class McpProxyClient:
         when ``session.user_id`` is ``None`` and we fell back to the
         session's ``service_account_id``.
         """
+        # A phone call wakes the harness on every caller turn; its tool list does not change
+        # mid-call, so with a ``cache_ttl`` the proxy round trip is paid once per session.
+        if cache_ttl > 0:
+            cached = self._session_tools.get(session_id)
+            if cached is not None and time.monotonic() - cached[0] < cache_ttl:
+                return list(cached[1])
+
         token = create_sandbox_token(
             org_id, user_id, session_id,
             agent_id=agent_id,
@@ -129,6 +141,10 @@ class McpProxyClient:
             n for n in current if is_composio_router_name(n)
         }
         registered = sorted(current)
+        if cache_ttl > 0:
+            now = time.monotonic()
+            self._session_tools = {sid: v for sid, v in self._session_tools.items() if now - v[0] < cache_ttl}
+            self._session_tools[session_id] = (now, registered)
         if registered:
             logger.info(
                 "Agent %s has %d MCP tool(s) via proxy: %s",
