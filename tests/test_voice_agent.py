@@ -15,3 +15,31 @@ def test_call_config_survives_bad_values():
                                    "idle_ask_seconds": True, "unknown": object()})
     assert cfg == CallConfig()
     assert CallConfig.from_routing(None) == CallConfig() and CallConfig().greeting == GREETING_DEFAULT
+
+
+async def test_our_own_voice_coming_back_never_reaches_turn_taking(monkeypatch):
+    """Speakerphone echo must be dropped before LiveKit counts its words as an interruption."""
+    from types import SimpleNamespace
+
+    from livekit.agents import Agent, stt
+
+    from surogates.voice.agent import VoiceAgent
+
+    def said(text):
+        return stt.SpeechEvent(type=stt.SpeechEventType.INTERIM_TRANSCRIPT,
+                               alternatives=[stt.SpeechData(language="ro", text=text)])
+
+    heard = [stt.SpeechEvent(type=stt.SpeechEventType.START_OF_SPEECH), said("întrebări legate de știrile zilei"),
+             said("cât e euro azi")]
+
+    async def default_stt_node(agent, audio, model_settings):
+        for ev in heard:
+            yield ev
+
+    monkeypatch.setattr(Agent.default, "stt_node", default_stt_node)
+    monkeypatch.setattr(VoiceAgent, "session", property(lambda self: SimpleNamespace(agent_state="speaking")))
+    agent = VoiceAgent(CallConfig())
+    agent.recent = [(__import__("time").monotonic(), "Te pot ajuta cu întrebări legate de știrile zilei.")]
+    out = [ev async for ev in agent.stt_node(None, None)]
+    assert [ev.alternatives[0].text if ev.alternatives else ev.type for ev in out] == \
+        [stt.SpeechEventType.START_OF_SPEECH, "cât e euro azi"]

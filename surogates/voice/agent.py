@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from livekit import rtc
-from livekit.agents import Agent, ModelSettings, StopResponse, llm
+from livekit.agents import Agent, ModelSettings, StopResponse, llm, stt
 
 from surogates.voice.text import caller_says_goodbye, is_echo, is_farewell, say_as, spoken_sentences
 
@@ -78,10 +78,27 @@ class VoiceAgent(Agent):
         self.recent: list[tuple[float, str]] = []  # (when, sentence) we spoke, for the echo check
         self.hangup_after_reply = False
 
-    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
-        text, now = new_message.text_content or "", time.monotonic()
+    def _recent_said(self) -> list[str]:
+        now = time.monotonic()
         self.recent = [(t, s) for t, s in self.recent if now - t < ECHO_WINDOW]
-        if is_echo(text, [s for _, s in self.recent]):
+        return [s for _, s in self.recent]
+
+    async def stt_node(self, audio: AsyncIterable[rtc.AudioFrame],
+                       model_settings: ModelSettings) -> AsyncIterable[stt.SpeechEvent]:
+        """The caller's words, minus our own voice coming back through a speakerphone.
+
+        Filtered here, before turn-taking sees it: LiveKit interrupts the agent on the words it hears
+        while the agent speaks, so an echo dropped any later would already have cut the agent off.
+        """
+        async for ev in Agent.default.stt_node(self, audio, model_settings):
+            text = ev.alternatives[0].text if isinstance(ev, stt.SpeechEvent) and ev.alternatives else ""
+            if text and is_echo(text, self._recent_said(), while_speaking=self.session.agent_state == "speaking"):
+                continue
+            yield ev
+
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
+        text = new_message.text_content or ""
+        if is_echo(text, self._recent_said()):
             raise StopResponse()  # our own voice through a speakerphone, not the caller
         if caller_says_goodbye(text):
             self.hangup_after_reply = True
