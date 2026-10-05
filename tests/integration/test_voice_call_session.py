@@ -49,6 +49,7 @@ async def test_stream_follows_the_turn_live_and_stops_at_the_final_answer(call):
 
     async def agent():  # the harness writing its turn while the call is already listening
         await asyncio.sleep(0.05)
+        await emit(call.session_id, EventType.LLM_REQUEST, {})
         await emit(call.session_id, EventType.LLM_DELTA, {"content": "O clipă, verific. "})
         await emit(call.session_id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "tool_calls": [{"id": "1"}]}})
         await asyncio.sleep(0.05)
@@ -65,6 +66,7 @@ async def test_stream_follows_the_turn_live_and_stops_at_the_final_answer(call):
 async def test_a_question_from_the_agent_is_spoken_and_ends_the_turn(call):
     after = await call.send("Vreau o programare")
     args = {"question": "Ce zi vă convine?", "options": ["luni", "marți"]}
+    await call.store.emit_event(call.session_id, EventType.LLM_REQUEST, {})
     await call.store.emit_event(call.session_id, EventType.TOOL_CALL,
                                 {"tool_call_id": "q1", "name": "ask_user_question", "arguments": json.dumps(args)})
     assert [t async for t in call.stream(after)] == ["Ce zi vă convine? Variante: luni, marți."]
@@ -104,3 +106,22 @@ async def test_cut_before_a_word_was_heard(call):
     await call.record_heard("")
     await call.send("Alo?")
     assert (await _user_messages(call))[-1] == f"{HEARD_NONE}Alo?"
+
+
+async def test_the_previous_turn_ending_does_not_end_the_callers_new_turn(call):
+    """Barge-in: the old turn's tail, its answer and its stop land after the caller's new words."""
+    after = await call.send("Stop, spune-mi doar anul.")
+    emit = call.store.emit_event
+    await emit(call.session_id, EventType.LLM_DELTA, {"content": "...tail of the story nobody asked for. "})
+    await emit(call.session_id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "The whole story."}})
+    await emit(call.session_id, EventType.SESSION_STOPPED, {"reason": "channel_stop"})
+    await emit(call.session_id, EventType.LLM_REQUEST, {})
+    await emit(call.session_id, EventType.LLM_DELTA, {"content": "În 1659."})
+    await emit(call.session_id, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "În 1659."}})
+    assert "".join([t async for t in call.stream(after)]) == "În 1659."
+
+
+async def test_a_failed_session_ends_the_turn_even_before_it_started(call):
+    after = await call.send("Alo?")
+    await call.store.emit_event(call.session_id, EventType.SESSION_FAIL, {"reason": "crash_loop_detected"})
+    assert [t async for t in call.stream(after)] == []

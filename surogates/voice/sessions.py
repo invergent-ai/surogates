@@ -90,14 +90,24 @@ class CallSession:
         return self._user_event
 
     async def stream(self, after: int) -> AsyncIterator[str]:
-        """The turn's text as the agent writes it. Ends at its final answer, at a question, or when the turn ends."""
+        """The turn's text as the agent writes it. Ends at its final answer, at a question, or when the turn ends.
+
+        Everything before the harness starts this turn (its first ``llm.request``) belongs to the turn the
+        caller just cut off: its tail, its answer and its ``session.stopped`` land after the caller's
+        new words and must not be spoken or end this turn. Only a failed session ends it regardless.
+        """
         pubsub = self.redis.pubsub()
         await pubsub.subscribe(f"surogates:session:{self.session_id}")
-        cursor = after
+        cursor, started = after, False
         try:
             while True:
                 for e in await self.store.get_events(self.session_id, after=cursor):
                     cursor, data = e.id, e.data or {}
+                    if e.type == EventType.SESSION_FAIL.value:
+                        return
+                    if not started:
+                        started = e.type == EventType.LLM_REQUEST.value
+                        continue
                     if e.type == EventType.LLM_DELTA.value and data.get("content"):
                         yield data["content"]
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":

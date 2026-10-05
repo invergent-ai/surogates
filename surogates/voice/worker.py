@@ -128,12 +128,6 @@ async def entrypoint(ctx: JobContext) -> None:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
-    @session.on("conversation_item_added")
-    def _heard(ev) -> None:
-        item = ev.item
-        if getattr(item, "role", None) == "assistant" and getattr(item, "interrupted", False):
-            spawn(call.record_heard(item.text_content or ""))
-
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:
         if ev.new_state == "listening" and agent.hangup_after_reply:
@@ -170,7 +164,9 @@ async def entrypoint(ctx: JobContext) -> None:
 async def run_voice(settings: Any) -> None:
     vs = settings.voice
     server = AgentServer(ws_url=vs.livekit_url, api_key=vs.livekit_api_key, api_secret=vs.livekit_api_secret,
-                         setup_fnc=prewarm, port=vs.health_port, load_threshold=1.0,
+                         setup_fnc=prewarm, num_idle_processes=vs.idle_processes,
+                         initialize_process_timeout=vs.process_init_timeout, port=vs.health_port,
+                         load_threshold=1.0,
                          load_fnc=lambda s: len(s.active_jobs) / max(vs.max_calls, 1))
     server.rtc_session(entrypoint, agent_name=vs.agent_name)
     await server.run()

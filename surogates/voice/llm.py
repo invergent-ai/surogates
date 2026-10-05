@@ -25,6 +25,7 @@ class SurogatesLLM(llm.LLM):
     def __init__(self, call: CallSession) -> None:
         super().__init__()
         self._call = call
+        self._reported: set[str] = set()  # interrupted replies whose heard part the session already has
 
     @property
     def model(self) -> str:
@@ -48,6 +49,7 @@ class SurogatesStream(llm.LLMStream):
         if not text:
             return
         call: CallSession = self._llm._call
+        await self._report_cut_reply(call)
         after = await call.send(text)
         finished = False
         try:
@@ -58,3 +60,14 @@ class SurogatesStream(llm.LLMStream):
         finally:
             if not finished:
                 await asyncio.shield(call.interrupt())
+
+    async def _report_cut_reply(self, call: CallSession) -> None:
+        """LiveKit truncates an interrupted reply to what was played. Tell the session before the caller's
+        next words go in, so the agent continues from what was actually heard."""
+        for item in reversed(self._chat_ctx.items):
+            if getattr(item, "role", None) != "assistant":
+                continue
+            if getattr(item, "interrupted", False) and item.id not in self._llm._reported:
+                self._llm._reported.add(item.id)
+                await call.record_heard(item.text_content or "")
+            return
