@@ -101,9 +101,19 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     info = call_info(ctx.room.name, participant.attributes)
+    call, tasks = None, set()
+
+    async def cleanup() -> None:
+        # in this order: the call's session is closed while Redis and the DB are still open
+        for task in list(tasks):
+            task.cancel()
+        if call is not None:
+            await call.end()
+        await rt.aclose()
+
     try:
         rt = await Runtime.open(settings)
-        ctx.add_shutdown_callback(rt.aclose)
+        ctx.add_shutdown_callback(cleanup)
         tenant = await resolve_tenant(rt.routing, "voice", info.called) if info else None
     except Exception:  # ops down, 401, a timeout: the caller hears why, not silence
         log.exception("could not resolve room %s (called %s)", ctx.room.name, info and info.called)
@@ -128,7 +138,6 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(vad=ctx.proc.userdata["vad"], stt=RoSTT(url=vs.stt_url), llm=SurogatesLLM(call),
                            tts=RoTTS(url=vs.tts_url, voice=config.voice), turn_handling=TURN_HANDLING,
                            user_away_timeout=config.idle_ask_seconds)
-    tasks: set[asyncio.Task] = set()
 
     def spawn(coro) -> None:
         task = asyncio.create_task(coro)
@@ -146,13 +155,16 @@ async def entrypoint(ctx: JobContext) -> None:
         # the session gave up (unrecoverable STT/LLM/TTS errors, or the caller left): never keep a caller
         # on the line with nobody there
         log.info("call %s session closed: %s", info.call_id, ev.reason)
-        spawn(ctx.delete_room())
+        spawn(hang_up())
 
     @session.on("agent_state_changed")
     def _done_speaking(ev) -> None:
         if ev.new_state == "listening" and agent.hangup_after_reply:
             agent.hangup_after_reply = False
-            spawn(ctx.delete_room())
+            spawn(hang_up())
+
+    async def hang_up() -> None:
+        await ctx.delete_room()  # a Future, not a coroutine: spawn() needs this wrapper
 
     async def still_there() -> None:
         await session.say(STILL_THERE, add_to_chat_ctx=False).wait_for_playout()
@@ -169,11 +181,6 @@ async def entrypoint(ctx: JobContext) -> None:
         await asyncio.sleep(config.max_call_seconds)
         await say_and_hang_up(ctx, session, GOODBYE)
 
-    async def cancel_tasks() -> None:
-        for task in list(tasks):
-            task.cancel()
-
-    ctx.add_shutdown_callback(cancel_tasks)
     await session.start(agent=agent, room=ctx.room)
     background = BackgroundAudioPlayer(thinking_sound=[AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5)])
     await background.start(room=ctx.room, agent_session=session)

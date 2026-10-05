@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -38,8 +39,17 @@ def normalize_caller(raw: str | None) -> str:
     return digits if re.fullmatch(r"\d{3,15}", digits) else ANONYMOUS
 
 
-def question_text(arguments: Any) -> str:
+def _words(text: str) -> str:
+    """Lowercase words without diacritics or punctuation, for "was this already said"."""
+    text = "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
+    return " ".join(re.findall(r"\w+", text))
+
+
+def question_text(arguments: Any, said: str = "") -> str:
     """An ``ask_user_question`` call as spoken questions, each with its choices read as a list.
+
+    A prompt the agent already spoke in ``said`` (models often write the question, then call the
+    tool with it) is not repeated: only its choices are added.
 
     The tool's schema (``tools/builtin/ask_user_question.py``) is
     ``{"questions": [{"prompt": str, "choices": [{"label": str}]}]}``.
@@ -56,7 +66,9 @@ def question_text(arguments: Any) -> str:
             continue
         labels = [str(c.get("label")).strip() for c in q.get("choices") or []
                   if isinstance(c, dict) and str(c.get("label") or "").strip()]
-        spoken.append(str(q["prompt"]).strip() + (f" Variante: {', '.join(labels)}." if labels else ""))
+        choices = f"Variante: {', '.join(labels)}." if labels else ""
+        prompt = "" if _words(str(q["prompt"])) in _words(said) else str(q["prompt"]).strip()
+        spoken.append(" ".join(p for p in (prompt, choices) if p))
     return " ".join(spoken)
 
 
@@ -115,7 +127,7 @@ class CallSession:
         await pubsub.subscribe(f"surogates:session:{self.session_id}")
         loop = asyncio.get_running_loop()
         began = loop.time()
-        cursor, started, spoke = after, False, False
+        cursor, started, said = after, False, ""
         try:
             while True:
                 for e in await self.store.get_events(self.session_id, after=cursor):
@@ -126,15 +138,15 @@ class CallSession:
                         started = e.type == EventType.LLM_REQUEST.value
                         continue
                     if e.type == EventType.LLM_DELTA.value and data.get("content"):
-                        spoke = True
+                        said += data["content"]
                         yield data["content"]
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
-                        if question := question_text(data.get("arguments")):
-                            yield question
+                        if question := question_text(data.get("arguments"), said):
+                            yield f" {question}" if said else question
                         return
                     elif _final_answer(e):
                         # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
-                        if not spoke and (content := str((data.get("message") or {}).get("content") or "").strip()):
+                        if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
                             yield content
                         return  # after the final answer only summaries and completion follow: nothing to say
                     elif e.type in TERMINAL:
@@ -153,6 +165,17 @@ class CallSession:
     async def interrupt(self) -> None:
         """The caller talked over the agent: stop its turn. The session stays active for the next words."""
         await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": "channel_stop"}))
+
+    async def end(self) -> None:
+        """The caller hung up: stop any turn still running and close the session.
+
+        A voice session left ``active`` looks abandoned to the orphan sweeper, which re-runs its last
+        turn (tools, browsers, model calls) for a caller who is gone, and fails a silent call after
+        repeated recoveries. ``completed`` with ``call_ended`` is the end of the conversation.
+        """
+        await self.interrupt()
+        await self.store.update_session_status(self.session_id, "completed")
+        await self.store.emit_event(self.session_id, EventType.SESSION_COMPLETE, {"reason": "call_ended"})
 
     async def record_heard(self, heard: str) -> None:
         """Make the history say what the caller actually heard of the answer they cut off.

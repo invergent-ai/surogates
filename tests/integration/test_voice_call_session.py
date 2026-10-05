@@ -125,3 +125,23 @@ async def test_a_failed_session_ends_the_turn_even_before_it_started(call):
     after = await call.send("Alo?")
     await call.store.emit_event(call.session_id, EventType.SESSION_FAIL, {"reason": "crash_loop_detected"})
     assert [t async for t in call.stream(after)] == []
+
+
+async def test_hanging_up_ends_the_session_so_nothing_reruns_after_the_caller_left(call):
+    """A session left active after the call is found by the orphan sweeper and re-run for nobody."""
+    pubsub = call.redis.pubsub()
+    await pubsub.subscribe(f"surogates:interrupt:{call.session_id}")
+    await pubsub.get_message(timeout=1)
+    await call.send("Caută cursul euro")
+    await call.end()
+    msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=2)
+    await pubsub.aclose()
+    assert msg and json.loads(msg["data"]) == {"reason": "channel_stop"}  # a turn still running is stopped
+    assert (await call.store.get_session(call.session_id)).status == "completed"
+    last = (await call.store.get_events(call.session_id))[-1]
+    assert (last.type, last.data) == ("session.complete", {"reason": "call_ended"})
+
+
+async def test_a_call_where_nobody_spoke_ends_cleanly_too(call):
+    await call.end()
+    assert (await call.store.get_session(call.session_id)).status == "completed"

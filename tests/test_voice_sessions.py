@@ -132,3 +132,11 @@ async def test_cut_greeting_invents_no_reply_and_says_what_was_heard():
     await call.record_heard("Bună ziua! Sunt")
     assert call.store.events == []
     assert call.note == "[Ai răspuns la telefon, dar apelantul te-a întrerupt după: «Bună ziua! Sunt».] "
+
+
+async def test_a_question_the_agent_already_said_is_not_said_twice():
+    """The model often writes the question as text and then calls ask_user_question with the same prompt."""
+    args = {"questions": [{"prompt": "În ce zi doriți programarea?", "choices": [{"label": "luni"}, {"label": "marți"}]}]}
+    call = _call(_Log(("llm.request", {}), ("llm.delta", {"content": "Sigur. În ce zi doriți programarea?"}),
+                      ("tool.call", {"name": "ask_user_question", "arguments": json.dumps(args)})))
+    assert [t async for t in call.stream(0)] == ["Sigur. În ce zi doriți programarea?", " Variante: luni, marți."]
