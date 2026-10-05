@@ -375,6 +375,42 @@ async def test_a_header_racing_the_last_chunk_of_its_transfer_leaves_the_data_wh
     assert await stored(session_factory, str(op.id)) == DATA
 
 
+async def test_a_header_while_the_last_chunk_of_its_transfer_is_being_stored_waits_and_leaves_the_data_whole(
+    laptop_rig, engine, session_factory, redis_client,
+):
+    rig = laptop_rig
+    waiting = asyncio.create_task(rig.ops.run(read_request(rig)))
+    await eventually(lambda: _pending_count(rig, 1))
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    sha = hashlib.sha256(DATA).hexdigest()
+    assert await rig.ops.start_transfer(rig.device_id, 1, "conn-1", op.id, op.digest, len(DATA), sha) == "started"
+    for seq in (0, 1):
+        assert await rig.ops.store_chunk(
+            rig.device_id, 1, "conn-1", op.id, op.digest, seq, DATA[seq * CHUNK_BYTES:(seq + 1) * CHUNK_BYTES], None,
+        ) == "stored"
+    seen: dict = {}
+
+    async def the_header_comes_meanwhile() -> None:
+        seen["start"] = asyncio.create_task(
+            rig.ops.start_transfer(rig.device_id, 1, "conn-2", op.id, op.digest, len(DATA), sha),
+        )
+        await asyncio.sleep(0.5)
+        seen["blocked"] = not seen["start"].done()
+
+    # The last chunk's transaction has moved its transfer whole and not yet answered the operation.
+    ops = DeviceOperations(
+        racing(engine, "device_operations", the_header_comes_meanwhile, kinds=(Update,)), redis_client,
+    )
+    assert await ops.store_chunk(
+        rig.device_id, 1, "conn-1", op.id, op.digest, 2, DATA[2 * CHUNK_BYTES:], named(DATA),
+    ) == "completed"
+    # The header's DELETE waited for that transaction, then found the transfer whole and kept it.
+    assert seen["blocked"]
+    assert await asyncio.wait_for(seen["start"], 5.0) == "busy"
+    assert await asyncio.wait_for(waiting, 5.0) == named(DATA)
+    assert await stored(session_factory, str(op.id)) == DATA
+
+
 async def test_the_reference_laptop_sends_a_read_too_large_for_a_frame_in_chunks(laptop_rig, session_factory):
     rig = laptop_rig
     await rig.laptop.connect()
