@@ -953,21 +953,28 @@ class DeviceOperations:
 async def reap_transfers(session_factory: async_sessionmaker[AsyncSession]) -> int:
     """Delete the transfers nothing will read again; their operations' rows stay.
 
-    Those are: one consumed RETAIN_CONSUMED ago; one its operation closed
-    without, half-sent (cancelled, revoked); and one nothing consumed for
+    A write's data went to the computer: it goes once its operation is closed
+    (answered, stopped or revoked), and never while it is open, however long
+    the computer stays away.  A read's result came from the computer, and goes
+    when it was consumed RETAIN_CONSUMED ago; when its operation closed without
+    it, half-sent (cancelled, revoked); and when nothing consumed it for
     ORPHAN_AFTER (a tool call that never committed its result, or a session
     never resumed), which a replay then reports interrupted.
     """
-    closed = exists().where(
-        DeviceOperation.id == DeviceTransfer.operation_id, DeviceOperation.completed_at.is_not(None),
-    )
+    def of_operation(*conditions: Any) -> Any:
+        return exists().where(DeviceOperation.id == DeviceTransfer.operation_id, *conditions)
+
+    closed = DeviceOperation.completed_at.is_not(None)
     async with session_factory() as db:
         reaped = (await db.execute(
             delete(DeviceTransfer)
             .where(or_(
-                DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
-                and_(DeviceTransfer.received < DeviceTransfer.size, closed),
-                and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
+                of_operation(DeviceOperation.kind == "write", closed),
+                and_(of_operation(DeviceOperation.kind == "read"), or_(
+                    DeviceTransfer.consumed_at < func.now() - RETAIN_CONSUMED,
+                    and_(DeviceTransfer.received < DeviceTransfer.size, of_operation(closed)),
+                    and_(DeviceTransfer.consumed_at.is_(None), DeviceTransfer.created_at < func.now() - ORPHAN_AFTER),
+                )),
             ))
             .returning(DeviceTransfer.operation_id)
         )).all()

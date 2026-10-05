@@ -5,33 +5,50 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import uuid
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 from surogates.db.models import DeviceOperation, DeviceTransfer
 from surogates.devices.link import TRANSFER_WINDOW
-from surogates.devices.operations import CANCELLED_OUTCOME, DeviceOperations, OperationConflict, OperationRequest
+from surogates.devices.operations import (
+    CANCELLED_OUTCOME,
+    DeviceOperations,
+    OperationConflict,
+    OperationRequest,
+    reap_transfers,
+)
 from surogates.devices.store import REVOKED_OUTCOME
 from surogates.devices.workspace import CHUNK_BYTES
+from surogates.session.store import SessionStore
+from surogates.tools.builtin import file_ops
+from surogates.tools.registry import ToolSchema
 
-from .test_device_transfers import stored, transfers_of
+from .test_device_transfers import StoppingStore, big_text, stored, transfers_of
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
     _first_op,
     api,
+    builtin_tools,
+    device_io,
     eventually,
     laptop_rig,
     link_url,
     linked,
     receive,
     request_for,
+    resume_call,
     send,
     stop,
+    take_over,
+    tool_call,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -202,4 +219,129 @@ async def test_a_writes_data_goes_only_to_its_device_under_its_current_credentia
     assert response.status_code == 200, response.text
     assert await rig.ops.outgoing_chunk(rig.device_id, 1, op.id, 1) is None
     assert await rig.ops.outgoing_chunk(rig.device_id, 2, op.id, 1) == DATA[CHUNK_BYTES:2 * CHUNK_BYTES]
+    await stop(waiting)
+
+
+async def test_the_reference_laptop_takes_a_write_too_large_for_a_frame_in_chunks(laptop_rig):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    wio = device_io(rig.ops, rig.device_id, rig.root, rig.folder)
+    await asyncio.wait_for(wio.write(str(rig.folder / "big.bin"), BIG), 10.0)
+    assert (rig.folder / "big.bin").read_bytes() == BIG
+    [operation_id] = rig.laptop.outcomes
+    assert rig.laptop.chunks_received == [(operation_id, seq) for seq in range(7)]
+
+
+async def test_write_file_and_research_notes_over_1_mib_land_on_the_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io_ = {"redis_client": redis_client, "session_factory": session_factory}
+    content = big_text()
+    written = await tool_call(rig, store, tools, "call_1", "write_file", {"path": "app.log", "content": content}, **io_)
+    assert json.loads(written["content"])["status"] == "ok", written
+    assert (rig.folder / "app.log").read_text() == content
+    for n in range(4):
+        added = await tool_call(rig, store, tools, f"call_{n + 2}", "research_memory", {
+            "action": "add", "url": f"https://example.org/{n}", "title": f"T{n}", "summary": "s" * 400_000,
+        }, **io_)
+        assert json.loads(added["content"])["success"] is True, added
+    assert (rig.folder / ".research" / "memory.jsonl").stat().st_size > 1024 * 1024
+
+
+def big_file(folder) -> tuple[dict, str]:
+    """A 5 MiB file in *folder*, and the patch that changes its last line but one, with what it makes."""
+    lines = [f"row {n:07d} of a large file\n" for n in range(200_000)]
+    (folder / "big.txt").write_text("".join(lines))
+    lines[199_998] = "ROW 0199998 OF a large file\n"
+    args = {"mode": "replace", "path": "big.txt", "old_string": "row 0199998 of", "new_string": "ROW 0199998 OF"}
+    return args, "".join(lines)
+
+
+async def test_a_patch_on_a_5_mib_file_lands_on_the_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    args, patched = big_file(rig.folder)
+    result = await tool_call(
+        rig, SessionStore(session_factory), builtin_tools(), "call_1", "patch", args,
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    assert json.loads(result["content"])["status"] == "ok", result
+    assert (rig.folder / "big.txt").read_text() == patched
+
+
+async def test_a_worker_stopped_after_the_computer_wrote_a_5_mib_patch_resumes_without_writing_again(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    args, patched = big_file(rig.folder)
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io_ = {"redis_client": redis_client, "session_factory": session_factory}
+    with pytest.raises(asyncio.CancelledError):
+        await tool_call(rig, StoppingStore(session_factory), tools, "call_1", "patch", args, **io_)
+    assert rig.laptop.ran.count("write") == 1 and (rig.folder / "big.txt").read_text() == patched
+    ran, received = len(rig.laptop.ran), len(rig.laptop.chunks_received)
+    file_ops._read_tracker.clear()
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "patch", args, **io_)
+
+    assert json.loads(resumed["content"])["status"] == "ok", resumed
+    # The read came back from the journal, the write's recorded outcome too: the computer did nothing again.
+    assert (len(rig.laptop.ran), len(rig.laptop.chunks_received)) == (ran, received)
+    assert (rig.folder / "big.txt").read_text() == patched
+
+
+def reporting(report: str):
+    """The built-in tools and big_report, a tool whose result is *report*, as a cloud tool's can be."""
+    tools = builtin_tools()
+    tools.register(
+        "big_report",
+        ToolSchema(name="big_report", description="a report", parameters={"type": "object", "properties": {}}),
+        handler=AsyncMock(return_value=report),
+        max_result_size=4 * 1024 * 1024,
+    )
+    return tools
+
+
+async def test_a_3_mib_tool_result_spills_onto_the_computer(laptop_rig, session_factory, redis_client):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    report = big_text(70_000)
+    assert len(report) > 3 * 1024 * 1024
+    result = await tool_call(
+        rig, SessionStore(session_factory), reporting(report), "call_1", "big_report", {},
+        redis_client=redis_client, session_factory=session_factory,
+    )
+    assert "Full output saved to: .surogates-results/call_1.txt" in result["content"]
+    assert (rig.folder / ".surogates-results" / "call_1.txt").read_text() == report
+
+
+async def test_the_reaper_deletes_a_writes_data_once_it_is_closed_and_never_while_it_is_open(laptop_rig, session_factory):
+    rig = laptop_rig
+    async with session_factory() as db:
+        await db.execute(delete(DeviceTransfer))
+        await db.commit()
+    stopped = asyncio.create_task(rig.ops.run(write_request(rig)))
+    await eventually(lambda: open_count(rig, 1))
+    [closed] = await rig.ops.pending(rig.device_id, 1)
+    await rig.ops.cancel([rig.root])
+    assert await asyncio.wait_for(stopped, 5.0) == CANCELLED_OUTCOME
+    waiting = asyncio.create_task(rig.ops.run(write_request(rig)))
+    await eventually(lambda: open_count(rig, 1))
+    [still_open] = await rig.ops.pending(rig.device_id, 1)
+    # Its computer away for a week, and marked consumed by a call that gave up on it: a read's rules would take it.
+    async with session_factory() as db:
+        await db.execute(update(DeviceTransfer).where(DeviceTransfer.operation_id == still_open.id).values(
+            created_at=func.now() - timedelta(days=8), consumed_at=func.now() - timedelta(hours=25),
+        ))
+        await db.commit()
+
+    assert await reap_transfers(session_factory) == 1
+
+    async with session_factory() as db:
+        assert set((await db.execute(select(DeviceTransfer.operation_id))).scalars()) == {still_open.id}
+    assert await stored(session_factory, str(closed.id)) == b""
+    assert await stored(session_factory, str(still_open.id)) == DATA
     await stop(waiting)
