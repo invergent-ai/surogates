@@ -39,6 +39,17 @@ class Suspension {
   constructor(readonly outcome: Outcome) {}
 }
 
+// What a read is answered when its chunks cannot be journaled: up to 50 MiB makes
+// a full disk likely, and a journal error would stop the link for every chat.
+const NO_SPACE: Outcome = {
+  error: { type: "os", code: "ENOSPC", message: "Not enough free disk space on this computer to send this file" },
+};
+const NOT_KEPT: Outcome = {
+  error: { type: "os", code: "EIO", message: "This computer could not keep this file to send it" },
+};
+// SQLite's result code for a full disk, as node:sqlite reports it in errcode.
+const SQLITE_FULL = 13;
+
 // An answer given before the operation started that could not be sent: nothing ran.
 const ANSWER_TOO_LARGE: Outcome = {
   error: {
@@ -249,7 +260,16 @@ export class OperationRunner {
       chunks = [];
     }
     // A cancelled operation's late outcome is dropped: the server gave up on it.
-    if (this.journal.finish(operation.id, outcome, chunks)) this.deliver(operation, outcome);
+    let finished: boolean;
+    try {
+      finished = this.journal.finish(operation.id, outcome, chunks);
+    } catch (error) {
+      if (chunks.length === 0) throw error;
+      // The read is answered with why; only a failure of this reaches onError.
+      outcome = isRecord(error) && error.errcode === SQLITE_FULL ? NO_SPACE : NOT_KEPT;
+      finished = this.journal.finish(operation.id, outcome);
+    }
+    if (finished) this.deliver(operation, outcome);
   }
 
   // A result that names a transfer waits its turn; any other goes at once.

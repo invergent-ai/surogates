@@ -253,7 +253,13 @@ export class OperationJournal {
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      // SQLite rolls back by itself on some errors, a full disk among them: the
+      // error to throw is still the one that failed the work.
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // No transaction was left to roll back.
+      }
       throw error;
     }
   }

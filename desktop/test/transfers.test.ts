@@ -2,8 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { connectDevice } from "../src/device.js";
 import { MAX_PAYLOAD_BYTES, MAX_READ_BYTES } from "../src/files/answers.js";
@@ -18,8 +19,10 @@ let dir: string;
 let server: FakeLinkServer;
 let link: DeviceLink | null;
 let journal: OperationJournal;
+let errors: unknown[];
 
 beforeEach(() => {
+  errors = [];
   dir = mkdtempSync(join(tmpdir(), "transfers-"));
   server = new FakeLinkServer({ heartbeatS: 1 });
   link = null;
@@ -57,7 +60,7 @@ function reading(data: Buffer, ran: string[] = []): Executor {
 
 async function start(executor: Executor): Promise<void> {
   const url = await server.start();
-  const device = connectDevice({ url, token: "surg_dev_test", journal, executor, onError: () => {}, delay: () => 20 });
+  const device = connectDevice({ url, token: "surg_dev_test", journal, executor, onError: (error) => errors.push(error), delay: () => 20 });
   link = device.link;
   device.link.start();
   await server.until(() => device.link.status === "connected");
@@ -170,6 +173,40 @@ describe("a read's result", () => {
     await server.until(() => headers("a").length === 1);
     expect(headers("a")[0]?.outcome).toEqual(TOO_LARGE);
     expect(chunks("a")).toEqual([]);
+  });
+});
+
+describe("a read whose chunks the journal cannot keep", () => {
+  it("is answered that the disk is full, and the link stays up", async () => {
+    await start(reading(DATA));
+    // A full disk: SQLite fails the write and rolls it back by itself.
+    const db = (journal as unknown as { db: DatabaseSync }).db;
+    const { page_count: pages } = db.prepare("PRAGMA page_count").get() as { page_count: number };
+    db.exec(`PRAGMA max_page_count = ${pages + 2}`);
+    server.send(readOp("a"));
+    await server.until(() => headers("a").length === 1);
+    expect(headers("a")[0]?.outcome).toEqual({
+      error: { type: "os", code: "ENOSPC", message: "Not enough free disk space on this computer to send this file" },
+    });
+    expect(chunks("a")).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(link?.status).toBe("connected");
+  });
+
+  it("for another reason is answered that it could not be kept, and the link stays up", async () => {
+    await start(reading(DATA));
+    const finish = journal.finish.bind(journal);
+    vi.spyOn(journal, "finish").mockImplementation((id, outcome, chunks = []) => {
+      if (chunks.length > 0) throw new Error("disk I/O error");
+      return finish(id, outcome, chunks);
+    });
+    server.send(readOp("a"));
+    await server.until(() => headers("a").length === 1);
+    expect(headers("a")[0]?.outcome).toEqual({
+      error: { type: "os", code: "EIO", message: "This computer could not keep this file to send it" },
+    });
+    expect(errors).toEqual([]);
+    expect(link?.status).toBe("connected");
   });
 });
 
