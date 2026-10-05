@@ -18,7 +18,7 @@ from uuid import UUID
 
 from surogates.channels.identity import get_or_create_channel_identity, get_or_create_channel_session
 from surogates.channels.inbound import build_principal_stamp
-from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.session.events import EventType
 from surogates.session.interactive_input import try_resolve_text_answer
 from surogates.tools.builtin.ask_user_question import ASK_USER_QUESTION_MAX_WAIT_SECONDS
@@ -26,6 +26,7 @@ from surogates.tools.builtin.ask_user_question import ASK_USER_QUESTION_MAX_WAIT
 log = logging.getLogger("surogates.voice")
 
 TERMINAL = frozenset({"session.complete", "session.fail", "session.stopped", "session.pause"})
+VOICE_PRIORITY = -1.0  # work-queue score: lower pops first; everything else is enqueued at 0
 POLL_SECONDS = 0.4  # pub/sub is a nudge; poll as a fallback, like the OpenAI route
 START_TIMEOUT = 45.0  # seconds for the harness to pick the turn up (a backlogged or dead worker)
 TURN_TIMEOUT = 120.0  # seconds for the whole turn, tools included
@@ -129,7 +130,10 @@ class CallSession:
                            "user_name": self.caller, "thread_id": None}}
         data.update(build_principal_stamp(user_id=self.user_id))
         self._user_event = await self.store.emit_event(self.session_id, EventType.USER_MESSAGE, data)
-        await enqueue_session(self.redis, org_id=str(self.org_id), agent_id=self.agent_id, session_id=self.session_id)
+        # a caller is waiting on the line: ahead of ordinary work (score 0), and LT so a later plain
+        # re-enqueue of the same member can never push it back
+        member = encode_queue_member(org_id=str(self.org_id), agent_id=self.agent_id, session_id=str(self.session_id))
+        await self.redis.zadd(SHARED_WORK_QUEUE_KEY, {member: VOICE_PRIORITY}, lt=True)
         return self._user_event
 
     async def stream(self, after: int, *, start_timeout: float = START_TIMEOUT,

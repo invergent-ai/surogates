@@ -163,3 +163,12 @@ async def test_hanging_up_after_the_session_finished_changes_nothing(call):
     assert json.loads(msg["data"]) == {"reason": "call_ended"}
     ends = [e for e in await call.store.get_events(call.session_id) if e.type == "session.complete"]
     assert [e.data["reason"] for e in ends] == ["completed"]
+
+
+async def test_a_callers_turn_goes_ahead_of_ordinary_work(call):
+    """The work queue pops the lowest score first; everything else is enqueued at 0."""
+    from surogates.config import encode_queue_member
+
+    await call.send("Alo?")
+    member = encode_queue_member(org_id=str(call.org_id), agent_id=call.agent_id, session_id=str(call.session_id))
+    assert await call.redis.zscore(SHARED_WORK_QUEUE_KEY, member) < 0
