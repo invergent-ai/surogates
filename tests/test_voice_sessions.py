@@ -140,3 +140,12 @@ async def test_a_question_the_agent_already_said_is_not_said_twice():
     call = _call(_Log(("llm.request", {}), ("llm.delta", {"content": "Sigur. În ce zi doriți programarea?"}),
                       ("tool.call", {"name": "ask_user_question", "arguments": json.dumps(args)})))
     assert [t async for t in call.stream(0)] == ["Sigur. În ce zi doriți programarea?", " Variante: luni, marți."]
+
+
+async def test_a_paraphrased_question_is_not_asked_twice():
+    """The model rarely repeats its own words exactly: "în ce zi doriți să vă programez?" then the tool's
+    "În ce zi doriți programarea?". If what it just said ends in a question, only the choices are added."""
+    args = {"questions": [{"prompt": "În ce zi doriți programarea?", "choices": [{"label": "luni"}, {"label": "marți"}]}]}
+    call = _call(_Log(("llm.request", {}), ("llm.delta", {"content": "Sigur. În ce zi doriți să vă programez? "}),
+                      ("tool.call", {"name": "ask_user_question", "arguments": json.dumps(args)})))
+    assert [t async for t in call.stream(0)] == ["Sigur. În ce zi doriți să vă programez? ", " Variante: luni, marți."]

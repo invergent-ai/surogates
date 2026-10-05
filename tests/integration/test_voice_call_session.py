@@ -145,3 +145,19 @@ async def test_hanging_up_ends_the_session_so_nothing_reruns_after_the_caller_le
 async def test_a_call_where_nobody_spoke_ends_cleanly_too(call):
     await call.end()
     assert (await call.store.get_session(call.session_id)).status == "completed"
+
+
+async def test_hanging_up_after_the_session_finished_changes_nothing(call):
+    """A normal goodbye: the turn already completed the session. No second session.complete, no stop
+    for a harness that is not running (the dispatcher logs that as an ERROR)."""
+    await call.send("Mulțumesc, atât.")
+    await call.store.update_session_status(call.session_id, "completed")
+    await call.store.emit_event(call.session_id, EventType.SESSION_COMPLETE, {"reason": "completed"})
+    pubsub = call.redis.pubsub()
+    await pubsub.subscribe(f"surogates:interrupt:{call.session_id}")
+    await pubsub.get_message(timeout=1)
+    await call.end()
+    assert await pubsub.get_message(ignore_subscribe_messages=True, timeout=1) is None
+    await pubsub.aclose()
+    ends = [e for e in await call.store.get_events(call.session_id) if e.type == "session.complete"]
+    assert [e.data["reason"] for e in ends] == ["completed"]

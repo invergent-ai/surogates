@@ -48,8 +48,9 @@ def _words(text: str) -> str:
 def question_text(arguments: Any, said: str = "") -> str:
     """An ``ask_user_question`` call as spoken questions, each with its choices read as a list.
 
-    A prompt the agent already spoke in ``said`` (models often write the question, then call the
-    tool with it) is not repeated: only its choices are added.
+    A prompt the agent already spoke in ``said`` is not repeated: only its choices are added. Models
+    write the question and then call the tool with it, rarely in the same words, so when what they
+    just said ends in a question, the first prompt counts as said.
 
     The tool's schema (``tools/builtin/ask_user_question.py``) is
     ``{"questions": [{"prompt": str, "choices": [{"label": str}]}]}``.
@@ -60,14 +61,15 @@ def question_text(arguments: Any, said: str = "") -> str:
         except ValueError:
             return ""
     questions = arguments.get("questions") if isinstance(arguments, dict) else None
-    spoken = []
+    spoken, asked = [], said.rstrip().endswith("?")
     for q in questions if isinstance(questions, list) else []:
         if not isinstance(q, dict) or not str(q.get("prompt") or "").strip():
             continue
         labels = [str(c.get("label")).strip() for c in q.get("choices") or []
                   if isinstance(c, dict) and str(c.get("label") or "").strip()]
         choices = f"Variante: {', '.join(labels)}." if labels else ""
-        prompt = "" if _words(str(q["prompt"])) in _words(said) else str(q["prompt"]).strip()
+        repeated = (asked and not spoken) or _words(str(q["prompt"])) in _words(said)
+        prompt = "" if repeated else str(q["prompt"]).strip()
         spoken.append(" ".join(p for p in (prompt, choices) if p))
     return " ".join(spoken)
 
@@ -173,9 +175,12 @@ class CallSession:
         turn (tools, browsers, model calls) for a caller who is gone, and fails a silent call after
         repeated recoveries. ``completed`` with ``call_ended`` is the end of the conversation.
         """
-        await self.interrupt()
-        await self.store.update_session_status(self.session_id, "completed")
-        await self.store.emit_event(self.session_id, EventType.SESSION_COMPLETE, {"reason": "call_ended"})
+        status = (await self.store.get_session(self.session_id)).status
+        if status in ("active", "processing"):  # a stop for a harness that is not running is logged as an error
+            await self.interrupt()
+        if status != "completed":  # a turn that already completed the session leaves nothing to close
+            await self.store.update_session_status(self.session_id, "completed")
+            await self.store.emit_event(self.session_id, EventType.SESSION_COMPLETE, {"reason": "call_ended"})
 
     async def record_heard(self, heard: str) -> None:
         """Make the history say what the caller actually heard of the answer they cut off.
