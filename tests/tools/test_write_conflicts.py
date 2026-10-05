@@ -42,7 +42,7 @@ SAVED = b"one\ntwo\nthree\n"
 
 
 class Saving:
-    """The reference laptop, where the user saves *path* just before a write to it runs.
+    """The reference laptop, where the user saves *path* just before the first write to it runs.
 
     With *keep_mtime*, the save puts the file's mtime back, as ``cp -p`` or ``rsync -t`` does.
     """
@@ -51,9 +51,11 @@ class Saving:
         self.inner = InProcessRunner(LocalWorkspaceIO(str(folder)))
         self.path = path
         self.keep_mtime = keep_mtime
+        self.saved = False
 
     async def run(self, kind: str, args: dict, payload: bytes | None = None) -> dict:
-        if kind == "write" and args["key"] == str(self.path):
+        if kind == "write" and args["key"] == str(self.path) and not self.saved:
+            self.saved = True
             st = self.path.stat()
             self.path.write_bytes(SAVED)
             if self.keep_mtime:
@@ -92,12 +94,51 @@ class HeldWrites:
         return await self.inner.run(kind, args, payload)
 
 
+class SavingThenBreaking(Saving):
+    """The reference laptop, where the user saves *path*, and then the next stat is answered with nonsense."""
+
+    def __init__(self, folder: Path, path: Path) -> None:
+        super().__init__(folder, path, keep_mtime=True)
+        self.broke = False
+
+    async def run(self, kind: str, args: dict, payload: bytes | None = None) -> dict:
+        if kind == "stat" and self.saved and not self.broke:
+            self.broke = True
+            return {"ok": "nonsense"}
+        return await super().run(kind, args, payload)
+
+
+class ConflictOnResolve:
+    """A computer that answers ``resolve`` with a conflict, which only a write should get."""
+
+    def __init__(self, folder: Path) -> None:
+        self.inner = InProcessRunner(LocalWorkspaceIO(str(folder)))
+
+    async def run(self, kind: str, args: dict, payload: bytes | None = None) -> dict:
+        if kind == "resolve":
+            return {"error": {"type": "conflict", "message": "not a write"}}
+        return await self.inner.run(kind, args, payload)
+
+
 def on_device(runner) -> dict:
     return {"workspace_io": DeviceWorkspaceIO(runner, root=str(runner.inner.folder.root))}
 
 
 async def patch(kwargs: dict, **arguments) -> dict:
     return json.loads(await file_ops._patch_handler(arguments, **kwargs))
+
+
+async def write_file(kwargs: dict, **arguments) -> dict:
+    return json.loads(await file_ops._write_file_handler(arguments, **kwargs))
+
+
+async def conflicting(kwargs: dict, call: str) -> dict:
+    """Edit a.py with *call*, whose write the user's save makes conflict."""
+    if call == "replace":
+        return await patch(kwargs, path="a.py", old_string="two", new_string="2")
+    if call == "v4a":
+        return await patch(kwargs, mode="patch", patch="*** Begin Patch\n*** Update File: a.py\n-two\n+2\n*** End Patch")
+    return await write_file(kwargs, path="a.py", content="mine\n")
 
 
 async def test_a_patch_keeps_what_the_user_saved_after_it_read_the_file(folder):
@@ -135,32 +176,70 @@ async def test_a_v4a_patch_reports_the_file_that_changed_and_writes_the_others(f
 async def test_a_v4a_patch_neither_lints_nor_marks_read_a_file_it_did_not_write(folder):
     kwargs = on_device(Saving(folder, folder / "a.py"))
     await file_ops._read_file_handler({"path": "a.py"}, **kwargs)
-    read = file_ops._read_tracker["default"]["read_timestamps"][str(folder / "a.py")]
+    assert str(folder / "a.py") in file_ops._read_tracker["default"]["read_timestamps"]
     result = await patch(kwargs, mode="patch", patch=(
         "*** Begin Patch\n*** Add File: b.py\n+bee\n*** Update File: a.py\n-two\n+2\n*** End Patch"
     ))
     assert result["status"] == "partial"
     # In Ask every time, linting a.py would ask the user about a file the patch did not change.
     assert set(result["lint"]) == {"b.py"}
-    # Still the read before the user's save, so a later write of a.py is warned that it is stale.
-    assert file_ops._read_tracker["default"]["read_timestamps"][str(folder / "a.py")] == read
+    # Its read is forgotten, not refreshed: whatever the mtimes, a.py no longer counts as read.
+    assert str(folder / "a.py") not in file_ops._read_tracker["default"]["read_timestamps"]
+    assert str(folder / "b.py") in file_ops._read_tracker["default"]["read_timestamps"]
+
+
+async def test_a_v4a_patch_writes_nothing_more_to_a_file_whose_write_conflicted(folder):
+    runner = Saving(folder, folder / "a.py")
+    result = await patch(on_device(runner), mode="patch", patch=(
+        "*** Begin Patch\n*** Update File: a.py\n-two\n+2\n*** Update File: ./a.py\n-one\n+1\n*** End Patch"
+    ))
+    # Its second block would land on the user's save without the first.
+    failed = f"Failed to write: {CONFLICT.format(folder / 'a.py')}"
+    assert result["files"] == [{"path": "a.py", "error": failed}, {"path": "./a.py", "error": failed}]
+    assert (folder / "a.py").read_bytes() == SAVED
+    assert runner.inner.kinds.count("write") == 1
 
 
 @pytest.mark.parametrize("call", ["replace", "v4a", "write_file"])
 async def test_the_read_a_conflict_asks_for_shows_the_file_even_with_its_mtime_put_back(folder, call):
     kwargs = on_device(Saving(folder, folder / "a.py", keep_mtime=True))
     assert json.loads(await file_ops._read_file_handler({"path": "a.py"}, **kwargs))["content"] == "one\ntwo\n"
-    if call == "replace":
-        result = await patch(kwargs, path="a.py", old_string="two", new_string="2")
-    elif call == "v4a":
-        v4a = "*** Begin Patch\n*** Update File: a.py\n-two\n+2\n*** End Patch"
-        result = await patch(kwargs, mode="patch", patch=v4a)
-    else:
-        result = json.loads(await file_ops._write_file_handler({"path": "a.py", "content": "mine\n"}, **kwargs))
+    result = await conflicting(kwargs, call)
     assert CONFLICT.format(folder / "a.py") in json.dumps(result)
     # Not "unchanged since last read": the mtime is the same, the file is not.
     again = json.loads(await file_ops._read_file_handler({"path": "a.py"}, **kwargs))
     assert again["content"] == SAVED.decode()
+
+
+@pytest.mark.parametrize("call", ["replace", "v4a", "write_file"])
+async def test_a_write_file_sent_after_a_conflict_without_a_read_is_refused(folder, call):
+    kwargs = on_device(Saving(folder, folder / "a.py"))
+    assert "content" in json.loads(await file_ops._read_file_handler({"path": "a.py"}, **kwargs))
+    assert CONFLICT.format(folder / "a.py") in json.dumps(await conflicting(kwargs, call))
+    # The model skipped the read the conflict asked for: the user's save is not written over.
+    result = await write_file(kwargs, path="a.py", content="mine\n")
+    assert "has not been read in this session" in result["error"]
+    assert (folder / "a.py").read_bytes() == SAVED
+
+
+async def test_a_conflict_forgets_the_read_even_when_the_patch_then_fails(folder):
+    (folder / "b.py").write_text("bee\n")
+    kwargs = on_device(SavingThenBreaking(folder, folder / "a.py"))
+    assert json.loads(await file_ops._read_file_handler({"path": "a.py"}, **kwargs))["content"] == "one\ntwo\n"
+    result = await patch(kwargs, mode="patch", patch=(
+        "*** Begin Patch\n*** Update File: a.py\n-two\n+2\n*** Update File: b.py\n-bee\n+B\n*** End Patch"
+    ))
+    assert result == {"error": "The computer returned an invalid stat"}
+    # a.py's mtime is put back, and still the read shows the user's save.
+    again = json.loads(await file_ops._read_file_handler({"path": "a.py"}, **kwargs))
+    assert again["content"] == SAVED.decode()
+
+
+async def test_write_file_reports_a_conflict_on_resolve_as_an_error(folder, caplog):
+    with caplog.at_level(logging.ERROR, logger=file_ops.logger.name):
+        result = await write_file(on_device(ConflictOnResolve(folder)), path="a.py", content="mine\n")
+    assert result == {"error": "not a write"}
+    assert caplog.records == []
 
 
 async def test_write_file_keeps_what_the_user_saved_during_its_call(folder, caplog):

@@ -769,6 +769,20 @@ def _invalidate_dedup_for_path(resolved_path: str, task_id: str) -> None:
             del dedup[key]
 
 
+def _forget_read(key: str, task_id: str) -> None:
+    """Forget that *task_id* read *key*: its dedup and its read record.
+
+    For a file whose write conflicted.  The model is told to read it again:
+    that read must show the file whatever its mtime, and a write_file sent
+    without it is refused as unread instead of writing over the change.
+    """
+    _invalidate_dedup_for_path(key, task_id)
+    with _read_tracker_lock:
+        task_data = _read_tracker.get(task_id)
+        if task_data:
+            task_data.get("read_timestamps", {}).pop(key, None)
+
+
 def notify_other_tool_call(task_id: str = "default") -> None:
     """Reset consecutive read/search counter for a task.
 
@@ -1596,7 +1610,11 @@ async def _write_file_handler(
 
         # Atomic write that creates parent directories, on the revision this
         # call saw: a file changed since is never written over.
-        await wio.write(key, content.encode("utf-8"), expected_revision=None if st is None else st.revision)
+        try:
+            await wio.write(key, content.encode("utf-8"), expected_revision=None if st is None else st.revision)
+        except RevisionConflict:
+            _forget_read(key, task_id)
+            raise
 
         lines_written = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         result_dict: dict[str, Any] = {
@@ -1620,10 +1638,6 @@ async def _write_file_handler(
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as exc:
-        if isinstance(exc, RevisionConflict):
-            # The model is told to read it again: that read must show the
-            # file, whatever its mtime.
-            _invalidate_dedup_for_path(key, task_id)
         if _is_expected_write_exception(exc):
             logger.debug("write_file expected denial: %s: %s", type(exc).__name__, exc)
         else:
@@ -1671,8 +1685,9 @@ async def _patch_handler(
 
     try:
         keys = {p: await wio.resolve(p) for p in paths_to_check}
-        # The keys of files whose write found them changed since this call read them.
-        conflicted: set[str] = set()
+        # The keys of files whose write found them changed since this call
+        # read them, each with the computer's message.
+        conflicted: dict[str, str] = {}
 
         # Check staleness for all files this patch will touch.
         stale_warnings: list[str] = []
@@ -1681,21 +1696,26 @@ async def _patch_handler(
             if sw:
                 stale_warnings.append(sw)
 
-        if mode == "patch":
-            if not patch_content:
-                return _tool_error("patch content required")
-            # V4A patch mode — apply multi-file patches
-            result_dict = await _apply_v4a_patch(wio, patch_content, conflicted=conflicted)
-        elif mode == "replace":
-            if not path:
-                return _tool_error("path required")
-            if old_string is None or new_string is None:
-                return _tool_error("old_string and new_string required")
-            result_dict = await _apply_replace(
-                wio, path, old_string, new_string, replace_all, conflicted=conflicted,
-            )
-        else:
-            return _tool_error(f"Unknown mode: {mode}")
+        try:
+            if mode == "patch":
+                if not patch_content:
+                    return _tool_error("patch content required")
+                # V4A patch mode — apply multi-file patches
+                result_dict = await _apply_v4a_patch(wio, patch_content, conflicted=conflicted)
+            elif mode == "replace":
+                if not path:
+                    return _tool_error("path required")
+                if old_string is None or new_string is None:
+                    return _tool_error("old_string and new_string required")
+                result_dict = await _apply_replace(
+                    wio, path, old_string, new_string, replace_all, conflicted=conflicted,
+                )
+            else:
+                return _tool_error(f"Unknown mode: {mode}")
+        finally:
+            # Even when a later file's operation raised: the conflict happened.
+            for key in conflicted:
+                _forget_read(key, task_id)
 
         if stale_warnings:
             result_dict["_warning"] = (
@@ -1705,11 +1725,8 @@ async def _patch_handler(
             )
 
         # A file whose write conflicted was not written: it is neither linted
-        # nor recorded as read.  The model is told to read it again, and that
-        # read must show the file, whatever its mtime.
+        # nor recorded as read.
         written = [p for p in paths_to_check if keys[p] not in conflicted]
-        for key in conflicted:
-            _invalidate_dedup_for_path(key, task_id)
 
         # Auto-lint after successful patch
         if not result_dict.get("error"):
@@ -1780,15 +1797,15 @@ async def _apply_replace(
     new_string: str,
     replace_all: bool,
     *,
-    conflicted: set[str] | None = None,
+    conflicted: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Apply a find-and-replace edit to a single file.
 
     Tries an exact match first, then a whitespace-insensitive line-window
     match that must be unique.  Either way the replacement is spliced into
     the original text, so nothing outside the matched region is rewritten.
-    Returns a result dict.  *conflicted* gets the key when the file changed
-    since it was read, and was not written.
+    Returns a result dict.  *conflicted* gets the key, with the computer's
+    message, when the file changed since it was read, and was not written.
     """
     if not old_string.strip():
         return {
@@ -1887,13 +1904,14 @@ async def _apply_v4a_patch(
     wio: WorkspaceIO,
     patch_content: str,
     *,
-    conflicted: set[str] | None = None,
+    conflicted: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Apply a V4A-format multi-file patch.
 
     Parses the V4A patch format and applies each file operation
     (Update, Add, Delete) in sequence.  *conflicted* gets the key of each
-    file that changed since it was read, and was not written.
+    file that changed since it was read, and was not written, with the
+    computer's message.
 
     V4A format::
 
@@ -2072,7 +2090,7 @@ async def _apply_v4a_file_op(
     filepath: str,
     operation: str,
     hunk_lines: list[str],
-    conflicted: set[str] | None,
+    conflicted: dict[str, str] | None,
 ) -> dict[str, Any]:
     """Apply a single V4A file operation (Update, Add, or Delete)."""
     try:
@@ -2108,6 +2126,10 @@ async def _apply_v4a_file_op(
             return {"path": filepath, "error": f"Failed to create: {exc}"}
 
     # Operation == "Update"
+    if conflicted is not None and resolved in conflicted:
+        # An earlier block's write conflicted: this one would land on the
+        # user's change without it.
+        return {"path": filepath, "error": f"Failed to write: {conflicted[resolved]}"}
     st = await wio.stat(resolved)
     if st is None:
         return {"path": filepath, "error": f"File not found: {filepath}"}
@@ -2202,7 +2224,7 @@ async def _apply_v4a_file_op(
         }
     except OSError as exc:
         if isinstance(exc, RevisionConflict) and conflicted is not None:
-            conflicted.add(resolved)
+            conflicted[resolved] = str(exc)
         return {"path": filepath, "error": f"Failed to write: {exc}"}
 
 
@@ -2213,7 +2235,7 @@ async def _write_patched(
     original: str,
     new_content: str,
     revision: str,
-    conflicted: set[str] | None,
+    conflicted: dict[str, str] | None,
 ) -> dict[str, Any]:
     """Write patched content and return a unified diff result.
 
@@ -2225,7 +2247,7 @@ async def _write_patched(
         await wio.write(key, new_content.encode("utf-8"), expected_revision=revision)
     except OSError as exc:
         if isinstance(exc, RevisionConflict) and conflicted is not None:
-            conflicted.add(key)
+            conflicted[key] = str(exc)
         return {"error": f"Failed to write patched file: {exc}"}
 
     # Generate unified diff for the response
