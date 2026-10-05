@@ -31,7 +31,7 @@ RATE = 24000
 FRAME = RATE // 50  # 20 ms
 QUIET_END = 1.5  # seconds of agent silence that end its reply
 LOUD = 300  # int16 RMS above which a frame is speech
-BUSY = 60  # RMS above which the background track is typing: the agent is still working
+BUSY = 100  # RMS above which the background track is typing (the agent is still working); distant room events stay below
 
 
 async def speech(text: str, voice: str = "male") -> np.ndarray:
@@ -74,6 +74,7 @@ class Call:
         self.room_name = f"call-qa-{uuid.uuid4().hex[:8]}"
         self.heard: list[tuple[float, np.ndarray, bool]] = []  # (when, frame, loud) of the agent's voice
         self.busy_at: list[float] = []  # when the agent's background track was typing
+        self.background: list[tuple[float, np.ndarray]] = []  # (when, frame) of the background track
         self.ended = asyncio.Event()
         self._room = rtc.Room()
         self._outbox: asyncio.Queue[np.ndarray] = asyncio.Queue()
@@ -101,7 +102,8 @@ class Call:
         def _track(track, publication, _participant):
             if track.kind != rtc.TrackKind.KIND_AUDIO:
                 return
-            work = self._typing(track) if publication.name == "background_audio" else self._listen(track)
+            background = publication.name in ("background", "background_audio")  # ours, or LiveKit's player
+            work = self._typing(track) if background else self._listen(track)
             self._tasks.append(asyncio.ensure_future(work))
 
         self._room.on("disconnected", lambda *_: self.ended.set())
@@ -119,6 +121,8 @@ class Call:
         while True:
             pcm = self._outbox.get_nowait() if not self._outbox.empty() else None
             frames = [pcm[i:i + FRAME] for i in range(0, len(pcm) - FRAME + 1, FRAME)] if pcm is not None else [silence]
+            if pcm is not None:
+                self.started_at = time.monotonic()  # the first word of the line leaves the microphone
             for f in frames:
                 await source.capture_frame(rtc.AudioFrame(f.tobytes(), RATE, 1, FRAME))
             if pcm is not None:
@@ -132,7 +136,9 @@ class Call:
 
     async def _typing(self, track: rtc.Track) -> None:
         async for ev in rtc.AudioStream(track, sample_rate=RATE, num_channels=1):
-            x = np.frombuffer(ev.frame.data, "<i2").astype(np.float32)
+            pcm = np.frombuffer(ev.frame.data, "<i2")
+            self.background.append((time.monotonic(), pcm))
+            x = pcm.astype(np.float32)
             if float(np.sqrt(np.mean(x ** 2))) > BUSY:
                 self.busy_at.append(time.monotonic())
 
