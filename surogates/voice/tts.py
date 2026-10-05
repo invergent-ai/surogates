@@ -5,7 +5,11 @@ body is exactly four keys; audio streams back as raw PCM at ``X-Audio-Sample-Rat
 """
 from __future__ import annotations
 
+import hashlib
+from collections.abc import AsyncIterator
+
 import httpx
+from livekit import rtc
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, APIError, APIStatusError, tts, utils
 
 from surogates.voice.audio import PhoneVoice
@@ -53,3 +57,39 @@ class RoChunkedStream(tts.ChunkedStream):
             if out := voice(b"", last=True):
                 output_emitter.push(out)
             output_emitter.flush()
+
+
+class PhraseCache:
+    """Fixed phrases (greeting, goodbye, sorry) as ready-to-play PCM in Redis.
+
+    Every call starts with the same greeting, and a fresh synthesis is the TTS's first-audio delay
+    plus its leading silence. Synthesized once (already shaped by PhoneVoice), a phrase then plays
+    the moment the caller connects. Redis trouble falls back to synthesizing, never to silence.
+    """
+
+    TTL = 7 * 24 * 3600  # a greeting edited in Studio is a new key; old ones expire
+    FRAME_S = 0.1
+
+    def __init__(self, redis, tts: RoTTS) -> None:
+        self._redis, self._tts = redis, tts
+
+    def _key(self, text: str) -> str:
+        t = self._tts
+        return f"voice:phrase:{t.model}:{t._voice}:{t.sample_rate}:{hashlib.sha256(text.encode()).hexdigest()}"
+
+    async def frames(self, text: str) -> AsyncIterator[rtc.AudioFrame]:
+        key, pcm = self._key(text), None
+        try:
+            pcm = await self._redis.get(key)
+        except Exception:
+            pass
+        if pcm is None:
+            pcm = b"".join([ev.frame.data.tobytes() async for ev in self._tts.synthesize(text)])
+            try:
+                await self._redis.set(key, pcm, ex=self.TTL)
+            except Exception:
+                pass
+        rate, step = self._tts.sample_rate, int(self._tts.sample_rate * self.FRAME_S) * 2
+        for i in range(0, len(pcm), step):
+            chunk = pcm[i:i + step]
+            yield rtc.AudioFrame(chunk, rate, 1, len(chunk) // 2)

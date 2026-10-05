@@ -40,3 +40,28 @@ async def test_a_different_sample_rate_is_an_error_not_chipmunk_audio():
     with pytest.raises(APIError):
         async for _ in _tts(handler).synthesize("x", conn_options=APIConnectOptions(max_retry=0)):
             pass
+
+
+async def test_fixed_phrases_are_synthesized_once_and_replayed_from_redis():
+    """The greeting is the same on every call: synthesize it once, play it instantly afterwards."""
+    from surogates.voice.tts import PhraseCache
+
+    class _Redis(dict):
+        async def get(self, k):
+            return dict.get(self, k)
+
+        async def set(self, k, v, ex=None):
+            self[k] = v
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content)["input"])
+        return httpx.Response(200, headers={"x-audio-sample-rate": str(RATE)}, content=_speech(0.4))
+
+    redis, tts = _Redis(), _tts(handler, voice="male")
+    first = [f async for f in PhraseCache(redis, tts).frames("Bună ziua!")]
+    again = [f async for f in PhraseCache(redis, _tts(handler, voice="male")).frames("Bună ziua!")]
+    assert calls == ["Bună ziua!"]  # the second call, a new process, read it back
+    assert sum(f.samples_per_channel for f in again) == sum(f.samples_per_channel for f in first) > 0
+    assert all(f.sample_rate == RATE for f in again)

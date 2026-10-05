@@ -25,7 +25,7 @@ from surogates.voice.agent import GOODBYE, SORRY, STILL_THERE, TURN_HANDLING, UN
 from surogates.voice.llm import SurogatesLLM
 from surogates.voice.sessions import SORRY_TURN, CallTarget, VoiceSessions
 from surogates.voice.stt import RoSTT
-from surogates.voice.tts import RoTTS
+from surogates.voice.tts import PhraseCache, RoTTS
 
 log = logging.getLogger("surogates.voice")
 
@@ -82,17 +82,24 @@ def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load()
 
 
-async def say_and_hang_up(ctx: JobContext, session: AgentSession, text: str) -> None:
+def fixed(session: AgentSession, phrases: PhraseCache | None, text: str, **kw):
+    """Say a fixed phrase, from the phrase cache when there is one (instant after its first use)."""
+    return session.say(text, audio=phrases.frames(text), **kw) if phrases else session.say(text, **kw)
+
+
+async def say_and_hang_up(ctx: JobContext, session: AgentSession, text: str,
+                          phrases: PhraseCache | None = None) -> None:
     await session.interrupt(force=True)  # cut in: never queue a goodbye behind speech that may never end
-    await session.say(text, allow_interruptions=False, add_to_chat_ctx=False).wait_for_playout()
+    await fixed(session, phrases, text, allow_interruptions=False, add_to_chat_ctx=False).wait_for_playout()
     await ctx.delete_room()
 
 
-async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str) -> None:
+async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str, redis=None) -> None:
     """Say one sentence and end the call, before (or instead of) a conversation."""
-    bare = AgentSession(tts=RoTTS(url=tts_url, voice=voice))
+    tts = RoTTS(url=tts_url, voice=voice)
+    bare = AgentSession(tts=tts)
     await bare.start(agent=Agent(instructions=""), room=ctx.room)
-    await say_and_hang_up(ctx, bare, text)
+    await say_and_hang_up(ctx, bare, text, PhraseCache(redis, tts) if redis is not None else None)
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -120,7 +127,7 @@ async def entrypoint(ctx: JobContext) -> None:
         return await apologize(ctx, vs.tts_url, "female", SORRY)
     if info is None or tenant is None:
         log.warning("no agent for room %s (called %s)", ctx.room.name, info and info.called)
-        return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE)
+        return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE, rt.redis)
 
     config = CallConfig.from_routing(tenant.get("config"))
     try:
@@ -130,13 +137,15 @@ async def entrypoint(ctx: JobContext) -> None:
             call_id=info.call_id, called=info.called, caller=info.caller, greeting=config.greeting)
     except Exception:
         log.exception("could not open a session for call %s", info.call_id)
-        return await apologize(ctx, vs.tts_url, config.voice, SORRY)
+        return await apologize(ctx, vs.tts_url, config.voice, SORRY, rt.redis)
     log.info("call %s to %s from %s -> agent %s session %s", info.call_id, info.called, call.caller,
              tenant["agent_id"], call.session_id)
 
     agent = VoiceAgent(config)
+    tts = RoTTS(url=vs.tts_url, voice=config.voice)
+    phrases = PhraseCache(rt.redis, tts)
     session = AgentSession(vad=ctx.proc.userdata["vad"], stt=RoSTT(url=vs.stt_url), llm=SurogatesLLM(call),
-                           tts=RoTTS(url=vs.tts_url, voice=config.voice), turn_handling=TURN_HANDLING,
+                           tts=tts, turn_handling=TURN_HANDLING,
                            user_away_timeout=config.idle_ask_seconds)
 
     def spawn(coro) -> None:
@@ -167,10 +176,10 @@ async def entrypoint(ctx: JobContext) -> None:
         await ctx.delete_room()  # a Future, not a coroutine: spawn() needs this wrapper
 
     async def still_there() -> None:
-        await session.say(STILL_THERE, add_to_chat_ctx=False).wait_for_playout()
+        await fixed(session, phrases, STILL_THERE, add_to_chat_ctx=False).wait_for_playout()
         await asyncio.sleep(config.idle_hangup_seconds)
         if session.user_state == "away":
-            await say_and_hang_up(ctx, session, GOODBYE)
+            await say_and_hang_up(ctx, session, GOODBYE, phrases)
 
     @session.on("user_state_changed")
     def _away(ev) -> None:
@@ -179,12 +188,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def time_limit() -> None:
         await asyncio.sleep(config.max_call_seconds)
-        await say_and_hang_up(ctx, session, GOODBYE)
+        await say_and_hang_up(ctx, session, GOODBYE, phrases)
 
     await session.start(agent=agent, room=ctx.room)
     background = BackgroundAudioPlayer(thinking_sound=[AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5)])
     await background.start(room=ctx.room, agent_session=session)
-    session.say(config.greeting)
+    fixed(session, phrases, config.greeting)
     spawn(time_limit())
 
 
