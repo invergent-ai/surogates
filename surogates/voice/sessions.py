@@ -22,10 +22,14 @@ from surogates.session.interactive_input import try_resolve_text_answer
 
 TERMINAL = frozenset({"session.complete", "session.fail", "session.stopped", "session.pause"})
 POLL_SECONDS = 0.4  # pub/sub is a nudge; poll as a fallback, like the OpenAI route
+START_TIMEOUT = 45.0  # seconds for the harness to pick the turn up (a backlogged or dead worker)
+TURN_TIMEOUT = 120.0  # seconds for the whole turn, tools included
+SORRY_TURN = "Îmi pare rău, nu am reușit să răspund acum. Vă rog să mai întrebați o dată."
 ANONYMOUS = "anonymous"
 HEARD_NONE = "[Apelantul te-a întrerupt înainte să audă răspunsul tău anterior.] "
 HEARD_PART = "[Apelantul te-a întrerupt; din răspunsul tău anterior a auzit doar: «{}».] "
 GREETED = "[Ai răspuns deja la telefon cu: «{}».] "
+GREETING_CUT = "[Ai răspuns la telefon, dar apelantul te-a întrerupt după: «{}».] "
 
 
 def normalize_caller(raw: str | None) -> str:
@@ -97,16 +101,21 @@ class CallSession:
         await enqueue_session(self.redis, org_id=str(self.org_id), agent_id=self.agent_id, session_id=self.session_id)
         return self._user_event
 
-    async def stream(self, after: int) -> AsyncIterator[str]:
+    async def stream(self, after: int, *, start_timeout: float = START_TIMEOUT,
+                     turn_timeout: float = TURN_TIMEOUT) -> AsyncIterator[str]:
         """The turn's text as the agent writes it. Ends at its final answer, at a question, or when the turn ends.
 
         Everything before the harness starts this turn (its first ``llm.request``) belongs to the turn the
         caller just cut off: its tail, its answer and its ``session.stopped`` land after the caller's
         new words and must not be spoken or end this turn. Only a failed session ends it regardless.
+        A turn that does not start, or does not finish, in time ends with an apology and is stopped:
+        a caller must never be left listening to silence.
         """
         pubsub = self.redis.pubsub()
         await pubsub.subscribe(f"surogates:session:{self.session_id}")
-        cursor, started = after, False
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        cursor, started, spoke = after, False, False
         try:
             while True:
                 for e in await self.store.get_events(self.session_id, after=cursor):
@@ -117,13 +126,23 @@ class CallSession:
                         started = e.type == EventType.LLM_REQUEST.value
                         continue
                     if e.type == EventType.LLM_DELTA.value and data.get("content"):
+                        spoke = True
                         yield data["content"]
                     elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
                         if question := question_text(data.get("arguments")):
                             yield question
                         return
-                    elif _final_answer(e) or e.type in TERMINAL:
+                    elif _final_answer(e):
+                        # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
+                        if not spoke and (content := str((data.get("message") or {}).get("content") or "").strip()):
+                            yield content
                         return  # after the final answer only summaries and completion follow: nothing to say
+                    elif e.type in TERMINAL:
+                        return
+                if loop.time() - began > (turn_timeout if started else start_timeout):
+                    await self.interrupt()
+                    yield SORRY_TURN
+                    return
                 try:
                     await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_SECONDS)
                 except Exception:
@@ -139,11 +158,18 @@ class CallSession:
         """Make the history say what the caller actually heard of the answer they cut off.
 
         Stopped mid-generation, the harness persists no reply, so the heard part becomes the reply.
-        If the whole reply was already written, the agent is told on the caller's next words.
+        If any reply of this turn was already written (the final answer, or the preamble that called
+        a tool), the agent is told on the caller's next words instead. A cut greeting is not in the
+        session at all: the note about it says how far it got.
         """
         heard = heard.strip()
-        written = any(map(_final_answer, await self.store.get_events(self.session_id, after=self._user_event)))
-        # ponytail: a reply persisted between this read and the stop still lands whole; the next turn's note covers it
+        if not self._user_event:  # nothing asked yet: it was the greeting
+            self.note = GREETING_CUT.format(heard) if heard else ""
+            return
+        events = await self.store.get_events(self.session_id, after=self._user_event)
+        written = any(e.type == EventType.LLM_RESPONSE.value for e in events)
+        # ponytail: a reply persisted between this read and the stop lands whole beside the heard part;
+        # the agent then sees both. Rare (the stop and the persist must cross within one read).
         if heard and not written:
             await self.store.emit_event(self.session_id, EventType.LLM_RESPONSE,
                                         {"message": {"role": "assistant", "content": heard}, "synthetic": "voice_heard"})
