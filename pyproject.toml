@@ -57,6 +57,17 @@ dependencies = [
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
+[project.optional-dependencies]
+# `surogates voice`: phone calls through LiveKit SIP. The other processes never import it.
+voice = [
+    "livekit-agents[silero]~=1.8",
+    "livekit-api~=1.2",
+    "numpy>=2.0",
+    "scipy>=1.14",
+    "soxr>=1.0",
+    "websockets>=13",
+]
+
 [build-system]
 requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
