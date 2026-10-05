@@ -65,7 +65,7 @@ async def test_stream_follows_the_turn_live_and_stops_at_the_final_answer(call):
 
 async def test_a_question_from_the_agent_is_spoken_and_ends_the_turn(call):
     after = await call.send("Vreau o programare")
-    args = {"question": "Ce zi vă convine?", "options": ["luni", "marți"]}
+    args = {"questions": [{"prompt": "Ce zi vă convine?", "choices": [{"label": "luni"}, {"label": "marți"}]}]}
     await call.store.emit_event(call.session_id, EventType.LLM_REQUEST, {})
     await call.store.emit_event(call.session_id, EventType.TOOL_CALL,
                                 {"tool_call_id": "q1", "name": "ask_user_question", "arguments": json.dumps(args)})

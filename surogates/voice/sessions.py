@@ -35,17 +35,25 @@ def normalize_caller(raw: str | None) -> str:
 
 
 def question_text(arguments: Any) -> str:
-    """An ``ask_user_question`` call as one spoken question; its options are read as a list."""
+    """An ``ask_user_question`` call as spoken questions, each with its choices read as a list.
+
+    The tool's schema (``tools/builtin/ask_user_question.py``) is
+    ``{"questions": [{"prompt": str, "choices": [{"label": str}]}]}``.
+    """
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except ValueError:
             return ""
-    if not isinstance(arguments, dict):
-        return ""
-    question = str(arguments.get("question") or "").strip()
-    options = [str(o).strip() for o in arguments.get("options") or [] if str(o).strip()]
-    return f"{question} Variante: {', '.join(options)}." if question and options else question
+    questions = arguments.get("questions") if isinstance(arguments, dict) else None
+    spoken = []
+    for q in questions if isinstance(questions, list) else []:
+        if not isinstance(q, dict) or not str(q.get("prompt") or "").strip():
+            continue
+        labels = [str(c.get("label")).strip() for c in q.get("choices") or []
+                  if isinstance(c, dict) and str(c.get("label") or "").strip()]
+        spoken.append(str(q["prompt"]).strip() + (f" Variante: {', '.join(labels)}." if labels else ""))
+    return " ".join(spoken)
 
 
 def _final_answer(e: Any) -> bool:
