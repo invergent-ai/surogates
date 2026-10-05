@@ -765,6 +765,26 @@ class HubSettings(BaseSettings):
     password: str = ""
 
 
+class VoiceSettings(BaseSettings):
+    """Phone calls through LiveKit SIP (``surogates voice``).
+
+    ``stt_url`` / ``tts_url`` are our Romanian speech services; in development
+    they are the prod ones through an SSH tunnel. ``max_calls`` is per process:
+    LiveKit sends no more jobs once it is reached.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_VOICE_"}
+
+    livekit_url: str = "ws://127.0.0.1:7880"
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    agent_name: str = "surogate-voice"
+    stt_url: str = "ws://127.0.0.1:18001/v1/audio/streams"
+    tts_url: str = "http://127.0.0.1:18080/v1/audio/speech"
+    max_calls: int = 8
+    health_port: int = 8003
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
 
@@ -790,6 +810,7 @@ class Settings(BaseSettings):
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
     website: WebsiteSettings = Field(default_factory=WebsiteSettings)
     channels: ChannelsSettings = Field(default_factory=ChannelsSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem
