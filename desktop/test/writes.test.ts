@@ -10,13 +10,14 @@ import { MAX_PAYLOAD_BYTES, MAX_WRITE_BYTES } from "../src/files/answers.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import { CHUNK_BYTES, type Operation, type Outcome } from "../src/link/protocol.js";
-import { DAMAGED, type Executor, MALFORMED_TRANSFER } from "../src/operations/runner.js";
+import { APP_CLOSED, DAMAGED, type Executor, MALFORMED_TRANSFER, type OperationRunner } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 let dir: string;
 let server: FakeLinkServer;
 let url: string | null;
 let links: DeviceLink[];
+let runner: OperationRunner;
 let journals: OperationJournal[];
 
 beforeEach(() => {
@@ -50,10 +51,12 @@ function chunk(id: string, seq: number, data: Buffer = DATA): Record<string, unk
 }
 
 // Records what it is asked to admit and to run, and how many chunks the server had
-// sent by then; it lets everything run, and answers each write with ok.
+// sent by then; it lets everything run, and answers each write with ok. It counts
+// each time it is asked to end local work.
 class Recording implements Executor {
   readonly admitted: Array<{ id: string; args: Record<string, unknown>; chunksSent: number }> = [];
   readonly ran: Operation[] = [];
+  ended = 0;
 
   admit(operation: Operation): Promise<Outcome | null> {
     this.admitted.push({ id: operation.id, args: operation.args, chunksSent: sentChunks(operation.id) });
@@ -63,6 +66,11 @@ class Recording implements Executor {
   run(operation: Operation): Promise<Outcome> {
     this.ran.push(operation);
     return Promise.resolve({ ok: null });
+  }
+
+  end(): Promise<void> {
+    this.ended += 1;
+    return Promise.resolve();
   }
 }
 
@@ -84,6 +92,7 @@ async function start(executor: Executor, journal = open()): Promise<DeviceLink> 
   url ??= await server.start();
   const device = connectDevice({ url, token: "surg_dev_test", journal, executor, onError: () => {}, delay: () => 20 });
   links.push(device.link);
+  runner = device.runner;
   device.link.start();
   await server.until(() => device.link.status === "connected");
   return device.link;
@@ -178,6 +187,39 @@ describe("a write whose data comes in a transfer", () => {
     expect(executor.admitted).toEqual([]);
     expect(executor.ran).toEqual([]);
     expect(results("a")).toEqual([]);
+  });
+
+  it("stopped while its data comes, with no more of it, is let go: never run, and nothing waits on it", async () => {
+    const executor = new Recording();
+    await start(executor);
+    send(writeOp("a"));
+    send(chunk("a", 0));
+    await server.until(() => acks("a").length === 1);
+    // The server sends no more of a cancelled write's data, so the cancel alone must end its wait.
+    send({ type: "cancel", id: "a" });
+    await server.until(() => journals[0]?.openIds().length === 0);
+    let settled = false;
+    void runner.suspend(APP_CLOSED).then(() => {
+      settled = true;
+    });
+    await server.until(() => settled);
+    expect(executor.admitted).toEqual([]);
+    expect(executor.ran).toEqual([]);
+    expect(results("a")).toEqual([]);
+  });
+
+  it("whose data stops part-way lets a revocation end the computer's access, and never runs", async () => {
+    const executor = new Recording();
+    await start(executor);
+    send(writeOp("a"));
+    send(chunk("a", 0));
+    await server.until(() => acks("a").length === 1);
+    server.close(4403);
+    await server.until(() => executor.ended === 1);
+    expect(executor.admitted).toEqual([]);
+    expect(executor.ran).toEqual([]);
+    // Dropped while it waited for its data: still received, so the server sends it again.
+    expect(journals[0]?.openIds()).toEqual(["a"]);
   });
 
   it("starts its data over from chunk 0 on a new connection, and runs once", async () => {
