@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from surogates.devices.operations import DeviceOperations
 from surogates.devices.sandbox import NOT_AVAILABLE, DeviceCall, enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.harness.prompt import PromptBuilder
@@ -25,6 +26,12 @@ pytestmark = pytest.mark.asyncio
 
 FOLDER = "/home/flavius/notes"
 _ids = iter(range(1, 1_000_000))
+
+
+@pytest.fixture(autouse=True)
+def nothing_to_consume(monkeypatch):
+    """The consumed mark after each committed result, over these tests' MagicMock session factories."""
+    monkeypatch.setattr(DeviceOperations, "consume", AsyncMock(return_value=0))
 
 
 def registry_with(*names: str, output: str = '{"ok": true}', max_result_size: int = 50_000) -> ToolRegistry:
