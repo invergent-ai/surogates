@@ -268,6 +268,8 @@ export class OperationRunner {
       // The read is answered with why; only a failure of this reaches onError.
       outcome = isRecord(error) && error.errcode === SQLITE_FULL ? NO_SPACE : NOT_KEPT;
       finished = this.journal.finish(operation.id, outcome);
+      // The failed write left the -wal as large as it got: on a full disk, that space is the user's.
+      this.journal.checkpoint();
     }
     if (finished) this.deliver(operation, outcome);
   }

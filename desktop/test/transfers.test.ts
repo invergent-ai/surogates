@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -177,18 +177,20 @@ describe("a read's result", () => {
 });
 
 describe("a read whose chunks the journal cannot keep", () => {
-  it("is answered that the disk is full, and the link stays up", async () => {
+  it("is answered that the disk is full, gives the space back, and the link stays up", async () => {
     await start(reading(DATA));
-    // A full disk: SQLite fails the write and rolls it back by itself.
+    // A full disk 4 MiB on: SQLite spills part of the write to the -wal, fails it and rolls it back by itself.
     const db = (journal as unknown as { db: DatabaseSync }).db;
     const { page_count: pages } = db.prepare("PRAGMA page_count").get() as { page_count: number };
-    db.exec(`PRAGMA max_page_count = ${pages + 2}`);
+    db.exec(`PRAGMA max_page_count = ${pages + 1024}`);
     server.send(readOp("a"));
     await server.until(() => headers("a").length === 1);
     expect(headers("a")[0]?.outcome).toEqual({
       error: { type: "os", code: "ENOSPC", message: "Not enough free disk space on this computer to send this file" },
     });
     expect(chunks("a")).toEqual([]);
+    // The rollback leaves the -wal as large as the write got: the user's disk would stay full.
+    expect(statSync(join(dir, "journal.sqlite-wal")).size).toBe(0);
     expect(errors).toEqual([]);
     expect(link?.status).toBe("connected");
   });

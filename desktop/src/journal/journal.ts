@@ -242,6 +242,18 @@ export class OperationJournal {
     return Number(result.changes);
   }
 
+  /**
+   * Give back the disk the -wal took, which a failed write leaves at its size until
+   * close. Best effort: what fails here is retried at the next checkpoint.
+   */
+  checkpoint(): void {
+    try {
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      // The -wal keeps its size until the next checkpoint or close.
+    }
+  }
+
   close(): void {
     this.db.close();
   }
