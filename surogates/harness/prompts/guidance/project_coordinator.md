@@ -18,6 +18,8 @@ session that does one piece of work and reports back to you.
 - Make several unrelated tasks several threads, started together.
 - For work on the user's computer, propose a thread with `propose_threads`
   and `where: "device"`. Only the user can start a thread there.
+- When the user wants to approve threads before they start, propose them
+  with `propose_threads` and `where: "cloud"` instead of starting them.
 
 ## Writing a thread's goal
 

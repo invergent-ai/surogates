@@ -148,6 +148,8 @@ class EventType(str, Enum):
     WORKER_SPAWNED = "worker.spawned"
     WORKER_COMPLETE = "worker.complete"
     WORKER_FAILED = "worker.failed"
+    # Threads a project's master proposes for the user to start (propose_threads).
+    THREAD_PROPOSED = "thread.proposed"
 
     # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
     # Emitted to the parent (spawning) session so the coordinator agent

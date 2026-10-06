@@ -12,7 +12,7 @@ import json
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
@@ -154,6 +154,43 @@ _RESOLVE_THREAD_SCHEMA = ToolSchema(
 )
 
 
+_PROPOSE_THREADS_SCHEMA = ToolSchema(
+    name="propose_threads",
+    description=(
+        "Propose threads for the user to start, instead of starting them: the "
+        "user sees a card for each and starts the ones they want. Use it when "
+        "the user wants to approve threads before they start, and for work on "
+        "the user's computer (where: \"device\"), which only the user can "
+        "start. Returns at once; you are told when the user starts one."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "threads": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": _START_THREAD_SCHEMA.parameters["properties"]["title"],
+                        "goal": _START_THREAD_SCHEMA.parameters["properties"]["goal"],
+                        "where": {
+                            "type": "string",
+                            "enum": ["cloud", "device"],
+                            "description": "cloud for a thread of its own; device for work in a folder on the user's computer.",
+                        },
+                    },
+                    "required": ["title", "goal", "where"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["threads"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     for name, schema, handler in (
         ("start_thread", _START_THREAD_SCHEMA, _start_thread_handler),
@@ -162,6 +199,7 @@ def register(registry: ToolRegistry) -> None:
         ("list_threads", _LIST_THREADS_SCHEMA, _list_threads_handler),
         ("read_thread", _READ_THREAD_SCHEMA, _read_thread_handler),
         ("resolve_thread", _RESOLVE_THREAD_SCHEMA, _resolve_thread_handler),
+        ("propose_threads", _PROPOSE_THREADS_SCHEMA, _propose_threads_handler),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="core")
 
@@ -175,20 +213,27 @@ def _text(arguments: dict[str, Any], name: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _malformed(texts: dict[str, str]) -> str | None:
+    """What is wrong with a thread's title and goal, or None."""
+    if not texts["title"]:
+        return "title is required"
+    # The title is the thread's session instructions and its report's header,
+    # so a line break would let it write instructions of its own.
+    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in texts["title"]):
+        return "title must be one line"
+    if len(texts["title"].encode("utf-16-le")) // 2 > _MAX_TITLE:
+        return f"title must be at most {_MAX_TITLE} characters"
+    if not texts["goal"]:
+        return "goal is required"
+    return None
+
+
 async def _start_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     from surogates.workstreams.threads import start_thread
 
     texts = {name: _text(arguments, name) for name in ("title", "goal", "context")}
-    if not texts["title"]:
-        return _error("title is required")
-    # The title is the thread's session instructions and its report's header,
-    # so a line break would let it write instructions of its own.
-    if any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in texts["title"]):
-        return _error("title must be one line")
-    if len(texts["title"].encode("utf-16-le")) // 2 > _MAX_TITLE:
-        return _error(f"title must be at most {_MAX_TITLE} characters")
-    if not texts["goal"]:
-        return _error("goal is required")
+    if (malformed := _malformed(texts)) is not None:
+        return _error(malformed)
 
     session_store = kwargs["session_store"]
     master = await session_store.get_session(UUID(str(kwargs["session_id"])))
@@ -342,3 +387,32 @@ async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     await _stop(thread, "resolved by the coordinator", **kwargs)
     await WorkstreamStore(kwargs["session_factory"]).resolve_thread(thread.id)
     return json.dumps({"status": "resolved", "thread_id": str(thread.id)})
+
+
+async def _propose_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    proposed = arguments.get("threads")
+    if not isinstance(proposed, list) or not proposed:
+        return _error("threads is required")
+    threads = []
+    for key, thread in enumerate(proposed, 1):
+        thread = thread if isinstance(thread, dict) else {}
+        texts = {name: _text(thread, name) for name in ("title", "goal")}
+        if (malformed := _malformed(texts)) is not None:
+            return _error(f"threads[{key}]: {malformed}")
+        if thread.get("where") not in ("cloud", "device"):
+            return _error(f"threads[{key}]: where must be cloud or device")
+        threads.append({"key": str(key), **texts, "where": thread["where"]})
+    if not is_project_master(kwargs.get("session_config")):
+        return _error("Only a project's coordinator proposes threads.")
+    # The cards are drawn from this event, and a thread is started from it
+    # by its proposal and key, so the request that starts it names nothing else.
+    proposal_id = str(uuid4())
+    await kwargs["session_store"].emit_event(
+        UUID(str(kwargs["session_id"])), EventType.THREAD_PROPOSED,
+        {"proposal_id": proposal_id, "threads": threads},
+    )
+    return json.dumps({
+        "status": "proposed",
+        "proposal_id": proposal_id,
+        "threads": [{"key": t["key"], "title": t["title"]} for t in threads],
+    }, ensure_ascii=False)
