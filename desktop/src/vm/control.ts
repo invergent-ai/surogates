@@ -15,6 +15,10 @@ import type { Outcome } from "../link/protocol.js";
 type Without<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 export type Request = Without<Exclude<ToAgent, { type: "done" }>, "id">;
 
+// Past the agent's longest line, a result of MAX_MESSAGE_CHARS at about 4.5 MiB:
+// a guest that sends one is not the agent, and the link closes as a lost VM's.
+const MAX_LINE_BYTES = 8 * 1024 ** 2;
+
 export class ControlLink {
   private next = 1;
   private readonly waiting = new Map<number, (answer: FromAgent | null) => void>();
@@ -49,6 +53,12 @@ export class ControlLink {
     });
     const late = () => new Error(exited ? "The VM exited" : "The guest's agent did not say hello");
     channel.on("error", () => {});
+    let unended = 0;
+    channel.on("data", (chunk: Buffer) => {
+      const newline = chunk.lastIndexOf(0x0a);
+      unended = newline < 0 ? unended + chunk.length : chunk.length - newline - 1;
+      if (unended > MAX_LINE_BYTES) channel.destroy();
+    });
     const reader = createInterface({ input: channel, crlfDelay: Infinity });
     // A channel destroyed on this side ends with no 'end' for the reader to see.
     channel.once("close", () => reader.close());
@@ -108,11 +118,15 @@ export class ControlLink {
   async op(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal): Promise<Outcome> {
     if (signal.aborted) return CANCELLED;
     const id = this.next;
-    const cancel = () => this.write({ type: "cancel", id });
+    let cancel = () => {};
+    const cancelled = new Promise<"cancelled">((resolve) => {
+      cancel = () => {
+        this.write({ type: "cancel", id });
+        resolve("cancelled");
+      };
+    });
     signal.addEventListener("abort", cancel, { once: true });
-    const answered = this.request({ type: "op", root, kind, args });
-    const cancelled = new Promise<"cancelled">((resolve) => signal.addEventListener("abort", () => resolve("cancelled"), { once: true }));
-    const reply = await Promise.race([answered, cancelled]);
+    const reply = await Promise.race([this.request({ type: "op", root, kind, args }), cancelled]);
     signal.removeEventListener("abort", cancel);
     if (reply === "cancelled") return CANCELLED;
     return reply?.type === "result" ? reply.outcome : SANDBOX_STOPPED;

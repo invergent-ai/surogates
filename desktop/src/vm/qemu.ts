@@ -77,7 +77,8 @@ export class Qmp {
   private constructor(private readonly socket: Socket) {
     // Nobody may be waiting for it when the monitor closes.
     this.greeted.catch(() => {});
-    createInterface({ input: socket }).on("line", (line) => this.received(line));
+    // readline passes the socket's errors on: a reset, or a connect that fails, ends in 'close' below.
+    createInterface({ input: socket }).on("line", (line) => this.received(line)).on("error", () => {});
     socket.on("error", () => {});
     socket.on("close", () => {
       this.closed = true;
@@ -114,16 +115,29 @@ export class Qmp {
     return qmp;
   }
 
-  // Its "return", or a rejection with QEMU's own description of the error.
-  execute(command: string, args?: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Its "return", or a rejection with QEMU's own description of the error. At
+   * *deadline* (performance.now()) it fails, and the monitor closes: QEMU answers
+   * in turn, so its late answer would be taken for the next command's.
+   */
+  execute(command: string, args?: Record<string, unknown>, deadline = Infinity): Promise<unknown> {
     if (this.closed) return Promise.reject(new Error("QEMU's monitor closed"));
     return new Promise((resolve, reject) => {
-      this.waiting.push({ resolve, reject });
+      const timer = deadline === Infinity ? undefined : setTimeout(() => {
+        reject(new Error("QEMU's monitor did not answer"));
+        this.close();
+      }, Math.max(0, deadline - performance.now()));
+      const settled = () => clearTimeout(timer);
+      this.waiting.push({
+        resolve: (value) => (settled(), resolve(value)),
+        reject: (error) => (settled(), reject(error)),
+      });
       this.socket.write(`${JSON.stringify({ execute: command, ...(args ? { arguments: args } : {}) })}\n`);
     });
   }
 
   close(): void {
+    this.closed = true;
     this.socket.destroy();
   }
 

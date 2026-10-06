@@ -113,6 +113,26 @@ describe("QEMU's machine protocol", () => {
     await expect(Qmp.open(connect(join(dir, "qmp.sock")), performance.now() + 200)).rejects.toThrow("QEMU's monitor did not answer");
   });
 
+  it("fails to open a monitor whose connection QEMU resets, as when it exits with what it was sent unread, or that never connects", async () => {
+    const resetting = createServer({ pauseOnConnect: true }, (socket) => {
+      socket.write('{"QMP": {"version": {}, "capabilities": ["oob"]}}\n');
+      // qmp_capabilities is still unread: the kernel resets the connection.
+      setTimeout(() => socket.destroy(), 50);
+    });
+    const path = join(dir, "reset.sock");
+    await new Promise<void>((resolve) => resetting.listen(path, resolve));
+    await expect(Qmp.open(connect(path))).rejects.toThrow("QEMU's monitor closed");
+    await expect(Qmp.open(connect(join(dir, "missing.sock")))).rejects.toThrow("QEMU's monitor closed");
+    await new Promise((resolve) => resetting.close(resolve));
+  });
+
+  it("gives up on a command at its deadline, and closes the monitor, whose next answer would be taken for the next command's", async () => {
+    const qmp = await Qmp.open(connect(join(dir, "qmp.sock")));
+    answer = () => {};
+    await expect(qmp.execute("device_add", {}, performance.now() + 200)).rejects.toThrow("QEMU's monitor did not answer");
+    await expect(qmp.execute("query-status")).rejects.toThrow("QEMU's monitor closed");
+  });
+
   it("fails what waits, and what comes after, once QEMU has gone", async () => {
     const qmp = await Qmp.open(connect(join(dir, "qmp.sock")));
     answer = (_command, socket) => socket.destroy();

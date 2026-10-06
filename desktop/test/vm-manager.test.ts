@@ -113,6 +113,16 @@ describe("the VM manager on the host", () => {
     });
   });
 
+  it("does not start without newuidmap and newgidmap, which virtiofsd needs for its maps", async () => {
+    await withQemu("exec sleep 30", async () => {
+      // The stand-in QEMU alone.
+      process.env.PATH = join(dir, "bin");
+      await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow(
+        "virtiofsd needs newuidmap and newgidmap (the uidmap package)",
+      );
+    });
+  });
+
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {
     await withQemu(`echo $$ > '${join(dir, "qemu-pid")}'\nexec sleep 30`, async () => {
       await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow("QEMU did not open its sockets");

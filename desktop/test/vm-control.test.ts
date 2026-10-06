@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -38,9 +39,17 @@ async function agent(speak = true): Promise<void> {
   server = createServer((socket) => {
     sockets.push(socket);
     if (!speak) return;
-    const control = new Control((message) => socket.write(`${JSON.stringify(message)}\n`), roots);
+    let first = true;
+    const control = new Control((message) => {
+      const line = `${JSON.stringify(message)}\n`;
+      if (!first) return void socket.write(line);
+      // Hello, cut in two, as the guest's port can deliver a line.
+      first = false;
+      socket.write(line.slice(0, 7));
+      setTimeout(() => socket.write(line.slice(7)), 20);
+    }, roots);
     createInterface({ input: socket }).on("line", (line) => control.receive(line));
-    // A cut line and one that is not JSON, which the host skips.
+    // A line that is not JSON, which the host skips.
     socket.write("not json\n");
     control.hello();
   });
@@ -90,6 +99,15 @@ describe("the host's side of the control port", () => {
     expect(await link.op("root-1", "which", {}, new AbortController().signal)).toEqual(SANDBOX_STOPPED);
   });
 
+  it("leaves no listener on a signal its operations shared once they settle", async () => {
+    await agent();
+    const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
+    const shared = new AbortController().signal;
+    for (const name of ["sh", "ls"]) expect(await link.op("root-1", "which", { name }, shared)).toEqual({ ok: { name } });
+    expect(getEventListeners(shared, "abort")).toHaveLength(0);
+    link.close();
+  });
+
   it("gives up on an answer after its own deadline", async () => {
     await agent();
     const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
@@ -121,6 +139,29 @@ describe("the host's side of the control port, closed from the host", () => {
     });
     await new Promise<void>((resolve) => server?.listen(path, resolve));
     await expect(ControlLink.open(connect(path), USER, performance.now() + 5_000, never)).rejects.toThrow("The VM exited");
+  });
+});
+
+describe("a guest whose line passes 8 MiB", () => {
+  it("is lost: before hello as a VM that exited, after it with what waits answered and the link closed", async () => {
+    const unended = Buffer.alloc(9 * 1024 ** 2, "x");
+    let connections = 0;
+    server = createServer((socket) => {
+      sockets.push(socket);
+      // The host closes on what it has not read: this end is reset.
+      socket.on("error", () => {});
+      connections += 1;
+      if (connections === 1) return void socket.write(unended);
+      socket.write('{"type":"hello","id":0}\n');
+      // Asked, it answers with a line that never ends.
+      socket.once("data", () => socket.write(unended));
+    });
+    await new Promise<void>((resolve) => server?.listen(path, resolve));
+    await expect(ControlLink.open(connect(path), USER, performance.now() + 5_000, never)).rejects.toThrow("The VM exited");
+    const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
+    const asked = link.request({ type: "ping" });
+    expect(await Promise.race([asked, new Promise((resolve) => setTimeout(() => resolve("unanswered"), 3_000))])).toBeNull();
+    await link.closed;
   });
 });
 

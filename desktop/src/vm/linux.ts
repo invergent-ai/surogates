@@ -5,7 +5,9 @@
 // leaves a pidfile in the runtime folder, so a later manager can end one that did not.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  accessSync, closeSync, constants, existsSync, ftruncateSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync,
+} from "node:fs";
 import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
 
@@ -63,6 +65,18 @@ function launch(argv: string[]): { child: ChildProcess; said: () => string } {
   return { child, said: () => said.trim() };
 }
 
+// Whether *name* is a program on the PATH, where virtiofsd looks for newuidmap and newgidmap.
+function onPath(name: string): boolean {
+  return (process.env.PATH ?? "").split(":").some((folder) => {
+    try {
+      accessSync(join(folder || ".", name), constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 const ended = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null;
 
 const exited = (child: ChildProcess) => new Promise<void>((resolve) => {
@@ -90,6 +104,8 @@ async function reach(path: string, qemu: ChildProcess, deadline: number): Promis
  * at the first boot. Rejects with why not, QEMU's own words included.
  */
 export const bootLinux: BootVm = async (options, signal, deadline) => {
+  // Its uid and gid maps: without them no folder could be shared, and virtiofsd's own words would not reach the user.
+  if (!onPath("newuidmap") || !onPath("newgidmap")) throw new Error("virtiofsd needs newuidmap and newgidmap (the uidmap package)");
   sweep(options.run);
   if (!existsSync(options.sessions)) {
     mkdirSync(dirname(options.sessions), { recursive: true, mode: 0o700 });
@@ -145,7 +161,8 @@ class LinuxVm implements VmBackend {
     const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
     writeFileSync(join(this.options.run, `vfs-${n}.pid`), String(daemon.pid ?? ""));
-    for (const deadline = performance.now() + SHARE_MS; !existsSync(socket);) {
+    const deadline = performance.now() + SHARE_MS;
+    while (!existsSync(socket)) {
       if (ended(daemon) || performance.now() > deadline) {
         daemon.kill("SIGKILL");
         throw new Error(`virtiofsd did not start: ${said()}`);
@@ -155,8 +172,8 @@ class LinuxVm implements VmBackend {
     try {
       await this.qmp.execute("chardev-add", {
         id: `vfs${n}`, backend: { type: "socket", data: { addr: { type: "unix", data: { path: socket } }, server: false } },
-      });
-      await this.qmp.execute("device_add", { driver: "vhost-user-fs-pci", id: `fs${n}`, chardev: `vfs${n}`, tag: `r${n}`, bus: `rp${n}` });
+      }, deadline);
+      await this.qmp.execute("device_add", { driver: "vhost-user-fs-pci", id: `fs${n}`, chardev: `vfs${n}`, tag: `r${n}`, bus: `rp${n}` }, deadline);
     } catch (error) {
       // Not added: its daemon serves the folder to nobody.
       daemon.kill("SIGKILL");
