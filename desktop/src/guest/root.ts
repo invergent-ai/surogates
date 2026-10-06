@@ -28,15 +28,21 @@ const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
 
 export const NOT_SET_UP: Outcome = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } };
 const ALREADY = "This chat's sandbox is already set up";
-// The cloud sandbox's HOME, under which /etc/surogate/environment names the layout.
-const CLOUD_HOME = /\/home\/sandbox(?=\/|:|$)/g;
+// The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
+// at the start of a path, in a value or a list of them.
+const CLOUD_HOME = /(?<=^|:)\/home\/sandbox(?=\/|:|$)/g;
+// How long past its timeout a run waits for its runner to report the command's
+// end. A runner that answers nothing, its loop blocked on a stalled stat or the
+// runner stopped by a command, holds no run longer than its timeout and this.
+const GRACE_MS = 2_000;
 
 // The commands' environment: the cloud's layout under the root's own HOME, and the user's names.
 export function rootEnvironment(layout: string, user: HostUser): Record<string, string> {
   const env: Record<string, string> = {};
   for (const line of layout.split("\n")) {
     const at = line.indexOf("=");
-    if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, user.home);
+    // A function, so a '$' in the home is not read as a replacement pattern.
+    if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, () => user.home);
   }
   return { ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8" };
 }
@@ -123,6 +129,8 @@ export class Root {
     return answered(async () => {
       const checked = runArgs(args);
       if (!("command" in checked)) return checked;
+      // One for the whole run, its folder lookup and its command.
+      const deadline = Date.now() + checked.timeout * 1000 + GRACE_MS;
       const { folder, home } = this.place;
       const placed = await first(this.runner.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, checked.timeout * 1000);
       if (placed === "cancelled") return CANCELLED;
@@ -133,7 +141,13 @@ export class Root {
       if (placed.unenterable) return ran(cannotEnter(placed.unenterable, placed.cwd), -1);
       if (signal.aborted) return CANCELLED;
       const child = this.runner.spawn({ id, command: checked.command, cwd: placed.cwd, env: {}, pty: false, stdin: false });
-      return supervise(child, checked.timeout, signal);
+      // The runner's report of its end, or the cancel, or the deadline. The kill
+      // waits in the runner's input, and a report after the answer settles nothing.
+      const ended = await first(supervise(child, checked.timeout, signal), signal, deadline - Date.now());
+      if (ended === "cancelled") return CANCELLED;
+      if (ended !== "timeout") return ended;
+      child.kill();
+      return timedOut(checked.timeout);
     });
   }
 

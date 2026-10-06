@@ -30,6 +30,10 @@ const STALLED = `process.stdout.write('{"ready":true}\\n'); setInterval(() => {}
 const op = (kind: string, args: Record<string, unknown>, signal = new AbortController().signal, id = "op-1") =>
   roots.perform("root-1", kind, args, signal, id);
 
+// *answer*, or "no answer" once *ms* pass.
+const within = <T>(answer: Promise<T>, ms: number) =>
+  Promise.race([answer, new Promise<"no answer">((resolve) => setTimeout(() => resolve("no answer"), ms))]);
+
 beforeEach(async () => {
   base = realpathSync(mkdtempSync(join(tmpdir(), "guest-root-")));
   user = { uid: 1000, gid: 1000, name: "someone", home: base };
@@ -103,6 +107,31 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(await looking).toEqual(CANCELLED);
   });
 
+  // A runner whose loop blocks on a stalled stat, or that a command stopped, reports no command's end.
+  it("answers a run's timeout while its runner is stopped, at the timeout and its grace", async () => {
+    const runner = children[0] as ChildProcess;
+    const running = op("run", { command: "sleep 5", workdir: null, timeout: 0.5 }, undefined, "op-8");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    runner.kill("SIGSTOP");
+    // 0.5 s, then 2 s of grace.
+    expect(await within(running, 3_000)).toEqual({ ok: { output: "Command timed out after 0.5 seconds", returncode: 124, timed_out: true } });
+    // Back, it reports the command's end, which nothing waits for any more.
+    runner.kill("SIGCONT");
+    expect(await op("which", { name: "sh" }, undefined, "op-9")).toEqual({ ok: true });
+  });
+
+  it("answers a run's cancel at once while its runner is stopped", async () => {
+    const runner = children[0] as ChildProcess;
+    const cancel = new AbortController();
+    const running = op("run", { command: "sleep 5", workdir: null, timeout: 30 }, cancel.signal, "op-10");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    runner.kill("SIGSTOP");
+    cancel.abort();
+    expect(await within(running, 500)).toEqual(CANCELLED);
+    runner.kill("SIGCONT");
+    expect(await op("which", { name: "sh" }, undefined, "op-11")).toEqual({ ok: true });
+  });
+
   it("answers which from the commands' PATH", async () => {
     expect(await op("which", { name: "sh" })).toEqual({ ok: true });
     expect(await op("which", { name: "no-such-tool" })).toEqual({ ok: false });
@@ -156,6 +185,15 @@ describe("a root's environment", () => {
       USER: "ana",
       LOGNAME: "ana",
       LANG: "C.UTF-8",
+    });
+  });
+
+  it("takes the home as it is, and moves only the paths that start at the cloud's HOME", () => {
+    const layout = "PATH=/home/sandbox/.local/bin:/opt/home/sandbox/bin:/home/sandboxes/bin\nPYTHONUSERBASE=/home/sandbox\n";
+    const home = "/home/a$&b$$c$`d$'e";
+    expect(rootEnvironment(layout, { uid: 1000, gid: 1000, name: "ana", home })).toMatchObject({
+      PATH: `${home}/.local/bin:/opt/home/sandbox/bin:/home/sandboxes/bin`,
+      PYTHONUSERBASE: home,
     });
   });
 });
