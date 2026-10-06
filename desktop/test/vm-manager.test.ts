@@ -8,9 +8,10 @@ import { duplexPair } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, Guest, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, Guest, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -217,6 +218,43 @@ describe("the VM manager on a guest", () => {
     await tearing;
     expect(asked).toEqual(["setup", "set up", "teardown"]);
     expect(await answer).toEqual({ ok: true });
+    await manager.stop();
+  });
+});
+
+describe("a guest that goes", () => {
+  it("is followed by a guest booted once all of its VM has gone, as its disks are then free", async () => {
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      teardown: async () => {},
+      // A run that never ends; which answers at once.
+      perform: (_root, kind) => new Promise((resolve) => kind === "which" && resolve({ ok: true })),
+    };
+    const events: string[] = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      events.push("boot");
+      const vm = await fakeVm(roots)(...args);
+      vms.push(vm);
+      // Its hypervisor takes a while to end, as QEMU does to let its disks go.
+      return { ...vm, kill: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        await vm.kill();
+        events.push("gone");
+      } };
+    };
+    const manager = new VmManager(options(), boot);
+    const folder = { path: dir, ...statSync(dir) };
+    const which = () => manager.perform({ id: `which-${Math.random()}`, root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal);
+    expect(await which()).toEqual({ ok: true });
+    const running = manager.perform({ id: "run", root: "root-1", folder, kind: "run", args: {} }, new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Its control channel goes, as a guest's that panics does.
+    vms[0]?.control.destroy();
+    expect(await running).toEqual(SANDBOX_STOPPED);
+    expect(await which()).toEqual({ ok: true });
+    expect(events.slice(0, 3)).toEqual(["boot", "gone", "boot"]);
     await manager.stop();
   });
 });

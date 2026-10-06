@@ -105,6 +105,7 @@ interface Root {
 
 // One boot of the guest, until it goes.
 export class Guest {
+  // Settles once the guest has gone and all of its VM with it, so a next boot finds its disks free.
   readonly gone: Promise<void>;
   private leave: () => void = () => {};
   private left = false;
@@ -252,13 +253,17 @@ export class Guest {
     return this.vm.kill();
   }
 
+  // Whether it has gone, though all of its VM may not have yet.
+  get ended(): boolean {
+    return this.left;
+  }
+
   private lose(): void {
     if (this.left) return;
     this.left = true;
     clearInterval(this.keepalive);
     this.control.close();
-    void this.vm.kill().catch(() => {});
-    this.leave();
+    void this.vm.kill().catch(() => {}).then(this.leave);
   }
 }
 
@@ -307,11 +312,20 @@ export class VmManager {
     rmSync(this.options.run, { recursive: true, force: true });
   }
 
-  // The guest that runs, or a new one: a guest that went, or did not start, is booted again by the next operation.
+  // The guest that runs, or a new one: a guest that went, or did not start, is booted
+  // again by the next operation, once all of the one that went has gone.
   private booted(boot: BootVm): Promise<Guest> {
-    if (this.guest) return this.guest;
+    const current = (this.guest ??= this.start(boot));
+    return current.then(async (guest) => {
+      if (!guest.ended) return guest;
+      await guest.gone;
+      if (this.guest === current) this.guest = null;
+      return this.booted(boot);
+    });
+  }
+
+  private start(boot: BootVm): Promise<Guest> {
     const booting = Guest.boot(boot, this.options, this.halt.signal);
-    this.guest = booting;
     booting.then((guest) => guest.gone, () => {}).finally(() => {
       if (this.guest === booting) this.guest = null;
     });
