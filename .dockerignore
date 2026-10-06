@@ -3,3 +3,4 @@ web/dist/
 .venv/
 desktop/node_modules/
 desktop/dist/
+images/guest/out/
