@@ -5,6 +5,14 @@
 
 import type { Refusal } from "../files/answers.js";
 
+// The host user the agent's roots run for, as the host's answer to hello names it.
+export interface HostUser {
+  uid: number;
+  gid: number;
+  name: string;
+  home: string;
+}
+
 export type ToRunner =
   // stdin: a pipe the host can write to (a background process); else /dev/null.
   | { type: "spawn"; id: string; command: string; cwd: string; env: Record<string, string>; pty: boolean; stdin: boolean }
