@@ -1,9 +1,8 @@
-// What the guest agent says to each root runner (runner.ts): one JSON object a
-// line, over the runner's stdin and stdout, after its {"ready":true}. The agent
-// ends the runner by ending its stdin. Until commands move into the VM, a tool
-// host speaks the same to its session runner.
+// What the guest agent says: to the host over the control port, and to each
+// root runner over the runner's stdin and stdout. Both are one JSON object a line.
 
 import type { Refusal } from "../files/answers.js";
+import type { Outcome } from "../link/protocol.js";
 
 // The host user the agent's roots run for, as the host's answer to hello names it.
 export interface HostUser {
@@ -12,6 +11,30 @@ export interface HostUser {
   name: string;
   home: string;
 }
+
+// The control port, ai.surogate.control (spec, Section 11, Transport). The agent
+// says hello first, and the host answers it with its user; from then on the host
+// asks. Every request carries an id of its sender's, and its answer the same id.
+export type ToAgent =
+  | { type: "done"; id: number; user: HostUser } // the answer to hello
+  | { type: "ping"; id: number }
+  // A root's guest uid, asked before its share is made, so its virtiofsd maps the host user to it.
+  | { type: "uid"; id: number; root: string }
+  // A root's namespaces and runner, with its folder at its own path from the share *tag*.
+  | { type: "setup"; id: number; root: string; folder: string; tag: string }
+  | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
+  | { type: "cancel"; id: number }; // the op of that id
+
+export type FromAgent =
+  | { type: "hello"; id: number }
+  | { type: "pong"; id: number }
+  | { type: "done"; id: number; uid?: number }
+  | { type: "failed"; id: number; message: string }
+  | { type: "result"; id: number; outcome: Outcome };
+
+// Each root runner (runner.ts), after its {"ready":true}. The agent ends the
+// runner by ending its stdin. Until commands move into the VM, a tool host speaks
+// the same to its session runner.
 
 export type ToRunner =
   // stdin: a pipe the host can write to (a background process); else /dev/null.
