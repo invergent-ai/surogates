@@ -32,5 +32,6 @@ if (location.protocol === "file:") {
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
     close: () => ipcRenderer.invoke("settings:close"),
+    onChanged: listen("settings:changed"),
   });
 }

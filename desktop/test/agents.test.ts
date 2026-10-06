@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, linkUrl, partitionFor,
+  type Agent, AgentStore, canonicalOrigin, connectAgent, consoleFor, describeAgent, linkUrl, linksFor, partitionFor,
 } from "../src/shell/agents.js";
 
 const CONFIG = { agent_id: "agent-1", desktop_sessions: true, multi_session: true, self_registration_enabled: false };
@@ -189,5 +189,19 @@ describe("the console an agent's user is sent to", () => {
     ["https://evilsurogate.ai", null],
   ])("for %s is %s", (origin, console) => {
     expect(consoleFor(origin)).toBe(console);
+  });
+});
+describe("the links the user menu and Settings open", () => {
+  it("lead into the console's settings for an agent surogate.ai hosts", () => {
+    expect(linksFor("https://acme.surogate.ai")).toEqual({
+      help: "https://docs.surogate.ai/work/",
+      usage: "https://ops.surogate.ai/work/settings/usage",
+      billing: "https://ops.surogate.ai/work/settings/billing",
+    });
+  });
+
+  it("are help alone for an install of its own, and before there is an agent", () => {
+    expect(linksFor("https://agent.example.com")).toEqual({ help: "https://docs.surogate.ai/work/" });
+    expect(linksFor(null)).toEqual({ help: "https://docs.surogate.ai/work/" });
   });
 });

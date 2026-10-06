@@ -19,7 +19,7 @@ import { verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
 import { ToolHosts } from "../hosts/tool-hosts.js";
 import type { LinkStatus } from "../link/client.js";
-import { type Agent, AgentStore, connectAgent, consoleFor, describeAgent, linkUrl } from "./agents.js";
+import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { type Credential, CredentialStore } from "./credentials.js";
@@ -100,8 +100,10 @@ function bounds(value: unknown): Bounds {
   return { x: Math.round(x!), y: Math.round(y!), width: Math.round(width!), height: Math.round(height!) };
 }
 
+// What the window's page and an open Settings show changed: each reads its state again.
 function changed(): void {
   main?.window.webContents.send("shell:changed");
+  main?.settingsContents()?.send("settings:changed");
 }
 
 const appearanceNow = () => ({ ...appearance.get(), theme: theme.dark ? ("dark" as const) : ("light" as const) });
@@ -111,17 +113,11 @@ function tellAppearance(): void {
   main?.webContents()?.send("desktop:appearance", appearanceNow());
 }
 
-// The links the user menu and Settings open: only these, built here, never a page's own address.
-function links(): Record<string, string> {
-  const console = consoleFor(agents.get()?.origin ?? "https://localhost");
-  return {
-    help: "https://docs.surogate.ai/work/",
-    ...(console ? { usage: `${console}/usage`, billing: `${console}/billing`, keys: `${console}/settings` } : {}),
-  };
-}
+const links = () => linksFor(agents.get()?.origin ?? null);
 
 function openLink(which: unknown): void {
-  const url = typeof which === "string" ? links()[which] : undefined;
+  const known = links();
+  const url = typeof which === "string" && Object.hasOwn(known, which) ? known[which] : undefined;
   if (!url) throw new Error("No such link");
   void shell.openExternal(url);
 }
@@ -462,7 +458,7 @@ function settingsState() {
       organisation: account?.orgId ?? kept?.orgId ?? null,
       agents: agent ? [agent.name] : [],
     },
-    links: { usage: "usage" in links(), keys: "keys" in links() },
+    links: { usage: "usage" in links() },
   };
 }
 

@@ -478,8 +478,7 @@ body.main.first {
   cursor: default;
 }
 
-.menu-item .shortcut,
-.menu-item .external {
+.menu-item .shortcut {
   margin-left: auto;
   color: var(--dim);
   font-size: 12.5px;

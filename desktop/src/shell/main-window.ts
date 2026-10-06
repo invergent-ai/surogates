@@ -6,7 +6,7 @@
 // client fills the centre's hole, in a WebContentsView of the agent's own partition
 // that stays on the agent's origin, as claude.ai fills Claude Desktop's window.
 
-import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView } from "electron";
+import { app, BrowserWindow, net, screen, shell, type WebContents, WebContentsView, webContents } from "electron";
 
 import { reconnectDelayMs } from "../link/backoff.js";
 import { type Agent, partitionFor } from "./agents.js";
@@ -114,6 +114,7 @@ export class MainWindow {
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   // Settings, over everything: a transparent view whose page dims the window beneath it.
   private settingsView: WebContentsView | null = null;
+  private opener: WebContents | null = null; // what had the keyboard when Settings opened
   private dark: boolean;
 
   constructor(private readonly options: MainWindowOptions) {
@@ -229,6 +230,7 @@ export class MainWindow {
       this.settingsView.webContents.focus();
       return;
     }
+    this.opener = webContents.getFocusedWebContents();
     const view = new WebContentsView({ webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false } });
     view.setBackgroundColor("#00000000");
     this.window.contentView.addChildView(view);
@@ -246,12 +248,21 @@ export class MainWindow {
     void view.webContents.loadFile(page).then(() => view.webContents.focus());
   }
 
+  /** Close Settings, and give the keyboard back to what had it, or else to the window's page. */
   closeSettings(): void {
     const view = this.settingsView;
     if (!view) return;
     this.settingsView = null;
     this.window.contentView.removeChildView(view);
     view.webContents.close();
+    const back = this.opener && !this.opener.isDestroyed() ? this.opener : this.window.webContents;
+    this.opener = null;
+    back.focus();
+  }
+
+  // Settings' contents, while it is open.
+  settingsContents(): WebContents | undefined {
+    return this.settingsView?.webContents;
   }
 
   /** The web client in the centre, or the page beneath it: it shows only while it has something to show. */

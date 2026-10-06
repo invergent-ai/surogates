@@ -255,6 +255,8 @@ async function render(): Promise<void> {
   for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-link]")) {
     row.hidden = !state.links.includes(row.dataset.link ?? "");
   }
+  // The divider under Plans and billing goes with it: no two dividers meet.
+  byId("user-menu").querySelector<HTMLElement>("hr:last-of-type")!.hidden = !state.links.includes("billing");
   const device = byId("device");
   device.title = state.device?.text ?? "";
   device.classList.toggle("connected", state.device?.status === "connected");
@@ -320,9 +322,11 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") menu(false);
 });
+// The conversation and Settings are views of their own: a click there reaches this page as its blur.
+addEventListener("blur", () => menu(false));
 for (const row of document.querySelectorAll<HTMLElement>("#user-menu [data-action]")) {
   const action = row.dataset.action ?? "";
-  if (["usage", "help", "billing", "keys"].includes(action)) row.dataset.link = action;
+  if (["usage", "help", "billing"].includes(action)) row.dataset.link = action;
   row.addEventListener("click", () => {
     menu(false);
     if (action === "settings") void shell.settings();

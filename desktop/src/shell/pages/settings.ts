@@ -15,14 +15,15 @@ interface State {
   appearance: Appearance;
   account: { name: string; email: string } | null;
   computer: { name: string; connection: string; added: string | null; organisation: string | null; agents: string[] };
-  links: { usage: boolean; keys: boolean };
+  links: { usage: boolean };
 }
 
 interface Settings {
   state(): Promise<State>;
   set(key: string, value: string): Promise<void>;
-  link(which: "usage" | "keys"): Promise<void>;
+  link(which: "usage"): Promise<void>;
   close(): Promise<void>;
+  onChanged(listener: () => void): () => void;
 }
 
 const settings = (globalThis as unknown as { surogateSettings: Settings }).surogateSettings;
@@ -81,8 +82,9 @@ async function render(): Promise<void> {
   byId("connection").textContent = state.computer.connection;
   byId("added").textContent = date(state.computer.added);
   byId("agents").textContent = state.computer.agents.join(", ");
+  // A link the agent lacks goes for good: no search brings it back.
   for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
-    link.hidden = !state.links[link.dataset.link as "usage" | "keys"];
+    if (!state.links[link.dataset.link as "usage"]) link.remove();
   }
   hideEmptyGroups();
 }
@@ -91,7 +93,7 @@ for (const item of document.querySelectorAll<HTMLElement>(".settings-nav [data-s
   item.addEventListener("click", () => show(item.dataset.section ?? "general"));
 }
 for (const link of document.querySelectorAll<HTMLElement>("[data-link]")) {
-  link.addEventListener("click", () => void settings.link(link.dataset.link as "usage" | "keys"));
+  link.addEventListener("click", () => void settings.link(link.dataset.link as "usage"));
 }
 for (const control of document.querySelectorAll<HTMLElement>("[data-setting]")) {
   for (const option of control.querySelectorAll<HTMLElement>("[data-value]")) {
@@ -104,4 +106,5 @@ byId("backdrop").addEventListener("click", () => void settings.close());
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") void settings.close();
 });
+settings.onChanged(() => void render());
 void render().then(() => byId("settings-search").focus());

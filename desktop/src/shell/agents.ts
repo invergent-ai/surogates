@@ -140,7 +140,16 @@ export function describeAgent(agent: Agent, device: { status: LinkStatus; comput
   }
 }
 
-// Where an agent's user finds usage, billing and API keys: the Surogate console, for an agent
-// surogate.ai hosts. An install of its own has no console the app knows, and its menu shows no link.
+// Where an agent's user finds usage and billing: the Surogate console, for an agent surogate.ai
+// hosts. An install of its own has no console the app knows, and its menu shows no link.
 export const consoleFor = (origin: string): string | null =>
   new URL(origin).hostname.endsWith(".surogate.ai") ? "https://ops.surogate.ai" : null;
+
+/** The links the user menu and Settings open for the agent at *origin*: only these, never a page's own address. */
+export function linksFor(origin: string | null): Record<string, string> {
+  const console = origin === null ? null : consoleFor(origin);
+  return {
+    help: "https://docs.surogate.ai/work/",
+    ...(console ? { usage: `${console}/work/settings/usage`, billing: `${console}/work/settings/billing` } : {}),
+  };
+}
