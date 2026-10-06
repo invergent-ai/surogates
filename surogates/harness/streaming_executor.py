@@ -157,6 +157,7 @@ class StreamingToolExecutor:
         bundle: Any | None = None,
         platform_client: Any | None = None,
         expert_transcript: Any | None = None,
+        offered_tools: frozenset[str] | None = None,
         start_early: bool = True,
     ) -> None:
         self._session = session
@@ -190,6 +191,7 @@ class StreamingToolExecutor:
         self._bundle = bundle
         self._platform_client = platform_client
         self._expert_transcript = expert_transcript
+        self._offered_tools = offered_tools
         self._start_early = start_early
 
         self._tracked: list[TrackedTool] = []
@@ -442,6 +444,7 @@ class StreamingToolExecutor:
                 platform_client=self._platform_client,
                 expert_transcript=self._expert_transcript,
                 interrupt_check=self._interrupt_check,
+                offered_tools=self._offered_tools,
             )
             if guardrails is not None:
                 after = guardrails.after_call(

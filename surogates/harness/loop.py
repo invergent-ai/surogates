@@ -1854,6 +1854,9 @@ class AgentHarness(
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
+        # The model may call only what it was sent.  The registry is the
+        # worker's, so it also holds what this session's gates took away.
+        offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -2069,6 +2072,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     platform_client=self._platform_client,
                     expert_transcript=expert_transcript,
+                    offered_tools=offered_tools,
                     # On the user's computer a call may start only once the
                     # response is saved: a stopped worker's replay reads it.
                     start_early=device_of(session.config) is None,
@@ -2840,7 +2844,7 @@ class AgentHarness(
             # tools may have already started executing during streaming.
             # Invalid calls get natural error results from execute_single_tool.
             if not use_streaming_exec:
-                invalid_calls = self._find_invalid_tool_calls(tool_calls_raw)
+                invalid_calls = self._find_invalid_tool_calls(tool_calls_raw, offered_tools)
                 if invalid_calls:
                     consecutive_invalid_tool_calls += 1
                     if consecutive_invalid_tool_calls >= _MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
@@ -3512,10 +3516,10 @@ class AgentHarness(
     # ------------------------------------------------------------------
 
     def _find_invalid_tool_calls(
-        self, tool_calls: list[dict[str, Any]],
+        self, tool_calls: list[dict[str, Any]], offered: frozenset[str],
     ) -> list[tuple[dict[str, Any], str]]:
         """Return list of (tool_call, error_message) for invalid calls."""
-        return find_invalid_tool_calls(tool_calls, self._tools)
+        return find_invalid_tool_calls(tool_calls, offered)
 
     async def _maybe_route_final_response_to_inbox(
         self,

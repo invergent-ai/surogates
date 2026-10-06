@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select
@@ -26,6 +27,7 @@ from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
 from tests.test_harness_resilience import _make_harness
+from tests.test_steer_loop import _final_response, _make_loop_harness
 from tests.test_wake_slash_command_gate import (
     _harness,
     _llm_responses,
@@ -503,6 +505,64 @@ async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
         "/goal does not run in a project's conversation. Ask for the work here, and it is given to a thread."
     )
     assert "outcome" not in (await api.app.state.session_store.get_session(master.id)).config
+
+
+async def turn_calling(monkeypatch, session, names: list[str], *, streamed: bool):
+    """One turn of *session* whose model calls *names*: the tools it offered, ran and answered."""
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    ran = AsyncMock(return_value='{"ok": true}')
+    monkeypatch.setattr(registry, "dispatch", ran)
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._tools = registry
+    harness._tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4(), asset_root="/tmp/test")
+    harness._streaming_enabled = streamed
+    calls = [{"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": "{}"}} for name in names]
+    responses = iter([
+        ({"role": "assistant", "content": "", "tool_calls": calls},
+         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1}),
+        _final_response("Done."),
+    ])
+    offered: list[set[str]] = []
+
+    async def llm(**kwargs):
+        offered.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        message, usage = next(responses)
+        if kwargs["on_tool_call_complete"] is not None:
+            for call in message["tool_calls"] or []:
+                kwargs["on_tool_call_complete"](call)
+        return message, usage
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    messages = [{"role": "user", "content": "Get the Q3 report done"}]
+    await harness._run_loop(session, messages, "system", SimpleNamespace(lease_token=uuid4()), all_events=[])
+    answered = {m["tool_call_id"]: m["content"] for m in messages if m.get("role") == "tool"}
+    return offered[0], ran, answered
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
+async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
+    master = await master_of(api, await create(api))
+    refused = ["spawn_task", "delegate_task", "run_coding_agent"]
+    offered, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
+    ran.assert_not_awaited()
+    listed = ", ".join(sorted(offered))
+    assert answered == {
+        f"call_{name}": json.dumps({"error": f"Unknown tool: {name!r}. Available tools: {listed}"})
+        for name in refused
+    }
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
+async def test_a_chats_model_calls_its_tools_as_before(api, monkeypatch, streamed):
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    _, ran, answered = await turn_calling(monkeypatch, session, ["todo", "delegate_task"], streamed=streamed)
+    assert [call.args[0] for call in ran.await_args_list] == ["todo", "delegate_task"]
+    assert answered == {"call_todo": '{"ok": true}', "call_delegate_task": '{"ok": true}'}
 
 
 async def system_prompt(api, session) -> str:

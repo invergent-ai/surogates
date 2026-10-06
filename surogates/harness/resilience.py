@@ -17,7 +17,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
     from surogates.harness.budget import IterationBudget
     from surogates.harness.session_llm import ResolvedLLM
-    from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +107,8 @@ def try_activate_fallback(
     return slot.client, slot.model, new_index, new_primary_config, True
 
 
-def repair_tool_name(name: str, registry: ToolRegistry) -> str | None:
-    """Attempt to repair a misspelled tool name.
+def repair_tool_name(name: str, known: Collection[str]) -> str | None:
+    """Attempt to repair a misspelled tool name onto one of *known*.
 
     1. Lowercase
     2. Normalize hyphens/spaces to underscores
@@ -117,8 +116,6 @@ def repair_tool_name(name: str, registry: ToolRegistry) -> str | None:
 
     Returns the repaired name, or ``None`` if no match.
     """
-    known = registry.tool_names
-
     # 1. Lowercase
     lowered = name.lower()
     if lowered in known:
@@ -134,14 +131,23 @@ def repair_tool_name(name: str, registry: ToolRegistry) -> str | None:
     return matches[0] if matches else None
 
 
+def unknown_tool_error(tool_name: str, offered: Collection[str]) -> str:
+    """The result of a call to a tool this turn's model was not offered."""
+    available = ", ".join(sorted(offered))
+    return json.dumps({
+        "error": f"Unknown tool: {tool_name!r}. Available tools: {available}",
+    })
+
+
 def find_invalid_tool_calls(
     tool_calls: list[dict[str, Any]],
-    registry: ToolRegistry,
+    offered: Collection[str],
 ) -> list[tuple[dict[str, Any], str]]:
     """Return list of (tool_call, error_message) for invalid calls.
 
     A tool call is invalid if:
-    - The tool name is not registered (and cannot be repaired via fuzzy match)
+    - The tool name is not one *offered* to the model, registered or not
+      (and cannot be repaired onto one via fuzzy match)
     - The arguments JSON is malformed
 
     When a tool name is unknown but can be repaired via :func:`repair_tool_name`,
@@ -154,18 +160,15 @@ def find_invalid_tool_calls(
         args_raw = fn.get("arguments", "")
 
         # Unknown tool -- attempt repair first
-        if tool_name and not registry.has(tool_name):
-            repaired = repair_tool_name(tool_name, registry)
+        if tool_name and tool_name not in offered:
+            repaired = repair_tool_name(tool_name, offered)
             if repaired is not None:
                 logger.info(
                     "Repaired tool name %r -> %r", tool_name, repaired,
                 )
                 fn["name"] = repaired
             else:
-                available = ", ".join(sorted(registry.tool_names))
-                invalid.append((tc, json.dumps({
-                    "error": f"Unknown tool: {tool_name!r}. Available tools: {available}",
-                })))
+                invalid.append((tc, unknown_tool_error(tool_name, offered)))
                 continue
 
         # Malformed JSON arguments
