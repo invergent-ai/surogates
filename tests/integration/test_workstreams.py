@@ -13,10 +13,13 @@ from sqlalchemy import delete, select
 import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Session, SessionCursor, Workstream
+from surogates.harness.prompt import PromptBuilder
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
 from surogates.runtime.rate_limiter import PerTenantRateLimiter
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_service_account_session_token
+from surogates.tenant.context import TenantContext
+from surogates.tools.loader import AgentDef
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
@@ -479,3 +482,33 @@ async def test_a_master_keeps_its_routines(api, monkeypatch):
     await harness.wake(master.id)
     harness._handle_loop_command.assert_awaited_once()
     assert _llm_responses(store) == []
+
+
+async def system_prompt(api, session) -> str:
+    tenant = TenantContext(
+        org_id=api.org_id, user_id=api.user_id, org_config={}, user_preferences={},
+        permissions=frozenset(), asset_root="/tmp/test",
+    )
+    builder = PromptBuilder(tenant, session=session, available_agents=[
+        AgentDef(name="analyst", description="Reads the numbers", system_prompt="", source="platform"),
+    ])
+    return await _make_harness(prompt_builder=builder)._build_system_prompt(session)
+
+
+async def test_a_masters_prompt_runs_the_project(api):
+    project = await create(api, goal="The board's Q3 report", instructions="Use euros.")
+    prompt = await system_prompt(api, await master_of(api, project))
+    assert "# Running a project" in prompt
+    assert "# Worker Delegation" not in prompt
+    assert "# Available Sub-Agents" not in prompt
+    assert prompt.endswith(
+        "## Session instructions\n\nProject: Quarterly report\n\nGoal: The board's Q3 report\n\nUse euros."
+    )
+
+
+async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
+    chat = await api.client.post("/v1/sessions", json={"config": {"coordinator": True}}, headers=api.auth())
+    prompt = await system_prompt(api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])))
+    assert "# Worker Delegation" in prompt
+    assert "# Available Sub-Agents" in prompt
+    assert "# Running a project" not in prompt
