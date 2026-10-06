@@ -3,6 +3,7 @@
 
 import type { OperationJournal } from "./journal/journal.js";
 import { DeviceLink, type LinkStatus } from "./link/client.js";
+import type { Welcome } from "./link/protocol.js";
 import { ACCESS_ENDED, type Executor, OperationRunner } from "./operations/runner.js";
 import { report } from "./report.js";
 
@@ -16,6 +17,9 @@ export interface DeviceOptions {
   journal: OperationJournal;
   executor: Executor;
   onStatus?: (status: LinkStatus) => void;
+  // Who the server says this device is, at each connect, before the journal is claimed. A
+  // throw refuses it: the link stops, as when any of its handlers throws, and says why.
+  onWelcome?: (welcome: Welcome) => void;
   // Something the app cannot recover from (a journal that fails, a journal that is
   // another device's): said first, then the link stops. Required, so a stop is never silent.
   onError: (error: unknown) => void;
@@ -39,6 +43,7 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
     openIds: () => runner.openIds(),
     handlers: {
       onWelcome: (welcome) => {
+        options.onWelcome?.(welcome);
         // One journal per device: another device's results would be refused and resent forever.
         if (!options.journal.claim(welcome.deviceId)) {
           fail(new Error(
@@ -67,4 +72,43 @@ export function connectDevice(options: DeviceOptions): { link: DeviceLink; runne
     },
   });
   return { link, runner };
+}
+
+// How long verifyDevice waits for a welcome, retries included.
+export const VERIFY_TIMEOUT_MS = 15_000;
+
+/**
+ * Who *token* connects as, with no journal and nothing run: the link is opened, read
+ * up to its welcome, and closed. The hello holds nothing open, and an operation sent
+ * behind the welcome is left to the next connection. Rejects when the server ends
+ * the link instead, or no welcome comes within *timeoutMs*.
+ */
+export function verifyDevice(url: string, token: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<Welcome> {
+  const { promise, resolve, reject } = Promise.withResolvers<Welcome>();
+  let settled = false;
+  const settle = (outcome: () => void): void => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    void link.stop().then(outcome);
+  };
+  const link: DeviceLink = new DeviceLink({
+    url,
+    token,
+    openIds: () => [],
+    handlers: {
+      onWelcome: (welcome) => settle(() => resolve(welcome)),
+      onOperation: () => {},
+      onCancel: () => {},
+      onAck: () => {},
+      onStatus: (status) => {
+        if (status === "unauthenticated" || status === "revoked" || status === "superseded" || status === "update_required") {
+          settle(() => reject(new Error(`The agent did not accept this computer's token (${status})`)));
+        }
+      },
+    },
+  });
+  const timer = setTimeout(() => settle(() => reject(new Error("The agent did not answer in time"))), timeoutMs);
+  link.start();
+  return promise;
 }
