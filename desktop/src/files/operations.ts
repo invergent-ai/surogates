@@ -42,7 +42,6 @@ const KINDS: Record<string, Kind> = {
   delete: remove,
   list_dir: listDir,
   ripgrep,
-  which,
 };
 
 const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_LARGE });
@@ -409,7 +408,8 @@ function listDir(args: Record<string, unknown>, { folder }: Context): string[] {
 
 // shutil.which: a name with a slash is checked as it is (relative to *cwd*);
 // otherwise the first PATH entry holding an executable file of that name, a
-// relative or empty entry being read from *cwd*.
+// relative or empty entry being read from *cwd*. The guest's root runner answers
+// which with it, in the commands' environment; here it finds the helper's rg.
 export function findOnPath(name: string, path: string | undefined, cwd: string): string | null {
   if (!name || name.includes("\0")) return null;
   if (name.includes("/")) return runnable(name.startsWith("/") ? name : join(cwd, name)) ? name : null;
@@ -430,10 +430,6 @@ function runnable(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-function which(args: Record<string, unknown>, { env, folder }: Context): boolean {
-  return findOnPath(text(args, "name"), env.PATH, folder) !== null;
 }
 
 // The cloud's command line: --no-ignore, the key last, -e so a pattern may start with "-".

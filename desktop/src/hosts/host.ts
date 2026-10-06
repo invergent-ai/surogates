@@ -122,6 +122,14 @@ process.on("message", (raw) => {
       commands.get(message.id)?.controller.abort();
       helper?.stdin?.write(`${JSON.stringify({ cancel: message.id })}\n`);
       break;
+    case "refusal":
+      // A command for a folder replaced since the start would run on the replacement.
+      if (!sameFolder()) send({ type: "result", id: message.id, outcome: FOLDER_UNAVAILABLE });
+      else void guard?.refusal().then((refused) => !failing && send({ type: "result", id: message.id, outcome: refused ?? { ok: null } }));
+      break;
+    case "after":
+      void guard?.after(message.outcome).then((outcome) => !failing && send({ type: "result", id: message.id, outcome }));
+      break;
     case "restart":
       restart(GRANT_CHANGED);
       break;

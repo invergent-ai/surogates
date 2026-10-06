@@ -209,10 +209,6 @@ SAME = [
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "gamma", "glob": "*.md", "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "(", "glob": None, "context": 0}),
     ("ripgrep", {"key": "{f}/sub", "mode": "count", "pattern": "a\0", "glob": None, "context": 0}),
-    ("which", {"name": "sh"}),
-    ("which", {"name": "/bin/sh"}),
-    ("which", {"name": "no-such-command-zz"}),
-    ("which", {"name": ""}),
 ]
 
 # Changes that fail the same way on both and change nothing.

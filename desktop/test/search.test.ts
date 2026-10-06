@@ -213,31 +213,33 @@ describe("ripgrep, with the cloud's arguments", () => {
   });
 });
 
-describe("which, as shutil.which", () => {
-  it("finds a command on the PATH, or by its path", async () => {
-    expect(await run("which", { name: "sh" })).toEqual({ ok: true });
-    expect(await run("which", { name: "/bin/sh" })).toEqual({ ok: true });
-    expect(await run("which", { name: "no-such-command-zz" })).toEqual({ ok: false });
+describe("findOnPath, as shutil.which", () => {
+  const found = (name: string, path: string | undefined, cwd = folder) => findOnPath(name, path, cwd) !== null;
+
+  it("finds a command on the PATH, or by its path", () => {
+    expect(found("sh", "/usr/bin:/bin")).toBe(true);
+    expect(found("/bin/sh", "/usr/bin:/bin")).toBe(true);
+    expect(found("no-such-command-zz", "/usr/bin:/bin")).toBe(false);
   });
 
-  it("finds nothing for an empty name, a NUL, an empty PATH, a folder or a file that does not run", async () => {
-    expect(await run("which", { name: "" })).toEqual({ ok: false });
-    expect(await run("which", { name: "s\0h" })).toEqual({ ok: false });
+  it("finds nothing for an empty name, a NUL, an empty PATH, a folder or a file that does not run", () => {
+    expect(found("", "/usr/bin:/bin")).toBe(false);
+    expect(found("s\0h", "/usr/bin:/bin")).toBe(false);
     mkdirSync(join(base, "bin", "tool"), { recursive: true });
     writeFileSync(join(base, "bin", "plain"), "x", { mode: 0o644 });
-    context.env.PATH = join(base, "bin");
-    expect(await run("which", { name: "tool" })).toEqual({ ok: false });
-    expect(await run("which", { name: "plain" })).toEqual({ ok: false });
-    context.env.PATH = "";
-    expect(await run("which", { name: "sh" })).toEqual({ ok: false });
+    expect(found("tool", join(base, "bin"))).toBe(false);
+    expect(found("plain", join(base, "bin"))).toBe(false);
+    expect(found("sh", "")).toBe(false);
   });
 
-  it("finds a command with no PATH set, in /bin:/usr/bin, and in the folder through an empty entry", async () => {
-    delete context.env.PATH;
-    expect(await run("which", { name: "sh" })).toEqual({ ok: true });
+  it("finds a command with no PATH set, in /bin:/usr/bin, and in the folder through an empty entry", () => {
+    expect(found("sh", undefined)).toBe(true);
     writeFileSync(join(folder, "tool"), "#!/bin/sh\n", { mode: 0o755 });
-    context.env.PATH = ":/nonexistent";
-    expect(await run("which", { name: "tool" })).toEqual({ ok: true });
+    expect(found("tool", ":/nonexistent")).toBe(true);
+  });
+
+  it("is not a kind of the file helper's: the guest answers which", async () => {
+    expect(await run("which", { name: "sh" })).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'which' yet" } });
   });
 
   it("reads a relative PATH entry from the folder, as it does an empty one", () => {

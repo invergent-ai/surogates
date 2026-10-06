@@ -42,7 +42,7 @@ const unavailable = (why: string): Outcome => ({
 });
 
 // What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
-type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
+export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
 
 export interface HostProcess {
   send(message: ToHost): void;
@@ -124,6 +124,9 @@ export interface ToolHostsOptions {
   spawnHost?: () => HostProcess;
   startTimeoutMs?: number;
   idleMs?: number;
+  // Waited for before a root's host lets its folder go, so what else holds the folder
+  // lets it go first; told too when a host went by itself.
+  release?(root: string): Promise<void>;
 }
 
 export class ToolHosts implements Executor {
@@ -140,6 +143,20 @@ export class ToolHosts implements Executor {
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
     return this.hostFor(operation.sessionId, binding).run(operation, signal);
+  }
+
+  /**
+   * *inner*, a process operation that runs elsewhere (the VM), while the root's host
+   * holds the folder: its lock, and, with *guard*, the hook guard's refusal before
+   * it and its look after it (Host.guarded).
+   */
+  guarded(
+    operation: Operation, signal: AbortSignal, guard: boolean, inner: (binding: BoundFolder, signal: AbortSignal) => Promise<Outcome>,
+  ): Promise<Outcome> {
+    if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
+    const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
+    if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
+    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted) => inner(binding, aborted));
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -164,7 +181,10 @@ export class ToolHosts implements Executor {
   private async stopHosts(): Promise<void> {
     const hosts = [...this.live];
     this.hosts.clear();
-    await Promise.all(hosts.map((host) => host.stop()));
+    await Promise.all(hosts.map(async (host) => {
+      await host.letGo();
+      await host.stop();
+    }));
   }
 
   private hostFor(root: string, binding: BoundFolder): Host {
@@ -190,6 +210,7 @@ export class ToolHosts implements Executor {
         if (this.hosts.get(root) === host) this.hosts.delete(root);
       },
       ask,
+      () => this.options.release?.(root) ?? Promise.resolve(),
     );
     this.hosts.set(root, host);
     this.live.add(host);
@@ -210,6 +231,7 @@ class Host {
   private idleTimer: NodeJS.Timeout | undefined;
   // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
   private prompts = new AbortController();
+  private letting: Promise<void> | null = null;
 
   constructor(
     private readonly process: HostProcess,
@@ -218,6 +240,7 @@ class Host {
     private readonly idleMs: number,
     private readonly onGone: () => void,
     private readonly ask: (asked: NetworkAsk, signal: AbortSignal) => Promise<NetworkAnswer>,
+    private readonly release: () => Promise<void>,
   ) {
     this.started = new Promise((resolve) => {
       this.settleStart = (failure) => {
@@ -243,11 +266,37 @@ class Host {
     this.send(start);
   }
 
-  async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+  run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    return this.busy(async () => {
+      const failure = await this.ready(signal);
+      return failure ?? this.request({ type: "op", id: operation.id, kind: operation.kind, args: operation.args }, signal);
+    });
+  }
+
+  /**
+   * *inner* while this host holds the folder, so the folder is not let go mid-way.
+   * With *guard*: the hook guard's refusal first, then, whatever the outcome, a
+   * cancel's too, its look after, which no cancel stops; the outcome carries its notice.
+   */
+  guarded(operation: Operation, signal: AbortSignal, guard: boolean, inner: (signal: AbortSignal) => Promise<Outcome>): Promise<Outcome> {
+    return this.busy(async () => {
+      const failure = await this.ready(signal);
+      if (failure) return failure;
+      if (guard) {
+        const refused = await this.request({ type: "refusal", id: operation.id }, signal);
+        if (!("ok" in refused)) return refused;
+      }
+      const outcome = await inner(signal);
+      return guard ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
+    });
+  }
+
+  // Counted while it runs: a host with work is never idle.
+  private async busy(work: () => Promise<Outcome>): Promise<Outcome> {
     this.running += 1;
     clearTimeout(this.idleTimer);
     try {
-      return await this.answer(operation, signal);
+      return await work();
     } finally {
       this.running -= 1;
       this.idle();
@@ -265,12 +314,18 @@ class Host {
     this.prompts = new AbortController();
     this.idleTimer = setTimeout(() => {
       this.onGone();
-      void this.stop();
+      void this.letGo().then(() => this.stop());
     }, this.idleMs).unref();
   }
 
-  private async answer(operation: Operation, signal: AbortSignal): Promise<Outcome> {
-    // A cancel while the host is still starting is answered at once.
+  // Its folder's other holders let it go, once a host's life: before it stops, or after it went.
+  letGo(): Promise<void> {
+    this.letting ??= this.release().catch(() => {});
+    return this.letting;
+  }
+
+  // Null once the host has started; otherwise why nothing runs. A cancel while it starts is answered at once.
+  private async ready(signal: AbortSignal): Promise<Outcome | null> {
     let onAbort = () => {};
     const aborted = new Promise<Outcome>((resolve) => {
       onAbort = () => resolve(CANCELLED);
@@ -282,21 +337,28 @@ class Host {
     if (failure) return failure;
     if (this.gone) return unavailable("its tool host stopped; try again");
     if (signal.aborted) return CANCELLED;
+    return null;
+  }
+
+  // The host's answer to *message*, by its id, or CANCELLED at once when *signal* aborts first, and the host is told.
+  private request(message: Extract<ToHost, { type: "op" | "refusal" | "after" }>, signal?: AbortSignal): Promise<Outcome> {
+    // One that went since: nothing would answer.
+    if (this.gone) return Promise.resolve(HOST_STOPPED);
     return new Promise((resolve) => {
       const answer = (outcome: Outcome) => {
-        signal.removeEventListener("abort", cancel);
+        signal?.removeEventListener("abort", cancel);
         resolve(outcome);
       };
-      // A newer operation may have this id by now; only this one's entry goes.
+      // A newer request may have this id by now; only this one's entry goes.
       const cancel = () => {
-        if (this.pending.get(operation.id) !== answer) return;
-        this.pending.delete(operation.id);
-        this.send({ type: "cancel", id: operation.id });
+        if (this.pending.get(message.id) !== answer) return;
+        this.pending.delete(message.id);
+        this.send({ type: "cancel", id: message.id });
         resolve(CANCELLED);
       };
-      this.pending.set(operation.id, answer);
-      signal.addEventListener("abort", cancel, { once: true });
-      this.send({ type: "op", id: operation.id, kind: operation.kind, args: operation.args });
+      this.pending.set(message.id, answer);
+      signal?.addEventListener("abort", cancel, { once: true });
+      this.send(message);
     });
   }
 
@@ -355,6 +417,7 @@ class Host {
     this.prompts.abort();
     this.gone = true;
     this.onGone();
+    void this.letGo();
     this.settleStart(unavailable("its tool host stopped while it was starting"));
     for (const answer of this.pending.values()) answer(HOST_STOPPED);
     this.pending.clear();

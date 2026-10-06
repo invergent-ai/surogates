@@ -10,9 +10,12 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { BOOT_ID } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
+import type { Operation } from "../../src/link/protocol.js";
+import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
 
@@ -574,5 +577,62 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
   it("takes its guest's sockets and pidfiles with it when it stops", async () => {
     await managers.at(-1)!.stop();
     expect(existsSync(options.run)).toBe(false);
+  });
+});
+
+describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the guest", { timeout: 60_000 }, () => {
+  const CHAT = "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c";
+  let dir: string;
+  let run: string;
+  let manager: VmManager;
+  let executor: VmExecutor;
+  const operation = (kind: string, args: Record<string, unknown>): Operation => ({
+    id: `${kind}-${Math.random()}`, sessionId: CHAT, callingSessionId: CHAT, invocationId: "call", ordinal: 1, kind, args, digest: "d",
+  });
+  const command = (line: string) => executor.run(operation("run", { command: line, workdir: null, timeout: 10 }), signal());
+
+  beforeAll(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "vm-executor-")));
+    const folder = join(dir, "folder");
+    mkdirSync(folder);
+    run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    manager = new VmManager({
+      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+      run, console: join(dir, "console.log"), user: USER,
+    });
+    const { dev, ino } = statSync(folder);
+    executor = new VmExecutor({
+      bindingOf: (root) => (root === CHAT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
+      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500, vm: manager,
+    });
+  });
+
+  afterAll(async () => {
+    await executor?.stop();
+    await manager?.stop();
+    rmSync(run, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("answers a chat's first which, its file host and its guest started for it", async () => {
+    const begun = performance.now();
+    expect(await executor.run(operation("which", { name: "pandoc" }), signal())).toEqual({ ok: true });
+    const cold = performance.now() - begun;
+    const again = performance.now();
+    expect(await executor.run(operation("which", { name: "pandoc" }), signal())).toEqual({ ok: true });
+    console.log(`which: ${cold.toFixed(0)} ms with its file host and the guest cold, ${(performance.now() - again).toFixed(0)} ms warm`);
+  });
+
+  it("ends what a command left running once the chat's file host lets its folder go", async () => {
+    // No marker of its command's, cleared before the command ends, and a session of its own: only the root's cgroup still holds it.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
+    expect(await command(leaver)).toMatchObject({ ok: { output: "started\n" } });
+    expect(await command("pgrep -c -x sleep")).toMatchObject({ ok: { output: "1\n" } });
+    // Idle for 500 ms, the file host tears the guest's root down, then lets the folder go.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const begun = performance.now();
+    expect(await executor.run(operation("which", { name: "pandoc" }), signal())).toEqual({ ok: true });
+    console.log(`which: ${(performance.now() - begun).toFixed(0)} ms with its file host cold and the guest warm`);
+    expect(await command("pgrep -c -x sleep || true")).toMatchObject({ ok: { output: "0\n" } });
   });
 });

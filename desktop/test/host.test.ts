@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { MAX_WRITE_BYTES } from "../src/files/answers.js";
-import { findOnPath } from "../src/files/operations.js";
 import { FOLDER_UNAVAILABLE, type HostStart } from "../src/hosts/messages.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
@@ -80,22 +79,6 @@ describe("a tool host", { timeout: 30_000 }, () => {
       ok: null,
     });
     expect(readFileSync(join(folder, "most.bin")).equals(data)).toBe(true);
-  });
-
-  it("cannot see what the sandbox hides", async () => {
-    const hidden = join(base, "hidden-bin");
-    mkdirSync(hidden);
-    writeFileSync(join(hidden, "only-outside"), "#!/bin/sh\n", { mode: 0o755 });
-    mkdirSync(join(folder, "bin"));
-    writeFileSync(join(folder, "bin", "only-inside"), "#!/bin/sh\n", { mode: 0o755 });
-    const PATH = `${hidden}:${join(folder, "bin")}:/usr/bin:/bin`;
-    expect(findOnPath("only-outside", PATH, folder)).toBe(join(hidden, "only-outside"));
-    const harness = host({ env: { ...start.env, PATH } });
-    await ready(harness);
-    expect(await harness.op("1", "which", { name: "only-outside" })).toEqual({ ok: false });
-    // Found only through the app's PATH, so the helper has it.
-    expect(await harness.op("2", "which", { name: "only-inside" })).toEqual({ ok: true });
-    expect(await harness.op("3", "which", { name: "sh" })).toEqual({ ok: true });
   });
 
   it("leaves the user's folder as it was", async () => {
