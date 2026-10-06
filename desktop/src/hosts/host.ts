@@ -105,7 +105,7 @@ process.on("message", (raw) => {
     case "start":
       if (folder) break;
       start(message).then(
-        () => send({ type: "ready" }),
+        () => send({ type: "ready", processes: processes?.handles() ?? [] }),
         (error: unknown) => send(
           {
             type: "failed",
@@ -137,6 +137,16 @@ process.on("message", (raw) => {
         watchHooks();
         if (!failing) send({ type: "result", id: message.id, outcome });
       });
+      break;
+    case "handles":
+      // What the guest's processes can write, they write at any time: the look every WATCH_MS goes on, as after a command.
+      guestCommands = true;
+      try {
+        save({ processes: message.handles });
+      } catch {
+        // Kept from the last write.
+      }
+      watchHooks();
       break;
     case "restart":
       restart(GRANT_CHANGED);

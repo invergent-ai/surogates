@@ -19,7 +19,7 @@ import type { Operation } from "../../src/link/protocol.js";
 import { vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
-import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
+import { type Folder, Guest, type ProcessesChange, VmManager, type VmOptions } from "../../src/vm/manager.js";
 
 const IMAGE = process.env.SUROGATE_VM_IMAGE ?? fileURLToPath(new URL("../../../images/guest/out", import.meta.url));
 const AGENT_DISK = fileURLToPath(new URL("../../vm/agent-disk.sh", import.meta.url));
@@ -772,14 +772,24 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     const folder = join(dir, "folder");
     mkdirSync(folder);
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
+    // The manager in this process, as VmClient hears it in its own.
+    let tell: (root: string, change: ProcessesChange) => void = () => {};
     manager = new VmManager({
       kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
       run, console: join(dir, "console.log"), user: USER,
-    });
+    }, bootLinux, (root, change) => tell(root, change));
     const { dev, ino } = statSync(folder);
     executor = new VmExecutor({
       bindingOf: (root) => (root === CHAT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
-      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500, vm: manager,
+      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500,
+      vm: {
+        perform: (operation, cancel) => manager.perform(operation, cancel),
+        teardown: (root) => manager.teardown(root),
+        onProcesses: (listener) => {
+          tell = listener;
+          return () => {};
+        },
+      },
     });
   });
 
@@ -797,6 +807,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     const again = performance.now();
     expect(await executor.run(operation("which", { name: "pandoc" }), signal())).toEqual({ ok: true });
     console.log(`which: ${cold.toFixed(0)} ms with its file host and the guest cold, ${(performance.now() - again).toFixed(0)} ms warm`);
+  });
+
+  it("keeps the chat's file host while its background process lives, and answers for it once the guest that ran it goes", async () => {
+    const started = await executor.run(operation("start", background("sleep 30")), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    // Past the file host's 500 ms idle time: had it let the folder go, the root's teardown would have ended the process.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({ ok: { status: "running" } });
+    process.kill(Number(readFileSync(join(run, "qemu.pid"), "utf8")), "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    // A new guest, which the file host gives what it kept.
+    expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({
+      ok: { status: "exited", exit_code: null, note: "The process ended because the computer's sandbox stopped" },
+    });
   });
 
   it("ends what a command left running once the chat's file host lets its folder go", async () => {

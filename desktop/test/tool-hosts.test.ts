@@ -245,7 +245,7 @@ const onStop = (host: FakeHost, message: ToHost) => {
 };
 // Says ready, then answers nothing: its operations stay running.
 const readyOnly = (host: FakeHost, message: ToHost) => {
-  if (message.type === "start") host.say({ type: "ready" });
+  if (message.type === "start") host.say({ type: "ready", processes: [] });
   onStop(host, message);
 };
 const answering = (host: FakeHost, message: ToHost) => {
@@ -409,7 +409,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
 
   it("makes a second stop wait for the first", async () => {
     const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
-      if (message.type === "start") host.say({ type: "ready" });
+      if (message.type === "start") host.say({ type: "ready", processes: [] });
     }) });
     const running = executor.run(resolve(), signal());
     await until(() => sent(0, "op") === 1);
@@ -440,7 +440,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     aborted.abort();
     expect(await executor.run(resolve(), aborted.signal)).toEqual(CANCELLED);
     expect(fakes[0]?.count("op")).toBe(0);
-    fakes[0]?.say({ type: "ready" });
+    fakes[0]?.say({ type: "ready", processes: [] });
     const next = resolve();
     expect(await executor.run(next, signal())).toEqual({ ok: next.id });
     expect(fakes).toHaveLength(1);
@@ -686,7 +686,7 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
 
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
-      if (message.type === "start") host.say({ type: "ready" });
+      if (message.type === "start") host.say({ type: "ready", processes: [] });
       if (message.type === "op") host.say({ type: "result", id: message.id, outcome: { ok: message.id } });
       if (message.type === "stop") setTimeout(() => host.exit(), 300);
     };

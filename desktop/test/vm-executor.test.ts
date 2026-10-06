@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
+import { APP_QUIT, type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
+import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND } from "../src/hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { type DeviceStack, stopDevice } from "../src/shell/device-stack.js";
 import { VmExecutor } from "../src/vm/executor.js";
-import type { VmOperation } from "../src/vm/manager.js";
+import type { ProcessesChange, VmOperation } from "../src/vm/manager.js";
 
 const ROOT = "11111111-1111-4111-8111-111111111111";
 const UNBOUND = "33333333-3333-4333-8333-333333333333";
@@ -27,6 +29,8 @@ let torn: Array<[string, number]>;
 let guest: (operation: VmOperation, signal: AbortSignal) => Promise<Outcome>;
 // What the VM does with a root's teardown; by default, it answers at once.
 let tear: (root: string) => Promise<void>;
+// What the VM tells of a root's processes, while the executor listens.
+let heard: ((root: string, change: ProcessesChange) => void) | null;
 let executor: VmExecutor;
 
 const ran = (output: string): Outcome => ({ ok: { output, returncode: 0, timed_out: false } });
@@ -66,6 +70,12 @@ function vmExecutor(idleMs?: number): VmExecutor {
         torn.push([root, exits]);
         return tear(root);
       },
+      onProcesses: (listener) => {
+        heard = listener;
+        return () => {
+          heard = null;
+        };
+      },
     },
   });
   return executor;
@@ -81,6 +91,7 @@ beforeEach(() => {
   torn = [];
   guest = async () => ran("ran\n");
   tear = async () => {};
+  heard = null;
 });
 
 afterEach(async () => {
@@ -207,6 +218,92 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     cancel.abort();
     expect(await answer).toMatchObject({ error: { type: "cancelled" } });
     expect(sent).toEqual([]);
+  });
+
+  it("keeps the root's file host, and with it the folder, while a process of the root's lives in the guest", async () => {
+    vmExecutor(200);
+    const handle: ProcessHandle = { id: "proc_000000000001", command: "npm run dev", cwd: folder, task_id: null, started_at: Date.now() / 1000 };
+    expect(await executor.run(op("start", { command: "npm run dev" }), signal())).toEqual(ran("ran\n"));
+    heard?.(ROOT, { handles: [handle], live: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect([exits, torn]).toEqual([0, []]);
+    heard?.(ROOT, { handles: [{ ...handle, ended: { exit_code: 0, output: "", note: null } }], live: 0 });
+    await until(() => exits === 1);
+    expect(torn).toEqual([[ROOT, 0]]);
+  });
+
+  it("looks for the hooks a background process leaves every 5 s while it lives, not just after its start", async () => {
+    vmExecutor();
+    const hook = join(folder, ".git", "hooks", "pre-commit");
+    const started = { ok: { session_id: "proc_000000000001", pid: 7 } };
+    // The process writes a hook once its start has been answered, as a dev server's setup step might.
+    guest = async () => {
+      heard?.(ROOT, { handles: [{ id: "proc_000000000001", command: "make", cwd: folder, task_id: null, started_at: Date.now() / 1000 }], live: 1 });
+      setTimeout(() => {
+        mkdirSync(join(folder, ".git", "hooks"), { recursive: true });
+        writeFileSync(hook, "#!/bin/sh\n", { mode: 0o755 });
+      }, 300);
+      return started;
+    };
+    expect(await executor.run(op("start", { command: "make" }), signal())).toEqual(started);
+    const answered = performance.now();
+    await until(() => {
+      try {
+        return (statSync(hook).mode & 0o111) === 0;
+      } catch {
+        return false;
+      }
+    }, 8_000);
+    expect(performance.now() - answered).toBeLessThan(6_500);
+  });
+
+  it("keeps the handles in the folder's record, gives them to each operation in the guest, and ends those still running when the guest goes", async () => {
+    vmExecutor();
+    const { dev, ino } = statSync(folder);
+    const record = join(base, "data", "folders", `${dev}-${ino}.json`);
+    const handle: ProcessHandle = { id: "proc_000000000001", command: "sleep 9", cwd: folder, task_id: "t", started_at: Date.now() / 1000 };
+    expect(await run()).toEqual(ran("ran\n"));
+    expect(sent[0]?.ended).toEqual([]);
+    heard?.(ROOT, { handles: [handle], live: 1 });
+    await until(() => readRecord(record)?.processes.length === 1);
+    expect(await run()).toEqual(ran("ran\n"));
+    expect(sent[1]?.ended).toEqual([handle]);
+    heard?.(ROOT, { gone: true });
+    const lost = { ...handle, ended: { exit_code: null, output: "", note: RUNNER_GONE } };
+    await until(() => readRecord(record)?.processes[0]?.ended !== undefined);
+    expect(readRecord(record)?.processes).toEqual([lost]);
+    expect(await run()).toEqual(ran("ran\n"));
+    expect(sent[2]?.ended).toEqual([lost]);
+  });
+
+  it("gives the guest the handles the folder's record kept from before the app quit, each ended as the app quit", async () => {
+    const { dev, ino } = statSync(folder);
+    const handle: ProcessHandle = { id: "proc_000000000001", command: "sleep 9", cwd: folder, task_id: "t", started_at: Date.now() / 1000 };
+    writeRecord(join(base, "data", "folders", `${dev}-${ino}.json`), { state: "stopped", present: [], hooks: null, processes: [handle] });
+    vmExecutor();
+    expect(await executor.run(op("poll", { session_id: handle.id }), signal())).toEqual(ran("ran\n"));
+    expect(sent[0]?.ended).toEqual([{ ...handle, ended: { exit_code: null, output: "", note: APP_QUIT } }]);
+  });
+
+  it("gives the guest what a root's file host last kept once it let the folder go, its live processes ended as the app quit, whatever the VM tells of the root after", async () => {
+    vmExecutor();
+    const handle: ProcessHandle = { id: "proc_000000000001", command: "sleep 9", cwd: folder, task_id: "t", started_at: Date.now() / 1000 };
+    expect(await run()).toEqual(ran("ran\n"));
+    heard?.(ROOT, { handles: [handle], live: 1 });
+    // A manager killed for a teardown it did not answer in time tells the root gone, and so does one that exits later.
+    tear = async (root) => heard?.(root, { gone: true });
+    await executor.end();
+    heard?.(ROOT, { gone: true });
+    // The teardown ended the process, and told nothing: the next file host's registry says how.
+    expect(await run()).toEqual(ran("ran\n"));
+    expect(sent.at(-1)?.ended).toEqual([{ ...handle, ended: { exit_code: null, output: "", note: APP_QUIT } }]);
+  });
+
+  it("hears the guest only until it stops", async () => {
+    vmExecutor();
+    expect(heard).not.toBeNull();
+    await executor.stop();
+    expect(heard).toBeNull();
   });
 
   it("lets the guest's root go before the root's file host lets its folder go, and when the device's access ends", async () => {

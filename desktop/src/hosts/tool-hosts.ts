@@ -8,9 +8,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
+import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
+import type { ProcessesChange } from "../vm/manager.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
@@ -151,12 +153,18 @@ export class ToolHosts implements Executor {
    * it and its look after it (Host.guarded).
    */
   guarded(
-    operation: Operation, signal: AbortSignal, guard: boolean, inner: (binding: BoundFolder, signal: AbortSignal) => Promise<Outcome>,
+    operation: Operation, signal: AbortSignal, guard: boolean,
+    inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
-    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted) => inner(binding, aborted));
+    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended) => inner(binding, aborted, ended));
+  }
+
+  /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
+  processes(root: string, change: ProcessesChange): void {
+    this.hosts.get(root)?.processes(change);
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -238,6 +246,9 @@ class Host {
   // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
   private prompts = new AbortController();
   private letting: Promise<void> | null = null;
+  // The handles of its root's background processes elsewhere (the VM), which every
+  // operation there carries: from the folder's record at its start, then as they change.
+  private handles: ProcessHandle[] = [];
 
   constructor(
     private readonly process: HostProcess,
@@ -284,7 +295,9 @@ class Host {
    * With *guard*: the hook guard's refusal first, then, whatever the outcome, a
    * cancel's too, its look after, which no cancel stops; the outcome carries its notice.
    */
-  guarded(operation: Operation, signal: AbortSignal, guard: boolean, inner: (signal: AbortSignal) => Promise<Outcome>): Promise<Outcome> {
+  guarded(
+    operation: Operation, signal: AbortSignal, guard: boolean, inner: (signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+  ): Promise<Outcome> {
     return this.busy(async () => {
       const failure = await this.ready(signal);
       if (failure) return failure;
@@ -292,9 +305,18 @@ class Host {
         const refused = await this.request({ type: "refusal", id: operation.id }, signal);
         if (!("ok" in refused)) return refused;
       }
-      const outcome = await inner(signal);
+      const outcome = await inner(signal, this.handles);
       return guard ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
+  }
+
+  // Its root's processes elsewhere changed: the host's record keeps their handles, and a
+  // host with any alive is never idle. Gone: those still running ended with their sandbox.
+  processes(change: ProcessesChange): void {
+    this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
+    this.live = "gone" in change ? 0 : change.live;
+    this.send({ type: "handles", handles: this.handles });
+    this.idle();
   }
 
   // Counted while it runs: a host with work is never idle.
@@ -387,6 +409,7 @@ class Host {
 
   private received(message: FromHost): void {
     if (message.type === "ready") {
+      this.handles = message.processes;
       this.settleStart(null);
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one.
