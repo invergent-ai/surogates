@@ -9,10 +9,13 @@
     "node": ">=22.13"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/shell/pages && cp src/shell/pages/*.html src/shell/pages/*.css dist/shell/pages/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "electron:install": "node node_modules/electron/install.js",
+    "start": "npm run build && env -u ELECTRON_RUN_AS_NODE electron dist/shell/main.js",
     "pretest": "npm run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "npm run build && xvfb-run -a vitest run -c vitest.e2e.config.ts"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",
@@ -21,6 +24,8 @@
   "devDependencies": {
     "@types/node": "^24.10.1",
     "@types/ws": "^8.5.12",
+    "electron": "44.5.0",
+    "playwright-core": "1.63.0",
     "typescript": "~5.9.3",
     "vitest": "^3.2.4"
   }
