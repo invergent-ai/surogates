@@ -75,6 +75,78 @@ def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> boo
     return turn_id is not None and reason in {"stop", "done", "complete", "completed"}
 
 
+async def resolve_loop_result_parent(store: Any, session: Any) -> Any | None:
+    """Return the direct-UI parent that should receive this loop run result.
+
+    Messaging-platform parents are excluded on purpose: their result
+    reaches the user through the channel's own outbound adapter, so
+    delivering it here as well would double-post.
+    """
+    if not _is_scheduled_run(session) or session.parent_id is None:
+        return None
+
+    from surogates.session.store import SessionNotFoundError
+
+    try:
+        parent = await store.get_session(session.parent_id)
+    except SessionNotFoundError:
+        return None
+
+    if parent.channel not in DIRECT_UI_CHANNELS:
+        return None
+    return parent
+
+
+async def announce_failure(store: Any, session: Any, *, error: str, summary: str = "") -> None:
+    """Say that *session* failed where its user reads its result: a
+    scheduled run's ``loop.result`` on its direct-UI parent, else a failed
+    ``task_complete`` item for a scheduled run or an inbox-announced root.
+
+    The turn's own failure and the dispatcher's give-up both end here, so a
+    run reports the same way however it fails.
+    """
+    parent = None
+    try:
+        parent = await resolve_loop_result_parent(store, session)
+    except Exception:
+        logger.debug(
+            "Failed to resolve loop.result parent for %s", session.id, exc_info=True,
+        )
+    if parent is not None:
+        try:
+            await store.emit_event(
+                parent.id,
+                EventType.LOOP_RESULT,
+                {
+                    "run_session_id": str(session.id),
+                    "scheduled_session_id": str(
+                        (session.config or {}).get("scheduled_session_id") or ""
+                    ),
+                    "content": error,
+                    "outcome": "failed",
+                    "duration_seconds": _seconds_since(session.created_at),
+                    "run_completed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Failed to emit loop.result on parent %s for run %s",
+                parent.id, session.id, exc_info=True,
+            )
+    elif _is_scheduled_run(session) or raises_completion_inbox_item(session):
+        await store.emit_event(
+            session.id,
+            EventType.INBOX_TASK_COMPLETE,
+            {
+                "outcome": "failed",
+                "summary": summary,
+                "duration_seconds": _seconds_since(session.created_at),
+                "session_title": session.title or "Task failed",
+                "error": error,
+            },
+        )
+
+
 class ArtifactCompletionMixin:
     async def _promote_fenced_artifacts(
         self,
@@ -669,27 +741,6 @@ class ArtifactCompletionMixin:
             )
         return out, entries_by_path
 
-    async def _resolve_loop_result_parent(self, session: Session) -> Session | None:
-        """Return the direct-UI parent that should receive this loop run result.
-
-        Messaging-platform parents are excluded on purpose: their result
-        reaches the user through the channel's own outbound adapter, so
-        delivering it here as well would double-post.
-        """
-        if not _is_scheduled_run(session) or session.parent_id is None:
-            return None
-
-        from surogates.session.store import SessionNotFoundError
-
-        try:
-            parent = await self._store.get_session(session.parent_id)
-        except SessionNotFoundError:
-            return None
-
-        if parent.channel not in DIRECT_UI_CHANNELS:
-            return None
-        return parent
-
     async def _settle_commerce_reservation(
         self,
         session: Session,
@@ -967,7 +1018,7 @@ class ArtifactCompletionMixin:
 
         loop_result_parent = None
         try:
-            loop_result_parent = await self._resolve_loop_result_parent(session)
+            loop_result_parent = await resolve_loop_result_parent(self._store, session)
         except Exception:
             logger.debug(
                 "Failed to resolve loop.result parent for %s",
@@ -1102,47 +1153,9 @@ class ArtifactCompletionMixin:
             session.id, EventType.SESSION_FAIL, fail_data,
         )
         error = f"{reason}: {data}" if data else reason
-
-        loop_result_parent = None
-        try:
-            loop_result_parent = await self._resolve_loop_result_parent(session)
-        except Exception:
-            logger.debug(
-                "Failed to resolve loop.result parent for %s", session.id, exc_info=True,
-            )
-        if loop_result_parent is not None:
-            try:
-                await self._store.emit_event(
-                    loop_result_parent.id,
-                    EventType.LOOP_RESULT,
-                    {
-                        "run_session_id": str(session.id),
-                        "scheduled_session_id": str(
-                            (session.config or {}).get("scheduled_session_id") or ""
-                        ),
-                        "content": error,
-                        "outcome": "failed",
-                        "duration_seconds": _seconds_since(session.created_at),
-                        "run_completed_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to emit loop.result on parent %s for run %s",
-                    loop_result_parent.id, session.id, exc_info=True,
-                )
-        elif _is_scheduled_run(session) or raises_completion_inbox_item(session):
-            await self._store.emit_event(
-                session.id,
-                EventType.INBOX_TASK_COMPLETE,
-                {
-                    "outcome": "failed",
-                    "summary": _last_assistant_message_excerpt(messages),
-                    "duration_seconds": _seconds_since(session.created_at),
-                    "session_title": session.title or "Task failed",
-                    "error": error,
-                },
-            )
+        await announce_failure(
+            self._store, session, error=error, summary=_last_assistant_message_excerpt(messages),
+        )
 
         try:
             await self._store.update_session_status(session.id, "failed")

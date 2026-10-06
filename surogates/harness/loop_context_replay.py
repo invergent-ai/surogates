@@ -111,6 +111,10 @@ def build_user_message_dict(
 
 #: The events that carry a worker's report to the session that started it.
 WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
+#: What a coordinator hears of its workers between its own requests: their
+#: reports, and the threads the user started (``worker.spawned`` with
+#: ``started_by``).  A spawn of its own is its own tool call's result.
+WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -129,6 +133,20 @@ def _thread_words(text: str) -> str:
     while removed:
         text, removed = _REPORT_MARKER.subn("", text)
     return text.strip()
+
+
+#: The most files a report names; the rest are counted.
+_MAX_LISTED_FILES = 20
+
+
+def _listed(files: list) -> str:
+    """A report's ``Files:`` line.  An entry with neither a label nor a ref
+    is skipped rather than failing the master's every wake."""
+    labels = [_file_label(f.get("label") or f.get("ref") or "") for f in files if isinstance(f, dict)]
+    labels = [label for label in labels if label]
+    if len(labels) > _MAX_LISTED_FILES:
+        labels = [*labels[:_MAX_LISTED_FILES], f"and {len(labels) - _MAX_LISTED_FILES} more"]
+    return ", ".join(labels) or "none"
 
 
 def _file_label(label: str) -> str:
@@ -160,16 +178,24 @@ def worker_note(event_type: str, data: dict) -> dict:
             content = f"{named} failed: {data.get('error', 'unknown error')}]"
         else:
             files = data.get("files")
-            if files is None:
-                listed = "not listed (the turn ended early)"
-            else:
-                listed = ", ".join(_file_label(f["label"]) for f in files) or "none"
+            listed = _listed(files) if isinstance(files, list) else "not listed (the turn ended early)"
             content = (
                 f"{named} reported]\n"
                 f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
                 f"Files: {listed}"
             )
     return {"role": "user", "content": content}
+
+
+def worker_news(event_type: str, data: dict) -> dict | None:
+    """The message a coordinator reads a worker's news as: its report, or a
+    thread the user started; None for a spawn the coordinator made."""
+    if event_type != EventType.WORKER_SPAWNED.value:
+        return worker_note(event_type, data)
+    if data.get("started_by") != "user":
+        return None
+    title = json.dumps(data.get("title"), ensure_ascii=False)
+    return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
 
 
 def unread_reports(events: list) -> list[dict]:
@@ -182,8 +208,8 @@ def unread_reports(events: list) -> list[dict]:
     for event in events:
         if event.type == EventType.LLM_REQUEST.value:
             held = []
-        elif event.type in WORKER_REPORT_TYPES:
-            held.append(worker_note(event.type, event.data))
+        elif event.type in WORKER_NEWS_TYPES and (note := worker_news(event.type, event.data)) is not None:
+            held.append(note)
     return held
 
 
@@ -409,8 +435,10 @@ class ContextReplayMixin:
             # by the provider; and merged into a user's message it would
             # carry the user's words as a report.  So each waits for the
             # next request, on its own.
-            elif etype in WORKER_REPORT_TYPES:
-                held_reports.append(worker_note(etype, event.data))
+            elif etype in WORKER_NEWS_TYPES:
+                note = worker_news(etype, event.data)
+                if note is not None:
+                    held_reports.append(note)
 
             elif etype == EventType.BROWSER_DESTROYED.value:
                 # Without this the close is a UI-only event: the model keeps

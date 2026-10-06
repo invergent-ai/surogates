@@ -188,13 +188,13 @@ from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
-    WORKER_REPORT_TYPES,
+    WORKER_NEWS_TYPES,
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
     prune_superseded_canvas_images,
     unread_reports,
-    worker_note,
+    worker_news,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -781,8 +781,8 @@ class AgentHarness(
         after_event_id: int,
         before: int | None = None,
     ) -> tuple[list[dict], int]:
-        """Thread reports that reached a project's master past *after_event_id*,
-        and below *before* when given.
+        """Thread reports, and news of threads the user started, that reached
+        a project's master past *after_event_id*, and below *before* when given.
 
         Read for each model request, and at the end of a reply, one message
         per report, as replay renders them.  Only a master reads them live:
@@ -795,16 +795,14 @@ class AgentHarness(
         events = await self._store.get_events(
             session.id,
             after=after_event_id,
-            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED],
         )
         if before is not None:
             events = [event for event in events if event.id < before]
         if not events:
             return [], after_event_id
-        return (
-            [worker_note(event.type, event.data) for event in events],
-            max(event.id for event in events),
-        )
+        notes = [worker_news(event.type, event.data) for event in events]
+        return [note for note in notes if note is not None], max(event.id for event in events)
 
     async def _collect_steer_messages(
         self,
@@ -1504,27 +1502,8 @@ class AgentHarness(
                     "Failed to emit HARNESS_CRASH event for session %s",
                     session_id,
                 )
-            # Notify parent if this is a worker session.  ``session`` is
-            # ``None`` when the crash happened in the pre-wake setup
-            # (e.g. a Hub timeout during ``resolve_agent_def``) -- the
-            # row wasn't even fetched.  Skip the parent notification in
-            # that case; the parent's delegation poll will time out
-            # normally and the next pickup retries the wake.
-            if session is not None and session.parent_id is not None:
-                from surogates.harness.worker_notify import notify_parent_on_failure
-                try:
-                    await notify_parent_on_failure(
-                        session_store=self._store,
-                        worker_session_id=session_id,
-                        parent_session_id=session.parent_id,
-                        org_id=str(session.org_id),
-                        agent_id=session.agent_id,
-                        error=traceback.format_exc()[-500:],
-                        redis=self._redis,
-                        task_id=getattr(session, "task_id", None),
-                    )
-                except Exception:
-                    logger.debug("Failed to notify parent on crash", exc_info=True)
+            # The parent hears of a crash only when the dispatcher stops
+            # retrying it (``Orchestrator._report_failure_to_parent``).
             raise
         finally:
             leave_device_session(device_token)
@@ -1741,13 +1720,13 @@ class AgentHarness(
         # The worker reports no request had read when the wake began.  Replay
         # left them out of ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
-        # Report cursor: the newest worker report the wake has.  A project's
-        # master reads later ones live, before each request.
+        # Report cursor: the newest worker news the wake has.  A project's
+        # master reads later news live, before each request.
         report_cursor = max(
             (
                 event.id
                 for event in (all_events or [])
-                if event.type in WORKER_REPORT_TYPES
+                if event.type in WORKER_NEWS_TYPES
             ),
             default=0,
         )
@@ -2857,10 +2836,11 @@ class AgentHarness(
                     session.id, steer_cursor,
                 )
                 # A thread's report that landed meanwhile keeps the wake
-                # going too; the next request reads it.
+                # going too; the next request reads it.  News alone waits
+                # for the master's next turn, which reads it from the log.
                 arrived, report_cursor = await self._collect_reports(session, report_cursor)
                 reports.extend(arrived)
-                if followup is not None or reports:
+                if followup is not None or (reports and await self._has_unread_report(session.id)):
                     if followup is not None:
                         messages.append(followup)
                     turn_id = str(uuid4())

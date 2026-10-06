@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_, tuple_
+from sqlalchemy import and_, case, not_, select, text, true, update, delete, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -490,6 +490,17 @@ class SessionStore:
                 raise SessionNotFoundError(f"session {session_id} not found")
             await db.commit()
 
+    async def fail_if_active(self, session_id: UUID) -> bool:
+        """Fail *session_id* if it is still active; whether it was."""
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(status="failed", updated_at=func.now())
+            )
+            await db.commit()
+            return result.rowcount == 1
+
     async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
         """Re-activate an idle (completed/paused) session and record the resume.
 
@@ -535,6 +546,12 @@ class SessionStore:
         ``INTERRUPT_CHANNEL_PREFIX:<id>`` for every archived session).
         """
         async with self._sf() as db:
+            # A project's row before its tree: a thread being added holds it
+            # (``WorkstreamStore.add_thread``), so the tree read below has
+            # every thread, and a project's change takes it first too.
+            await db.execute(
+                select(WorkstreamRow.id).where(WorkstreamRow.master_session_id == session_id).with_for_update()
+            )
             result = await db.execute(
                 text(
                     """
@@ -2350,45 +2367,47 @@ class SessionStore:
         # sees the most recent harness-driven event.  Used to distinguish
         # idle-between-turns sessions from genuinely abandoned mid-turn
         # sessions.
-        latest_event_type = (
-            select(EventRow.type)
-            .where(
-                EventRow.session_id == SessionRow.id,
-                EventRow.type.notin_(trailing_async_event_types),
+        def latest_event(column):
+            return (
+                select(column)
+                .where(
+                    EventRow.session_id == SessionRow.id,
+                    EventRow.type.notin_(trailing_async_event_types),
+                )
+                .order_by(EventRow.id.desc())
+                .limit(1)
+                .correlate(SessionRow)
+                .scalar_subquery()
             )
-            .order_by(EventRow.id.desc())
-            .limit(1)
-            .correlate(SessionRow)
-            .scalar_subquery()
-        )
-        latest_event_data = (
-            select(EventRow.data)
-            .where(
-                EventRow.session_id == SessionRow.id,
-                EventRow.type.notin_(trailing_async_event_types),
-            )
-            .order_by(EventRow.id.desc())
-            .limit(1)
-            .correlate(SessionRow)
-            .scalar_subquery()
-        )
+
+        latest_event_type = latest_event(EventRow.type)
+        latest_event_data = latest_event(EventRow.data)
+        # A ``harness.crash`` under one hour old is no end: the dispatcher
+        # retries it seconds later, and a worker killed before that leaves
+        # nothing else to wake the session.  An older one is left alone, so a
+        # deploy never re-runs a turn its user asked for long ago.
         session_end_event_types = (
             "session.done",
             "session.complete",
             "session.fail",
-            "harness.crash",
         )
+        latest_event_is_an_old_crash = and_(
+            latest_event_type == "harness.crash",
+            latest_event(EventRow.created_at) < func.now() - text("interval '1 hour'"),
+        )
+        # ``case`` checks the type before taking the length: one response
+        # whose ``tool_calls`` is a JSON null would otherwise error the sweep.
+        tool_calls = latest_event_data["message"]["tool_calls"]
         latest_llm_response_is_clean = and_(
             latest_event_type == "llm.response",
-            func.jsonb_array_length(
-                func.coalesce(
-                    latest_event_data["message"]["tool_calls"],
-                    text("'[]'::jsonb"),
-                )
+            case(
+                (func.jsonb_typeof(tool_calls) == "array", func.jsonb_array_length(tool_calls)),
+                else_=0,
             ) == 0,
         )
         latest_event_ended_work = or_(
             latest_event_type.in_(session_end_event_types),
+            latest_event_is_an_old_crash,
             latest_llm_response_is_clean,
         )
         stmt = (

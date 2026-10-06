@@ -24,11 +24,16 @@ async def start_thread(
     title: str,
     goal: str,
     context: str,
+    proposal: dict[str, str] | None = None,
 ) -> Session | None:
     """Start a thread of *master*'s project on *goal*; None when the project is archived.
 
     The thread is queued only once its goal is written, so nothing runs it
-    before it has its row and its first message.
+    before it has its row and its first message.  A thread the user starts
+    from a proposal card (*proposal*: its ``proposal_id`` and ``key``) is
+    news to the master, which reads it at its next model request; it does
+    not wake the master, whose next turn comes with the thread's first
+    report at the latest.
     """
     projects = WorkstreamStore(session_factory)
     project = await projects.get(
@@ -46,12 +51,15 @@ async def start_thread(
     thread = await create_thread_session(store=session_store, master=master, config=config)
     content = f"{goal}\n\n## Context\n{context}" if context else goal
     try:
-        await projects.add_thread(thread.id, project.id, title)
+        if not await projects.add_thread(thread.id, project.id, title):
+            # Archived since it was read: the thread goes with the project.
+            await session_store.update_session_status(thread.id, "archived")
+            return None
         await session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": content})
-        await session_store.emit_event(
-            master.id, EventType.WORKER_SPAWNED,
-            {"worker_id": str(thread.id), "title": title, "goal": goal[:500]},
-        )
+        spawned = {"worker_id": str(thread.id), "title": title, "goal": goal[:500]}
+        if proposal is not None:
+            spawned.update(started_by="user", proposal_id=proposal["proposal_id"], key=proposal["key"])
+        await session_store.emit_event(master.id, EventType.WORKER_SPAWNED, spawned)
     except BaseException:
         # A thread without its row, its goal or its card is never queued:
         # archived, it is neither listed nor left for a duplicate to shadow.

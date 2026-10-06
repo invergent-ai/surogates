@@ -385,10 +385,11 @@ DELEGATION_TOOLS: frozenset[str] = frozenset({
 # delegation tools.  Used only for batched (post-stream) dispatch.
 BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 
-# Tools that start, resume or schedule another session.  The streaming
-# executor starts them only once the response is saved: a dropped stream is
-# retried, the retried response makes the call again, and a call that had
-# already run would start its session twice.
+# Tools that start, resume or schedule another session, or offer the user one
+# to start.  The streaming executor starts them only once the response is
+# saved: a dropped stream is retried, the retried response makes the call
+# again, and a call that had already run would start its session twice, or
+# show its proposal twice.
 SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "send_worker_message",
     "spawn_task",
@@ -397,6 +398,7 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "cron_create",
     "start_thread",
     "message_thread",
+    "propose_threads",
 })
 
 MAX_TOOL_WORKERS: int = 8

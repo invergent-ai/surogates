@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.db.models import Event, InboxItem, Workstream, WorkstreamThread
 from surogates.db.models import Session as SessionRow
-from surogates.db.models import Workstream, WorkstreamThread
+from surogates.session.events import EventType
 from surogates.workstreams import master_instructions
+from surogates.workstreams.derive import LATEST_TYPES, WAITING_KINDS, ThreadFacts
 
 
 def _owned(workstream_id: UUID | None, *, org_id: UUID, agent_id: str, user_id: UUID) -> tuple[Any, ...]:
@@ -72,12 +75,26 @@ class WorkstreamStore:
             await db.commit()
             return row
 
-    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> None:
-        """Record *session_id* as a thread of the project, and title its chat."""
+    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> bool:
+        """Record *session_id* as a thread of the project, and title its chat;
+        False, writing nothing, when the project has been archived.
+
+        The project's row is held while the thread is added, and an archive
+        takes it before it reads the tree it archives, so a thread is either
+        in that tree or refused here.
+        """
         async with self._sf() as db:
+            live = await db.scalar(
+                select(Workstream.id)
+                .where(Workstream.id == workstream_id, Workstream.status == "active")
+                .with_for_update(read=True)
+            )
+            if live is None:
+                return False
             db.add(WorkstreamThread(session_id=session_id, workstream_id=workstream_id, title=title))
             await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(title=title))
             await db.commit()
+            return True
 
     async def get_thread(self, session_id: UUID) -> WorkstreamThread | None:
         async with self._sf() as db:
@@ -90,3 +107,101 @@ class WorkstreamStore:
                 update(WorkstreamThread).where(WorkstreamThread.session_id == session_id).values(resolved_at=None)
             )
             await db.commit()
+
+    async def pause_thread(self, session_id: UUID) -> bool:
+        """Pause *session_id* if it is working; whether it was.
+
+        Conditional, so a stop that lands as the thread's turn ends leaves
+        the thread as its turn left it.
+        """
+        async with self._sf() as db:
+            result = await db.execute(
+                update(SessionRow).where(SessionRow.id == session_id, SessionRow.status == "active")
+                .values(status="paused", updated_at=func.now())
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def resolve_thread(self, session_id: UUID) -> None:
+        """Move the thread to Resolved; one already there keeps the moment it got there."""
+        async with self._sf() as db:
+            await db.execute(
+                update(WorkstreamThread)
+                .where(WorkstreamThread.session_id == session_id, WorkstreamThread.resolved_at.is_(None))
+                .values(resolved_at=func.now())
+            )
+            await db.commit()
+
+    async def thread_facts(self, workstream_id: UUID, *, thread_id: UUID | None = None) -> list[ThreadFacts]:
+        """What the rows of the project's threads are derived from, or only
+        *thread_id*'s.  A deleted thread is left out."""
+        query = (
+            select(WorkstreamThread, SessionRow.status, SessionRow.updated_at)
+            .join(SessionRow, SessionRow.id == WorkstreamThread.session_id)
+            .where(WorkstreamThread.workstream_id == workstream_id, SessionRow.status != "archived")
+        )
+        if thread_id is not None:
+            query = query.where(WorkstreamThread.session_id == thread_id)
+        async with self._sf() as db:
+            threads = (await db.execute(query)).all()
+            ids = [thread.session_id for thread, _, _ in threads]
+            if not ids:
+                return []
+            # A thread's delegated children wait on the user for it, so every
+            # session under a thread counts as the thread's.
+            tree = select(SessionRow.id, SessionRow.id.label("thread_id")).where(SessionRow.id.in_(ids))
+            tree = tree.cte("tree", recursive=True)
+            tree = tree.union_all(
+                select(SessionRow.id, tree.c.thread_id).join(tree, SessionRow.parent_id == tree.c.id)
+            )
+            thread_of = dict((await db.execute(select(tree.c.id, tree.c.thread_id))).all())
+            # Pending items, and the expired questions the rules read.
+            items = await db.scalars(select(InboxItem).where(
+                InboxItem.session_id.in_(thread_of),
+                InboxItem.kind.in_(WAITING_KINDS),
+                or_(
+                    InboxItem.status == "pending",
+                    and_(InboxItem.status == "expired", InboxItem.kind == "input_required"),
+                ),
+            ))
+            # The newest event of each type the rules read, per thread: the
+            # ids first, aggregated from narrow rows, then those rows.  And
+            # every turn summary, for the files.
+            newest = (
+                select(func.max(Event.id))
+                .where(Event.session_id.in_(ids), Event.type.in_(LATEST_TYPES))
+                .group_by(Event.session_id, Event.type)
+            )
+            latest = await db.scalars(select(Event).where(Event.id.in_(newest)))
+            summaries = await db.scalars(select(Event).where(
+                Event.session_id.in_(ids), Event.type == EventType.TURN_SUMMARY.value,
+            ))
+            items_of, events_of = defaultdict(list), defaultdict(list)
+            for item in items:
+                items_of[thread_of[item.session_id]].append(item)
+            for event in (*latest, *summaries):
+                events_of[event.session_id].append(event)
+        return [
+            ThreadFacts(
+                id=thread.session_id, title=thread.title, status=status,
+                created_at=thread.created_at, updated_at=updated_at, resolved_at=thread.resolved_at,
+                # Every thread works in the cloud until local-folder threads.
+                place={"kind": "cloud"},
+                items=tuple(items_of[thread.session_id]), events=tuple(events_of[thread.session_id]),
+            )
+            for thread, status, updated_at in sorted(threads, key=lambda found: found[2], reverse=True)
+        ]
+
+    async def latest_report(self, master_id: UUID, thread_id: UUID) -> Event | None:
+        """The last report *thread_id* sent its master, as the master read it."""
+        async with self._sf() as db:
+            return await db.scalar(
+                select(Event)
+                .where(
+                    Event.session_id == master_id,
+                    Event.type.in_((EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value)),
+                    Event.data["worker_id"].astext == str(thread_id),
+                )
+                .order_by(Event.id.desc())
+                .limit(1)
+            )

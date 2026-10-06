@@ -836,6 +836,7 @@ class Orchestrator:
                     "tripped": True,
                     "tripped_event_id": fail_event_id,
                 })
+                await self._report_failure_to_parent(session_id, f"crash_loop_detected: {str(exc) or type(exc).__name__}")
                 return
 
             if attempt + 1 < _MAX_RETRIES:
@@ -880,6 +881,42 @@ class Orchestrator:
                         "Failed to emit SESSION_FAIL for session %s",
                         session_id,
                     )
+                await self._report_failure_to_parent(session_id, f"max_retries_exhausted: {str(exc) or type(exc).__name__}")
+
+    async def _report_failure_to_parent(self, session_id: UUID, error: str) -> None:
+        """Tell the session that started *session_id* that it failed for good.
+
+        Once, where the dispatcher stops retrying: a crash it retries is not
+        the worker's end, and its parent would hear of every attempt.  A
+        scheduled run is not a worker: it says so where its result goes, as
+        its turn's own failure does.
+        """
+        from surogates.harness.loop_artifact_completion import announce_failure
+        from surogates.harness.loop_messages import _is_scheduled_run, _should_notify_parent_on_completion
+        from surogates.harness.worker_notify import notify_parent_on_failure
+
+        try:
+            session = await self.session_store.get_session(session_id)
+        except Exception:
+            logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
+            return
+        if _is_scheduled_run(session):
+            try:
+                await announce_failure(self.session_store, session, error=error)
+            except Exception:
+                logger.warning("Could not report the failure of scheduled run %s", session_id, exc_info=True)
+        elif _should_notify_parent_on_completion(session):
+            await notify_parent_on_failure(
+                session_store=self.session_store,
+                worker_session_id=session_id,
+                parent_session_id=session.parent_id,
+                org_id=str(session.org_id),
+                agent_id=session.agent_id,
+                error=error,
+                redis=self.redis,
+                task_id=getattr(session, "task_id", None),
+                session_factory=self._session_factory,
+            )
 
     def _task_done(self, task: asyncio.Task) -> None:
         """Remove the task from the tracking set on completion."""
@@ -1120,6 +1157,10 @@ class Orchestrator:
         )
         await self.session_store.release_stale_lease(session.id)
         await self._release_dead_owner_gate_slot(session)
+        # Every runtime worker sweeps and nothing claims a session, so two can
+        # give up on one at once: only the one that fails it says so.
+        if not await self.session_store.fail_if_active(session.id):
+            return
         await self.session_store.emit_event(
             session.id,
             EventType.SESSION_FAIL,
@@ -1130,7 +1171,7 @@ class Orchestrator:
                 "retryable": False,
             },
         )
-        await self.session_store.update_session_status(session.id, "failed")
+        await self._report_failure_to_parent(session.id, "recovery_loop")
         # Nothing will resume it: what it left waiting on a computer must not run later.
         if self._session_factory is not None:
             from surogates.devices.operations import DeviceOperations
