@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, not_, select, text, true, update, delete, func, or_, tuple_
+from sqlalchemy import and_, case, not_, select, text, true, update, delete, func, or_, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -2395,13 +2395,14 @@ class SessionStore:
             latest_event_type == "harness.crash",
             latest_event(EventRow.created_at) < func.now() - text("interval '1 hour'"),
         )
+        # ``case`` checks the type before taking the length: one response
+        # whose ``tool_calls`` is a JSON null would otherwise error the sweep.
+        tool_calls = latest_event_data["message"]["tool_calls"]
         latest_llm_response_is_clean = and_(
             latest_event_type == "llm.response",
-            func.jsonb_array_length(
-                func.coalesce(
-                    latest_event_data["message"]["tool_calls"],
-                    text("'[]'::jsonb"),
-                )
+            case(
+                (func.jsonb_typeof(tool_calls) == "array", func.jsonb_array_length(tool_calls)),
+                else_=0,
             ) == 0,
         )
         latest_event_ended_work = or_(

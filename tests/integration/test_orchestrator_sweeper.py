@@ -247,3 +247,16 @@ async def test_a_session_whose_worker_died_after_a_recent_crash_is_recovered(
     member = encode_queue_member(org_id=str(session.org_id), agent_id=agent_id, session_id=str(session.id))
     assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == recovered
 
+
+async def test_a_response_with_null_tool_calls_does_not_stop_the_sweep(session_store, session_factory, redis_client):
+    agent_id = "sweeper-null-tools-agent"
+    answered = await _stuck(session_store, session_factory, agent_id, (
+        EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "Done.", "tool_calls": None}},
+    ))
+    orphan = await _stuck(session_store, session_factory, agent_id)
+    for session in (answered, orphan):
+        await _backdate(session_factory, session.id, seconds=120)
+    sweeper = _sweeper(session_store, redis_client, agent_id)
+    assert await sweeper._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
+    member = encode_queue_member(org_id=str(orphan.org_id), agent_id=agent_id, session_id=str(orphan.id))
+    assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == 1
