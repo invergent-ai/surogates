@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import type { ElectronApplication } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { dataHome, ELECTRON, launch, MAIN, quit, shellEnv } from "./launch.js";
+import { dataHome, ELECTRON, launch, MAIN, quit, shellEnv, shellPage } from "./launch.js";
 
 let home: string;
 let app: ElectronApplication | undefined;
@@ -21,6 +21,14 @@ afterEach(async () => {
   app = undefined;
   rmSync(home, { recursive: true, force: true });
 });
+
+// An agent kept from an earlier run, at an address nothing answers on: the window shows its three columns.
+function seedAgent(): void {
+  mkdirSync(join(home, "surogate"), { recursive: true });
+  writeFileSync(join(home, "surogate", "agent.json"), JSON.stringify({
+    origin: "http://127.0.0.1:9", agentId: "a", name: "127.0.0.1:9", desktopSessions: true, multiSession: true,
+  }));
+}
 
 const visible = (shell: ElectronApplication) =>
   shell.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().map((window) => window.isVisible()));
@@ -40,8 +48,9 @@ describe("the shell", () => {
   });
 
   it("is one window of three columns with no native frame, under the system's own controls", async () => {
+    seedAgent();
     app = await launch(home);
-    const page = await app.firstWindow();
+    const page = await shellPage(app);
     await page.waitForSelector("#panel #close-panel");
     const layout = await page.evaluate(() => {
       const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect().toJSON() as DOMRect;

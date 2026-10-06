@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 import { Outlet, createRootRoute, useRouterState } from "@tanstack/react-router";
-import { Suspense } from "react";
+import { Suspense, useEffect } from "react";
 
+import { authFetch, fetchCurrentUser } from "@/api/auth";
+import { listSessions } from "@/api/sessions";
+import { hasAuthToken } from "@/features/auth";
 import { useVisualViewport } from "@/hooks/use-visual-viewport";
+import { getDesktop, joinDesktop } from "@/lib/desktop-bridge";
 
 import { AppProvider } from "../provider";
 
@@ -14,6 +18,7 @@ function RootLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const isBare = BARE_ROUTES.includes(pathname);
   useVisualViewport();
+  useDesktop(!isBare);
 
   return (
     <AppProvider>
@@ -33,6 +38,40 @@ function RootLayout() {
       </div>
     </AppProvider>
   );
+}
+
+// In Surogate Desktop, once signed in: tell the desktop who is signed in, serve it their
+// projects for its sidebar and Overview pane, and register this computer.
+function useDesktop(signedInRoute: boolean): void {
+  useEffect(() => {
+    const desktop = getDesktop();
+    if (!desktop || !signedInRoute || !hasAuthToken()) return;
+    return joinDesktop(desktop, {
+      register: async (name) => {
+        const response = await authFetch("/api/v1/devices", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+        if (!response.ok) throw new Error(`Registering this computer failed (HTTP ${response.status})`);
+        return (await response.json()) as { token: string };
+      },
+      account: async () => {
+        const me = await fetchCurrentUser();
+        return { name: me.display_name ?? me.email, email: me.email, userId: me.id, orgId: me.org_id };
+      },
+      sessions: async () =>
+        (await listSessions({ includeDescendants: true, limit: 200 })).sessions.map((session) => ({
+          id: session.id,
+          parentId: session.parent_id,
+          channel: session.channel,
+          title: session.title,
+          status: session.status,
+          createdAt: session.created_at,
+          updatedAt: session.updated_at,
+        })),
+    });
+  }, [signedInRoute]);
 }
 
 export const Route = createRootRoute({

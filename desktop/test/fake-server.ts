@@ -1,6 +1,7 @@
 // A device-link server for tests: protocol version 1, as surogates/devices/link.py speaks it.
 
 import { once } from "node:events";
+import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { WebSocketServer, type WebSocket } from "ws";
@@ -27,9 +28,10 @@ export class FakeLinkServer {
 
   constructor(private readonly options: FakeLinkServerOptions = {}) {}
 
-  async start(): Promise<string> {
-    this.server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
-    await once(this.server, "listening");
+  // On a port of its own; or on *at*'s listening server and path, as the api serves the link beside its pages.
+  async start(at?: { server: Server; path: string }): Promise<string> {
+    this.server = at ? new WebSocketServer(at) : new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    if (!at) await once(this.server, "listening");
     this.server.on("connection", (socket, request) => {
       this.connections += 1;
       this.socket = socket;
@@ -56,8 +58,8 @@ export class FakeLinkServer {
         }
       });
     });
-    const { port } = this.server.address() as AddressInfo;
-    return `ws://127.0.0.1:${port}`;
+    const { port } = (at ? at.server.address() : this.server.address()) as AddressInfo;
+    return `ws://127.0.0.1:${port}${at?.path ?? ""}`;
   }
 
   send(frame: Record<string, unknown> | string): void {
@@ -80,6 +82,11 @@ export class FakeLinkServer {
       if (Date.now() > deadline) throw new Error("timed out waiting");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+  }
+
+  // Cut every connection, and keep serving.
+  drop(): void {
+    for (const client of this.server?.clients ?? []) client.terminate();
   }
 
   async stop(): Promise<void> {

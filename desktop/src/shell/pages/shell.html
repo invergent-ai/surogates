@@ -15,8 +15,10 @@
         <h1>Connect to your agent</h1>
         <p class="desc">Paste your agent's address. You sign in to it next, and this computer joins it, so the agent can work on folders of this computer that you choose.</p>
         <form class="connect" id="connect">
-          <input id="address" type="text" placeholder="https://agent.example.com" aria-label="Agent address" autocomplete="off" spellcheck="false" />
-          <button class="btn primary" type="submit">Connect</button>
+          <fieldset id="connecting">
+            <input id="address" type="text" placeholder="https://agent.example.com" aria-label="Agent address" autocomplete="off" spellcheck="false" />
+            <button class="btn primary" type="submit">Connect</button>
+          </fieldset>
         </form>
         <p class="error" id="error" role="alert"></p>
       </div>

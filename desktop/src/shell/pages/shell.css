@@ -215,6 +215,16 @@ body.main.first {
   margin-top: 8px;
 }
 
+.connect fieldset {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .connect input {
   flex: 1;
   min-width: 0;
