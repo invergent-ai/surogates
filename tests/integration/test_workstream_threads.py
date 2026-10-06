@@ -21,6 +21,7 @@ from surogates.harness.loop_context_replay import unread_reports
 from surogates.harness.slash_skill import build_deep_research_message
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
+from surogates.runtime import SlashCommandConfig
 from surogates.runtime.governance import build_governance_gate
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
@@ -785,3 +786,187 @@ async def test_two_threads_clone_one_repository_into_two_folders(api):
         f"/workspace/.threads/{first.id}/reports",
         "/workspace/reports",
     ]
+
+
+async def turn_of_the_master_ends(api, master, text="I started a thread for each part.") -> None:
+    """The master answers the user and its turn ends: completed, its cursor at the end."""
+    await api.app.state.session_store.emit_event(master.id, EventType.LLM_REQUEST, {})
+    await answered(api, master, text)
+    await turn_ends(api, master)
+
+
+def waking(api, monkeypatch):
+    """A harness whose wake runs for real up to the turn, which records the
+    conversation its first request sends instead of calling the model."""
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    harness = _harness(api.app.state.session_store, SlashCommandConfig())
+    del harness._rebuild_messages  # the real replay
+    harness._compressor.prune_stale_browser_states.side_effect = lambda messages: messages
+    harness._handle_loop_command = AsyncMock()
+    handed: list[list[dict]] = []
+
+    async def turn(session, messages, system_prompt, lease, *, all_events, **_):
+        handed.append(messages + unread_reports(all_events))
+
+    harness._run_loop = turn
+    return harness, handed
+
+
+async def test_a_finished_master_takes_a_turn_on_a_report(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await turn_of_the_master_ends(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    [conversation] = handed
+    assert conversation[-2] == {"role": "assistant", "content": "I started a thread for each part."}
+    assert conversation[-1]["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
+    [resumed] = await events_of(api, master.id, EventType.SESSION_RESUME)
+    assert resumed.data == {"source": "worker_report"}
+    assert (await api.app.state.session_store.get_session(master.id)).status == "active"
+
+
+async def test_a_report_wakes_a_master_whose_last_message_was_a_command(api, monkeypatch):
+    # The user's /loop was handled in its own turn; the report must not run it again.
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await api.app.state.session_store.emit_event(
+        master.id, EventType.USER_MESSAGE, {"content": "/loop 1d Check the cash report"},
+    )
+    await turn_of_the_master_ends(api, master, "I will check the cash report daily.")
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    harness._handle_loop_command.assert_not_awaited()
+    assert handed[0][-1]["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
+
+
+async def test_a_report_already_read_wakes_no_one(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await turn_of_the_master_ends(api, master, "The memo is drafted.")
+
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    assert handed == []
+    assert await events_of(api, master.id, EventType.SESSION_RESUME) == []
+
+
+async def test_a_stopped_master_waits_for_the_user(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await api.app.state.session_store.update_session_status(master.id, "paused")
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    assert handed == []
+    assert (await api.app.state.session_store.get_session(master.id)).status == "paused"
+
+
+TODO_CALL = (
+    {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}},
+    ]},
+    {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1},
+)
+
+
+async def live_turn(api, monkeypatch, master, replies, *, during_tool=None, during_reply=None) -> list[list[dict]]:
+    """One real turn of *master* against a model that gives *replies* in order.
+
+    *during_tool* runs while the model's ``todo`` call runs, and
+    *during_reply* while the model writes its first reply.  Returns the
+    conversation of each model request.
+    """
+    store = api.app.state.session_store
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+
+    async def todo(name, arguments, **_):
+        await during_tool()
+        return '{"ok": true}'
+
+    monkeypatch.setattr(registry, "dispatch", todo)
+    harness = _make_loop_harness(session_store=store)
+    harness._tools = registry
+    harness._tenant = SimpleNamespace(org_id=master.org_id, user_id=master.user_id, asset_root="/tmp/test")
+    harness._session_factory = api.app.state.session_factory
+    harness._slash_commands = SlashCommandConfig()
+    replies = iter(replies)
+    requests: list[list[dict]] = []
+
+    async def model(**kwargs):
+        requests.append(kwargs["create_kwargs"]["messages"])
+        if during_reply is not None and len(requests) == 1:
+            await during_reply()
+        message, usage = next(replies)
+        if kwargs["on_tool_call_complete"] is not None:
+            for call in message.get("tool_calls") or []:
+                kwargs["on_tool_call_complete"](call)
+        return message, usage
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
+    lease = await store.try_acquire_lease(master.id, "worker-threads", ttl_seconds=60)
+    events = await store.get_events(master.id)
+    await harness._run_loop(master, harness._rebuild_messages(events), "system", lease, all_events=events)
+    await store.release_lease(master.id, lease.lease_token)
+    return requests
+
+
+async def test_a_report_during_a_tool_call_is_read_in_that_turn(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "Draft A, then tell me."})
+
+    async def thread_reports():
+        await answered(api, thread, "Drafted the memo.")
+        await turn_ends(api, thread)
+
+    requests = await live_turn(
+        api, monkeypatch, master, [TODO_CALL, _final_response("The memo is drafted.")],
+        during_tool=thread_reports,
+    )
+    *_, called, result, report = requests[1]
+    assert [called["role"], result["role"], report["role"]] == ["assistant", "tool", "user"]
+    assert report["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
+    # Replay hands a later turn the conversation the model was sent.
+    replay = harness_of(api)._rebuild_messages(await store.get_events(master.id))
+    assert [(m["role"], m.get("content")) for m in replay[-4:-1]] == [
+        (m["role"], m.get("content")) for m in requests[1][-3:]
+    ]
+    # Read in its turn, the report wakes no second one once that turn ends.
+    await turn_ends(api, master)
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    assert handed == []
+
+
+async def test_a_report_during_the_masters_reply_is_read_before_its_turn_ends(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "How is A going?"})
+
+    async def thread_reports():
+        await answered(api, thread, "Drafted the memo.")
+        await turn_ends(api, thread)
+
+    requests = await live_turn(
+        api, monkeypatch, master,
+        [_final_response("A is still being drafted."), _final_response("A is drafted now.")],
+        during_reply=thread_reports,
+    )
+    assert len(requests) == 2
+    *_, answer, report = requests[1]
+    assert (answer["role"], answer["content"]) == ("assistant", "A is still being drafted.")
+    assert report["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
