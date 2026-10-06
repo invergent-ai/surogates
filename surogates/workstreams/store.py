@@ -82,3 +82,11 @@ class WorkstreamStore:
     async def get_thread(self, session_id: UUID) -> WorkstreamThread | None:
         async with self._sf() as db:
             return await db.get(WorkstreamThread, session_id)
+
+    async def reopen_thread(self, session_id: UUID) -> None:
+        """New work for a thread takes it out of Resolved."""
+        async with self._sf() as db:
+            await db.execute(
+                update(WorkstreamThread).where(WorkstreamThread.session_id == session_id).values(resolved_at=None)
+            )
+            await db.commit()

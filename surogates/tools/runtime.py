@@ -106,7 +106,7 @@ class ToolRuntime:
             ask_user_question,
             cron,
             coordinator,
-            threads,  # start_thread (a project's master)
+            threads,  # start_thread, message_thread, stop_thread (a project's master)
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
             github,  # github (scoped GitHub REST — read + writes — for the agent's repos)

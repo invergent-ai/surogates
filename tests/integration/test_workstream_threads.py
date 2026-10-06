@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -17,12 +18,13 @@ from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_sin
 from surogates.runtime.governance import build_governance_gate
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
 
-from .test_devices import api  # noqa: F401  (api is a fixture)
+from .test_devices import api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstreams import create, master_of, patch, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -221,7 +223,7 @@ async def test_deleting_the_user_deletes_their_threads(api, session_factory):
         assert await db.get(WorkstreamThread, thread.id) is None
 
 
-THREAD_TOOLS = {"start_thread"}
+THREAD_TOOLS = {"start_thread", "message_thread", "stop_thread"}
 
 
 async def test_only_a_master_is_sent_the_thread_tools(api, monkeypatch, session_factory):
@@ -257,3 +259,113 @@ async def test_an_agent_with_a_tool_allow_list_still_starts_threads(api):
     gate = build_governance_gate({"enabled": True, "allowed_tools": ["web_search"]})
     result = await call_tool(api, master, "start_thread", gate=gate, title="Draft A", goal="Draft A.")
     assert result["status"] == "started", result
+
+
+async def resolve(api, thread) -> None:
+    async with api.app.state.session_factory() as db:
+        await db.execute(
+            update(WorkstreamThread).where(WorkstreamThread.session_id == thread.id)
+            .values(resolved_at=datetime.now(timezone.utc))
+        )
+        await db.commit()
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "paused"])
+async def test_a_follow_up_runs_a_finished_thread_again(api, status):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    store = api.app.state.session_store
+    await store.update_session_status(thread.id, status)
+    await resolve(api, thread)
+    await api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
+
+    result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    assert result == {"status": "sent", "thread_id": str(thread.id)}
+    assert (await store.get_session(thread.id)).status == "active"
+    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.USER_MESSAGE)
+    assert [(e.type, e.data.get("content")) for e in events[-2:]] == [
+        ("session.resume", None), ("user.message", "Use the 2025 figures."),
+    ]
+    assert await queued(api, thread)
+    async with api.app.state.session_factory() as db:
+        assert (await db.get(WorkstreamThread, thread.id)).resolved_at is None
+
+
+async def test_a_follow_up_to_a_working_thread_is_steered_in(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Keep it to one page.")
+    events = await events_of(api, thread.id, EventType.SESSION_RESUME, EventType.USER_MESSAGE)
+    assert [e.type for e in events] == ["user.message", "user.message"]
+
+
+async def not_this_projects_threads(api, master) -> dict[str, str]:
+    """Ids a master must not reach: another project's thread, a plain
+    child, the master itself, and ids that are not threads at all."""
+    other = await start(api, await master_of(api, await create(api, name="Budget")))
+    child = await create_child_session(store=api.app.state.session_store, parent=master, channel="worker")
+    return {
+        "another project's thread": str(other.id),
+        "a plain worker": str(child.id),
+        "the master": str(master.id),
+        "an unknown id": str(uuid4()),
+        "not an id": "Draft A",
+    }
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("message_thread", {"message": "Use the 2025 figures."}),
+    ("stop_thread", {}),
+], ids=["message", "stop"])
+async def test_a_master_reaches_only_its_own_threads(api, tool, arguments):
+    master = await master_of(api, await create(api))
+    store = api.app.state.session_store
+    for case, thread_id in (await not_this_projects_threads(api, master)).items():
+        result = await call_tool(api, master, tool, thread_id=thread_id, **arguments)
+        assert result == {"error": f"No thread {thread_id} in this project."}, case
+        if case in ("another project's thread", "a plain worker"):
+            target = UUID(thread_id)
+            assert (await store.get_session(target)).status == "active", case
+            assert not [
+                e for e in await events_of(api, target, EventType.USER_MESSAGE, EventType.SESSION_PAUSE)
+                if e.data.get("content") != "Draft the A memo as A.docx."
+            ], case
+
+
+async def test_a_thread_cannot_reach_its_siblings(api):
+    master = await master_of(api, await create(api))
+    first = await start(api, master)
+    second = await start(api, master, title="Summarise B", goal="Summarise B.pdf.")
+    for tool, arguments in (("message_thread", {"message": "Stop the summary."}), ("stop_thread", {})):
+        result = await call_tool(api, first, tool, thread_id=str(second.id), **arguments)
+        assert result == {"error": f"No thread {second.id} in this project."}, tool
+    assert (await api.app.state.session_store.get_session(second.id)).status == "active"
+    assert len(await events_of(api, second.id, EventType.USER_MESSAGE)) == 1
+
+
+async def test_a_deleted_thread_takes_no_follow_up(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await api.app.state.session_store.update_session_status(thread.id, "archived")
+    result = await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    assert result == {"error": f"Thread {thread.id} was deleted."}
+    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
+
+
+async def test_stopping_a_working_thread_pauses_it(api):
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    listener = api.app.state.redis.pubsub()
+    await listener.subscribe(f"surogates:interrupt:{thread.id}")
+    try:
+        result = await call_tool(api, master, "stop_thread", thread_id=str(thread.id), reason="The brief changed.")
+        assert result == {"status": "stopped", "thread_id": str(thread.id)}
+        assert json.loads(await next_control(listener)) == {"reason": "The brief changed."}
+    finally:
+        await listener.aclose()
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "paused"
+    [paused] = await events_of(api, thread.id, EventType.SESSION_PAUSE)
+    assert paused.data == {"reason": "The brief changed."}
+
+    again = await call_tool(api, master, "stop_thread", thread_id=str(thread.id))
+    assert again == {"status": "not_running", "thread_id": str(thread.id)}
