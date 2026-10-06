@@ -17,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 import re
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -139,6 +141,14 @@ def pack_files(manifest: Mapping[str, Any], settings: SoundSettings) -> list[str
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*\.(ogg|mp3|json)$")
 
 
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Write via a temp file of this writer's own: calls start in parallel (a process each, one cache),
+    and a shared temp name let one call move away, or half-overwrite, another's file."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part")
+    tmp.write_bytes(data)
+    tmp.replace(path)  # atomic: a reader sees the old file or the new one, never half of one
+
+
 async def fetch_pack(get: Callable[[str], Any], cache: Path, settings: SoundSettings) -> Path | None:
     """Download what a call needs into ``cache`` (files are content-named, so a cached one is never stale).
 
@@ -155,10 +165,8 @@ async def fetch_pack(get: Callable[[str], Any], cache: Path, settings: SoundSett
                 raise ValueError(f"unsafe file name in the sound pack: {name!r}")
             path = cache / name
             if not path.exists():
-                tmp = path.with_suffix(path.suffix + ".part")
-                tmp.write_bytes(await get(name))
-                tmp.replace(path)
-        (cache / "manifest.json").write_text(json.dumps(manifest))
+                _write_atomic(path, await get(name))
+        _write_atomic(cache / "manifest.json", json.dumps(manifest).encode())
         return cache
     except Exception:
         log.warning("sound pack unavailable; the call has no background", exc_info=True)

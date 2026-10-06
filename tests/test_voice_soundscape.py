@@ -278,3 +278,21 @@ async def test_closing_the_player_never_hangs_on_a_room_that_is_gone():
     player._task = asyncio.ensure_future(asyncio.Event().wait())
     player._room = SimpleNamespace(isconnected=lambda: False, local_participant=None)  # gone: nothing to unpublish
     await asyncio.wait_for(player.aclose(), timeout=4)
+
+
+@pytest.mark.asyncio
+async def test_two_calls_filling_the_cache_at_once_both_get_their_sounds(tmp_path):
+    """Calls start in parallel (one process each, one cache): writing the same temp file raced."""
+    import asyncio
+    import json as _json
+    from surogates.voice.soundscape import fetch_pack
+
+    async def get(name):
+        await asyncio.sleep(0)  # interleave the two calls at every download
+        return _json.dumps(MANIFEST).encode() if name == "manifest.json" else b"audio:" + name.encode()
+
+    settings = SoundSettings(scene="clinic")
+    results = await asyncio.gather(*(fetch_pack(get, tmp_path, settings) for _ in range(2)))
+    assert results == [tmp_path, tmp_path]
+    assert _json.loads((tmp_path / "manifest.json").read_text())["level_dbfs"] == -20
+    assert not list(tmp_path.glob("*.part*"))
