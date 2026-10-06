@@ -9,6 +9,7 @@ import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { forkHost, HOST_STOPPED, type HostProcess, NOT_BOUND } from "../src/hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
+import { type DeviceStack, stopDevice } from "../src/shell/device-stack.js";
 import { VmExecutor } from "../src/vm/executor.js";
 import type { VmOperation } from "../src/vm/manager.js";
 
@@ -24,6 +25,8 @@ let sent: VmOperation[];
 let torn: Array<[string, number]>;
 // What the VM does with each operation it is sent; by default, a command that says "ran".
 let guest: (operation: VmOperation, signal: AbortSignal) => Promise<Outcome>;
+// What the VM does with a root's teardown; by default, it answers at once.
+let tear: (root: string) => Promise<void>;
 let executor: VmExecutor;
 
 const ran = (output: string): Outcome => ({ ok: { output, returncode: 0, timed_out: false } });
@@ -59,8 +62,9 @@ function vmExecutor(idleMs?: number): VmExecutor {
         sent.push(operation);
         return guest(operation, cancel);
       },
-      teardown: async (root) => {
+      teardown: (root) => {
         torn.push([root, exits]);
+        return tear(root);
       },
     },
   });
@@ -76,6 +80,7 @@ beforeEach(() => {
   sent = [];
   torn = [];
   guest = async () => ran("ran\n");
+  tear = async () => {};
 });
 
 afterEach(async () => {
@@ -119,6 +124,20 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     const answer = await run();
     expect(answer).toEqual(ran(`made\n\n${HOOKS_NOTICE}.git/hooks/pre-commit`));
     expect(statSync(join(folder, ".git", "hooks", "pre-commit")).mode & 0o111).toBe(0);
+  });
+
+  it("quits within its bound when the guest does not answer a root's teardown, and the VM stops all the same", async () => {
+    vmExecutor();
+    expect(await run()).toEqual(ran("ran\n"));
+    // A manager that is wedged, or a guest waiting on a folder whose mount does not answer.
+    tear = () => new Promise(() => {});
+    const stopped: string[] = [];
+    const begun = performance.now();
+    const quit = stopDevice(Promise.resolve({ stop: () => executor.stop() } as DeviceStack), { stop: async () => void stopped.push("vm") });
+    expect(await Promise.race([quit.then(() => "quit"), new Promise((resolve) => setTimeout(() => resolve("still quitting"), 9_000))])).toBe("quit");
+    // The host's own bound on its stop: 5 s.
+    expect(performance.now() - begun).toBeLessThan(7_000);
+    expect([torn.map(([root]) => root), stopped, exits]).toEqual([[ROOT], ["vm"], 1]);
   });
 
   it("keeps looking after a command for the hooks what it left running in the guest writes later", async () => {

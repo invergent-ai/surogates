@@ -36,6 +36,7 @@ export interface VmOptions extends Disks {
   user: HostUser; // whom the roots run for: the name and home they see
   cpus?: number;
   pingMs?: number;
+  shareMs?: number;
 }
 
 /**
@@ -97,6 +98,11 @@ const describe = (error: unknown) => (error instanceof Error ? error.message : S
 // The folder is not the one its chat was bound to: its share would serve whatever is at the path now.
 class FolderGone extends Error {}
 
+// Settles with "late" once *ms* pass, its timer not holding the process.
+const late = (ms: number) => new Promise<"late">((resolve) => {
+  setTimeout(() => resolve("late"), Math.max(0, ms)).unref();
+});
+
 // Settles once *signal* aborts.
 const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
   if (signal.aborted) resolve("aborted");
@@ -116,6 +122,7 @@ export class Guest {
   private left = false;
   private readonly roots = new Map<string, Root>();
   private keepalive: NodeJS.Timeout | undefined;
+  private readonly shareMs: number;
 
   private constructor(
     options: VmOptions,
@@ -146,6 +153,7 @@ export class Guest {
       });
     }, options.pingMs ?? PING_MS);
     this.keepalive.unref();
+    this.shareMs = options.shareMs ?? SHARE_MS;
   }
 
   /**
@@ -220,9 +228,15 @@ export class Guest {
    * does; the backend ends a VM that cannot share any more, and the guest goes with it.
    */
   async share(root: string, folder: Folder): Promise<Share> {
-    const deadline = performance.now() + SHARE_MS;
-    const found = await lstat(folder.path).catch(() => null);
-    const real = await realpath(folder.path).catch(() => null);
+    const deadline = performance.now() + this.shareMs;
+    // On a mount that does not answer, as a dead network or FUSE one, the look never
+    // returns, and Node cannot cancel it: it is given up on at the deadline, its thread still held.
+    const looked = await Promise.race([
+      (async () => [await lstat(folder.path).catch(() => null), await realpath(folder.path).catch(() => null)] as const)(),
+      late(deadline - performance.now()),
+    ]);
+    if (looked === "late") throw new Error(`it did not answer within ${this.shareMs / 1000} s`);
+    const [found, real] = looked;
     // A reboot can renumber the folder's mount: after one, only the inode is compared, as the file host does.
     const rebooted = Boolean(folder.boot) && BOOT_ID !== "" && folder.boot !== BOOT_ID;
     if (!found?.isDirectory() || (!rebooted && found.dev !== folder.dev) || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
@@ -243,8 +257,9 @@ export class Guest {
   async teardown(root: string): Promise<void> {
     const entry = this.roots.get(root);
     if (!entry) return;
-    // A setup under way lands first: the teardown then ends what it set up.
-    await entry.setup;
+    // A setup under way lands first: the teardown then ends what it set up. One that
+    // does not land within SETUP_MS loses the guest, the root's processes with it.
+    if ((await Promise.race([entry.setup, late(SETUP_MS)])) === "late") return this.lose();
     entry.setup = null;
     // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
     if (!(await this.request({ type: "teardown", root }, SETUP_MS))) this.lose();

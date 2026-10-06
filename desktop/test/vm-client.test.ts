@@ -62,6 +62,36 @@ afterEach(async () => {
 const within = <T>(answer: Promise<T>, ms: number) =>
   Promise.race([answer, new Promise<"no answer">((resolve) => setTimeout(() => resolve("no answer"), ms))]);
 
+describe("a manager that does not answer a teardown", () => {
+  it("is killed once the teardown's bound passes, and its guest goes with it", async () => {
+    let killed = false;
+    const exits: Array<() => void> = [];
+    // It takes its start and says it runs, then answers nothing more.
+    const wedged: ManagerProcess = {
+      send: () => {},
+      onMessage: (listener) => void setTimeout(() => listener({ type: "ready" }), 10),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => {
+        killed = true;
+        for (const exit of exits.splice(0)) exit();
+      },
+    };
+    const vm = new VmClient({
+      vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+      spawn: () => wedged,
+      teardownMs: 300,
+    });
+    clients.push(vm);
+    const running = vm.perform(operation(), signal());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const begun = performance.now();
+    expect(await within(vm.teardown("root-1"), 3_000)).toBeUndefined();
+    expect(performance.now() - begun).toBeLessThan(1_000);
+    expect(killed).toBe(true);
+    expect(await running).toEqual(SANDBOX_STOPPED);
+  });
+});
+
 describe("a manager that cannot be started", () => {
   it("answers the operation, and starts another for the next", async () => {
     const vm = client();

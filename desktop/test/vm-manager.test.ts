@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,6 +75,10 @@ const fakeVm = (roots?: ControlRoots): BootVm => async () => {
     },
   };
 };
+
+// *answer*, or "no answer" once *ms* pass.
+const within = <T>(answer: Promise<T>, ms: number) =>
+  Promise.race([answer, new Promise<"no answer">((resolve) => setTimeout(() => resolve("no answer"), ms))]);
 
 const alive = (pid: number) => {
   try {
@@ -316,6 +320,47 @@ describe("a chat's folder, checked again before it is shared", () => {
     ];
     for (const [n, folder] of cases.entries()) expect(await which(manager, `root-${n}`, folder)).toEqual(FOLDER_UNAVAILABLE);
     await manager.stop();
+  });
+});
+
+// A folder on a FUSE mount whose daemon is stopped: every look into it waits, as on a
+// dead network mount. Bound first, as a chat's folder is; let go by *release*.
+function stalledFolder(): { folder: Folder; release: () => void } {
+  const fuse = join(dir, "fuse");
+  for (const name of ["lower/folder", "upper", "work", "mnt"]) mkdirSync(join(fuse, name), { recursive: true });
+  const mnt = join(fuse, "mnt");
+  const mounted = spawnSync("fuse-overlayfs", ["-o", `lowerdir=${fuse}/lower,upperdir=${fuse}/upper,workdir=${fuse}/work,timeout=0`, mnt]);
+  if (mounted.status !== 0) throw new Error(`fuse-overlayfs: ${mounted.stderr}`);
+  const path = join(mnt, "folder");
+  const { dev, ino } = statSync(path);
+  const pid = Number(spawnSync("pgrep", ["-f", `^fuse-overlayfs .* ${mnt}$`], { encoding: "utf8" }).stdout.trim());
+  process.kill(pid, "SIGSTOP");
+  return {
+    folder: { path, dev, ino },
+    release: () => {
+      process.kill(pid, "SIGCONT");
+      spawnSync("fusermount3", ["-u", mnt]);
+    },
+  };
+}
+
+describe("a chat's folder on a mount that does not answer", () => {
+  it("is answered as unavailable within the share's bound, and its root torn down without waiting on it", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const manager = new VmManager({ ...options(), shareMs: 300 }, fakeVm(roots));
+    const { folder, release } = stalledFolder();
+    try {
+      const begun = performance.now();
+      const answer = manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal);
+      expect(await within(answer, 3_000)).toEqual({
+        error: { type: "unavailable", message: "This computer's sandbox could not add this chat's folder: it did not answer within 0.3 s" },
+      });
+      expect(await within(manager.teardown("root-1"), 1_000)).toBeUndefined();
+      expect(performance.now() - begun).toBeLessThan(2_000);
+      await manager.stop();
+    } finally {
+      release();
+    }
   });
 });
 

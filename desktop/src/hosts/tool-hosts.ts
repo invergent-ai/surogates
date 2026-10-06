@@ -167,8 +167,10 @@ export class ToolHosts implements Executor {
     return { home, dataDir: this.options.dataDir, appDirs: this.options.appDirs ?? APP_DIRS };
   }
 
+  // The app's quit: each folder's other holders get as long to let it go as its host
+  // gets to stop. What holds it next, the VM, is stopped after, whether or not they did.
   stop(): Promise<void> {
-    this.stopping ??= this.stopHosts();
+    this.stopping ??= this.stopHosts(STOP_TIMEOUT_MS);
     return this.stopping;
   }
 
@@ -178,11 +180,15 @@ export class ToolHosts implements Executor {
     return this.stopHosts();
   }
 
-  private async stopHosts(): Promise<void> {
+  private async stopHosts(letGoMs?: number): Promise<void> {
     const hosts = [...this.live];
     this.hosts.clear();
     await Promise.all(hosts.map(async (host) => {
-      await host.letGo();
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([host.letGo(), new Promise((resolve) => {
+        if (letGoMs !== undefined) timer = setTimeout(resolve, letGoMs);
+      })]);
+      clearTimeout(timer);
       await host.stop();
     }));
   }

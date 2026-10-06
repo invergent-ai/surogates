@@ -17,6 +17,8 @@ import { unavailable, type VmOperation, type VmOptions } from "./manager.js";
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
 export const MANAGER = join(PACKAGE, "dist", "vm", "main.js");
 const STOP_MS = 5_000;
+// Past the manager's own bounds on a teardown: 15 s for a setup under way, 15 s for the agent's answer.
+const TEARDOWN_MS = 35_000;
 
 /**
  * The VM's files for an app whose data is *dataDir*: the sessions disk and the
@@ -88,6 +90,7 @@ export function forkManager(script = MANAGER): ManagerProcess {
 export interface VmClientOptions {
   vm: VmOptions;
   spawn?: () => ManagerProcess;
+  teardownMs?: number;
 }
 
 export class VmClient {
@@ -124,18 +127,32 @@ export class VmClient {
     });
   }
 
-  /** Everything of *root* ends in the guest, if a manager runs: its folder is being let go. Never rejects. */
+  /**
+   * Everything of *root* ends in the guest, if a manager runs: its folder is being let
+   * go. A manager that does not answer in time is wedged: it is killed, and its guest,
+   * the root's processes in it, goes with it. Never rejects.
+   */
   async teardown(root: string): Promise<void> {
     const manager = this.manager;
     if (!manager || this.stopping) return;
     const id = `teardown-${(this.teardowns += 1)}`;
-    await new Promise<void>((resolve) => {
+    const answered = new Promise<void>((resolve) => {
       this.pending.set(id, () => {
         this.pending.delete(id);
         resolve();
       });
       manager.send({ type: "teardown", id, root });
     });
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), this.options.teardownMs ?? TEARDOWN_MS);
+    });
+    const settled = await Promise.race([answered, late]);
+    clearTimeout(timer);
+    if (settled !== "late") return;
+    const gone = new Promise<void>((resolve) => manager.onExit(resolve));
+    manager.kill();
+    await gone;
   }
 
   // The manager stops its guest and exits; one that does not is killed, and its guest goes with it.
