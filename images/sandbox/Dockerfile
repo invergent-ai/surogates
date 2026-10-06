@@ -1,25 +1,25 @@
 # Surogates Sandbox — agent execution environment
 #
-# Includes the surogates Python package so the real tool handlers
-# (terminal, file_ops, code_execution, etc.) run inside the sandbox
-# with full feature parity.
+# One shared `tools` stage holds what commands find: the OS packages, Node and
+# the global npm packages, the Python venv with the data libraries, uv and the
+# pip wrapper. The cloud sandbox builds on it:
+#
+#   sandbox  the surogates package (so the real tool handlers run inside the
+#            sandbox with full feature parity), the tool executor, geesefs and
+#            the coding agents. The last stage, so a build without --target
+#            builds it.
 #
 # Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
 # Load into k3d cluster (optional, if using k3d):
 #   k3d image import ghcr.io/invergent-ai/surogates-agent-sandbox:latest -c surogates
 
-# ── Stage 1: Python dependencies ──────────────────────────────────────
+# ── Python dependencies: the data libraries ──────────────────────────
 FROM python:3.12-slim AS python-deps
 
-WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
-COPY surogates/ ./surogates/
-
 RUN uv venv /opt/venv \
-    && uv pip install --python /opt/venv/bin/python . \
     && uv pip install --python /opt/venv/bin/python \
         pandas \
         numpy \
@@ -40,24 +40,20 @@ RUN uv venv /opt/venv \
         pdfplumber \
         pypdfium2 \
         pytesseract \
-        pdf2image
-# liteparse, pypdf, python-docx, python-pptx, openpyxl are pulled in
-# by the surogates package install above (project deps), so they are
-# not listed here.
-#
+        pdf2image \
+        pypdf \
+        python-docx \
+        python-pptx \
+        openpyxl
 # The extra libraries above (reportlab, pdfplumber, pypdfium2,
-# pytesseract, pdf2image) are referenced by the bundled productivity
-# skills (pdf/docx/xlsx/pptx); preinstalling them lets the skills run
-# without any `pip install` step.  Pandoc the binary comes from the
-# apt layer below (the `pandoc` PyPI package is just a wrapper).
+# pytesseract, pdf2image, pypdf, python-docx, python-pptx, openpyxl) are
+# referenced by the bundled productivity skills (pdf/docx/xlsx/pptx);
+# preinstalling them lets the skills run without any `pip install` step,
+# in the cloud and in the desktop's guest.  Pandoc the binary comes from
+# the apt layer below (the `pandoc` PyPI package is just a wrapper).
 
-# ── Stage 2: Final image ─────────────────────────────────────────────
-FROM python:3.12-slim
-
-LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
-      org.opencontainers.image.description="Surogates agent sandbox execution environment" \
-      org.opencontainers.image.vendor="Invergent SA" \
-      org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
+# ── Shared tools ─────────────────────────────────────────────────────
+FROM python:3.12-slim AS tools
 
 # ── OS packages ──────────────────────────────────────────────────────
 # poppler-utils ships pdftotext/pdftoppm/pdfimages used by the pdf skill.
@@ -93,10 +89,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         imagemagick \
         pdfgrep \
-        fuse \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
     # gh (GitHub CLI) lets a coding-agent run commit, push, and open a PR on
     # a checked-out repo; git is already installed in the base apt list above.
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -118,8 +113,6 @@ RUN npm install -g \
         pdf-lib \
         pdfjs-dist \
         pnpm \
-        @anthropic-ai/claude-code \
-        @openai/codex \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────
@@ -157,6 +150,29 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
     UV_CACHE_DIR="/home/sandbox/.cache/uv" \
     XDG_CACHE_HOME="/home/sandbox/.cache"
+
+# ── The cloud sandbox ───────────────────────────────────────────────
+FROM tools AS sandbox
+
+LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
+      org.opencontainers.image.description="Surogates agent sandbox execution environment" \
+      org.opencontainers.image.vendor="Invergent SA" \
+      org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
+
+# The coding agents, beside the shared stage's npm packages: in /usr, not the
+# NPM_CONFIG_PREFIX the shared stage sets for the agent's own installs. fuse is
+# for geesefs below.
+RUN apt-get update && apt-get install -y --no-install-recommends fuse \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --prefix /usr @anthropic-ai/claude-code @openai/codex \
+    && npm cache clean --force
+
+# The surogates package, so the real tool handlers run inside the sandbox.
+# liteparse comes with it (project deps).
+COPY pyproject.toml /build/pyproject.toml
+COPY surogates/ /build/surogates/
+RUN uv pip install --python /opt/venv/bin/python --no-cache /build \
+    && rm -rf /build
 
 # ── Tool executor ───────────────────────────────────────────────────
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor
