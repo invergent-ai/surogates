@@ -81,3 +81,14 @@ export function markTheme(): void {
 }
 
 export const byId = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
+
+const RELATIVE = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+
+/** How long ago *when* was: "17m" in a row, or "17 minutes ago" on a card. A time ahead of *now* is now. */
+export function ago(when: string, now = Date.now(), form: "short" | "long" = "short"): string {
+  const minutes = Math.floor((now - Date.parse(when)) / 60_000);
+  if (minutes < 1) return form === "short" ? "now" : "just now";
+  const [count, unit]: [number, Intl.RelativeTimeFormatUnit] = minutes < 60 ? [minutes, "minute"]
+    : minutes < 24 * 60 ? [Math.floor(minutes / 60), "hour"] : [Math.floor(minutes / (24 * 60)), "day"];
+  return form === "short" ? `${count}${unit[0]}` : RELATIVE.format(-count, unit);
+}

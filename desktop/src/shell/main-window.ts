@@ -100,6 +100,7 @@ export interface MainWindowOptions {
 export class MainWindow {
   readonly window: BrowserWindow;
   private web: WebView | null = null;
+  private webShown = true; // false while the centre shows a page of the shell's own, the Projects page
   private hole: Bounds = { x: 0, y: 0, width: 0, height: 0 };
   private dark: boolean;
 
@@ -192,7 +193,7 @@ export class MainWindow {
       if (!isMainFrame || code === -3) return;
       web.failing = true;
       web.unreachable = description || "The agent did not answer";
-      view.setVisible(false);
+      this.showWeb(this.webShown);
       this.options.onChange();
       this.tryAgain(web);
     });
@@ -203,11 +204,17 @@ export class MainWindow {
       web.attempt = 0;
       if (web.unreachable === null) return;
       web.unreachable = null;
-      view.setVisible(true);
+      this.showWeb(this.webShown);
       this.options.onChange();
     });
     this.load(web, "/");
     return contents;
+  }
+
+  /** The web client in the centre, or the page beneath it: it shows only while it has something to show. */
+  showWeb(shown: boolean): void {
+    this.webShown = shown;
+    this.web?.view.setVisible(shown && this.web.unreachable === null);
   }
 
   // The centre's hole, as the page measures it.

@@ -62,6 +62,9 @@ let account: DesktopAccount | null = null;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
 let served = false;
 let listed: ProjectSummary[] = [];
+// What the centre shows: a page of the web client, the Projects page, or a project's conversation.
+type View = { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string };
+let view: View = { kind: "web" };
 
 const report = (error: unknown): void => {
   console.error(error);
@@ -264,6 +267,7 @@ function state() {
       status: device?.status ?? null,
     },
     account,
+    view,
     projects: listed,
     unreachable: main?.unreachable ?? null,
     notice: credentials.unencrypted() ? "Credentials on this computer are not encrypted: Linux has no secret store here" : null,
@@ -310,7 +314,26 @@ function wire(window: MainWindow, page: string): void {
   });
   handle("shell:go", (path) => {
     if (typeof path !== "string" || !webClientPath(path)) throw new Error("Not a page of the web client");
+    view = { kind: "web" };
+    window.showWeb(true);
     window.go(path);
+    changed();
+  });
+  handle("shell:projects", () => {
+    view = { kind: "projects" };
+    window.showWeb(false);
+    changed();
+  });
+  // A project opens on its conversation: the page's answer names it, and is checked as a chat's path.
+  handle("shell:project", async (id) => {
+    if (typeof id !== "string") throw new Error("No such project");
+    const project = await projects.get(id);
+    const path = `/chat/${project.masterSessionId}`;
+    if (!webClientPath(path)) throw new Error("This project's conversation is not a chat");
+    view = { kind: "project", id: project.id, name: project.name };
+    window.showWeb(true);
+    window.go(path);
+    changed();
   });
   handle("shell:back", () => window.back());
   handle("shell:forward", () => window.forward());

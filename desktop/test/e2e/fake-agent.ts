@@ -1,6 +1,7 @@
 // An agent's server as the shell meets it, on one origin: /auth/config, device
 // registration, the device link, and a page standing for the web client at every
-// other path. Tests drive that page as the web client would.
+// other path. Tests drive that page as the web client would. With projects set, the
+// page serves them on every load, as the web client serves its own.
 
 import { once } from "node:events";
 import { createServer, type Server } from "node:http";
@@ -9,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import type { ElectronApplication, Page } from "playwright-core";
 import { expect } from "vitest";
 
+import type { ProjectFixtures, ProjectsSource } from "../../../web/src/lib/projects.js";
 import { FakeLinkServer } from "../fake-server.js";
 
 // As surogates/devices/store.py issues one: surg_dev_ and token_urlsafe(33).
@@ -16,7 +18,8 @@ export const TOKEN = `surg_dev_${"t".repeat(44)}`;
 
 export class FakeAgent {
   config: Record<string, unknown> = { agent_id: "a", desktop_sessions: true, multi_session: true };
-  page = "<!doctype html><title>Fake agent</title><p>The web client</p>";
+  // The projects the page serves: a fake ProjectsSource built on these, or none.
+  projects: ProjectFixtures | null = null;
   readonly link = new FakeLinkServer({ token: TOKEN });
   readonly registered: unknown[] = [];
   readonly server: Server = createServer((request, response) => {
@@ -36,7 +39,8 @@ export class FakeAgent {
       });
       return;
     }
-    response.writeHead(200, { "content-type": "text/html" }).end(this.page);
+    const served = this.projects === null ? "" : `<script>(${serveProjects.toString()})(${JSON.stringify(this.projects).replace(/</g, "\\u003c")})</script>`;
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>Fake agent</title><p>The web client</p>${served}`);
   });
   private linked = false;
 
@@ -87,3 +91,39 @@ export const register = (client: Page, account = ACCOUNT) => client.evaluate(asy
     .then((response) => response.json() as Promise<{ token: string }>);
   return { before, device: await desktop.registerDevice(issued.token) };
 }, account);
+
+// Run in the fake agent's page: a ProjectsSource on *data*, registered with the desktop. The
+// page keeps it as window.fakeProjects, whose changed() tells the source's subscribers.
+function serveProjects(data: ProjectFixtures): void {
+  const listeners = new Map<string, Set<(threadId: string | null) => void>>();
+  const one = (id: string) => {
+    const found = data.projects.find((project) => project.id === id);
+    if (!found) throw new Error("No such project");
+    return found;
+  };
+  const refuse = () => Promise.reject(new Error("The fake source changes nothing"));
+  const source: ProjectsSource = {
+    list: async () => data.projects.map(({ id, name, icon, createdAt, updatedAt, waiting, working }) =>
+      ({ id, name, icon, createdAt, updatedAt, waiting, working })),
+    get: async (id) => one(id),
+    threads: async (id) => data.threads[one(id).id] ?? [],
+    library: async (id) => data.library[one(id).id] ?? [],
+    routines: async (id) => data.routines[one(id).id] ?? [],
+    create: refuse,
+    update: refuse,
+    archive: refuse,
+    resolve: refuse,
+    reopen: refuse,
+    subscribe: (id, onChange) => {
+      const heard = listeners.get(id) ?? new Set();
+      heard.add(onChange);
+      listeners.set(id, heard);
+      return () => heard.delete(onChange);
+    },
+  };
+  const changed = (id: string, threadId: string | null) => {
+    for (const listener of listeners.get(id) ?? []) listener(threadId);
+  };
+  Object.assign(window, { fakeProjects: { data, changed } });
+  void window.surogateDesktop?.registerProjects(source);
+}
