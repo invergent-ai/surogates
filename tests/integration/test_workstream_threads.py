@@ -31,6 +31,7 @@ from surogates.session.store import SessionStore
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
+from surogates.workstreams.threads import start_thread
 from tests.test_execute_coding_run_repo import _PAT, _FakeStore, _anthropic_creds, _done_poll, _noop_ensure, _sbx
 from tests.test_harness_resilience import _make_harness
 from tests.test_steer_loop import _final_response, _make_loop_harness
@@ -1407,3 +1408,97 @@ async def test_a_dropped_stream_proposes_each_thread_once(api, monkeypatch):
     proposals = await events_of(api, master.id, EventType.THREAD_PROPOSED)
     assert sorted(p.data["threads"][0]["title"] for p in proposals) == ["Check the totals", "Draft A"]
     assert early == []
+
+
+PROPOSAL_ID = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b"
+
+
+async def the_user_starts(api, master, title="Check the totals", goal="Check the totals in Budget.xlsx.") -> Session:
+    """The user starts a thread from a proposal card, outside the master's turn."""
+    state = api.app.state
+    return await start_thread(
+        session_store=state.session_store, session_factory=state.session_factory, redis=state.redis,
+        master=master, live_config=None, title=title, goal=goal, context="",
+        proposal={"proposal_id": PROPOSAL_ID, "key": "1"},
+    )
+
+
+async def test_a_thread_the_user_started_is_news_to_the_master(api):
+    master = await master_of(api, await create(api))
+    await start(api, master)
+    await turn_of_the_master_ends(api, master, "I proposed a thread for the totals.")
+    await api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
+    thread = await the_user_starts(api, master)
+    spawned = (await events_of(api, master.id, EventType.WORKER_SPAWNED))[-1]
+    # The card it came from, so a card started twice can be refused, and drawn as started.
+    assert spawned.data == {
+        "worker_id": str(thread.id), "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
+        "started_by": "user", "proposal_id": PROPOSAL_ID, "key": "1",
+    }
+    # A thread the master started is its own tool call's result, not news.
+    *_, answer, news = await replayed(api, master)
+    assert answer == {"role": "assistant", "content": "I proposed a thread for the totals."}
+    assert news == {"role": "user", "content": f'[Thread "Check the totals" ({thread.id}) started by the user]'}
+    assert await queued(api, thread) and not await queued(api, master)
+
+
+async def test_news_alone_wakes_no_one_and_the_next_report_brings_it(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    await turn_of_the_master_ends(api, master, "I proposed a thread for the totals.")
+    thread = await the_user_starts(api, master)
+    harness, handed = waking(api, monkeypatch)
+    await harness.wake(master.id)
+    assert handed == []
+
+    await answered(api, thread, "The totals add up.")
+    await turn_ends(api, thread)
+    await harness.wake(master.id)
+    [conversation] = handed
+    news, report = conversation[-2:]
+    assert news["content"] == f'[Thread "Check the totals" ({thread.id}) started by the user]'
+    assert report["content"].startswith(f'[Thread "Check the totals" ({thread.id}) reported]')
+
+
+async def test_news_during_the_masters_turn_is_read_at_its_next_request(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "Plan the budget."})
+    started: list[Session] = []
+
+    async def the_user_starts_one():
+        started.append(await the_user_starts(api, master))
+
+    requests = await live_turn(
+        api, monkeypatch, master, [TODO_CALL, _final_response("The totals are being checked.")],
+        during_tool=the_user_starts_one,
+    )
+    *_, called, result, news = requests[1]
+    assert [called["role"], result["role"]] == ["assistant", "tool"]
+    assert news == {"role": "user", "content": f'[Thread "Check the totals" ({started[0].id}) started by the user]'}
+    replay = harness_of(api)._rebuild_messages(await store.get_events(master.id))
+    assert [(m["role"], m.get("content")) for m in replay[-4:-1]] == [
+        (m["role"], m.get("content")) for m in requests[1][-3:]
+    ]
+
+
+async def test_news_during_the_masters_reply_waits_for_its_next_turn(api, monkeypatch):
+    # Only a report keeps a finished reply going: news alone would cost a
+    # request and a second reply that says nothing new.
+    master = await master_of(api, await create(api))
+    store = api.app.state.session_store
+    await store.emit_event(master.id, EventType.USER_MESSAGE, {"content": "Plan the budget."})
+    started: list[Session] = []
+
+    async def the_user_starts_one():
+        started.append(await the_user_starts(api, master))
+
+    requests = await live_turn(
+        api, monkeypatch, master,
+        [_final_response("I proposed a thread for the totals."), _final_response("The totals are under way.")],
+        during_reply=the_user_starts_one,
+    )
+    assert len(requests) == 1
+    # Left after the turn's last request, the news is the next wake's.
+    assert unread_reports(await store.get_events(master.id)) == [
+        {"role": "user", "content": f'[Thread "Check the totals" ({started[0].id}) started by the user]'},
+    ]

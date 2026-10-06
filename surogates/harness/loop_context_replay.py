@@ -111,6 +111,10 @@ def build_user_message_dict(
 
 #: The events that carry a worker's report to the session that started it.
 WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
+#: What a coordinator hears of its workers between its own requests: their
+#: reports, and the threads the user started (``worker.spawned`` with
+#: ``started_by``).  A spawn of its own is its own tool call's result.
+WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
 
 
 #: The lines a thread's own words sit between in its report.  Only the
@@ -172,6 +176,17 @@ def worker_note(event_type: str, data: dict) -> dict:
     return {"role": "user", "content": content}
 
 
+def worker_news(event_type: str, data: dict) -> dict | None:
+    """The message a coordinator reads a worker's news as: its report, or a
+    thread the user started; None for a spawn the coordinator made."""
+    if event_type != EventType.WORKER_SPAWNED.value:
+        return worker_note(event_type, data)
+    if data.get("started_by") != "user":
+        return None
+    title = json.dumps(data.get("title"), ensure_ascii=False)
+    return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
+
+
 def unread_reports(events: list) -> list[dict]:
     """The worker reports no model request has read: those after the log's
     last ``llm.request``.  Replay leaves them out, and the wake adds them
@@ -182,8 +197,8 @@ def unread_reports(events: list) -> list[dict]:
     for event in events:
         if event.type == EventType.LLM_REQUEST.value:
             held = []
-        elif event.type in WORKER_REPORT_TYPES:
-            held.append(worker_note(event.type, event.data))
+        elif event.type in WORKER_NEWS_TYPES and (note := worker_news(event.type, event.data)) is not None:
+            held.append(note)
     return held
 
 
@@ -409,8 +424,10 @@ class ContextReplayMixin:
             # by the provider; and merged into a user's message it would
             # carry the user's words as a report.  So each waits for the
             # next request, on its own.
-            elif etype in WORKER_REPORT_TYPES:
-                held_reports.append(worker_note(etype, event.data))
+            elif etype in WORKER_NEWS_TYPES:
+                note = worker_news(etype, event.data)
+                if note is not None:
+                    held_reports.append(note)
 
             elif etype == EventType.BROWSER_DESTROYED.value:
                 # Without this the close is a UI-only event: the model keeps

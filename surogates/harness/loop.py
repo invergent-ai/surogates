@@ -188,13 +188,13 @@ from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
-    WORKER_REPORT_TYPES,
+    WORKER_NEWS_TYPES,
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
     prune_superseded_canvas_images,
     unread_reports,
-    worker_note,
+    worker_news,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -795,16 +795,14 @@ class AgentHarness(
         events = await self._store.get_events(
             session.id,
             after=after_event_id,
-            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.WORKER_SPAWNED],
         )
         if before is not None:
             events = [event for event in events if event.id < before]
         if not events:
             return [], after_event_id
-        return (
-            [worker_note(event.type, event.data) for event in events],
-            max(event.id for event in events),
-        )
+        notes = [worker_news(event.type, event.data) for event in events]
+        return [note for note in notes if note is not None], max(event.id for event in events)
 
     async def _collect_steer_messages(
         self,
@@ -1741,13 +1739,13 @@ class AgentHarness(
         # The worker reports no request had read when the wake began.  Replay
         # left them out of ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
-        # Report cursor: the newest worker report the wake has.  A project's
-        # master reads later ones live, before each request.
+        # Report cursor: the newest worker news the wake has.  A project's
+        # master reads later news live, before each request.
         report_cursor = max(
             (
                 event.id
                 for event in (all_events or [])
-                if event.type in WORKER_REPORT_TYPES
+                if event.type in WORKER_NEWS_TYPES
             ),
             default=0,
         )
@@ -2857,10 +2855,11 @@ class AgentHarness(
                     session.id, steer_cursor,
                 )
                 # A thread's report that landed meanwhile keeps the wake
-                # going too; the next request reads it.
+                # going too; the next request reads it.  News alone waits
+                # for the master's next turn, which reads it from the log.
                 arrived, report_cursor = await self._collect_reports(session, report_cursor)
                 reports.extend(arrived)
-                if followup is not None or reports:
+                if followup is not None or (reports and await self._has_unread_report(session.id)):
                     if followup is not None:
                         messages.append(followup)
                     turn_id = str(uuid4())
