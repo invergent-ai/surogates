@@ -3,12 +3,28 @@
 // Section 11, "Sessions in the guest"). Every command of a root runs in its
 // runner, so a server one command starts is reachable from the next.
 
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
+import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { join, posix } from "node:path";
 
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
 import type { HostUser } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
+
+// The sessions disk's folder of roots (vm/init), each named by its root session id.
+export const SESSIONS = "/run/surogate/sessions/roots";
+// Each share's virtiofs mount, readable by root only.
+const SHARES = "/run/surogate/shares";
+const ENTER_ROOT = "/run/surogate/agent/enter-root";
+// The cloud's layout of the commands' environment, written by the image's build.
+const LAYOUT = "/etc/surogate/environment";
+const FIRST_UID = 10_000;
+const ROOT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const TAG = /^r[0-9]{1,3}$/;
+// Any name a passwd line can hold, as directories join AD users (ana@corp.example):
+// no ':', newline, NUL or '/', no leading '-', at most 256 characters.
+const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
 
 export const NOT_SET_UP: Outcome = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } };
 const ALREADY = "This chat's sandbox is already set up";
@@ -23,6 +39,64 @@ export function rootEnvironment(layout: string, user: HostUser): Record<string, 
     if (at > 0) env[line.slice(0, at)] = line.slice(at + 1).replace(CLOUD_HOME, user.home);
   }
   return { ...env, HOME: user.home, USER: user.name, LOGNAME: user.name, LANG: "C.UTF-8" };
+}
+
+// The guest uid of *root*: given at its first ask, from FIRST_UID up, and kept
+// as the owner of its folder on the sessions disk, which holds its home and temp
+// folder. A uid is never given again while that folder exists.
+export function uidOf(root: string, sessions = SESSIONS): number {
+  if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
+  const folder = join(sessions, root);
+  try {
+    return statSync(folder).uid;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const taken = readdirSync(sessions).filter((name) => ROOT_ID.test(name)).map((name) => statSync(join(sessions, name)).uid);
+  const uid = Math.max(FIRST_UID - 1, ...taken) + 1;
+  // Made whole under another name, then renamed: the folder is never there with another owner.
+  const making = join(sessions, `.${root}`);
+  rmSync(making, { recursive: true, force: true });
+  for (const [path, mode] of [[making, 0o700], [join(making, "home"), 0o700], [join(making, "tmp"), 0o1777]] as const) {
+    mkdirSync(path);
+    chownSync(path, uid, uid);
+    chmodSync(path, mode);
+  }
+  renameSync(making, folder);
+  return uid;
+}
+
+function checkPath(path: string, what: string): void {
+  if (!path.startsWith("/") || path === "/" || path.includes("\0") || posix.normalize(path) !== path) {
+    throw new Error(`not a ${what}: ${path}`);
+  }
+}
+
+// The root's runner in its own namespaces: mount, PID, IPC, UTS, network and
+// cgroup, as util-linux's unshare makes them, and enter-root builds them. Ending
+// the runner's stdin ends the runner, then tini, the namespaces' PID 1, and
+// everything in them with it. Killing unshare reaches them only while enter-root
+// builds them: the kernel drops the parent-death signal when the runner takes on
+// the root's user. Nothing is made or mounted until every input has passed.
+export function enter(root: string, place: Place, tag: string, user: HostUser): ChildProcess {
+  if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
+  if (!TAG.test(tag)) throw new Error(`not a share tag: ${tag}`);
+  if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
+  checkPath(place.folder, "folder");
+  checkPath(place.home, "home folder");
+  const uid = uidOf(root);
+  const share = join(SHARES, tag);
+  mkdirSync(share, { recursive: true });
+  chmodSync(SHARES, 0o700);
+  if (spawnSync("mountpoint", ["-q", share]).status !== 0) execFileSync("mount", ["-t", "virtiofs", tag, share]);
+  return spawn(
+    "unshare",
+    [
+      "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
+      ENTER_ROOT, join(SESSIONS, root), place.folder, share, place.home, String(uid), user.name,
+    ],
+    { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
+  );
 }
 
 // *answer*, or the signal, or *ms* passing, whichever comes first: the runner's

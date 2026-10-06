@@ -1,0 +1,30 @@
+#!/bin/sh
+# The rest of the guest's init, from the agent disk, which the image's stub init
+# (surogate-init) mounted at /run/surogate/agent. It ends by running the agent
+# under tini, which reaps orphans. When the agent exits, so does tini, PID 1, and
+# the guest panics, which ends QEMU (panic=-1, -no-reboot).
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# The sessions disk holds each root's home and temp folder, which can be lost:
+# checked at each boot and repaired, and made again, empty, only when the repair
+# fails too or it was never made (exit codes 4 and up).
+e2fsck -p /dev/vdc || [ $? -lt 4 ] || e2fsck -y /dev/vdc || [ $? -lt 4 ] \
+  || mke2fs -q -F -t ext4 -E nodiscard -L sessions /dev/vdc
+mkdir -p /run/surogate/sessions
+mount -t ext4 -o nodev,nosuid,discard /dev/vdc /run/surogate/sessions
+mkdir -p -m 0711 /run/surogate/sessions/roots
+
+modprobe virtiofs
+modprobe overlay
+# The kernel loads no more modules: a command opening a socket of a rare family
+# would otherwise pull that family's code into the kernel every root shares.
+echo 1 > /proc/sys/kernel/modules_disabled
+# No user namespaces in the guest: the agent makes the roots' namespaces as root.
+echo 0 > /proc/sys/user/max_user_namespaces
+# What systemd's sysctl files set on a host, which the guest has none of.
+sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_disabled=1 \
+  kernel.unprivileged_bpf_disabled=1 net.core.bpf_jit_harden=2 \
+  fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2
+
+exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js
