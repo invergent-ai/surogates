@@ -1844,11 +1844,12 @@ class AgentHarness(
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
             has_channel=getattr(session, "channel", None) in MANAGED_CHANNELS,
-            is_scheduled=bool(
-                (getattr(session, "config", None) or {}).get(
-                    "scheduled_session_id")
-                or (getattr(session, "config", None) or {}).get(
-                    "scheduled_dynamic_loop")
+            # A master's routines are the project's, and its model makes
+            # them.  A scheduled run is never a master, and its filter
+            # already took the cron tools away.
+            makes_routines=(
+                is_project_master(session.config)
+                and self._slash_command_enabled("loop", session)
             ),
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
@@ -3519,7 +3520,7 @@ class AgentHarness(
         self, tool_calls: list[dict[str, Any]], offered: frozenset[str],
     ) -> list[tuple[dict[str, Any], str]]:
         """Return list of (tool_call, error_message) for invalid calls."""
-        return find_invalid_tool_calls(tool_calls, offered)
+        return find_invalid_tool_calls(tool_calls, offered, self._tools.tool_names)
 
     async def _maybe_route_final_response_to_inbox(
         self,

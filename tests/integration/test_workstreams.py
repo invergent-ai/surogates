@@ -13,10 +13,15 @@ from sqlalchemy import delete, select
 
 import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
-from surogates.db.models import Session, SessionCursor, Workstream
+from surogates.db.models import ScheduledSession, Session, SessionCursor, Workstream
 from surogates.harness.prompt import PromptBuilder
 from surogates.harness.turn_summarizer import TurnSummary
-from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+from surogates.runtime import (
+    SLASH_COMMAND_IDS,
+    SlashCommandConfig,
+    agent_runtime_context_dep,
+    build_agent_runtime_context,
+)
 from surogates.runtime.rate_limiter import PerTenantRateLimiter
 from surogates.session.events import EventType
 from surogates.session.store import SessionStore
@@ -425,15 +430,20 @@ def harness_with_every_tool():
     return _make_harness(tool_registry=registry, prompt_builder=SimpleNamespace(has_agents=False))
 
 
-async def test_a_master_reads_and_coordinates_but_does_no_work_itself(api):
+ROUTINE_TOOLS = {"cron_create", "cron_list", "cron_delete"}
+
+
+@pytest.mark.parametrize("loop", [True, False], ids=["loop-on", "loop-off"])
+async def test_a_master_reads_and_coordinates_but_does_no_work_itself(api, monkeypatch, loop):
     master = await master_of(api, await create(api))
-    tools = harness_with_every_tool()._tool_filter_for_session(master)
+    sent, _, _ = await turn_calling(monkeypatch, master, {}, loop=loop)
     assert {
         "read_file", "search_files", "list_files", "kb_list_pages", "kb_read_page", "kb_search_pages",
         "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
-        "cron_create", "cron_list", "cron_delete",
-    } <= tools
-    assert not tools & {
+    } <= sent
+    # Its routines follow the agent's /loop.
+    assert sent & ROUTINE_TOOLS == (ROUTINE_TOOLS if loop else set())
+    assert not sent & {
         "write_file", "patch", "terminal", "web_search", "browser_navigate", "create_artifact",
         "spawn_worker", "send_worker_message", "stop_worker", "delegate_task",
         "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
@@ -507,29 +517,41 @@ async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
     assert "outcome" not in (await api.app.state.session_store.get_session(master.id)).config
 
 
-async def turn_calling(monkeypatch, session, names: list[str], *, streamed: bool):
-    """One turn of *session* whose model calls *names*: the tools it offered, ran and answered."""
+async def turn_calling(
+    monkeypatch, session, calls: dict[str, dict], *, streamed=False, loop=True, session_factory=None,
+):
+    """One turn of *session* whose model makes *calls* (name: arguments).
+
+    Returns the tools the model was sent, the dispatch, and each call's
+    answer.  The dispatch is a stub unless *session_factory* is given.
+    """
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
-    ran = AsyncMock(return_value='{"ok": true}')
+    ran = AsyncMock(side_effect=registry.dispatch) if session_factory else AsyncMock(return_value='{"ok": true}')
     monkeypatch.setattr(registry, "dispatch", ran)
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 300))
     store.get_events = AsyncMock(return_value=[])
     harness = _make_loop_harness(session_store=store)
     harness._tools = registry
-    harness._tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4(), asset_root="/tmp/test")
+    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
     harness._streaming_enabled = streamed
-    calls = [{"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": "{}"}} for name in names]
+    harness._slash_commands = SlashCommandConfig() if loop else SlashCommandConfig(
+        commands=SLASH_COMMAND_IDS - {"loop"},
+    )
+    harness._session_factory = session_factory
+    tool_calls = [
+        {"id": f"call_{name}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for name, args in calls.items()
+    ]
     responses = iter([
-        ({"role": "assistant", "content": "", "tool_calls": calls},
+        ({"role": "assistant", "content": "", "tool_calls": tool_calls},
          {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1}),
-        _final_response("Done."),
-    ])
-    offered: list[set[str]] = []
+    ] * bool(calls) + [_final_response("Done.")])
+    sent: list[set[str]] = []
 
     async def llm(**kwargs):
-        offered.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        sent.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
         message, usage = next(responses)
         if kwargs["on_tool_call_complete"] is not None:
             for call in message["tool_calls"] or []:
@@ -540,27 +562,56 @@ async def turn_calling(monkeypatch, session, names: list[str], *, streamed: bool
     messages = [{"role": "user", "content": "Get the Q3 report done"}]
     await harness._run_loop(session, messages, "system", SimpleNamespace(lease_token=uuid4()), all_events=[])
     answered = {m["tool_call_id"]: m["content"] for m in messages if m.get("role") == "tool"}
-    return offered[0], ran, answered
+    return sent[0], ran, answered
+
+
+def unknown(name: str, sent: set[str]) -> str:
+    return json.dumps({"error": f"Unknown tool: {name!r}. Available tools: {', '.join(sorted(sent))}"})
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
     master = await master_of(api, await create(api))
-    refused = ["spawn_task", "delegate_task", "run_coding_agent"]
-    offered, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
+    refused = {"spawn_task": {}, "delegate_task": {}, "run_coding_agent": {}}
+    sent, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
     ran.assert_not_awaited()
-    listed = ", ".join(sorted(offered))
-    assert answered == {
-        f"call_{name}": json.dumps({"error": f"Unknown tool: {name!r}. Available tools: {listed}"})
-        for name in refused
-    }
+    assert answered == {f"call_{name}": unknown(name, sent) for name in refused}
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
+async def test_a_hidden_tool_is_refused_rather_than_repaired_into_another(api, monkeypatch, streamed):
+    # write_file is one edit from read_file, which a master has.
+    master = await master_of(api, await create(api))
+    call = {"write_file": {"path": "notes.md", "content": "Q3 revenue was 4.2M."}}
+    sent, ran, answered = await turn_calling(monkeypatch, master, call, streamed=streamed)
+    ran.assert_not_awaited()
+    assert answered == {"call_write_file": unknown("write_file", sent)}
+
+
+async def test_a_misspelt_tool_is_still_repaired(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    _, ran, answered = await turn_calling(monkeypatch, master, {"read_fiel": {"path": "notes.md"}})
+    assert [call.args[0] for call in ran.await_args_list] == ["read_file"]
+    assert answered == {"call_read_fiel": '{"ok": true}'}
+
+
+async def test_a_masters_model_makes_a_routine(api, monkeypatch, session_factory):
+    master = await master_of(api, await create(api))
+    routine = {"cron_create": {"cron": "0 9 * * 1", "prompt": "Check the cash report"}}
+    _, _, answered = await turn_calling(monkeypatch, master, routine, session_factory=session_factory)
+    assert json.loads(answered["call_cron_create"])["success"] is True
+    async with session_factory() as db:
+        [schedule] = (await db.scalars(
+            select(ScheduledSession).where(ScheduledSession.created_from_session_id == master.id),
+        )).all()
+    assert (schedule.prompt, schedule.agent_id, schedule.user_id) == ("Check the cash report", AGENT_ID, master.user_id)
 
 
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_chats_model_calls_its_tools_as_before(api, monkeypatch, streamed):
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
-    _, ran, answered = await turn_calling(monkeypatch, session, ["todo", "delegate_task"], streamed=streamed)
+    _, ran, answered = await turn_calling(monkeypatch, session, {"todo": {}, "delegate_task": {}}, streamed=streamed)
     assert [call.args[0] for call in ran.await_args_list] == ["todo", "delegate_task"]
     assert answered == {"call_todo": '{"ok": true}', "call_delegate_task": '{"ok": true}'}
 

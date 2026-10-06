@@ -107,27 +107,35 @@ def try_activate_fallback(
     return slot.client, slot.model, new_index, new_primary_config, True
 
 
-def repair_tool_name(name: str, known: Collection[str]) -> str | None:
-    """Attempt to repair a misspelled tool name onto one of *known*.
+def repair_tool_name(
+    name: str, offered: Collection[str], registered: Collection[str],
+) -> str | None:
+    """Attempt to repair a misspelled tool name onto one of *offered*.
 
     1. Lowercase
     2. Normalize hyphens/spaces to underscores
     3. Fuzzy match with difflib (cutoff=0.7)
 
+    A *registered* tool the session was not offered is not a typo, so it
+    is never repaired: ``write_file`` must not become ``read_file``.
+
     Returns the repaired name, or ``None`` if no match.
     """
     # 1. Lowercase
     lowered = name.lower()
-    if lowered in known:
+    if lowered in offered:
         return lowered
 
     # 2. Normalize hyphens/spaces to underscores
     normalized = lowered.replace("-", "_").replace(" ", "_")
-    if normalized in known:
+    if normalized in offered:
         return normalized
 
+    if any(candidate in registered for candidate in (name, lowered, normalized)):
+        return None
+
     # 3. Fuzzy match
-    matches = difflib.get_close_matches(normalized, sorted(known), n=1, cutoff=0.7)
+    matches = difflib.get_close_matches(normalized, sorted(offered), n=1, cutoff=0.7)
     return matches[0] if matches else None
 
 
@@ -142,6 +150,7 @@ def unknown_tool_error(tool_name: str, offered: Collection[str]) -> str:
 def find_invalid_tool_calls(
     tool_calls: list[dict[str, Any]],
     offered: Collection[str],
+    registered: Collection[str],
 ) -> list[tuple[dict[str, Any], str]]:
     """Return list of (tool_call, error_message) for invalid calls.
 
@@ -161,7 +170,7 @@ def find_invalid_tool_calls(
 
         # Unknown tool -- attempt repair first
         if tool_name and tool_name not in offered:
-            repaired = repair_tool_name(tool_name, offered)
+            repaired = repair_tool_name(tool_name, offered, registered)
             if repaired is not None:
                 logger.info(
                     "Repaired tool name %r -> %r", tool_name, repaired,
