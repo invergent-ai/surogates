@@ -30,6 +30,7 @@ DID, CALLER = "+40300000001", "+40722000111"
 RATE = 24000
 FRAME = RATE // 50  # 20 ms
 QUIET_END = 1.5  # seconds of agent silence that end its reply
+BUSY_END = 3.0  # seconds without typing that end a lookup: the soundscape types in bursts, with natural gaps
 LOUD = 300  # int16 RMS above which a frame is speech
 BUSY = 100  # RMS above which the background track is typing (the agent is still working); distant room events stay below
 
@@ -169,8 +170,9 @@ class Call:
         deadline = since + timeout
         while time.monotonic() < deadline and not self.ended.is_set():
             loud = [w for w, _, l in self.heard if l and w > since]
-            last = max([loud[-1]] + [b for b in self.busy_at[-50:] if b > since]) if loud else None
-            if last is not None and time.monotonic() - last > QUIET_END:
+            busy = [b for b in self.busy_at[-50:] if b > since]
+            now = time.monotonic()
+            if loud and now - loud[-1] > QUIET_END and (not busy or now - busy[-1] > BUSY_END):
                 break
             await asyncio.sleep(0.05)
         loud = [w for w, _, l in self.heard if l and w > since]
