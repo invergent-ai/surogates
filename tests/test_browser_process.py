@@ -243,6 +243,34 @@ class TestProvision:
         assert "stop" in verbs
         assert "rm" in verbs
 
+    async def test_provision_cancelled_while_waiting_cleans_up_its_container(self) -> None:
+        """A turn stopped mid-provision (a phone caller talking over the agent) cancels this task.
+
+        CancelledError is not an Exception: the started container used to survive, outside every
+        map and registry, and a re-run of the turn provisioned a second one next to it.
+        """
+        import asyncio
+
+        started = asyncio.Event()
+
+        class HangingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                started.set()
+                await asyncio.Event().wait()
+
+        docker = FakeDocker()
+        backend = ProcessBrowserBackend(
+            image="i", rest_port_base=30000, cdp_port_base=31000, live_view_port_base=32000,
+            docker=docker, httpx_transport=HangingTransport(),
+        )
+        task = asyncio.create_task(backend.provision(BrowserSpec(pod_ready_timeout=60)))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        verbs = [call[0] for call in docker.calls]
+        assert "stop" in verbs and "rm" in verbs
+
 
 class TestStatus:
 

@@ -25,6 +25,7 @@ component allowed to interpret them.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
@@ -88,6 +89,9 @@ class MediaCreditsExhaustedError(RuntimeError):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformClient:
@@ -238,6 +242,29 @@ class PlatformClient:
             )
         resp.raise_for_status()
         return resp.json()
+
+    async def report_voice_call(self, **call: Any) -> None:
+        """Record a finished phone call in ops (``POST /api/channels/voice/calls``).
+
+        Best effort: a call has already ended when this runs, so a failure is logged,
+        never raised. Ops keys the row by ``call_id``, so a retry is harmless.
+        """
+        try:
+            resp = await self._client.post("/api/channels/voice/calls", json=call)
+        except httpx.HTTPError as exc:
+            logger.warning("Could not report voice call %s to ops: %r", call.get("call_id"), exc)
+            return
+        if resp.status_code >= 300:
+            logger.warning("Ops refused voice call %s: %s %s", call.get("call_id"), resp.status_code, resp.text[:200])
+
+    async def get_voice_sound(self, name: str) -> bytes:
+        """One file of the voice soundscape's sound pack (``GET /api/voice/sounds/files/<name>``).
+
+        Raises like any request: the caller (``fetch_pack``) treats any failure as "no background".
+        """
+        resp = await self._client.get(f"/api/voice/sounds/files/{name}", timeout=30.0)
+        resp.raise_for_status()
+        return resp.content
 
     async def get_channel_routing(
         self, kind: str, identifier: str,

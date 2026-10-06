@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 from dataclasses import dataclass
 
+from surogates.channels.constants import queue_priority
 from surogates.config import (
     INTERRUPT_CHANNEL_PREFIX,
     SHARED_WORK_QUEUE_KEY,
@@ -153,6 +154,8 @@ _TASKS_TICK_INTERVAL: float = 5.0
 # interrupted harness has time to release its lease.
 _LEASE_BUSY_REQUEUE_DELAY: float = 0.25
 
+# interrupt reasons meaning nobody is left: the turn stops, the browser goes, no warning if no turn runs
+_SESSION_GONE_REASONS = frozenset({"session deleted", "call_ended"})
 # priority bump applied when a session is requeued
 # because its tenant is over the TurnConcurrencyGate cap.  Larger
 # numbers = later delivery, so the noisy tenant slips to the back of
@@ -565,6 +568,8 @@ class Orchestrator:
             org_id=str(session.org_id),
             agent_id=session.agent_id,
             session_id=session_id,
+            # a phone call's turn goes back where it was: at the front
+            priority=queue_priority(getattr(session, "channel", None)),
         )
 
     # ── Crash-loop breaker state (Redis, shared across replicas) ──────
@@ -700,6 +705,16 @@ class Orchestrator:
                             state.get("fingerprint"),
                         )
                         return
+
+            # Another worker holds this session (e.g. a caller's next turn queued behind a wake still
+            # finishing): learn that before building a harness, which costs a full set of DB, vault
+            # and MCP round trips, instead of after it inside wake().
+            has_live_lease = getattr(self.session_store, "has_live_lease", None)
+            if has_live_lease is not None and await has_live_lease(session_id):
+                self._rewake_pending.discard(session_id)
+                logger.info("Session %s lease is held; requeueing wake", session_id)
+                await self._requeue_busy_session(session_id)
+                return
 
             harness = self.harness_factory(session_id)
             # Support both sync and async factories.
@@ -940,7 +955,13 @@ class Orchestrator:
             )
 
     async def _handle_interrupt_signal(self, session_id: UUID, reason: str) -> None:
-        delivered = self.interrupt_session(session_id, reason)
+        gone = reason in _SESSION_GONE_REASONS
+        # Nobody is left (a deleted session, a phone call that ended): stop a turn running here, if
+        # any; most of the time none is, and that is not worth a warning in the log.
+        if gone and session_id not in self._active_harnesses:
+            delivered = False
+        else:
+            delivered = self.interrupt_session(session_id, reason)
         # A turn waiting to take its slot back on a full worker would not see
         # the interrupt until a slot freed.  Only a delivered interrupt ends
         # the turn, so only then may it go on without its slot.
@@ -948,16 +969,17 @@ class Orchestrator:
             for slots, dequeued in list(self._turns.values()):
                 if dequeued.session_id == str(session_id):
                     slots.interrupt()
-        if reason == "session deleted" and self._browser_pool is not None:
+        # nobody is left to use its browser either
+        if gone and self._browser_pool is not None:
             try:
                 await self._browser_pool.destroy_for_session(str(session_id))
             except Exception:
                 logger.warning(
-                    "Failed to destroy browser sandbox for deleted session %s",
+                    "Failed to destroy browser sandbox for ended session %s",
                     session_id,
                     exc_info=True,
                 )
-        if not delivered:
+        if not delivered and not gone:
             logger.warning(
                 "Interrupt for session %s could not be delivered "
                 "(no active harness on this worker)",

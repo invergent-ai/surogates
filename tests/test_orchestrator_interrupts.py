@@ -47,6 +47,19 @@ async def test_session_deleted_interrupt_destroys_browser_pool(
     assert browser_pool.destroyed_sessions == [str(session_id)]
 
 
+async def test_a_hang_up_tears_the_calls_browser_down_quietly(
+    browser_pool: _BrowserPool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A phone call's browser must not outlive the call; no turn running at hang-up is normal."""
+    session_id = uuid4()
+    orchestrator = _orchestrator(browser_pool)
+
+    await orchestrator._handle_interrupt_signal(session_id, "call_ended")
+
+    assert browser_pool.destroyed_sessions == [str(session_id)]
+    assert not [r for r in caplog.records if r.levelname in ("ERROR", "WARNING")]
+
+
 async def test_pause_interrupt_does_not_destroy_browser_pool(
     browser_pool: _BrowserPool,
 ) -> None:
@@ -101,7 +114,36 @@ async def test_lease_held_wake_is_requeued(
                 session_id=str(session_id),
             ): 0,
         },
+        lt=True,
     )
+
+
+async def test_a_wake_for_a_session_held_elsewhere_builds_no_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building a harness costs a full set of DB, vault and MCP round trips; a phone caller's next
+    turn re-queued behind a busy session paid that on every spin before learning the lease was held."""
+    session_id = uuid4()
+    org_id = uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+
+    def fail_if_called(_session_id):
+        raise AssertionError("a session leased elsewhere must not get a harness")
+
+    session_store = SimpleNamespace(
+        has_live_lease=AsyncMock(return_value=True),
+        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot")),
+    )
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY", 0, raising=False)
+    orchestrator = Orchestrator(
+        redis_client=redis, session_store=session_store, harness_factory=fail_if_called,
+        agent_id="support-bot", queue_key="surogates:work_queue:support-bot", max_concurrent=1,
+    )
+
+    await orchestrator._process(session_id)
+
+    redis.zadd.assert_called_once()
 
 
 async def test_locally_active_wake_defers_rewake_without_zadd(
@@ -181,6 +223,7 @@ async def test_deferred_rewake_enqueues_once_after_wake_exits(
                 session_id=str(session_id),
             ): 0,
         },
+        lt=True,
     )
 
 
@@ -280,3 +323,25 @@ async def test_interrupt_listener_resubscribes_after_redis_error(
 
     assert received == [(session_id, "session deleted")]
     assert first.closed and second.closed
+
+
+async def test_a_busy_session_keeps_its_place_in_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A phone caller's turn (priority -1) re-queued because the session is still leased must go back
+    at -1, not at 0 behind ordinary work; and a re-queue never pushes an earlier, better place back."""
+    session_id, org_id = uuid4(), uuid4()
+    redis = AsyncMock()
+    redis.zadd = AsyncMock()
+    session_store = SimpleNamespace(
+        has_live_lease=AsyncMock(return_value=True),
+        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot", channel="voice")),
+    )
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY", 0, raising=False)
+    orchestrator = Orchestrator(
+        redis_client=redis, session_store=session_store, harness_factory=lambda _sid: None,
+        agent_id="support-bot", queue_key="surogates:work_queue:support-bot", max_concurrent=1,
+    )
+
+    await orchestrator._process(session_id)
+
+    member = encode_queue_member(org_id=str(org_id), agent_id="support-bot", session_id=str(session_id))
+    redis.zadd.assert_called_once_with(SHARED_WORK_QUEUE_KEY, {member: -1}, lt=True)
