@@ -73,7 +73,7 @@ from surogates.runtime import (
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
-from surogates.workstreams import is_project_master
+from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
 
 logger = logging.getLogger(__name__)
 
@@ -620,6 +620,10 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     resolved.pop("memory_boundary", None)
     resolved.pop("workspace_boundary", None)
     resolved.pop("channel", None)
+    # A project's keys say a session is its master or one of its threads,
+    # which decides its tools, its prompt and the lists it shows in.
+    for key in SERVER_OWNED_KEYS:
+        resolved.pop(key, None)
     if channel != API_CHANNEL:
         return resolved
     partition_id = str(resolved.get("eval_partition_id") or "").strip()
@@ -1667,6 +1671,8 @@ async def list_sessions(
         # conversation (and its subtree) is listed — multi-era chats
         # stay hidden until the capability is re-enabled.
         single_session_only=not agent_runtime.multi_session,
+        # A project's master is listed with its project, not as a chat.
+        exclude_project_masters=True,
     )
 
     # Pagination is over roots; any descendants ride along with their root, so

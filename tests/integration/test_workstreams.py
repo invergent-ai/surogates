@@ -342,3 +342,26 @@ async def test_ops_archiving_a_master_archives_its_project(api, session_factory)
         row = await db.scalar(select(Workstream).where(Workstream.id == UUID(project["id"])))
     assert row.status == "archived"
     assert (await api.client.get("/v1/workstreams", headers=api.auth())).json() == []
+
+
+async def test_a_master_is_not_in_the_chat_list(api):
+    project = await create(api)
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    assert chat.status_code == 201, chat.text
+    listed = await api.client.get("/v1/sessions", headers=api.auth())
+    assert listed.status_code == 200, listed.text
+    assert [s["id"] for s in listed.json()["sessions"]] == [chat.json()["id"]]
+    opened = await api.client.get(f"/v1/sessions/{project['master_session_id']}", headers=api.auth())
+    assert opened.status_code == 200, opened.text
+
+
+async def test_config_cannot_make_a_chat_part_of_a_project(api):
+    project = await create(api)
+    response = await api.client.post("/v1/sessions", json={"config": {
+        "workstream_id": project["id"], "workstream_role": "coordinator", "workstream_tier": "pro",
+    }}, headers=api.auth())
+    assert response.status_code == 201, response.text
+    config = response.json()["config"]
+    assert not {"workstream_id", "workstream_role", "workstream_tier"} & set(config)
+    listed = await api.client.get("/v1/sessions", headers=api.auth())
+    assert [s["id"] for s in listed.json()["sessions"]] == [response.json()["id"]]

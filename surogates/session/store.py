@@ -64,6 +64,7 @@ from surogates.session.models import (
     Session,
     SessionLease,
 )
+from surogates.workstreams import COORDINATOR
 
 logger = logging.getLogger(__name__)
 
@@ -962,12 +963,15 @@ class SessionStore:
         include_descendants: bool = False,
         any_principal: bool = False,
         single_session_only: bool = False,
+        exclude_project_masters: bool = False,
     ) -> list[Session]:
         """Return top-level sessions for a principal within an org, newest first.
 
         With *single_session_only* the page is restricted to roots stamped
         ``config.single_session`` — the "multi session off" listing, where
-        multi-era conversations stay hidden.
+        multi-era conversations stay hidden.  With *exclude_project_masters*
+        it leaves out projects' master sessions, which are listed with their
+        projects.
 
         Delegation children (``parent_id IS NOT NULL``) are excluded from the
         page itself -- they belong under their parent in the session tree, not
@@ -998,6 +1002,11 @@ class SessionStore:
                 else SessionRow.user_id == user_id
             )
         marker_filter = _SINGLE_SESSION_MARKER if single_session_only else true()
+        master_filter = (
+            SessionRow.config["workstream_role"].astext.is_distinct_from(COORDINATOR)
+            if exclude_project_masters
+            else true()
+        )
         async with self._sf() as db:
             result = await db.execute(
                 select(SessionRow)
@@ -1008,6 +1017,7 @@ class SessionStore:
                     SessionRow.status != "archived",
                     SessionRow.parent_id.is_(None),
                     marker_filter,
+                    master_filter,
                 )
                 .order_by(SessionRow.created_at.desc())
                 .limit(limit)
