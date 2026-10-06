@@ -108,8 +108,11 @@ async def apologize(ctx: JobContext, tts_url: str, voice: str, text: str, redis=
 
 
 async def run_all(*steps: tuple[str, Any]) -> None:
-    """Run each ``(name, awaitable)`` in order; a step that fails is logged and the next one still runs."""
+    """Run each ``(name, awaitable)`` in order; a step that fails is logged and the next one still runs.
+    A ``None`` step (nothing to close) is skipped."""
     for name, step in steps:
+        if step is None:
+            continue
         try:
             await step
         except Exception:
@@ -118,7 +121,7 @@ async def run_all(*steps: tuple[str, Any]) -> None:
 
 def follow_call(session: AgentSession, agent: Any, scape: Any) -> None:
     """The background follows the call: who speaks, the agent thinking, the caller giving details."""
-    pen_for = {"said": None}
+    pen_for = None  # the question the pen last wrote for
 
     @session.on("agent_state_changed")
     def _agent(ev) -> None:
@@ -127,9 +130,10 @@ def follow_call(session: AgentSession, agent: Any, scape: Any) -> None:
 
     @session.on("user_state_changed")
     def _caller(ev) -> None:
+        nonlocal pen_for
         speaking = ev.new_state == "speaking"
-        if speaking and agent.last_said != pen_for["said"]:
-            pen_for["said"] = agent.last_said  # once per question, however many breaths the answer takes
+        if speaking and agent.last_said != pen_for:
+            pen_for = agent.last_said  # once per question, however many breaths the answer takes
             if asks_for_details(agent.last_said):
                 scape.writing()
         scape.caller_speaking(speaking)
@@ -174,9 +178,6 @@ async def entrypoint(ctx: JobContext) -> None:
             started_at=started.isoformat(), ended_at=ended.isoformat(),
             seconds=int((ended - started).total_seconds()), outcome=outcome)
 
-    async def none() -> None:
-        return None
-
     async def cleanup() -> None:
         # what the platform needs first (the session closed, the call reported, the line freed), while
         # Redis and the DB are still open; then the media. Each step runs even if an earlier one fails:
@@ -184,11 +185,11 @@ async def entrypoint(ctx: JobContext) -> None:
         for task in list(tasks):
             task.cancel()
         await run_all(
-            ("end the session", call.end() if call is not None else none()),
-            ("report the call", report("completed") if call is not None else none()),
-            ("release the line", slots.release(info.call_id) if slots is not None else none()),
-            ("stop the background", background.aclose() if background is not None else none()),
-            ("close the TTS", tts.aclose() if tts is not None else none()),
+            ("end the session", call and call.end()),
+            ("report the call", call and report("completed")),
+            ("release the line", slots and slots.release(info.call_id)),
+            ("stop the background", background and background.aclose()),
+            ("close the TTS", tts and tts.aclose()),
             ("close the runtime", rt.aclose()),
         )
 
@@ -204,12 +205,11 @@ async def entrypoint(ctx: JobContext) -> None:
         return await apologize(ctx, vs.tts_url, "female", UNAVAILABLE, rt.redis)
 
     config = CallConfig.from_routing(tenant.get("config"))
-    held = CallSlots(rt.redis, vs.max_concurrent_calls)
-    if not await held.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
+    slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op
+    if not await slots.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)
         await report("busy")
         return await apologize(ctx, vs.tts_url, config.voice, BUSY, rt.redis)
-    slots = held
     try:
         call = await rt.sessions.open_call(
             CallTarget(org_id=UUID(str(tenant["org_id"])), agent_id=tenant["agent_id"],

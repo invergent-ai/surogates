@@ -78,6 +78,7 @@ async def test_call_cleanup_runs_every_step_even_when_one_fails(caplog):
     async def boom():
         raise ValueError("background crashed")
 
-    await run_all(("end the session", ok("end")), ("background", boom()), ("release the line", ok("release")))
+    await run_all(("end the session", ok("end")), ("no call", None), ("background", boom()),
+                  ("release the line", ok("release")))
     assert done == ["end", "release"]
     assert "background" in caplog.text
