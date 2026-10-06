@@ -1608,6 +1608,39 @@ async def test_a_crashed_worker_reports_once_when_it_fails_for_good(api, monkeyp
         assert (crashes, report.data) == (3, {"worker_id": str(child.id), **reported})
 
 
+@pytest.mark.parametrize("creator", ["master", "none"])
+async def test_a_routine_that_crashes_for_good_says_so_where_its_results_go(api, monkeypatch, creator):
+    # A scheduled run is not a worker: its creator reads its result, or the inbox does.
+    monkeypatch.setattr("surogates.orchestrator.dispatcher._BASE_RETRY_DELAY", 0)
+    store = api.app.state.session_store
+    master = await master_of(api, await create(api))
+    routine = {"scheduled_session_id": str(uuid4())}
+    if creator == "master":
+        run = await create_child_session(store=store, parent=master, channel="scheduled", config=routine)
+    else:
+        run = await store.create_session(
+            user_id=master.user_id, org_id=master.org_id, agent_id=master.agent_id, channel="scheduled", config=routine,
+        )
+    await store.emit_event(run.id, EventType.USER_MESSAGE, {"content": "Check the cash report."})
+    harness, _ = waking(api, monkeypatch)
+
+    async def turn(session, messages, system_prompt, lease, **_):
+        raise RuntimeError("the hub timed out")
+
+    harness._run_loop = turn
+    await dispatcher(api, harness)._process(run.id)
+    assert await events_of(api, master.id, EventType.WORKER_FAILED) == []
+    if creator == "master":
+        [result] = await events_of(api, master.id, EventType.LOOP_RESULT)
+        said = {key: result.data[key] for key in ("run_session_id", "outcome", "content")}
+        assert said == {"run_session_id": str(run.id), "outcome": "failed", "content": "crash_loop_detected: the hub timed out"}
+    else:
+        [item] = await events_of(api, run.id, EventType.INBOX_TASK_COMPLETE)
+        assert {key: item.data[key] for key in ("outcome", "error")} == {
+            "outcome": "failed", "error": "crash_loop_detected: the hub timed out",
+        }
+
+
 async def test_a_thread_the_orphan_sweeper_gives_up_on_reports_once(api):
     # A worker that keeps dying (out of memory, evicted) never raises in a wake:
     # the sweeper's recovery ceiling is where it ends.

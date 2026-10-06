@@ -887,9 +887,12 @@ class Orchestrator:
         """Tell the session that started *session_id* that it failed for good.
 
         Once, where the dispatcher stops retrying: a crash it retries is not
-        the worker's end, and its parent would hear of every attempt.
+        the worker's end, and its parent would hear of every attempt.  A
+        scheduled run is not a worker: it says so where its result goes, as
+        its turn's own failure does.
         """
-        from surogates.harness.loop_messages import _should_notify_parent_on_completion
+        from surogates.harness.loop_artifact_completion import announce_failure
+        from surogates.harness.loop_messages import _is_scheduled_run, _should_notify_parent_on_completion
         from surogates.harness.worker_notify import notify_parent_on_failure
 
         try:
@@ -897,19 +900,23 @@ class Orchestrator:
         except Exception:
             logger.warning("Could not read session %s to report its failure", session_id, exc_info=True)
             return
-        if not _should_notify_parent_on_completion(session):
-            return
-        await notify_parent_on_failure(
-            session_store=self.session_store,
-            worker_session_id=session_id,
-            parent_session_id=session.parent_id,
-            org_id=str(session.org_id),
-            agent_id=session.agent_id,
-            error=error,
-            redis=self.redis,
-            task_id=getattr(session, "task_id", None),
-            session_factory=self._session_factory,
-        )
+        if _is_scheduled_run(session):
+            try:
+                await announce_failure(self.session_store, session, error=error)
+            except Exception:
+                logger.warning("Could not report the failure of scheduled run %s", session_id, exc_info=True)
+        elif _should_notify_parent_on_completion(session):
+            await notify_parent_on_failure(
+                session_store=self.session_store,
+                worker_session_id=session_id,
+                parent_session_id=session.parent_id,
+                org_id=str(session.org_id),
+                agent_id=session.agent_id,
+                error=error,
+                redis=self.redis,
+                task_id=getattr(session, "task_id", None),
+                session_factory=self._session_factory,
+            )
 
     def _task_done(self, task: asyncio.Task) -> None:
         """Remove the task from the tracking set on completion."""
