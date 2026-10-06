@@ -33,9 +33,10 @@ The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
     npm run build
     SUROGATE_VM_TESTS=1 npx vitest run test/vm/guest.test.ts
 
-The app runs a chat's commands in that VM, its manager in a utility process of its
-own, with the VM's sockets in a folder of `$XDG_RUNTIME_DIR/surogate` that is its
-state's own. Until the image is delivered, the app boots the image built here (or
+The app runs a chat's commands and background processes in that VM, each command
+in a cgroup of its own, its manager in a utility process of its own, with the VM's
+sockets in a folder of `$XDG_RUNTIME_DIR/surogate` that is its state's own.
+Until the image is delivered, the app boots the image built here (or
 `SUROGATE_VM_IMAGE`'s) with the agent disk `npm run agent-disk` makes from `dist/`.
 The shell's tests that run a command boot it too:
 

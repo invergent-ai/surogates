@@ -8,9 +8,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { FolderGuards } from "../binding/folder.js";
+import { lostWith, type ProcessHandle } from "../guest/processes.js";
 import type { Binding } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
+import type { ProcessesChange } from "../vm/manager.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
@@ -40,6 +42,10 @@ export const NOT_BOUND: Outcome = { error: { type: "binding", message: "This fol
 const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
+
+// The hook guard around a process operation that runs elsewhere: its refusal before it
+// and its look after it, its refusal alone, or neither.
+export type Guard = "around" | "before" | null;
 
 // What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
 export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
@@ -147,16 +153,21 @@ export class ToolHosts implements Executor {
 
   /**
    * *inner*, a process operation that runs elsewhere (the VM), while the root's host
-   * holds the folder: its lock, and, with *guard*, the hook guard's refusal before
-   * it and its look after it (Host.guarded).
+   * holds the folder: its lock, and the hook guard as *guard* says (Host.guarded).
    */
   guarded(
-    operation: Operation, signal: AbortSignal, guard: boolean, inner: (binding: BoundFolder, signal: AbortSignal) => Promise<Outcome>,
+    operation: Operation, signal: AbortSignal, guard: Guard,
+    inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
     const binding = SESSION_ID.test(operation.sessionId) ? this.options.bindingOf(operation.sessionId) : undefined;
     if (!binding) return Promise.resolve(FOLDER_UNAVAILABLE);
-    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted) => inner(binding, aborted));
+    return this.hostFor(operation.sessionId, binding).guarded(operation, signal, guard, (aborted, ended) => inner(binding, aborted, ended));
+  }
+
+  /** A root's background processes elsewhere (the VM) changed: its host keeps their handles, and stays while any lives. */
+  processes(root: string, change: ProcessesChange): void {
+    this.hosts.get(root)?.processes(change);
   }
 
   // The guards each host checks its folder against: the binder's must be these, or the
@@ -238,6 +249,11 @@ class Host {
   // Its open network prompts: dismissed when it goes, or once nothing of its root runs.
   private prompts = new AbortController();
   private letting: Promise<void> | null = null;
+  // The handles of its root's background processes elsewhere (the VM), which every
+  // operation there carries: from the folder's record at its start, then as they change.
+  private handles: ProcessHandle[] = [];
+  // Once its file host said ready: what came of its root's processes before is not its own.
+  private readied = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -281,10 +297,12 @@ class Host {
 
   /**
    * *inner* while this host holds the folder, so the folder is not let go mid-way.
-   * With *guard*: the hook guard's refusal first, then, whatever the outcome, a
-   * cancel's too, its look after, which no cancel stops; the outcome carries its notice.
+   * With *guard*: the hook guard's refusal first; "around" then, whatever the outcome,
+   * a cancel's too, its look after, which no cancel stops; the outcome carries its notice.
    */
-  guarded(operation: Operation, signal: AbortSignal, guard: boolean, inner: (signal: AbortSignal) => Promise<Outcome>): Promise<Outcome> {
+  guarded(
+    operation: Operation, signal: AbortSignal, guard: Guard, inner: (signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+  ): Promise<Outcome> {
     return this.busy(async () => {
       const failure = await this.ready(signal);
       if (failure) return failure;
@@ -292,9 +310,21 @@ class Host {
         const refused = await this.request({ type: "refusal", id: operation.id }, signal);
         if (!("ok" in refused)) return refused;
       }
-      const outcome = await inner(signal);
-      return guard ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
+      const outcome = await inner(signal, this.handles);
+      return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
+  }
+
+  // Its root's processes elsewhere changed: the host's record keeps their handles, and a
+  // host with any alive is never idle. Gone: those still running ended with their sandbox.
+  // Until its file host is ready, a change is an earlier host's or an earlier guest's: its
+  // operations reach the guest only after, and the record's handles, which ready brings, have all ended.
+  processes(change: ProcessesChange): void {
+    if (!this.readied) return;
+    this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
+    this.live = "gone" in change ? 0 : change.live;
+    this.send({ type: "handles", handles: this.handles });
+    this.idle();
   }
 
   // Counted while it runs: a host with work is never idle.
@@ -387,6 +417,8 @@ class Host {
 
   private received(message: FromHost): void {
     if (message.type === "ready") {
+      this.handles = message.processes;
+      this.readied = true;
       this.settleStart(null);
     } else if (message.type === "failed") {
       // A host that failed to start is exiting: the next operation starts a new one.

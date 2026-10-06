@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { HostStart } from "../src/hosts/messages.js";
-import { RESTARTED, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
+import { RESTARTED, RUNNER_GONE, restartNotice } from "../src/guest/processes.js";
 import { appeared, GRANT_CHANGED, MAX_EXTRA_DENIES } from "../src/hosts/restarts.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";

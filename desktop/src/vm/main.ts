@@ -39,7 +39,7 @@ function answer(id: string, work: Promise<Outcome>): void {
 
 function received(message: ToManager): void {
   if (message.type === "start") {
-    manager ??= new VmManager(message.options);
+    manager ??= new VmManager(message.options, undefined, (root, change) => void send({ type: "processes", root, change }));
     void send({ type: "ready" });
   } else if (message.type === "op") {
     const { id } = message.operation;

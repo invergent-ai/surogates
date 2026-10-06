@@ -1,7 +1,9 @@
 // A root's background processes: start, poll, read_output, wait, kill,
 // write_stdin and list_processes, answered in the shapes of the cloud's process
-// registry (surogates/tools/utils/process_registry.py). The records live here in
-// the host, not in the session runner, so they outlive it.
+// registry (surogates/tools/utils/process_registry.py). The records live in the
+// guest agent, one registry a root (root.ts), not in its runner, so they outlive
+// it; their handles go to the host, which keeps them. Until commands move into the
+// VM, a tool host keeps a registry of its own too (hosts/host.ts).
 
 import { randomBytes } from "node:crypto";
 import { constants as osConstants } from "node:os";
@@ -9,10 +11,9 @@ import { TextDecoder } from "node:util";
 
 import { Failure, osError, type Refusal, sandboxError, valueError } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
-import { CANCELLED, type CommandChild, type CommandEnd, unenterable, workdir } from "../guest/command.js";
-import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "../guest/output.js";
-import type { SpawnRequest } from "../guest/protocol.js";
-import type { CommandContext } from "./run.js";
+import { CANCELLED, type CommandChild, type CommandEnd } from "./command.js";
+import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "./output.js";
+import type { SpawnRequest } from "./protocol.js";
 
 export const MAX_OUTPUT_CHARS = 200_000;
 export const FINISHED_TTL_SECONDS = 1800;
@@ -20,9 +21,13 @@ export const MAX_PROCESSES = 64;
 // The cloud's TERMINAL_TIMEOUT: wait's default and its most.
 export const MAX_WAIT_SECONDS = 180;
 export const KILL_GRACE_MS = 2_000;
+// How much of a process's command, task id and output its handle keeps, in code points:
+// the host keeps every handle, and sends them back with each operation.
+export const HANDLE_CHARS = 2_000;
 export const APP_QUIT = "The process ended when the app quit";
 export const RUNNER_GONE = "The process ended because the computer's sandbox stopped";
 export const RESTARTED = "The process was stopped because the computer restarted its sandbox; start it again if you still need it";
+export const OUT_OF_MEMORY = "The computer's sandbox ran out of memory and ended this process, or one it started";
 export const restartNotice = (reason: string) =>
   `The computer restarted its sandbox because ${reason}, and stopped your background processes; start them again if you still need them.`;
 export const TOO_MANY = `This computer is already running ${MAX_PROCESSES} background processes for this chat; stop one before starting another.`;
@@ -50,8 +55,16 @@ export interface Spawner {
   spawn(request: SpawnRequest): Spawned;
 }
 
+// Where a command would run, as its runner sees the folder: the folder a start's
+// workdir resolves to, and why it cannot be entered (an errno name), or null.
+export interface Placed {
+  cwd: string;
+  unenterable: string | null;
+}
+
 export interface ProcessesOptions {
-  context: CommandContext;
+  // run's workdir checks for a start, asked where its command will run: throws the refusal.
+  place(workdir: string | null, signal: AbortSignal): Promise<Placed>;
   // The root's session runner, started at the first start; rejects when it cannot start,
   // or when *signal* cancels the start that waits for it.
   runner(signal: AbortSignal): Promise<Spawner>;
@@ -90,6 +103,10 @@ interface Tracked {
   // Called once at its end.
   waiters: Set<() => void>;
 }
+
+// The handles of a root whose guest went: each process still running ended with it.
+export const lostWith = (handles: readonly ProcessHandle[]): ProcessHandle[] =>
+  handles.map((handle) => handle.ended ? handle : { ...handle, ended: { exit_code: null, output: "", note: RUNNER_GONE } });
 
 const notFound = (id: string) => ({ status: "not_found", error: `No process with ID ${id}` });
 // The answers that carry a restart's notice as a note of their own.
@@ -225,21 +242,27 @@ export class Processes {
     const taskId = args.task_id ?? null;
     if (taskId !== null && typeof taskId !== "string") throw valueError("'task_id' must be a string or null");
     // notify_on_complete and watcher_interval are taken and ignored: nothing in the cloud reads them yet.
-    // The cloud resolves the workdir before it sees the NUL, and Popen sees the NUL
-    // before it enters the workdir.
-    const cwd = workdir(this.options.context, requested);
-    if (command.includes("\0")) throw valueError("embedded null byte");
-    const code = unenterable(cwd);
-    if (code) throw osError(code, cwd);
-    await this.refuse();
-    this.prune();
-    if (this.running.size >= MAX_PROCESSES) throw sandboxError(TOO_MANY);
-    let runner: Spawner;
-    // A cancel does not wait out a restart, or the runner's start.
+    // A cancel does not wait out the runner's answer, a restart, or the runner's start.
     const cancelled = new Promise<never>((_resolve, reject) => {
       if (signal.aborted) reject(CANCELLED);
       signal.addEventListener("abort", () => reject(CANCELLED), { once: true });
     });
+    let placed: Placed;
+    try {
+      placed = await Promise.race([this.options.place(requested, signal), cancelled]);
+    } catch (error) {
+      if (signal.aborted) return CANCELLED;
+      throw error;
+    }
+    // The cloud resolves the workdir before it sees the NUL, and Popen sees the NUL
+    // before it enters the workdir.
+    const { cwd } = placed;
+    if (command.includes("\0")) throw valueError("embedded null byte");
+    if (placed.unenterable) throw osError(placed.unenterable, cwd);
+    await this.refuse();
+    this.prune();
+    if (this.running.size >= MAX_PROCESSES) throw sandboxError(TOO_MANY);
+    let runner: Spawner;
     try {
       runner = await Promise.race([this.options.runner(signal), cancelled]);
     } catch (error) {
@@ -419,7 +442,10 @@ export class Processes {
     if (record.restarted !== null) record.note = RESTARTED;
     else if (record.killed) record.exitCode = -15;
     else if ("lost" in end) record.note = RUNNER_GONE;
-    else if ("code" in end) record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
+    else if ("code" in end) {
+      record.exitCode = end.code ?? 128 + (end.signal ? osConstants.signals[end.signal] : 0);
+      if (end.oom) record.note = OUT_OF_MEMORY;
+    }
     if (record.pid !== null) this.noticed(record);
     this.running.delete(record.handle.id);
     this.finished.set(record.handle.id, record);
@@ -446,12 +472,15 @@ export class Processes {
     });
   }
 
-  // A host that idles out keeps how a process ended for the next one, as the cloud keeps it for 30 minutes;
-  // one its sandbox took with it, as when the host stops, ended when the app quit.
+  // How each process ended, kept for the next registry, as the cloud keeps it for 30
+  // minutes; one still running is kept as it started, and the next says it ended when the app quit.
   handles(): ProcessHandle[] {
-    return [...this.running.values(), ...this.finished.values()].map((record) => (record.exited && record.note !== RUNNER_GONE
-      ? { ...record.handle, ended: { exit_code: record.exitCode, output: lastPoints(record.buffer, 2000), note: record.note } }
-      : record.handle));
+    return [...this.running.values(), ...this.finished.values()].map((record) => {
+      const { command, task_id: taskId } = record.handle;
+      const handle = { ...record.handle, command: firstPoints(command, HANDLE_CHARS), task_id: taskId === null ? null : firstPoints(taskId, HANDLE_CHARS) };
+      if (!record.exited) return handle;
+      return { ...handle, ended: { exit_code: record.exitCode, output: lastPoints(record.buffer, HANDLE_CHARS), note: record.note } };
+    });
   }
 
   // _prune_if_needed: finished records older than the TTL, from their start; then,

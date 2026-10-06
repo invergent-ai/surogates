@@ -6,7 +6,7 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 
-import type { ProcessHandle } from "./processes.js";
+import type { ProcessHandle } from "../guest/processes.js";
 
 // srt 0.0.77 mounts a placeholder over each of these in the folder while a command
 // runs, where it is absent: its dangerous files and folders, and .git's two when
@@ -77,14 +77,20 @@ export function readRecord(path: string): FolderRecord | null {
   }
 }
 
-function isHandle(value: unknown): value is ProcessHandle {
+// The longest string a handle holds, in UTF-16 units: a registry keeps 2 000 code
+// points of a command, task id and output (guest/processes.ts, HANDLE_CHARS), and a
+// folder a command can run in is a path of fewer than 4 096 bytes.
+const HANDLE_UNITS = 4_096;
+const short = (value: unknown): value is string => typeof value === "string" && value.length <= HANDLE_UNITS;
+
+export function isHandle(value: unknown): value is ProcessHandle {
   const handle = value as ProcessHandle;
-  return typeof handle === "object" && handle !== null && typeof handle.id === "string" && typeof handle.command === "string"
-    && typeof handle.cwd === "string" && (handle.task_id === null || typeof handle.task_id === "string")
+  return typeof handle === "object" && handle !== null && short(handle.id) && short(handle.command)
+    && short(handle.cwd) && (handle.task_id === null || short(handle.task_id))
     && typeof handle.started_at === "number"
     && (handle.ended === undefined || (typeof handle.ended === "object" && handle.ended !== null
       && (handle.ended.exit_code === null || typeof handle.ended.exit_code === "number")
-      && typeof handle.ended.output === "string" && (handle.ended.note === null || typeof handle.ended.note === "string")));
+      && short(handle.ended.output) && (handle.ended.note === null || short(handle.ended.note))));
 }
 
 // Whole or not at all, and on disk before it returns: a crash right after must find it.

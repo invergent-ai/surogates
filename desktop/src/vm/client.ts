@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
 import type { HostUser } from "../guest/protocol.js";
 import type { Outcome } from "../link/protocol.js";
-import { unavailable, type VmOperation, type VmOptions } from "./manager.js";
+import { type ProcessesChange, unavailable, type VmOperation, type VmOptions } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -55,6 +55,8 @@ export type FromManager =
   // It runs, and took its start.
   | { type: "ready" }
   | { type: "result"; id: string; outcome: Outcome }
+  // Unasked: a root's background processes in the guest changed.
+  | { type: "processes"; root: string; change: ProcessesChange }
   // Its last word at a stop, after every answer, from a process that waits to be ended: a utility
   // process's postMessage has no callback, and an exit right after it can lose what it sent.
   | { type: "stopped" };
@@ -98,6 +100,9 @@ export class VmClient {
   private readonly pending = new Map<string, (outcome: Outcome) => void>();
   private stopping: Promise<void> | null = null;
   private teardowns = 0;
+  private readonly listeners = new Set<(root: string, change: ProcessesChange) => void>();
+  // The roots whose processes the manager has told of: a manager that goes takes them with its guest.
+  private readonly told = new Set<string>();
 
   constructor(private readonly options: VmClientOptions) {}
 
@@ -155,6 +160,12 @@ export class VmClient {
     await gone;
   }
 
+  /** Told each change of a root's processes in the guest, whichever device's root it is. Returns what stops it. */
+  onProcesses(listener: (root: string, change: ProcessesChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => void this.listeners.delete(listener);
+  }
+
   // The manager stops its guest and exits; one that does not is killed, and its guest goes with it.
   stop(): Promise<void> {
     this.stopping ??= (async () => {
@@ -178,14 +189,23 @@ export class VmClient {
     manager.onMessage((message) => {
       if (message.type === "ready") ran = true;
       else if (message.type === "result") this.pending.get(message.id)?.(message.outcome);
+      else if (message.type === "processes") this.tell(message.root, message.change);
       else if (message.type === "stopped") manager.kill();
     });
     manager.onExit(() => {
       if (this.manager === manager) this.manager = null;
+      // Before what it ran is answered: the next operation finds them ended.
+      for (const root of this.told) this.tell(root, { gone: true });
       const outcome = ran ? SANDBOX_STOPPED : unavailable("did not start: its manager exited");
       for (const answer of [...this.pending.values()]) answer(outcome);
     });
     manager.send({ type: "start", options: this.options.vm });
     return manager;
+  }
+
+  private tell(root: string, change: ProcessesChange): void {
+    if ("gone" in change) this.told.delete(root);
+    else this.told.add(root);
+    for (const listener of this.listeners) listener(root, change);
   }
 }

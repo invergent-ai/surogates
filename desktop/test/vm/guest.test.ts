@@ -12,10 +12,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
+import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation } from "../../src/link/protocol.js";
-import { vmOptions } from "../../src/vm/client.js";
+import { VmClient, vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
@@ -52,6 +53,13 @@ const FILES = [
 const INCOMPAT = 1024 + 0x60;
 
 const signal = () => new AbortController().signal;
+const background = (command: string) => ({ command, workdir: null, task_id: "vm", pty: false, notify_on_complete: false, watcher_interval: null });
+
+async function until(check: () => boolean, ms = 10_000): Promise<void> {
+  for (const end = Date.now() + ms; !check(); await new Promise((resolve) => setTimeout(resolve, 50))) {
+    if (Date.now() > end) throw new Error("timed out");
+  }
+}
 const folderOf = (path: string): Folder => {
   const { dev, ino } = statSync(path);
   return { path, dev, ino };
@@ -77,7 +85,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
   const run = (command: string, root = ROOT, timeout = 30) => guest.op(root, "run", { command, workdir: null, timeout }, signal());
   // *path* added to the guest for *root*, then *root* set up on it.
-  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, share: await guest.share(root, folderOf(path)) });
+  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, share: await guest.share(root, folderOf(path)), ended: [] });
 
   // The first boot formats the sessions disk; the tests run on the second, which checks it, as every later boot does.
   beforeAll(async () => {
@@ -113,11 +121,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run("pwd; echo $HOME; id -un")).toEqual({
       ok: { output: `${folder}\n${USER.home}\n${USER.name}\n`, returncode: 0, timed_out: false },
     });
-    expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1 })).toMatchObject({
+    expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1, ended: [] })).toMatchObject({
       type: "failed", message: "This chat's sandbox is already set up",
     });
     expect(await run("true", OTHER)).toMatchObject({ error: { type: "unavailable" } });
-    const valid = { type: "setup", root: OTHER, folder, share: R1 } as const;
+    const valid = { type: "setup", root: OTHER, folder, share: R1, ended: [] as ProcessHandle[] } as const;
     for (const [fields, message] of [
       [{ share: { kind: "virtiofs", tag: "../r1" } }, "not a share tag: ../r1"],
       [{ folder: "relative/path" }, "not a folder: relative/path"],
@@ -128,6 +136,115 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         type: "failed", message,
       }));
     }
+  });
+
+  it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
+    writeFileSync(join(folder, "served.txt"), "served\n");
+    const started = await guest.op(ROOT, "start", background("python3 -m http.server 8765 --bind 127.0.0.1"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    let fetched = await run("curl -sS http://127.0.0.1:8765/served.txt");
+    for (let tries = 0; tries < 50 && (fetched as { ok?: { output: string } }).ok?.output !== "served\n"; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      fetched = await run("curl -sS http://127.0.0.1:8765/served.txt");
+    }
+    expect(fetched).toEqual({ ok: { output: "served\n", returncode: 0, timed_out: false } });
+    expect(await guest.op(ROOT, "poll", { session_id }, signal())).toMatchObject({ ok: { status: "running", command: "python3 -m http.server 8765 --bind 127.0.0.1" } });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    rmSync(join(folder, "served.txt"));
+  });
+
+  it("ends what a command left running when it ends, a process that left its session and its environment too", async () => {
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 303 < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
+    expect(await run(leaver)).toEqual({ ok: { output: "started\n", returncode: 0, timed_out: false } });
+    expect(await run("for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x sleep > /dev/null || break; sleep 0.1; done; pgrep -c -x sleep || true")).toMatchObject({
+      ok: { output: "0\n" },
+    });
+  });
+
+  it("kills a background process with everything it started, and notes one the guest ended for memory", async () => {
+    const begin = async (command: string) => ((await guest.op(ROOT, "start", background(command), signal())) as { ok: { session_id: string } }).ok.session_id;
+    const session_id = await begin("env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 304 < /dev/null > /dev/null 2>&1 & exec sleep 305");
+    expect(await run("sleep 0.5; pgrep -c -x sleep")).toMatchObject({ ok: { output: "2\n" } });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    expect(await run("pgrep -c -x sleep || true")).toMatchObject({ ok: { output: "0\n" } });
+    // More than the roots may have together, less than the guest's 2 GiB.
+    const hungry = await begin("python3 -c 'b = b\"x\" * (1800 * 2 ** 20)'");
+    expect(await guest.op(ROOT, "wait", { session_id: hungry, timeout: 60 }, signal())).toEqual({
+      ok: { status: "exited", exit_code: 137, output: "", note: "The computer's sandbox ran out of memory and ended this process, or one it started" },
+    });
+  });
+
+  it("kills what a background process left that ignores SIGTERM once kill's grace has passed, though the process itself ended at once", async () => {
+    const started = await guest.op(ROOT, "start", background("(trap '' TERM; exec setsid sleep 308) </dev/null >/dev/null 2>&1 & exec sleep 309"), signal());
+    const { session_id } = (started as { ok: { session_id: string } }).ok;
+    expect(await run("sleep 0.5; pgrep -c -x sleep")).toMatchObject({ ok: { output: "2\n" } });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    // KILL_GRACE_MS after the SIGTERM.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(await run("for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x sleep > /dev/null || break; sleep 0.1; done; pgrep -c -x sleep || true")).toMatchObject({
+      ok: { output: "0\n" },
+    });
+  });
+
+  it("gives each command a cgroup of its own, gone once it ends, and the root's user none of the root's own limits", async () => {
+    expect(await run("true")).toMatchObject({ ok: { returncode: 0 } });
+    expect(await run([
+      "ls /sys/fs/cgroup/run | grep -c '^op-'",
+      "cat /proc/self/cgroup",
+      // A run's memory is not counted apart: a background process's is, for its out-of-memory note.
+      'test -e "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.events" || echo a run has no memory cgroup',
+      "(echo 1 > /sys/fs/cgroup/pids.max) 2>&1 | sed 's/.*: //'",
+      "(echo 1 > /sys/fs/cgroup/init/cgroup.kill) 2>&1 | sed 's/.*: //'",
+      "(mkdir /sys/fs/cgroup/mine) 2>&1 | sed 's/.*: //'",
+    ].join("; "))).toEqual({
+      ok: {
+        output: expect.stringMatching(/^1\n0::\/run\/op-\d+\na run has no memory cgroup\nPermission denied\nPermission denied\nPermission denied\n$/),
+        returncode: 0,
+        timed_out: false,
+      },
+    });
+  });
+
+  it("stops a command that makes cgroups at its root's bound, none below a command's, and the guest keeps its memory", async () => {
+    const make = [
+      "import errno, os",
+      "def free():",
+      "    return int(next(line for line in open('/proc/meminfo') if line.startswith('MemAvailable')).split()[1])",
+      "before = free()",
+      "n = 0",
+      "try:",
+      "    while n < 100000:",
+      "        os.mkdir('/sys/fs/cgroup/run/c%d' % n)",
+      "        n += 1",
+      "except OSError as error:",
+      "    print(n, errno.errorcode[error.errno])",
+      "try:",
+      "    os.mkdir('/sys/fs/cgroup/run/c0/below')",
+      "except OSError as error:",
+      "    print(errno.errorcode[error.errno])",
+      "print('MiB taken', (before - free()) // 1024)",
+      "for k in range(n): os.rmdir('/sys/fs/cgroup/run/c%d' % k)",
+    ].join("\n");
+    const outcome = await run(`python3 -c "${make}"`) as { ok: { output: string } };
+    console.log(`cgroups a command made: ${outcome.ok.output.replaceAll("\n", "; ")}`);
+    const [, made, taken] = /^(\d+) EAGAIN\nEAGAIN\nMiB taken (-?\d+)\n$/.exec(outcome.ok.output) ?? [];
+    // 256 below the root: init, run, proc and the command's own cgroup, then the command's.
+    expect(Number(made)).toBe(252);
+    expect(Number(taken)).toBeLessThan(32);
+  });
+
+  it("leaves no dying cgroup behind runs that each leave a file in /tmp", async () => {
+    for (let i = 0; i < 1000; i += 1) await run(`echo ${i} > /tmp/run-${i}`);
+    const stat = await run("grep nr_dying_descendants /sys/fs/cgroup/cgroup.stat; rm -f /tmp/run-*") as { ok: { output: string } };
+    console.log(`after 1000 runs: ${stat.ok.output.trim()}`);
+    expect(Number(/nr_dying_descendants (\d+)/.exec(stat.ok.output)?.[1])).toBeLessThan(20);
+  });
+
+  it("gives back the cgroup of each command that cannot start, so a root still runs commands after more of them than its bound", async () => {
+    // Past Linux's 128 KiB for one argument: the spawn throws E2BIG at once, once the command's cgroup is made.
+    const long = `: ${"x".repeat(140_000)}`;
+    for (let i = 0; i < 260; i += 1) expect(await run(long)).toMatchObject({ ok: { output: "spawn E2BIG", returncode: -1 } });
+    expect(await run("echo still here")).toEqual({ ok: { output: "still here\n", returncode: 0, timed_out: false } });
   });
 
   it("answers ping, and carries large results", async () => {
@@ -210,7 +327,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run("env | cut -d= -f1 | sort | tr '\\n' ' '")).toEqual({
       ok: {
         output: "HOME LANG LOGNAME NPM_CONFIG_PREFIX PATH PIP_USER PWD PYTHONDONTWRITEBYTECODE PYTHONUNBUFFERED PYTHONUSERBASE SHLVL " +
-          "SUROGATE_PROCESS USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
+          "USER UV_CACHE_DIR XDG_CACHE_HOME _ ",
         returncode: 0,
         timed_out: false,
       },
@@ -262,6 +379,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
     expect(filled).toEqual({ ok: { output: "256\n64\nENOSPC ENOSPC \n 32768 0\n 8192 0\n", returncode: 0, timed_out: false } });
     await run("rm -rf /var/tmp/fill /dev/shm/fill /var/tmp/many /dev/shm/many");
+  });
+
+  it("lets two roots each run a server on one port, each reached by its own commands only", async () => {
+    const ids: string[] = [];
+    for (const [root, path] of [[ROOT, folder], [OTHER, other]] as const) {
+      writeFileSync(join(path, "who.txt"), `${root}\n`);
+      const started = await guest.op(root, "start", background("python3 -m http.server 8766 --bind 127.0.0.1"), signal()) as { ok: { session_id: string } };
+      ids.push(started.ok.session_id);
+    }
+    for (const root of [ROOT, OTHER]) {
+      let fetched = await run("curl -sS http://127.0.0.1:8766/who.txt", root);
+      for (let tries = 0; tries < 50 && (fetched as { ok?: { output: string } }).ok?.output !== `${root}\n`; tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        fetched = await run("curl -sS http://127.0.0.1:8766/who.txt", root);
+      }
+      expect(fetched).toEqual({ ok: { output: `${root}\n`, returncode: 0, timed_out: false } });
+    }
+    for (const [index, root] of [ROOT, OTHER].entries()) await guest.op(root, "kill", { session_id: ids[index] }, signal());
+    for (const path of [folder, other]) rmSync(join(path, "who.txt"));
+  });
+
+  it("keeps its guest, and another root's process, through a start whose command is longer than a control line", async () => {
+    const other = await guest.op(OTHER, "start", background("sleep 306"), signal()) as { ok: { session_id: string } };
+    // 1.5M characters, each six bytes once escaped in JSON: past the host's 8 MiB line, inside the link's 2M-character frame.
+    expect(await guest.op(ROOT, "start", background(`: ${"\u0001".repeat(1_500_000)}`), signal())).not.toEqual(SANDBOX_STOPPED);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(guest.ended).toBe(false);
+    expect(await guest.op(OTHER, "poll", { session_id: other.ok.session_id }, signal())).toMatchObject({ ok: { status: "running" } });
+    await guest.op(OTHER, "kill", { session_id: other.ok.session_id }, signal());
   });
 
   it("bounds a root's memory and processes in its cgroup, and the agent and the other root go on", async () => {
@@ -476,11 +622,12 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
 
   it("ends everything of a root it tears down, a process that left its session and its environment too, and sets it up again", async () => {
     const a = join(dir, "a");
-    // No marker of its command's, cleared before the command ends, and a session of its
-    // own: only the root's cgroup still holds it. It beats in the folder, where the host sees it.
+    // What a background process left, in a session of its own and with its environment
+    // cleared, once that process has ended. It beats in the folder, where the host sees it.
     const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c 'while :; do /usr/bin/date +%s%N > beat; /usr/bin/sleep 0.1; done'"
-      + " < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
-    expect(await op(ROOT, a, "run", { command: leaver, workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "started\n" } });
+      + " < /dev/null > /dev/null 2>&1 & echo started";
+    expect(await op(ROOT, a, "start", background(leaver))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    await until(() => existsSync(join(a, "beat")));
     const beats = async () => {
       const before = readFileSync(join(a, "beat"), "utf8");
       await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -527,8 +674,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     const daemon = Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8"));
     const share = [daemon, ...spawnSync("pgrep", ["-P", String(daemon)], { encoding: "utf8" }).stdout.trim().split("\n").map(Number)];
     // A process that looks in the folder once its share has stalled: until the share answers, it cannot end.
-    const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
-    expect(await op(ROOT, a, "run", { command: stuck, workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "started\n" } });
+    const stuck = "env -i /usr/bin/setsid /usr/bin/nohup /bin/sh -c '/usr/bin/sleep 1; /usr/bin/stat ./stuck' < /dev/null > /dev/null 2>&1 & echo started";
+    expect(await op(ROOT, a, "start", background(stuck))).toMatchObject({ ok: { session_id: expect.any(String) } });
+    await new Promise((resolve) => setTimeout(resolve, 500));
     for (const pid of share) process.kill(pid, "SIGSTOP");
     try {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
@@ -631,7 +779,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
   const CHAT = "5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c";
   let dir: string;
   let run: string;
-  let manager: VmManager;
+  let vm: VmClient;
   let executor: VmExecutor;
   const operation = (kind: string, args: Record<string, unknown>): Operation => ({
     id: `${kind}-${Math.random()}`, sessionId: CHAT, callingSessionId: CHAT, invocationId: "call", ordinal: 1, kind, args, digest: "d",
@@ -643,20 +791,23 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     const folder = join(dir, "folder");
     mkdirSync(folder);
     run = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-vm-"));
-    manager = new VmManager({
-      kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
-      run, console: join(dir, "console.log"), user: USER,
+    // The manager in a process of its own, as the app runs it: what it tells of a root's processes comes through its channel.
+    vm = new VmClient({
+      vm: {
+        kernel: join(IMAGE, "vmlinuz"), rootfs: join(IMAGE, "rootfs.img"), agentDisk: agentDisk(dir), sessions: join(dir, "sessions.img"),
+        run, console: join(dir, "console.log"), user: USER,
+      },
     });
     const { dev, ino } = statSync(folder);
     executor = new VmExecutor({
       bindingOf: (root) => (root === CHAT ? { folder, dev, ino, boot: BOOT_ID } : undefined),
-      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500, vm: manager,
+      dataDir: join(dir, "data"), env: { HOME: USER.home, LANG: "C.UTF-8", PATH: "/usr/bin:/bin" }, idleMs: 500, vm,
     });
   });
 
   afterAll(async () => {
     await executor?.stop();
-    await manager?.stop();
+    await vm?.stop();
     rmSync(run, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   });
@@ -670,11 +821,25 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VmExecutor, with the
     console.log(`which: ${cold.toFixed(0)} ms with its file host and the guest cold, ${(performance.now() - again).toFixed(0)} ms warm`);
   });
 
+  it("keeps the chat's file host while its background process lives, and answers for it once the guest that ran it goes", async () => {
+    const started = await executor.run(operation("start", background("sleep 30")), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    // Past the file host's 500 ms idle time: had it let the folder go, the root's teardown would have ended the process.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({ ok: { status: "running" } });
+    process.kill(Number(readFileSync(join(run, "qemu.pid"), "utf8")), "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    // A new guest, which the file host gives what it kept.
+    expect(await executor.run(operation("poll", { session_id }), signal())).toMatchObject({
+      ok: { status: "exited", exit_code: null, note: "The process ended because the computer's sandbox stopped" },
+    });
+  });
+
   it("ends what a command left running once the chat's file host lets its folder go", async () => {
-    // No marker of its command's, cleared before the command ends, and a session of its own: only the root's cgroup still holds it.
-    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
-    expect(await command(leaver)).toMatchObject({ ok: { output: "started\n" } });
-    expect(await command("pgrep -c -x sleep")).toMatchObject({ ok: { output: "1\n" } });
+    // What a background process left, in a session of its own and with its environment cleared, once that process has ended.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & echo started";
+    expect(await executor.run(operation("start", background(leaver)), signal())).toMatchObject({ ok: { session_id: expect.any(String) } });
+    expect(await command("sleep 0.5; pgrep -c -x sleep")).toMatchObject({ ok: { output: "1\n" } });
     // Idle for 500 ms, the file host tears the guest's root down, then lets the folder go.
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     const begun = performance.now();
