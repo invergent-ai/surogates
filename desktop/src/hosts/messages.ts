@@ -41,6 +41,10 @@ export type ToHost =
   | { type: "restart"; reason: "grant" }
   // The app's answer to a network ask. With remember, its host goes through from now on, on every port, without asking.
   | { type: "answer"; id: number; allow: boolean; remember: boolean }
+  // The hook guard around a command that runs in the VM: why it may not run, answered
+  // {ok: null} when it may; then the look after it, answered with its outcome and the look's notice.
+  | { type: "refusal"; id: string }
+  | { type: "after"; id: string; outcome: Outcome }
   | { type: "stop" };
 
 export type FromHost =

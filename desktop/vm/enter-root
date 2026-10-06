@@ -15,6 +15,12 @@ data=$1 folder=$2 share=$3 home=$4 uid=$5 name=$6
 runner_path=$PATH
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# A mount point must be where its path says. The root's home and /tmp outlive its
+# commands, which can leave links there, and these mounts are made as root.
+at() {
+  [ "$(realpath -m -- "$1")" = "$1" ] || { echo "surogate: $1 leads elsewhere, so this chat's sandbox is not set up" >&2; exit 1; }
+}
+
 # The image under a tmpfs upper, so mount points can be made at any path and
 # nothing reaches the image. The tmpfs is this namespace's alone.
 layers=/run/surogate/layers
@@ -28,7 +34,7 @@ mkdir -p "$layers"
 # files than /var/tmp or /dev/shm hold in use.
 mount -t tmpfs -o mode=0755,size=256m,nr_inodes=32768 layers "$layers"
 mkdir "$layers/upper" "$layers/work" "$layers/root"
-mount -t overlay overlay -o "lowerdir=/,upperdir=$layers/upper,workdir=$layers/work" "$layers/root"
+mount -t overlay overlay -o "nosuid,nodev,lowerdir=/,upperdir=$layers/upper,workdir=$layers/work" "$layers/root"
 new=$layers/root
 
 mount -t proc -o nosuid,nodev,noexec proc "$new/proc"
@@ -39,7 +45,8 @@ for device in null zero full random urandom tty; do
   mount --bind "/dev/$device" "$new/dev/$device"
 done
 mkdir "$new/dev/pts" "$new/dev/shm"
-mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$new/dev/pts"
+# At most 256 terminals, of this root's own.
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,max=256 devpts "$new/dev/pts"
 mount -t tmpfs -o mode=1777,nosuid,nodev,size=64m,nr_inodes=8192 shm "$new/dev/shm"
 ln -s pts/ptmx "$new/dev/ptmx"
 ln -s /proc/self/fd "$new/dev/fd"
@@ -52,11 +59,14 @@ mount -t tmpfs -o mode=0755,nosuid,nodev run "$new/run"
 mkdir -p "$new/run/surogate/agent"
 mount --bind /run/surogate/agent "$new/run/surogate/agent"
 
-# HOME at the host home's path and /tmp, from the root's own folder; then the
-# folder at its own path, last, so it shows over both.
+# /tmp, then HOME at the host home's path, both from the root's own folder; then
+# the folder at its own path. Each over the one before, so a home under /tmp, or a
+# folder under either, shows.
+mount --bind "$data/tmp" "$new/tmp"
+at "$new$home"
 mkdir -p "$new$home"
 mount --bind "$data/home" "$new$home"
-mount --bind "$data/tmp" "$new/tmp"
+at "$new$folder"
 mkdir -p "$new$folder"
 mount --bind "$share" "$new$folder"
 
@@ -80,6 +90,8 @@ cd /
 umount -l /.old
 rmdir /.old
 
+# The agent is the last the kernel would end for memory; the root is as any process.
+echo 0 > /proc/self/oom_score_adj
 export PATH=$runner_path
 exec /usr/bin/setpriv --reuid="$uid" --regid="$uid" --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
   -- /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/runner.js

@@ -15,9 +15,12 @@ function fakeRoots() {
       if (root === "bad") throw new Error("not a root session id: bad");
       return 10_000;
     },
-    setup: async (root, folder, tag, user) => {
-      calls.push(["setup", root, folder, tag, user]);
+    setup: async (root, folder, share, user) => {
+      calls.push(["setup", root, folder, share, user]);
       if (root === "broken") throw new Error("the session runner exited: no namespaces");
+    },
+    teardown: async (root) => {
+      calls.push(["teardown", root]);
     },
     perform: (root, kind, args, signal, id) => {
       calls.push(["perform", root, kind, args, id]);
@@ -49,7 +52,7 @@ describe("the agent's control port", () => {
 
   it("ignores lines that are not its messages", () => {
     const { agent, sent } = control();
-    for (const line of ["", "{", "null", "42", '"ping"', '{"type":"bogus","id":1}', '{"type":"ping"}']) agent.receive(line);
+    for (const line of ["", "{", "null", "42", '"ping"', '{"type":"ping"}', '{"type":"ping","id":"1"}']) agent.receive(line);
     expect(sent).toEqual([]);
   });
 
@@ -66,13 +69,13 @@ describe("the agent's control port", () => {
   it("sets up a root only once the host has answered hello, with the host's user", async () => {
     const { agent, sent, calls, tell, settle } = control();
     agent.hello();
-    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
     // An answer to another request of the agent's is not hello's.
     tell({ type: "done", id: 4, user: USER });
-    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
     tell({ type: "done", id: 0, user: USER });
-    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", tag: "r1" });
-    tell({ type: "setup", id: 3, root: "broken", folder: "/home/someone/other", tag: "r2" });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 3, root: "broken", folder: "/home/someone/other", share: { kind: "virtiofs", tag: "r2" } });
     await settle();
     expect(sent.slice(1)).toEqual([
       { type: "failed", id: 1, message: NO_HELLO },
@@ -81,8 +84,8 @@ describe("the agent's control port", () => {
       { type: "failed", id: 3, message: "the session runner exited: no namespaces" },
     ]);
     expect(calls).toEqual([
-      ["setup", "root-1", "/home/someone/project", "r1", USER],
-      ["setup", "broken", "/home/someone/other", "r2", USER],
+      ["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER],
+      ["setup", "broken", "/home/someone/other", { kind: "virtiofs", tag: "r2" }, USER],
     ]);
   });
 
@@ -100,5 +103,78 @@ describe("the agent's control port", () => {
       ["perform", "root-1", "which", { name: "pandoc" }, "op-1"],
       ["perform", "root-1", "run", { command: "sleep 30" }, "op-2"],
     ]);
+  });
+
+  it("answers a request whose fields are not what its type names, and one of a type it does not know", async () => {
+    const { agent, sent, calls, tell, settle } = control();
+    tell({ type: "uid", id: 1 });
+    tell({ type: "setup", id: 2, root: "root-1", folder: 7, share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "op", id: 3, root: "root-1", args: {} });
+    tell({ type: "bogus", id: 4 });
+    // A share of a kind this agent does not mount.
+    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "9p", tag: "r1" } });
+    tell({ type: "setup", id: 6, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    await settle();
+    expect(sent).toEqual([
+      { type: "failed", id: 1, message: "The agent cannot take this uid request" },
+      { type: "failed", id: 2, message: "The agent cannot take this setup request" },
+      { type: "result", id: 3, outcome: { error: { type: "value", message: "The agent cannot take this op request" } } },
+      { type: "failed", id: 4, message: "The agent does not know the request bogus" },
+      { type: "failed", id: 5, message: "The agent cannot take this setup request" },
+      { type: "failed", id: 6, message: "The agent cannot take this setup request" },
+    ]);
+    expect(calls).toEqual([]);
+    agent.hello();
+  });
+
+  it("takes the host's user from hello's answer only, once, and in its shape", async () => {
+    const { agent, sent, calls, tell, settle } = control();
+    agent.hello();
+    tell({ type: "done", id: 0, user: { uid: "1000", gid: 1000, name: "someone", home: "/home/someone" } });
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "done", id: 0, user: USER });
+    tell({ type: "done", id: 0, user: { ...USER, name: "other" } });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    await settle();
+    expect(sent.slice(1)).toEqual([{ type: "failed", id: 1, message: NO_HELLO }, { type: "done", id: 2 }]);
+    expect(calls).toEqual([["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER]]);
+  });
+
+  it("answers an operation whose id is still running, and keeps the first one cancellable", async () => {
+    const { sent, tell, settle } = control();
+    tell({ type: "op", id: 1, root: "root-1", kind: "run", args: { command: "sleep 30" } });
+    tell({ type: "op", id: 1, root: "root-1", kind: "which", args: { name: "sh" } });
+    await settle();
+    expect(sent).toEqual([
+      { type: "result", id: 1, outcome: { error: { type: "other", message: "An operation with this id is already running" } } },
+    ]);
+    tell({ type: "cancel", id: 1 });
+    await settle();
+    expect(sent.at(-1)).toEqual({ type: "result", id: 1, outcome: CANCELLED });
+  });
+
+  it("answers an operation the roots could not, rather than end the agent", async () => {
+    const sent: FromAgent[] = [];
+    const roots: ControlRoots = {
+      uid: () => 10_000,
+      setup: async () => {},
+      teardown: async () => {},
+      perform: () => Promise.reject(new Error("broken")),
+    };
+    new Control((message) => sent.push(message), roots).receive(JSON.stringify({ type: "op", id: 1, root: "r", kind: "run", args: {} }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "other", message: "Error: broken" } } }]);
+  });
+
+  it("tears a root down when the host asks, and answers once it has", async () => {
+    const { sent, calls, tell, settle } = control();
+    tell({ type: "teardown", id: 1, root: "root-1" });
+    tell({ type: "teardown", id: 2 });
+    await settle();
+    expect(sent).toEqual([
+      { type: "failed", id: 2, message: "The agent cannot take this teardown request" },
+      { type: "done", id: 1 },
+    ]);
+    expect(calls).toEqual([["teardown", "root-1"]]);
   });
 });

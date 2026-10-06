@@ -57,12 +57,39 @@ export interface DeviceStack {
 export function startDevice(options: DeviceStackOptions): DeviceStack {
   mkdirSync(dirname(options.journalPath), { recursive: true, mode: 0o700 });
   const journal = new OperationJournal(options.journalPath);
+  const made: { tools?: ToolLayer } = {};
+  try {
+    return deviceOn(journal, options, made);
+  } catch (error) {
+    // A start that fails leaves nothing open: its tools stop, and the journal's lock goes for the next start.
+    void made.tools?.stop().catch(() => {});
+    journal.close();
+    throw error;
+  }
+}
+
+/**
+ * The app's stop, after a device's: a device still starting is stopped once it has
+ * started, then what every device shares (the VM), whether or not the device's stop
+ * throws, which it then rethrows.
+ */
+export async function stopDevice(started: Promise<DeviceStack> | undefined, shared: { stop(): Promise<void> } | null): Promise<void> {
+  try {
+    await started?.then((stack) => stack.stop(), () => {});
+  } finally {
+    await shared?.stop();
+  }
+}
+
+// The stack on *journal*. *made* holds its tools as soon as they are made, for a start that fails after.
+function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: { tools?: ToolLayer }): DeviceStack {
   // The tools ask the binder's approvals about the network; the binder exists by the time any host asks.
   const network: NetworkApprovals = {
     granted: (root) => binder.approvals.granted(root),
     askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal),
   };
   const tools = options.tools(journal.bindings, network);
+  made.tools = tools;
   // Each session's operations on the tools, counted as they run: the binder runs nothing else there.
   // A chat's sub-agents are sessions of their own: their operations carry the chat as sessionId.
   const running = new Map<string, number>();
@@ -128,8 +155,12 @@ export function startDevice(options: DeviceStackOptions): DeviceStack {
     ]);
     // Cleared once what runs has stopped: a plain Node process would otherwise live on until the deadline.
     clearTimeout(deadline);
-    await tools.stop();
-    journal.close();
+    // The journal closes whatever the tools' stop does: its lock is the next launch's.
+    try {
+      await tools.stop();
+    } finally {
+      journal.close();
+    }
   };
   return {
     binder,

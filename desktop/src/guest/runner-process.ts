@@ -99,15 +99,15 @@ export class SessionRunner {
   private stderr = "";
 
   // *child* is the runner's process: srt's wrap of it, or, in the tests, the bare script.
-  // *onLost* is told when it goes without being stopped.
-  constructor(private readonly child: ChildProcess, onLost: () => void = () => {}) {
+  // *onLost* is told when it goes without being stopped; *readyMs* is how long it has to say it is ready.
+  constructor(private readonly child: ChildProcess, onLost: () => void = () => {}, readyMs = READY_TIMEOUT_MS) {
     // A write to a runner that has died is not an error of its own: its exit is the one way out.
     child.stdin?.on("error", () => {});
     child.stderr?.on("data", (chunk: Buffer) => {
       this.stderr = (this.stderr + chunk.toString()).slice(-4000);
     });
     this.ready = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`the session runner did not start: ${this.stderr}`)), READY_TIMEOUT_MS);
+      const timer = setTimeout(() => reject(new Error(`the session runner did not start: ${this.stderr}`)), readyMs);
       this.settleReady = (error) => {
         clearTimeout(timer);
         if (error) reject(error);
@@ -190,7 +190,11 @@ export class SessionRunner {
 
   // The runner's answer to *question*, or null when it has gone, or goes first.
   ask(question: Question): Promise<Answer | null> {
-    if (this.left || this.questions.has(question.id)) return Promise.resolve(null);
+    if (this.left) return Promise.resolve(null);
+    // The runner would answer the two as one: the second is refused, and the runner is still there.
+    if (this.questions.has(question.id)) {
+      return Promise.resolve({ type: "refused", id: question.id, refusal: { type: "other", message: "A question with this id is already waiting" } });
+    }
     return new Promise((resolve) => {
       this.questions.set(question.id, resolve);
       this.send(question);
