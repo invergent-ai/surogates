@@ -19,7 +19,6 @@ import json
 import os
 import sys
 import time
-import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,14 +29,13 @@ from redis.asyncio import Redis
 
 sys.path.insert(0, str(Path(__file__).parent))
 from caller import DID, Call, Reply  # noqa: E402
+from surogates.voice.text import fold
 
 UNROUTED = "+40371000000"
 OUT = Path.home() / ".surogate" / "voice-qa"
 
 
-def plain(text: str) -> str:
-    """Lowercase without diacritics: STT spelling varies, the words do not."""
-    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
+plain = fold  # STT spelling varies, the words do not
 
 
 @dataclass

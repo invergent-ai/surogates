@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import re
-import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +21,7 @@ from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.session.interactive_input import try_resolve_text_answer
+from surogates.voice.text import fold, words
 from surogates.tools.builtin.ask_user_question import ASK_USER_QUESTION_MAX_WAIT_SECONDS
 
 log = logging.getLogger("surogates.voice")
@@ -57,8 +57,7 @@ def normalize_caller(raw: str | None) -> str:
 
 def _words(text: str) -> str:
     """Lowercase words without diacritics or punctuation, for "was this already said"."""
-    text = "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
-    return " ".join(re.findall(r"\w+", text))
+    return " ".join(words(fold(text)))
 
 
 def question_text(arguments: Any, said: str = "") -> str:
@@ -190,15 +189,21 @@ class CallSession:
                     yield SORRY_TURN
                     return
                 try:
-                    await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_SECONDS)
+                    if await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_SECONDS):
+                        # one nudge per streamed delta: drain them, the next read gets all their events
+                        while await pubsub.get_message(ignore_subscribe_messages=True, timeout=0):
+                            pass
                 except Exception:
                     await asyncio.sleep(POLL_SECONDS)
         finally:
             await pubsub.aclose()
 
+    async def _stop(self, reason: str) -> None:
+        await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": reason}))
+
     async def interrupt(self) -> None:
         """The caller talked over the agent: stop its turn. The session stays active for the next words."""
-        await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": "channel_stop"}))
+        await self._stop("channel_stop")
 
     async def end(self) -> None:
         """The caller hung up: stop any turn still running and close the session.
@@ -208,7 +213,7 @@ class CallSession:
         repeated recoveries. ``completed`` with ``call_ended`` is the end of the conversation.
         """
         # always: it stops a turn still running and tears the call's browser down (dispatcher)
-        await self.redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{self.session_id}", json.dumps({"reason": "call_ended"}))
+        await self._stop("call_ended")
         status = (await self.store.get_session(self.session_id)).status
         if status != "completed":  # a turn that already completed the session leaves nothing to close
             await self.store.update_session_status(self.session_id, "completed")

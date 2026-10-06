@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import re
+import unicodedata
 from collections.abc import AsyncIterable, AsyncIterator, Mapping
 
 BRAND = re.compile(r"\bsurogate\b", re.I)
@@ -72,6 +73,11 @@ class SentenceSplitter:
 
 def words(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
+
+
+def fold(text: str) -> str:
+    """Lowercase without diacritics: speech-to-text spells "știri" and "stiri" both ways."""
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
 
 
 # The agent's "I'm on it" line. Once per answer is natural; the model sometimes says it again after the
