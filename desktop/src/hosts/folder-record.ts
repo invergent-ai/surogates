@@ -6,7 +6,7 @@ import { closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, ren
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 
-import type { ProcessHandle } from "./processes.js";
+import type { ProcessHandle } from "../guest/processes.js";
 
 // srt 0.0.77 mounts a placeholder over each of these in the folder while a command
 // runs, where it is absent: its dangerous files and folders, and .git's two when

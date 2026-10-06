@@ -24,9 +24,9 @@ import { type FolderRecord, lockFolder, presentIn, readRecord, removePlaceholder
 import { type Destination, FOLDER_UNAVAILABLE, type FromHost, type HostStart, type ToHost } from "./messages.js";
 import { HookGuard } from "./hooks.js";
 import { destination, GLOB, hideSrtTmp, quote, reach, sandboxPolicy } from "./policy.js";
-import { Processes } from "./processes.js";
 import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
-import { CANCELLED } from "../guest/command.js";
+import { CANCELLED, unenterable, workdir } from "../guest/command.js";
+import { Processes } from "../guest/processes.js";
 import type { SessionRunner } from "../guest/runner-process.js";
 import { type CommandContext, runCommand } from "./run.js";
 import { startRunner, stopRunner } from "./session-runner.js";
@@ -323,13 +323,19 @@ async function start(message: HostStart): Promise<void> {
   SandboxManager.cleanupAfterCommand();
   context = { folder: path, home, env, claudeWasAbsent: !existsSync(join(path, ".claude")) };
   const hooks = guard;
+  const ready = context;
   processes = new Processes({
-    context,
+    place: async (requested) => {
+      const cwd = workdir(ready, requested);
+      return { cwd, unenterable: unenterable(cwd) };
+    },
     runner: sessionRunner,
     refusal: () => hooks.refusal(),
     ended,
     // The handle is only for answering after the app quit: a record that cannot be written does not stop the process.
+    // Once the host stops, what it ends ended when the app quit, as the record already says of it.
     save: (handles) => {
+      if (stopping) return;
       try {
         save({ processes: handles });
       } catch {

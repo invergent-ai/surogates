@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
+import { Failure, OUTPUT_CAP_CHARS, pyJsonLength, sandboxError } from "../src/files/answers.js";
 import type { Outcome } from "../src/link/protocol.js";
 import {
   APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RESTARTED, RUNNER_GONE, type Spawner, TOO_MANY,
   restartNotice,
-} from "../src/hosts/processes.js";
-import { CANCELLED, type CommandEnd } from "../src/guest/command.js";
+} from "../src/guest/processes.js";
+import { CANCELLED, type CommandEnd, unenterable, workdir } from "../src/guest/command.js";
 import { SessionRunner } from "../src/guest/runner-process.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
@@ -37,7 +37,11 @@ async function runner(PATH = "/usr/bin:/bin"): Promise<SessionRunner> {
 function processes(options: Partial<ProcessesOptions> = {}): Processes {
   let up: Promise<SessionRunner> | null = null;
   registry = new Processes({
-    context: { folder: base, home: base, env: {}, claudeWasAbsent: false },
+    // As the runner answers place, in the test's own view.
+    place: async (requested) => {
+      const cwd = workdir({ folder: base, home: base }, requested);
+      return { cwd, unenterable: unenterable(cwd) };
+    },
     runner: () => (up ??= runner()),
     ...options,
   });
@@ -309,6 +313,19 @@ describe("background processes", { timeout: 20_000 }, () => {
     expect((await answer("/etc", "a\0b")).error?.type).toBe("sandbox");
   });
 
+  it("asks where its command runs before it starts, and answers that answer's refusal, or a cancel while it waits", async () => {
+    let asked = 0;
+    const refusal = { type: "interrupted", message: "interrupted: the runner went" };
+    processes({ place: async () => { throw new Failure(refusal); }, runner: async () => { asked += 1; throw new Error("not wanted"); } });
+    expect(await ask("start", { command: "a\0b", workdir: null, task_id: "t", pty: false })).toEqual({ error: refusal });
+    processes({ place: () => new Promise(() => {}), runner: async () => { asked += 1; throw new Error("not wanted"); } });
+    const controller = new AbortController();
+    const starting = ask("start", { command: "true", workdir: null, task_id: "t", pty: false }, controller.signal);
+    setTimeout(() => controller.abort(), 10);
+    expect(await starting).toEqual(CANCELLED);
+    expect(asked).toBe(0);
+  });
+
   it("refuses what the hook guard refuses, before any runner starts", async () => {
     let asked = 0;
     const refused: Outcome = { error: { type: "sandbox", message: "Blocked: no" } };
@@ -567,6 +584,19 @@ describe("processes from before the app quit", { timeout: 20_000 }, () => {
     expect(saves[0]).toEqual([id, old.id]);
   });
 
+  it("keep 2 000 characters of a command and a task id, which the process's own answers keep whole", async () => {
+    const { runner: driven } = fake();
+    const saves: ProcessHandle[][] = [];
+    processes({ runner: driven, save: (handles) => saves.push(handles) });
+    // Astral, two UTF-16 units a character: the cut counts code points, as Python does.
+    const long = "😀".repeat(3000);
+    const id = await start(`: ${long}`, { task_id: long });
+    const [kept] = saves[0] ?? [];
+    expect([Array.from(kept?.command ?? "").length, Array.from(kept?.task_id ?? "").length]).toEqual([2000, 2000]);
+    expect(kept?.command.startsWith(": 😀")).toBe(true);
+    expect((await ask("poll", { session_id: id })).ok.command).toBe(`: ${long}`);
+  });
+
   it("are written once when many processes end together, as when their runner dies", async () => {
     const { runner: driven, spawned } = fake();
     const saves: ProcessHandle[][] = [];
@@ -576,7 +606,7 @@ describe("processes from before the app quit", { timeout: 20_000 }, () => {
     for (const child of spawned) child.end({ lost: true });
     await Promise.resolve();
     expect(saves).toHaveLength(21);
-    expect(saves[20]?.every((handle) => handle.ended === undefined)).toBe(true);
+    expect(saves[20]?.every((handle) => handle.ended?.note === RUNNER_GONE)).toBe(true);
   });
 });
 

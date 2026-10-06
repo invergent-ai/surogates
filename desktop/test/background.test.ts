@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readRecord, writeRecord } from "../src/hosts/folder-record.js";
 import { HOOKS_NOTICE } from "../src/hosts/hooks.js";
 import type { HostStart } from "../src/hosts/messages.js";
-import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE, restartNotice } from "../src/hosts/processes.js";
+import { APP_QUIT, FINISHED_TTL_SECONDS, RUNNER_GONE, restartNotice } from "../src/guest/processes.js";
 import { appeared } from "../src/hosts/restarts.js";
 import { bound, Harness, PACKAGE } from "./host-harness.js";
 
