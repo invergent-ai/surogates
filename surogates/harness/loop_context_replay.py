@@ -131,6 +131,14 @@ def _thread_words(text: str) -> str:
     return text.strip()
 
 
+def _file_label(label: str) -> str:
+    """*label* on one line: a file name can hold a line break or another
+    control character, and the ``Files:`` line comes after the report's end
+    marker, where a second line would read as the harness's."""
+    printable = "".join(c if c.isprintable() else " " for c in _thread_words(str(label)))
+    return " ".join(printable.split())
+
+
 def worker_note(event_type: str, data: dict) -> dict:
     """The user-role message a worker's report is read as, built from its
     payload alone, so the live loop and replay produce the same bytes.  A
@@ -155,7 +163,7 @@ def worker_note(event_type: str, data: dict) -> dict:
             if files is None:
                 listed = "not listed (the turn ended early)"
             else:
-                listed = ", ".join(f["label"] for f in files) or "none"
+                listed = ", ".join(_file_label(f["label"]) for f in files) or "none"
             content = (
                 f"{named} reported]\n"
                 f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
