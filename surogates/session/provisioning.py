@@ -212,3 +212,39 @@ async def create_child_session(
         idempotency_key=idempotency_key,
         task_id=task_id,
     )
+
+
+async def create_thread_session(
+    *,
+    store: SessionStore,
+    master: Session,
+    config: dict,
+) -> Session:
+    """Create a project's thread: a child of *master* in a sandbox of its own.
+
+    A child made by :func:`create_child_session` runs in its root's pod, so
+    the project's threads would share the master's.  A thread is its own
+    sandbox root instead: ``sandbox_root_session_id`` is its own id, and the
+    children it delegates to share its pod.  It keeps the master's workspace
+    fields and boundaries, so every pod mounts the project's one workspace,
+    and the master's identity.  It takes no ``execution``: a cloud thread
+    runs in the cloud whatever the master does.
+    """
+    session_id = uuid4()
+    merged_config = dict(config)
+    parent_config = master.config or {}
+    for field in _WORKSPACE_SHARING_FIELDS:
+        merged_config[field] = parent_config[field]
+    for field in _BOUNDARY_SHARING_FIELDS:
+        if field in parent_config:
+            merged_config[field] = parent_config[field]
+    merged_config["sandbox_root_session_id"] = str(session_id)
+    return await store.create_session(
+        session_id=session_id,
+        user_id=master.user_id,
+        org_id=master.org_id,
+        agent_id=master.agent_id,
+        channel="worker",
+        config=merged_config,
+        parent_id=master.id,
+    )

@@ -4075,6 +4075,7 @@ class AgentHarness(
         """
         from surogates.runtime.governance import (
             BOARD_SELF_TOOLS,
+            PROJECT_THREAD_TOOLS,
             RESEARCH_SPINE_TOOLS,
             WORKER_SELF_TOOLS,
         )
@@ -4102,6 +4103,10 @@ class AgentHarness(
         # shared-state protocol between themselves.
         if not (config.get("active_research_run_id") and not is_task_worker):
             result -= RESEARCH_SPINE_TOOLS
+
+        # Only a project's master starts and follows up its threads.
+        if not is_project_master(config):
+            result -= PROJECT_THREAD_TOOLS
 
         return result
 

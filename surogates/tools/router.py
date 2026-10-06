@@ -103,6 +103,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "spawn_worker": ToolLocation.HARNESS,
     "send_worker_message": ToolLocation.HARNESS,
     "stop_worker": ToolLocation.HARNESS,
+    # A project's thread tools: sessions, rows and the queue.
+    "start_thread": ToolLocation.HARNESS,
     # Subagent task layer — handlers need the worker's DB session
     # factory, redis client, and session store. They cannot run in a
     # sandbox pod (no DB connectivity); the default ``SANDBOX`` fallback
