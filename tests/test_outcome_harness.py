@@ -103,7 +103,8 @@ class FakeRedis:
     def __init__(self) -> None:
         self.zadds: list[tuple[str, dict[str, float]]] = []
 
-    async def zadd(self, key: str, mapping: dict[str, float]) -> None:
+    async def zadd(self, key: str, mapping: dict[str, float], **_options: Any) -> None:
+        # enqueue_session passes lt=True (a queued session keeps its better place)
         self.zadds.append((key, mapping))
 
 
