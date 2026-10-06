@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 
 from dataclasses import dataclass
 
+from surogates.channels.constants import queue_priority
 from surogates.config import (
     INTERRUPT_CHANNEL_PREFIX,
     SHARED_WORK_QUEUE_KEY,
@@ -546,7 +547,7 @@ class Orchestrator:
             # The turn's own work is an activity; the loop steps out of it
             # while it waits for its tool calls.
             async with slots.activity():
-                await self._process(session_id, priority=dequeued.priority if dequeued is not None else 0)
+                await self._process(session_id)
         finally:
             current_turn.reset(token)
             self._turns.pop(task, None)
@@ -554,7 +555,7 @@ class Orchestrator:
             # before taking them again: release only what it holds.
             await slots.release_owned()
 
-    async def _requeue_busy_session(self, session_id: UUID, priority: float = 0) -> None:
+    async def _requeue_busy_session(self, session_id: UUID) -> None:
         await asyncio.sleep(_LEASE_BUSY_REQUEUE_DELAY)
         # the shared queue needs the tenant tuple.
         # Look up the session row once; this is a cold path (only
@@ -565,7 +566,8 @@ class Orchestrator:
             org_id=str(session.org_id),
             agent_id=session.agent_id,
             session_id=session_id,
-            priority=priority,
+            # a phone call's turn goes back where it was: at the front
+            priority=queue_priority(getattr(session, "channel", None)),
         )
 
     # ── Crash-loop breaker state (Redis, shared across replicas) ──────
@@ -659,11 +661,8 @@ class Orchestrator:
                 return True
         return False
 
-    async def _process(self, session_id: UUID, attempt: int = 0, priority: float = 0) -> None:
-        """Process a single session.  Retry with exponential backoff on failure.
-
-        *priority* is the queue score it was dequeued at: a re-queue keeps it (a phone call's -1).
-        """
+    async def _process(self, session_id: UUID, attempt: int = 0) -> None:
+        """Process a single session.  Retry with exponential backoff on failure."""
         from surogates.trace import new_span, new_trace
 
         # First attempt gets a fresh trace; retries get child spans so
@@ -712,7 +711,7 @@ class Orchestrator:
             if has_live_lease is not None and await has_live_lease(session_id):
                 self._rewake_pending.discard(session_id)
                 logger.info("Session %s lease is held; requeueing wake", session_id)
-                await self._requeue_busy_session(session_id, priority)
+                await self._requeue_busy_session(session_id)
                 return
 
             harness = self.harness_factory(session_id)
@@ -847,7 +846,7 @@ class Orchestrator:
                     _MAX_RETRIES,
                 )
                 await asyncio.sleep(delay)
-                await self._process(session_id, attempt=attempt + 1, priority=priority)
+                await self._process(session_id, attempt=attempt + 1)
             else:
                 # All retries exhausted -- emit SESSION_FAIL.
                 logger.error(

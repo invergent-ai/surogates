@@ -47,6 +47,20 @@ def multi_session_disabled(config: dict) -> bool:
     """
     return config.get("multi_session") is False
 
+#: Real-time channels: a person is waiting on the line. Their turns go to the front of the work queue,
+#: and the after-turn extras (judge, title, recap, summary) are skipped: nobody reads them mid-call.
+REALTIME_CHANNELS = frozenset({"voice"})
+REALTIME_PRIORITY = -1.0  # work-queue score: lower pops first; everything else is enqueued at 0
+
+#: Tools a channel brings with it, offered only to that channel's sessions (``end_call``: phone calls).
+VOICE_TOOLS = frozenset({"end_call"})
+
+
+def queue_priority(channel: str | None) -> float:
+    """A session's work-queue score: real-time channels jump the queue."""
+    return REALTIME_PRIORITY if channel in REALTIME_CHANNELS else 0.0
+
+
 #: Channels with a registered outbound delivery adapter (a delivery loop
 #: that claims their outbox rows).  Must match the platforms registered in
 #: :mod:`surogates.channels.platforms` — an outbox row for any other

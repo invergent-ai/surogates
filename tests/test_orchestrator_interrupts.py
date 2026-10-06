@@ -333,7 +333,7 @@ async def test_a_busy_session_keeps_its_place_in_the_queue(monkeypatch: pytest.M
     redis.zadd = AsyncMock()
     session_store = SimpleNamespace(
         has_live_lease=AsyncMock(return_value=True),
-        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot")),
+        get_session=AsyncMock(return_value=SimpleNamespace(org_id=org_id, agent_id="support-bot", channel="voice")),
     )
     monkeypatch.setattr("surogates.orchestrator.dispatcher._LEASE_BUSY_REQUEUE_DELAY", 0, raising=False)
     orchestrator = Orchestrator(
@@ -341,7 +341,7 @@ async def test_a_busy_session_keeps_its_place_in_the_queue(monkeypatch: pytest.M
         agent_id="support-bot", queue_key="surogates:work_queue:support-bot", max_concurrent=1,
     )
 
-    await orchestrator._process(session_id, priority=-1)
+    await orchestrator._process(session_id)
 
     member = encode_queue_member(org_id=str(org_id), agent_id="support-bot", session_id=str(session_id))
     redis.zadd.assert_called_once_with(SHARED_WORK_QUEUE_KEY, {member: -1}, lt=True)
