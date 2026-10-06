@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import Session as SessionRow
-from surogates.db.models import Workstream
+from surogates.db.models import Workstream, WorkstreamThread
 from surogates.workstreams import master_instructions
 
 
@@ -71,3 +71,22 @@ class WorkstreamStore:
             master.title = row.name
             await db.commit()
             return row
+
+    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> None:
+        """Record *session_id* as a thread of the project, and title its chat."""
+        async with self._sf() as db:
+            db.add(WorkstreamThread(session_id=session_id, workstream_id=workstream_id, title=title))
+            await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(title=title))
+            await db.commit()
+
+    async def get_thread(self, session_id: UUID) -> WorkstreamThread | None:
+        async with self._sf() as db:
+            return await db.get(WorkstreamThread, session_id)
+
+    async def reopen_thread(self, session_id: UUID) -> None:
+        """New work for a thread takes it out of Resolved."""
+        async with self._sf() as db:
+            await db.execute(
+                update(WorkstreamThread).where(WorkstreamThread.session_id == session_id).values(resolved_at=None)
+            )
+            await db.commit()

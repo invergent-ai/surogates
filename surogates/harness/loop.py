@@ -188,10 +188,13 @@ from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
+    WORKER_REPORT_TYPES,
     ContextReplayMixin,
     build_user_message_dict,
     coalesce_user_messages,
     prune_superseded_canvas_images,
+    unread_reports,
+    worker_note,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -758,6 +761,51 @@ class AgentHarness(
             not (event.data or {}).get("synthetic") for event in events
         )
 
+    async def _has_unread_report(self, session_id: UUID) -> bool:
+        """Return True if a worker's report is newer than the session's last model request.
+
+        The harness cursor cannot tell: a report that lands during a tool call
+        is behind the cursor once that call's result is recorded.  Every
+        model request reads the reports written before it, live and in
+        replay alike, so a report after the last request is one no turn read.
+        """
+        events = await self._store.get_events(
+            session_id,
+            types=[EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+        )
+        return bool(unread_reports(events))
+
+    async def _collect_reports(
+        self,
+        session: Session,
+        after_event_id: int,
+        before: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Thread reports that reached a project's master past *after_event_id*,
+        and below *before* when given.
+
+        Read for each model request, and at the end of a reply, one message
+        per report, as replay renders them.  Only a master reads them live:
+        its only reporting children are its threads.  A ``delegate_task``
+        parent, which a master never is, already has its child's result as
+        the tool's result.
+        """
+        if not is_project_master(session.config):
+            return [], after_event_id
+        events = await self._store.get_events(
+            session.id,
+            after=after_event_id,
+            types=[EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+        )
+        if before is not None:
+            events = [event for event in events if event.id < before]
+        if not events:
+            return [], after_event_id
+        return (
+            [worker_note(event.type, event.data) for event in events],
+            max(event.id for event in events),
+        )
+
     async def _collect_steer_messages(
         self,
         session_id: UUID,
@@ -1088,15 +1136,22 @@ class AgentHarness(
             # Paused stays a hard stop: pause is an explicit user
             # action, and send_message on a paused session resumes
             # through the API path.  Archived (deleted) is as final.
+            # A project's master is also resumed by a thread's report that
+            # no turn has read: the master's turn has usually ended long
+            # before a thread finishes, and the report is what it waits for.
+            revived_by: str | None = None
             if session.status in ("paused", "completed", "failed", "archived"):
-                if session.status in (
-                    "completed", "failed",
-                ) and await self._has_stranded_user_message(session_id):
+                if session.status in ("completed", "failed"):
+                    if await self._has_stranded_user_message(session_id):
+                        revived_by = "stranded_user_message"
+                    elif is_project_master(session.config) and await self._has_unread_report(session_id):
+                        revived_by = "worker_report"
+                if revived_by is not None:
                     logger.info(
-                        "Session %s: status is '%s' but an unprocessed "
-                        "user message sits past the cursor — resuming",
+                        "Session %s: status is '%s' but %s is unprocessed — resuming",
                         session_id,
                         session.status,
+                        revived_by,
                     )
                     await self._store.update_session_status(
                         session_id, "active",
@@ -1104,7 +1159,7 @@ class AgentHarness(
                     await self._store.emit_event(
                         session_id,
                         EventType.SESSION_RESUME,
-                        {"source": "stranded_user_message"},
+                        {"source": revived_by},
                     )
                     session.status = "active"
                 else:
@@ -1290,7 +1345,11 @@ class AgentHarness(
                 (m for m in reversed(messages) if m.get("role") == "user"),
                 None,
             )
-            last_user_content = _latest_user_event_text(all_events)
+            # A wake for a report has no new user input, so the user's last
+            # message, a command already handled included, must not run again.
+            last_user_content = (
+                "" if revived_by == "worker_report" else _latest_user_event_text(all_events)
+            )
 
             # Capability gate: refuse slash commands disabled for this
             # agent (master switch off, or this command individually off)
@@ -1679,6 +1738,19 @@ class AgentHarness(
             ),
             default=0,
         )
+        # The worker reports no request had read when the wake began.  Replay
+        # left them out of ``messages``; the first request reads them.
+        reports = unread_reports(all_events or [])
+        # Report cursor: the newest worker report the wake has.  A project's
+        # master reads later ones live, before each request.
+        report_cursor = max(
+            (
+                event.id
+                for event in (all_events or [])
+                if event.type in WORKER_REPORT_TYPES
+            ),
+            default=0,
+        )
         # Iteration index is reported per user turn, not per wake.  When a
         # steer message starts a new turn mid-wake, this base advances so the
         # new turn's first model call reports iteration_index 0.
@@ -1954,7 +2026,7 @@ class AgentHarness(
 
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model
-            await self._store.emit_event(
+            request_id = await self._store.emit_event(
                 session.id,
                 EventType.LLM_REQUEST,
                 {
@@ -1964,6 +2036,17 @@ class AgentHarness(
                     "iteration_index": turn_iteration_index,
                 },
             )
+
+            # Worker reports go last, after the steered messages, the board
+            # update and the harvest: where replay puts them, so the request
+            # it rebuilds is the one sent.  A master's threads also report
+            # during its turn; this request reads those written before it,
+            # and one that lands after it waits for the next request.
+            arrived, report_cursor = await self._collect_reports(
+                session, report_cursor, before=request_id,
+            )
+            messages.extend(reports + arrived)
+            reports = []
 
             # 2. Call the LLM with retry (streaming or non-streaming).
             # Build the message list: system → prefill → memory → conversation.
@@ -2773,8 +2856,13 @@ class AgentHarness(
                 followup, steer_cursor = await self._collect_steer_messages(
                     session.id, steer_cursor,
                 )
-                if followup is not None:
-                    messages.append(followup)
+                # A thread's report that landed meanwhile keeps the wake
+                # going too; the next request reads it.
+                arrived, report_cursor = await self._collect_reports(session, report_cursor)
+                reports.extend(arrived)
+                if followup is not None or reports:
+                    if followup is not None:
+                        messages.append(followup)
                     turn_id = str(uuid4())
                     turn_base_iteration = iteration
                     self._pending_iteration_summary_tasks = {}
@@ -4075,6 +4163,7 @@ class AgentHarness(
         """
         from surogates.runtime.governance import (
             BOARD_SELF_TOOLS,
+            PROJECT_THREAD_TOOLS,
             RESEARCH_SPINE_TOOLS,
             WORKER_SELF_TOOLS,
         )
@@ -4102,6 +4191,10 @@ class AgentHarness(
         # shared-state protocol between themselves.
         if not (config.get("active_research_run_id") and not is_task_worker):
             result -= RESEARCH_SPINE_TOOLS
+
+        # Only a project's master starts and follows up its threads.
+        if not is_project_master(config):
+            result -= PROJECT_THREAD_TOOLS
 
         return result
 

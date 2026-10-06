@@ -241,7 +241,7 @@ class ArtifactCompletionMixin:
         turn_id: str,
         user_message: str,
         final_message: str = "",
-    ) -> None:
+    ) -> list[dict[str, Any]] | None:
         """Drain pending iteration summaries, then emit TURN_SUMMARY.
 
         Soft 10s cap on the drain so a hung iteration-summary task
@@ -249,6 +249,9 @@ class ArtifactCompletionMixin:
         summary call. Any failure is logged and swallowed — the SDK
         falls back to the per-iteration view when TURN_SUMMARY is
         missing.
+
+        Returns the deliverables the summary named, or None when it was
+        not written, so a worker's report lists no files it cannot know.
         """
         # No early return on a missing summarizer: the manifest needs no
         # model, so the download card outlives the recap.
@@ -368,8 +371,9 @@ class ArtifactCompletionMixin:
         # show, so a turn that produced nothing emits nothing rather than
         # an empty card.
         if not recap and not delivered and not manifest.unsupported_claim:
-            return
+            return []
 
+        artifacts = [{"kind": a.kind, "label": a.label, "ref": a.ref} for a in delivered]
         try:
             await self._store.emit_event(
                 session_id,
@@ -395,16 +399,15 @@ class ArtifactCompletionMixin:
                         if manifest.rejected
                         else {}
                     ),
-                    "artifacts": [
-                        {"kind": a.kind, "label": a.label, "ref": a.ref}
-                        for a in delivered
-                    ],
+                    "artifacts": artifacts,
                 },
             )
         except Exception:
             logger.warning(
                 "Failed to emit TURN_SUMMARY for %s", turn_id, exc_info=True,
             )
+            return None
+        return artifacts
 
     async def _collect_candidate_artifacts(
         self,
@@ -917,9 +920,11 @@ class ArtifactCompletionMixin:
         # Not gated on the summarizer: deciding what was delivered is
         # bookkeeping now, so the download card survives with recaps
         # turned off. Only the recap itself needs a model.
+        # The turn's files, for a report: None when no summary was written.
+        files: list[dict[str, Any]] | None = None
         if wants_turn_summary(session, turn_id=turn_id, reason=reason):
             try:
-                await self._drain_and_emit_turn_summary(
+                files = await self._drain_and_emit_turn_summary(
                     session_id=session.id,
                     turn_id=turn_id,
                     user_message=user_message
@@ -1039,6 +1044,7 @@ class ArtifactCompletionMixin:
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
+                    files=files,
                 )
             except Exception:
                 logger.warning(
@@ -1158,6 +1164,7 @@ class ArtifactCompletionMixin:
                     error=error,
                     redis=self._redis,
                     task_id=getattr(session, "task_id", None),
+                    session_factory=self._session_factory,
                 )
             except Exception:
                 logger.warning(

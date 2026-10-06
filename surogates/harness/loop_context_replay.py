@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from uuid import UUID
 
 from surogates.harness.loop_attachments import (
@@ -105,6 +107,84 @@ def build_user_message_dict(
         shrink_image_parts_in_messages([user_msg])
         return user_msg
     return {"role": "user", "content": content}
+
+
+#: The events that carry a worker's report to the session that started it.
+WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
+
+
+#: The lines a thread's own words sit between in its report.  Only the
+#: harness writes them: ``_thread_words`` takes them out of the words.
+_REPORT_BEGIN = "<<thread report>>"
+_REPORT_END = "<<end of thread report>>"
+#: Either marker, in any case or spacing a model would still read as one.
+_REPORT_MARKER = re.compile(r"<<\s*(?:end\s+of\s+)?thread\s+report\s*>>", re.IGNORECASE)
+
+
+def _thread_words(text: str) -> str:
+    """*text* with every report marker taken out, so a thread's words can
+    neither end their block early nor open another report.  Repeated until
+    none is left, since taking one out can join the pieces of another."""
+    removed = 1
+    while removed:
+        text, removed = _REPORT_MARKER.subn("", text)
+    return text.strip()
+
+
+def _file_label(label: str) -> str:
+    """*label* on one line: a file name can hold a line break or another
+    control character, and the ``Files:`` line comes after the report's end
+    marker, where a second line would read as the harness's."""
+    printable = "".join(c if c.isprintable() else " " for c in _thread_words(str(label)))
+    return " ".join(printable.split())
+
+
+def worker_note(event_type: str, data: dict) -> dict:
+    """The user-role message a worker's report is read as, built from its
+    payload alone, so the live loop and replay produce the same bytes.  A
+    project's thread is named by its title, quoted, and lists the files of
+    the turn it reports.  Its own words sit between the harness's markers:
+    they may quote a document or a web page, and the master reads them as
+    the thread's, never as the user's."""
+    worker_id = data.get("worker_id", "?")
+    title = data.get("title")
+    failed = event_type == EventType.WORKER_FAILED.value
+    if title is None and failed:
+        content = f"[Worker {worker_id} failed: {data.get('error', 'unknown error')}]"
+    elif title is None:
+        content = f"[Worker {worker_id} completed]\n{data.get('result', '')}"
+    else:
+        # A title is one line, but it can hold a quote.
+        named = f"[Thread {json.dumps(title, ensure_ascii=False)} ({worker_id})"
+        if failed:
+            content = f"{named} failed: {data.get('error', 'unknown error')}]"
+        else:
+            files = data.get("files")
+            if files is None:
+                listed = "not listed (the turn ended early)"
+            else:
+                listed = ", ".join(_file_label(f["label"]) for f in files) or "none"
+            content = (
+                f"{named} reported]\n"
+                f"{_REPORT_BEGIN}\n{_thread_words(str(data.get('result') or ''))}\n{_REPORT_END}\n"
+                f"Files: {listed}"
+            )
+    return {"role": "user", "content": content}
+
+
+def unread_reports(events: list) -> list[dict]:
+    """The worker reports no model request has read: those after the log's
+    last ``llm.request``.  Replay leaves them out, and the wake adds them
+    right before its first request, after its compaction, its command and
+    its board update, which is where replay puts them once that request is
+    in the log."""
+    held: list[dict] = []
+    for event in events:
+        if event.type == EventType.LLM_REQUEST.value:
+            held = []
+        elif event.type in WORKER_REPORT_TYPES:
+            held.append(worker_note(event.type, event.data))
+    return held
 
 
 def coalesce_user_messages(messages: list[dict]) -> dict:
@@ -237,6 +317,10 @@ class ContextReplayMixin:
         awaiting_tool_ids: set[str] = set()
         deferred_users: list[dict] = []
         deferred_advisors: list[dict] = []
+        # Worker reports wait for the next model request, which is where the
+        # wake adds them: after the user's messages, one message each.  The
+        # ones no request has read yet are left out (``unread_reports``).
+        held_reports: list[dict] = []
 
         def _flush_deferred() -> None:
             nonlocal deferred_users, deferred_advisors
@@ -254,6 +338,8 @@ class ContextReplayMixin:
             etype = event.type
 
             if etype == EventType.LLM_REQUEST.value:
+                messages.extend(held_reports)
+                held_reports = []
                 iteration_open = True
                 awaiting_tool_ids = set()
 
@@ -317,14 +403,14 @@ class ContextReplayMixin:
                     awaiting_tool_ids = set()
 
             # Worker coordination events — injected as synthetic user
-            # messages so the coordinator LLM sees worker results.
-            elif etype == EventType.WORKER_COMPLETE.value:
-                worker_id = event.data.get("worker_id", "?")
-                result = event.data.get("result", "")
-                messages.append({
-                    "role": "user",
-                    "content": f"[Worker {worker_id} completed]\n{result}",
-                })
+            # messages so the coordinator LLM sees worker results.  A worker
+            # reports whenever it finishes, even between the coordinator's
+            # tool call and its result, where a user-role message is refused
+            # by the provider; and merged into a user's message it would
+            # carry the user's words as a report.  So each waits for the
+            # next request, on its own.
+            elif etype in WORKER_REPORT_TYPES:
+                held_reports.append(worker_note(etype, event.data))
 
             elif etype == EventType.BROWSER_DESTROYED.value:
                 # Without this the close is a UI-only event: the model keeps
@@ -349,14 +435,6 @@ class ContextReplayMixin:
                     deferred_users.append(note)
                 else:
                     messages.append(note)
-
-            elif etype == EventType.WORKER_FAILED.value:
-                worker_id = event.data.get("worker_id", "?")
-                error = event.data.get("error", "unknown error")
-                messages.append({
-                    "role": "user",
-                    "content": f"[Worker {worker_id} failed: {error}]",
-                })
 
             # Task-layer terminal signals.  Same synthetic-user-message
             # shape as the worker events above: without a branch here a

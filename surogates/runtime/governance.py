@@ -74,13 +74,20 @@ TASK_LIFECYCLE_TOOLS: frozenset[str] = frozenset({
 RESEARCH_SPINE_TOOLS: frozenset[str] = frozenset({
     "idea_tree", "dispatch_experiments", "merge_experiment",
 })
+# A project's thread tools: only its master is sent them, so a thread or a
+# chat cannot grow the project behind its coordinator.  Protected as well:
+# Studio does not know projects, so an agent's policy never names them, and
+# an allow-list would leave a master that can start no work.
+PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
+    "start_thread", "message_thread", "stop_thread",
+})
 
 # Tools no agent policy may take away. The ops catalog omits these names
 # so Studio cannot offer them and the policy validator rejects them with
 # a clear 422; this set is the runtime's own belt-and-braces for
 # hand-written or legacy blobs.
 PROTECTED_TOOLS: frozenset[str] = (
-    WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS
+    WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS | PROJECT_THREAD_TOOLS
 )
 
 # Tools a channel brings with it (``tool_schemas.channel_tool_flags``): ``end_call`` exists only on phone

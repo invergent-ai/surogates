@@ -16,10 +16,16 @@ SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier")
 
 #: ``workstream_role`` of a project's master session.
 COORDINATOR = "coordinator"
+#: ``workstream_role`` of a project's thread.
+THREAD = "thread"
 
 
 def is_project_master(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == COORDINATOR
+
+
+def is_project_thread(config: dict[str, Any] | None) -> bool:
+    return (config or {}).get("workstream_role") == THREAD
 
 
 def master_refusal(command: str) -> str:
@@ -49,3 +55,20 @@ def master_config(
         "workspace_boundary": boundary,
         "system": master_instructions(name, goal, instructions),
     }
+
+
+def thread_config(workstream_id: UUID | str, *, title: str, tier: str | None) -> dict[str, Any]:
+    """The project's keys a thread is created with.
+
+    Built afresh, never copied from the master, so a thread carries neither
+    the coordinator's role nor its strict mode.  The title is its session
+    instructions, so the thread knows the name its work is filed under.
+    """
+    config: dict[str, Any] = {
+        "workstream_id": str(workstream_id),
+        "workstream_role": THREAD,
+        "system": f"Thread: {title}",
+    }
+    if tier is not None:
+        config["workstream_tier"] = tier
+    return config

@@ -2121,3 +2121,28 @@ class Workstream(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class WorkstreamThread(Base):
+    """A project's thread: a worker session of the master that does one piece
+    of the project's work in its own sandbox and reports back.
+
+    The row's presence is what makes the session a thread.  Both keys
+    cascade: ops's hard delete of the sessions, and the deletion of the
+    project with its user, take the row with them.
+    """
+
+    __tablename__ = "workstream_threads"
+    __table_args__ = (Index("idx_workstream_threads_workstream", "workstream_id"),)
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), primary_key=True,
+    )
+    workstream_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workstreams.id", ondelete="CASCADE"), nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
