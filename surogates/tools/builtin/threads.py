@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +18,7 @@ from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
+from surogates.workstreams.derive import GROUPS, derive_thread, question_of
 
 # The chat title's cap, since a thread's title is its chat's title.  Counted
 # in UTF-16 units, as a project's name is and as the desktop shell counts.
@@ -99,11 +101,47 @@ _STOP_THREAD_SCHEMA = ToolSchema(
 )
 
 
+_LIST_THREADS_SCHEMA = ToolSchema(
+    name="list_threads",
+    description=(
+        "List this project's threads: each one's id and title, where it stands "
+        "(waiting on the user, working, idle or resolved), why it waits, and its "
+        "status line, which is the thread's own words. Call it to find a "
+        "thread's id rather than guessing one."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "group": {"type": "string", "enum": list(GROUPS), "description": "Only the threads in this group."},
+        },
+        "additionalProperties": False,
+    },
+)
+
+_READ_THREAD_SCHEMA = ToolSchema(
+    name="read_thread",
+    description=(
+        "Read where one of this project's threads stands: its latest report as "
+        "you received it, with its files, and the question it is waiting on the "
+        "user to answer, if any. The user answers a thread's question in the "
+        "thread; a message_thread does not answer it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"thread_id": _THREAD_ID},
+        "required": ["thread_id"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     for name, schema, handler in (
         ("start_thread", _START_THREAD_SCHEMA, _start_thread_handler),
         ("message_thread", _MESSAGE_THREAD_SCHEMA, _message_thread_handler),
         ("stop_thread", _STOP_THREAD_SCHEMA, _stop_thread_handler),
+        ("list_threads", _LIST_THREADS_SCHEMA, _list_threads_handler),
+        ("read_thread", _READ_THREAD_SCHEMA, _read_thread_handler),
     ):
         registry.register(name=name, schema=schema, handler=handler, toolset="core")
 
@@ -215,3 +253,49 @@ async def _stop_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if redis is not None:
         await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{thread.id}", json.dumps({"reason": reason}))
     return json.dumps({"status": "stopped", "thread_id": str(thread.id)})
+
+
+async def _list_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    from surogates.workstreams.store import WorkstreamStore
+
+    group = arguments.get("group")
+    if group is not None and group not in GROUPS:
+        return _error(f"group must be one of: {', '.join(GROUPS)}")
+    master_config = kwargs.get("session_config") or {}
+    if not is_project_master(master_config):
+        return _error("Only a project's coordinator lists its threads.")
+    now = datetime.now(timezone.utc)
+    rows = [
+        derive_thread(facts, now=now)
+        for facts in await WorkstreamStore(kwargs["session_factory"]).thread_facts(UUID(master_config["workstream_id"]))
+    ]
+    return json.dumps({"threads": [
+        {"thread_id": row["id"], **{key: row[key] for key in ("title", "group", "reason", "status_line")}}
+        for row in rows if group is None or row["group"] == group
+    ]}, ensure_ascii=False)
+
+
+async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    from surogates.harness.loop_context_replay import worker_note
+    from surogates.workstreams.store import WorkstreamStore
+
+    thread_id = _text(arguments, "thread_id")
+    thread = await _own_thread(thread_id, **kwargs)
+    if thread is None:
+        return _error(f"No thread {thread_id} in this project.")
+    projects = WorkstreamStore(kwargs["session_factory"])
+    master_config = kwargs["session_config"]
+    found = await projects.thread_facts(UUID(master_config["workstream_id"]), thread_id=thread.id)
+    if not found:
+        return _error(f"Thread {thread_id} was deleted.")
+    row = derive_thread(found[0], now=datetime.now(timezone.utc))
+    report = await projects.latest_report(thread.parent_id, thread.id)
+    asked = question_of(found[0])
+    return json.dumps({
+        "thread_id": row["id"],
+        **{key: row[key] for key in ("title", "group", "reason", "status_line", "progress")},
+        # The text the master was sent: the thread's words between the
+        # harness's markers, and that turn's files.
+        "report": worker_note(report.type, report.data)["content"] if report is not None else None,
+        "question": asked.payload.get("questions") if asked is not None else None,
+    }, ensure_ascii=False)

@@ -79,7 +79,7 @@ RESEARCH_SPINE_TOOLS: frozenset[str] = frozenset({
 # Studio does not know projects, so an agent's policy never names them, and
 # an allow-list would leave a master that can start no work.
 PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
-    "start_thread", "message_thread", "stop_thread",
+    "start_thread", "message_thread", "stop_thread", "list_threads", "read_thread",
 })
 
 # Tools no agent policy may take away. The ops catalog omits these names
