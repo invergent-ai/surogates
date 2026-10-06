@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import socket
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from surogates.tools.workspace_io.local import CODE_UNITS, LocalWorkspaceIO
 from tests.fake_laptop import CONFLICT, perform
 from tests.tools.test_workspace_io_read_lines import text
 
-from .test_desktop_link_client import built_client, client, connected  # noqa: F401  (fixture)
+from .test_desktop_link_client import DESKTOP, built_client, client, connected  # noqa: F401  (fixture)
 from .test_devices import (  # noqa: F401  (fixtures)
     _fields,
     api,
@@ -40,6 +41,16 @@ from .test_devices import (  # noqa: F401  (fixtures)
 )
 
 pytestmark = [pytest.mark.desktop, pytest.mark.asyncio(loop_scope="session")]
+
+# Boots the app's VM: KVM, QEMU, virtiofsd and the image images/guest/build.sh makes
+# (or SUROGATE_VM_IMAGE's folder).
+VM = pytest.mark.skipif(os.environ.get("SUROGATE_VM_TESTS") != "1", reason="boots the VM: set SUROGATE_VM_TESTS=1")
+
+
+@pytest.fixture
+def built_agent_disk(built_client):
+    """The guest agent's disk, from the client's build, where the app looks for it."""
+    subprocess.run(["npm", "run", "agent-disk"], cwd=DESKTOP, check=True)
 
 
 @pytest.fixture
@@ -248,6 +259,14 @@ SAME_RUN = [
     ("run", {"command": "exit 0", "workdir": None, "timeout": 10}),
 ]
 
+# which, answered in the guest from the image's PATH, as the cloud answers it from its own.
+SAME_WHICH = [
+    ("which", {"name": "sh"}),
+    ("which", {"name": "/bin/sh"}),
+    ("which", {"name": "no-such-command-zz"}),
+    ("which", {"name": ""}),
+]
+
 # Background processes, step by step. "{id}" in a step is the session id its case's
 # first start answered. Each case has its own task id: the cloud's registry is the
 # whole process's.
@@ -362,6 +381,28 @@ async def test_the_app_answers_as_the_cloud_does(built_client, laptop_rig, link_
             want = await perform(cloud, kind, args)
             assert comparable(kind, args, got) == comparable(kind, args, want), (kind, args, got, want)
         # Nothing appeared or went: no srt placeholders, no temporary files.
+        assert sorted(os.listdir(folder)) == prepared
+    finally:
+        await app.close()
+
+
+@VM
+async def test_the_vm_runs_commands_as_the_cloud_does(
+    built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir,
+):
+    """Every command in the root's runner in the guest, the folder shared into it: the same answers as the cloud's."""
+    folder = prepare(tmp_path)
+    prepared = sorted(os.listdir(folder))
+    cloud = LocalWorkspaceIO(str(folder))
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
+    try:
+        await app.until(connected)
+        for kind, template in SAME_RUN + SAME_WHICH:
+            args = fill(template, folder)
+            got = await on_app(laptop_rig, kind, args)
+            want = await perform(cloud, kind, args)
+            assert comparable(kind, args, got) == comparable(kind, args, want), (kind, args, got, want)
+        # Nothing appeared or went in the folder.
         assert sorted(os.listdir(folder)) == prepared
     finally:
         await app.close()

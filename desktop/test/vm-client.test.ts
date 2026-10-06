@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import { forkManager, type ManagerProcess, VmClient } from "../src/vm/client.js";
+import { forkManager, type ManagerProcess, VmClient, vmOptions } from "../src/vm/client.js";
 import type { VmOperation, VmOptions } from "../src/vm/manager.js";
 
 let dir: string;
@@ -160,5 +160,21 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(await vm.perform(operation(), signal())).toMatchObject({ error: { type: "unavailable" } });
     await vm.teardown("root-1");
     expect(spawned).toHaveLength(1);
+  });
+});
+
+describe("the VM's files", () => {
+  const ana = { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" };
+
+  it("are each app's own: a runtime folder for each data folder, short enough for a socket", () => {
+    const env = { XDG_RUNTIME_DIR: "/run/user/1000" };
+    const installed = vmOptions("/home/ana/.local/share/surogate", ana, env);
+    expect(installed.run).toMatch(/^\/run\/user\/1000\/surogate\/vm-[0-9a-f]{8}$/);
+    expect(vmOptions("/home/ana/.local/share/surogate", ana, env).run).toBe(installed.run);
+    expect(vmOptions("/tmp/sd-x1/surogate", ana, env).run).not.toBe(installed.run);
+    expect(Buffer.byteLength(join(installed.run, "vfs-8.sock"))).toBeLessThan(108);
+    expect(installed.sessions).toBe("/home/ana/.local/share/surogate/vm/sessions.img");
+    // Without XDG_RUNTIME_DIR: the user's own folder logind makes, never /tmp.
+    expect(vmOptions("/d", { ...ana, uid: 1234 }, {}).run).toMatch(/^\/run\/user\/1234\/surogate\/vm-[0-9a-f]{8}$/);
   });
 });

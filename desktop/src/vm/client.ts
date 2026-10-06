@@ -4,16 +4,42 @@
 // and the cross-check, a Node child process. Its guest goes with it (pdeathsig).
 
 import { fork } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
+import type { HostUser } from "../guest/protocol.js";
 import type { Outcome } from "../link/protocol.js";
 import { unavailable, type VmOperation, type VmOptions } from "./manager.js";
 
 // The same from src/vm and from dist/vm.
-export const MANAGER = join(fileURLToPath(new URL("../..", import.meta.url)), "dist", "vm", "main.js");
+const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
+export const MANAGER = join(PACKAGE, "dist", "vm", "main.js");
 const STOP_MS = 5_000;
+
+/**
+ * The VM's files for an app whose data is *dataDir*: the sessions disk and the
+ * console log there, the sockets in a folder of this user's runtime folder that is
+ * that data's own, so two apps never share one (a development build beside the
+ * installed app, a test), and a boot's sweep reaches no other app's guest. Until the
+ * image is delivered, the image is the one images/guest/build.sh built in this
+ * repository, or SUROGATE_VM_IMAGE's folder, and the agent disk this package's
+ * (npm run agent-disk).
+ */
+export function vmOptions(dataDir: string, user: HostUser, env: NodeJS.ProcessEnv = process.env): VmOptions {
+  const image = env.SUROGATE_VM_IMAGE || join(PACKAGE, "..", "images", "guest", "out");
+  return {
+    kernel: join(image, "vmlinuz"),
+    rootfs: join(image, "rootfs.img"),
+    agentDisk: join(PACKAGE, "dist", "agent.img"),
+    sessions: join(dataDir, "vm", "sessions.img"),
+    // The user's own, 0700, made by logind; short enough for a vhost-user socket's 108 bytes.
+    run: join(env.XDG_RUNTIME_DIR || `/run/user/${user.uid}`, "surogate", `vm-${createHash("sha256").update(dataDir).digest("hex").slice(0, 8)}`),
+    console: join(dataDir, "logs", "vm-console.log"),
+    user,
+  };
+}
 
 export type ToManager =
   | { type: "start"; options: VmOptions }

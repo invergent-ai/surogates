@@ -15,6 +15,7 @@ import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation } from "../../src/link/protocol.js";
+import { vmOptions } from "../../src/vm/client.js";
 import { VmExecutor } from "../../src/vm/executor.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
@@ -572,6 +573,26 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     // Three pings unanswered, at 200 ms each, well before the command's own end.
     expect(performance.now() - begun).toBeLessThan(5_000);
     expect(await op(ROOT, join(dir, "a"), "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+  });
+
+  it("gives two apps' data folders two guests, and one's boot leaves the other's running", async () => {
+    // A runtime folder of the test's own, as each app has its own data.
+    const runtime = mkdtempSync(join(process.env.XDG_RUNTIME_DIR ?? "/tmp", "sg-rt-"));
+    const env = { SUROGATE_VM_IMAGE: IMAGE, XDG_RUNTIME_DIR: runtime };
+    const [one, two] = ["one", "two"].map((app) => new VmManager({ ...vmOptions(join(dir, app), USER, env), agentDisk: options.agentDisk }));
+    try {
+      const echo = (manager: VmManager | undefined, root: string, path: string, line: string) =>
+        manager!.perform({ id: `run-${Math.random()}`, root, folder: folderOf(path), kind: "run", args: { command: line, workdir: null, timeout: 10 } }, signal());
+      expect(await echo(one, ROOT, join(dir, "a"), "echo one")).toMatchObject({ ok: { output: "one\n" } });
+      // The first app's command goes on through the second's boot, and its sweep.
+      const going = echo(one, ROOT, join(dir, "a"), "sleep 4; echo slept");
+      expect(await echo(two, OTHER, join(dir, "b"), "echo two")).toMatchObject({ ok: { output: "two\n" } });
+      expect(await going).toMatchObject({ ok: { output: "slept\n" } });
+    } finally {
+      await one?.stop();
+      await two?.stop();
+      rmSync(runtime, { recursive: true, force: true });
+    }
   });
 
   it("takes its guest's sockets and pidfiles with it when it stops", async () => {

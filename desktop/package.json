@@ -15,7 +15,8 @@
     "start": "npm run build && env -u ELECTRON_RUN_AS_NODE electron dist/shell/main.js",
     "pretest": "npm run build",
     "test": "vitest run",
-    "test:e2e": "npm run build && xvfb-run -a vitest run -c vitest.e2e.config.ts"
+    "test:e2e": "npm run build && xvfb-run -a vitest run -c vitest.e2e.config.ts",
+    "agent-disk": "vm/agent-disk.sh dist/agent.img"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.77",
