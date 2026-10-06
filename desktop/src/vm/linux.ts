@@ -179,6 +179,12 @@ class LinuxVm implements VmBackend {
     } catch (error) {
       // Not added: its daemon serves the folder to nobody.
       daemon.kill("SIGKILL");
+      // A monitor that has gone, as at a command QEMU did not answer in time, adds
+      // no folder again: the VM goes, and the share fails once it has, its guest lost.
+      if (this.qmp.gone) {
+        this.qemu.kill("SIGKILL");
+        await this.exited;
+      }
       throw error;
     }
     // The folder is the guest's now: a daemon that goes takes the VM with it.

@@ -3,7 +3,7 @@
 // first). Behind SUROGATE_VM_TESTS=1; SUROGATE_VM_IMAGE names another image folder.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -560,6 +560,32 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     // The share's 15 s, before three keepalives at 10 s each would be missed.
     expect(performance.now() - begun).toBeLessThan(20_000);
     expect(await op("slow", slow, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+  });
+
+  it("stops a guest whose monitor does not add a root's folder in 15 s, and boots a new one for the next operation", async () => {
+    const stalled = join(dir, "stalled");
+    mkdirSync(stalled);
+    expect(await op(ROOT, join(dir, "a"), "run", { command: "true", workdir: null, timeout: 10 })).toMatchObject({ ok: { returncode: 0 } });
+    const pid = qemuPid();
+    // Once the agent has given the root's uid and its virtiofsd is launched, QEMU answers its monitor no more.
+    const watcher = watch(options.run, (_event, name) => {
+      if (/^vfs-\d+\.pid$/.test(String(name))) process.kill(pid, "SIGSTOP");
+    });
+    const begun = performance.now();
+    try {
+      expect(await op("stalled", stalled, "run", { command: "true", workdir: null, timeout: 10 })).toEqual(SANDBOX_STOPPED);
+    } finally {
+      watcher.close();
+      try {
+        process.kill(pid, "SIGCONT");
+      } catch {
+        // Gone with its guest.
+      }
+    }
+    expect(performance.now() - begun).toBeLessThan(20_000);
+    expect(() => process.kill(pid, 0)).toThrow();
+    expect(await op("stalled", stalled, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    expect(qemuPid()).not.toBe(pid);
   });
 
   it("stops a guest that misses three keepalives, and boots a new one for the next operation", async () => {

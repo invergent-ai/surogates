@@ -21,7 +21,8 @@ const HELLO_MS = 15_000;
 // A ping every PING_MS; MISSED in a row unanswered is a hung guest.
 const PING_MS = 10_000;
 const MISSED = 3;
-// The agent's own bounds on a setup, 5 s for the share and 5 s for the runner, fit inside it.
+// The agent's own bounds on a setup fit inside it: 5 s to mount the share, 3 s for
+// what the root ran before to end, and 5 s for its runner to start.
 const SETUP_MS = 15_000;
 // A share's hot-add, from the agent's uid to the folder in the guest (Section 11's timeouts).
 const SHARE_MS = 15_000;
@@ -52,7 +53,8 @@ export interface VmBackend {
    * *folder* shared into the running guest for the root whose guest uid is *uid*.
    * Resolves with how the agent mounts it, whose kind also says who maps the
    * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
-   * *deadline* (performance.now()). A share whose server goes takes the VM with it.
+   * *deadline* (performance.now()). A share whose server goes takes the VM with it,
+   * and so does one that leaves the VM unable to share again: it rejects once the VM has gone.
    */
   share(folder: string, uid: number, deadline: number): Promise<Share>;
   /** Ends the VM at once; settles once all of it has gone. Its runtime files go at the next boot, or with the manager. */
@@ -211,7 +213,8 @@ export class Guest {
   /**
    * *folder*, shared into the guest for *root* once its identity is checked again
    * and the agent has given the root's guest uid. Resolves with how the agent mounts
-   * it. One not shared within SHARE_MS stops the guest, as a setup with no answer does.
+   * it. A uid not given within SHARE_MS stops the guest, as a setup with no answer
+   * does; the backend ends a VM that cannot share any more, and the guest goes with it.
    */
   async share(root: string, folder: Folder): Promise<Share> {
     const deadline = performance.now() + SHARE_MS;
@@ -228,12 +231,7 @@ export class Guest {
     if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
       throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
     }
-    try {
-      return await this.vm.share(folder.path, uid, deadline);
-    } catch (error) {
-      if (performance.now() >= deadline) this.lose();
-      throw error;
-    }
+    return this.vm.share(folder.path, uid, deadline);
   }
 
   /** Everything of *root* ends in the guest, its share left in place; its next operation sets it up again. */

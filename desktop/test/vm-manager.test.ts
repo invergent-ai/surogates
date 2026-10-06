@@ -182,6 +182,36 @@ describe("the VM manager on the host", () => {
     });
   });
 
+  it("ends a VM whose monitor does not answer a share in time, so its guest is lost", async () => {
+    // A QEMU with its two sockets, whose monitor greets and takes its capabilities, then answers nothing.
+    const fake = join(dir, "qemu.cjs");
+    writeFileSync(fake, [
+      'const net = require("node:net");',
+      "const run = process.argv[2];",
+      'net.createServer(() => {}).listen(run + "/control.sock");',
+      "net.createServer((socket) => {",
+      '  socket.write(\'{"QMP": {"version": {}, "capabilities": []}}\\n\');',
+      '  socket.once("data", () => socket.write(\'{"return": {}}\\n\'));',
+      '}).listen(run + "/qmp.sock");',
+    ].join("\n"));
+    await withQemu(`exec '${process.execPath}' '${fake}' '${join(dir, "run")}'`, async () => {
+      const vm = await bootLinux(options(), undefined, performance.now() + 5_000);
+      try {
+        let gone = false;
+        void vm.exited.then(() => {
+          gone = true;
+        });
+        const begun = performance.now();
+        await expect(vm.share(dir, 10_000, performance.now() + 300)).rejects.toThrow("QEMU's monitor did not answer");
+        // It fails once the VM has gone: the guest above sees its loss first.
+        expect(gone).toBe(true);
+        expect(performance.now() - begun).toBeLessThan(2_000);
+      } finally {
+        await vm.kill();
+      }
+    });
+  });
+
   it("ends a QEMU that opens no sockets by the boot's deadline", async () => {
     await withQemu(`echo $$ > '${join(dir, "qemu-pid")}'\nexec sleep 30`, async () => {
       await expect(bootLinux(options(), undefined, performance.now() + 500)).rejects.toThrow("QEMU did not open its sockets");

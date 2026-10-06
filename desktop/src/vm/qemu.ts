@@ -136,6 +136,11 @@ export class Qmp {
     });
   }
 
+  // Once QEMU closed it, or a command went unanswered: no command reaches QEMU again.
+  get gone(): boolean {
+    return this.closed;
+  }
+
   close(): void {
     this.closed = true;
     this.socket.destroy();
