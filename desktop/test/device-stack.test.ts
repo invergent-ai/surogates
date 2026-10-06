@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FolderGuards } from "../src/binding/folder.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
@@ -15,6 +15,8 @@ import { type DeviceStackOptions, startDevice, type ToolLayer } from "../src/she
 import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "66666666-6666-4666-8666-666666666666";
+// A sub-agent of the chat: its operations run in the chat's folder, as sessions of their own.
+const CHILD = "77777777-7777-4777-8777-777777777777";
 const IDENTITY = { deviceId: "d", orgId: "o", agentId: "a", userId: "u" };
 
 // The tool layer under the binder, as far as the stack sees it.
@@ -103,9 +105,9 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
   return device;
 }
 
-function op(id: string, kind: string, args: Record<string, unknown>, own = false): Record<string, unknown> {
+function op(id: string, kind: string, args: Record<string, unknown>, own = false, calling = ROOT): Record<string, unknown> {
   return {
-    type: "op", id, session_id: ROOT, calling_session_id: ROOT, invocation_id: own ? "bind" : "1:c",
+    type: "op", id, session_id: ROOT, calling_session_id: calling, invocation_id: own ? "bind" : "1:c",
     ordinal: own ? 0 : 1, kind, args, digest: `digest-${id}`,
   };
 }
@@ -163,7 +165,7 @@ describe("one agent's device", () => {
     }
   });
 
-  it("counts the chats whose operations its tools run, and says each time the count changes", async () => {
+  it("counts the sessions whose operations its tools run, and says each time the count changes", async () => {
     const counts: number[] = [];
     const device = await start({ onWorking: (count) => counts.push(count) });
     await server.until(() => statuses.includes("connected"));
@@ -180,6 +182,40 @@ describe("one agent's device", () => {
     server.send({ type: "cancel", id: "run-2" });
     await server.until(() => device.working() === 0);
     expect(counts).toEqual([1, 0]);
+  });
+
+  it("counts a chat's sub-agent apart from the chat, as a session of its own", async () => {
+    const counts: number[] = [];
+    const device = await start({ onWorking: (count) => counts.push(count) });
+    await server.until(() => statuses.includes("connected"));
+    tools.hold = "until-aborted";
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    server.send(op("run-1", "run", { command: "sleep 9", workdir: null, timeout: 10 }));
+    server.send(op("run-2", "run", { command: "sleep 9", workdir: null, timeout: 10 }, false, CHILD));
+    await server.until(() => tools.ran.length === 2);
+    expect(device.working()).toBe(2);
+    server.send({ type: "cancel", id: "run-1" });
+    server.send({ type: "cancel", id: "run-2" });
+    await server.until(() => device.working() === 0);
+    expect(counts).toEqual([1, 2, 1, 0]);
+  });
+
+  it("clears its deadline once what runs has stopped, so nothing is left waiting on it", async () => {
+    const device = await start({ quitTimeoutMs: 54_321 });
+    await server.until(() => statuses.includes("connected"));
+    const armed = vi.spyOn(globalThis, "setTimeout");
+    const cleared = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      await device.stop();
+      const deadlines = armed.mock.calls.flatMap((call, index) => (call[1] === 54_321 ? [armed.mock.results[index]?.value] : []));
+      expect(deadlines).toHaveLength(1);
+      expect(cleared.mock.calls.map(([timer]) => timer)).toContain(deadlines[0]);
+    } finally {
+      armed.mockRestore();
+      cleared.mockRestore();
+    }
   });
 
   it("waits no longer than its deadline for an operation that ignores the quit", async () => {

@@ -5,7 +5,6 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import { Binder, type FolderPrompts } from "../binding/binder.js";
@@ -42,7 +41,8 @@ export interface DeviceStackOptions {
   approvalPrompts: ApprovalPrompts;
   onStatus(status: LinkStatus): void;
   onError(error: unknown): void;
-  // How many chats have an operation running on the tools, each time that changes: the quit asks first.
+  // How many sessions (a chat, and each of its sub-agents) have an operation running on the tools,
+  // each time that changes: the quit asks first.
   onWorking?: (count: number) => void;
   quitTimeoutMs?: number;
   delay?: (attempt: number) => number;
@@ -63,22 +63,23 @@ export function startDevice(options: DeviceStackOptions): DeviceStack {
     askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal),
   };
   const tools = options.tools(journal.bindings, network);
-  // Each chat's operations on the tools, counted as they run: the binder runs nothing else there.
+  // Each session's operations on the tools, counted as they run: the binder runs nothing else there.
+  // A chat's sub-agents are sessions of their own: their operations carry the chat as sessionId.
   const running = new Map<string, number>();
-  const count = (root: string, change: number): void => {
+  const count = (session: string, change: number): void => {
     const before = running.size;
-    const left = (running.get(root) ?? 0) + change;
-    if (left === 0) running.delete(root);
-    else running.set(root, left);
+    const left = (running.get(session) ?? 0) + change;
+    if (left === 0) running.delete(session);
+    else running.set(session, left);
     if (running.size !== before) options.onWorking?.(running.size);
   };
   const counted: Executor = {
     run: async (operation, signal) => {
-      count(operation.sessionId, 1);
+      count(operation.callingSessionId, 1);
       try {
         return await tools.run(operation, signal);
       } finally {
-        count(operation.sessionId, -1);
+        count(operation.callingSessionId, -1);
       }
     },
     end: () => tools.end?.() ?? Promise.resolve(),
@@ -118,7 +119,15 @@ export function startDevice(options: DeviceStackOptions): DeviceStack {
   // app, within the deadline; the tools; the journal.
   const quit = async (): Promise<void> => {
     await link.stop();
-    await Promise.race([runner.suspend(APP_CLOSED), sleep(options.quitTimeoutMs ?? QUIT_TIMEOUT_MS)]);
+    let deadline: NodeJS.Timeout | undefined;
+    await Promise.race([
+      runner.suspend(APP_CLOSED),
+      new Promise((resolve) => {
+        deadline = setTimeout(resolve, options.quitTimeoutMs ?? QUIT_TIMEOUT_MS);
+      }),
+    ]);
+    // Cleared once what runs has stopped: a plain Node process would otherwise live on until the deadline.
+    clearTimeout(deadline);
     await tools.stop();
     journal.close();
   };
