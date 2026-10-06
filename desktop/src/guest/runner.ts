@@ -1,18 +1,20 @@
-// The session runner. Once a root starts a background process, every command of
-// that root runs in here, inside one long-lived sandbox: each srt command
-// otherwise gets its own network namespace, and could not reach a server another
-// command started (spec, Section 1). The host speaks ToRunner on stdin and reads
-// FromRunner on stdout, after a first {"ready":true}; it ends the runner by
-// ending its stdin, and the sandbox goes with it.
+// The root runner: every command of a root runs in here, in the root's own
+// namespaces in the guest, as the root's own user, so a server one command
+// starts is reachable from the next (spec, Section 11). The agent speaks
+// ToRunner on stdin and reads FromRunner on stdout, after a first
+// {"ready":true}; it ends the runner by ending its stdin, and the namespaces go
+// with it. Until commands move into the VM, a tool host runs it the same way,
+// wrapped once in srt, as the root's session runner.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
+import { Failure } from "../files/answers.js";
 import { findOnPath } from "../files/operations.js";
-import type { FromRunner, SpawnRequest, ToRunner } from "./messages.js";
-import { quote } from "./policy.js";
+import { unenterable, workdir } from "./command.js";
+import type { FromRunner, SpawnRequest, ToRunner } from "./protocol.js";
 
 // Every process a command starts inherits it, setsid or not: how the runner finds them all.
 export const MARKER = "SUROGATE_PROCESS";
@@ -29,6 +31,10 @@ interface Child {
   exited: boolean;
   done: boolean;
 }
+
+// One word on a bash line: in '...', an embedded quote written as '\''. A copy
+// of hosts/policy.ts's, which the agent does not ship.
+const quote = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
 
 const children = new Map<string, Child>();
 const paused = new Set<Readable>();
@@ -160,6 +166,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     start(request);
   } else if (message.type === "signal") {
     signal(message.id, message.signal);
+  } else if (message.type === "place") {
+    // In this view and as this user: what the command will see.
+    try {
+      const cwd = workdir(message, message.workdir);
+      say({ type: "placed", id: message.id, cwd, unenterable: unenterable(cwd) });
+    } catch (error) {
+      const refusal = error instanceof Failure ? error.refusal : { type: "other", message: String(error) };
+      say({ type: "refused", id: message.id, refusal });
+    }
+  } else if (message.type === "which") {
+    say({ type: "found", id: message.id, found: findOnPath(message.name, process.env.PATH, message.cwd) !== null });
   } else if (message.type === "stdin") {
     // Each is answered, in order: the host waits to know whether it was taken.
     const stdin = children.get(message.id)?.proc.stdin;

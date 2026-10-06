@@ -18,3 +18,17 @@ The shell, in development:
 Its state lives under `$XDG_DATA_HOME/surogate` (`~/.local/share/surogate`):
 Electron's own data, the agent, the device's credential and journal, and the
 window's place. No chat's folder may hold it.
+
+The VM sandbox's guest (spec, Section 11) is the `guest` stage of
+`images/sandbox/Dockerfile`, which shares its `tools` stage with the cloud
+sandbox, and the guest agent in `src/guest/`. Docker builds the image, without
+root:
+
+    ../images/guest/build.sh      # rootfs.img(.zst) and vmlinuz into images/guest/out
+
+The VM tests boot it under QEMU and KVM (`/dev/kvm`, `qemu-system-x86`,
+`virtiofsd`), with the agent disk `vm/agent-disk.sh` makes from `dist/`.
+`SUROGATE_VM_IMAGE` names another image folder.
+
+    npm run build
+    SUROGATE_VM_TESTS=1 npx vitest run test/vm

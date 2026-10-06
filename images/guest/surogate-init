@@ -1,0 +1,14 @@
+#!/bin/sh
+# The guest's PID 1 until the agent disk's init replaces it. The kernel has
+# mounted this image read-only at / and devtmpfs at /dev. The agent disk is the
+# second disk, read-only: it changes with every app release, and this file only
+# when the image does. Anything that fails here ends PID 1, so the guest panics
+# and QEMU exits (panic=-1, -no-reboot).
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mkdir -p /run/surogate/agent
+mount -t ext4 -o ro,nodev,nosuid /dev/vdb /run/surogate/agent
+exec /run/surogate/agent/init

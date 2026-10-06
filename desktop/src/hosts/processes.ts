@@ -9,9 +9,10 @@ import { TextDecoder } from "node:util";
 
 import { Failure, osError, type Refusal, sandboxError, valueError } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
-import type { SpawnRequest } from "./messages.js";
-import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "./output.js";
-import { CANCELLED, type CommandChild, type CommandContext, type CommandEnd, unenterable, workdir } from "./run.js";
+import { CANCELLED, type CommandChild, type CommandEnd, unenterable, workdir } from "../guest/command.js";
+import { capStrings, firstPoints, lastPoints, splitLines, stripAnsi } from "../guest/output.js";
+import type { SpawnRequest } from "../guest/protocol.js";
+import type { CommandContext } from "./run.js";
 
 export const MAX_OUTPUT_CHARS = 200_000;
 export const FINISHED_TTL_SECONDS = 1800;

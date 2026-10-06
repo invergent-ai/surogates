@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
-import { capStrings, capText, commandOutput, firstPoints, lastPoints, splitLines, stripAnsi, Window } from "../src/hosts/output.js";
+import { capStrings, capText, commandOutput, firstPoints, lastPoints, splitLines, stripAnsi, Window } from "../src/guest/output.js";
 
 const repeat = (bytes: number[] | string, times: number) =>
   Buffer.concat(Array.from({ length: times }, () => (typeof bytes === "string" ? Buffer.from(bytes) : Buffer.from(bytes))));
