@@ -4,16 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createInterface } from "node:readline";
-import { duplexPair } from "node:stream";
+import { type Duplex, duplexPair } from "node:stream";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID } from "../src/binding/folder.js";
 import { SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { FOLDER_UNAVAILABLE } from "../src/hosts/messages.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, type Folder, Guest, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, type Folder, Guest, type ProcessesChange, type VmBackend, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -52,10 +52,14 @@ async function withQemu(script: string, body: () => Promise<void>): Promise<void
   }
 }
 
+// The agent's end of the latest fake VM's control port, to say what the agent says unasked.
+let agent: Duplex | undefined;
+
 // A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
 // what the agent is asked, and when. Without roots, an agent that never says hello.
 const fakeVm = (roots?: ControlRoots): BootVm => async () => {
   const [host, guest] = duplexPair();
+  agent = guest;
   if (roots) {
     const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
     createInterface({ input: guest }).on("line", (line) => control.receive(line));
@@ -254,6 +258,42 @@ describe("the VM manager on a guest", () => {
     await tearing;
     expect(asked).toEqual(["setup", "set up", "teardown"]);
     expect(await answer).toEqual({ ok: true });
+    await manager.stop();
+  });
+});
+
+describe("a root's processes in the guest", () => {
+  it("are told as they change, refused whole past a registry's count or a handle's shape and size, and told gone with every root of a guest that goes", async () => {
+    const roots: ControlRoots = { uid: () => 10_000, setup: async () => {}, teardown: async () => {}, perform: async () => ({ ok: true }) };
+    const told: Array<[string, ProcessesChange]> = [];
+    const vms: VmBackend[] = [];
+    const boot: BootVm = async (...args) => {
+      const vm = await fakeVm(roots)(...args);
+      vms.push(vm);
+      return vm;
+    };
+    const manager = new VmManager(options(), boot, (root, change) => told.push([root, change]));
+    const folder = { path: dir, ...statSync(dir) };
+    expect(await manager.perform({ id: "1", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal)).toEqual({ ok: true });
+    const handle = { id: "proc_000000000001", command: "sleep 9", cwd: dir, task_id: null, started_at: 1 };
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const say = (handles: unknown[]) => agent?.write(`${JSON.stringify({ type: "handles", root: "root-1", handles, live: 1 })}\n`);
+    try {
+      say([handle, { id: 7 }]);
+      say(Array.from({ length: 65 }, () => handle));
+      say([{ ...handle, command: "x".repeat(4097) }]);
+      say([handle]);
+      await until(() => told.length === 1);
+      expect(warned).toHaveBeenCalledTimes(3);
+    } finally {
+      warned.mockRestore();
+    }
+    expect(told).toEqual([["root-1", { handles: [handle], live: 1 }]]);
+    // The guest goes on.
+    expect(await manager.perform({ id: "2", root: "root-1", folder, kind: "which", args: {} }, new AbortController().signal)).toEqual({ ok: true });
+    vms[0]?.control.destroy();
+    await until(() => told.length === 2);
+    expect(told[1]).toEqual(["root-1", { gone: true }]);
     await manager.stop();
   });
 });

@@ -204,6 +204,41 @@ describe("the VM manager's process", { timeout: 20_000 }, () => {
     expect(await waiting).toEqual(unavailable("is stopping"));
   });
 
+  it("tells each listener of a root's processes, and of every root it heard of as gone when its manager goes", async () => {
+    const heard: Array<(message: FromManager) => void> = [];
+    const exits: Array<() => void> = [];
+    const tell = (message: FromManager) => heard.forEach((listener) => listener(message));
+    const manager: ManagerProcess = {
+      send: (message) => {
+        if (message.type === "start") tell({ type: "ready" });
+      },
+      onMessage: (listener) => void heard.push(listener),
+      onExit: (listener) => void exits.push(listener),
+      kill: () => exits.forEach((listener) => listener()),
+    };
+    const vm = new VmClient({ vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } }, spawn: () => manager });
+    clients.push(vm);
+    const told: unknown[] = [];
+    const other: unknown[] = [];
+    const stop = vm.onProcesses((root, change) => told.push([root, change]));
+    vm.onProcesses((root) => other.push(root));
+    const waiting = vm.perform(operation(), signal());
+    const handle = { id: "proc_000000000001", command: "sleep 9", cwd: dir, task_id: null, started_at: 1 };
+    tell({ type: "processes", root: "root-1", change: { handles: [handle], live: 1 } });
+    tell({ type: "processes", root: "root-2", change: { handles: [], live: 0 } });
+    tell({ type: "processes", root: "root-2", change: { gone: true } });
+    expect(told).toEqual([["root-1", { handles: [handle], live: 1 }], ["root-2", { handles: [], live: 0 }], ["root-2", { gone: true }]]);
+    manager.kill();
+    expect(await waiting).toEqual(SANDBOX_STOPPED);
+    // root-2 was told gone already; root-1 goes with the manager.
+    expect(told.at(-1)).toEqual(["root-1", { gone: true }]);
+    expect(told).toHaveLength(4);
+    stop();
+    tell({ type: "processes", root: "root-3", change: { handles: [], live: 0 } });
+    expect(told).toHaveLength(4);
+    expect(other).toEqual(["root-1", "root-2", "root-2", "root-1", "root-3"]);
+  });
+
   it("answers that the sandbox did not start when its manager cannot", async () => {
     const vm = new VmClient({
       vm: { kernel: "", rootfs: "", agentDisk: "", sessions: "", run: "", console: "", user: { uid: 1, gid: 1, name: "ana", home: "/home/ana" } },

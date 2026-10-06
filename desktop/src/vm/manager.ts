@@ -76,6 +76,11 @@ export function bootFor(platform: NodeJS.Platform): BootVm | null {
   return platform === "linux" ? bootLinux : null;
 }
 
+// A root's background processes in the guest, each time they change: the handles to
+// keep and how many live, or gone, when the guest went and they with it.
+export type ProcessesChange = { handles: ProcessHandle[]; live: number } | { gone: true };
+type Told = (root: string, change: ProcessesChange) => void;
+
 // A root's folder as its binding holds it: the path, and its identity when it was
 // bound, in the boot it was bound in ("", or none, when that could not be read).
 export interface Folder {
@@ -134,6 +139,7 @@ export class Guest {
     // When the boot began (performance.now()), and how long after it the agent said hello.
     readonly launched: number,
     readonly helloMs: number,
+    private readonly told: Told,
   ) {
     this.gone = new Promise((resolve) => {
       this.leave = resolve;
@@ -144,6 +150,7 @@ export class Guest {
       const entry = this.roots.get(root);
       if (entry) entry.setup = null;
     });
+    control.onHandles((root, handles, live) => told(root, { handles, live }));
     let missed = 0;
     let waiting = false;
     this.keepalive = setInterval(() => {
@@ -163,7 +170,7 @@ export class Guest {
    * The guest *boot* starts, once its agent has said hello. Rejects with why it did
    * not start, its hypervisor's words included. *signal* stops a boot under way.
    */
-  static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal): Promise<Guest> {
+  static async boot(boot: BootVm, options: VmOptions, signal?: AbortSignal, told: Told = () => {}): Promise<Guest> {
     const launched = performance.now();
     const deadline = launched + HELLO_MS;
     const vm = await boot(options, signal, deadline);
@@ -173,7 +180,7 @@ export class Guest {
     if (signal?.aborted) halt();
     try {
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
-      return new Guest(options, vm, control, launched, performance.now() - launched);
+      return new Guest(options, vm, control, launched, performance.now() - launched, told);
     } catch (error) {
       await vm.kill();
       throw new Error([describe(error), await vm.exited].filter(Boolean).join(": "));
@@ -287,6 +294,8 @@ export class Guest {
     this.left = true;
     clearInterval(this.keepalive);
     this.control.close();
+    // Before what waited on it is answered: the next operation finds them ended.
+    for (const root of this.roots.keys()) this.told(root, { gone: true });
     void this.vm.kill().catch(() => {}).then(this.leave);
   }
 }
@@ -297,7 +306,12 @@ export class VmManager {
   // Stops a boot under way when the manager stops.
   private readonly halt = new AbortController();
 
-  constructor(private readonly options: VmOptions, private readonly boot: BootVm | null = bootFor(process.platform)) {}
+  // *told*: each change of a root's processes in its guests.
+  constructor(
+    private readonly options: VmOptions,
+    private readonly boot: BootVm | null = bootFor(process.platform),
+    private readonly told: Told = () => {},
+  ) {}
 
   /**
    * One process operation of a root's, in the guest, its folder added first. A
@@ -349,7 +363,7 @@ export class VmManager {
   }
 
   private start(boot: BootVm): Promise<Guest> {
-    const booting = Guest.boot(boot, this.options, this.halt.signal);
+    const booting = Guest.boot(boot, this.options, this.halt.signal, this.told);
     booting.then((guest) => guest.gone, () => {}).finally(() => {
       if (this.guest === booting) this.guest = null;
     });

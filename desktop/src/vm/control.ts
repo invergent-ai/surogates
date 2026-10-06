@@ -8,7 +8,9 @@ import { createInterface } from "node:readline";
 import type { Duplex } from "node:stream";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
+import { MAX_PROCESSES, type ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, ToAgent } from "../guest/protocol.js";
+import { isHandle } from "../hosts/folder-record.js";
 import type { Outcome } from "../link/protocol.js";
 
 // What the host asks: every message to the agent but hello's answer, its id added on sending.
@@ -24,6 +26,7 @@ export class ControlLink {
   private readonly waiting = new Map<number, (answer: FromAgent | null) => void>();
   private ended = false;
   private lost: (root: string) => void = () => {};
+  private handles: (root: string, handles: ProcessHandle[], live: number) => void = () => {};
   readonly closed: Promise<void>;
 
   private constructor(private readonly channel: Duplex, lines: AsyncIterableIterator<string>) {
@@ -137,12 +140,28 @@ export class ControlLink {
     this.lost = listener;
   }
 
+  // Told each change of a root's processes in the guest: the handles to keep, and how many live.
+  onHandles(listener: (root: string, handles: ProcessHandle[], live: number) => void): void {
+    this.handles = listener;
+  }
+
   close(): void {
     this.channel.destroy();
   }
 
   private write(message: ToAgent): void {
     if (!this.ended) this.channel.write(`${JSON.stringify(message)}\n`);
+  }
+
+  // Kept in the folder's record and carried by each operation of the root's: at most a
+  // registry's handles, each in a handle's shape and size. Others are the agent's bug,
+  // refused whole, and the guest goes on.
+  private handled({ root, handles, live }: Extract<FromAgent, { type: "handles" }>): void {
+    if (Array.isArray(handles) && handles.length <= MAX_PROCESSES && handles.every(isHandle) && Number.isInteger(live)) {
+      this.handles(root, handles, live);
+    } else {
+      console.warn(new Error(`The guest's process handles for ${JSON.stringify(root.slice(0, 64))} were refused: more than ${MAX_PROCESSES}, or not a handle's shape and size`));
+    }
   }
 
   private received(line: string): void {
@@ -153,6 +172,7 @@ export class ControlLink {
       return;
     }
     if (message?.type === "lost" && typeof message.root === "string") this.lost(message.root);
+    else if (message?.type === "handles" && typeof message.root === "string") this.handled(message);
     else if (typeof (message as { id?: unknown } | null)?.id === "number") this.waiting.get((message as { id: number }).id)?.(message);
   }
 }
