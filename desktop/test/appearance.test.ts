@@ -61,6 +61,17 @@ describe("the appearance settings", () => {
     }
   });
 
+  it("are the defaults when the file holds JSON that is no object, which is said", () => {
+    writeFileSync(path, "null");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(new AppearanceStore(path).get()).toEqual(DEFAULTS);
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/settings\.json could not be read, so Surogate starts without it: it holds null/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("read a value the file should not hold as its default", () => {
     writeFileSync(path, JSON.stringify({ theme: "blue", motion: "reduced" }));
     expect(new AppearanceStore(path).get()).toEqual({ ...DEFAULTS, motion: "reduced" });

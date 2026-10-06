@@ -343,5 +343,10 @@ if (!app.requestSingleInstanceLock()) {
     open(main, agent);
     kept = credentials.list().find((stored) => stored.origin === agent.origin && stored.agentId === agent.agentId) ?? null;
     if (kept) void startStack(agent, kept).catch(report);
+  }).catch((error: unknown) => {
+    // A start that fails is said, and ends the app: one left with no window would keep the
+    // single-instance lock, and every later launch would hand it nothing.
+    report(error);
+    app.exit(1);
   });
 }

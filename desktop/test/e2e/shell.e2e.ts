@@ -107,6 +107,34 @@ describe("the shell", () => {
     expect(await page.evaluate(async () => (await navigator.permissions.query({ name: "notifications" })).state)).toBe("denied");
   });
 
+  it("opens with its defaults when its state files hold JSON that is no object", async () => {
+    mkdirSync(join(home, "surogate"), { recursive: true });
+    for (const name of ["window-state.json", "settings.json", "agent.json", "credentials.json"]) {
+      writeFileSync(join(home, "surogate", name), "null");
+    }
+    app = await launch(home);
+    const page = await shellPage(app);
+    await expect.poll(() => visible(app!)).toEqual([true]);
+    await expect.poll(() => page.isVisible("#first-run")).toBe(true);
+  });
+
+  it("exits with an error, rather than live on with no window, when it cannot start", async () => {
+    // The system's theme cannot be set: the start fails once the app is ready.
+    const failing = join(home, "no-theme.cjs");
+    writeFileSync(failing, [
+      'const { nativeTheme } = require("electron");',
+      'Object.defineProperty(nativeTheme, "themeSource", { get: () => "system", set: () => { throw new Error("No theme here"); } });',
+    ].join("\n"));
+    // Loaded before the main, as Playwright loads its own: under NODE_OPTIONS it would run before electron exists.
+    const started = spawn(ELECTRON, ["-r", failing, MAIN, "--password-store=basic"], { env: shellEnv(home), stdio: "ignore" });
+    try {
+      const ended = once(started, "exit").then(([code]) => code as number | null);
+      expect(await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 10_000, "still running"))])).toBe(1);
+    } finally {
+      started.kill("SIGKILL");
+    }
+  });
+
   it("opens in the saved theme", async () => {
     mkdirSync(join(home, "surogate"), { recursive: true });
     writeFileSync(join(home, "surogate", "settings.json"), JSON.stringify({ theme: "dark" }));

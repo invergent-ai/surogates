@@ -61,4 +61,16 @@ describe("a window's place", () => {
       warn.mockRestore();
     }
   });
+
+  it.each(["null", "[1]", '"x"'])("is its default when the file holds %s, which is no object, and that is said", (held) => {
+    const path = join(dir, "window-state.json");
+    writeFileSync(path, held);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(new WindowStates(path).restore("agents", DEFAULTS, SCREEN)).toEqual({ width: 1200, height: 800, maximized: false });
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/window-state\.json could not be read, so Surogate starts without it: it holds .+ where Surogate keeps an object/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
