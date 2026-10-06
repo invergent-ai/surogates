@@ -84,7 +84,14 @@ class Runtime:
 
 
 def prewarm(proc: JobProcess) -> None:
+    """Runs in each warm process before it gets a call: what loads here is not paid during a greeting."""
     proc.userdata["vad"] = silero.VAD.load()
+    # the first call in a process imported these mid-greeting (the database, storage and runtime stack)
+    import surogates.api.app  # noqa: F401
+    import surogates.db.engine  # noqa: F401
+    import surogates.runtime.platform_client  # noqa: F401
+    import surogates.session.store  # noqa: F401
+    import surogates.storage.backend  # noqa: F401
 
 
 def fixed(session: AgentSession, phrases: PhraseCache | None, text: str, **kw):
