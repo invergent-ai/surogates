@@ -26,8 +26,10 @@ import { HookGuard } from "./hooks.js";
 import { destination, GLOB, hideSrtTmp, quote, reach, sandboxPolicy } from "./policy.js";
 import { Processes } from "./processes.js";
 import { appeared, extraDenies, GRANT_CHANGED, identity, protectedKeys, srtTargets } from "./restarts.js";
-import { CANCELLED, type CommandContext, runCommand } from "./run.js";
-import { type SessionRunner, startRunner, stopRunner } from "./session-runner.js";
+import { CANCELLED } from "../guest/command.js";
+import type { SessionRunner } from "../guest/runner-process.js";
+import { type CommandContext, runCommand } from "./run.js";
+import { startRunner, stopRunner } from "./session-runner.js";
 
 const HELPER = fileURLToPath(new URL("../files/helper.js", import.meta.url));
 const READY_TIMEOUT_MS = 15_000;

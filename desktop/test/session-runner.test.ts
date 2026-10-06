@@ -7,12 +7,14 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { FromRunner, SpawnRequest, ToRunner } from "../src/hosts/messages.js";
 import { OUTPUT_CAP_CHARS, pyJsonLength } from "../src/files/answers.js";
-import { CANCELLED, type CommandContext, type CommandEnd, runCommand, SANDBOX_STOPPED } from "../src/hosts/run.js";
-import { type RunnerChild, SessionRunner, stopRunner } from "../src/hosts/session-runner.js";
+import { CANCELLED, type CommandEnd, SANDBOX_STOPPED } from "../src/guest/command.js";
+import type { FromRunner, SpawnRequest, ToRunner } from "../src/guest/protocol.js";
+import { type RunnerChild, SessionRunner } from "../src/guest/runner-process.js";
+import { type CommandContext, runCommand } from "../src/hosts/run.js";
+import { stopRunner } from "../src/hosts/session-runner.js";
 
-const RUNNER = fileURLToPath(new URL("../dist/hosts/runner.js", import.meta.url));
+const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
 
 let base: string;
 let runners: SessionRunner[];

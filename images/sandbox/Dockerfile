@@ -1,25 +1,33 @@
-# Surogates Sandbox — agent execution environment
+# Surogates Sandbox — agent execution environment, and Surogate Desktop's VM guest
 #
-# Includes the surogates Python package so the real tool handlers
-# (terminal, file_ops, code_execution, etc.) run inside the sandbox
-# with full feature parity.
+# One shared `tools` stage holds what commands find: the OS packages, Node and
+# the global npm packages, the Python venv with the data libraries, uv and the
+# pip wrapper. Two images build on it, so `which` answers alike in both:
+#
+#   sandbox  the cloud sandbox: the surogates package (so the real tool handlers
+#            run inside the sandbox with full feature parity), the tool
+#            executor, geesefs and the coding agents. The last stage, so a
+#            build without --target builds it.
+#   guest    the desktop VM's root filesystem: no geesefs, no claude-code or
+#            codex (switched off for local folders); the stub init, the pinned
+#            kernel's modules, iproute2, e2fsprogs and kmod.
 #
 # Build (from repo root):
 #   docker build -t ghcr.io/invergent-ai/surogates-agent-sandbox:latest -f images/sandbox/Dockerfile .
+#   images/guest/build.sh <out-dir>     # the guest's rootfs.img and vmlinuz
 # Load into k3d cluster (optional, if using k3d):
 #   k3d image import ghcr.io/invergent-ai/surogates-agent-sandbox:latest -c surogates
 
-# ── Stage 1: Python dependencies ──────────────────────────────────────
+# The guest's kernel: Ubuntu 24.04's generic kernel, booted directly. Its .debs
+# come from Launchpad, which keeps every published version, and are checked by hash.
+ARG KERNEL=6.8.0-146-generic
+
+# ── Python dependencies: the data libraries ──────────────────────────
 FROM python:3.12-slim AS python-deps
 
-WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-COPY pyproject.toml ./
-COPY surogates/ ./surogates/
-
 RUN uv venv /opt/venv \
-    && uv pip install --python /opt/venv/bin/python . \
     && uv pip install --python /opt/venv/bin/python \
         pandas \
         numpy \
@@ -40,24 +48,20 @@ RUN uv venv /opt/venv \
         pdfplumber \
         pypdfium2 \
         pytesseract \
-        pdf2image
-# liteparse, pypdf, python-docx, python-pptx, openpyxl are pulled in
-# by the surogates package install above (project deps), so they are
-# not listed here.
-#
+        pdf2image \
+        pypdf \
+        python-docx \
+        python-pptx \
+        openpyxl
 # The extra libraries above (reportlab, pdfplumber, pypdfium2,
-# pytesseract, pdf2image) are referenced by the bundled productivity
-# skills (pdf/docx/xlsx/pptx); preinstalling them lets the skills run
-# without any `pip install` step.  Pandoc the binary comes from the
-# apt layer below (the `pandoc` PyPI package is just a wrapper).
+# pytesseract, pdf2image, pypdf, python-docx, python-pptx, openpyxl) are
+# referenced by the bundled productivity skills (pdf/docx/xlsx/pptx);
+# preinstalling them lets the skills run without any `pip install` step,
+# in the cloud and in the desktop's guest.  Pandoc the binary comes from
+# the apt layer below (the `pandoc` PyPI package is just a wrapper).
 
-# ── Stage 2: Final image ─────────────────────────────────────────────
-FROM python:3.12-slim
-
-LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
-      org.opencontainers.image.description="Surogates agent sandbox execution environment" \
-      org.opencontainers.image.vendor="Invergent SA" \
-      org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
+# ── Shared tools ─────────────────────────────────────────────────────
+FROM python:3.12-slim AS tools
 
 # ── OS packages ──────────────────────────────────────────────────────
 # poppler-utils ships pdftotext/pdftoppm/pdfimages used by the pdf skill.
@@ -93,10 +97,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         imagemagick \
         pdfgrep \
-        fuse \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
     # gh (GitHub CLI) lets a coding-agent run commit, push, and open a PR on
     # a checked-out repo; git is already installed in the base apt list above.
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -118,8 +121,6 @@ RUN npm install -g \
         pdf-lib \
         pdfjs-dist \
         pnpm \
-        @anthropic-ai/claude-code \
-        @openai/codex \
     && npm cache clean --force
 
 # ── Python virtualenv ────────────────────────────────────────────────
@@ -149,6 +150,9 @@ RUN chmod +x /usr/local/bin/uv /opt/venv/bin/pip \
 # don't survive a sandbox-pod crash within a session (they're scoped to
 # the pod's lifetime) — sessions are short-lived enough that a re-install
 # on a fresh pod is cheap.
+# The guest gives each root the same layout under its own HOME: the guest
+# stage's /etc/surogate/environment names these variables, so a variable
+# added here is added to its list too.
 ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$PATH" \
     PYTHONUSERBASE="/home/sandbox/.local" \
     PYTHONUNBUFFERED=1 \
@@ -157,6 +161,85 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
     NPM_CONFIG_PREFIX="/home/sandbox/.npm-global" \
     UV_CACHE_DIR="/home/sandbox/.cache/uv" \
     XDG_CACHE_HOME="/home/sandbox/.cache"
+
+# ── The guest's kernel ──────────────────────────────────────────────
+# The kernel pin: KERNEL above and these two .debs, their version and hashes, change together.
+FROM python:3.12-slim AS kernel
+ADD --checksum=sha256:5ff8d86009ba6c30a6aacfe47a5176969bbb6591438c913d29881032d071e83f \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/image.deb
+ADD --checksum=sha256:9287a0b722a7dd0c94a412eda8e27de4742a7925fdf2d08375b2f608516e6ab4 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-6.8.0-146-generic_6.8.0-146.146_amd64.deb /tmp/modules.deb
+RUN dpkg-deb -x /tmp/image.deb /kernel && dpkg-deb -x /tmp/modules.deb /kernel
+
+# ── Surogate Desktop's VM guest ─────────────────────────────────────
+FROM tools AS guest
+ARG KERNEL
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs kmod \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=kernel /kernel/lib/modules/ /usr/lib/modules/
+COPY --chmod=0755 images/guest/surogate-init /usr/sbin/surogate-init
+# No setuid programs and no file capabilities: the image is mounted read-only,
+# so none comes back. /etc/surogate/environment is the commands' environment,
+# the cloud's layout, which the guest agent moves under each root's own HOME.
+RUN depmod "$KERNEL" \
+    && find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+    && find / -xdev -type f -exec python3 -c 'import os, sys; [os.removexattr(p, "security.capability") for p in sys.argv[1:] if "security.capability" in os.listxattr(p)]' {} + \
+    && mkdir -p /etc/surogate \
+    && printenv | grep -E '^(PATH|PYTHONUSERBASE|PYTHONUNBUFFERED|PYTHONDONTWRITEBYTECODE|PIP_USER|NPM_CONFIG_PREFIX|UV_CACHE_DIR|XDG_CACHE_HOME)=' \
+        > /etc/surogate/environment
+# Docker writes these two at run time, so neither is in a layer. localhost
+# resolves without DNS, and the guest has no DNS: the host resolves the names
+# in each connection's request.
+COPY <<EOF /etc/hosts
+127.0.0.1 localhost
+::1 localhost ip6-localhost ip6-loopback
+EOF
+COPY <<EOF /etc/resolv.conf
+# No DNS in the guest: the host resolves the names in each connection's request.
+EOF
+
+# The guest's disks, made in the build so the tree keeps its owners and modes:
+# docker build --target guest-disk --output type=local,dest=<dir> (images/guest/build.sh).
+FROM python:3.12-slim AS guest-disk-build
+ARG KERNEL
+RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs zstd \
+    && rm -rf /var/lib/apt/lists/*
+# Sized from the tree: 10% and 64 MiB over its blocks, an inode for every entry and a fifth more.
+RUN --mount=type=bind,from=guest,target=/tree \
+    --mount=type=bind,from=kernel,source=/kernel/boot,target=/boot \
+    mkdir /out \
+    && blocks=$(du -sxm /tree | cut -f1) \
+    && inodes=$(find /tree -xdev | wc -l) \
+    && mke2fs -q -t ext4 -O ^has_journal -L surogate-guest -N $((inodes * 6 / 5)) \
+        -d /tree /out/rootfs.img "$((blocks * 11 / 10 + 64))M" \
+    && zstd -q -T0 -19 --rm /out/rootfs.img \
+    && cp "/boot/vmlinuz-$KERNEL" /out/vmlinuz && chmod 0644 /out/vmlinuz
+
+FROM scratch AS guest-disk
+COPY --from=guest-disk-build /out/ /
+
+# ── The cloud sandbox ───────────────────────────────────────────────
+FROM tools AS sandbox
+
+LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
+      org.opencontainers.image.description="Surogates agent sandbox execution environment" \
+      org.opencontainers.image.vendor="Invergent SA" \
+      org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
+
+# The coding agents, beside the shared stage's npm packages: in /usr, not the
+# NPM_CONFIG_PREFIX the shared stage sets for the agent's own installs. fuse is
+# for geesefs below.
+RUN apt-get update && apt-get install -y --no-install-recommends fuse \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --prefix /usr @anthropic-ai/claude-code @openai/codex \
+    && npm cache clean --force
+
+# The surogates package, so the real tool handlers run inside the sandbox.
+# liteparse comes with it (project deps).
+COPY pyproject.toml /build/pyproject.toml
+COPY surogates/ /build/surogates/
+RUN uv pip install --python /opt/venv/bin/python --no-cache /build \
+    && rm -rf /build
 
 # ── Tool executor ───────────────────────────────────────────────────
 COPY images/sandbox/tool-executor /usr/local/bin/tool-executor

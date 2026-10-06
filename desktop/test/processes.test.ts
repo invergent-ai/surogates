@@ -12,10 +12,10 @@ import {
   APP_QUIT, MAX_PROCESSES, type ProcessHandle, Processes, type ProcessesOptions, RESTARTED, RUNNER_GONE, type Spawner, TOO_MANY,
   restartNotice,
 } from "../src/hosts/processes.js";
-import { CANCELLED, type CommandEnd } from "../src/hosts/run.js";
-import { SessionRunner } from "../src/hosts/session-runner.js";
+import { CANCELLED, type CommandEnd } from "../src/guest/command.js";
+import { SessionRunner } from "../src/guest/runner-process.js";
 
-const RUNNER = fileURLToPath(new URL("../dist/hosts/runner.js", import.meta.url));
+const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
 
 let base: string;
 let runners: SessionRunner[];

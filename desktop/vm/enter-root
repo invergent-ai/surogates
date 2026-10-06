@@ -1,0 +1,85 @@
+#!/bin/sh
+# A root's namespaces, from the inside. The agent runs this through unshare, as
+# PID 1 of a new PID namespace with new mount, IPC, UTS, network and cgroup
+# namespaces. It builds the root's own filesystem, then becomes the root's
+# runner, as the root's own user, with no capabilities and no_new_privs, under
+# tini as the namespace's PID 1.
+#
+#   enter-root <data> <folder> <share> <home> <uid> <name>
+#
+# <data> is the root's folder on the sessions disk, holding its home and its temp
+# folder; <share> is the folder's virtiofs mount. Paths and the name are the
+# agent's, checked there.
+set -eu
+data=$1 folder=$2 share=$3 home=$4 uid=$5 name=$6
+runner_path=$PATH
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# The image under a tmpfs upper, so mount points can be made at any path and
+# nothing reaches the image. The tmpfs is this namespace's alone.
+layers=/run/surogate/layers
+mkdir -p "$layers"
+# Bounded, as /dev/shm is below: a tmpfs belongs to no process, so one root
+# filling the guest's memory would stall every other. size= bounds its data,
+# and nr_inodes its files, links and directories, which size= does not count:
+# each holds about 1 KiB the kernel cannot reclaim, and through the overlay
+# about as much again that it can. The two mounts hold at most about 400 MiB of
+# the guest's memory, 320 MiB of data and 80 MiB of files, and still far more
+# files than /var/tmp or /dev/shm hold in use.
+mount -t tmpfs -o mode=0755,size=256m,nr_inodes=32768 layers "$layers"
+mkdir "$layers/upper" "$layers/work" "$layers/root"
+mount -t overlay overlay -o "lowerdir=/,upperdir=$layers/upper,workdir=$layers/work" "$layers/root"
+new=$layers/root
+
+mount -t proc -o nosuid,nodev,noexec proc "$new/proc"
+mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$new/sys"
+mount -t tmpfs -o mode=0755,nosuid dev "$new/dev"
+for device in null zero full random urandom tty; do
+  touch "$new/dev/$device"
+  mount --bind "/dev/$device" "$new/dev/$device"
+done
+mkdir "$new/dev/pts" "$new/dev/shm"
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts "$new/dev/pts"
+mount -t tmpfs -o mode=1777,nosuid,nodev,size=64m,nr_inodes=8192 shm "$new/dev/shm"
+ln -s pts/ptmx "$new/dev/ptmx"
+ln -s /proc/self/fd "$new/dev/fd"
+ln -s /proc/self/fd/0 "$new/dev/stdin"
+ln -s /proc/self/fd/1 "$new/dev/stdout"
+ln -s /proc/self/fd/2 "$new/dev/stderr"
+
+# A /run of its own, with the agent disk read-only for the runner.
+mount -t tmpfs -o mode=0755,nosuid,nodev run "$new/run"
+mkdir -p "$new/run/surogate/agent"
+mount --bind /run/surogate/agent "$new/run/surogate/agent"
+
+# HOME at the host home's path and /tmp, from the root's own folder; then the
+# folder at its own path, last, so it shows over both.
+mkdir -p "$new$home"
+mount --bind "$data/home" "$new$home"
+mount --bind "$data/tmp" "$new/tmp"
+mkdir -p "$new$folder"
+mount --bind "$share" "$new$folder"
+
+# The root's user, under the host user's name, which reaches awk and printf as
+# it is: through awk's environment alone, so no command sees it, and as an argument.
+{ name=$name awk -F: '$1 != ENVIRON["name"]' /etc/passwd; printf '%s:x:%s:%s::%s:/bin/bash\n' "$name" "$uid" "$uid" "$home"; } > "$new/etc/passwd.new"
+mv "$new/etc/passwd.new" "$new/etc/passwd"
+{ name=$name awk -F: '$1 != ENVIRON["name"]' /etc/group; printf '%s:x:%s:\n' "$name" "$uid"; } > "$new/etc/group.new"
+mv "$new/etc/group.new" "$new/etc/group"
+
+# A hostname of its own, which resolves.
+echo surogate > /proc/sys/kernel/hostname
+echo "127.0.1.1 surogate" >> "$new/etc/hosts"
+
+ip link set lo up
+
+cd "$new"
+mkdir .old
+pivot_root . .old
+cd /
+umount -l /.old
+rmdir /.old
+
+export PATH=$runner_path
+exec /usr/bin/setpriv --reuid="$uid" --regid="$uid" --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
+  -- /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/runner.js

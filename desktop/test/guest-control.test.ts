@@ -1,0 +1,104 @@
+import { describe, expect, it } from "vitest";
+
+import { CANCELLED } from "../src/guest/command.js";
+import { Control, type ControlRoots, NO_HELLO } from "../src/guest/control.js";
+import type { FromAgent, HostUser } from "../src/guest/protocol.js";
+import type { Outcome } from "../src/link/protocol.js";
+
+const USER: HostUser = { uid: 1000, gid: 1000, name: "someone", home: "/home/someone" };
+
+// Roots that record what the control asked of them.
+function fakeRoots() {
+  const calls: unknown[] = [];
+  const roots: ControlRoots = {
+    uid: (root) => {
+      if (root === "bad") throw new Error("not a root session id: bad");
+      return 10_000;
+    },
+    setup: async (root, folder, tag, user) => {
+      calls.push(["setup", root, folder, tag, user]);
+      if (root === "broken") throw new Error("the session runner exited: no namespaces");
+    },
+    perform: (root, kind, args, signal, id) => {
+      calls.push(["perform", root, kind, args, id]);
+      return new Promise<Outcome>((resolve) => {
+        if (kind === "run") signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
+        else resolve({ ok: true });
+      });
+    },
+  };
+  return { roots, calls };
+}
+
+function control() {
+  const sent: FromAgent[] = [];
+  const { roots, calls } = fakeRoots();
+  const agent = new Control((message) => sent.push(message), roots);
+  const tell = (message: unknown) => agent.receive(JSON.stringify(message));
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  return { agent, sent, calls, tell, settle };
+}
+
+describe("the agent's control port", () => {
+  it("says hello first, and answers a ping at any time", () => {
+    const { agent, sent, tell } = control();
+    agent.hello();
+    tell({ type: "ping", id: 1 });
+    expect(sent).toEqual([{ type: "hello", id: 0 }, { type: "pong", id: 1 }]);
+  });
+
+  it("ignores lines that are not its messages", () => {
+    const { agent, sent } = control();
+    for (const line of ["", "{", "null", "42", '"ping"', '{"type":"bogus","id":1}', '{"type":"ping"}']) agent.receive(line);
+    expect(sent).toEqual([]);
+  });
+
+  it("answers a root's guest uid, or why it cannot", () => {
+    const { sent, tell } = control();
+    tell({ type: "uid", id: 1, root: "root-1" });
+    tell({ type: "uid", id: 2, root: "bad" });
+    expect(sent).toEqual([
+      { type: "done", id: 1, uid: 10_000 },
+      { type: "failed", id: 2, message: "not a root session id: bad" },
+    ]);
+  });
+
+  it("sets up a root only once the host has answered hello, with the host's user", async () => {
+    const { agent, sent, calls, tell, settle } = control();
+    agent.hello();
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    // An answer to another request of the agent's is not hello's.
+    tell({ type: "done", id: 4, user: USER });
+    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "done", id: 0, user: USER });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "setup", id: 3, root: "broken", folder: "/home/someone/other", tag: "r2" });
+    await settle();
+    expect(sent.slice(1)).toEqual([
+      { type: "failed", id: 1, message: NO_HELLO },
+      { type: "failed", id: 5, message: NO_HELLO },
+      { type: "done", id: 2 },
+      { type: "failed", id: 3, message: "the session runner exited: no namespaces" },
+    ]);
+    expect(calls).toEqual([
+      ["setup", "root-1", "/home/someone/project", "r1", USER],
+      ["setup", "broken", "/home/someone/other", "r2", USER],
+    ]);
+  });
+
+  it("answers an operation with its outcome, and cancels one the host cancels", async () => {
+    const { sent, calls, tell, settle } = control();
+    tell({ type: "op", id: 1, root: "root-1", kind: "which", args: { name: "pandoc" } });
+    tell({ type: "op", id: 2, root: "root-1", kind: "run", args: { command: "sleep 30" } });
+    await settle();
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: { ok: true } }]);
+    tell({ type: "cancel", id: 2 });
+    tell({ type: "cancel", id: 3 });
+    await settle();
+    expect(sent).toEqual([{ type: "result", id: 1, outcome: { ok: true } }, { type: "result", id: 2, outcome: CANCELLED }]);
+    expect(calls).toEqual([
+      ["perform", "root-1", "which", { name: "pandoc" }, "op-1"],
+      ["perform", "root-1", "run", { command: "sleep 30" }, "op-2"],
+    ]);
+  });
+});
