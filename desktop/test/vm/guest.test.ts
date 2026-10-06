@@ -258,6 +258,20 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     await run("rm -rf /var/tmp/fill /dev/shm/fill /var/tmp/many /dev/shm/many");
   });
 
+  it("bounds a root's memory and processes in its cgroup, and the agent and the other root go on", async () => {
+    // More than the roots may have together, less than the guest's 2 GiB.
+    expect(await run("python3 -c 'b = b\"x\" * (1800 * 2 ** 20); print(\"kept\")'", OTHER)).toMatchObject({ ok: { output: "", returncode: 137 } });
+    expect(await guest.request({ type: "ping" })).toMatchObject({ type: "pong" });
+    // Children that end by themselves, until the root's cgroup refuses one more.
+    const bomb = [
+      "import os, time", "n = 0", "try:", "    while True:", "        if os.fork() == 0:", "            time.sleep(2)", "            os._exit(0)",
+      "        n += 1", "except OSError as error:", "    print(n < 4096, error.errno)",
+    ].join("\n");
+    expect(await run(`python3 -c '${bomb}'`, OTHER)).toEqual({ ok: { output: "True 11\n", returncode: 0, timed_out: false } });
+    expect(await run("echo still here")).toEqual({ ok: { output: "still here\n", returncode: 0, timed_out: false } });
+    await new Promise((resolve) => setTimeout(resolve, 2_500));
+  });
+
   it("holds a folder for each root up to its eight root ports, and says why it takes no ninth", async () => {
     // Two are in; six more, then one too many.
     for (let n = 3; n <= 9; n += 1) {
@@ -436,6 +450,32 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
     process.kill(Number(readFileSync(join(options.run, "vfs-1.pid"), "utf8")), "SIGKILL");
     expect(await running).toEqual(SANDBOX_STOPPED);
     expect(await op(ROOT, join(dir, "a"), "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
+  });
+
+  it("sets a root up again once its own command stops its runner, and answers what waited on it as stopped by the sandbox", async () => {
+    const a = join(dir, "a");
+    // The runner is the command's parent.
+    expect(await op(ROOT, a, "run", { command: "kill -STOP $PPID", workdir: null, timeout: 1 })).toEqual({
+      ok: { output: "Command timed out after 1 seconds", returncode: 124, timed_out: true },
+    });
+    const begun = performance.now();
+    expect(await op(ROOT, a, "run", { command: "echo next", workdir: null, timeout: 30 })).toEqual(SANDBOX_STOPPED);
+    // Its question unanswered for 10 s, not the run's 30.
+    expect(performance.now() - begun).toBeLessThan(15_000);
+    expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+    // Killed by its own command, it is set up again too.
+    expect(await op(ROOT, a, "run", { command: "kill -KILL $PPID; sleep 5", workdir: null, timeout: 10 })).toEqual(SANDBOX_STOPPED);
+    expect(await op(ROOT, a, "run", { command: "echo again", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "again\n" } });
+  });
+
+  it("ends everything of a root it tears down, a process that left its session and its environment too, and sets it up again", async () => {
+    const a = join(dir, "a");
+    // No marker of its command's, cleared before the command ends, and a session of its own: only the root's cgroup still holds it.
+    const leaver = "env -i /usr/bin/setsid /usr/bin/nohup /usr/bin/sleep 300 < /dev/null > /dev/null 2>&1 & sleep 0.5; echo started";
+    expect(await op(ROOT, a, "run", { command: leaver, workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "started\n" } });
+    expect(await op(ROOT, a, "run", { command: "pgrep -c -x sleep", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "1\n" } });
+    await managers.at(-1)!.teardown(ROOT);
+    expect(await op(ROOT, a, "run", { command: "pgrep -c -x sleep || true", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "0\n" } });
   });
 
   it("stops a guest that misses three keepalives, and boots a new one for the next operation", async () => {

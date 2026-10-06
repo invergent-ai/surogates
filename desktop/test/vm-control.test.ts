@@ -27,6 +27,7 @@ const roots: ControlRoots = {
   setup: async (...args) => {
     setups.push(args);
   },
+  teardown: async () => {},
   perform: (_root, kind, args, signal) => new Promise<Outcome>((resolve) => {
     if (kind === "run") signal.addEventListener("abort", () => resolve(CANCELLED), { once: true });
     else resolve({ ok: args });
@@ -120,5 +121,22 @@ describe("the host's side of the control port, closed from the host", () => {
     });
     await new Promise<void>((resolve) => server?.listen(path, resolve));
     await expect(ControlLink.open(connect(path), USER, performance.now() + 5_000, never)).rejects.toThrow("The VM exited");
+  });
+});
+
+describe("a root the guest lost", () => {
+  it("is told, unasked", async () => {
+    // Only a root that was set up can be lost: here, after the host's first request.
+    server = createServer((socket) => {
+      sockets.push(socket);
+      socket.write('{"type":"hello","id":0}\n');
+      createInterface({ input: socket }).on("line", () => socket.write('{"type":"lost","root":"root-1"}\n'));
+    });
+    await new Promise<void>((resolve) => server?.listen(path, resolve));
+    const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
+    const told = new Promise<string>((resolve) => link.onLost(resolve));
+    void link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", tag: "r1" }, 100);
+    expect(await told).toBe("root-1");
+    link.close();
   });
 });

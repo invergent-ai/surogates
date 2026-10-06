@@ -19,6 +19,9 @@ function fakeRoots() {
       calls.push(["setup", root, folder, tag, user]);
       if (root === "broken") throw new Error("the session runner exited: no namespaces");
     },
+    teardown: async (root) => {
+      calls.push(["teardown", root]);
+    },
     perform: (root, kind, args, signal, id) => {
       calls.push(["perform", root, kind, args, id]);
       return new Promise<Outcome>((resolve) => {
@@ -150,10 +153,23 @@ describe("the agent's control port", () => {
     const roots: ControlRoots = {
       uid: () => 10_000,
       setup: async () => {},
+      teardown: async () => {},
       perform: () => Promise.reject(new Error("broken")),
     };
     new Control((message) => sent.push(message), roots).receive(JSON.stringify({ type: "op", id: 1, root: "r", kind: "run", args: {} }));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sent).toEqual([{ type: "result", id: 1, outcome: { error: { type: "other", message: "Error: broken" } } }]);
+  });
+
+  it("tears a root down when the host asks, and answers once it has", async () => {
+    const { sent, calls, tell, settle } = control();
+    tell({ type: "teardown", id: 1, root: "root-1" });
+    tell({ type: "teardown", id: 2 });
+    await settle();
+    expect(sent).toEqual([
+      { type: "failed", id: 2, message: "The agent cannot take this teardown request" },
+      { type: "done", id: 1 },
+    ]);
+    expect(calls).toEqual([["teardown", "root-1"]]);
   });
 });

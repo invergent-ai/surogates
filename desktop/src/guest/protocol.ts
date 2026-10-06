@@ -23,10 +23,14 @@ export type ToAgent =
   // A root's namespaces and runner, with its folder at its own path from the share *tag*.
   | { type: "setup"; id: number; root: string; folder: string; tag: string }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
+  // Everything of a root ends, its share left mounted: the host is letting its folder go.
+  | { type: "teardown"; id: number; root: string }
   | { type: "cancel"; id: number }; // the op of that id
 
 export type FromAgent =
   | { type: "hello"; id: number }
+  // Unasked: a root that was set up lost its runner, and everything of it ended. The host sets it up again.
+  | { type: "lost"; root: string }
   | { type: "pong"; id: number }
   | { type: "done"; id: number; uid?: number }
   | { type: "failed"; id: number; message: string }

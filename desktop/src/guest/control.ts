@@ -12,6 +12,7 @@ export const NO_HELLO = "The host has not answered hello";
 export interface ControlRoots {
   uid(root: string): number;
   setup(root: string, folder: string, tag: string, user: HostUser): Promise<void>;
+  teardown(root: string): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
 }
@@ -84,6 +85,12 @@ export class Control {
           this.running.delete(id);
           this.send({ type: "result", id, outcome });
         });
+    } else if (message.type === "teardown") {
+      if (!isText(message.root)) return this.send({ type: "failed", id, message: malformed("teardown") });
+      this.roots.teardown(message.root).then(
+        () => this.send({ type: "done", id }),
+        (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
+      );
     } else if (message.type === "cancel") {
       this.running.get(id)?.abort();
     } else {

@@ -5,19 +5,23 @@
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
-import type { HostUser } from "./protocol.js";
+import type { Answer, HostUser, Question } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
 export const SESSIONS = "/run/surogate/sessions/roots";
 // Each share's virtiofs mount, readable by root only.
 const SHARES = "/run/surogate/shares";
+// Each root's cgroup, under the one vm/init bounds below the guest's memory.
+const CGROUPS = "/sys/fs/cgroup/roots";
+// How many processes one root may have of the guest's 32 768.
+const PIDS_MAX = 4096;
 const ENTER_ROOT = "/run/surogate/agent/enter-root";
 // The cloud's layout of the commands' environment, written by the image's build.
 const LAYOUT = "/etc/surogate/environment";
@@ -39,6 +43,9 @@ const MOUNT_MS = 5_000;
 const MOUNT_RETRY_MS = 25;
 // A root's runner starts in about 50 ms. The host gives a setup 15 s, past this and MOUNT_MS.
 const RUNNER_READY_MS = 5_000;
+// A runner that answers no question in this long is stopped, by one of its own
+// commands, or stuck in a stat of the folder that does not return: it is lost.
+const QUESTION_MS = 10_000;
 // How long past its timeout a run waits for its runner to report the command's
 // end. A runner that answers nothing, its loop blocked on a stalled stat or the
 // runner stopped by a command, holds no run longer than its timeout and this.
@@ -128,15 +135,27 @@ export async function enter(root: string, place: Place, tag: string, user: HostU
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
   const share = await mountShare(tag);
-  // By its path: never through the PATH made for the commands.
+  const cgroup = join(CGROUPS, root);
+  // Made again for a root set up again once its runner was lost.
+  await mkdir(cgroup, { recursive: true });
+  await writeFile(join(cgroup, "pids.max"), String(PIDS_MAX));
+  // In the root's cgroup before unshare runs, so it and everything it starts are
+  // there, and the cgroup namespace it makes is rooted there. Each by its path:
+  // never through the PATH made for the commands.
   return spawn(
-    "/usr/bin/unshare",
+    "/bin/sh",
     [
-      "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
+      "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
+      "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
       ENTER_ROOT, join(SESSIONS, root), place.folder, share, place.home, String(uid), user.name,
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );
+}
+
+// Everything of *root* ends at once, its runner and the namespaces' PID 1 among it, whatever its uid or state.
+export async function killRoot(root: string): Promise<void> {
+  if (ROOT_ID.test(root)) await writeFile(join(CGROUPS, root, "cgroup.kill"), "1");
 }
 
 // *answer*, or the signal, or *ms* passing, whichever comes first: the runner's
@@ -157,7 +176,26 @@ function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise
 }
 
 export class Root {
-  constructor(private readonly place: Place, private readonly runner: SessionRunner) {}
+  constructor(
+    private readonly place: Place,
+    private readonly runner: SessionRunner,
+    private readonly lose: () => void,
+    private readonly questionMs: number,
+  ) {}
+
+  // Everything of the root ends; resolves once its runner has gone.
+  async end(): Promise<void> {
+    this.lose();
+    await this.runner.gone;
+  }
+
+  // The runner's answer, or null once it has gone; one that does not come in questionMs loses the root.
+  private ask(question: Question): Promise<Answer | null> {
+    const answer = this.runner.ask(question);
+    const timer = setTimeout(this.lose, this.questionMs).unref();
+    void answer.then(() => clearTimeout(timer));
+    return answer;
+  }
 
   run(args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     return answered(async () => {
@@ -166,7 +204,7 @@ export class Root {
       // One for the whole run, its folder lookup and its command.
       const deadline = Date.now() + checked.timeout * 1000 + GRACE_MS;
       const { folder, home } = this.place;
-      const placed = await first(this.runner.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, checked.timeout * 1000);
+      const placed = await first(this.ask({ type: "place", id, folder, home, workdir: checked.workdir }), signal, checked.timeout * 1000);
       if (placed === "cancelled") return CANCELLED;
       if (placed === "timeout") return timedOut(checked.timeout);
       if (!placed) return SANDBOX_STOPPED;
@@ -188,7 +226,7 @@ export class Root {
   async which(args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     const { name } = args;
     if (typeof name !== "string") return { error: { type: "value", message: "'name' must be a string" } };
-    const found = await first(this.runner.ask({ type: "which", id, name, cwd: this.place.folder }), signal);
+    const found = await first(this.ask({ type: "which", id, name, cwd: this.place.folder }), signal);
     if (found === "cancelled") return CANCELLED;
     if (found !== "timeout" && found?.type === "found") return { ok: found.found };
     if (found !== "timeout" && found?.type === "refused") return { error: found.refusal };
@@ -201,6 +239,11 @@ export interface RootsOptions {
   start(root: string, place: Place, tag: string, user: HostUser): ChildProcess | Promise<ChildProcess>;
   // The root's guest uid.
   uid(root: string): number;
+  // Ends every process of the root.
+  kill(root: string): void | Promise<void>;
+  // Told of a root that was set up and has lost its runner: the host sets it up again.
+  lost?(root: string): void;
+  questionMs?: number;
 }
 
 // The roots set up in this guest, by root session id.
@@ -220,17 +263,33 @@ export class Roots {
     this.starting.add(root);
     try {
       const place = { folder, home: user.home };
-      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => this.roots.delete(root), RUNNER_READY_MS);
+      const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => {
+        if (this.roots.delete(root)) this.options.lost?.(root);
+      }, RUNNER_READY_MS);
       try {
         await runner.ready;
       } catch (error) {
         await runner.stop();
         throw error;
       }
-      this.roots.set(root, new Root(place, runner));
+      // A cgroup that cannot be written still loses the runner: its stdin is ended.
+      const lose = () => {
+        Promise.resolve().then(() => this.options.kill(root)).catch(() => runner.stop());
+      };
+      this.roots.set(root, new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS));
     } finally {
       this.starting.delete(root);
     }
+  }
+
+  // Everything of *root* ends and it is forgotten, its share left mounted: the host
+  // is letting its folder go. Its next operation sets it up again.
+  async teardown(root: string): Promise<void> {
+    const target = this.roots.get(root);
+    if (!target) return;
+    // Out of the list first: the end of its runner is no loss to tell.
+    this.roots.delete(root);
+    await target.end();
   }
 
   // One process operation's outcome. Never rejects.

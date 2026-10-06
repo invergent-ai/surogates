@@ -121,6 +121,10 @@ export class Guest {
     });
     void vm.exited.then(() => this.lose());
     void control.closed.then(() => this.lose());
+    control.onLost((root) => {
+      const entry = this.roots.get(root);
+      if (entry) entry.setup = null;
+    });
     let missed = 0;
     let waiting = false;
     this.keepalive = setInterval(() => {
@@ -214,6 +218,15 @@ export class Guest {
     return this.vm.share(folder.path, uid);
   }
 
+  /** Everything of *root* ends in the guest, its share left in place; its next operation sets it up again. */
+  async teardown(root: string): Promise<void> {
+    const entry = this.roots.get(root);
+    if (!entry) return;
+    entry.setup = null;
+    // Unanswered: the agent is stuck, and the guest goes, the root's processes with it.
+    if (!(await this.request({ type: "teardown", root }, SETUP_MS))) this.lose();
+  }
+
   // Settles once all of the VM has gone.
   stop(): Promise<void> {
     this.lose();
@@ -258,6 +271,12 @@ export class VmManager {
     if (failure === "aborted") return CANCELLED;
     if (failure) return this.stopping ? unavailable("is stopping") : failure;
     return guest.op(operation.root, operation.kind, operation.args, signal);
+  }
+
+  /** Everything of *root* ends in the guest, if one runs: its folder is being let go. Never rejects. */
+  async teardown(root: string): Promise<void> {
+    const guest = await this.guest?.catch(() => null);
+    await guest?.teardown(root);
   }
 
   // Its guest's runtime folder goes with it.

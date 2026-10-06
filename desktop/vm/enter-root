@@ -90,6 +90,8 @@ cd /
 umount -l /.old
 rmdir /.old
 
+# The agent is the last the kernel would end for memory; the root is as any process.
+echo 0 > /proc/self/oom_score_adj
 export PATH=$runner_path
 exec /usr/bin/setpriv --reuid="$uid" --regid="$uid" --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
   -- /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/runner.js

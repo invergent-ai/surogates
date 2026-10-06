@@ -19,6 +19,7 @@ export class ControlLink {
   private next = 1;
   private readonly waiting = new Map<number, (answer: FromAgent | null) => void>();
   private ended = false;
+  private lost: (root: string) => void = () => {};
   readonly closed: Promise<void>;
 
   private constructor(private readonly channel: Duplex, lines: AsyncIterableIterator<string>) {
@@ -117,6 +118,11 @@ export class ControlLink {
     return reply?.type === "result" ? reply.outcome : SANDBOX_STOPPED;
   }
 
+  // Told of each root whose runner the guest lost, and set up again by the next operation.
+  onLost(listener: (root: string) => void): void {
+    this.lost = listener;
+  }
+
   close(): void {
     this.channel.destroy();
   }
@@ -132,6 +138,7 @@ export class ControlLink {
     } catch {
       return;
     }
-    if (typeof message?.id === "number") this.waiting.get(message.id)?.(message);
+    if (message?.type === "lost" && typeof message.root === "string") this.lost(message.root);
+    else if (typeof (message as { id?: unknown } | null)?.id === "number") this.waiting.get((message as { id: number }).id)?.(message);
   }
 }
