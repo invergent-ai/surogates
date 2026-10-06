@@ -58,6 +58,40 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// *answer*, or "no answer" once *ms* pass.
+const within = <T>(answer: Promise<T>, ms: number) =>
+  Promise.race([answer, new Promise<"no answer">((resolve) => setTimeout(() => resolve("no answer"), ms))]);
+
+describe("a manager that cannot be started", () => {
+  it("answers the operation, and starts another for the next", async () => {
+    const vm = client();
+    // fork runs the Node at process.execPath: one that is not there fails to spawn, and never exits.
+    const node = process.execPath;
+    process.execPath = join(dir, "no-node");
+    let first: Promise<unknown>;
+    try {
+      first = vm.perform(operation(), signal());
+    } finally {
+      process.execPath = node;
+    }
+    expect(await within(first, 3_000)).toEqual({ error: { type: "unavailable", message: "This computer's sandbox did not start: its manager exited" } });
+    expect(await within(vm.perform(operation(), signal()), 5_000)).toEqual({
+      error: { type: "unavailable", message: "This computer's sandbox did not start: QEMU exited: no KVM here" },
+    });
+  });
+
+  it("answers the operation when the spawn throws", async () => {
+    const vm = new VmClient({
+      vm: { kernel: "/k", rootfs: "/r", agentDisk: "/a", sessions: join(dir, "s.img"), run: join(dir, "run"), console: join(dir, "c.log"), user: { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" } },
+      spawn: () => {
+        throw new Error("spawn ENOMEM");
+      },
+    });
+    clients.push(vm);
+    expect(await vm.perform(operation(), signal())).toEqual({ error: { type: "unavailable", message: "This computer's sandbox did not start: spawn ENOMEM" } });
+  });
+});
+
 describe("the VM manager's process", { timeout: 20_000 }, () => {
   it("is started at the first operation, and answers it", async () => {
     const vm = client();

@@ -39,13 +39,18 @@ export function forkManager(script = MANAGER): ManagerProcess {
   // Its stdout goes to stderr: the app's stdout may carry other things.
   const child = fork(script, [], { stdio: ["ignore", 2, 2, "ipc"] });
   child.on("error", () => {});
+  // Its end: 'close' follows its exit, and a spawn that failed, which has no exit.
+  let closed = false;
+  child.once("close", () => {
+    closed = true;
+  });
   return {
     // A send to a manager that has gone: its exit is what counts.
     send: (message) => void child.send(message, (error) => error),
     onMessage: (listener) => void child.on("message", (message) => listener(message as FromManager)),
     onExit: (listener) => {
-      if (child.exitCode !== null || child.signalCode !== null) listener();
-      else child.once("exit", () => listener());
+      if (closed) listener();
+      else child.once("close", () => listener());
     },
     kill: () => void child.kill("SIGKILL"),
   };
@@ -68,7 +73,12 @@ export class VmClient {
   perform(operation: VmOperation, signal: AbortSignal): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(unavailable("is stopping"));
     if (signal.aborted) return Promise.resolve(CANCELLED);
-    const manager = (this.manager ??= this.start());
+    let manager: ManagerProcess;
+    try {
+      manager = this.manager ?? this.start();
+    } catch (error) {
+      return Promise.resolve(unavailable(`did not start: ${error instanceof Error ? error.message : String(error)}`));
+    }
     return new Promise((resolve) => {
       const answer = (outcome: Outcome) => {
         signal.removeEventListener("abort", cancel);
@@ -115,6 +125,8 @@ export class VmClient {
 
   private start(): ManagerProcess {
     const manager = (this.options.spawn ?? forkManager)();
+    // Before its exit is listened for, so an exit told at once clears it.
+    this.manager = manager;
     // A manager that exits before it says it runs never ran what it was given.
     let ran = false;
     manager.onMessage((message) => {
