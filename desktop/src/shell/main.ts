@@ -57,6 +57,8 @@ let kept: Credential | null = null;
 let device: { credential: Credential; status: LinkStatus; stack: DeviceStack | null; started: Promise<DeviceStack> } | null = null;
 let registering = false;
 let connecting = false;
+// Who waits for the threads working on this computer to finish: a quit that the user told to wait.
+const idle = new Set<() => void>();
 // What the web client tells once its user signed in, and the projects it serves.
 let account: DesktopAccount | null = null;
 const projects = new PageProjects((message) => main?.webContents()?.send("desktop:projects", message));
@@ -271,6 +273,11 @@ function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> 
     onStatus: (status) => {
       if (device?.credential === credential) device.status = status;
       changed();
+    },
+    onWorking: (count) => {
+      if (count > 0) return;
+      for (const resume of idle) resume();
+      idle.clear();
     },
     onError: report,
   }));
@@ -576,13 +583,92 @@ function wire(window: MainWindow, page: string): void {
   handle("shell:link", openLink);
 }
 
+// Quitting, as Claude Desktop quits (its updater's session guard): with threads working on this
+// computer, the user is asked first, and may wait for them; then the device stops in its order.
+async function confirmQuit(working: number): Promise<"quit" | "wait" | "cancel"> {
+  const options = {
+    type: "warning" as const,
+    message: "Surogate is still working",
+    detail: `${working === 1 ? "1 thread is" : `${working} threads are`} working on this computer. Quitting now will interrupt that work.`,
+    buttons: ["Quit anyway", "Wait for them", "Cancel"],
+    defaultId: 1,
+    cancelId: 2,
+    noLink: true,
+  };
+  const shown = main?.window.isVisible() ? main.window : undefined;
+  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
+  return (["quit", "wait", "cancel"] as const)[response] ?? "cancel";
+}
+
+let quitting: Promise<void> | null = null;
+// While a quit waits for the threads: what ends the wait at once.
+let waiting: (() => void) | null = null;
+let askingAgain = false;
+let stopped = false;
+
+// A quit asked again while the first waits for the threads: quit now, or keep waiting.
+async function quitNow(): Promise<void> {
+  const working = device?.stack?.working() ?? 0;
+  const options = {
+    type: "warning" as const,
+    message: "Quit now?",
+    detail: `Surogate is waiting for ${working === 1 ? "1 thread" : `${working} threads`} working on this computer. Quitting now will interrupt that work.`,
+    buttons: ["Quit now", "Keep waiting"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  };
+  const shown = main?.window.isVisible() ? main.window : undefined;
+  const { response } = shown ? await dialog.showMessageBox(shown, options) : await dialog.showMessageBox(options);
+  if (response === 0) waiting?.();
+}
+
+async function quit(): Promise<void> {
+  const working = device?.stack?.working() ?? 0;
+  if (working > 0) {
+    const answer = await confirmQuit(working);
+    if (answer === "cancel") return;
+    if (answer === "wait" && (device?.stack?.working() ?? 0) > 0) {
+      await new Promise<void>((resume) => {
+        waiting = resume;
+        idle.add(resume);
+      });
+      waiting = null;
+    }
+  }
+  // A device still starting is stopped once it has started. A stop that fails still quits:
+  // the next launch answers what it cut off.
+  try {
+    await device?.started.then((stack) => stack.stop(), () => {});
+  } finally {
+    stopped = true;
+    app.quit();
+  }
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => main?.show());
   // The device link stays up with the window closed (spec, Section 7).
   app.on("window-all-closed", () => {});
-  app.on("before-quit", letWindowClose);
+  app.on("before-quit", (event) => {
+    if (stopped) {
+      letWindowClose();
+      return;
+    }
+    event.preventDefault();
+    if (waiting && !askingAgain) {
+      askingAgain = true;
+      void quitNow().catch(report).finally(() => {
+        askingAgain = false;
+      });
+      return;
+    }
+    quitting ??= quit().catch(report).finally(() => {
+      quitting = null;
+    });
+  });
   void app.whenReady().then(() => {
     credentials = new CredentialStore(join(root, "credentials.json"), safeStorage, report);
     environment = appEnvironment();
