@@ -49,16 +49,6 @@ async def _thread_title(session_factory: Any | None, worker_session_id: UUID) ->
     return row.title if row is not None else None
 
 
-def _turn_files(events: list[Any], turn_id: str) -> list[dict[str, Any]]:
-    """The deliverables the turn's ``turn.summary`` named, as its card shows them."""
-    return [
-        artifact
-        for event in events
-        if event.type == EventType.TURN_SUMMARY.value and (event.data or {}).get("turn_id") == turn_id
-        for artifact in event.data.get("artifacts") or []
-    ]
-
-
 async def notify_parent_of_task_event(
     *,
     session_store: SessionStore,
@@ -119,7 +109,7 @@ async def notify_parent_on_completion(
     redis: Redis | None = None,
     task_id: UUID | None = None,
     session_factory: Any | None = None,
-    turn_id: str | None = None,
+    files: list[dict[str, Any]] | None = None,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -145,10 +135,10 @@ async def notify_parent_on_completion(
     completed naturally without ``worker_complete``, ``task.result`` is
     typically ``None`` and we fall back to the extracted LLM response.
 
-    A project's thread also reports its ``title``, and the ``files`` of
-    turn *turn_id*'s summary, which the turn end emits before this.  A turn
-    that ended early has no summary and no *turn_id*, so its report lists
-    no files rather than claiming none.
+    A project's thread also reports its ``title``, and the *files* its
+    turn's summary named.  A turn that ended early, or whose summary was
+    not written, has None, so its report lists no files rather than
+    claiming none.
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -191,8 +181,8 @@ async def notify_parent_on_completion(
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
-            if turn_id is not None:
-                payload["files"] = _turn_files(events, turn_id)
+            if files is not None:
+                payload["files"] = files
 
         await session_store.emit_event(
             parent_session_id,

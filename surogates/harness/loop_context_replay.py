@@ -135,6 +135,21 @@ def worker_note(event_type: str, data: dict) -> dict:
     return {"role": "user", "content": content}
 
 
+def unread_reports(events: list) -> list[dict]:
+    """The worker reports no model request has read: those after the log's
+    last ``llm.request``.  Replay leaves them out, and the wake adds them
+    right before its first request, after its compaction, its command and
+    its board update, which is where replay puts them once that request is
+    in the log."""
+    held: list[dict] = []
+    for event in events:
+        if event.type == EventType.LLM_REQUEST.value:
+            held = []
+        elif event.type in WORKER_REPORT_TYPES:
+            held.append(worker_note(event.type, event.data))
+    return held
+
+
 def coalesce_user_messages(messages: list[dict]) -> dict:
     """Merge one or more rendered user-message dicts into a single user turn.
 
@@ -266,7 +281,8 @@ class ContextReplayMixin:
         deferred_users: list[dict] = []
         deferred_advisors: list[dict] = []
         # Worker reports wait for the next model request, which is where the
-        # live loop reads them: after the user's messages, one message each.
+        # wake adds them: after the user's messages, one message each.  The
+        # ones no request has read yet are left out (``unread_reports``).
         held_reports: list[dict] = []
 
         def _flush_deferred() -> None:
@@ -431,8 +447,6 @@ class ContextReplayMixin:
         # Flush any users deferred by an iteration that never closed (the
         # log ends mid-tool-execution because this is an in-progress wake).
         _flush_deferred()
-        # Reports no request has read yet are the newest thing in the log.
-        messages.extend(held_reports)
 
         # Strip stale budget warnings from replayed tool results.
         strip_budget_warnings(messages)

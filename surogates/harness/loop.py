@@ -192,6 +192,7 @@ from surogates.harness.loop_context_replay import (
     build_user_message_dict,
     coalesce_user_messages,
     prune_superseded_canvas_images,
+    unread_reports,
 )
 from surogates.harness.loop_iteration_summary import IterationSummaryMixin
 from surogates.harness.loop_outcome_commands import OutcomeCommandMixin
@@ -1679,6 +1680,9 @@ class AgentHarness(
             ),
             default=0,
         )
+        # The worker reports no request had read when the wake began.  Replay
+        # left them out of ``messages``; the first request reads them.
+        reports = unread_reports(all_events or [])
         # Iteration index is reported per user turn, not per wake.  When a
         # steer message starts a new turn mid-wake, this base advances so the
         # new turn's first model call reports iteration_index 0.
@@ -1951,6 +1955,12 @@ class AgentHarness(
                     iteration_index=turn_iteration_index,
                 )
                 return
+
+            # Worker reports go right before the request, after the steered
+            # messages, the board update and the harvest: where replay puts
+            # them, so the request it rebuilds is the one sent.
+            messages.extend(reports)
+            reports = []
 
             # 1. Emit LLM_REQUEST event.
             model_id = self._current_model or session.model or self._default_model

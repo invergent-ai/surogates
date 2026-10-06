@@ -16,7 +16,9 @@ import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
-from surogates.db.models import Event, Session, SessionCursor, WorkstreamThread
+from surogates.db.models import BoardNote, Event, Session, SessionCursor, WorkstreamThread
+from surogates.harness.loop_context_replay import unread_reports
+from surogates.harness.slash_skill import build_deep_research_message
 from surogates.harness.tool_exec import _build_session_sandbox_spec, execute_single_tool
 from surogates.harness.turn_summarizer import TurnArtifact, TurnSummary
 from surogates.runtime.governance import build_governance_gate
@@ -30,6 +32,7 @@ from surogates.workstreams.store import WorkstreamStore
 from tests.test_execute_coding_run_repo import _PAT, _FakeStore, _anthropic_creds, _done_poll, _noop_ensure, _sbx
 from tests.test_harness_resilience import _make_harness
 from tests.test_steer_loop import _final_response, _make_loop_harness
+from tests.test_wake_slash_command_gate import _harness, _permissive
 
 from .test_devices import api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstreams import create, master_of, patch, system_prompt, turn_calling
@@ -523,8 +526,9 @@ async def turn_ends(api, session, *, turn_id="turn-1", files=(), reason="complet
 
 
 async def replayed(api, master) -> list[dict]:
+    """*master*'s replayed conversation, its unread reports added as its next request adds them."""
     events = await api.app.state.session_store.get_events(master.id)
-    return harness_of(api)._rebuild_messages(events)
+    return harness_of(api)._rebuild_messages(events) + unread_reports(events)
 
 
 async def test_a_threads_report_carries_its_title_and_files(api):
@@ -653,6 +657,103 @@ async def test_reports_and_the_users_message_stay_apart(api):
     assert typed == {"role": "user", "content": "Also, cancel the B summary."}
     assert report_a["content"].startswith(f'[Thread "Draft A" ({first.id}) reported]')
     assert report_b["content"].startswith(f'[Thread "Summarise B" ({second.id}) reported]')
+
+
+async def test_a_turn_whose_summary_failed_lists_no_files(api, monkeypatch):
+    # Its files are unknown, not none.
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+
+    async def fail(self, **_):
+        raise RuntimeError("the workspace went away")
+
+    monkeypatch.setattr(loop_module.AgentHarness, "_collect_candidate_artifacts", fail)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread, files=["threads/Draft A/A.docx"])
+    [report] = await events_of(api, master.id, EventType.WORKER_COMPLETE)
+    assert "files" not in report.data
+
+
+async def woken(api, monkeypatch, session, *, compacts=False) -> list[dict]:
+    """Wake *session* once, its model answering; the conversation its first request sent."""
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    sent: list[list[dict]] = []
+
+    async def llm(**kwargs):
+        sent.append(kwargs["create_kwargs"]["messages"][1:])  # after the system prompt
+        return _final_response("Noted.")
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    state = api.app.state
+    harness = _harness(state.session_store, _permissive())
+    del harness._rebuild_messages  # the real replay, not the helper's stub
+    harness._prompt.has_agents = False
+    # The wake compacts once, if at all.  A compressor keeps the tail
+    # verbatim; this one keeps everything.
+    harness._compressor = SimpleNamespace(
+        context_length=200_000, _context_window=200_000,
+        prune_stale_browser_states=lambda messages: messages,
+        should_compress=MagicMock(side_effect=[compacts] + [False] * 10),
+        compress=AsyncMock(side_effect=lambda messages, *_, **__: (list(messages), {})),
+    )
+    del harness._engineer_context
+    harness._redis, harness._session_factory = state.redis, state.session_factory
+    harness._complete_session = AsyncMock()
+    await harness.wake(session.id)
+    return sent[0]
+
+
+async def reported_then_typed(api, text: str = "Where are we?"):
+    """A master whose thread reported after its last request, and then the user typed *text*."""
+    master = await master_of(api, await create(api))
+    thread = await start(api, master)
+    await answered(api, thread, "Drafted the memo.")
+    await turn_ends(api, thread)
+    await api.app.state.session_store.emit_event(master.id, EventType.USER_MESSAGE, {"content": text})
+    return master, thread
+
+
+async def test_a_report_compacted_at_wake_is_read_once(api, monkeypatch):
+    master, thread = await reported_then_typed(api)
+    sent = await woken(api, monkeypatch, master, compacts=True)
+    header = f'[Thread "Draft A" ({thread.id}) reported]'
+    assert [m["content"] for m in sent if str(m.get("content")).startswith(header)] == [sent[-1]["content"]]
+    *replay, answer = await replayed(api, master)
+    assert (replay, answer["content"]) == (sent, "Noted.")
+
+
+async def test_a_command_expands_from_the_users_message_and_the_report_follows(api, monkeypatch):
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    parent = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    worker = await create_child_session(store=api.app.state.session_store, parent=parent, channel="worker")
+    await answered(api, worker, "Checked the figures.")
+    await turn_ends(api, worker)
+    await api.app.state.session_store.emit_event(
+        parent.id, EventType.USER_MESSAGE, {"content": "/deep-research The Q3 market"},
+    )
+    *_, command, report = await woken(api, monkeypatch, parent)
+    assert command == {"role": "user", "content": build_deep_research_message(topic="The Q3 market")}
+    assert report == {"role": "user", "content": f"[Worker {worker.id} completed]\nChecked the figures."}
+
+
+async def test_a_wake_sends_what_its_replay_rebuilds(api, monkeypatch):
+    # The board's update comes at the top of the wake's first iteration,
+    # after the reports were read; replay must put them in the same order.
+    master, thread = await reported_then_typed(api)
+    master = await api.app.state.session_store.get_session(master.id)
+    async with api.app.state.session_factory() as db:
+        db.add(BoardNote(
+            org_id=master.org_id, group_id=UUID(master.config["context_group_id"]),
+            writer_session_id=thread.id, writer_label="t1", type="RESULT", content="A.docx drafted",
+        ))
+        await db.commit()
+    sent = await woken(api, monkeypatch, master)
+    typed, board, report = sent[-3:]
+    assert typed == {"role": "user", "content": "Where are we?"}
+    assert "A.docx drafted" in board["content"]
+    assert report["content"].startswith(f'[Thread "Draft A" ({thread.id}) reported]')
+    *replay, answer = await replayed(api, master)
+    assert (replay, answer["content"]) == (sent, "Noted.")
 
 
 async def clone_folder_of(session) -> str:
