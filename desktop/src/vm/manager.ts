@@ -11,6 +11,7 @@ import type { Duplex } from "node:stream";
 
 import { BOOT_ID } from "../binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
+import type { ProcessHandle } from "../guest/processes.js";
 import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
@@ -90,6 +91,8 @@ export interface VmOperation {
   folder: Folder;
   kind: string;
   args: Record<string, unknown>;
+  // The handles the host keeps of the root's background processes: a root new to the guest answers for them.
+  ended?: ProcessHandle[];
 }
 
 export const unavailable = (why: string): Outcome => ({ error: { type: "unavailable", message: `This computer's sandbox ${why}` } });
@@ -187,8 +190,11 @@ export class Guest {
     return this.control.op(root, kind, args, signal);
   }
 
-  /** Null once *root* is set up, its folder added; otherwise the answer that says why not, and the next asks again. */
-  ready(root: string, folder: Folder): Promise<Outcome | null> {
+  /**
+   * Null once *root* is set up, its folder added, its processes' *ended* handles
+   * given; otherwise the answer that says why not, and the next asks again.
+   */
+  ready(root: string, folder: Folder, ended: ProcessHandle[] = []): Promise<Outcome | null> {
     let known = this.roots.get(root);
     if (!known) {
       const entry: Root = { share: this.share(root, folder), setup: null };
@@ -210,7 +216,7 @@ export class Guest {
         if (this.left) return SANDBOX_STOPPED;
         return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`could not add this chat's folder: ${describe(error)}`);
       }
-      const answer = await this.request({ type: "setup", root, folder: folder.path, share }, SETUP_MS);
+      const answer = await this.request({ type: "setup", root, folder: folder.path, share, ended }, SETUP_MS);
       if (answer?.type === "done") return null;
       entry.setup = null;
       if (answer?.type === "failed") return unavailable(`could not set up this chat: ${answer.message}`);
@@ -309,7 +315,7 @@ export class VmManager {
       return unavailable(this.stopping ? "is stopping" : `did not start: ${describe(error)}`);
     }
     if (guest === "aborted") return CANCELLED;
-    const failure = await Promise.race([guest.ready(operation.root, operation.folder), aborted(signal)]);
+    const failure = await Promise.race([guest.ready(operation.root, operation.folder, operation.ended), aborted(signal)]);
     if (failure === "aborted") return CANCELLED;
     if (failure) return this.stopping ? unavailable("is stopping") : failure;
     return guest.op(operation.root, operation.kind, operation.args, signal);

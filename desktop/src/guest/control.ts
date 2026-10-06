@@ -4,6 +4,7 @@
 // are not what its type names is the host's bug, and is answered, never thrown.
 
 import type { Outcome } from "../link/protocol.js";
+import type { ProcessHandle } from "./processes.js";
 import type { FromAgent, HostUser, Share, ToAgent } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
@@ -11,7 +12,7 @@ export const NO_HELLO = "The host has not answered hello";
 // What the control asks of the roots (root.ts, Roots).
 export interface ControlRoots {
   uid(root: string): number;
-  setup(root: string, folder: string, share: Share, user: HostUser): Promise<void>;
+  setup(root: string, folder: string, share: Share, user: HostUser, ended: ProcessHandle[]): Promise<void>;
   teardown(root: string): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
@@ -66,9 +67,11 @@ export class Control {
         this.send({ type: "failed", id, message: describe(error) });
       }
     } else if (message.type === "setup") {
-      if (![message.root, message.folder].every(isText) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("setup") });
+      if (![message.root, message.folder].every(isText) || !isShare(message.share) || !Array.isArray(message.ended)) {
+        return this.send({ type: "failed", id, message: malformed("setup") });
+      }
       if (!this.user) return this.send({ type: "failed", id, message: NO_HELLO });
-      this.roots.setup(message.root, message.folder, message.share, this.user).then(
+      this.roots.setup(message.root, message.folder, message.share, this.user, message.ended).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );

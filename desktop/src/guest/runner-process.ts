@@ -172,6 +172,11 @@ export class SessionRunner {
     });
   }
 
+  // Whether its process has gone.
+  get went(): boolean {
+    return this.left;
+  }
+
   spawn(request: SpawnRequest): RunnerChild {
     const target = new RunnerChild(request.id, (message) => this.send(message));
     if (this.left) {

@@ -12,7 +12,11 @@ import { enter, killRoot, Roots, uidOf } from "./root.js";
 
 const port = await openPort(await findPort("ai.surogate.control"));
 const say = (message: FromAgent) => void port.write(`${JSON.stringify(message)}\n`);
-const roots = new Roots({ start: enter, uid: uidOf, kill: killRoot, lost: (root) => say({ type: "lost", root }) });
+const roots = new Roots({
+  start: enter, uid: uidOf, kill: killRoot,
+  lost: (root) => say({ type: "lost", root }),
+  handles: (root, handles, live) => say({ type: "handles", root, handles, live }),
+});
 const control = new Control(say, roots);
 createInterface({ input: port.input, crlfDelay: Infinity }).on("line", (line) => control.receive(line));
 control.hello();

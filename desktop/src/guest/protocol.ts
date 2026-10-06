@@ -3,6 +3,7 @@
 
 import type { Refusal } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
+import type { ProcessHandle } from "./processes.js";
 
 // The host user the agent's roots run for, as the host's answer to hello names it.
 export interface HostUser {
@@ -26,8 +27,9 @@ export type ToAgent =
   | { type: "ping"; id: number }
   // A root's guest uid, asked before its share is made, so its virtiofsd maps the host user to it.
   | { type: "uid"; id: number; root: string }
-  // A root's namespaces and runner, with its folder at its own path from *share*.
-  | { type: "setup"; id: number; root: string; folder: string; share: Share }
+  // A root's namespaces and runner, with its folder at its own path from *share*,
+  // and the handles of its background processes the host keeps, which it answers for.
+  | { type: "setup"; id: number; root: string; folder: string; share: Share; ended: ProcessHandle[] }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
   // Everything of a root ends, its share left mounted: the host is letting its folder go.
   | { type: "teardown"; id: number; root: string }
@@ -37,6 +39,8 @@ export type FromAgent =
   | { type: "hello"; id: number }
   // Unasked: a root that was set up lost its runner, and everything of it ended. The host sets it up again.
   | { type: "lost"; root: string }
+  // Unasked, each time they change: a root's process handles for the host to keep, and how many of its processes live.
+  | { type: "handles"; root: string; handles: ProcessHandle[]; live: number }
   | { type: "pong"; id: number }
   | { type: "done"; id: number; uid?: number }
   | { type: "failed"; id: number; message: string }

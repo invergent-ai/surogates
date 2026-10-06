@@ -1,7 +1,8 @@
 // A root session's side of the guest: its root runner, started in the root's
-// own namespaces, and the process kinds it answers, run and which (spec,
-// Section 11, "Sessions in the guest"). Every command of a root runs in its
-// runner, so a server one command starts is reachable from the next.
+// own namespaces, and the process kinds it answers: run and which, and its
+// background processes in its registry (spec, Section 11, "Sessions in the
+// guest"). Every command of a root runs in its runner, so a server one command
+// starts is reachable from the next.
 
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
@@ -9,8 +10,10 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { promisify } from "node:util";
 
+import { Failure } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
+import { lostWith, type Placed, type ProcessHandle, Processes } from "./processes.js";
 import type { Answer, HostUser, Question, Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
@@ -35,8 +38,10 @@ const TAG = /^r[0-9]{1,3}$/;
 // Any name a passwd line can hold, as directories join AD users (ana@corp.example):
 // no ':', newline, NUL or '/', no leading '-', at most 256 characters.
 const NAME = /^(?!-)[^:\n\0/]{1,256}$/;
+// The background process kinds, which a root's registry answers.
+const PROCESS_KINDS = new Set(["start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
 
-export const NOT_SET_UP: Outcome = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } };
+export const NOT_SET_UP = { error: { type: "unavailable", message: "This computer's sandbox has not set up this chat" } } satisfies Outcome;
 const ALREADY = "This chat's sandbox is already set up";
 // The cloud sandbox's HOME, under which /etc/surogate/environment names the layout:
 // at the start of a path, in a value or a list of them.
@@ -191,9 +196,11 @@ function first<T>(answer: Promise<T>, signal: AbortSignal, ms?: number): Promise
 }
 
 export class Root {
+  private asked = 0;
+
   constructor(
     private readonly place: Place,
-    private readonly runner: SessionRunner,
+    readonly runner: SessionRunner,
     private readonly lose: () => Promise<void>,
     private readonly questionMs: number,
   ) {}
@@ -238,6 +245,17 @@ export class Root {
     });
   }
 
+  // Where a start's command would run, in the runner's view and as its user, as a
+  // run's place: throws why not. The registry answers a cancel itself.
+  async where(workdir: string | null, signal: AbortSignal): Promise<Placed> {
+    const { folder, home } = this.place;
+    const placed = await first(this.ask({ type: "place", id: `start-${(this.asked += 1)}`, folder, home, workdir }), signal);
+    const answer = typeof placed === "object" ? placed : null;
+    if (answer?.type === "refused") throw new Failure(answer.refusal);
+    if (answer?.type !== "placed") throw new Failure(SANDBOX_STOPPED.error);
+    return { cwd: answer.cwd, unenterable: answer.unenterable };
+  }
+
   async which(args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     const { name } = args;
     if (typeof name !== "string") return { error: { type: "value", message: "'name' must be a string" } };
@@ -258,6 +276,8 @@ export interface RootsOptions {
   kill(root: string): void | Promise<void>;
   // Told of a root that was set up and has lost its runner: the host sets it up again.
   lost?(root: string): void;
+  // Told a root's process handles to keep, and how many of its processes live, each time they change.
+  handles?(root: string, handles: ProcessHandle[], live: number): void;
   questionMs?: number;
 }
 
@@ -266,6 +286,10 @@ export class Roots {
   private readonly roots = new Map<string, Root>();
   // The setups under way, which a teardown waits for.
   private readonly starting = new Map<string, Promise<void>>();
+  // Each root's background processes, from its first setup in this guest to its
+  // teardown: set up again once its runner was lost, a root still answers for
+  // what ended with that runner, and how.
+  private readonly registries = new Map<string, Processes>();
 
   constructor(private readonly options: RootsOptions) {}
 
@@ -273,10 +297,11 @@ export class Roots {
     return this.options.uid(root);
   }
 
-  // Rejects with why the root's runner did not start.
-  async setup(root: string, folder: string, share: Share, user: HostUser): Promise<void> {
+  // Rejects with why the root's runner did not start. *ended*: the handles the host
+  // keeps of the root's processes, which a root new to this guest answers for.
+  async setup(root: string, folder: string, share: Share, user: HostUser, ended: readonly ProcessHandle[] = []): Promise<void> {
     if (this.roots.has(root) || this.starting.has(root)) throw new Error(ALREADY);
-    const started = this.start(root, folder, share, user);
+    const started = this.start(root, folder, share, user, ended);
     this.starting.set(root, started);
     try {
       await started;
@@ -285,7 +310,7 @@ export class Roots {
     }
   }
 
-  private async start(root: string, folder: string, share: Share, user: HostUser): Promise<void> {
+  private async start(root: string, folder: string, share: Share, user: HostUser, ended: readonly ProcessHandle[]): Promise<void> {
     const place = { folder, home: user.home };
     let listed: Root | undefined;
     let ending: Promise<void> | undefined;
@@ -311,7 +336,29 @@ export class Roots {
       throw error;
     }
     listed = new Root(place, runner, lose, this.options.questionMs ?? QUESTION_MS);
+    if (!this.registries.has(root)) this.registries.set(root, this.registry(root, ended));
     this.roots.set(root, listed);
+  }
+
+  // A root's registry, its processes in whichever runner the root has set up.
+  private registry(root: string, ended: readonly ProcessHandle[]): Processes {
+    const current = () => {
+      const target = this.roots.get(root);
+      if (!target) throw new Failure(NOT_SET_UP.error);
+      return target;
+    };
+    const registry: Processes = new Processes({
+      place: async (workdir, signal) => current().where(workdir, signal),
+      runner: async () => current().runner,
+      // The host's handles: one from before the app quit comes ended as the app quit,
+      // so one still running ran in a guest that went.
+      ended: lostWith(ended),
+      // Once the root is torn down the host keeps what it heard last: its live processes end as the app quit.
+      save: (handles) => {
+        if (this.registries.get(root) === registry) this.options.handles?.(root, handles, registry.live);
+      },
+    });
+    return registry;
   }
 
   // Everything of *root* ends and it is forgotten, its share left mounted: the host
@@ -319,6 +366,7 @@ export class Roots {
   async teardown(root: string): Promise<void> {
     // A setup under way lands first, and what it set up ends with the rest.
     await this.starting.get(root)?.catch(() => {});
+    this.registries.delete(root);
     const target = this.roots.get(root);
     if (!target) return;
     // Out of the list first: the end of its runner is no loss to tell.
@@ -331,6 +379,12 @@ export class Roots {
   async perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome> {
     const target = this.roots.get(root);
     if (!target) return NOT_SET_UP;
+    const registry = this.registries.get(root);
+    if (registry && PROCESS_KINDS.has(kind)) {
+      const outcome = await registry.answer(kind, args, signal);
+      if (target.runner.went) await target.end();
+      return outcome;
+    }
     if (kind !== "run" && kind !== "which") return { error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } };
     const outcome = await (kind === "run" ? target.run(args, signal, id) : target.which(args, signal, id));
     if (outcome === SANDBOX_STOPPED) await target.end();

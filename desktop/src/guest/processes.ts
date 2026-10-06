@@ -103,6 +103,10 @@ interface Tracked {
   waiters: Set<() => void>;
 }
 
+// The handles of a root whose guest went: each process still running ended with it.
+export const lostWith = (handles: readonly ProcessHandle[]): ProcessHandle[] =>
+  handles.map((handle) => handle.ended ? handle : { ...handle, ended: { exit_code: null, output: "", note: RUNNER_GONE } });
+
 const notFound = (id: string) => ({ status: "not_found", error: `No process with ID ${id}` });
 // The answers that carry a restart's notice as a note of their own.
 const NOTED = new Set(["poll", "read_output", "wait", "kill", "write_stdin"]);

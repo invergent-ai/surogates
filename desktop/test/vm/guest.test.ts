@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { BOOT_ID } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
+import type { ProcessHandle } from "../../src/guest/processes.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import type { Operation } from "../../src/link/protocol.js";
@@ -52,6 +53,7 @@ const FILES = [
 const INCOMPAT = 1024 + 0x60;
 
 const signal = () => new AbortController().signal;
+const background = (command: string) => ({ command, workdir: null, task_id: "vm", pty: false, notify_on_complete: false, watcher_interval: null });
 const folderOf = (path: string): Folder => {
   const { dev, ino } = statSync(path);
   return { path, dev, ino };
@@ -77,7 +79,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
   const run = (command: string, root = ROOT, timeout = 30) => guest.op(root, "run", { command, workdir: null, timeout }, signal());
   // *path* added to the guest for *root*, then *root* set up on it.
-  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, share: await guest.share(root, folderOf(path)) });
+  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, share: await guest.share(root, folderOf(path)), ended: [] });
 
   // The first boot formats the sessions disk; the tests run on the second, which checks it, as every later boot does.
   beforeAll(async () => {
@@ -113,11 +115,11 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run("pwd; echo $HOME; id -un")).toEqual({
       ok: { output: `${folder}\n${USER.home}\n${USER.name}\n`, returncode: 0, timed_out: false },
     });
-    expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1 })).toMatchObject({
+    expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1, ended: [] })).toMatchObject({
       type: "failed", message: "This chat's sandbox is already set up",
     });
     expect(await run("true", OTHER)).toMatchObject({ error: { type: "unavailable" } });
-    const valid = { type: "setup", root: OTHER, folder, share: R1 } as const;
+    const valid = { type: "setup", root: OTHER, folder, share: R1, ended: [] as ProcessHandle[] } as const;
     for (const [fields, message] of [
       [{ share: { kind: "virtiofs", tag: "../r1" } }, "not a share tag: ../r1"],
       [{ folder: "relative/path" }, "not a folder: relative/path"],
@@ -128,6 +130,21 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         type: "failed", message,
       }));
     }
+  });
+
+  it("runs a root's background process in its runner, where the next command reaches it, and answers for it", async () => {
+    writeFileSync(join(folder, "served.txt"), "served\n");
+    const started = await guest.op(ROOT, "start", background("python3 -m http.server 8765 --bind 127.0.0.1"), signal()) as { ok: { session_id: string } };
+    const { session_id } = started.ok;
+    let fetched = await run("curl -sS http://127.0.0.1:8765/served.txt");
+    for (let tries = 0; tries < 50 && (fetched as { ok?: { output: string } }).ok?.output !== "served\n"; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      fetched = await run("curl -sS http://127.0.0.1:8765/served.txt");
+    }
+    expect(fetched).toEqual({ ok: { output: "served\n", returncode: 0, timed_out: false } });
+    expect(await guest.op(ROOT, "poll", { session_id }, signal())).toMatchObject({ ok: { status: "running", command: "python3 -m http.server 8765 --bind 127.0.0.1" } });
+    expect(await guest.op(ROOT, "kill", { session_id }, signal())).toEqual({ ok: { status: "killed", session_id } });
+    rmSync(join(folder, "served.txt"));
   });
 
   it("answers ping, and carries large results", async () => {
@@ -262,6 +279,35 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     });
     expect(filled).toEqual({ ok: { output: "256\n64\nENOSPC ENOSPC \n 32768 0\n 8192 0\n", returncode: 0, timed_out: false } });
     await run("rm -rf /var/tmp/fill /dev/shm/fill /var/tmp/many /dev/shm/many");
+  });
+
+  it("lets two roots each run a server on one port, each reached by its own commands only", async () => {
+    const ids: string[] = [];
+    for (const [root, path] of [[ROOT, folder], [OTHER, other]] as const) {
+      writeFileSync(join(path, "who.txt"), `${root}\n`);
+      const started = await guest.op(root, "start", background("python3 -m http.server 8766 --bind 127.0.0.1"), signal()) as { ok: { session_id: string } };
+      ids.push(started.ok.session_id);
+    }
+    for (const root of [ROOT, OTHER]) {
+      let fetched = await run("curl -sS http://127.0.0.1:8766/who.txt", root);
+      for (let tries = 0; tries < 50 && (fetched as { ok?: { output: string } }).ok?.output !== `${root}\n`; tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        fetched = await run("curl -sS http://127.0.0.1:8766/who.txt", root);
+      }
+      expect(fetched).toEqual({ ok: { output: `${root}\n`, returncode: 0, timed_out: false } });
+    }
+    for (const [index, root] of [ROOT, OTHER].entries()) await guest.op(root, "kill", { session_id: ids[index] }, signal());
+    for (const path of [folder, other]) rmSync(join(path, "who.txt"));
+  });
+
+  it("keeps its guest, and another root's process, through a start whose command is longer than a control line", async () => {
+    const other = await guest.op(OTHER, "start", background("sleep 306"), signal()) as { ok: { session_id: string } };
+    // 1.5M characters, each six bytes once escaped in JSON: past the host's 8 MiB line, inside the link's 2M-character frame.
+    expect(await guest.op(ROOT, "start", background(`: ${"\u0001".repeat(1_500_000)}`), signal())).not.toEqual(SANDBOX_STOPPED);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(guest.ended).toBe(false);
+    expect(await guest.op(OTHER, "poll", { session_id: other.ok.session_id }, signal())).toMatchObject({ ok: { status: "running" } });
+    await guest.op(OTHER, "kill", { session_id: other.ok.session_id }, signal());
   });
 
   it("bounds a root's memory and processes in its cgroup, and the agent and the other root go on", async () => {

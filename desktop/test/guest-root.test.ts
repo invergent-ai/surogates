@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
+import { type ProcessHandle, RUNNER_GONE } from "../src/guest/processes.js";
 import type { HostUser, Share } from "../src/guest/protocol.js";
 import { enter, NOT_SET_UP, rootEnvironment, Roots } from "../src/guest/root.js";
 
@@ -35,6 +36,12 @@ const STALLED = `process.stdout.write('{"ready":true}\\n'); setInterval(() => {}
 
 const op = (kind: string, args: Record<string, unknown>, signal = new AbortController().signal, id = "op-1") =>
   roots.perform("root-1", kind, args, signal, id);
+
+async function until(check: () => boolean | Promise<boolean>, ms = 10_000): Promise<void> {
+  for (const end = Date.now() + ms; !(await check()); await new Promise((resolve) => setTimeout(resolve, 50))) {
+    if (Date.now() > end) throw new Error("timed out");
+  }
+}
 
 // *answer*, or "no answer" once *ms* pass.
 const within = <T>(answer: Promise<T>, ms: number) =>
@@ -151,7 +158,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
 
   it("answers for a root it has not set up, a kind it does not do, and a root whose runner went", async () => {
     expect(await roots.perform("root-2", "run", {}, new AbortController().signal, "op-3")).toEqual(NOT_SET_UP);
-    expect(await op("start", { command: "true" })).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'start' yet" } });
+    expect(await op("bogus", {})).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'bogus' yet" } });
     const running = op("run", { command: "sleep 30", workdir: null, timeout: 10 });
     await new Promise((resolve) => setTimeout(resolve, 200));
     for (const child of children) child.kill("SIGKILL");
@@ -279,6 +286,121 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(lost).toEqual(["root-1"]);
     expect(await op("which", { name: "sh" })).toEqual(NOT_SET_UP);
+  });
+});
+
+describe("a root's background processes", { timeout: 20_000 }, () => {
+  type Answer = { ok?: any; error?: { type: string; message: string } };
+  const signal = () => new AbortController().signal;
+  const begin = (target: Roots, root: string, command: string, extra: Record<string, unknown> = {}) => target.perform(
+    root, "start", { command, workdir: null, task_id: "t", pty: false, notify_on_complete: false, watcher_interval: null, ...extra }, signal(), "op-30",
+  ) as Promise<Answer>;
+  const ask = (target: Roots, root: string, kind: string, args: Record<string, unknown>) => target.perform(root, kind, args, signal(), "op-31") as Promise<Answer>;
+  // A bare runner's processes outlive it; one in the guest goes with its root's cgroup.
+  const reap = (pattern: string) => spawnSync("pkill", ["-KILL", "-f", pattern]);
+
+  it("starts one in the root's runner, and answers for it in the cloud's shapes", async () => {
+    const started = await begin(roots, "root-1", "echo hi; sleep 30");
+    expect(started).toEqual({ ok: { session_id: expect.stringMatching(/^proc_[0-9a-f]{12}$/), pid: expect.any(Number) } });
+    const session_id = started.ok.session_id as string;
+    await until(async () => (await ask(roots, "root-1", "poll", { session_id })).ok.output_preview === "hi\n");
+    expect(await ask(roots, "root-1", "kill", { session_id })).toEqual({ ok: { status: "killed", session_id } });
+    expect((await ask(roots, "root-1", "list_processes", { task_id: "t" })).ok).toEqual([
+      expect.objectContaining({ session_id, status: "exited", exit_code: -15 }),
+    ]);
+  });
+
+  it("asks the runner where a start's command runs, and answers as the cloud does where it cannot", async () => {
+    writeFileSync(join(base, "file"), "");
+    expect(await begin(roots, "root-1", "true", { workdir: "/etc" })).toMatchObject({
+      error: { type: "sandbox", message: expect.stringMatching(/^Blocked: .*All commands must run within the workspace directory\.$/) },
+    });
+    expect(await begin(roots, "root-1", "true", { workdir: "nope" })).toEqual({
+      error: { type: "os", code: "ENOENT", message: `No such file or directory: '${join(base, "nope")}'` },
+    });
+    expect(await begin(roots, "root-1", "true", { workdir: "file" })).toEqual({
+      error: { type: "os", code: "ENOTDIR", message: `Not a directory: '${join(base, "file")}'` },
+    });
+    expect(await begin(roots, "root-1", "a\0b")).toEqual({ error: { type: "value", message: "embedded null byte" } });
+  });
+
+  it("answers a start whose runner does not say where it would run as stopped by the sandbox, and loses the root", async () => {
+    const told: string[] = [];
+    const stalled = new Roots({
+      start: () => {
+        const child = spawn(process.execPath, ["-e", STALLED], { stdio: ["pipe", "pipe", "pipe"] });
+        children.push(child);
+        return child;
+      },
+      uid: () => 10_000,
+      // Its runner ends at once, the rest of its cgroup a little later.
+      kill: () => new Promise<void>((resolve) => {
+        children.at(-1)?.kill("SIGKILL");
+        setTimeout(resolve, 300);
+      }),
+      lost: (root) => told.push(root),
+      questionMs: 300,
+    });
+    await stalled.setup("root-2", base, R1, user);
+    expect(await begin(stalled, "root-2", "true")).toEqual(SANDBOX_STOPPED);
+    // Answered once the host has been told.
+    expect(told).toEqual(["root-2"]);
+  });
+
+  it("tells the host each change of a root's processes: the handles to keep, and how many live", async () => {
+    const told: Array<[string, ProcessHandle[], number]> = [];
+    const watched = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), handles: (root, handles, live) => told.push([root, handles, live]) });
+    await watched.setup("root-3", base, R1, user);
+    const session_id = (await begin(watched, "root-3", "echo bye; exit 3")).ok.session_id as string;
+    await until(() => told.at(-1)?.[2] === 0);
+    expect(told[0]).toEqual(["root-3", [expect.objectContaining({ id: session_id, command: "echo bye; exit 3", cwd: base, task_id: "t" })], 1]);
+    expect(told.at(-1)).toEqual(["root-3", [expect.objectContaining({ id: session_id, ended: { exit_code: 3, output: "bye\n", note: null } })], 0]);
+  });
+
+  it("answers for the handles its first setup brought, and for what ended with a lost runner once it is set up again", async () => {
+    const told: string[] = [];
+    const before: ProcessHandle = {
+      id: "proc_000000000001", command: "make", cwd: base, task_id: "t", started_at: Date.now() / 1000, ended: { exit_code: 2, output: "failed\n", note: null },
+    };
+    const own = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), lost: (root) => told.push(root) });
+    await own.setup("root-4", base, R1, user, [before]);
+    expect((await ask(own, "root-4", "poll", { session_id: before.id })).ok).toMatchObject({ status: "exited", exit_code: 2, output_preview: "failed\n" });
+    try {
+      const session_id = (await begin(own, "root-4", "sleep 694")).ok.session_id as string;
+      children.at(-1)?.kill("SIGKILL");
+      await until(() => told.length === 1);
+      // Brought again, the host's handles are older than what the root holds.
+      await own.setup("root-4", base, R1, user, []);
+      expect((await ask(own, "root-4", "poll", { session_id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RUNNER_GONE });
+      expect((await ask(own, "root-4", "poll", { session_id: before.id })).ok).toMatchObject({ exit_code: 2 });
+    } finally {
+      reap("^sleep 694$");
+    }
+  });
+
+  it("answers a process its setup brought as still running as one that ended with its sandbox: the guest it ran in went", async () => {
+    const running: ProcessHandle = { id: "proc_000000000002", command: "npm run dev", cwd: base, task_id: "t", started_at: Date.now() / 1000 };
+    const own = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children) });
+    await own.setup("root-6", base, R1, user, [running]);
+    expect((await ask(own, "root-6", "poll", { session_id: running.id })).ok).toMatchObject({ status: "exited", exit_code: null, note: RUNNER_GONE });
+  });
+
+  it("tells the host nothing more of a root it tears down, and forgets its processes", async () => {
+    const told: number[] = [];
+    const own = new Roots({ start: bare, uid: () => 10_000, kill: killLatest(children), handles: (_root, _handles, live) => told.push(live) });
+    await own.setup("root-5", base, R1, user);
+    try {
+      const session_id = (await begin(own, "root-5", "sleep 695")).ok.session_id as string;
+      await until(() => told.at(-1) === 1);
+      await own.teardown("root-5");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      // What the teardown ended is not told: the host keeps the process as it started, and it ended as the app quit.
+      expect(told).toEqual([1]);
+      await own.setup("root-5", base, R1, user);
+      expect((await ask(own, "root-5", "poll", { session_id })).ok.status).toBe("not_found");
+    } finally {
+      reap("^sleep 695$");
+    }
   });
 });
 

@@ -22,9 +22,9 @@ export interface Place {
 const HOME_ALIASES = new Set(["$HOME", "~", "$WORKSPACE_DIR", "${HOME}", "${WORKSPACE_DIR}"]);
 const MAX_TIMER_MS = 2 ** 31 - 1;
 export const CANCELLED: Outcome = { error: { type: "cancelled", message: "The session stopped this command" } };
-export const SANDBOX_STOPPED: Outcome = {
+export const SANDBOX_STOPPED = {
   error: { type: "interrupted", message: "interrupted: the computer's sandbox stopped while this ran. Check what it did before repeating it." },
-};
+} satisfies Outcome;
 
 // How a command ended: it exited, it never started, or the sandbox it ran in went first.
 export type CommandEnd = { code: number | null; signal: NodeJS.Signals | null } | { failed: string } | { lost: true };
