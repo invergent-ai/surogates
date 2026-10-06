@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import { CANCELLED } from "../src/guest/command.js";
 import { Control, type ControlRoots, NO_HELLO } from "../src/guest/control.js";
+import type { ProcessHandle } from "../src/guest/processes.js";
 import type { FromAgent, HostUser } from "../src/guest/protocol.js";
 import type { Outcome } from "../src/link/protocol.js";
 
 const USER: HostUser = { uid: 1000, gid: 1000, name: "someone", home: "/home/someone" };
+const HANDLE: ProcessHandle = {
+  id: "proc_000000000001", command: "make", cwd: "/home/someone/project", task_id: null, started_at: 1,
+  ended: { exit_code: 0, output: "done\n", note: null },
+};
 
 // Roots that record what the control asked of them.
 function fakeRoots() {
@@ -15,8 +20,8 @@ function fakeRoots() {
       if (root === "bad") throw new Error("not a root session id: bad");
       return 10_000;
     },
-    setup: async (root, folder, share, user) => {
-      calls.push(["setup", root, folder, share, user]);
+    setup: async (root, folder, share, user, ended) => {
+      calls.push(["setup", root, folder, share, user, ended]);
       if (root === "broken") throw new Error("the session runner exited: no namespaces");
     },
     teardown: async (root) => {
@@ -69,13 +74,13 @@ describe("the agent's control port", () => {
   it("sets up a root only once the host has answered hello, with the host's user", async () => {
     const { agent, sent, calls, tell, settle } = control();
     agent.hello();
-    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [] });
     // An answer to another request of the agent's is not hello's.
     tell({ type: "done", id: 4, user: USER });
-    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [] });
     tell({ type: "done", id: 0, user: USER });
-    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
-    tell({ type: "setup", id: 3, root: "broken", folder: "/home/someone/other", share: { kind: "virtiofs", tag: "r2" } });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [HANDLE] });
+    tell({ type: "setup", id: 3, root: "broken", folder: "/home/someone/other", share: { kind: "virtiofs", tag: "r2" }, ended: [] });
     await settle();
     expect(sent.slice(1)).toEqual([
       { type: "failed", id: 1, message: NO_HELLO },
@@ -84,8 +89,8 @@ describe("the agent's control port", () => {
       { type: "failed", id: 3, message: "the session runner exited: no namespaces" },
     ]);
     expect(calls).toEqual([
-      ["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER],
-      ["setup", "broken", "/home/someone/other", { kind: "virtiofs", tag: "r2" }, USER],
+      ["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER, [HANDLE]],
+      ["setup", "broken", "/home/someone/other", { kind: "virtiofs", tag: "r2" }, USER, []],
     ]);
   });
 
@@ -108,12 +113,14 @@ describe("the agent's control port", () => {
   it("answers a request whose fields are not what its type names, and one of a type it does not know", async () => {
     const { agent, sent, calls, tell, settle } = control();
     tell({ type: "uid", id: 1 });
-    tell({ type: "setup", id: 2, root: "root-1", folder: 7, share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 2, root: "root-1", folder: 7, share: { kind: "virtiofs", tag: "r1" }, ended: [] });
     tell({ type: "op", id: 3, root: "root-1", args: {} });
     tell({ type: "bogus", id: 4 });
     // A share of a kind this agent does not mount.
-    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "9p", tag: "r1" } });
-    tell({ type: "setup", id: 6, root: "root-1", folder: "/home/someone/project", tag: "r1" });
+    tell({ type: "setup", id: 5, root: "root-1", folder: "/home/someone/project", share: { kind: "9p", tag: "r1" }, ended: [] });
+    tell({ type: "setup", id: 6, root: "root-1", folder: "/home/someone/project", tag: "r1", ended: [] });
+    // Handles that are not a list of them.
+    tell({ type: "setup", id: 7, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: {} });
     await settle();
     expect(sent).toEqual([
       { type: "failed", id: 1, message: "The agent cannot take this uid request" },
@@ -122,6 +129,7 @@ describe("the agent's control port", () => {
       { type: "failed", id: 4, message: "The agent does not know the request bogus" },
       { type: "failed", id: 5, message: "The agent cannot take this setup request" },
       { type: "failed", id: 6, message: "The agent cannot take this setup request" },
+      { type: "failed", id: 7, message: "The agent cannot take this setup request" },
     ]);
     expect(calls).toEqual([]);
     agent.hello();
@@ -131,13 +139,13 @@ describe("the agent's control port", () => {
     const { agent, sent, calls, tell, settle } = control();
     agent.hello();
     tell({ type: "done", id: 0, user: { uid: "1000", gid: 1000, name: "someone", home: "/home/someone" } });
-    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 1, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [] });
     tell({ type: "done", id: 0, user: USER });
     tell({ type: "done", id: 0, user: { ...USER, name: "other" } });
-    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" } });
+    tell({ type: "setup", id: 2, root: "root-1", folder: "/home/someone/project", share: { kind: "virtiofs", tag: "r1" }, ended: [] });
     await settle();
     expect(sent.slice(1)).toEqual([{ type: "failed", id: 1, message: NO_HELLO }, { type: "done", id: 2 }]);
-    expect(calls).toEqual([["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER]]);
+    expect(calls).toEqual([["setup", "root-1", "/home/someone/project", { kind: "virtiofs", tag: "r1" }, USER, []]]);
   });
 
   it("answers an operation whose id is still running, and keeps the first one cancellable", async () => {

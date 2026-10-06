@@ -1,5 +1,6 @@
 // What the main process and a tool host say to each other, over the host's IPC channel.
 
+import type { ProcessHandle } from "../guest/processes.js";
 import type { Outcome } from "../link/protocol.js";
 
 // A destination a command asked srt's proxy for: its host as srt compares it, and its port (policy.ts destination).
@@ -45,10 +46,13 @@ export type ToHost =
   // {ok: null} when it may; then the look after it, answered with its outcome and the look's notice.
   | { type: "refusal"; id: string }
   | { type: "after"; id: string; outcome: Outcome }
+  // The root's background processes in the VM, as the guest says: the folder's record keeps their handles.
+  | { type: "handles"; handles: ProcessHandle[] }
   | { type: "stop" };
 
 export type FromHost =
-  | { type: "ready" }
+  // With the handles of the processes its folder's record keeps, as a registry answers for them.
+  | { type: "ready"; processes: ProcessHandle[] }
   // folder: the bound folder is not there, is not a folder, or was replaced; the app answers folder_unavailable.
   | { type: "failed"; message: string; folder?: true }
   | { type: "result"; id: string; outcome: Outcome }

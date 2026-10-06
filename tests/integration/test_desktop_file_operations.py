@@ -510,6 +510,62 @@ async def test_the_app_runs_background_processes_as_the_cloud_does(
         await app.close()
 
 
+@VM
+async def test_the_vm_runs_background_processes_as_the_cloud_does(
+    built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir, monkeypatch,
+):
+    """Every background process in the root's runner in the guest, its registry in the agent: the same answers as the cloud's."""
+    folder = prepare(tmp_path)
+    # As the cross-check without the VM: the cloud's login shell adds nothing to the output.
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    (folder / ".hushlogin").touch()
+    cloud = LocalWorkspaceIO(str(folder))
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
+    try:
+        await app.until(connected)
+        # Task ids of its own: the cloud's registry is the whole test process's, and the srt cross-check's cases may be in it.
+        for steps in json.loads(json.dumps(PROCESS_CASES).replace('"cross-', '"vm-cross-')):
+            got = await play(lambda kind, args: on_app(laptop_rig, kind, args), steps)
+            want = await play(lambda kind, args: perform(cloud, kind, args), steps)
+            assert normalised(got) == normalised(want), (steps, got, want)
+    finally:
+        await app.close()
+
+
+@VM
+async def test_the_vm_runs_a_server_that_the_next_command_reaches(
+    built_client, built_agent_disk, laptop_rig, link_url, tmp_path, journal_dir,
+):
+    """A background process and the commands after it share the root's network in the guest, as its own user there."""
+    folder = prepare(tmp_path)
+    app = await client(built_client, link_url, laptop_rig.token, journal_dir / "journal.sqlite", folder=folder, vm=True)
+
+    async def start(command: str, pty: bool = False) -> str:
+        started = await on_app(laptop_rig, "start", {
+            "command": command, "workdir": None, "task_id": "vm", "pty": pty, "notify_on_complete": False, "watcher_interval": None,
+        })
+        return started["ok"]["session_id"]
+
+    try:
+        await app.until(connected)
+        # The root's own guest user, not the host's: the process runs in the guest.
+        waited = await on_app(laptop_rig, "wait", {"session_id": await start("id -u"), "timeout": 10})
+        assert int(waited["ok"]["output"]) >= 10_000, waited
+        server = await start("python3 -m http.server 8765 --bind 127.0.0.1")
+        for _ in range(50):
+            fetched = await on_app(laptop_rig, "run", {"command": "curl -sS http://127.0.0.1:8765/a.txt", "workdir": None, "timeout": 10})
+            if fetched["ok"]["output"] == "alpha\nbeta\n":
+                break
+            await asyncio.sleep(0.2)
+        assert fetched["ok"]["output"] == "alpha\nbeta\n"
+        assert await on_app(laptop_rig, "kill", {"session_id": server}) == {"ok": {"status": "killed", "session_id": server}}
+        # A real terminal, as the cloud gives with ptyprocess installed.
+        waited = await on_app(laptop_rig, "wait", {"session_id": await start("tty", pty=True), "timeout": 10})
+        assert waited["ok"]["output"].startswith("/dev/pts/")
+    finally:
+        await app.close()
+
+
 async def test_the_app_is_stricter_where_the_laptop_must_be(built_client, laptop_rig, link_url, tmp_path, journal_dir):
     folder = prepare(tmp_path)
     outside = tmp_path / "outside" / "o.txt"

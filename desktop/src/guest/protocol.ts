@@ -3,6 +3,7 @@
 
 import type { Refusal } from "../files/answers.js";
 import type { Outcome } from "../link/protocol.js";
+import type { ProcessHandle } from "./processes.js";
 
 // The host user the agent's roots run for, as the host's answer to hello names it.
 export interface HostUser {
@@ -26,8 +27,9 @@ export type ToAgent =
   | { type: "ping"; id: number }
   // A root's guest uid, asked before its share is made, so its virtiofsd maps the host user to it.
   | { type: "uid"; id: number; root: string }
-  // A root's namespaces and runner, with its folder at its own path from *share*.
-  | { type: "setup"; id: number; root: string; folder: string; share: Share }
+  // A root's namespaces and runner, with its folder at its own path from *share*,
+  // and the handles of its background processes the host keeps, which it answers for.
+  | { type: "setup"; id: number; root: string; folder: string; share: Share; ended: ProcessHandle[] }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
   // Everything of a root ends, its share left mounted: the host is letting its folder go.
   | { type: "teardown"; id: number; root: string }
@@ -37,6 +39,8 @@ export type FromAgent =
   | { type: "hello"; id: number }
   // Unasked: a root that was set up lost its runner, and everything of it ended. The host sets it up again.
   | { type: "lost"; root: string }
+  // Unasked, each time they change: a root's process handles for the host to keep, and how many of its processes live.
+  | { type: "handles"; root: string; handles: ProcessHandle[]; live: number }
   | { type: "pong"; id: number }
   | { type: "done"; id: number; uid?: number }
   | { type: "failed"; id: number; message: string }
@@ -62,7 +66,8 @@ export type FromRunner =
   | { type: "data"; id: string; data: string; err?: true } // base64; err: from its stderr
   // A stdin message was taken.
   | { type: "written"; id: string }
-  | { type: "exit"; id: string; code: number | null; signal: NodeJS.Signals | null }
+  // oom: the kernel ended one of its processes for memory.
+  | { type: "exit"; id: string; code: number | null; signal: NodeJS.Signals | null; oom?: true }
   // It could not be started; with stdin, a stdin message was refused and it goes on.
   | { type: "error"; id: string; message: string; stdin?: true }
   // The answers to place: the folder a command would run in, and why it cannot be entered (an errno name), or the refusal.

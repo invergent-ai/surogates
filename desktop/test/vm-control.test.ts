@@ -77,8 +77,8 @@ describe("the host's side of the control port", () => {
     const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
     expect(await link.request({ type: "uid", root: "root-1" })).toEqual({ type: "done", id: 1, uid: 10_000 });
     expect(await link.request({ type: "ping" })).toEqual({ type: "pong", id: 2 });
-    expect(await link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1 })).toEqual({ type: "done", id: 3 });
-    expect(setups).toEqual([["root-1", "/home/ana/p", R1, USER]]);
+    expect(await link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1, ended: [] })).toEqual({ type: "done", id: 3 });
+    expect(setups).toEqual([["root-1", "/home/ana/p", R1, USER, []]]);
     expect(await link.op("root-1", "which", { name: "sh" }, new AbortController().signal)).toEqual({ ok: { name: "sh" } });
     link.close();
   });
@@ -177,7 +177,7 @@ describe("a root the guest lost", () => {
     await new Promise<void>((resolve) => server?.listen(path, resolve));
     const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
     const told = new Promise<string>((resolve) => link.onLost(resolve));
-    void link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1 }, 100);
+    void link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1, ended: [] }, 100);
     expect(await told).toBe("root-1");
     link.close();
   });

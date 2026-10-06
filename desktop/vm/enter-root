@@ -39,6 +39,11 @@ new=$layers/root
 
 mount -t proc -o nosuid,nodev,noexec proc "$new/proc"
 mount -t sysfs -o ro,nosuid,nodev,noexec sysfs "$new/sys"
+# The root's cgroup, as this cgroup namespace shows it, which the agent delegated
+# to the root's user. This and all it starts, the runner among them, go into its
+# leaf for the runner, so each command can have a cgroup of its own beside it.
+mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 "$new/sys/fs/cgroup"
+echo $$ > "$new/sys/fs/cgroup/init/cgroup.procs"
 mount -t tmpfs -o mode=0755,nosuid dev "$new/dev"
 for device in null zero full random urandom tty; do
   touch "$new/dev/$device"
@@ -94,4 +99,4 @@ rmdir /.old
 echo 0 > /proc/self/oom_score_adj
 export PATH=$runner_path
 exec /usr/bin/setpriv --reuid="$uid" --regid="$uid" --clear-groups --inh-caps=-all --bounding-set=-all --no-new-privs \
-  -- /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/runner.js
+  -- /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/runner.js --cgroups /sys/fs/cgroup
