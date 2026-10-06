@@ -4,14 +4,14 @@
 // are not what its type names is the host's bug, and is answered, never thrown.
 
 import type { Outcome } from "../link/protocol.js";
-import type { FromAgent, HostUser, ToAgent } from "./protocol.js";
+import type { FromAgent, HostUser, Share, ToAgent } from "./protocol.js";
 
 export const NO_HELLO = "The host has not answered hello";
 
 // What the control asks of the roots (root.ts, Roots).
 export interface ControlRoots {
   uid(root: string): number;
-  setup(root: string, folder: string, tag: string, user: HostUser): Promise<void>;
+  setup(root: string, folder: string, share: Share, user: HostUser): Promise<void>;
   teardown(root: string): Promise<void>;
   // Never rejects: whatever goes wrong is an outcome.
   perform(root: string, kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string): Promise<Outcome>;
@@ -22,6 +22,9 @@ const malformed = (type: string) => `The agent cannot take this ${type} request`
 const isText = (value: unknown): value is string => typeof value === "string";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+// The kinds of share this agent mounts.
+const isShare = (value: unknown): value is Share => isRecord(value) && value.kind === "virtiofs" && isText(value.tag);
 
 function isUser(value: unknown): value is HostUser {
   if (!isRecord(value)) return false;
@@ -63,9 +66,9 @@ export class Control {
         this.send({ type: "failed", id, message: describe(error) });
       }
     } else if (message.type === "setup") {
-      if (![message.root, message.folder, message.tag].every(isText)) return this.send({ type: "failed", id, message: malformed("setup") });
+      if (![message.root, message.folder].every(isText) || !isShare(message.share)) return this.send({ type: "failed", id, message: malformed("setup") });
       if (!this.user) return this.send({ type: "failed", id, message: NO_HELLO });
-      this.roots.setup(message.root, message.folder, message.tag, this.user).then(
+      this.roots.setup(message.root, message.folder, message.share, this.user).then(
         () => this.send({ type: "done", id }),
         (error: unknown) => this.send({ type: "failed", id, message: describe(error) }),
       );

@@ -9,11 +9,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
 import { Control, type ControlRoots } from "../src/guest/control.js";
-import type { HostUser } from "../src/guest/protocol.js";
+import type { HostUser, Share } from "../src/guest/protocol.js";
 import type { Outcome } from "../src/link/protocol.js";
 import { ControlLink } from "../src/vm/control.js";
 
 const USER: HostUser = { uid: 1000, gid: 1000, name: "ana", home: "/home/ana" };
+const R1: Share = { kind: "virtiofs", tag: "r1" };
 const never = new Promise<never>(() => {});
 
 let dir: string;
@@ -76,8 +77,8 @@ describe("the host's side of the control port", () => {
     const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
     expect(await link.request({ type: "uid", root: "root-1" })).toEqual({ type: "done", id: 1, uid: 10_000 });
     expect(await link.request({ type: "ping" })).toEqual({ type: "pong", id: 2 });
-    expect(await link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", tag: "r1" })).toEqual({ type: "done", id: 3 });
-    expect(setups).toEqual([["root-1", "/home/ana/p", "r1", USER]]);
+    expect(await link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1 })).toEqual({ type: "done", id: 3 });
+    expect(setups).toEqual([["root-1", "/home/ana/p", R1, USER]]);
     expect(await link.op("root-1", "which", { name: "sh" }, new AbortController().signal)).toEqual({ ok: { name: "sh" } });
     link.close();
   });
@@ -176,7 +177,7 @@ describe("a root the guest lost", () => {
     await new Promise<void>((resolve) => server?.listen(path, resolve));
     const link = await ControlLink.open(connect(path), USER, performance.now() + 5_000, never);
     const told = new Promise<string>((resolve) => link.onLost(resolve));
-    void link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", tag: "r1" }, 100);
+    void link.request({ type: "setup", root: "root-1", folder: "/home/ana/p", share: R1 }, 100);
     expect(await told).toBe("root-1");
     link.close();
   });

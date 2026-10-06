@@ -11,11 +11,10 @@ import {
 import { connect, type Socket } from "node:net";
 import { basename, dirname, join } from "node:path";
 
+import type { Share } from "../guest/protocol.js";
 import type { BootVm, VmBackend, VmOptions } from "./manager.js";
 import { Qmp, qemuArgs, ROOT_PORTS, VIRTIOFSD, virtiofsdArgs } from "./qemu.js";
 
-// A share's hot-add, its virtiofsd's start included (Section 11's timeouts).
-const SHARE_MS = 15_000;
 const SESSIONS_BYTES = 32 * 1024 ** 3;
 const RETRY_MS = 5;
 
@@ -104,6 +103,7 @@ async function reach(path: string, qemu: ChildProcess, deadline: number): Promis
  * at the first boot. Rejects with why not, QEMU's own words included.
  */
 export const bootLinux: BootVm = async (options, signal, deadline) => {
+  if (signal?.aborted) throw new Error("The boot was stopped");
   // Its uid and gid maps: without them no folder could be shared, and virtiofsd's own words would not reach the user.
   if (!onPath("newuidmap") || !onPath("newgidmap")) throw new Error("virtiofsd needs newuidmap and newgidmap (the uidmap package)");
   sweep(options.run);
@@ -151,8 +151,11 @@ class LinuxVm implements VmBackend {
     this.exited = exited(qemu).then(said);
   }
 
-  /** *folder* on a root port of its own: its virtiofsd, mapping the host user to *uid*, then QMP's chardev-add and device_add. */
-  async share(folder: string, uid: number): Promise<string> {
+  /**
+   * *folder* on a root port of its own, by *deadline*: its virtiofsd, which maps the
+   * host user to *uid* (so the guest mounts it as it is), then QMP's chardev-add and device_add.
+   */
+  async share(folder: string, uid: number, deadline: number): Promise<Share> {
     if (this.killed) throw new Error("the VM has gone");
     if (this.port >= ROOT_PORTS) throw new Error(`it holds ${ROOT_PORTS} folders already, its most until the app restarts`);
     this.port += 1;
@@ -161,7 +164,6 @@ class LinuxVm implements VmBackend {
     const { child: daemon, said } = launch([VIRTIOFSD, ...virtiofsdArgs(folder, socket, uid, this.options.user)]);
     this.daemons.push(daemon);
     writeFileSync(join(this.options.run, `vfs-${n}.pid`), String(daemon.pid ?? ""));
-    const deadline = performance.now() + SHARE_MS;
     while (!existsSync(socket)) {
       if (ended(daemon) || performance.now() > deadline) {
         daemon.kill("SIGKILL");
@@ -181,7 +183,7 @@ class LinuxVm implements VmBackend {
     }
     // The folder is the guest's now: a daemon that goes takes the VM with it.
     void exited(daemon).then(() => this.qemu.kill("SIGKILL"));
-    return `r${n}`;
+    return { kind: "virtiofs", tag: `r${n}` };
   }
 
   // A power cut: only the sessions disk is written, and it is journaled and checked at the next boot.

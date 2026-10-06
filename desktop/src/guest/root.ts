@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 
 import type { Outcome } from "../link/protocol.js";
 import { answered, CANCELLED, cannotEnter, type Place, ran, runArgs, SANDBOX_STOPPED, supervise, timedOut } from "./command.js";
-import type { Answer, HostUser, Question } from "./protocol.js";
+import type { Answer, HostUser, Question, Share } from "./protocol.js";
 import { SessionRunner } from "./runner-process.js";
 
 // The sessions disk's folder of roots (vm/init), each named by its root session id.
@@ -131,14 +131,14 @@ async function mountShare(tag: string): Promise<string> {
 // everything in them with it. Killing unshare reaches them only while enter-root
 // builds them: the kernel drops the parent-death signal when the runner takes on
 // the root's user. Nothing is made, mounted or given until every input has passed.
-export async function enter(root: string, place: Place, tag: string, user: HostUser): Promise<ChildProcess> {
+export async function enter(root: string, place: Place, share: Share, user: HostUser): Promise<ChildProcess> {
   if (!ROOT_ID.test(root)) throw new Error(`not a root session id: ${root}`);
-  if (!TAG.test(tag)) throw new Error(`not a share tag: ${tag}`);
+  if (!TAG.test(share.tag)) throw new Error(`not a share tag: ${share.tag}`);
   if (!NAME.test(user.name)) throw new Error(`not a user name: ${user.name}`);
   checkPath(place.folder, "folder", /[\0\n]/);
   checkPath(place.home, "home folder", /[\0\n:]/);
   const uid = uidOf(root);
-  const share = await mountShare(tag);
+  const mount = await mountShare(share.tag);
   const cgroup = join(CGROUPS, root);
   // Made again for a root set up again once its runner was lost.
   await mkdir(cgroup, { recursive: true });
@@ -155,7 +155,7 @@ export async function enter(root: string, place: Place, tag: string, user: HostU
     [
       "-c", 'echo $$ > "$1/cgroup.procs" && shift && exec "$@"', "sh", cgroup,
       "/usr/bin/unshare", "--mount", "--pid", "--fork", "--kill-child", "--ipc", "--uts", "--net", "--cgroup", "--propagation", "private", "--",
-      ENTER_ROOT, join(SESSIONS, root), place.folder, share, place.home, String(uid), user.name,
+      ENTER_ROOT, join(SESSIONS, root), place.folder, mount, place.home, String(uid), user.name,
     ],
     { env: rootEnvironment(readFileSync(LAYOUT, "utf8"), user), stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -251,7 +251,7 @@ export class Root {
 
 export interface RootsOptions {
   // The root's runner, started in its namespaces as its own guest user; it checks what it is given first.
-  start(root: string, place: Place, tag: string, user: HostUser): ChildProcess | Promise<ChildProcess>;
+  start(root: string, place: Place, share: Share, user: HostUser): ChildProcess | Promise<ChildProcess>;
   // The root's guest uid.
   uid(root: string): number;
   // Ends every process of the root; resolves once they have all ended, or rejects.
@@ -274,9 +274,9 @@ export class Roots {
   }
 
   // Rejects with why the root's runner did not start.
-  async setup(root: string, folder: string, tag: string, user: HostUser): Promise<void> {
+  async setup(root: string, folder: string, share: Share, user: HostUser): Promise<void> {
     if (this.roots.has(root) || this.starting.has(root)) throw new Error(ALREADY);
-    const started = this.start(root, folder, tag, user);
+    const started = this.start(root, folder, share, user);
     this.starting.set(root, started);
     try {
       await started;
@@ -285,7 +285,7 @@ export class Roots {
     }
   }
 
-  private async start(root: string, folder: string, tag: string, user: HostUser): Promise<void> {
+  private async start(root: string, folder: string, share: Share, user: HostUser): Promise<void> {
     const place = { folder, home: user.home };
     let listed: Root | undefined;
     let ending: Promise<void> | undefined;
@@ -303,7 +303,7 @@ export class Roots {
         this.options.lost?.(root);
       }
     })());
-    const runner = new SessionRunner(await this.options.start(root, place, tag, user), () => void lose(), RUNNER_READY_MS);
+    const runner = new SessionRunner(await this.options.start(root, place, share, user), () => void lose(), RUNNER_READY_MS);
     try {
       await runner.ready;
     } catch (error) {

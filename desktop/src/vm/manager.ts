@@ -10,7 +10,7 @@ import { lstat, realpath } from "node:fs/promises";
 import type { Duplex } from "node:stream";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../guest/command.js";
-import type { FromAgent, HostUser } from "../guest/protocol.js";
+import type { FromAgent, HostUser, Share } from "../guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../hosts/messages.js";
 import type { Outcome } from "../link/protocol.js";
 import { ControlLink, type Request } from "./control.js";
@@ -23,6 +23,8 @@ const PING_MS = 10_000;
 const MISSED = 3;
 // The agent's own bounds on a setup, 5 s for the share and 5 s for the runner, fit inside it.
 const SETUP_MS = 15_000;
+// A share's hot-add, from the agent's uid to the folder in the guest (Section 11's timeouts).
+const SHARE_MS = 15_000;
 // The agent gives its roots uids from here up.
 const FIRST_UID = 10_000;
 
@@ -47,11 +49,12 @@ export interface VmBackend {
   /** Settles once the VM has gone, however it went, with the end of what its hypervisor said, or "". */
   readonly exited: Promise<string>;
   /**
-   * *folder* shared into the running guest, owned there by *uid*, its root's guest
-   * uid, and on the host by the host user. Resolves with the share's tag, which the
-   * agent mounts, or rejects with why not. A share whose server goes takes the VM with it.
+   * *folder* shared into the running guest for the root whose guest uid is *uid*.
+   * Resolves with how the agent mounts it, whose kind also says who maps the
+   * folder's owner to *uid* (protocol.ts, Share), or rejects with why not, by
+   * *deadline* (performance.now()). A share whose server goes takes the VM with it.
    */
-  share(folder: string, uid: number): Promise<string>;
+  share(folder: string, uid: number, deadline: number): Promise<Share>;
   /** Ends the VM at once; settles once all of it has gone. Its runtime files go at the next boot, or with the manager. */
   kill(): Promise<void>;
 }
@@ -96,7 +99,7 @@ const aborted = (signal: AbortSignal) => new Promise<"aborted">((resolve) => {
 });
 
 interface Root {
-  share: Promise<string>; // its share's tag, once added
+  share: Promise<Share>; // how the agent mounts its folder, once added
   setup: Promise<Outcome | null> | null; // null once set up, or why not
 }
 
@@ -149,6 +152,8 @@ export class Guest {
     const vm = await boot(options, signal, deadline);
     const halt = () => void vm.kill();
     signal?.addEventListener("abort", halt, { once: true });
+    // Stopped between the backend's listener and this one.
+    if (signal?.aborted) halt();
     try {
       const control = await ControlLink.open(vm.control, options.user, deadline, vm.exited);
       return new Guest(options, vm, control, launched, performance.now() - launched);
@@ -182,14 +187,16 @@ export class Guest {
     }
     const entry = known;
     entry.setup ??= (async () => {
-      let tag: string;
+      let share: Share;
       try {
-        tag = await entry.share;
+        share = await entry.share;
       } catch (error) {
         entry.setup = null;
+        // The guest went while the folder was being added: as what it ran.
+        if (this.left) return SANDBOX_STOPPED;
         return error instanceof FolderGone ? FOLDER_UNAVAILABLE : unavailable(`could not add this chat's folder: ${describe(error)}`);
       }
-      const answer = await this.request({ type: "setup", root, folder: folder.path, tag }, SETUP_MS);
+      const answer = await this.request({ type: "setup", root, folder: folder.path, share }, SETUP_MS);
       if (answer?.type === "done") return null;
       entry.setup = null;
       if (answer?.type === "failed") return unavailable(`could not set up this chat: ${answer.message}`);
@@ -202,20 +209,30 @@ export class Guest {
 
   /**
    * *folder*, shared into the guest for *root* once its identity is checked again
-   * and the agent has given the root's guest uid, which the share maps the host
-   * user to. Resolves with its share's tag.
+   * and the agent has given the root's guest uid. Resolves with how the agent mounts
+   * it. One not shared within SHARE_MS stops the guest, as a setup with no answer does.
    */
-  async share(root: string, folder: Folder): Promise<string> {
+  async share(root: string, folder: Folder): Promise<Share> {
+    const deadline = performance.now() + SHARE_MS;
     const found = await lstat(folder.path).catch(() => null);
     const real = await realpath(folder.path).catch(() => null);
     if (!found?.isDirectory() || found.dev !== folder.dev || found.ino !== folder.ino || real !== folder.path) throw new FolderGone();
-    const given = await this.request({ type: "uid", root });
-    // A uid the agent cannot have given goes into no share.
-    const uid = given?.type === "done" ? given.uid : undefined;
-    if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
-      throw new Error(given?.type === "failed" ? given.message : "the guest gave no uid a root can have");
+    const given = await this.request({ type: "uid", root }, Math.max(0, deadline - performance.now()));
+    if (!given) {
+      this.lose();
+      throw new Error("the guest gave no uid in time");
     }
-    return this.vm.share(folder.path, uid);
+    // A uid the agent cannot have given goes into no share.
+    const uid = given.type === "done" ? given.uid : undefined;
+    if (uid === undefined || !Number.isInteger(uid) || uid < FIRST_UID) {
+      throw new Error(given.type === "failed" ? given.message : "the guest gave no uid a root can have");
+    }
+    try {
+      return await this.vm.share(folder.path, uid, deadline);
+    } catch (error) {
+      if (performance.now() >= deadline) this.lose();
+      throw error;
+    }
   }
 
   /** Everything of *root* ends in the guest, its share left in place; its next operation sets it up again. */

@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Control, type ControlRoots } from "../src/guest/control.js";
 import { bootLinux, sweep } from "../src/vm/linux.js";
-import { type BootVm, bootFor, VmManager, type VmOptions } from "../src/vm/manager.js";
+import { type BootVm, bootFor, Guest, VmManager, type VmOptions } from "../src/vm/manager.js";
 import { VIRTIOFSD } from "../src/vm/qemu.js";
 
 let dir: string;
@@ -49,12 +49,15 @@ async function withQemu(script: string, body: () => Promise<void>): Promise<void
   }
 }
 
-// A VM whose control port reaches the guest's own Control on *roots*, with no QEMU: what the agent is asked, and when.
-const fakeVm = (roots: ControlRoots): BootVm => async () => {
+// A VM whose control port reaches the guest's own Control on *roots*, with no QEMU:
+// what the agent is asked, and when. Without roots, an agent that never says hello.
+const fakeVm = (roots?: ControlRoots): BootVm => async () => {
   const [host, guest] = duplexPair();
-  const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
-  createInterface({ input: guest }).on("line", (line) => control.receive(line));
-  control.hello();
+  if (roots) {
+    const control = new Control((message) => void guest.write(`${JSON.stringify(message)}\n`), roots);
+    createInterface({ input: guest }).on("line", (line) => control.receive(line));
+    control.hello();
+  }
   let gone = (_said: string) => {};
   const exited = new Promise<string>((resolve) => {
     gone = resolve;
@@ -62,7 +65,7 @@ const fakeVm = (roots: ControlRoots): BootVm => async () => {
   return {
     control: host,
     exited,
-    share: async () => "r1",
+    share: async () => ({ kind: "virtiofs", tag: "r1" }),
     kill: async () => {
       host.destroy();
       gone("");
@@ -120,6 +123,36 @@ describe("the VM manager on the host", () => {
     } finally {
       for (const child of impostors) child.kill("SIGKILL");
     }
+  });
+
+  it("spares a QEMU or virtiofsd its pidfiles name that is another folder's", async () => {
+    const run = join(dir, "vm");
+    const other = join(dir, "other");
+    mkdirSync(run);
+    mkdirSync(other);
+    // Another app's, at pids a stale pidfile here could name: the same programs, each naming its own folder's file.
+    const qemu = spawn("qemu-system-x86_64", ["-nodefaults", "-display", "none", "-machine", "none", "-pidfile", join(other, "qemu.pid")], { stdio: "ignore" });
+    const daemon = spawn(VIRTIOFSD, [`--shared-dir=${dir}`, `--socket-path=${join(other, "vfs-1.sock")}`, "--sandbox=none"], { stdio: "ignore" });
+    try {
+      await until(() => existsSync(join(other, "qemu.pid")) && existsSync(join(other, "vfs-1.sock")));
+      writeFileSync(join(run, "qemu.pid"), String(qemu.pid));
+      writeFileSync(join(run, "vfs-1.pid"), String(daemon.pid));
+      sweep(run);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect([alive(qemu.pid!), alive(daemon.pid!)]).toEqual([true, true]);
+    } finally {
+      qemu.kill("SIGKILL");
+      daemon.kill("SIGKILL");
+    }
+  });
+
+  it("starts nothing for a boot stopped before it began", async () => {
+    await withQemu(`echo $$ > '${join(dir, "qemu-pid")}'\nexec sleep 30`, async () => {
+      const stop = new AbortController();
+      stop.abort();
+      await expect(bootLinux(options(), stop.signal, performance.now() + 2_000)).rejects.toThrow("The boot was stopped");
+      expect(existsSync(join(dir, "qemu-pid"))).toBe(false);
+    });
   });
 
   it("answers that the sandbox did not start, in QEMU's own words, and makes the sessions disk sparse", async () => {
@@ -185,6 +218,21 @@ describe("the VM manager on a guest", () => {
     expect(asked).toEqual(["setup", "set up", "teardown"]);
     expect(await answer).toEqual({ ok: true });
     await manager.stop();
+  });
+});
+
+describe("a guest's boot", () => {
+  it("ends a VM whose boot is stopped just as its backend returns it", async () => {
+    const stop = new AbortController();
+    const boot: BootVm = async (...args) => {
+      const vm = await fakeVm()(...args);
+      // After the backend's own listener has gone, before the guest's is added.
+      stop.abort();
+      return vm;
+    };
+    const begun = performance.now();
+    await expect(Guest.boot(boot, options(), stop.signal)).rejects.toThrow("The VM exited");
+    expect(performance.now() - begun).toBeLessThan(1_000);
   });
 });
 

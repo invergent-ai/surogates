@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../src/guest/command.js";
-import type { HostUser } from "../src/guest/protocol.js";
+import type { HostUser, Share } from "../src/guest/protocol.js";
 import { enter, NOT_SET_UP, rootEnvironment, Roots } from "../src/guest/root.js";
 
 const RUNNER = fileURLToPath(new URL("../dist/guest/runner.js", import.meta.url));
+const R1: Share = { kind: "virtiofs", tag: "r1" };
 
 let base: string;
 let user: HostUser;
@@ -48,7 +49,7 @@ beforeEach(async () => {
   const own = children;
   lost = told;
   roots = new Roots({ start: bare, uid: () => 10_000, kill: () => void own[0]?.kill("SIGKILL"), lost: (root) => told.push(root) });
-  await roots.setup("root-1", base, "r1", user);
+  await roots.setup("root-1", base, R1, user);
 });
 
 afterEach(() => {
@@ -104,7 +105,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       uid: () => 10_000,
       kill: killLatest(children),
     });
-    await stalled.setup("root-5", base, "r1", user);
+    await stalled.setup("root-5", base, R1, user);
     const ask = (kind: string, args: Record<string, unknown>, signal: AbortSignal, id: string) => stalled.perform("root-5", kind, args, signal, id);
     expect(await ask("run", { command: "true", workdir: null, timeout: 0.3 }, new AbortController().signal, "op-5")).toEqual({
       ok: { output: "Command timed out after 0.3 seconds", returncode: 124, timed_out: true },
@@ -160,15 +161,15 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
 
   it("refuses to set up a root twice, at once too, and says why a runner did not start", async () => {
     const told: string[] = [];
-    await expect(roots.setup("root-1", base, "r1", user)).rejects.toThrow("This chat's sandbox is already set up");
-    const both = await Promise.allSettled([roots.setup("root-2", base, "r1", user), roots.setup("root-2", base, "r1", user)]);
+    await expect(roots.setup("root-1", base, R1, user)).rejects.toThrow("This chat's sandbox is already set up");
+    const both = await Promise.allSettled([roots.setup("root-2", base, R1, user), roots.setup("root-2", base, R1, user)]);
     expect(both.map((settled) => settled.status).sort()).toEqual(["fulfilled", "rejected"]);
     expect(children).toHaveLength(2);
     const broken = new Roots({
       start: () => spawn("sh", ["-c", "echo no namespaces >&2; exit 1"], { stdio: ["pipe", "pipe", "pipe"] }), uid: () => 10_000, kill: () => {},
       lost: (root) => told.push(root),
     });
-    await expect(broken.setup("root-3", base, "r1", user)).rejects.toThrow("no namespaces");
+    await expect(broken.setup("root-3", base, R1, user)).rejects.toThrow("no namespaces");
     expect(await broken.perform("root-3", "which", { name: "sh" }, new AbortController().signal, "op-4")).toEqual(NOT_SET_UP);
     // Never set up: nothing was lost.
     expect(told).toEqual([]);
@@ -187,7 +188,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       lost: (root) => told.push(root),
       questionMs: 300,
     });
-    await stalled.setup("root-7", base, "r1", user);
+    await stalled.setup("root-7", base, R1, user);
     const begun = performance.now();
     const looking = stalled.perform("root-7", "which", { name: "sh" }, new AbortController().signal, "op-12");
     const running = stalled.perform("root-7", "run", { command: "true", workdir: null, timeout: 30 }, new AbortController().signal, "op-13");
@@ -197,7 +198,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(told).toEqual(["root-7"]);
     expect(await stalled.perform("root-7", "which", { name: "sh" }, new AbortController().signal, "op-14")).toEqual(NOT_SET_UP);
     // Lost, it can be set up again.
-    await stalled.setup("root-7", base, "r1", user);
+    await stalled.setup("root-7", base, R1, user);
   });
 
   it("tears a root down: its work ends, no loss is told, and it can be set up again", async () => {
@@ -209,7 +210,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
     expect(await op("which", { name: "sh" }, undefined, "op-16")).toEqual(NOT_SET_UP);
     // Nothing set up: nothing to end.
     await roots.teardown("root-1");
-    await roots.setup("root-1", base, "r1", user);
+    await roots.setup("root-1", base, R1, user);
     expect(await op("which", { name: "sh" }, undefined, "op-17")).toEqual({ ok: true });
   });
 
@@ -225,16 +226,16 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       }),
       lost: (root) => told.push(root),
     });
-    await slow.setup("root-8", base, "r1", user);
+    await slow.setup("root-8", base, R1, user);
     children.at(-1)?.kill("SIGKILL");
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(told).toEqual([]);
     // Something of it still runs: it is not set up again.
-    await expect(slow.setup("root-8", base, "r1", user)).rejects.toThrow("This chat's sandbox is already set up");
+    await expect(slow.setup("root-8", base, R1, user)).rejects.toThrow("This chat's sandbox is already set up");
     empty();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(told).toEqual(["root-8"]);
-    await slow.setup("root-8", base, "r1", user);
+    await slow.setup("root-8", base, R1, user);
     const unkillable = new Roots({
       start: () => {
         const child = spawn(process.execPath, ["-e", STALLED], { stdio: ["pipe", "pipe", "pipe"] });
@@ -248,7 +249,7 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       lost: (root) => told.push(root),
       questionMs: 300,
     });
-    await unkillable.setup("root-9", base, "r1", user);
+    await unkillable.setup("root-9", base, R1, user);
     expect(await unkillable.perform("root-9", "which", { name: "sh" }, new AbortController().signal, "op-18")).toEqual(SANDBOX_STOPPED);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(told).toEqual(["root-8", "root-9"]);
@@ -265,11 +266,11 @@ describe("a root's commands in its runner", { timeout: 20_000 }, () => {
       uid: () => 10_000,
       kill: (root) => void runners.get(root)?.kill("SIGKILL"),
     });
-    const setting = own.setup("root-2", base, "r1", user);
+    const setting = own.setup("root-2", base, R1, user);
     await own.teardown("root-2");
     await setting;
     expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-19")).toEqual(NOT_SET_UP);
-    await own.setup("root-2", base, "r1", user);
+    await own.setup("root-2", base, R1, user);
     expect(await own.perform("root-2", "which", { name: "sh" }, new AbortController().signal, "op-20")).toEqual({ ok: true });
   });
 
@@ -296,7 +297,7 @@ describe("a root's inputs", () => {
     ["root-1", { ...place, home: "/home/a:na" }, "r1", ana, "not a home folder: /home/a:na"],
     ["root-1", { ...place, home: "/home/ana/" }, "r1", ana, "not a home folder: /home/ana/"],
   ])("refuses %s %j %s %j before anything is given", async (root, at, tag, user, message) => {
-    await expect(enter(root, at, tag, user)).rejects.toThrow(message);
+    await expect(enter(root, at, { kind: "virtiofs", tag }, user)).rejects.toThrow(message);
   });
 });
 

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
-import type { HostUser } from "../../src/guest/protocol.js";
+import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { FOLDER_UNAVAILABLE } from "../../src/hosts/messages.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { type Folder, Guest, VmManager, type VmOptions } from "../../src/vm/manager.js";
@@ -21,6 +21,7 @@ const AGENT_DISK = fileURLToPath(new URL("../../vm/agent-disk.sh", import.meta.u
 const ROOT = "0b6c1d3e-6f0a-4c1e-9a52-6a1d2c3b4e5f";
 const OTHER = "7d8e9f00-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
 const FIRST_UID = 10_000;
+const R1: Share = { kind: "virtiofs", tag: "r1" };
 // Sockets of families whose modules a stock kernel loads on demand: AppleTalk,
 // X.25, CAN, RxRPC, Phonet, AF_ALG and vsock, then SCTP.
 const SOCKETS = [
@@ -72,7 +73,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
 
   const run = (command: string, root = ROOT, timeout = 30) => guest.op(root, "run", { command, workdir: null, timeout }, signal());
   // *path* added to the guest for *root*, then *root* set up on it.
-  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, tag: await guest.share(root, folderOf(path)) });
+  const setUp = async (root: string, path: string) => guest.request({ type: "setup", root, folder: path, share: await guest.share(root, folderOf(path)) });
 
   // The first boot formats the sessions disk; the tests run on the second, which checks it, as every later boot does.
   beforeAll(async () => {
@@ -108,17 +109,18 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run("pwd; echo $HOME; id -un")).toEqual({
       ok: { output: `${folder}\n${USER.home}\n${USER.name}\n`, returncode: 0, timed_out: false },
     });
-    expect(await guest.request({ type: "setup", root: ROOT, folder, tag: "r1" })).toMatchObject({
+    expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1 })).toMatchObject({
       type: "failed", message: "This chat's sandbox is already set up",
     });
     expect(await run("true", OTHER)).toMatchObject({ error: { type: "unavailable" } });
-    for (const [field, value, message] of [
-      ["tag", "../r1", "not a share tag: ../r1"],
-      ["folder", "relative/path", "not a folder: relative/path"],
-      ["folder", "/", "not a folder: /"],
-      ["root", "../etc", "not a root session id: ../etc"],
+    const valid = { type: "setup", root: OTHER, folder, share: R1 } as const;
+    for (const [fields, message] of [
+      [{ share: { kind: "virtiofs", tag: "../r1" } }, "not a share tag: ../r1"],
+      [{ folder: "relative/path" }, "not a folder: relative/path"],
+      [{ folder: "/" }, "not a folder: /"],
+      [{ root: "../etc" }, "not a root session id: ../etc"],
     ] as const) {
-      expect(await guest.request({ type: "setup", root: OTHER, folder, tag: "r1", [field]: value })).toEqual(expect.objectContaining({
+      expect(await guest.request({ ...valid, ...fields })).toEqual(expect.objectContaining({
         type: "failed", message,
       }));
     }
@@ -278,7 +280,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
       const path = join(dir, `more-${n}`);
       mkdirSync(path);
       const added = guest.share(`root-${n}`, folderOf(path));
-      if (n <= 8) expect(await added).toBe(`r${n}`);
+      if (n <= 8) expect(await added).toEqual({ kind: "virtiofs", tag: `r${n}` });
       else await expect(added).rejects.toThrow("it holds 8 folders already, its most until the app restarts");
     }
   });
@@ -534,6 +536,26 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the VM manager", { timeo
       for (const pid of share) process.kill(pid, "SIGCONT");
     }
     expect(await op(ROOT, a, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
+  });
+
+  it("stops a guest that has not added a root's folder in 15 s, and answers as stopped by the sandbox", async () => {
+    const slow = join(dir, "slow");
+    mkdirSync(slow);
+    const pid = qemuPid();
+    process.kill(pid, "SIGSTOP");
+    const begun = performance.now();
+    try {
+      expect(await op("slow", slow, "run", { command: "true", workdir: null, timeout: 10 })).toEqual(SANDBOX_STOPPED);
+    } finally {
+      try {
+        process.kill(pid, "SIGCONT");
+      } catch {
+        // Gone with its guest.
+      }
+    }
+    // The share's 15 s, before three keepalives at 10 s each would be missed.
+    expect(performance.now() - begun).toBeLessThan(20_000);
+    expect(await op("slow", slow, "run", { command: "echo back", workdir: null, timeout: 10 })).toMatchObject({ ok: { output: "back\n" } });
   });
 
   it("stops a guest that misses three keepalives, and boots a new one for the next operation", async () => {
