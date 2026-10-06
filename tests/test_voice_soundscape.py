@@ -296,3 +296,20 @@ async def test_two_calls_filling_the_cache_at_once_both_get_their_sounds(tmp_pat
     assert results == [tmp_path, tmp_path]
     assert _json.loads((tmp_path / "manifest.json").read_text())["level_dbfs"] == -20
     assert not list(tmp_path.glob("*.part*"))
+
+
+def test_a_clip_is_decoded_once_per_pod_not_once_per_call(tmp_path, monkeypatch):
+    import surogates.voice.soundscape as sc
+    decoded = []
+
+    def fake_decode(path, rate):
+        decoded.append(path.name)
+        return tone(0.2, 440)
+
+    monkeypatch.setattr(sc, "decode_av", fake_decode)
+    clip = tmp_path / "room-clinic-1a2b.ogg"
+    clip.write_bytes(b"ogg")
+    first = sc.decode_cached(clip, RATE)
+    second = sc.decode_cached(clip, RATE)  # the next call, in another process: from the cache
+    assert decoded == ["room-clinic-1a2b.ogg"]
+    assert np.array_equal(first, second)

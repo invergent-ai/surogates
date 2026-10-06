@@ -15,18 +15,19 @@ serves (``manifest.json`` plus audio); this module holds no audio of its own.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
-import os
 import random
 import re
-import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from surogates.storage.backend import _atomic_write_bytes
 
 log = logging.getLogger("surogates.voice")
 
@@ -91,6 +92,23 @@ def decode_av(path: Path, rate: int) -> np.ndarray:
     return np.concatenate(out).astype(np.float32) if out else np.zeros(0, np.float32)
 
 
+def decode_cached(path: Path, rate: int) -> np.ndarray:
+    """``decode_av``, once per clip per pod: the decoded samples are kept beside the clip (``.npy``,
+    memory-mapped on reuse). Clips are content-named, so a kept decode never goes stale; every call is
+    its own process, so an in-memory cache would not outlive one call."""
+    kept = path.with_name(f"{path.name}.{rate}.npy")
+    if kept.exists():
+        try:
+            return np.load(kept, mmap_mode="r")
+        except (OSError, ValueError):  # a damaged file: decode again below
+            pass
+    samples = decode_av(path, rate)
+    buf = io.BytesIO()
+    np.save(buf, samples)
+    _atomic_write_bytes(kept, buf.getvalue())
+    return samples
+
+
 @dataclass
 class Pack:
     """The clips one call needs. Every clip is stored at the same loudness (``level_dbfs`` RMS)."""
@@ -105,7 +123,7 @@ class Pack:
 
     @classmethod
     def load(cls, directory: Path, settings: SoundSettings, *, rate: int = 48000,
-             decode: Callable[[Path, int], np.ndarray] = decode_av) -> Pack:
+             decode: Callable[[Path, int], np.ndarray] = decode_cached) -> Pack:
         """Only what ``settings`` uses; an unknown scene or hold loads nothing for it."""
         m = json.loads((directory / "manifest.json").read_text())
         pack = cls(rate=rate, level_dbfs=float(m["level_dbfs"]), voice_dbfs=float(m.get("voice_dbfs", -20.0)))
@@ -141,14 +159,6 @@ def pack_files(manifest: Mapping[str, Any], settings: SoundSettings) -> list[str
 SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*\.(ogg|mp3|json)$")
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Write via a temp file of this writer's own: calls start in parallel (a process each, one cache),
-    and a shared temp name let one call move away, or half-overwrite, another's file."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part")
-    tmp.write_bytes(data)
-    tmp.replace(path)  # atomic: a reader sees the old file or the new one, never half of one
-
-
 async def fetch_pack(get: Callable[[str], Any], cache: Path, settings: SoundSettings) -> Path | None:
     """Download what a call needs into ``cache`` (files are content-named, so a cached one is never stale).
 
@@ -160,13 +170,16 @@ async def fetch_pack(get: Callable[[str], Any], cache: Path, settings: SoundSett
     try:
         manifest = json.loads(await get("manifest.json"))
         cache.mkdir(parents=True, exist_ok=True)
-        for name in pack_files(manifest, settings):
-            if not SAFE_NAME.match(name):
-                raise ValueError(f"unsafe file name in the sound pack: {name!r}")
-            path = cache / name
-            if not path.exists():
-                _write_atomic(path, await get(name))
-        _write_atomic(cache / "manifest.json", json.dumps(manifest).encode())
+        names = pack_files(manifest, settings)
+        if bad := [n for n in names if not SAFE_NAME.match(n)]:
+            raise ValueError(f"unsafe file name in the sound pack: {bad[0]!r}")
+        missing = [n for n in names if not (cache / n).exists()]
+        for name, data in zip(missing, await asyncio.gather(*(get(n) for n in missing))):
+            _atomic_write_bytes(cache / name, data)
+        raw = json.dumps(manifest).encode()
+        kept = cache / "manifest.json"
+        if not kept.exists() or kept.read_bytes() != raw:
+            _atomic_write_bytes(kept, raw)
         return cache
     except Exception:
         log.warning("sound pack unavailable; the call has no background", exc_info=True)
