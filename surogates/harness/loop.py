@@ -77,7 +77,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
-from surogates.workstreams import is_project_master
+from surogates.workstreams import is_project_master, master_refusal
 from surogates.harness.tool_schemas import (
     drop_unusable_tools,
     filter_schemas_for_tenant,
@@ -963,10 +963,7 @@ class AgentHarness(
             and session is not None
             and is_project_master(session.config)
         ):
-            return (
-                f"/{name} does not run in a project's conversation. "
-                "Ask for the work here, and it is given to a thread."
-            )
+            return master_refusal(name)
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."

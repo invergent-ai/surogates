@@ -22,6 +22,14 @@ def is_project_master(config: dict[str, Any] | None) -> bool:
     return (config or {}).get("workstream_role") == COORDINATOR
 
 
+def master_refusal(command: str) -> str:
+    """What a master answers to a command that would do its work in place."""
+    return (
+        f"/{command} does not run in a project's conversation. "
+        "Ask for the work here, and it is given to a thread."
+    )
+
+
 def master_instructions(name: str, goal: str | None, instructions: str) -> str:
     """The master's session instructions: the project's name, goal and instructions."""
     return "\n\n".join(part for part in (f"Project: {name}", goal and f"Goal: {goal}", instructions) if part)

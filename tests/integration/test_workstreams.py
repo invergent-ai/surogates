@@ -486,6 +486,25 @@ async def test_a_master_keeps_its_routines(api, monkeypatch):
     assert _llm_responses(store) == []
 
 
+async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
+    # The web composer turns "/goal <text>" into this event, never a message.
+    master = await master_of(api, await create(api))
+    response = await api.client.post(
+        f"/v1/sessions/{master.id}/events",
+        json={"events": [{
+            "type": "user.define_outcome",
+            "description": "Ship the Q3 report",
+            "rubric": {"type": "text", "content": "- the report is filed"},
+        }]},
+        headers=api.auth(),
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == (
+        "/goal does not run in a project's conversation. Ask for the work here, and it is given to a thread."
+    )
+    assert "outcome" not in (await api.app.state.session_store.get_session(master.id)).config
+
+
 async def system_prompt(api, session) -> str:
     tenant = TenantContext(
         org_id=api.org_id, user_id=api.user_id, org_config={}, user_preferences={},

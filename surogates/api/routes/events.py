@@ -23,6 +23,7 @@ from surogates.session.models import Event
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.workstreams import is_project_master, master_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,13 @@ async def send_session_events(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Unsupported event type: {event.type}",
+            )
+        # The web composer sends "/goal <text>" as this event, around the
+        # harness's slash gate, so a master refuses it here.
+        if is_project_master(session.config):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=master_refusal("goal"),
             )
 
         rubric_text = _rubric_text_or_422(event.rubric)
