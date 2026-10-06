@@ -77,6 +77,7 @@ from surogates.harness.structured_output import generate_structured, parse_json_
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.channels.memory_boundary import MANAGED_CHANNELS
+from surogates.workstreams import is_project_master
 from surogates.harness.tool_schemas import (
     drop_unusable_tools,
     filter_schemas_for_tenant,
@@ -341,6 +342,16 @@ def _slash_command_name(content: str | None) -> str | None:
     if parse_deep_research_command(content) is not None:
         return "deep-research"
     return None
+
+
+#: Commands that do their work in the conversation itself.  A project's
+#: master works through threads: a goal, a mission or an auto-research run
+#: there could neither delegate nor do the work, ``/deep-research`` hands its
+#: topic to ``delegate_task``, and ``/code`` clones into the project's shared
+#: workspace.  ``/loop`` (a routine), ``/compress`` and ``/clear`` still run.
+_PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
+    "goal", "mission", "auto-research", "code", "deep-research",
+})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
@@ -945,7 +956,18 @@ class AgentHarness(
         off for this agent (or excluded from the sender's plan), else None
         (allowed, or not a gateable command)."""
         name = _slash_command_name(content)
-        if name is None or self._slash_command_enabled(name, session):
+        if name is None:
+            return None
+        if (
+            name in _PROJECT_MASTER_REFUSED_COMMANDS
+            and session is not None
+            and is_project_master(session.config)
+        ):
+            return (
+                f"/{name} does not run in a project's conversation. "
+                "Ask for the work here, and it is given to a thread."
+            )
+        if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
 
@@ -4130,6 +4152,15 @@ class AgentHarness(
                         {"read_file", "search_files", "list_files"}
                         - user_excluded
                     )
+                if is_project_master(config):
+                    from surogates.tools.builtin.coordinator import (
+                        PROJECT_MASTER_EXCLUDED_TOOLS,
+                        PROJECT_MASTER_READ_TOOLS,
+                    )
+
+                    user_excluded = set(config.get("excluded_tools") or [])
+                    excluded -= PROJECT_MASTER_READ_TOOLS - user_excluded
+                    excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])

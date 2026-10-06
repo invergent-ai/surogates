@@ -3,16 +3,29 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 from sqlalchemy import delete, select
 
+import surogates.harness.loop as loop_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import Session, SessionCursor, Workstream
 from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
 from surogates.tenant.auth.jwt import create_service_account_session_token
+from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
+from tests.test_harness_resilience import _make_harness
+from tests.test_wake_slash_command_gate import (
+    _harness,
+    _llm_responses,
+    _permissive,
+    _stub_store,
+    _user_event,
+)
 
 from .conftest import issue_service_account_token
 from .test_devices import AGENT_ID, add_user, api  # noqa: F401  (api is a fixture)
@@ -365,3 +378,72 @@ async def test_config_cannot_make_a_chat_part_of_a_project(api):
     assert not {"workstream_id", "workstream_role", "workstream_tier"} & set(config)
     listed = await api.client.get("/v1/sessions", headers=api.auth())
     assert [s["id"] for s in listed.json()["sessions"]] == [response.json()["id"]]
+
+
+def harness_with_every_tool():
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    return _make_harness(tool_registry=registry, prompt_builder=SimpleNamespace(has_agents=False))
+
+
+async def test_a_master_reads_and_coordinates_but_does_no_work_itself(api):
+    master = await master_of(api, await create(api))
+    tools = harness_with_every_tool()._tool_filter_for_session(master)
+    assert {
+        "read_file", "search_files", "list_files", "kb_list_pages", "kb_read_page", "kb_search_pages",
+        "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
+        "cron_create", "cron_list", "cron_delete",
+    } <= tools
+    assert not tools & {
+        "write_file", "patch", "terminal", "web_search", "browser_navigate", "create_artifact",
+        "spawn_worker", "send_worker_message", "stop_worker", "delegate_task",
+        "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
+    }
+
+
+async def test_a_mission_coordinator_keeps_its_own_tools(api):
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    session.config.update(coordinator=True, strict_coordinator=True)
+    tools = harness_with_every_tool()._tool_filter_for_session(session)
+    assert {"spawn_worker", "delegate_task", "spawn_task", "run_coding_agent"} <= tools
+    assert not tools & {"read_file", "kb_read_page"}
+
+
+def woken_on(monkeypatch, session, message: str):
+    """A harness that wakes *session* on *message*, its command handlers stubbed."""
+    monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
+    store = _stub_store(session, [_user_event(10, message)])
+    harness = _harness(store, _permissive())
+    for handler in (
+        "_handle_goal_command", "_handle_mission_command", "_handle_auto_research_command",
+        "_handle_code_command", "_handle_loop_command", "_run_loop",
+    ):
+        setattr(harness, handler, AsyncMock())
+    return harness, store
+
+
+@pytest.mark.parametrize("message, handler", [
+    ("/goal Ship the Q3 report", "_handle_goal_command"),
+    ("/mission Audit the Q3 figures", "_handle_mission_command"),
+    ("/auto-research Find the best forecast", "_handle_auto_research_command"),
+    ("/code Fix the totals script", "_handle_code_command"),
+    ("/deep-research The Q3 market", "_run_loop"),
+], ids=["goal", "mission", "auto-research", "code", "deep-research"])
+async def test_a_master_refuses_the_commands_that_work_in_place(api, monkeypatch, message, handler):
+    master = await master_of(api, await create(api))
+    harness, store = woken_on(monkeypatch, master, message)
+    await harness.wake(master.id)
+    command = message.split()[0]
+    assert _llm_responses(store) == [
+        f"{command} does not run in a project's conversation. Ask for the work here, and it is given to a thread."
+    ]
+    getattr(harness, handler).assert_not_awaited()
+
+
+async def test_a_master_keeps_its_routines(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    harness, store = woken_on(monkeypatch, master, "/loop 1d Check the cash report")
+    await harness.wake(master.id)
+    harness._handle_loop_command.assert_awaited_once()
+    assert _llm_responses(store) == []
