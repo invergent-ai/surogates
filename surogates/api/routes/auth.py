@@ -108,6 +108,9 @@ class AuthConfigResponse(BaseModel):
     # Desktop.  An older server omits it, and the desktop then offers cloud
     # chats only.
     desktop_sessions: bool = True
+    # Projects: coordinator chats under /v1/workstreams.  An older server
+    # omits it, and the desktop then shows no Projects.
+    workstreams: bool = True
     # Active messaging channels an end-user can link their identity to
     # (subset of slack/teams/telegram).  Empty means the agent has no
     # such channel, so the SPA hides "Connected Channels" entirely.

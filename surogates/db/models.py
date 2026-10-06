@@ -2072,3 +2072,52 @@ class IdeaNode(Base):
     updated_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+# ---------------------------------------------------------------------------
+# Projects -- a sidecar table; `sessions` is never altered.
+# ---------------------------------------------------------------------------
+
+
+class Workstream(Base):
+    """A project: one user's coordinator chat, the master session.
+
+    The UI says "Projects"; the code says ``workstreams``, because a project
+    is already the ops tenant.  Archiving keeps the row, its files and its
+    memory.  Deleting the user deletes the row (``purge_user_account``), and
+    so does ops's hard delete of the master session, by the cascade.
+    """
+
+    __tablename__ = "workstreams"
+    __table_args__ = (Index("idx_workstreams_owner", "org_id", "agent_id", "user_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
+    )
+    # Logical reference to the ops ``Agent.id`` (another database, so no FK).
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    icon: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    goal: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    master_session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    # 'basic' | 'pro', or NULL for the agent's own tier.
+    coordinator_tier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    thread_tier: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 'active' | 'archived'
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

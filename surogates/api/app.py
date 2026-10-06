@@ -719,6 +719,7 @@ def create_app() -> FastAPI:
         transparency,
         website,
         workspace,
+        workstreams,
     commerce,
     firebase_auth_proxy,
 )
@@ -796,6 +797,7 @@ def create_app() -> FastAPI:
     app.include_router(inbox.router, prefix="/v1", tags=["inbox"])
     app.include_router(devices.router, prefix="/v1", tags=["devices"])
     app.include_router(missions.router, prefix="/v1", tags=["missions"])
+    app.include_router(workstreams.router, prefix="/v1", tags=["workstreams"])
     # OpenAI-compatible facade. Mounted at /v1 so its own "/api/..." paths
     # land on /v1/api/chat/completions -- inside the service-account path
     # prefix, which is the only place a surg_sk_ token is accepted.
