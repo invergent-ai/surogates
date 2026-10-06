@@ -137,6 +137,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # Channel message read — same rationale: needs the session-scoped API
     # client to call the ops server; no sandbox isolation.
     "fetch_channel_messages": ToolLocation.HARNESS,
+    # Phone call end — only records the decision; the voice process hangs up.
+    "end_call": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
     "terminal": ToolLocation.SANDBOX,
     "read_file": ToolLocation.SANDBOX,

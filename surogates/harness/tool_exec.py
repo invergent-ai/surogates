@@ -23,6 +23,7 @@ from surogates.devices.binding import device_of
 from surogates.devices.sandbox import INTERRUPTED, UNAVAILABLE_TOOLS, device_call_for, refusal
 from surogates.session.events import EventType
 from surogates.harness.message_utils import make_skipped_tool_result
+from surogates.harness.resilience import unknown_tool_error
 from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
     ToolGuardrails,
@@ -1195,6 +1196,7 @@ async def _run_single_tool(
     expert_transcript: Any | None = None,
     interrupt_check: Callable[[], bool] | None = None,
     replay_of: int | None = None,
+    offered_tools: frozenset[str] | None = None,
 ) -> dict:
     from surogates.trace import get_trace, new_span
 
@@ -1252,6 +1254,33 @@ async def _run_single_tool(
         )
     else:
         _call_event_id = replay_of
+
+    # A streamed call starts before the loop's own check of the response,
+    # which refuses a tool the model was not sent; *offered_tools* is that
+    # check here.  Nothing else may run first: governance could ask a
+    # human to approve a tool the session does not have.
+    if offered_tools is not None and tool_name not in offered_tools:
+        result_content = unknown_tool_error(tool_name, offered_tools)
+        result_event_id = await store.emit_event(
+            session.id,
+            EventType.TOOL_RESULT,
+            {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": result_content,
+                "elapsed_ms": 0,
+            },
+        )
+        await store.advance_harness_cursor(
+            session.id,
+            through_event_id=result_event_id,
+            lease_token=lease.lease_token,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": result_content,
+        }
 
     if parse_error is not None:
         result_content = json.dumps(

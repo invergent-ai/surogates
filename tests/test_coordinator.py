@@ -114,6 +114,7 @@ class TestSpawnWorker:
                     session_id=str(child_id),
                 ): 0,
             },
+            lt=True,
         )
 
     @pytest.mark.asyncio
@@ -236,6 +237,7 @@ class TestSendWorkerMessage:
                     session_id=str(worker_id),
                 ): 0,
             },
+            lt=True,
         )
 
     @pytest.mark.asyncio
@@ -409,6 +411,7 @@ class TestWorkerNotification:
                     session_id=str(parent_id),
                 ): 0,
             },
+            lt=True,
         )
 
     @pytest.mark.asyncio
@@ -504,5 +507,6 @@ class TestDelegateQueueFix:
                     session_id=str(child_id),
                 ): 0,
             },
+            lt=True,
         )
         redis.lpush.assert_not_called()

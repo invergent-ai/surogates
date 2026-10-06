@@ -1,0 +1,12 @@
+# Local livekit-sip; dev keys only.
+api_key: devkey
+api_secret: secret
+ws_url: ws://livekit:7880
+redis:
+  address: lk-redis:6379
+sip_port: 5060
+rtp_port: 10000-10100
+use_external_ip: false
+health_port: 8080
+logging:
+  level: info

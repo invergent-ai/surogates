@@ -12,6 +12,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from surogates.channels.constants import ADAPTER_CHANNELS, VOICE_TOOLS
+
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
@@ -71,13 +73,20 @@ _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def channel_tool_flags(channel: str | None) -> dict[str, bool]:
+    """Which channel-bound tools a session on ``channel`` can use: the text channels' tools (read the
+    channel's messages or files, post into it) need a text channel adapter; a phone call has its own."""
+    return {"has_channel": channel in ADAPTER_CHANNELS, "is_voice": channel == "voice"}
+
+
 def drop_unusable_tools(
     schemas: list[dict[str, Any]],
     *,
     has_kbs: bool,
     has_channel: bool,
-    is_scheduled: bool,
+    makes_routines: bool,
     is_whiteboard: bool = False,
+    is_voice: bool = False,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -87,6 +96,10 @@ def drop_unusable_tools(
     distinction is what makes this safe to apply to every agent rather
     than to one benchmark workload.
 
+    The cron tools go to a session that *makes_routines* through its
+    model: a project's master with ``/loop`` on.  Any other chat makes
+    one by typing ``/loop``, and a scheduled run may not make another.
+
     Never returns an empty list: a request with no tools at all is worse
     than an oversized one.
     """
@@ -95,10 +108,12 @@ def drop_unusable_tools(
         drop |= _KB_TOOLS
     if not has_channel:
         drop |= _CHANNEL_TOOLS
-    if not is_scheduled:
+    if not makes_routines:
         drop |= _CRON_TOOLS
     if not is_whiteboard:
         drop |= _WHITEBOARD_TOOLS
+    if not is_voice:
+        drop |= VOICE_TOOLS
     if not drop:
         return schemas
 

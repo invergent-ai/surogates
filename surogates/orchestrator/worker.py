@@ -80,6 +80,7 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 #: service-account principal (when the agent has one) instead of the end user.
 #: One source of truth with the memory-boundary set so credential-switching and
 #: conversation-scoped memory isolation can never drift to different channels.
+from surogates.channels.constants import REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
     is_eval_session,
@@ -1583,6 +1584,8 @@ async def run_worker(settings: Settings) -> None:
                             session_id=session.id,
                             agent_id=ctx.agent_id,
                             is_service_account=is_service_account,
+                            # a call wakes once per caller turn; reuse its tool list
+                            cache_ttl=300 if session.channel in REALTIME_CHANNELS else 0,
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
@@ -2084,7 +2087,8 @@ async def run_worker(settings: Settings) -> None:
         # summary model is configured.
         from surogates.harness.turn_summarizer import TurnSummarizer
 
-        if settings.worker.emit_turn_summaries:
+        # A phone call skips recaps (see wants_turn_summary): no summarizer, no summary calls.
+        if settings.worker.emit_turn_summaries and session.channel not in REALTIME_CHANNELS:
             turn_summarizer: TurnSummarizer | None = TurnSummarizer(
                 base_client=llm_client,
                 base_model=model_id,

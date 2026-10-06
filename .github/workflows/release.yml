@@ -91,6 +91,8 @@ jobs:
             name: surogates-agent-browser
           - dir: ssh-agent
             name: surogates-ssh-agent
+          - dir: voice
+            name: surogates-voice
     steps:
       - uses: actions/checkout@v4
 

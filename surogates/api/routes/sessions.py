@@ -73,6 +73,7 @@ from surogates.runtime import (
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.context import TenantContext
+from surogates.workstreams import SERVER_OWNED_KEYS, is_project_master
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +499,20 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
+def _require_not_project_master(session: Session, tenant: TenantContext, instead: str) -> None:
+    """409 a user's archive or rename of a project's master chat.
+
+    The project owns those: its routes archive and rename the master with it.
+    A service account (the ops console) archives the master as any chat, and
+    the project is archived with it.
+    """
+    if tenant.user_id is not None and is_project_master(session.config):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This chat is a project's coordinator: {instead}.",
+        )
+
+
 def _require_service_account_api_route(
     request: Request,
     tenant: TenantContext,
@@ -605,6 +620,10 @@ def apply_eval_isolation(config: dict, *, channel: str) -> dict:
     resolved.pop("memory_boundary", None)
     resolved.pop("workspace_boundary", None)
     resolved.pop("channel", None)
+    # A project's keys say a session is its master or one of its threads,
+    # which decides its tools, its prompt and the lists it shows in.
+    for key in SERVER_OWNED_KEYS:
+        resolved.pop(key, None)
     if channel != API_CHANNEL:
         return resolved
     partition_id = str(resolved.get("eval_partition_id") or "").strip()
@@ -1652,6 +1671,8 @@ async def list_sessions(
         # conversation (and its subtree) is listed — multi-era chats
         # stay hidden until the capability is re-enabled.
         single_session_only=not agent_runtime.multi_session,
+        # A project's master is listed with its project, not as a chat.
+        exclude_project_masters=True,
     )
 
     # Pagination is over roots; any descendants ride along with their root, so
@@ -1901,6 +1922,7 @@ async def update_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    _require_not_project_master(session, tenant, "rename the project instead")
 
     await store.update_session_title(session_id, body.title)
     return await store.get_session(session_id)
@@ -1923,10 +1945,24 @@ async def delete_session(
 ) -> None:
     """Archive (soft-delete) a session and delete its workspace storage."""
     _require_service_account_api_route(request, tenant)
-    store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    _require_not_project_master(session, tenant, "archive the project instead")
+    await archive_session_tree(request, session, background_tasks)
 
+
+async def archive_session_tree(
+    request: Request, session: Session, background_tasks: BackgroundTasks,
+) -> None:
+    """Archive *session* and every session under it, as deleting a chat does.
+
+    Their schedules and missions go, a project whose master is among them is
+    archived, their computers and browsers stop, their workers are
+    interrupted, and their workspaces are deleted after the response, except
+    a boundary workspace, which its siblings share.
+    """
+    store = _get_session_store(request)
+    session_id = session.id
     archived_sessions = await store.archive_session_tree_and_delete_schedules(
         session_id,
         org_id=session.org_id,

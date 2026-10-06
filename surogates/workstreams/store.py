@@ -1,0 +1,73 @@
+"""The ``workstreams`` rows: one user's projects for one agent."""
+
+from __future__ import annotations
+
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from surogates.db.models import Session as SessionRow
+from surogates.db.models import Workstream
+from surogates.workstreams import master_instructions
+
+
+def _owned(workstream_id: UUID | None, *, org_id: UUID, agent_id: str, user_id: UUID) -> tuple[Any, ...]:
+    """The owner's live projects, or the one with *workstream_id* among them."""
+    clauses = (
+        Workstream.org_id == org_id,
+        Workstream.agent_id == agent_id,
+        Workstream.user_id == user_id,
+        Workstream.status == "active",
+    )
+    return clauses if workstream_id is None else (*clauses, Workstream.id == workstream_id)
+
+
+class WorkstreamStore:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._sf = session_factory
+
+    async def create(self, **values: Any) -> Workstream:
+        row = Workstream(**values)
+        async with self._sf() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        return row
+
+    async def list(self, **owner: Any) -> list[Workstream]:
+        async with self._sf() as db:
+            rows = await db.scalars(
+                select(Workstream).where(*_owned(None, **owner)).order_by(Workstream.updated_at.desc())
+            )
+            return list(rows)
+
+    async def get(self, workstream_id: UUID, **owner: Any) -> Workstream | None:
+        async with self._sf() as db:
+            return await db.scalar(select(Workstream).where(*_owned(workstream_id, **owner)))
+
+    async def change(self, workstream_id: UUID, changes: dict[str, Any], **owner: Any) -> Workstream | None:
+        """Apply *changes* to a live project of the owner's and write them
+        through to its master, in one transaction; None when there is none.
+
+        The project row's lock orders two changes sent at once, so the master
+        ends with the instructions and tier of the one that lands last.
+        """
+        async with self._sf() as db:
+            row = await db.scalar(
+                update(Workstream).where(*_owned(workstream_id, **owner)).values(**changes).returning(Workstream)
+            )
+            if row is None:
+                return None
+            master = await db.get(SessionRow, row.master_session_id, with_for_update=True)
+            config = dict(master.config or {})
+            config["system"] = master_instructions(row.name, row.goal, row.instructions)
+            if row.coordinator_tier is None:
+                config.pop("workstream_tier", None)
+            else:
+                config["workstream_tier"] = row.coordinator_tier
+            master.config = config
+            master.title = row.name
+            await db.commit()
+            return row

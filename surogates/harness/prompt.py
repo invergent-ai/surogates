@@ -25,6 +25,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
+from surogates.workstreams import is_project_master
 
 if TYPE_CHECKING:
     from surogates.memory.manager import MemoryManager
@@ -325,12 +326,18 @@ class PromptBuilder:
             # that doesn't exist.
             parts.append(self._prompts.get("guidance/cron_loop"))
 
-        # Coordinator guidance — injected when the session is in coordinator mode.
+        # Coordinator guidance — injected when the session is in coordinator
+        # mode.  A project's master runs threads, not workers, so it gets its
+        # own.
         if (
             self._session is not None
             and self._session.config.get("coordinator")
         ):
-            parts.append(self._prompts.get("guidance/coordinator"))
+            parts.append(self._prompts.get(
+                "guidance/project_coordinator"
+                if is_project_master(self._session.config)
+                else "guidance/coordinator"
+            ))
 
         # Execution discipline (verification, missing_context,
         # execute-don't-narrate, etc.) applies to any response from a
@@ -415,10 +422,14 @@ class PromptBuilder:
         immutable per builder and rendering runs regex injection scans
         on every description.  Returns the empty string when the
         session is not a coordinator or when no agents are configured.
+        A project's master has neither ``spawn_worker`` nor
+        ``delegate_task``, so it gets none.
         """
         if self._session is None:
             return ""
         if not self._session.config.get("coordinator"):
+            return ""
+        if is_project_master(self._session.config):
             return ""
         if not self._available_agents:
             return ""

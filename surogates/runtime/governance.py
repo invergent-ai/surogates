@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from surogates.channels.constants import VOICE_TOOLS
 from surogates.governance.policy import GovernanceGate
 from surogates.governance.transparency import (
     TransparencyLevel,
@@ -82,6 +83,11 @@ PROTECTED_TOOLS: frozenset[str] = (
     WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS
 )
 
+# Tools a channel brings with it (``tool_schemas.channel_tool_flags``): ``end_call`` exists only on phone
+# calls. A Studio allow-list names built-in work tools and never these, so an allow-list admits them, the
+# way it admits MCP tools; unlike the self-tools an operator can still deny them outright.
+CHANNEL_TOOLS: frozenset[str] = VOICE_TOOLS
+
 # The harness disclosure-level vocabulary, straight off the enum.
 _LEVEL_VALUES = {level.value for level in TransparencyLevel}
 
@@ -111,7 +117,7 @@ def governance_profile(governance: dict[str, Any] | None) -> dict[str, Any] | No
     if allowed:
         # An allow-list must still admit the self-tools, or a task worker
         # cannot report its own state.
-        profile["allowed_tools"] = sorted(allowed | PROTECTED_TOOLS)
+        profile["allowed_tools"] = sorted(allowed | PROTECTED_TOOLS | CHANNEL_TOOLS)
 
     denied = _tool_names(governance, "denied_tools")
     protected = denied & PROTECTED_TOOLS

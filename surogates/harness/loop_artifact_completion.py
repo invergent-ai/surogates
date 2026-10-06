@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from surogates.channels.constants import DIRECT_UI_CHANNELS
+from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -33,6 +33,7 @@ from surogates.harness.loop_messages import (
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
 from surogates.session.inbox_payload import raises_completion_inbox_item
+from surogates.workstreams import is_project_master
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,29 @@ def _should_take_reservations(session: Any, config_key: str) -> bool:
     if getattr(session, "channel", None) == "website":
         return True
     return bool((session.config or {}).get(config_key))
+
+
+def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
+    """Whether a finished turn gets its recap and deliverables scan.
+
+    Orchestrated sessions skip it: a mission / auto-research coordinator ends its turn repeatedly
+    across the orchestration loop, and a "Task complete" recap after each one reads as the chat
+    stopping while the run goes on (``active_mission_id``, or ``active_research_run_id`` which an
+    Arbor coordinator keeps after a terminal verdict). A project's master skips it the same way: it
+    ends a turn at every exchange while its threads work on. A phone call skips it too: the caller heard
+    the answer, nothing renders a recap card on a call, and the drain (up to 10 s of summary calls)
+    holds the session while the caller's next words wait for it.
+    """
+    config = getattr(session, "config", None) or {}
+    if (
+        config.get("active_mission_id")
+        or config.get("active_research_run_id")
+        or is_project_master(config)
+    ):
+        return False
+    if getattr(session, "channel", None) in REALTIME_CHANNELS:
+        return False
+    return turn_id is not None and reason in {"stop", "done", "complete", "completed"}
 
 
 class ArtifactCompletionMixin:
@@ -890,19 +914,10 @@ class ArtifactCompletionMixin:
         # research coordinator also carries ``active_research_run_id`` (and
         # keeps running report turns even after the mission id is cleared at
         # a terminal verdict), so suppress on either key.
-        config = session.config or {}
-        is_orchestrated_session = bool(
-            config.get("active_mission_id")
-            or config.get("active_research_run_id")
-        )
         # Not gated on the summarizer: deciding what was delivered is
         # bookkeeping now, so the download card survives with recaps
         # turned off. Only the recap itself needs a model.
-        if (
-            turn_id is not None
-            and reason in {"stop", "done", "complete", "completed"}
-            and not is_orchestrated_session
-        ):
+        if wants_turn_summary(session, turn_id=turn_id, reason=reason):
             try:
                 await self._drain_and_emit_turn_summary(
                     session_id=session.id,
