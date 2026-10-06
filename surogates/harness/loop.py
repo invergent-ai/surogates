@@ -76,6 +76,7 @@ from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.harness.tool_exec import execute_single_tool, execute_tool_calls
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
+from surogates.workstreams import is_project_master, master_refusal
 from surogates.harness.tool_schemas import (
     channel_tool_flags,
     drop_unusable_tools,
@@ -341,6 +342,16 @@ def _slash_command_name(content: str | None) -> str | None:
     if parse_deep_research_command(content) is not None:
         return "deep-research"
     return None
+
+
+#: Commands that do their work in the conversation itself.  A project's
+#: master works through threads: a goal, a mission or an auto-research run
+#: there could neither delegate nor do the work, ``/deep-research`` hands its
+#: topic to ``delegate_task``, and ``/code`` clones into the project's shared
+#: workspace.  ``/loop`` (a routine), ``/compress`` and ``/clear`` still run.
+_PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
+    "goal", "mission", "auto-research", "code", "deep-research",
+})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
@@ -945,7 +956,15 @@ class AgentHarness(
         off for this agent (or excluded from the sender's plan), else None
         (allowed, or not a gateable command)."""
         name = _slash_command_name(content)
-        if name is None or self._slash_command_enabled(name, session):
+        if name is None:
+            return None
+        if (
+            name in _PROJECT_MASTER_REFUSED_COMMANDS
+            and session is not None
+            and is_project_master(session.config)
+        ):
+            return master_refusal(name)
+        if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
 
@@ -1825,16 +1844,20 @@ class AgentHarness(
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
             **channel_tool_flags(getattr(session, "channel", None)),
-            is_scheduled=bool(
-                (getattr(session, "config", None) or {}).get(
-                    "scheduled_session_id")
-                or (getattr(session, "config", None) or {}).get(
-                    "scheduled_dynamic_loop")
+            # A master's routines are the project's, and its model makes
+            # them.  A scheduled run is never a master, and its filter
+            # already took the cron tools away.
+            makes_routines=(
+                is_project_master(session.config)
+                and self._slash_command_enabled("loop", session)
             ),
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
         )
+        # The model may call only what it was sent.  The registry is the
+        # worker's, so it also holds what this session's gates took away.
+        offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -2050,6 +2073,7 @@ class AgentHarness(
                     bundle=self._bundle,
                     platform_client=self._platform_client,
                     expert_transcript=expert_transcript,
+                    offered_tools=offered_tools,
                     # On the user's computer a call may start only once the
                     # response is saved: a stopped worker's replay reads it.
                     start_early=device_of(session.config) is None,
@@ -2821,7 +2845,7 @@ class AgentHarness(
             # tools may have already started executing during streaming.
             # Invalid calls get natural error results from execute_single_tool.
             if not use_streaming_exec:
-                invalid_calls = self._find_invalid_tool_calls(tool_calls_raw)
+                invalid_calls = self._find_invalid_tool_calls(tool_calls_raw, offered_tools)
                 if invalid_calls:
                     consecutive_invalid_tool_calls += 1
                     if consecutive_invalid_tool_calls >= _MAX_CONSECUTIVE_INVALID_TOOL_CALLS:
@@ -3493,10 +3517,10 @@ class AgentHarness(
     # ------------------------------------------------------------------
 
     def _find_invalid_tool_calls(
-        self, tool_calls: list[dict[str, Any]],
+        self, tool_calls: list[dict[str, Any]], offered: frozenset[str],
     ) -> list[tuple[dict[str, Any], str]]:
         """Return list of (tool_call, error_message) for invalid calls."""
-        return find_invalid_tool_calls(tool_calls, self._tools)
+        return find_invalid_tool_calls(tool_calls, offered, self._tools.tool_names)
 
     async def _maybe_route_final_response_to_inbox(
         self,
@@ -4135,6 +4159,15 @@ class AgentHarness(
                         {"read_file", "search_files", "list_files"}
                         - user_excluded
                     )
+                if is_project_master(config):
+                    from surogates.tools.builtin.coordinator import (
+                        PROJECT_MASTER_EXCLUDED_TOOLS,
+                        PROJECT_MASTER_READ_TOOLS,
+                    )
+
+                    user_excluded = set(config.get("excluded_tools") or [])
+                    excluded -= PROJECT_MASTER_READ_TOOLS - user_excluded
+                    excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
                 tool_filter = set(self._tools.tool_names) - excluded
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])

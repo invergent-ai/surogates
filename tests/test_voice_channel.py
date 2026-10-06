@@ -43,9 +43,9 @@ def test_a_call_gets_end_call_and_none_of_the_text_channels_tools():
     from surogates.harness.tool_schemas import channel_tool_flags, drop_unusable_tools
 
     names = ["end_call", "fetch_channel_messages", "fetch_channel_file", "web_search"]
-    kept = drop_unusable_tools([_schema(n) for n in names], has_kbs=True, is_scheduled=False, **channel_tool_flags("voice"))
+    kept = drop_unusable_tools([_schema(n) for n in names], has_kbs=True, makes_routines=False, **channel_tool_flags("voice"))
     assert [s["function"]["name"] for s in kept] == ["end_call", "web_search"]
-    kept = drop_unusable_tools([_schema(n) for n in names], has_kbs=True, is_scheduled=False, **channel_tool_flags("slack"))
+    kept = drop_unusable_tools([_schema(n) for n in names], has_kbs=True, makes_routines=False, **channel_tool_flags("slack"))
     assert [s["function"]["name"] for s in kept] == ["fetch_channel_messages", "fetch_channel_file", "web_search"]
 
 

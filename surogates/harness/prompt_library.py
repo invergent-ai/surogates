@@ -65,6 +65,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/loop_wait",
     "guidance/cron_loop",
     "guidance/coordinator",
+    "guidance/project_coordinator",
     "guidance/execution_discipline",
     "guidance/working_principles",
     "identity/default_personality",
