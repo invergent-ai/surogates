@@ -20,7 +20,8 @@ cp "$DESKTOP/dist/link/protocol.js" "$tree/link/"
 find "$tree" -name '*.map' -delete
 cp "$DESKTOP/vm/init" "$DESKTOP/vm/enter-root" "$tree/"
 echo '{"type":"module"}' > "$tree/package.json"
-chmod -R go-w "$tree"
+# Readable by every root's user, whatever umask built it.
+chmod -R u=rwX,go=rX "$tree"
 
 # Owned by root in the guest: mke2fs records the owners it sees, and in a user
 # namespace of its own this user is root.

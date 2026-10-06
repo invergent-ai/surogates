@@ -12,11 +12,14 @@
 // that cannot be looked up, asks in either mode and is said as an "approval" event;
 // without --ask it is denied. One JSON line per event on stdout; a link that stops
 // itself says why as an "error" event.
+// With --vm as well, those operations go to the VmExecutor, which runs the process
+// kinds in the guest, as the app does; without it, to the tool hosts' own commands in srt.
 // The journal's file stays locked while this runs, so each op_ack the server sends is
 // said aloud as an "ack" event (one per frame, a repeat too): the cross-check reads
 // the file only after it quits.
 
 import { statSync } from "node:fs";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -27,6 +30,8 @@ import { appEnvironment } from "../hosts/environment.js";
 import { type NetworkApprovals, ToolHosts } from "../hosts/tool-hosts.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { Operation, Outcome } from "../link/protocol.js";
+import { VmClient, vmOptions } from "../vm/client.js";
+import { VmExecutor } from "../vm/executor.js";
 
 const { values } = parseArgs({
   options: {
@@ -37,13 +42,14 @@ const { values } = parseArgs({
     folder: { type: "string" },
     confirm: { type: "string" },
     ask: { type: "string" },
+    vm: { type: "boolean", default: false },
   },
 });
 // --folder binds every root by itself, so it cannot stand beside a confirmed folder; only a confirmed one asks.
-const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm);
+const usage = (values.folder && values.confirm) || (values.ask !== undefined && !values.confirm) || (values.vm && !values.folder && !values.confirm);
 if (!values.url || !values.token || !values.journal || usage) {
   process.stderr.write(
-    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]]\n",
+    "usage: echo-client --url URL --token TOKEN --journal PATH [--hold] [--folder PATH | --confirm PATH [--ask WORD]] [--vm]\n",
   );
   process.exit(2);
 }
@@ -74,9 +80,12 @@ const network: NetworkApprovals = {
   granted: (root) => binder?.approvals.granted(root) ?? [],
   askNetwork: (root, asked, signal) => binder?.approvals.askNetwork(root, asked, signal) ?? Promise.resolve("deny"),
 };
-const hosts = values.folder || values.confirm
-  ? new ToolHosts({ bindingOf: (root) => everyRoot ?? journal.bindings.get(root), dataDir, env, network })
-  : null;
+const bindingOf = (root: string) => everyRoot ?? journal.bindings.get(root);
+const host = userInfo();
+const vm = values.vm ? new VmClient({ vm: vmOptions(dataDir, { uid: host.uid, gid: host.gid, name: host.username, home: env.HOME ?? host.homedir }) }) : null;
+const hosts = !values.folder && !values.confirm ? null
+  : vm ? new VmExecutor({ bindingOf, dataDir, env, network, vm })
+  : new ToolHosts({ bindingOf, dataDir, env, network });
 const { confirm, ask } = values;
 let refusal: string | null = null;
 const binder = confirm && hosts
@@ -141,5 +150,5 @@ const { link } = connectDevice({
 });
 link.start();
 process.on("SIGTERM", () => {
-  void link.stop().then(() => hosts?.stop()).then(() => process.exit(0));
+  void link.stop().then(() => hosts?.stop()).then(() => vm?.stop()).then(() => process.exit(0));
 });

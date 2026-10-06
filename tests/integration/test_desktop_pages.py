@@ -94,7 +94,7 @@ async def test_a_50_mib_log_is_read_page_by_page_through_the_app(
             finally:
                 tracemalloc.stop()
             # The app's own time: a page against a small operation, each asked alone.
-            small = statistics.median([await round_trip(rig, "which", {"name": "sh"}) for _ in range(5)])
+            small = statistics.median([await round_trip(rig, "stat", {"key": str(folder)}) for _ in range(5)])
             paged = statistics.median([
                 await round_trip(rig, "read_lines", {"key": str(folder / "big.log"), **PAGE, "offset": offset})
                 for _ in range(5)
@@ -116,7 +116,7 @@ async def test_a_50_mib_log_is_read_page_by_page_through_the_app(
     for name, (elapsed, stall, peak, paged, small) in measured.items():
         print(
             f"\n{name} page of a 50 MiB log: {elapsed * 1000:.0f} ms; the worker's loop held at most {stall * 1000:.0f} ms; "
-            f"tracemalloc peak {peak / 2**20:.1f} MiB; read_lines on the app {paged * 1000:.0f} ms, a which {small * 1000:.0f} ms",
+            f"tracemalloc peak {peak / 2**20:.1f} MiB; read_lines on the app {paged * 1000:.0f} ms, a stat {small * 1000:.0f} ms",
         )
     print(f"largest outcome journaled: {largest} characters; transfers: {transfers}")
     # Nothing but the head and the pages crossed the link.

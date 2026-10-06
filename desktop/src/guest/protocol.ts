@@ -12,6 +12,12 @@ export interface HostUser {
   home: string;
 }
 
+// How the guest mounts a root's folder, as the host's VM backend shared it. Each
+// kind names who maps the folder's owner to the root's guest uid. virtiofs: its
+// server on the host (Linux's virtiofsd), so the guest mounts it by its tag as it is.
+// A backend whose share maps no owner, or maps them at the mount, adds its own kind.
+export type Share = { kind: "virtiofs"; tag: string };
+
 // The control port, ai.surogate.control (spec, Section 11, Transport). The agent
 // says hello first, and the host answers it with its user; from then on the host
 // asks. Every request carries an id of its sender's, and its answer the same id.
@@ -20,13 +26,17 @@ export type ToAgent =
   | { type: "ping"; id: number }
   // A root's guest uid, asked before its share is made, so its virtiofsd maps the host user to it.
   | { type: "uid"; id: number; root: string }
-  // A root's namespaces and runner, with its folder at its own path from the share *tag*.
-  | { type: "setup"; id: number; root: string; folder: string; tag: string }
+  // A root's namespaces and runner, with its folder at its own path from *share*.
+  | { type: "setup"; id: number; root: string; folder: string; share: Share }
   | { type: "op"; id: number; root: string; kind: string; args: Record<string, unknown> }
+  // Everything of a root ends, its share left mounted: the host is letting its folder go.
+  | { type: "teardown"; id: number; root: string }
   | { type: "cancel"; id: number }; // the op of that id
 
 export type FromAgent =
   | { type: "hello"; id: number }
+  // Unasked: a root that was set up lost its runner, and everything of it ended. The host sets it up again.
+  | { type: "lost"; root: string }
   | { type: "pong"; id: number }
   | { type: "done"; id: number; uid?: number }
   | { type: "failed"; id: number; message: string }

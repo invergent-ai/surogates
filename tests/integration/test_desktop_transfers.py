@@ -10,6 +10,7 @@ import os
 import re
 import sqlite3
 import time
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -87,6 +88,11 @@ async def test_a_worker_stopped_after_the_app_sent_a_30_mib_pdf_resumes_with_the
     assert journal_rows(journal) == asked - 1  # the bind was answered by the server-side rig, not the app
 
 
+def stat_of(rig, folder: Path) -> OperationRequest:
+    """A small operation: the folder's stat, which its file host answers."""
+    return OperationRequest(**{**_fields(request_for(rig.device_id, rig.root)), "kind": "stat", "args": {"key": str(folder)}})
+
+
 def read_of(rig, key: str) -> OperationRequest:
     return OperationRequest(**{
         **_fields(request_for(rig.device_id, rig.root)), "kind": "read", "args": {"key": key, "max_bytes": None},
@@ -124,7 +130,7 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
         alone = []
         for _ in range(5):
             started = time.monotonic()
-            assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 10.0) == {"ok": True}
+            assert (await asyncio.wait_for(rig.ops.run(stat_of(rig, folder)), 10.0))["ok"]["is_dir"] is True
             alone.append(time.monotonic() - started)
 
         started = time.monotonic()
@@ -134,7 +140,7 @@ async def test_the_link_carries_50_mib_and_answers_small_operations_meanwhile(
         while not reading.done():
             phase = on_link if on_link or await under_way(session_factory, rig.device_id) else before_header
             asked = time.monotonic()
-            assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 30.0) == {"ok": True}
+            assert (await asyncio.wait_for(rig.ops.run(stat_of(rig, folder)), 30.0))["ok"]["is_dir"] is True
             phase.append(time.monotonic() - asked)
         outcome = await reading
         elapsed = time.monotonic() - started
@@ -230,7 +236,7 @@ async def test_a_50_mib_write_crosses_the_link_and_small_operations_are_answered
             meanwhile = []
             while not writing.done():
                 asked = time.monotonic()
-                assert await asyncio.wait_for(rig.ops.run(request_for(rig.device_id, rig.root)), 30.0) == {"ok": True}
+                assert (await asyncio.wait_for(rig.ops.run(stat_of(rig, folder)), 30.0))["ok"]["is_dir"] is True
                 meanwhile.append(time.monotonic() - asked)
             await writing
         elapsed = time.monotonic() - started

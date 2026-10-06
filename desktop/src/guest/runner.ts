@@ -176,7 +176,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       say({ type: "refused", id: message.id, refusal });
     }
   } else if (message.type === "which") {
-    say({ type: "found", id: message.id, found: findOnPath(message.name, process.env.PATH, message.cwd) !== null });
+    // As place is: a question the agent got wrong is answered, never thrown out of this handler with every command.
+    try {
+      say({ type: "found", id: message.id, found: findOnPath(message.name, process.env.PATH, message.cwd) !== null });
+    } catch (error) {
+      say({ type: "refused", id: message.id, refusal: { type: "other", message: String(error) } });
+    }
   } else if (message.type === "stdin") {
     // Each is answered, in order: the host waits to know whether it was taken.
     const stdin = children.get(message.id)?.proc.stdin;

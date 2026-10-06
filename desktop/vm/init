@@ -38,9 +38,32 @@ modprobe overlay
 echo 1 > /proc/sys/kernel/modules_disabled
 # No user namespaces in the guest: the agent makes the roots' namespaces as root.
 echo 0 > /proc/sys/user/max_user_namespaces
-# What systemd's sysctl files set on a host, which the guest has none of.
+# What systemd's sysctl files set on a host, which the guest has none of, and no
+# io_uring, a large interface every root would share.
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 kernel.kexec_load_disabled=1 \
   kernel.unprivileged_bpf_disabled=1 net.core.bpf_jit_harden=2 \
-  fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2
+  fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=1 fs.protected_regular=2 \
+  kernel.io_uring_disabled=2
+
+# The kernel sizes its task limit to the guest's memory: 15 665 for 2 GiB, below
+# four roots at their own bound, so the roots together would reach it before their
+# cgroup's and leave the agent no process to start. Each task's kernel stack and
+# task_struct are charged to its memory cgroup, so the roots' memory.max still
+# bounds what their tasks cost, and pid_max's 32 768 is the guest's limit.
+sysctl -q -w kernel.threads-max=32768
+
+# Each root in a cgroup of its own (root.ts), under one whose memory stops 256 MiB
+# short of the guest's and whose processes stop 4096 short of its 32 768, so the
+# roots together cannot take the agent's memory or leave it no process to start.
+# The agent stays in the top cgroup, where the cpu controller gives it a share
+# against all the roots together, and it is the last the kernel would end for memory.
+mount -t cgroup2 -o nosuid,nodev,noexec cgroup2 /sys/fs/cgroup
+echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control
+mkdir /sys/fs/cgroup/roots
+echo "+memory +pids" > /sys/fs/cgroup/roots/cgroup.subtree_control
+total=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)
+echo $(( (total - 262144) * 1024 )) > /sys/fs/cgroup/roots/memory.max
+echo 28672 > /sys/fs/cgroup/roots/pids.max
+echo -1000 > /proc/self/oom_score_adj
 
 exec /usr/bin/tini -- /usr/bin/node /run/surogate/agent/guest/agent.js

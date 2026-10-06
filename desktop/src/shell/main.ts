@@ -4,12 +4,12 @@
 // Readiness is awaited with then(), never a top-level await: an ES module main that
 // awaits app.whenReady() deadlocks.
 
-import { hostname } from "node:os";
+import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, shell, type WebContents,
+  app, dialog, type IpcMainEvent, type IpcMainInvokeEvent, Menu, nativeTheme, net, safeStorage, shell, utilityProcess, type WebContents,
   webContents,
 } from "electron";
 
@@ -17,13 +17,14 @@ import type { DesktopAccount, DesktopDevice } from "../../../web/src/lib/desktop
 import type { LibraryEntry, Project, ProjectSummary, Routine, ThreadRow } from "../../../web/src/lib/projects-contract.js";
 import { verifyDevice } from "../device.js";
 import { appEnvironment } from "../hosts/environment.js";
-import { ToolHosts } from "../hosts/tool-hosts.js";
 import type { LinkStatus } from "../link/client.js";
+import { type FromManager, MANAGER, type ManagerProcess, type ToManager, VmClient, vmOptions } from "../vm/client.js";
+import { VmExecutor } from "../vm/executor.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, linksFor, linkUrl } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { bridgeHandlers } from "./bridge.js";
 import { type Credential, CredentialStore } from "./credentials.js";
-import { type DeviceStack, startDevice } from "./device-stack.js";
+import { type DeviceStack, startDevice, stopDevice } from "./device-stack.js";
 import { letWindowClose, MainWindow, onSettingsKey } from "./main-window.js";
 import { ANSWER_TIMEOUT_MS, PageProjects } from "./projects.js";
 import { folderPrompts, refusingApprovals } from "./prompts.js";
@@ -86,6 +87,43 @@ let unfollow = (): void => {};
 
 const report = (error: unknown): void => {
   console.error(error);
+};
+
+// The VM manager in an Electron utility process (spec, Section 11): a hang or a crash
+// there leaves the windows and the device link alone. What is sent before it has spawned waits.
+function utilityManager(): ManagerProcess {
+  const child = utilityProcess.fork(MANAGER, [], { serviceName: "Surogate VM", stdio: "inherit" });
+  const waiting: ToManager[] = [];
+  let spawned = false;
+  let exited = false;
+  child.once("spawn", () => {
+    spawned = true;
+    for (const message of waiting.splice(0)) child.postMessage(message);
+  });
+  child.once("exit", () => {
+    exited = true;
+  });
+  return {
+    send: (message) => {
+      if (exited) return;
+      if (spawned) child.postMessage(message);
+      else waiting.push(message);
+    },
+    onMessage: (listener) => void child.on("message", (message) => listener(message as FromManager)),
+    onExit: (listener) => {
+      if (exited) listener();
+      else child.once("exit", () => listener());
+    },
+    kill: () => void child.kill(),
+  };
+}
+
+// The app's one VM, shared by every device, for the user the commands' environment names.
+let vm: VmClient | null = null;
+const vmFor = (env: Record<string, string>): VmClient => {
+  const { uid, gid, username, homedir } = userInfo();
+  vm ??= new VmClient({ vm: vmOptions(root, { uid, gid, name: username, home: env.HOME ?? homedir }), spawn: utilityManager });
+  return vm;
 };
 
 // A call from *page*, the window's own, in its top frame: no other page, a file dropped there included.
@@ -283,8 +321,8 @@ function startStack(agent: Agent, credential: Credential): Promise<DeviceStack> 
     token: credential.token,
     agent: agent.name,
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
-    // The tool layer under the binder: srt's tool hosts until the VM's executor replaces them.
-    tools: (bindings, network) => new ToolHosts({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env }),
+    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the VM.
+    tools: (bindings, network) => new VmExecutor({ bindingOf: (bound) => bindings.get(bound), network, dataDir: root, env, vm: vmFor(env) }),
     prompts: folderPrompts(() => main?.window),
     approvalPrompts: refusingApprovals,
     onStatus: (status) => {
@@ -659,10 +697,10 @@ async function quit(): Promise<void> {
       waiting = null;
     }
   }
-  // A device still starting is stopped once it has started. A stop that fails still quits:
-  // the next launch answers what it cut off.
+  // The device, then the VM, which stops even when the device's stop fails. A stop that
+  // fails still quits: the next launch answers what it cut off.
   try {
-    await device?.started.then((stack) => stack.stop(), () => {});
+    await stopDevice(device?.started, vm);
   } finally {
     stopped = true;
     app.quit();
