@@ -18,7 +18,8 @@ function answering(body: unknown, url = "https://agent.example.com/api/v1/auth/c
   const asked: string[] = [];
   const fetch = (requested: string) => {
     asked.push(requested);
-    const response = new Response(JSON.stringify(body), { status });
+    // A string is the body itself, as a page that is not JSON serves it.
+    const response = new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
     Object.defineProperty(response, "url", { value: url });
     return Promise.resolve(response);
   };
@@ -82,6 +83,24 @@ describe("connecting to the agent", () => {
     }
   });
 
+  it.each([
+    ["no object", "[]"],
+    ["text", '"x"'],
+    ["no origin", JSON.stringify({ ...AGENT, origin: undefined })],
+    ["a flag that is no boolean", JSON.stringify({ ...AGENT, multiSession: "yes" })],
+    ["plain http to another computer", JSON.stringify({ ...AGENT, origin: "http://evil.example" })],
+    ["an origin with a path", JSON.stringify({ ...AGENT, origin: "https://agent.example.com/chat" })],
+  ])("starts over when the kept agent has %s, which is said", (_name, held) => {
+    writeFileSync(join(dir, "agent.json"), held);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(store.get()).toBeNull();
+      expect(String(warn.mock.calls[0]?.[0])).toMatch(/agent\.json does not hold an agent, so Surogate starts without it/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("asks the server who it is, confirms the new origin, and keeps it as the one agent", async () => {
     const { asked, fetch } = answering(CONFIG);
     const confirmed: Array<[string, string]> = [];
@@ -114,6 +133,7 @@ describe("connecting to the agent", () => {
     });
     expect(confirmed).toEqual([["https://agents.example.org", "https://agent.example.com"]]);
     expect(agent?.origin).toBe("https://agents.example.org");
+    expect(store.get()?.origin).toBe("https://agents.example.org");
   });
 
   it("reads an older server's missing desktop_sessions as no local folders, and a single conversation as such", async () => {

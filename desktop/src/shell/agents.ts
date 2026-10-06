@@ -43,11 +43,28 @@ export const linkUrl = (origin: string): string => `${origin.replace(/^http/, "w
 export const partitionFor = (origin: string, agentId: string): string =>
   `persist:agent-${createHash("sha256").update(`${origin}\n${agentId}`).digest("hex").slice(0, 32)}`;
 
+// An agent as connectAgent keeps one: its origin canonical, so the bridge's exact-origin check holds.
+function isAgent(value: unknown): value is Agent {
+  const { origin, agentId, name, desktopSessions, multiSession } =
+    (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  if (typeof origin !== "string" || typeof agentId !== "string" || agentId === "" || typeof name !== "string") return false;
+  if (typeof desktopSessions !== "boolean" || typeof multiSession !== "boolean") return false;
+  try {
+    return canonicalOrigin(origin) === origin;
+  } catch {
+    return false;
+  }
+}
+
 export class AgentStore {
   constructor(private readonly path: string) {}
 
+  // Anything else the file holds is said, and the app starts over at its first run.
   get(): Agent | null {
-    return readState<Agent | null>(this.path, null);
+    const kept = readState<unknown>(this.path, null);
+    if (kept === null || isAgent(kept)) return kept;
+    console.warn(new Error(`${this.path} does not hold an agent, so Surogate starts without it`));
+    return null;
   }
 
   set(agent: Agent): void {

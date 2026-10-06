@@ -93,4 +93,30 @@ describe("the device credentials", () => {
   it("are none before the first is saved", () => {
     expect(store().list()).toEqual([]);
   });
+
+  it.each(["{}", "null", "[null]", '"x"', '[{"origin": "https://agent.example.com"}]'])(
+    "are none when the file holds %s, which is said, and a save still keeps one",
+    (held) => {
+      writeFileSync(path, held);
+      expect(store().list()).toEqual([]);
+      expect(store().unencrypted()).toBe(false);
+      expect(errors.length).toBeGreaterThan(0);
+      store().save(CREDENTIAL);
+      expect(store().list()).toEqual([CREDENTIAL]);
+    },
+  );
+
+  it("are sealed where the secret store names no backend, as on macOS and Windows", () => {
+    const linux = new Secrets();
+    // Electron's safeStorage has getSelectedStorageBackend on Linux only.
+    const elsewhere: SecretStore = {
+      isEncryptionAvailable: () => true,
+      encryptString: (plain) => linux.encryptString(plain),
+      decryptString: (sealed) => linux.decryptString(sealed),
+    };
+    store(elsewhere).save(CREDENTIAL);
+    expect(readFileSync(path, "utf8")).not.toContain("surg_dev_secret");
+    expect(store(elsewhere).list()).toEqual([CREDENTIAL]);
+    expect(store(elsewhere).unencrypted()).toBe(false);
+  });
 });

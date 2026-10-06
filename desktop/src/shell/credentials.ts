@@ -1,7 +1,7 @@
 // The device tokens this computer keeps (spec, Section 2), one per origin,
 // organization, agent and user. Each is sealed by the OS secret store when there is
 // one. Linux's basic_text store protects nothing, so there the token is kept as it
-// is, in the same file only its user can read, and the Agents window says so.
+// is, in the same file only its user can read, and the shell says so.
 
 import { report } from "../report.js";
 import type { Identity } from "./device-stack.js";
@@ -10,7 +10,7 @@ import { readState, writeState } from "./state-file.js";
 // Electron's safeStorage, as far as the store uses it. Asked only once the app is ready.
 export interface SecretStore {
   isEncryptionAvailable(): boolean;
-  getSelectedStorageBackend(): string;
+  getSelectedStorageBackend?(): string; // Linux only: macOS and Windows have no basic_text store
   encryptString(plain: string): Buffer;
   decryptString(sealed: Buffer): string;
 }
@@ -30,6 +30,14 @@ interface Stored extends Identity {
   plain?: string; // the token itself, where the store protects nothing
 }
 
+const FIELDS = ["origin", "orgId", "agentId", "userId", "deviceId", "name", "addedAt"] as const;
+
+// An entry of the store's own shape: anything else the file holds is said, then left out.
+function usable(entry: unknown): entry is Stored {
+  const fields = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+  return FIELDS.every((key) => typeof fields[key] === "string") && (typeof fields.sealed === "string" || typeof fields.plain === "string");
+}
+
 const sameIdentity = (a: Stored, b: Stored): boolean =>
   a.origin === b.origin && a.orgId === b.orgId && a.agentId === b.agentId && a.userId === b.userId;
 
@@ -43,7 +51,7 @@ export class CredentialStore {
 
   save(credential: Credential): void {
     const { token, ...identity } = credential;
-    const sealing = this.secrets.isEncryptionAvailable() && this.secrets.getSelectedStorageBackend() !== "basic_text";
+    const sealing = this.secrets.isEncryptionAvailable() && this.secrets.getSelectedStorageBackend?.() !== "basic_text";
     const entry: Stored = sealing
       ? { ...identity, sealed: this.secrets.encryptString(token).toString("base64") }
       : { ...identity, plain: token };
@@ -64,12 +72,15 @@ export class CredentialStore {
     return credentials;
   }
 
-  // Whether any token is kept as it is: the Agents window then says credentials here are not encrypted.
+  // Whether any token is kept as it is: the shell then says credentials here are not encrypted.
   unencrypted(): boolean {
     return this.stored().some((entry) => entry.plain !== undefined);
   }
 
   private stored(): Stored[] {
-    return readState<Stored[]>(this.path, [], (error) => report(this.onError, error));
+    const entries = readState<unknown[]>(this.path, [], (error) => report(this.onError, error));
+    const kept = entries.filter(usable);
+    if (kept.length < entries.length) report(this.onError, new Error(`${this.path} holds a credential Surogate cannot use, so it is left out`));
+    return kept;
   }
 }
