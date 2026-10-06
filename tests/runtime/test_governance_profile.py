@@ -134,10 +134,10 @@ async def test_no_gate_preserves_open_behaviour():
 def test_an_allow_list_still_lets_a_phone_agent_hang_up():
     """``end_call`` only exists on phone calls; a Studio allow-list (``web_search`` only) never names it."""
     from surogates.governance.policy import GovernanceGate
-    from surogates.harness.tool_schemas import _VOICE_TOOLS
+    from surogates.channels.constants import VOICE_TOOLS
     from surogates.runtime.governance import CHANNEL_TOOLS, governance_profile
 
-    assert CHANNEL_TOOLS >= _VOICE_TOOLS
+    assert CHANNEL_TOOLS >= VOICE_TOOLS
     profile = governance_profile({"enabled": True, "allowed_tools": ["web_search"]})
     assert "end_call" in profile["allowed_tools"]
     gate = GovernanceGate(allowed_tools=set(profile["allowed_tools"]))

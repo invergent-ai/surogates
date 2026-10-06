@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from surogates.channels.constants import DIRECT_UI_CHANNELS
+from surogates.channels.constants import DIRECT_UI_CHANNELS, REALTIME_CHANNELS
 from surogates.harness.loop_artifacts import (
     _FENCE_RE,
     _PROMOTABLE_FENCES,
@@ -64,7 +64,7 @@ def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> boo
     config = getattr(session, "config", None) or {}
     if config.get("active_mission_id") or config.get("active_research_run_id"):
         return False
-    if getattr(session, "channel", None) == "voice":
+    if getattr(session, "channel", None) in REALTIME_CHANNELS:
         return False
     return turn_id is not None and reason in {"stop", "done", "complete", "completed"}
 

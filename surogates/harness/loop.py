@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
-from surogates.channels.constants import END_USER_CHANNELS, STUDIO_CHANNEL
+from surogates.channels.constants import END_USER_CHANNELS, REALTIME_CHANNELS, STUDIO_CHANNEL
 from surogates.channels.platform_resolve import effective_channel_platform
 from surogates.devices.binding import device_of
 from surogates.devices.sandbox import enter_device_session, leave_device_session
@@ -3537,7 +3537,7 @@ class AgentHarness(
         # A phone caller has already heard the answer: there is no widget to
         # rescue it into, and the judge's blocking calls would hold their next
         # turn.  The voice channel speaks questions itself.
-        if session.channel == "voice":
+        if session.channel in REALTIME_CHANNELS:
             return None
 
         decision = await self._judge_final_response_user_action(
@@ -4779,7 +4779,7 @@ class AgentHarness(
         """
         # A phone call is titled when it opens ("Apel de la …"); an LLM title would be one more
         # background call the session waits on before the caller's next turn.
-        if (session.title or "").strip() or getattr(session, "channel", None) == "voice":
+        if (session.title or "").strip() or getattr(session, "channel", None) in REALTIME_CHANNELS:
             return
         task = asyncio.create_task(
             self._run_title_generation(
