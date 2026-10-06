@@ -203,3 +203,25 @@ async def test_an_abandoned_session_cancels_what_it_left_on_its_computer(
     )
     await orchestrator._abandon_unrecoverable_session(session, attempts=3, reason="no progress")
     assert cancelled == [{session.id}]
+
+
+async def test_a_session_whose_worker_died_after_a_crash_is_recovered(session_store, session_factory, redis_client):
+    # The dispatcher retries a crash a second or two later. A worker killed in
+    # between leaves the crash as the last event, and nothing else to wake it.
+    agent_id = "sweeper-crash-agent"
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id=agent_id)
+    await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": "Check the figures."})
+    await session_store.emit_event(session.id, EventType.HARNESS_CRASH, {"error": "the hub timed out"})
+    await _backdate(session_factory, session.id, seconds=120)
+    orchestrator = Orchestrator(
+        redis_client=redis_client,
+        session_store=session_store,
+        harness_factory=lambda _sid: None,
+        agent_id=agent_id,
+        queue_key=SHARED_WORK_QUEUE_KEY,
+    )
+    assert await orchestrator._sweep_orphans_once(stale_seconds=60, reason="orchestrator_sweeper") == 1
+    member = encode_queue_member(org_id=str(org_id), agent_id=agent_id, session_id=str(session.id))
+    assert await redis_client.zrem(SHARED_WORK_QUEUE_KEY, member) == 1

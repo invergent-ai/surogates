@@ -2378,11 +2378,12 @@ class SessionStore:
             .correlate(SessionRow)
             .scalar_subquery()
         )
+        # ``harness.crash`` is not an end: the dispatcher retries it seconds
+        # later, and a worker killed before that leaves nothing else to wake it.
         session_end_event_types = (
             "session.done",
             "session.complete",
             "session.fail",
-            "harness.crash",
         )
         latest_llm_response_is_clean = and_(
             latest_event_type == "llm.response",
