@@ -129,11 +129,14 @@ function register(desktop: DesktopBridge, api: JoinApi): Promise<void> {
  */
 export function joinDesktop(desktop: DesktopBridge, api: JoinApi): () => void {
   let stopped = false;
+  // Each step waits on the desktop or the server: a sign-out meanwhile ends the join there.
   void (async () => {
     const account = await api.account();
     if (stopped) return;
     await desktop.setAccount(account);
+    if (stopped) return;
     await desktop.registerProjects(sessionProjects(api));
+    if (stopped) return;
     await register(desktop, api);
   })().catch((error: unknown) => console.warn("Surogate Desktop could not join this account", error));
   return () => {

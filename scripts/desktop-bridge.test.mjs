@@ -55,6 +55,23 @@ test("tells the desktop who is signed in and serves its projects, then registers
   assert.deepEqual(desktop.calls.slice(3), [["setAccount", null], ["registerProjects", null]]);
 });
 
+test("serves nothing, and registers nothing, once stopped while the desktop is still told who is signed in", async () => {
+  const desktop = bridge();
+  const told = desktop.setAccount;
+  // The desktop takes 20 ms to hear who is signed in: the user signs out meanwhile.
+  desktop.setAccount = async (account) => {
+    await told(account);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+  const server = api();
+  const stop = joinDesktop(desktop, server);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  stop();
+  await settle();
+  assert.deepEqual(desktop.calls, [["setAccount", ACCOUNT], ["setAccount", null], ["registerProjects", null]]);
+  assert.deepEqual(server.asked, []);
+});
+
 test("registers nothing for a computer already registered, or an agent without local folders", async () => {
   for (const desktop of [bridge({ deviceId: "d", name: "thinkpad" }), bridge(null, false)]) {
     const server = api();
