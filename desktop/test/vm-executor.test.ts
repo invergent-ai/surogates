@@ -190,6 +190,25 @@ describe("the VmExecutor", { timeout: 30_000 }, () => {
     }
   });
 
+  it.skipIf(process.getuid?.() === 0)("refuses a background process's start, and input to one, while the hook guard cannot see the whole folder", async () => {
+    vmExecutor();
+    const locked = join(folder, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      for (const [kind, args] of [["start", { command: "make watch" }], ["write_stdin", { session_id: "proc_000000000001", data: "rm -rf .git\n" }]] as const) {
+        expect(await executor.run(op(kind, args), signal())).toMatchObject({
+          error: { type: "sandbox", message: expect.stringContaining("Blocked: the computer cannot read locked") },
+        });
+      }
+      // Reading what a process said runs nothing: the guard is not asked.
+      expect(await executor.run(op("poll", { session_id: "proc_000000000001" }), signal())).toEqual(ran("ran\n"));
+      expect(sent.map((operation) => operation.kind)).toEqual(["poll"]);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
   it("keeps the root's file host, and with it the folder, while a command runs past the host's idle time", async () => {
     vmExecutor(200);
     guest = async () => {

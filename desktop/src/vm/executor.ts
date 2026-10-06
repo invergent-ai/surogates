@@ -4,12 +4,17 @@
 // folder: its lock, and, around a command, the hook guard's refusal and its look after.
 
 import type { FolderGuards } from "../binding/folder.js";
-import { ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
+import { type Guard, ToolHosts, type ToolHostsOptions } from "../hosts/tool-hosts.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import type { Executor } from "../operations/runner.js";
 import type { VmClient } from "./client.js";
 
 const PROCESS_KINDS = new Set(["run", "which", "start", "poll", "read_output", "wait", "kill", "write_stdin", "list_processes"]);
+
+// The hook guard around the kinds that run commands (spec, Section 11, "The VmExecutor"): a run
+// is refused while it refuses, and looked after; a start, and input to a process, are refused.
+// A live process is looked after every 5 s by the file host. The other kinds run no command.
+const GUARDS: Partial<Record<string, Guard>> = { run: "around", start: "before", write_stdin: "before" };
 
 export interface VmExecutorOptions extends ToolHostsOptions {
   vm: Pick<VmClient, "perform" | "teardown" | "onProcesses">;
@@ -29,7 +34,7 @@ export class VmExecutor implements Executor {
 
   run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (!PROCESS_KINDS.has(operation.kind)) return this.files.run(operation, signal);
-    return this.files.guarded(operation, signal, operation.kind === "run", ({ folder, dev, ino, boot }, aborted, ended) => this.options.vm.perform({
+    return this.files.guarded(operation, signal, GUARDS[operation.kind] ?? null, ({ folder, dev, ino, boot }, aborted, ended) => this.options.vm.perform({
       id: operation.id, root: operation.sessionId, folder: { path: folder, dev, ino, boot }, kind: operation.kind, args: operation.args, ended,
     }, aborted));
   }

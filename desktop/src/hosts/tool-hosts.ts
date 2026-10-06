@@ -43,6 +43,10 @@ const unavailable = (why: string): Outcome => ({
   error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${why}` },
 });
 
+// The hook guard around a process operation that runs elsewhere: its refusal before it
+// and its look after it, its refusal alone, or neither.
+export type Guard = "around" | "before" | null;
+
 // What a host needs of a root's binding: its folder, and that folder's identity when it was bound.
 export type BoundFolder = Pick<Binding, "folder" | "dev" | "ino" | "boot">;
 
@@ -149,11 +153,10 @@ export class ToolHosts implements Executor {
 
   /**
    * *inner*, a process operation that runs elsewhere (the VM), while the root's host
-   * holds the folder: its lock, and, with *guard*, the hook guard's refusal before
-   * it and its look after it (Host.guarded).
+   * holds the folder: its lock, and the hook guard as *guard* says (Host.guarded).
    */
   guarded(
-    operation: Operation, signal: AbortSignal, guard: boolean,
+    operation: Operation, signal: AbortSignal, guard: Guard,
     inner: (binding: BoundFolder, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     if (this.stopping) return Promise.resolve(unavailable("the app is quitting"));
@@ -292,11 +295,11 @@ class Host {
 
   /**
    * *inner* while this host holds the folder, so the folder is not let go mid-way.
-   * With *guard*: the hook guard's refusal first, then, whatever the outcome, a
-   * cancel's too, its look after, which no cancel stops; the outcome carries its notice.
+   * With *guard*: the hook guard's refusal first; "around" then, whatever the outcome,
+   * a cancel's too, its look after, which no cancel stops; the outcome carries its notice.
    */
   guarded(
-    operation: Operation, signal: AbortSignal, guard: boolean, inner: (signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
+    operation: Operation, signal: AbortSignal, guard: Guard, inner: (signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
     return this.busy(async () => {
       const failure = await this.ready(signal);
@@ -306,7 +309,7 @@ class Host {
         if (!("ok" in refused)) return refused;
       }
       const outcome = await inner(signal, this.handles);
-      return guard ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
+      return guard === "around" ? this.request({ type: "after", id: operation.id, outcome }) : outcome;
     });
   }
 
