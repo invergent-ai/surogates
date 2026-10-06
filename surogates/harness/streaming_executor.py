@@ -71,6 +71,7 @@ from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING b
     deduplicate_tool_calls,
 )
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
+    SESSION_STARTING_TOOLS,
     SIBLING_ABORT_TOOLS,
     is_parallelizable,
 )
@@ -197,6 +198,8 @@ class StreamingToolExecutor:
         self._tracked: list[TrackedTool] = []
         self._sibling_aborted: bool = False
         self._discarded: bool = False
+        # Set by get_all_results, which runs once the response is saved.
+        self._saved: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -219,7 +222,8 @@ class StreamingToolExecutor:
         from within a running event loop (which is guaranteed when called
         from an async streaming context).  An executor that does not start
         early only queues it: ``get_all_results`` starts it once the response
-        is saved.
+        is saved.  Every executor holds a call that starts another session
+        that way (``SESSION_STARTING_TOOLS``).
         """
         if self._discarded:
             return
@@ -241,8 +245,10 @@ class StreamingToolExecutor:
         )
         self._tracked.append(tracked)
 
-        if self._start_early and self._can_execute(tracked):
-            self._start_execution(tracked)
+        # In order, as the queue drains: a call held until the response is
+        # saved keeps its place, and the calls after it wait behind it.
+        if self._start_early:
+            self._process_queue()
 
     async def get_all_results(self) -> list[dict[str, Any]]:
         """Wait for all tools to complete and return results in insertion order.
@@ -258,6 +264,7 @@ class StreamingToolExecutor:
         now safely fan out in parallel.  See
         :meth:`_promote_batch_parallel_tools`.
         """
+        self._saved = True
         self._promote_batch_parallel_tools()
         self._process_queue()
 
@@ -346,6 +353,7 @@ class StreamingToolExecutor:
 
         Rules:
         - Aborted/discarded/interrupted → no.
+        - Starts another session and the response is not saved yet → no.
         - No tools currently executing → yes.
         - Tool is concurrent-safe AND all executing tools are concurrent-safe → yes.
         - Otherwise → no (must wait for executing tools to finish).
@@ -353,6 +361,8 @@ class StreamingToolExecutor:
         if self._sibling_aborted or self._discarded:
             return False
         if self._interrupt_check() or turn_detached():
+            return False
+        if not self._saved and tool.tool_call.get("function", {}).get("name", "") in SESSION_STARTING_TOOLS:
             return False
 
         executing = [t for t in self._tracked if t.status == ToolStatus.EXECUTING]

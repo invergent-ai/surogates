@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, update
 
+import surogates.harness.loop as loop_module
 from surogates.coding_agents.run_core import execute_coding_run
 from surogates.config import SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.agent_users import purge_user_account
@@ -27,6 +29,7 @@ from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams.store import WorkstreamStore
 from tests.test_execute_coding_run_repo import _PAT, _FakeStore, _anthropic_creds, _done_poll, _noop_ensure, _sbx
 from tests.test_harness_resilience import _make_harness
+from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_devices import api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstreams import create, master_of, patch, system_prompt, turn_calling
@@ -263,6 +266,92 @@ async def test_an_agent_with_a_tool_allow_list_still_starts_threads(api):
     gate = build_governance_gate({"enabled": True, "allowed_tools": ["web_search"]})
     result = await call_tool(api, master, "start_thread", gate=gate, title="Draft A", goal="Draft A.")
     assert result["status"] == "started", result
+
+
+async def dropped_stream(api, monkeypatch, session, calls: list[tuple[str, dict]]) -> list[str]:
+    """A streamed turn of *session* whose stream drops after its first call, and is retried.
+
+    The retried response makes the same calls, as a model does.  Returns the
+    tools that ran while the dropped stream was open.
+    """
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    ran = AsyncMock(side_effect=registry.dispatch)
+    monkeypatch.setattr(registry, "dispatch", ran)
+    state = api.app.state
+    harness = _make_loop_harness(session_store=state.session_store)
+    harness._tools = registry
+    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
+    harness._streaming_enabled = True
+    harness._redis = state.redis
+    harness._storage = state.storage
+    harness._session_factory = state.session_factory
+    tool_calls = [
+        {"id": f"call_{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for i, (name, args) in enumerate(calls)
+    ]
+    responses = iter([
+        ({"role": "assistant", "content": "", "tool_calls": tool_calls},
+         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1}),
+        _final_response("Done."),
+    ])
+    early: list[str] = []
+
+    async def llm(**kwargs):
+        message, usage = next(responses)
+        if message["tool_calls"]:
+            # The second call is still streaming when the first is complete.
+            kwargs["on_tool_call_complete"](tool_calls[0])
+            await asyncio.sleep(0.5)  # long enough for a call started early to finish
+            early.extend(call.args[0] for call in ran.await_args_list)
+            retried = kwargs["on_stream_retry"]()
+            for call in tool_calls:
+                retried(call)
+        return message, usage
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    messages = [{"role": "user", "content": "Get the Q3 report done"}]
+    await harness._run_loop(session, messages, "system", SimpleNamespace(lease_token=uuid4()), all_events=[])
+    return early
+
+
+async def children_of(api, session) -> list[Session]:
+    async with api.app.state.session_factory() as db:
+        return (await db.scalars(select(Session).where(Session.parent_id == session.id))).all()
+
+
+async def test_a_dropped_stream_starts_each_thread_once(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    early = await dropped_stream(api, monkeypatch, master, [
+        ("start_thread", {"title": "Draft A", "goal": "Draft A."}),
+        ("start_thread", {"title": "Summarise B", "goal": "Summarise B."}),
+    ])
+    assert sorted(child.title for child in await children_of(api, master)) == ["Draft A", "Summarise B"]
+    assert early == []
+
+
+async def test_a_dropped_stream_spawns_each_worker_once(api, monkeypatch):
+    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    coordinator = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
+    coordinator.config.update(coordinator=True)
+    early = await dropped_stream(api, monkeypatch, coordinator, [
+        ("spawn_worker", {"goal": "Draft A."}),
+        ("spawn_worker", {"goal": "Summarise B."}),
+    ])
+    spawned = await events_of(api, coordinator.id, EventType.WORKER_SPAWNED)
+    assert sorted(event.data["goal"] for event in spawned) == ["Draft A.", "Summarise B."]
+    assert len(await children_of(api, coordinator)) == 2
+    assert early == []
+
+
+async def test_an_ordinary_tool_still_runs_while_the_response_streams(api, monkeypatch):
+    master = await master_of(api, await create(api))
+    early = await dropped_stream(api, monkeypatch, master, [
+        ("todo", {"todos": [{"id": "1", "content": "Draft A", "status": "pending"}]}),
+        ("start_thread", {"title": "Draft A", "goal": "Draft A."}),
+    ])
+    assert early == ["todo"]
+    assert [child.title for child in await children_of(api, master)] == ["Draft A"]
 
 
 async def resolve(api, thread) -> None:
