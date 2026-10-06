@@ -66,3 +66,25 @@ async def test_what_the_caller_heard_is_recorded_before_their_next_words():
     async with model.chat(chat_ctx=ctx) as stream:  # the same cut reply is reported once
         [c async for c in stream]
     assert [k for k, _ in call.log].count("heard") == 1
+
+
+async def test_a_failed_turn_is_an_error_the_worker_answers_with_an_apology():
+    """A crashed harness turn must reach LiveKit as an error (the worker then says SORRY_TURN), not as an empty
+    answer the caller hears as silence."""
+    import pytest
+    from livekit.agents import APIError
+    from surogates.voice.sessions import TurnFailed
+
+    class _Failing(_Call):
+        async def stream(self, after):
+            raise TurnFailed("crash_loop_detected")
+            yield  # an async generator
+
+    errors = []
+    llm_ = SurogatesLLM(_Failing([]))
+    llm_.on("error", errors.append)
+    with pytest.raises(APIError):
+        async with llm_.chat(chat_ctx=_ctx(("user", "Alo?"))) as stream:
+            async for _ in stream:
+                pass
+    assert errors and isinstance(errors[0].error, APIError) and not errors[0].recoverable

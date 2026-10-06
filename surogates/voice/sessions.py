@@ -30,6 +30,10 @@ VOICE_PRIORITY = -1.0  # work-queue score: lower pops first; everything else is 
 POLL_SECONDS = 0.4  # pub/sub is a nudge; poll as a fallback, like the OpenAI route
 START_TIMEOUT = 45.0  # seconds for the harness to pick the turn up (a backlogged or dead worker)
 TURN_TIMEOUT = 120.0  # seconds for the whole turn, tools included
+class TurnFailed(Exception):
+    """The agent's turn failed before it said anything (``session.fail``): the caller must hear an apology."""
+
+
 FILLER = "O clipă, verific."  # said for the agent when it starts a tool without a word
 SORRY_TURN = "Îmi pare rău, nu am reușit să răspund acum. Vă rog să mai întrebați o dată."
 ANONYMOUS = "anonymous"
@@ -156,7 +160,9 @@ class CallSession:
                 for e in await self.store.get_events(self.session_id, after=cursor):
                     cursor, data = e.id, e.data or {}
                     if e.type == EventType.SESSION_FAIL.value:
-                        return
+                        if said:  # the caller already has an answer, cut short
+                            return
+                        raise TurnFailed(str(data.get("reason") or "session failed"))
                     if not started:
                         started = e.type == EventType.LLM_REQUEST.value
                         continue

@@ -122,9 +122,12 @@ async def test_the_previous_turn_ending_does_not_end_the_callers_new_turn(call):
 
 
 async def test_a_failed_session_ends_the_turn_even_before_it_started(call):
+    """Ended, and loudly: the caller must hear the apology, never silence."""
+    from surogates.voice.sessions import TurnFailed
     after = await call.send("Alo?")
     await call.store.emit_event(call.session_id, EventType.SESSION_FAIL, {"reason": "crash_loop_detected"})
-    assert [t async for t in call.stream(after)] == []
+    with pytest.raises(TurnFailed):
+        [t async for t in call.stream(after)]
 
 
 async def test_hanging_up_ends_the_session_so_nothing_reruns_after_the_caller_left(call):

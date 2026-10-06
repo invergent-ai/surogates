@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
-from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, APIConnectOptions, NotGivenOr, llm
+from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, APIConnectOptions, APIError, NotGivenOr, llm
 
-from surogates.voice.sessions import CallSession
+from surogates.voice.sessions import CallSession, TurnFailed
 
 
 def latest_user_text(chat_ctx: llm.ChatContext) -> str:
@@ -57,6 +57,8 @@ class SurogatesStream(llm.LLMStream):
                 self._event_ch.send_nowait(llm.ChatChunk(id=str(after),
                                                          delta=llm.ChoiceDelta(role="assistant", content=piece)))
             finished = True
+        except TurnFailed as e:  # an error, not an empty answer: the worker apologises instead of silence
+            raise APIError(f"the agent's turn failed: {e}", retryable=False) from e
         finally:
             if not finished:
                 await asyncio.shield(call.interrupt())
